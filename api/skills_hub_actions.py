@@ -48,6 +48,79 @@ logger = logging.getLogger(__name__)
 ACTIONS = ("scan", "install", "update", "uninstall")
 
 _ACTION_TIMEOUT_SECONDS = 300
+# SIGTERM -> SIGKILL escalation window for the owned process TREE, and how long
+# we wait for the group to actually disappear after the kill.
+_TREE_TERM_GRACE_SECONDS = 5
+_TREE_KILL_WAIT_SECONDS = 5
+
+
+def _process_group_alive(pgid: int) -> bool:
+    """True while any process remains in *pgid*.
+
+    ``killpg(pgid, 0)`` is the POSIX existence probe: it raises
+    ``ProcessLookupError`` only when the group is empty. ``PermissionError``
+    means the group exists but is not ours — treat that as alive rather than
+    silently declaring extinction.
+    """
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _extinguish_process_tree(proc) -> None:
+    """Make sure NO descendant of *proc* survives, then return.
+
+    Called after the leader has been reaped on the timeout path. Reaping the
+    leader says nothing about its children: a `git clone` or scanner spawned by
+    the CLI can outlive a leader that exited cleanly on SIGTERM, and would then
+    run concurrently with the next admitted action against the same skills
+    directory. Callers rely on this returning only once the owned tree is gone
+    (or has been reported as un-killable).
+    """
+    pid = getattr(proc, "pid", None)
+    if not isinstance(pid, int) or pid <= 0:
+        return
+    if os.name != "posix":
+        # Windows has no process group to signal here (`start_new_session` is
+        # POSIX-only). Best-effort tree kill via taskkill; nothing else in the
+        # stdlib walks the tree.
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_TREE_KILL_WAIT_SECONDS,
+                check=False,
+            )
+        except Exception:
+            logger.debug("taskkill tree cleanup failed for pid %s", pid, exc_info=True)
+        return
+    deadline = time.monotonic() + _TREE_TERM_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        if not _process_group_alive(pid):
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        pass
+    deadline = time.monotonic() + _TREE_KILL_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        if not _process_group_alive(pid):
+            return
+        time.sleep(0.05)
+    logger.error(
+        "skills hub action left descendants alive in process group %s after SIGKILL",
+        pid,
+    )
+
+
 _SEARCH_TIMEOUT_SECONDS = 35
 _LOG_TAIL_MAX_CHARS = 200_000
 
@@ -104,46 +177,162 @@ def _profile_hub(profile: str) -> _ProfileHub:
         return hub
 
 
-# ── Evidence-based completion (gate finding 2): the CLI exits 0 for fetch
-# failures, scanner blocks, already-installed no-ops and invalid uninstall
-# targets, so the return code alone is NOT authority. An action counts as
-# completed only with the CLI's own positive success evidence in the
-# transcript; blocked/no-op/evidence-less runs fail. All markers below are
-# the CLI's real output strings (hermes_cli/skills_hub.py / tools/skills_hub.py).
-_UPDATED_RE = re.compile(r"Updated (\d+) skill\(s\)")
+# ── Evidence-based completion: the CLI exits 0 for fetch failures, scanner
+# blocks, already-installed no-ops and invalid uninstall targets, so the return
+# code alone is NOT authority.
+#
+# Neither is the transcript. It carries attacker-influenced content — a skill's
+# own name, description and the scanner's matched source fragments are echoed
+# into it — so a crafted skill could print "Installed: ..." and impersonate a
+# completed install. Success for a mutation is therefore established against
+# the hub's own lock artifact (`<skills_dir>/.hub/lock.json`), snapshotted
+# before and after the run and compared for the requested target. The
+# transcript is retained for diagnostics only: it explains WHY nothing
+# changed, it never decides THAT something did.
 
 
-def _evaluate_outcome(action: str, log: str, scan_result) -> tuple[bool, str | None]:
-    """Return (ok, error). rc==0 and no timeout are already established."""
+def hub_lock_snapshot(skills_dir: Path) -> dict[str, dict]:
+    """Machine-readable installed-state snapshot, keyed by skill name.
+
+    ``<skills_dir>/.hub/lock.json`` is the hub's own artifact: the CLI writes
+    it, the browser cannot influence it, and it records the identifier and the
+    install/update timestamps per entry. It is the postcondition authority for
+    every mutation.
+    """
+    return {
+        str(entry.get("name") or ""): entry
+        for entry in list_installed_hub_skills(skills_dir)
+        if entry.get("name")
+    }
+
+
+def _lock_snapshot_or_none(skills_dir: Path) -> dict[str, dict] | None:
+    """`hub_lock_snapshot` that reports UNKNOWN instead of "empty" on error.
+
+    `list_installed_hub_skills` is best-effort by design (a missing lock file
+    legitimately means "no hub installs"). For a postcondition comparison that
+    is not good enough: an unreadable lock file must not look like an empty
+    one, or an uninstall would "succeed" simply because we could not read the
+    file that proves otherwise.
+    """
+    lock_path = Path(skills_dir) / ".hub" / "lock.json"
+    try:
+        if not lock_path.exists():
+            return {}
+        lock_path.read_bytes()
+    except OSError:
+        logger.warning("hub lock file unreadable at %s", lock_path, exc_info=True)
+        return None
+    try:
+        return hub_lock_snapshot(skills_dir)
+    except Exception:
+        logger.warning("hub lock snapshot failed", exc_info=True)
+        return None
+
+
+def _entry_for_target(snapshot: dict[str, dict], target: str) -> dict | None:
+    """Find *target* in a lock snapshot by skill name OR hub identifier."""
+    needle = str(target or "").strip()
+    if not needle:
+        return None
+    entry = snapshot.get(needle)
+    if entry is not None:
+        return entry
+    for candidate in snapshot.values():
+        if str(candidate.get("identifier") or "") == needle:
+            return candidate
+    return None
+
+
+def _entry_revision(entry: dict | None) -> tuple:
+    """Everything about a lock entry that a real mutation must change."""
+    if not isinstance(entry, dict):
+        return ()
+    return (
+        entry.get("identifier"),
+        entry.get("install_path"),
+        entry.get("installed_at"),
+        entry.get("updated_at"),
+        entry.get("scan_verdict"),
+        entry.get("trust_level"),
+    )
+
+
+def _evaluate_outcome(
+    action: str,
+    log: str,
+    scan_result,
+    *,
+    target: str = "",
+    before: dict[str, dict] | None = None,
+    after: dict[str, dict] | None = None,
+) -> tuple[bool, str | None]:
+    """Return (ok, error). rc==0 and no timeout are already established.
+
+    Success for a MUTATION is established by the hub's own lock artifact
+    changing in the expected direction for the expected target — never by
+    matching human sentences in the merged stdout transcript. That transcript
+    contains attacker-influenced content (a skill's own name, description and
+    scanner findings are echoed into it), so a crafted skill could print
+    ``Installed: ...`` and impersonate a completed install. The transcript is
+    kept for diagnostics only, to explain WHY a run did not change anything.
+
+    ``before``/``after`` are lock snapshots taken around the run. When they are
+    unavailable the mutation fails closed: an unverifiable mutation is not a
+    successful one.
+    """
     decision = (scan_result or {}).get("decision") if isinstance(scan_result, dict) else None
     if action == "scan":
+        # Read-only: the parsed report IS the product, and it is derived from
+        # this run's own output rather than asserting that state changed.
         if scan_result is not None:
             return True, None
         return False, "The CLI produced no scan report for this identifier."
+
+    if action not in ("install", "update", "uninstall"):
+        return False, f"Unknown action {action!r}"
+
+    if before is None or after is None:
+        return False, (
+            "Could not verify the result against the hub lock file; "
+            "treating the action as failed."
+        )
+
+    before_entry = _entry_for_target(before, target)
+    after_entry = _entry_for_target(after, target)
+
     if action == "install":
         if decision == "BLOCKED":
             return False, "Blocked by the security scan."
-        if "Installed:" in log:
-            return True, None
-        if "is already installed at" in log:
+        if after_entry is None:
+            if "is already installed at" in log:
+                return False, "Already installed — nothing was changed."
+            return False, "The hub lock file records no installed skill for this identifier."
+        if before_entry is not None and _entry_revision(before_entry) == _entry_revision(after_entry):
             return False, "Already installed — nothing was changed."
-        return False, "The CLI reported no completed install."
+        return True, None
+
     if action == "update":
-        m = _UPDATED_RE.search(log)
-        if m and int(m.group(1)) > 0:
-            return True, None
-        if "No updates available." in log:
-            return False, "No updates available — nothing was changed."
         if decision == "BLOCKED":
             return False, "Update blocked by the security scan."
-        return False, "The CLI reported no completed update."
-    if action == "uninstall":
-        if "Uninstalled '" in log:
-            return True, None
-        if "is not a hub-installed skill" in log:
-            return False, "Not a hub-installed skill — nothing was removed."
-        return False, "The CLI reported no completed uninstall."
-    return False, f"Unknown action {action!r}"
+        if after_entry is None:
+            return False, "The skill is no longer present in the hub lock file after the update."
+        if before_entry is None:
+            # An "update" that installed something is still a real change, but
+            # it is not what was asked for; report it rather than hiding it.
+            return False, "The skill was not installed before this update."
+        if _entry_revision(before_entry) == _entry_revision(after_entry):
+            if "No updates available." in log:
+                return False, "No updates available — nothing was changed."
+            return False, "The hub lock file is unchanged; nothing was updated."
+        return True, None
+
+    # uninstall
+    if before_entry is None:
+        return False, "Not a hub-installed skill — nothing was removed."
+    if after_entry is not None:
+        return False, "The skill is still recorded in the hub lock file."
+    return True, None
 
 
 def _resolve_hermes_command() -> str:
@@ -563,6 +752,9 @@ def start_action(
     # try/except so the slot reserved above is always released on failure.
     try:
         hermes_home = Path(get_active_hermes_home())
+        # Bound to THIS run's profile home, captured once: a profile switch
+        # mid-run must not move the postcondition target.
+        skills_dir = hermes_home / "skills"
         phases: list[tuple[str, list[str], str | None]] = []
         if action == "update":
             phases.append(
@@ -665,13 +857,20 @@ def start_action(
             )
             _signal_group(proc, signal.SIGTERM)
             try:
-                rc = proc.wait(timeout=5)
+                rc = proc.wait(timeout=_TREE_TERM_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
                 _signal_group(proc, signal.SIGKILL)
                 # Reap-before-release: block until the leader is gone. A
                 # process stuck in uninterruptible I/O keeps this profile's
                 # slot closed -- honest 409s instead of overlapping trees.
                 rc = proc.wait()
+            # Reaping the LEADER is not extinguishing the TREE. If the leader
+            # exits on SIGTERM while a git/scanner descendant survives, the
+            # branch above never escalates, and that descendant overlaps the
+            # next admitted run — writing into the same skills directory.
+            # Verify extinction (and force it) before returning, i.e. before
+            # `_run.finally` releases the profile slot.
+            _extinguish_process_tree(proc)
         reader.join(timeout=5)
         return rc, timed
 
@@ -689,6 +888,11 @@ def start_action(
 
     def _run() -> None:
         try:
+            # Postcondition authority: snapshot the hub's own lock artifact
+            # before the CLI runs, so success can be established from observed
+            # state rather than from sentences in an attacker-influenced
+            # transcript.
+            before_lock = _lock_snapshot_or_none(skills_dir)
             for phase_name, cmd, stdin_answer in phases:
                 rc, timed = _exec_phase(cmd, stdin_answer)
                 if timed:
@@ -726,7 +930,15 @@ def start_action(
             with hub.state_lock:
                 log_text = hub.state["log"]
                 scan_result = parse_scan_report(log_text)
-            ok, error = _evaluate_outcome(action, log_text, scan_result)
+            after_lock = _lock_snapshot_or_none(skills_dir)
+            ok, error = _evaluate_outcome(
+                action,
+                log_text,
+                scan_result,
+                target=target,
+                before=before_lock,
+                after=after_lock,
+            )
             _finalize("completed" if ok else "failed", 0, error)
         except Exception as exc:
             logger.exception("skills hub action %r runner failed", action)

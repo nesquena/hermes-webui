@@ -15604,8 +15604,17 @@ def handle_post(handler, parsed) -> bool:
         # flag on no longer exposes install/update/uninstall.
         from api.auth import ensure_trusted_auth_session
 
-        ensure_trusted_auth_session(handler)
-        if getattr(handler, "_trusted_auth_session_rejected", False) and not _onboarding_request_is_local(handler):
+        # Use the helper's RETURN VALUE, not its rejection side-effect.
+        # `_trusted_auth_session_rejected` is only set when an EXISTING session
+        # had to be invalidated. The common passwordless case — auth disabled,
+        # no cookie — returns None and sets nothing, so the old condition was
+        # false and the locality check never ran: a public remote request
+        # reached scan/install/uninstall whenever the capability flag was on.
+        #
+        # The rule is: an authenticated session is enough on its own; without
+        # one, the request must come from a spoof-resistant local/private peer.
+        session_info = ensure_trusted_auth_session(handler)
+        if not session_info and not _onboarding_request_is_local(handler):
             return bad(handler, "Authentication required", 401)
         action = _SKILLS_HUB_ACTION_BY_PATH[parsed.path]
         if action in ("scan", "install"):
