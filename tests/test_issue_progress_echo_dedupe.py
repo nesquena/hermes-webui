@@ -719,11 +719,53 @@ def test_redaction_mask_matches_quoted_secret_containing_delimiters(anchor_end):
         anchor_end=anchor_end,
     )
 
-    # Escaped quotes inside the secret stay inside the scalar. Odd/even counts are
-    # both exercised: an even number of escapes must not leave the scalar open.
+    # --- backslash PARITY immediately before the candidate-closing quote -------
+    # Fifth review: the previous rows here asserted three shapes that all returned
+    # True, so they could stay green without proving any parity behaviour — they
+    # never placed an odd AND an even backslash run immediately before the SAME
+    # candidate-closing quote, which is the boundary that decides whether that
+    # quote stays inside the secret or closes the scalar.
+    #
+    # These rows share ONE candidate and differ ONLY in that parity, and they must
+    # come out OPPOSITE:
+    #   odd  run  -> the quote is escaped, stays INSIDE the secret, so the scalar
+    #                never closes where the candidate expects and there is NO echo;
+    #   even run  -> the backslashes pair off, the quote CLOSES the scalar, and the
+    #                redaction-only difference IS an echo.
+    # Because the two rows disagree, this oracle discriminates: dropping the
+    # lexer's escape handling makes the odd row match and the test fails.
+    parity_cand = 'k="***" tail'
+    odd_vis = 'k="ab\\" tail'        # 1 backslash  -> closing quote escaped
+    even_vis = 'k="ab\\\\" tail'     # 2 backslashes -> closing quote closes
+    assert not match(parity_cand, vis_for(odd_vis), anchor_end=anchor_end), (
+        "an ODD backslash run before the closing quote escapes it, so the quoted "
+        "scalar does not close there and this must NOT be treated as an echo "
+        f"(anchor_end={anchor_end})"
+    )
+    assert match(parity_cand, vis_for(even_vis), anchor_end=anchor_end), (
+        "an EVEN backslash run before the closing quote leaves the quote "
+        "unescaped, so the scalar closes and the redaction-only difference IS an "
+        f"echo (anchor_end={anchor_end})"
+    )
+    # Same parity contract one run deeper (3 vs 4), so the assertion is about
+    # parity rather than about the specific counts 1 and 2.
+    assert not match(parity_cand, vis_for('k="ab\\\\\\" tail'), anchor_end=anchor_end)
+    assert match(parity_cand, vis_for('k="ab\\\\\\\\" tail'), anchor_end=anchor_end)
+
+    # Paired changed-sibling negatives: with a genuinely different status field
+    # outside the secret, BOTH parities must fail closed regardless.
+    parity_neg_cand = 'k="***" status=completed'
+    for label, neg_vis in (
+        ("odd", 'k="ab\\" x" status=failed status=completed'),
+        ("even", 'k="ab\\\\" status=failed status=completed'),
+    ):
+        assert not match(parity_neg_cand, vis_for(neg_vis), anchor_end=anchor_end), (
+            f"a changed sibling status field must fail closed for the {label} "
+            f"backslash-parity shape (anchor_end={anchor_end})"
+        )
+
+    # An escaped quote mid-secret still keeps the rest of the secret in one scalar.
     assert match('k="***"', vis_for('k="ab\\"cd"'), anchor_end=anchor_end)
-    assert match('k="***"', vis_for('k="ab\\"cd\\"ef"'), anchor_end=anchor_end)
-    assert match('k="***"', vis_for('k="ab\\\\cd"'), anchor_end=anchor_end)
 
     # CRITICAL: the quoted-scalar allowance must not reopen the false-dedup hole —
     # a changed field OUTSIDE the quoted secret still fails closed, in both modes.
