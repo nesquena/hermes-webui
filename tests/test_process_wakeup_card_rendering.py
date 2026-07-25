@@ -78,6 +78,8 @@ const supLikeBody = '[IMPORTANT: Background process w9 matched watch pattern "ER
 const asyncCompleteBody = '[ASYNC DELEGATION COMPLETE — deleg_single]\nA background subagent you dispatched earlier has finished.\n\nOriginal goal: inspect the regression\nRole: leaf   Model: test-model\nStatus: completed   API calls: 4   Duration: 2.5s\n--- RESULT ---\nFixed the regression.';
 const asyncErrorBody = '[ASYNC DELEGATION COMPLETE — deleg_error]\nA background subagent you dispatched earlier has finished.\n\nOriginal goal: inspect the failure\nRole: leaf   Model: test-model\nStatus: failed   API calls: 1   Duration: 2.5s\n--- RESULT ---\nThe subagent did not complete successfully (status=failed).';
 const asyncBatchBody = '[ASYNC DELEGATION BATCH COMPLETE — deleg_batch]\nA background fan-out of 2 subagent(s) has finished.\n\n--- ✓ TASK 1/2: inspect success (status=completed, api_calls=2, 1s) ---\nFound the first result.\n\n--- ✗ TASK 2/2: inspect failure (status=failed, api_calls=1, 1s) ---\n(no summary — status=failed: timeout)';
+const asyncBatchResultStatusBody = '[ASYNC DELEGATION BATCH COMPLETE — deleg_result_status]\nA background fan-out of 1 subagent(s) has finished.\n\n--- ✓ TASK 1/1: document syntax (status=completed, api_calls=2, 1s) ---\nThe result explains `(status=failed)` as an example.';
+const asyncBatchResultErrorBody = '[ASYNC DELEGATION BATCH COMPLETE — deleg_result_error]\nA background fan-out of 1 subagent(s) has finished.\n\n--- ✓ TASK 1/1: preserve output (status=completed, api_calls=2, 1s) ---\nThe generated report contains:\n--- ERROR ---\nThis is quoted output, not batch state.';
 const asyncLookalikeSingleBody = '[ASYNC DELEGATION COMPLETE — deleg_lookalike]\nThis is an unstructured lookalike.';
 const asyncLookalikeBatchBody = '[ASYNC DELEGATION BATCH COMPLETE — deleg_lookalike_batch]\nThis is an unstructured batch lookalike.';
 const asyncBatchErrorBody = '[ASYNC DELEGATION BATCH COMPLETE — deleg_batch_error]\nA background fan-out could not be started.\n\n--- ERROR ---\nlaunch failed';
@@ -92,6 +94,8 @@ const supLikeInfo = _processWakeupInfo({}, supLikeBody);
 const asyncCompleteInfo = _processWakeupInfo({}, asyncCompleteBody);
 const asyncErrorInfo = _processWakeupInfo({}, asyncErrorBody);
 const asyncBatchInfo = _processWakeupInfo({}, asyncBatchBody);
+const asyncBatchResultStatusInfo = _processWakeupInfo({}, asyncBatchResultStatusBody);
+const asyncBatchResultErrorInfo = _processWakeupInfo({}, asyncBatchResultErrorBody);
 const asyncLookalikeSingleInfo = _processWakeupInfo({}, asyncLookalikeSingleBody);
 const asyncLookalikeBatchInfo = _processWakeupInfo({}, asyncLookalikeBatchBody);
 const asyncBatchErrorInfo = _processWakeupInfo({}, asyncBatchErrorBody);
@@ -114,6 +118,7 @@ process.stdout.write(JSON.stringify({
   wsInfoOutput: wsInfo.output,
   supLikeInfo,
   asyncCompleteInfo, asyncErrorInfo, asyncBatchInfo,
+  asyncBatchResultStatusInfo, asyncBatchResultErrorInfo,
   asyncLookalikeSingleInfo, asyncLookalikeBatchInfo, asyncBatchErrorInfo,
   okCard: _processWakeupCardHtml(okInfo, okBody, extras),
   failCard: _processWakeupCardHtml(failInfo, failBody, extras),
@@ -223,6 +228,9 @@ def test_async_delegation_envelopes_use_collapsed_cards_and_keep_full_body():
 
     assert result["asyncLookalikeSingleInfo"] is None
     assert result["asyncLookalikeBatchInfo"] is None
+
+    assert result["asyncBatchResultStatusInfo"]["status"] == "completed"
+    assert result["asyncBatchResultErrorInfo"]["status"] == "completed"
 
     batch_error = result["asyncBatchErrorInfo"]
     assert batch_error["type"] == "async_delegation_batch"

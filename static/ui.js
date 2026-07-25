@@ -15628,11 +15628,11 @@ function _parseProcessWakeupBody(text){
     const isBatch=!!m[1];
     const body=m[3]||'';
     const statuses=isBatch
-      ?Array.from(body.matchAll(/\(status=([^,\s)]+)/g),match=>String(match[1]).toLowerCase())
+      ?Array.from(body.matchAll(/^--- [✓✗] TASK \d+\/\d+: [^\n]* \(status=([^,\s)]+),[^\n]*\) ---$/gm),match=>String(match[1]).toLowerCase())
       :(body.match(/^Status:\s*([^\s]+)/mi)||[]).slice(1).map(status=>String(status).toLowerCase());
     const successful=status=>status==='completed'||status==='success';
     const partial=status=>status==='partial'||status==='interrupted'||status==='cancelled';
-    const failedBatch=isBatch&&/^--- ERROR ---$/m.test(body);
+    const failedBatch=isBatch&&/^A background fan-out could not be started\.\n\n--- ERROR ---\n/.test(body);
     if(!statuses.length&&!failedBatch) return null;
     const status=failedBatch?'error'
       :(statuses.length&&statuses.every(successful))?'completed'
