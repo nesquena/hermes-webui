@@ -25,7 +25,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def _quota_region() -> str:
     source = UI_JS.read_text(encoding="utf-8")
     start = source.index("// ── Ambient provider quota indicator")
-    end = source.index("window.addEventListener('visibilitychange'", start)
+    end = source.index("// Dynamic model labels", start)
     return source[start:end]
 
 
@@ -54,7 +54,12 @@ const nodes = {{
   composerMobileQuotaLabel: makeNode(),
 }};
 function $(id) {{ return nodes[id] || null; }}
-const window = {{_showQuotaChip: true}};
+const window = {{_showQuotaChip: true, addEventListener: () => {{}}}};
+const S = {{session: null}};
+let _emptyComposerModelOverride = null;
+function _readEmptyComposerModelOverride() {{
+  return _emptyComposerModelOverride;
+}}
 function api(url) {{
   requests.push(url);
   return new Promise((resolve, reject) => pending.push({{resolve, reject}}));
@@ -201,6 +206,46 @@ return {requests, finalState: snapshot()};
     }
 
 
+def test_current_quota_provider_falls_back_to_empty_composer_override():
+    report = _run_quota_scenario(
+        """
+// Simulate an empty composer with a non-default provider selected.
+_emptyComposerModelOverride = {model: 'ollama-cloud/llama-3.3', model_provider: 'ollama-cloud'};
+const provider = _currentQuotaProvider();
+const request = refreshProviderQuotaIndicator(provider);
+return {requests, provider, pendingCount: pending.length};
+"""
+    )
+
+    assert report["provider"] == "ollama-cloud"
+    assert report["requests"] == ["/api/provider/quota?provider=ollama-cloud"]
+
+
+def test_current_quota_provider_prefers_session_provider_over_empty_composer_override():
+    report = _run_quota_scenario(
+        """
+// Active session takes priority over the empty-composer override.
+S.session = {session_id: 's1', model_provider: 'anthropic'};
+_emptyComposerModelOverride = {model: 'ollama-cloud/llama-3.3', model_provider: 'ollama-cloud'};
+const provider = _currentQuotaProvider();
+return {provider};
+"""
+    )
+
+    assert report["provider"] == "anthropic"
+
+
+def test_current_quota_provider_returns_null_when_no_session_and_no_override():
+    report = _run_quota_scenario(
+        """
+const provider = _currentQuotaProvider();
+return {provider};
+"""
+    )
+
+    assert report["provider"] is None
+
+
 def _between(source: str, start: str, end: str) -> str:
     start_at = source.index(start)
     return source[start_at : source.index(end, start_at)]
@@ -233,3 +278,16 @@ def test_provider_quota_refresh_follows_each_authoritative_provider_transition()
 
     boot_prefix = boot[: boot.index("const saved=urlSession||savedLocal;")]
     assert "refreshProviderQuotaIndicator();" not in boot_prefix
+
+
+def test_visibility_and_settings_refresh_use_current_quota_provider_helper():
+    ui_js = UI_JS.read_text(encoding="utf-8")
+    panels_js = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+
+    # visibilitychange in ui.js uses _currentQuotaProvider
+    vis_region = _between(ui_js, "window.addEventListener('visibilitychange'", ");")
+    assert "_currentQuotaProvider()" in vis_region
+
+    # Settings toggle in panels.js uses _currentQuotaProvider
+    toggle_region = _between(panels_js, "showQuotaChipCb.addEventListener('change'", "_schedulePreferencesAutosave();")
+    assert "_currentQuotaProvider()" in toggle_region
