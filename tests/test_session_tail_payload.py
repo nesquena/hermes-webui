@@ -120,6 +120,8 @@ def test_tail_window_includes_windowed_session_tool_calls_even_when_messages_hav
 
 
 def test_foreign_tail_load_is_bounded_and_keeps_full_history_todo_state():
+    import api.routes as routes
+
     session = _FakeSession([
         {"role": "user", "content": "older"},
         {
@@ -141,11 +143,14 @@ def test_foreign_tail_load_is_bounded_and_keeps_full_history_todo_state():
     assert payload["message_count"] == len(session.messages)
     assert payload["_messages_truncated"] is True
     assert payload["_messages_offset"] == 2
+    assert payload["_msg_limit_max"] == routes._MAX_MSG_LIMIT
     assert payload["tool_calls"] == []
     assert payload["todo_state"]["todos"][0]["id"] == "todo-1"
 
 
 def test_foreign_msg_before_page_reaches_offset_zero():
+    import api.routes as routes
+
     session = _FakeSession([
         {"role": "user", "content": "first"},
         {"role": "assistant", "content": "second"},
@@ -161,9 +166,12 @@ def test_foreign_msg_before_page_reaches_offset_zero():
     assert payload["message_count"] == 3
     assert payload["_messages_offset"] == 0
     assert payload["_messages_truncated"] is False
+    assert payload["_msg_limit_max"] == routes._MAX_MSG_LIMIT
 
 
 def test_foreign_messages_zero_returns_metadata_without_transcript():
+    import api.routes as routes
+
     session = _FakeSession([
         {"role": "user", "content": "first"},
         {"role": "assistant", "content": "second"},
@@ -179,10 +187,13 @@ def test_foreign_messages_zero_returns_metadata_without_transcript():
     assert payload["message_count"] == 2
     assert payload["_messages_offset"] == 0
     assert payload["_messages_truncated"] is False
+    assert payload["_msg_limit_max"] == routes._MAX_MSG_LIMIT
     assert "todo_state" not in payload
 
 
 def test_foreign_no_msg_limit_keeps_full_load():
+    import api.routes as routes
+
     session = _FakeSession([
         {"role": "user", "content": "first"},
         {"role": "assistant", "content": "second"},
@@ -197,6 +208,7 @@ def test_foreign_no_msg_limit_keeps_full_load():
     assert payload["message_count"] == 2
     assert payload["_messages_offset"] == 0
     assert payload["_messages_truncated"] is False
+    assert payload["_msg_limit_max"] == routes._MAX_MSG_LIMIT
     assert payload["tool_calls"] == []
 
 
