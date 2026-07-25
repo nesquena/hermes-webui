@@ -9500,6 +9500,7 @@ from api.models import (
     composer_draft_revision_is_stale,
     get_composer_draft_lock,
     update_cached_composer_draft,
+    DRAFT_REDIRECTED,
     DRAFT_UNREADABLE,
 )
 
@@ -14905,7 +14906,9 @@ def handle_post(handler, parsed) -> bool:
                     },
                     status=409,
                 )
-            sidecar_draft, sidecar_status, _redirect = read_composer_draft_sidecar_status(sid)
+            sidecar_draft, sidecar_status, in_lock_redirect = (
+                read_composer_draft_sidecar_status(sid)
+            )
             if sidecar_status == DRAFT_UNREADABLE:
                 # Merging into an unknown current state would silently drop the
                 # fields this request does not carry.
@@ -14913,6 +14916,24 @@ def handle_post(handler, parsed) -> bool:
                     handler,
                     {"ok": False, "error": "Could not read the saved draft"},
                     status=500,
+                )
+            if sidecar_status == DRAFT_REDIRECTED and in_lock_redirect:
+                # Re-check UNDER the lock. The redirect probe above the lock can
+                # legitimately see no marker and a compression can then win the
+                # same per-session lock and install one before this request gets
+                # it. Falling through here would write a plain draft over the
+                # continuation marker and reopen exactly the stranded-draft bug
+                # the marker exists to close.
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "error": "This conversation continues under a new id",
+                        "session_id": in_lock_redirect,
+                        "draft": resolve_composer_draft(in_lock_redirect),
+                        "rev": composer_draft_revision(in_lock_redirect),
+                    },
+                    status=409,
                 )
             if sidecar_draft is not None:
                 current_draft = dict(sidecar_draft)
@@ -15129,6 +15150,31 @@ def handle_post(handler, parsed) -> bool:
         # final state cannot contain a draft without an owning session.
         sidecar_deleted = False
         with get_composer_draft_lock(sid):
+            # Draft sidecar FIRST, and abort before touching anything else if it
+            # survives. Deleting the session file first and then bailing out on a
+            # failed unlink would be strictly worse than the orphan sidecar it
+            # was meant to prevent: the conversation is already gone, yet the
+            # index prune, the deletion tombstone, the attachment directory and —
+            # most importantly — the turn/run journal deletion (the #3802 privacy
+            # fix: plaintext transcript and full request/response payloads) all
+            # get skipped, with no way to make progress on a retry. Failing here
+            # leaves everything intact and retryable.
+            try:
+                draft_sidecar_cleared = delete_composer_draft_sidecar(sid)
+            except Exception:
+                logger.debug("Failed to unlink draft sidecar for %s", sid, exc_info=True)
+                draft_sidecar_cleared = False
+            if not draft_sidecar_cleared:
+                logger.warning("Draft sidecar for %s could not be removed; session kept", sid)
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "error": "The saved draft could not be deleted, so the "
+                                 "conversation was left untouched. Please retry.",
+                    },
+                    status=500,
+                )
             with LOCK:
                 SESSIONS.pop(sid, None)
             # Evict cached agent so turn count doesn't leak into a recycled session
@@ -15143,25 +15189,6 @@ def handle_post(handler, parsed) -> bool:
                 p.with_suffix('.json.bak').unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-            try:
-                draft_sidecar_cleared = delete_composer_draft_sidecar(sid)
-            except Exception:
-                logger.debug("Failed to unlink draft sidecar for %s", sid, exc_info=True)
-                draft_sidecar_cleared = False
-            if not draft_sidecar_cleared:
-                # The session file is gone but its sidecar survived. Reporting
-                # success here leaves an orphan draft that outlives its owner
-                # and wins over the legacy in-session field if the id is ever
-                # reused, so answer honestly instead.
-                logger.warning("Draft sidecar for deleted session %s could not be removed", sid)
-                return j(
-                    handler,
-                    {
-                        "ok": False,
-                        "error": "The session was removed but its saved draft could not be deleted",
-                    },
-                    status=500,
-                )
         try:
             prune_session_from_index(sid)
         except Exception:
@@ -21022,6 +21049,17 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
         for draft_path in drafts_dir.glob('*.json'):
             sid = draft_path.stem
             with get_composer_draft_lock(sid):
+                _draft, status, redirect_to = read_composer_draft_sidecar_status(sid)
+                if status == DRAFT_REDIRECTED and redirect_to:
+                    # Not a draft and never an orphan: this slot holds the
+                    # continuation marker that routes a late old-sid write to
+                    # the live session. Deleting it because the archived parent
+                    # happens to be gone reopens the stranded-draft bug.
+                    continue
+                if status == DRAFT_UNREADABLE:
+                    # Unknown contents: could be a recoverable draft.
+                    logger.warning("Keeping unreadable draft sidecar for %s", sid)
+                    continue
                 owner_exists = (SESSION_DIR / f'{sid}.json').exists()
                 with LOCK:
                     in_memory_owner = sid in SESSIONS

@@ -656,3 +656,141 @@ def test_migration_refuses_to_overwrite_an_unreadable_old_sidecar(
 
     assert models.composer_draft_sidecar_path(old_sid).exists()
     assert not models.composer_draft_sidecar_path(new_sid).exists()
+
+
+# ── Adversarial-review follow-ups ───────────────────────────────────────────
+
+
+def test_a_write_racing_a_rotation_cannot_destroy_the_marker(session_env, monkeypatch):
+    """The redirect probe above the lock can miss a marker installed under it.
+
+    Both the draft POST and `migrate_composer_draft_sidecar` take the SAME
+    per-session lock, so "compression wins the lock first" is ordinary
+    scheduling, not an exotic race. Falling through then wrote a plain draft
+    over the continuation marker and reopened the stranded-draft bug.
+    """
+    from api import models, routes
+
+    _session_dir, _sessions = session_env
+    old_sid = "race-rotation-old"
+    new_sid = "race-rotation-new"
+    session = models.Session(session_id=old_sid, title="Before compression")
+    session.save(skip_index=True)
+    models.write_composer_draft_sidecar(old_sid, {"text": "carry me", "files": []})
+    models.Session(session_id=new_sid, title="After compression").save(skip_index=True)
+
+    calls = {"n": 0}
+    real_probe = models.composer_draft_redirect_target
+
+    def probe_that_loses_the_race(sid):
+        calls["n"] += 1
+        if calls["n"] == 1 and sid == old_sid:
+            # The compression thread wins the lock right after we looked.
+            models.migrate_composer_draft_sidecar(old_sid, new_sid)
+            return None
+        return real_probe(sid)
+
+    monkeypatch.setattr(routes, "composer_draft_redirect_target", probe_that_loses_the_race)
+
+    response = _post_draft(
+        monkeypatch,
+        {"session_id": old_sid, "text": "typed after rotation", "files": []},
+    )
+
+    assert response["status"] == 409, response
+    assert response["payload"]["session_id"] == new_sid
+    assert models.composer_draft_redirect_target(old_sid) == new_sid, (
+        "a draft write destroyed the continuation marker"
+    )
+
+
+def test_a_failed_sidecar_delete_leaves_the_session_intact_and_retryable(
+    session_env, monkeypatch
+):
+    """Failing closed must not be worse than the problem it prevents.
+
+    Unlinking the session file first and only then bailing out left the
+    conversation gone while skipping the index prune, the tombstone, the
+    attachment directory and the turn/run journal deletion — with no way to
+    make progress on a retry.
+    """
+    from api import models, routes
+
+    session_dir, _sessions = session_env
+    sid = "delete-keeps-everything"
+    models.Session(session_id=sid, title="Doomed").save(skip_index=True)
+    models.write_composer_draft_sidecar(sid, {"text": "leftover", "files": []})
+
+    pruned = []
+    monkeypatch.setattr(routes, "delete_composer_draft_sidecar", lambda _sid: False)
+    monkeypatch.setattr(routes, "prune_session_from_index", pruned.append)
+
+    captured = {}
+
+    def fake_j(_handler, body, status=200, extra_headers=None):
+        captured.update(payload=body, status=status)
+        return True
+
+    monkeypatch.setattr(routes, "j", fake_j)
+    monkeypatch.setattr(
+        routes, "bad",
+        lambda handler, message, status=400: fake_j(handler, {"error": message}, status=status),
+    )
+    raw = json.dumps({"session_id": sid}).encode("utf-8")
+    handler = SimpleNamespace(
+        command="POST",
+        headers={"Content-Length": str(len(raw))},
+        rfile=BytesIO(raw),
+        _safe_webui_print=lambda *_a, **_k: None,
+    )
+    routes.handle_post(handler, SimpleNamespace(path="/api/session/delete"))
+
+    assert captured["status"] == 500
+    # Nothing was destroyed: the operation is fully retryable.
+    assert (session_dir / f"{sid}.json").exists(), "the session file was deleted anyway"
+    assert models.read_composer_draft_sidecar(sid) is not None
+    assert pruned == [], "the index was pruned for a session that still exists"
+
+
+def test_the_orphan_sweep_keeps_continuation_markers(session_env, monkeypatch):
+    """A redirect marker is never an orphan, whatever happened to its parent."""
+    from api import models, routes
+
+    _session_dir, _sessions = session_env
+    old_sid = "sweep-marker-old"
+    new_sid = "sweep-marker-new"
+    assert models.write_composer_draft_redirect(old_sid, new_sid)
+    assert models.composer_draft_redirect_target(old_sid) == new_sid
+
+    captured = {}
+    monkeypatch.setattr(
+        routes, "j",
+        lambda _h, body, status=200, extra_headers=None: captured.update(
+            payload=body, status=status
+        ) or True,
+    )
+    raw = json.dumps({}).encode("utf-8")
+    handler = SimpleNamespace(
+        command="POST",
+        headers={"Content-Length": str(len(raw))},
+        rfile=BytesIO(raw),
+        _safe_webui_print=lambda *_a, **_k: None,
+    )
+    routes._handle_sessions_cleanup(handler, {})
+
+    assert models.composer_draft_redirect_target(old_sid) == new_sid, (
+        "the cleanup sweep deleted a continuation marker"
+    )
+
+
+def test_the_revision_fence_is_documented_as_process_scoped():
+    """The limitation must be stated where a reader will find it."""
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "api" / "models.py").read_text(
+        encoding="utf-8"
+    )
+    idx = src.index("_COMPOSER_DRAFT_REVISIONS: dict = {}")
+    preamble = src[max(0, idx - 1400):idx]
+    assert "WITHIN ONE PROCESS" in preamble
+    assert "restart" in preamble

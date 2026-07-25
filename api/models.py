@@ -1236,12 +1236,22 @@ _DRAFT_SIDECAR_DIRNAME = '_drafts'
 _DRAFT_SIDECAR_CACHE: dict = {}
 _DRAFT_SIDECAR_LOCK = threading.Lock()
 _COMPOSER_DRAFT_LOCKS: dict = {}
-# Monotonic per-session draft revision. The composer autosaves on a debounce,
-# so a write can already be in flight when the user hits send and the client
-# clears the draft. Without an ordering token the clear completes, the older
-# write lands afterwards, and the sent message's text is resurrected as a
-# draft. Every mutating response carries the revision it produced; a request
-# that quotes an older one is rejected instead of applied.
+# Per-session draft revision. The composer autosaves on a debounce, so a write
+# can already be in flight when the user hits send and the client clears the
+# draft. Without an ordering token the clear completes, the older write lands
+# afterwards, and the sent message's text is resurrected as a draft. Every
+# mutating response carries the revision it produced; a request that quotes an
+# older one is rejected instead of applied.
+#
+# SCOPE — this counter is monotonic only WITHIN ONE PROCESS. It is an in-memory
+# dict, so a WebUI restart (or a second worker process) resets it to 0, and
+# `composer_draft_revision_is_stale()` only rejects `claimed < current` — after
+# a reset every pre-restart revision compares as fresh again, so a request that
+# was queued across the restart is accepted. The fence therefore closes the
+# common case (an autosave racing a clear inside one process lifetime) and does
+# NOT survive a restart. Making it durable means persisting the counter (or a
+# process-epoch stamp) alongside the sidecar; that is a deliberate follow-up,
+# not something this comment should pretend is already handled.
 _COMPOSER_DRAFT_REVISIONS: dict = {}
 
 
@@ -1526,10 +1536,13 @@ def resolve_composer_draft_status(sid, legacy=None):
     if status == DRAFT_UNREADABLE:
         return {}, False
     if status == DRAFT_REDIRECTED:
-        # Ownership moved; this sid holds no draft of its own, but the rotation
-        # target may. Report unreadable-for-destructive-purposes so a cleanup
-        # pass never deletes a row whose draft simply lives elsewhere now.
-        return {}, bool(redirect_to) is False
+        # Ownership moved: this sid holds no draft of its own, but the rotation
+        # target may. Deliberately report NOT readable so a destructive caller
+        # treats it as "unknown, keep everything" rather than "no draft, safe to
+        # delete" — the draft did not disappear, it lives under another sid, and
+        # deleting this row would also take the continuation marker with it.
+        del redirect_to  # only the status matters here
+        return {}, False
     if sidecar is not None:
         return sidecar, True
     return (legacy if isinstance(legacy, dict) else {}), True
