@@ -9576,7 +9576,7 @@ async function refreshSession() {
       // assistant->user (refs #6419).
       const msgs=S.messages;
       let liveIdx=-1;
-      for(let i=msgs.length-1;i>=0;i--){if(msgs[i]&&msgs[i]._live){liveIdx=i;break;}}
+      for(let i=0;i<msgs.length;i++){if(msgs[i]&&msgs[i]._live){liveIdx=i;break;}}
       if(liveIdx>=0) msgs.splice(liveIdx,0,pendingMsg);
       else msgs.push(pendingMsg);
     }
