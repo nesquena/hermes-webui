@@ -9361,7 +9361,9 @@ async function loadSettingsPanel(){
       showQuotaChipCb.addEventListener('change',()=>{
         window._showQuotaChip=showQuotaChipCb.checked;
         if(typeof refreshProviderQuotaIndicator==='function'){
-          const provider=(typeof S!=='undefined'&&S&&S.session&&S.session.model_provider)||null;
+          const provider=(typeof _currentQuotaProvider==='function')
+            ? _currentQuotaProvider()
+            : ((typeof S!=='undefined'&&S&&S.session&&S.session.model_provider)||null);
           void refreshProviderQuotaIndicator(provider);
         }
         _schedulePreferencesAutosave();

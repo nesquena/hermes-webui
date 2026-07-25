@@ -2858,10 +2858,23 @@ async function refreshProviderQuotaIndicator(providerId){
     clearProviderQuotaIndicator();
   }
 }
+// Resolve the provider that should drive the composer quota request.
+// Prefers the active session's provider; when the composer is empty, falls
+// back to the retained empty-composer model override so a non-default provider
+// selected before opening a conversation still scopes the quota request.
+function _currentQuotaProvider(){
+  if(typeof S!=='undefined'&&S&&S.session&&S.session.model_provider){
+    return S.session.model_provider;
+  }
+  if(typeof _readEmptyComposerModelOverride==='function'){
+    const override=_readEmptyComposerModelOverride();
+    if(override&&override.model_provider) return override.model_provider;
+  }
+  return null;
+}
 window.addEventListener('visibilitychange',()=>{
   if(document.visibilityState==='visible'&&typeof refreshProviderQuotaIndicator==='function'){
-    const provider=(typeof S!=='undefined'&&S&&S.session&&S.session.model_provider)||null;
-    void refreshProviderQuotaIndicator(provider);
+    void refreshProviderQuotaIndicator(_currentQuotaProvider());
   }
 });
 
