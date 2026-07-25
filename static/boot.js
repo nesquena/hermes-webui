@@ -3677,7 +3677,12 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
   if (typeof syncSessionSearchClear === 'function') syncSessionSearchClear();
   const _refreshQuotaForEmptyComposer=()=>{
-    if(!S.session&&typeof refreshProviderQuotaIndicator==='function') void refreshProviderQuotaIndicator(null);
+    if(!S.session&&typeof refreshProviderQuotaIndicator==='function'){
+      const provider=(typeof _currentQuotaProvider==='function')
+        ? _currentQuotaProvider()
+        : null;
+      void refreshProviderQuotaIndicator(provider);
+    }
   };
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
   const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
