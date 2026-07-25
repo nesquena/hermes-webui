@@ -4856,6 +4856,24 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
 MOA_DEFAULT_PRESET_NAME = "default"
 
 _MOA_SLOT_KEYS = {"provider", "model", "reasoning_effort"}
+# Transport-only handle: GET stamps each slot with the persisted slot it came
+# from, PUT echoes it back, and the write path uses it to merge unknown fields
+# from THAT EXACT slot. It is never persisted. Accepted as an input field so a
+# round-tripped slot does not trip the unknown-field validator.
+_MOA_SLOT_ORIGIN_KEY = "origin"
+_MOA_SLOT_INPUT_KEYS = _MOA_SLOT_KEYS | {_MOA_SLOT_ORIGIN_KEY}
+_MOA_AGGREGATOR_ORIGIN = "aggregator"
+
+
+def _moa_slot_origin(slot) -> str | None:
+    """The persisted slot this UI row was loaded from, if it declares one."""
+    if not isinstance(slot, dict):
+        return None
+    raw = slot.get(_MOA_SLOT_ORIGIN_KEY)
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    return raw or None
 _MOA_PRESET_KEYS = {
     "enabled",
     "reference_models",
@@ -4878,7 +4896,7 @@ def _moa_slot_problem(slot, *, label: str) -> str | None:
     """Return a validation problem for a non-blank MoA agent/aggregator slot."""
     if not isinstance(slot, dict):
         return f"{label} must be an object with 'provider' and 'model'"
-    unknown = sorted(set(slot) - _MOA_SLOT_KEYS)
+    unknown = sorted(set(slot) - _MOA_SLOT_INPUT_KEYS)
     if unknown:
         return f"{label} has unknown field(s): {', '.join(unknown)}"
     provider = str(slot.get("provider") or "").strip()
@@ -4904,6 +4922,7 @@ def _moa_effort_string(raw) -> str:
 
 
 def _moa_clean_slot(slot: dict) -> dict:
+    """Persistable slot content. The `origin` handle is transport only."""
     clean = {
         "provider": str(slot.get("provider") or "").strip(),
         "model": str(slot.get("model") or "").strip(),
@@ -4924,49 +4943,74 @@ def _moa_slot_identity(slot) -> tuple[str, str] | None:
     return (provider, model)
 
 
-def _moa_merge_slot_extras(new_slots: list[dict], old_slots) -> list[dict]:
-    """Merge-don't-replace at slot level -- by IDENTITY, never by position.
+def _moa_merge_slot_extras(new_slots: list[dict], old_slots, origins=None) -> list[dict]:
+    """Merge-don't-replace at slot level, keyed by the ORIGIN HANDLE.
 
-    Independent review P1: an index-based merge reassigns another tool's
-    slot metadata to the wrong agent as soon as a reference model is
-    removed or reordered. Unknown fields are carried over only when the
-    old slot is UNAMBIGUOUSLY identified by its (provider, model) pair:
+    The previous rule matched on the `(provider, model)` pair and carried
+    unknown fields only when that pair was unique on both sides. That loses
+    metadata in exactly the cases the editor produces:
 
-    * exactly one unclaimed old slot with the same identity -> carry its
-      unknown fields;
-    * duplicate identities on either side, or no match -> carry nothing
-      (dropping metadata is recoverable via the other tool; binding it to
-      the wrong agent silently corrupts semantics).
+    * duplicating an agent row makes the identity ambiguous, so BOTH rows lose
+      the source slot's metadata;
+    * changing a row's provider or model changes its identity, so an ordinary
+      edit drops another tool's fields — including on the aggregator, which is
+      a singleton and can never be ambiguous in the first place.
 
-    Known fields always take the UI's value."""
+    GET now stamps every slot with the persisted slot it came from, PUT echoes
+    that back, and the merge follows the handle. The preset revision already
+    pins the source content (a concurrent change is rejected as stale), so the
+    handle unambiguously identifies a slot in `old_slots`. Reorders and deletes
+    are then trivially correct — the handle travels with the row — and a
+    duplicated row legitimately inherits the metadata of the row it was copied
+    from. A row with no (or an unresolvable) handle is new: it carries nothing.
+
+    Known fields always take the UI's value; the handle itself is never
+    persisted.
+    """
     old_list = old_slots if isinstance(old_slots, list) else []
-    by_identity: dict[tuple[str, str], list[dict]] = {}
-    for old in old_list:
-        identity = _moa_slot_identity(old)
-        if identity is not None:
-            by_identity.setdefault(identity, []).append(old)
-
-    new_identities = [_moa_slot_identity(slot) for slot in new_slots]
+    if origins is None:
+        origins = [None] * len(new_slots)
     merged: list[dict] = []
-    for slot, identity in zip(new_slots, new_identities, strict=True):
-        candidates = by_identity.get(identity, []) if identity is not None else []
-        unambiguous = (
-            len(candidates) == 1
-            and new_identities.count(identity) == 1
-        )
-        if unambiguous:
-            old = candidates[0]
-            extras = {k: v for k, v in old.items() if k not in _MOA_SLOT_KEYS}
+    for slot, origin in zip(new_slots, origins, strict=True):
+        old = _moa_slot_for_origin(origin, old_list)
+        if isinstance(old, dict):
+            extras = {
+                k: v for k, v in old.items()
+                if k not in _MOA_SLOT_KEYS and k != _MOA_SLOT_ORIGIN_KEY
+            }
             merged.append({**extras, **slot})
         else:
             merged.append(dict(slot))
     return merged
 
 
-def _moa_read_slot(slot) -> dict:
+def _moa_slot_for_origin(origin, old_list: list):
+    """Resolve an origin handle to its persisted slot, or None."""
+    if not isinstance(origin, str) or not origin:
+        return None
+    if origin == _MOA_AGGREGATOR_ORIGIN:
+        # The aggregator is a stable singleton: its origin is itself,
+        # regardless of how its provider/model changed.
+        return old_list[0] if old_list and isinstance(old_list[0], dict) else None
+    if not origin.startswith("ref:"):
+        return None
+    try:
+        index = int(origin[4:])
+    except ValueError:
+        return None
+    if 0 <= index < len(old_list) and isinstance(old_list[index], dict):
+        return old_list[index]
+    return None
+
+
+def _moa_read_slot(slot, origin: str | None = None) -> dict:
     """Lenient read-side slot view — shows exactly what's persisted, even if
     incomplete, so the editor never substitutes hardcoded example agents for
-    a user's real (possibly blank) saved state."""
+    a user's real (possibly blank) saved state.
+
+    *origin* is the opaque handle the editor echoes back on save so unknown
+    fields written by other tooling can be merged from the exact source slot.
+    """
     if not isinstance(slot, dict):
         slot = {}
     out = {
@@ -4976,6 +5020,8 @@ def _moa_read_slot(slot) -> dict:
     effort = _moa_effort_string(slot.get("reasoning_effort"))
     if effort:
         out["reasoning_effort"] = effort
+    if origin:
+        out[_MOA_SLOT_ORIGIN_KEY] = origin
     return out
 
 
@@ -5115,8 +5161,14 @@ def _moa_preset_for_read(preset: dict) -> dict:
     enabled_default = bool(preset)
     return {
         "enabled": bool(preset.get("enabled", enabled_default)),
-        "reference_models": [_moa_read_slot(slot) for slot in refs],
-        "aggregator": _moa_read_slot(aggregator) if isinstance(aggregator, dict) else {"provider": "", "model": ""},
+        "reference_models": [
+            _moa_read_slot(slot, origin=f"ref:{index}") for index, slot in enumerate(refs)
+        ],
+        "aggregator": (
+            _moa_read_slot(aggregator, origin=_MOA_AGGREGATOR_ORIGIN)
+            if isinstance(aggregator, dict)
+            else {"provider": "", "model": ""}
+        ),
         "reference_temperature": _moa_float_or_none(preset.get("reference_temperature")),
         "aggregator_temperature": _moa_float_or_none(preset.get("aggregator_temperature")),
         "max_tokens": _moa_int_or_default(preset.get("max_tokens"), 4096),
@@ -5174,6 +5226,7 @@ def set_moa_config(payload: dict) -> dict:
 
     problems: list[str] = []
     clean_refs: list[dict] = []
+    ref_origins: list[str | None] = []
     for index, slot in enumerate(refs_raw):
         if _moa_slot_is_blank(slot):
             continue
@@ -5182,6 +5235,7 @@ def set_moa_config(payload: dict) -> dict:
             problems.append(issue)
         else:
             clean_refs.append(_moa_clean_slot(slot))
+            ref_origins.append(_moa_slot_origin(slot))
     if enabled and not clean_refs:
         problems.append("at least one agent with provider and model is required when enabled")
 
@@ -5213,7 +5267,14 @@ def set_moa_config(payload: dict) -> dict:
 
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW, not env-expanded. `_load_yaml_config_file()` recursively resolves
+        # every `${VAR}` reference, and `_save_yaml_config_file()` then writes
+        # the whole dict back — so saving a MoA preset would replace unrelated
+        # `${OPENAI_API_KEY}`-style placeholders elsewhere in config.yaml with
+        # their resolved values, materializing environment-backed secrets into
+        # a file that is not supposed to hold them. Every other config setter
+        # that mutates-and-writes uses the raw loader for exactly this reason.
+        config_data = _load_yaml_config_file_raw(config_path)
         raw_moa = config_data.get("moa")
         raw_moa = raw_moa if isinstance(raw_moa, dict) else {}
         preset_name, existing_preset, _others = _moa_locate_preset(raw_moa)
@@ -5240,13 +5301,15 @@ def set_moa_config(payload: dict) -> dict:
         old_refs = merged.get("reference_models")
         old_refs = old_refs if isinstance(old_refs, list) else []
         preset_update["reference_models"] = _moa_merge_slot_extras(
-            preset_update["reference_models"], old_refs
+            preset_update["reference_models"], old_refs, ref_origins
         )
         if not aggregator_blank:
-            # The aggregator is a singleton slot: identity-match against the
-            # persisted aggregator only (same rule, list of one).
+            # The aggregator is a stable singleton: its origin is itself, so an
+            # ordinary provider/model edit keeps another tool's metadata.
             preset_update["aggregator"] = _moa_merge_slot_extras(
-                [preset_update["aggregator"]], [merged.get("aggregator")]
+                [preset_update["aggregator"]],
+                [merged.get("aggregator")],
+                [_moa_slot_origin(aggregator_raw) or _MOA_AGGREGATOR_ORIGIN],
             )[0]
         merged.update(preset_update)
 

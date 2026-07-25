@@ -297,9 +297,17 @@ function _beginSettingsPanelSession() {
   _resetSettingsPanelState();
 }
 
+// True when ANY settings section holds unsaved edits. The MoA editor keeps its
+// own dirty flag because it saves through /api/config/moa rather than
+// /api/settings; leaving it out of the navigation/close guards meant closing
+// the panel discarded a half-edited MoA preset without a word.
+function _settingsHasUnsavedChanges() {
+  return !!(_settingsDirty || (typeof _moaDirty !== 'undefined' && _moaDirty));
+}
+
 function _beforePanelSwitch(nextPanel) {
   if (_currentPanel !== 'settings' || nextPanel === 'settings') return true;
-  if (_settingsDirty) {
+  if (_settingsHasUnsavedChanges()) {
     _pendingSettingsTargetPanel = nextPanel || 'chat';
     _showSettingsUnsavedBar();
     return false;
@@ -8315,7 +8323,7 @@ function _hideSettingsPanel(){
 
 // Close with unsaved-changes check. If dirty, show a confirm dialog.
 function _closeSettingsPanel(){
-  if(!_settingsDirty){
+  if(!_settingsHasUnsavedChanges()){
     _revertSettingsPreview();
     _hideSettingsPanel();
     return;
@@ -8351,6 +8359,9 @@ function _showSettingsUnsavedBar(){
 function _discardSettings(){
   _revertSettingsPreview();
   _settingsDirty = false;
+  // Discard means discard everything the bar was warning about.
+  if (typeof _moaDirty !== 'undefined') _moaDirty = false;
+  if (typeof _updateMoaSaveButtonState === 'function') _updateMoaSaveButtonState();
   _hideSettingsPanel();
 }
 
@@ -12709,8 +12720,8 @@ async function _loadMoaConfig(){
   // persists it per slot (see api/config.py _MOA_SLOT_KEYS) -- carry
   // whatever value was loaded through untouched so a save from this UI
   // doesn't silently erase it (#audit MEDIUM: this used to be dropped here).
-  _moaAgentsState=(Array.isArray(_moaMeta.reference_models)?_moaMeta.reference_models:[]).map(a=>({provider:(a&&a.provider)||'',model:(a&&a.model)||'',reasoning_effort:(a&&a.reasoning_effort)||''}));
-  _moaAggregatorState={provider:(_moaMeta.aggregator&&_moaMeta.aggregator.provider)||'',model:(_moaMeta.aggregator&&_moaMeta.aggregator.model)||'',reasoning_effort:(_moaMeta.aggregator&&_moaMeta.aggregator.reasoning_effort)||''};
+  _moaAgentsState=(Array.isArray(_moaMeta.reference_models)?_moaMeta.reference_models:[]).map(a=>({provider:(a&&a.provider)||'',model:(a&&a.model)||'',reasoning_effort:(a&&a.reasoning_effort)||'',origin:(a&&a.origin)||''}));
+  _moaAggregatorState={provider:(_moaMeta.aggregator&&_moaMeta.aggregator.provider)||'',model:(_moaMeta.aggregator&&_moaMeta.aggregator.model)||'',reasoning_effort:(_moaMeta.aggregator&&_moaMeta.aggregator.reasoning_effort)||'',origin:(_moaMeta.aggregator&&_moaMeta.aggregator.origin)||''};
   _renderMoaAgents();
   _renderMoaAggregator();
   _updateMoaFieldsVisibility();
@@ -12742,6 +12753,10 @@ function _moaSlotPayload(slot){
  // blank, matching the backend's own _moa_clean_slot behavior.
  const out={provider:slot.provider||'',model:slot.model||''};
  if(slot.reasoning_effort) out.reasoning_effort=slot.reasoning_effort;
+ // Opaque handle from GET: tells the backend WHICH persisted slot this row
+ // came from, so unknown fields written by other tooling are merged from that
+ // exact slot even after the provider/model was edited or the row duplicated.
+ if(slot.origin) out.origin=slot.origin;
  return out;
 }
 
@@ -12755,7 +12770,7 @@ async function _saveMoaConfig(){
  if(!_moaLoaded){
   // Defense in depth: the button is disabled pre-load, but keyboard/JS
   // activation must not slip through either (gate finding 3).
-  return;
+  return false;
  }
  const body={enabled,reference_models:referenceModels,aggregator};
  // Round-trip advanced fields this UI doesn't expose (reference_temperature,
@@ -12774,6 +12789,7 @@ async function _saveMoaConfig(){
   await api('/api/model/moa',{method:'PUT',body:JSON.stringify(body)});
   if(typeof showToast==='function') showToast(t('settings_moa_saved')||'Mixture of Agents settings saved');
   _loadMoaConfig();
+  return true;
  }catch(e){
   const msg=e&&e.message?e.message:'';
   if(typeof showToast==='function') showToast((t('settings_moa_save_failed')||'Failed to save Mixture of Agents settings')+(msg?': '+msg:''));
@@ -12782,6 +12798,7 @@ async function _saveMoaConfig(){
    // hammer Save against a moved target.
    _loadMoaConfig();
   }
+  return false;
  }
 }
 
@@ -12910,6 +12927,7 @@ async function saveSettings(andClose){
       _settingsDirty=false;
       _resetSettingsPanelState();
       if(!andClose) _pendingSettingsTargetPanel = null;
+      if(!(await _saveDirtyMoaBeforeClose())) return;
       if(andClose) _hideSettingsPanel();
       return;
     }catch(e){showToast(t('settings_save_failed')+e.message);return;}
@@ -12930,10 +12948,26 @@ async function saveSettings(andClose){
     _settingsDirty=false;
     _resetSettingsPanelState();
     if(!andClose) _pendingSettingsTargetPanel = null;
+    // The unsaved-changes bar warns about MoA too, and its Save button lands
+    // here. Closing after saving only /api/settings would silently discard the
+    // MoA edits the bar just promised to save.
+    if(!(await _saveDirtyMoaBeforeClose())) return;
     if(andClose) _hideSettingsPanel();
   }catch(e){
     showToast(t('settings_save_failed')+e.message);
   }
+}
+
+async function _saveDirtyMoaBeforeClose(){
+  if(typeof _moaDirty==='undefined' || !_moaDirty) return true;
+  if(typeof _saveMoaConfig!=='function') return true;
+  const ok=await _saveMoaConfig();
+  if(!ok){
+    // Keep the panel open and the bar visible: the MoA edits are still unsaved.
+    if(typeof _showSettingsUnsavedBar==='function') _showSettingsUnsavedBar();
+    return false;
+  }
+  return true;
 }
 
 async function signOut(){
