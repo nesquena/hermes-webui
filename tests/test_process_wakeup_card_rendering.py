@@ -75,6 +75,12 @@ const wsBody = '[IMPORTANT: Background process p completed (exit_code=0).\nComma
 // Finding 2: output that legitimately ends with the suppression phrasing must
 // be preserved intact (not lifted into a suppression field and dropped).
 const supLikeBody = '[IMPORTANT: Background process w9 matched watch pattern "ERR".\nCommand: tail\nMatched output:\nreal log\n(3 earlier matches were suppressed by rate limit)]';
+const asyncCompleteBody = '[ASYNC DELEGATION COMPLETE — deleg_single]\nA background subagent you dispatched earlier has finished.\n\nOriginal goal: inspect the regression\nRole: leaf   Model: test-model\nStatus: completed   API calls: 4   Duration: 2.5s\n--- RESULT ---\nFixed the regression.';
+const asyncErrorBody = '[ASYNC DELEGATION COMPLETE — deleg_error]\nA background subagent you dispatched earlier has finished.\n\nOriginal goal: inspect the failure\nRole: leaf   Model: test-model\nStatus: failed   API calls: 1   Duration: 2.5s\n--- RESULT ---\nThe subagent did not complete successfully (status=failed).';
+const asyncBatchBody = '[ASYNC DELEGATION BATCH COMPLETE — deleg_batch]\nA background fan-out of 2 subagent(s) has finished.\n\n--- ✓ TASK 1/2: inspect success (status=completed, api_calls=2, 1s) ---\nFound the first result.\n\n--- ✗ TASK 2/2: inspect failure (status=failed, api_calls=1, 1s) ---\n(no summary — status=failed: timeout)';
+const asyncLookalikeSingleBody = '[ASYNC DELEGATION COMPLETE — deleg_lookalike]\nThis is an unstructured lookalike.';
+const asyncLookalikeBatchBody = '[ASYNC DELEGATION BATCH COMPLETE — deleg_lookalike_batch]\nThis is an unstructured batch lookalike.';
+const asyncBatchErrorBody = '[ASYNC DELEGATION BATCH COMPLETE — deleg_batch_error]\nA background fan-out could not be started.\n\n--- ERROR ---\nlaunch failed';
 
 const okInfo = _processWakeupInfo({}, okBody);
 const failInfo = _processWakeupInfo({}, failBody);
@@ -83,6 +89,12 @@ const watchInfo = _processWakeupInfo({}, watchBody);
 const htmlInfo = _processWakeupInfo({}, htmlBody);
 const wsInfo = _processWakeupInfo({}, wsBody);
 const supLikeInfo = _processWakeupInfo({}, supLikeBody);
+const asyncCompleteInfo = _processWakeupInfo({}, asyncCompleteBody);
+const asyncErrorInfo = _processWakeupInfo({}, asyncErrorBody);
+const asyncBatchInfo = _processWakeupInfo({}, asyncBatchBody);
+const asyncLookalikeSingleInfo = _processWakeupInfo({}, asyncLookalikeSingleBody);
+const asyncLookalikeBatchInfo = _processWakeupInfo({}, asyncLookalikeBatchBody);
+const asyncBatchErrorInfo = _processWakeupInfo({}, asyncBatchErrorBody);
 const metaOnlyInfo = _processWakeupInfo(
   {_wakeup_meta: {type: 'completion', task_id: 'srv_1', command: 'cargo test', exit_code: 1}},
   'some future format the client parser does not know'
@@ -101,6 +113,8 @@ process.stdout.write(JSON.stringify({
   emptyIsNull: _processWakeupInfo({content: ''}, '') === null,
   wsInfoOutput: wsInfo.output,
   supLikeInfo,
+  asyncCompleteInfo, asyncErrorInfo, asyncBatchInfo,
+  asyncLookalikeSingleInfo, asyncLookalikeBatchInfo, asyncBatchErrorInfo,
   okCard: _processWakeupCardHtml(okInfo, okBody, extras),
   failCard: _processWakeupCardHtml(failInfo, failBody, extras),
   signalCard: _processWakeupCardHtml(signalInfo, signalBody, extras),
@@ -108,6 +122,10 @@ process.stdout.write(JSON.stringify({
   htmlCard: _processWakeupCardHtml(htmlInfo, htmlBody, extras),
   wsCard: _processWakeupCardHtml(wsInfo, wsBody, extras),
   supLikeCard: _processWakeupCardHtml(supLikeInfo, supLikeBody, extras),
+  asyncCompleteCard: asyncCompleteInfo ? _processWakeupCardHtml(asyncCompleteInfo, asyncCompleteBody, extras) : null,
+  asyncErrorCard: asyncErrorInfo ? _processWakeupCardHtml(asyncErrorInfo, asyncErrorBody, extras) : null,
+  asyncBatchCard: asyncBatchInfo ? _processWakeupCardHtml(asyncBatchInfo, asyncBatchBody, extras) : null,
+  asyncBatchErrorCard: asyncBatchErrorInfo ? _processWakeupCardHtml(asyncBatchErrorInfo, asyncBatchErrorBody, extras) : null,
   metaOnlyCard: _processWakeupCardHtml(metaOnlyInfo, 'some future format the client parser does not know', extras),
 }));
 """
@@ -165,6 +183,56 @@ def test_output_that_looks_like_suppression_metadata_is_kept_in_full():
     assert sup["output"] == "real log\n(3 earlier matches were suppressed by rate limit)"
     assert "suppressed" not in sup
     assert "(3 earlier matches were suppressed by rate limit)" in result["supLikeCard"]
+
+
+def test_async_delegation_envelopes_use_collapsed_cards_and_keep_full_body():
+    result = _run_driver()
+
+    completed = result["asyncCompleteInfo"]
+    assert completed["type"] == "async_delegation"
+    assert completed["taskId"] == "deleg_single"
+    assert completed["status"] == "completed"
+    assert completed["output"].startswith("[ASYNC DELEGATION COMPLETE — deleg_single]")
+
+    failed = result["asyncErrorInfo"]
+    assert failed["type"] == "async_delegation"
+    assert failed["taskId"] == "deleg_error"
+    assert failed["status"] == "error"
+
+    batch = result["asyncBatchInfo"]
+    assert batch["type"] == "async_delegation_batch"
+    assert batch["taskId"] == "deleg_batch"
+    assert batch["status"] == "partial"
+    assert batch["output"].startswith("[ASYNC DELEGATION BATCH COMPLETE — deleg_batch]")
+
+    completed_card = result["asyncCompleteCard"]
+    assert completed_card.startswith('<details class="process-wakeup-card">')
+    assert 'class="process-wakeup-chip ok"' in completed_card
+    assert "completed" in completed_card
+    assert "deleg_single" in completed_card
+    assert "[ASYNC DELEGATION COMPLETE — deleg_single]" in completed_card
+
+    failed_card = result["asyncErrorCard"]
+    assert 'class="process-wakeup-chip fail"' in failed_card
+    assert "error" in failed_card
+
+    batch_card = result["asyncBatchCard"]
+    assert 'class="process-wakeup-chip neutral"' in batch_card
+    assert "partial" in batch_card
+    assert "[ASYNC DELEGATION BATCH COMPLETE — deleg_batch]" in batch_card
+
+    assert result["asyncLookalikeSingleInfo"] is None
+    assert result["asyncLookalikeBatchInfo"] is None
+
+    batch_error = result["asyncBatchErrorInfo"]
+    assert batch_error["type"] == "async_delegation_batch"
+    assert batch_error["taskId"] == "deleg_batch_error"
+    assert batch_error["status"] == "error"
+    assert batch_error["output"].startswith("[ASYNC DELEGATION BATCH COMPLETE — deleg_batch_error]")
+
+    batch_error_card = result["asyncBatchErrorCard"]
+    assert 'class="process-wakeup-chip fail"' in batch_error_card
+    assert "--- ERROR ---" in batch_error_card
 
 
 def test_server_meta_is_authoritative_and_covers_unparseable_bodies():

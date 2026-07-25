@@ -15609,7 +15609,7 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
 }
 
 // #6345: parse the synthetic wakeup body back into display fields. Mirrors the
-// two structured api/background_process.format_wakeup_prompt shapes (pinned by
+// structured api/background_process.format_wakeup_prompt shapes (pinned by
 // tests/test_background_process_wakeup_format.py); other event kinds return
 // null and keep the raw-notice fallback.
 function _parseProcessWakeupBody(text){
@@ -15623,6 +15623,23 @@ function _parseProcessWakeupBody(text){
   if(m) return {type:'completion',taskId:m[1],exitCode:m[2],command:m[3],output:m[4],pattern:null};
   m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) matched watch pattern "(.*)"\.\nCommand: ([^\n]*)\nMatched output:\n([\s\S]*)\]$/);
   if(m) return {type:'watch_match',taskId:m[1],pattern:m[2],command:m[3],output:m[4],exitCode:null};
+  m=s.match(/^\[ASYNC DELEGATION (BATCH )?COMPLETE — ([^\]\n]+)\](?:\n([\s\S]*))?$/);
+  if(m){
+    const isBatch=!!m[1];
+    const body=m[3]||'';
+    const statuses=isBatch
+      ?Array.from(body.matchAll(/\(status=([^,\s)]+)/g),match=>String(match[1]).toLowerCase())
+      :(body.match(/^Status:\s*([^\s]+)/mi)||[]).slice(1).map(status=>String(status).toLowerCase());
+    const successful=status=>status==='completed'||status==='success';
+    const partial=status=>status==='partial'||status==='interrupted'||status==='cancelled';
+    const failedBatch=isBatch&&/^--- ERROR ---$/m.test(body);
+    if(!statuses.length&&!failedBatch) return null;
+    const status=failedBatch?'error'
+      :(statuses.length&&statuses.every(successful))?'completed'
+      :(statuses.some(successful)||statuses.some(partial))?'partial'
+      :'error';
+    return {type:isBatch?'async_delegation_batch':'async_delegation',taskId:m[2],exitCode:null,command:null,output:s,pattern:null,status};
+  }
   return null;
 }
 // Server-stamped _wakeup_meta (authoritative when present) merged over the
@@ -15643,10 +15660,12 @@ function _processWakeupInfo(m, text){
     exitCode:pick('exit_code','exitCode'),
     pattern:pick('pattern','pattern'),
     output:parsed?parsed.output:null,
+    status:String(pick('status','status')||''),
   };
 }
 function _processWakeupCardHtml(info, rawText, extras){
   const isWatch=info.type==='watch_match';
+  const isAsync=info.type==='async_delegation'||info.type==='async_delegation_batch';
   const exitStr=info.exitCode==null?'':String(info.exitCode);
   // Signal-killed processes report negative exit codes (subprocess returncode).
   const exitKnown=/^-?\d+$/.test(exitStr);
@@ -15654,12 +15673,18 @@ function _processWakeupCardHtml(info, rawText, extras){
   let chip;
   if(isWatch){
     chip=`<span class="process-wakeup-chip watch" title="${esc(t('process_wakeup_matched'))}">${li('eye',11)}<code title="${esc(String(info.pattern||''))}">${esc(String(info.pattern||''))}</code></span>`;
+  }else if(isAsync){
+    const status=['completed','error','partial'].includes(info.status)?info.status:'partial';
+    const cls=status==='completed'?'ok':(status==='error'?'fail':'neutral');
+    const icon=status==='completed'?li('check',11):(status==='error'?li('x',11):'');
+    chip=`<span class="process-wakeup-chip ${cls}">${icon}<span>${esc(status)}</span></span>`;
   }else{
     const cls=exitOk?'ok':(exitKnown?'fail':'neutral');
     const icon=exitOk?li('check',11):(exitKnown?li('x',11):'');
     chip=`<span class="process-wakeup-chip ${cls}">${icon}<span>exit ${esc(exitStr||'?')}</span></span>`;
   }
-  const cmdHtml=info.command?`<code class="process-wakeup-cmd" title="${esc(info.command)}">${esc(info.command)}</code>`:'';
+  const summaryTarget=isAsync?info.taskId:info.command;
+  const cmdHtml=summaryTarget?`<code class="process-wakeup-cmd" title="${esc(summaryTarget)}">${esc(summaryTarget)}</code>`:'';
   // Preserve output byte-for-byte for the <pre>; trim ONLY for the
   // empty/non-empty decision so leading indentation and trailing blank lines
   // survive (#6350 review finding 1).
