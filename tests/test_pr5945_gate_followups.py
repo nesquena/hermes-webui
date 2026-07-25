@@ -168,7 +168,10 @@ setTimeout(() => console.log(JSON.stringify({
     assert result["delivered"] is False
 
 
-def _run_hidden_poll_tick_probe(*, hidden: bool, ticks: int = 3, sse_first: bool = False) -> dict:
+def _run_hidden_poll_tick_probe(
+    *, hidden: bool, ticks: int = 3, sse_first: bool = False,
+    poll_count: int = 1, sse_count: int | None = None, sse_settle_ms: int = 0,
+) -> dict:
     """Drive the REAL production composition for the selected session.
 
     The list poll → payload → ``_syncSessionAttentionSoundState`` → delivery
@@ -197,8 +200,18 @@ def _run_hidden_poll_tick_probe(*, hidden: bool, ticks: int = 3, sse_first: bool
             _function_source(SESSIONS_JS, "_syncSessionAttentionSoundState"),
         )
     )
+    # The SSE path now derives its count from the payload, exactly like the
+    # production handler; the poll independently derives its own from the
+    # server-reported attention count. A test that feeds both the same literal
+    # can never observe them disagreeing.
+    # `sse_count` is what the SSE handler puts in the dedup key; `poll_count`
+    # is what the sidebar poll derives from the server's attention count. They
+    # are separate knobs on purpose: the whole defect was the two paths
+    # disagreeing for the same underlying state.
+    effective_sse_count = poll_count if sse_count is None else sse_count
     sse_line = (
-        "_deliverAttentionNotification('target','approval',1,'Approval required','Build');"
+        "_deliverAttentionNotification('target','approval',"
+        f"{effective_sse_count},'Approval required','Build');"
         if sse_first
         else ""
     )
@@ -231,8 +244,14 @@ const _sessionAttentionSoundState = new Map();
 {sse_line}
 // The real list payload the sidebar applies, unchanged across ticks — the
 // signature is stable, so only the first tick may deliver.
-const payload = [{{session_id: 'target', title: 'Build', attention: {{kind: 'approval', count: 1}}}}];
+const payload = [{{session_id: 'target', title: 'Build', attention: {{kind: 'approval', count: {poll_count}}}}}];
 let tick = 0;
+// Let the SSE delivery SETTLE before the first poll tick when asked. Without
+// the delay the poll's claim supersedes the still-in-flight SSE claim (the
+// generation fence cancels it), which hides a key disagreement that a real
+// user — whose first notification has long since been displayed — would see
+// as a second alert.
+setTimeout(function start() {{
 (function nextTick() {{
   if (tick++ >= {ticks}) {{
     setTimeout(() => console.log(JSON.stringify({{
@@ -245,6 +264,7 @@ let tick = 0;
   _syncSessionAttentionSoundState(payload);
   setTimeout(nextTick, 10);
 }})();
+}}, {sse_settle_ms});
 """
     completed = subprocess.run(
         [NODE, "-e", script], cwd=REPO, check=True, text=True, capture_output=True
@@ -267,7 +287,13 @@ def test_selected_session_hidden_delivers_exactly_once_through_the_poll_path():
 
 
 def test_selected_session_visible_delivers_nothing_through_the_poll_path():
-    """Selected + visible stays suppressed at the late visibility boundary."""
+    """Selected + visible stays suppressed.
+
+    Note this is a GUARD, not a regression pin: `sendBrowserNotification`
+    already short-circuits at `_isBackgroundedForBrowserNotification()` before
+    `onlyIfInactive` is ever consulted, so it passes with or without the
+    active-SID exclusion. Kept because the suppression still has to hold.
+    """
     result = _run_hidden_poll_tick_probe(hidden=False)
 
     assert result["sinkCalls"] == 0, result
@@ -280,3 +306,46 @@ def test_sse_then_poll_race_on_the_selected_session_still_alerts_once():
 
     assert result["sinkCalls"] == 1, result
     assert result["delivered"] is True
+
+
+def test_agreeing_counts_dedup_to_one_alert():
+    """Two stacked approvals, both paths seeing count=2 → exactly one alert.
+
+    Uses the same settle delay as the disagreement test, so the two differ only
+    in whether the counts match.
+    """
+    result = _run_hidden_poll_tick_probe(
+        hidden=True, sse_first=True, poll_count=2, sse_settle_ms=30
+    )
+
+    assert result["sinkCalls"] == 1, result
+
+
+def test_disagreeing_counts_produce_the_double_alert():
+    """Documents WHY the counts have to agree — this is the failure mode.
+
+    The dedup authority is the `sid:kind:count` key. When the SSE path says 1
+    and the poll says 2 for the same underlying "needs approval" state, the
+    keys differ, the generation-backed pending/delivered claim never matches,
+    and the user gets two notifications. This test asserts the broken shape on
+    purpose; `test_the_sse_handlers_use_the_real_pending_count` is what pins
+    production out of it.
+    """
+    result = _run_hidden_poll_tick_probe(
+        hidden=True, sse_first=True, poll_count=2, sse_count=1, sse_settle_ms=30
+    )
+
+    assert result["sinkCalls"] == 2, result
+
+
+def test_the_sse_handlers_use_the_real_pending_count():
+    """Pin the source of the key disagreement, not just its symptom."""
+    idx = MESSAGES_JS.index("source.addEventListener('approval'")
+    approval = MESSAGES_JS[idx:MESSAGES_JS.index("source.addEventListener('clarify'", idx)]
+    assert "_deliverAttentionNotification(activeSid,'approval',_approvalCount," in approval
+    assert "_deliverAttentionNotification(activeSid,'approval',1," not in approval
+
+    clarify_idx = MESSAGES_JS.index("source.addEventListener('clarify'")
+    clarify = MESSAGES_JS[clarify_idx:MESSAGES_JS.index("source.addEventListener('state_saved'", clarify_idx)]
+    assert "_deliverAttentionNotification(activeSid,'clarify',_clarifyCount," in clarify
+    assert "_deliverAttentionNotification(activeSid,'clarify',1," not in clarify

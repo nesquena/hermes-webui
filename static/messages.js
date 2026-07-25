@@ -5619,21 +5619,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('approval',e=>{
       const d=JSON.parse(e.data);
       _applyToAnchor('approval',d,e);
-      showApprovalForSession(activeSid, d, d.pending_count || 1);
-      playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
+      const _approvalCount=Math.max(1,Number(d.pending_count)||1);
+      showApprovalForSession(activeSid, d, _approvalCount);
+      playAttentionSound(_attentionSoundKey(activeSid,'approval',_approvalCount));
       // Unconditional (gate follow-up #1): the visibility/active gate lives
       // in the delivery path itself now -- a SELECTED session in a hidden
       // tab is exactly when a browser notification is needed. Shared-key
       // dedup keeps the sidebar path from double-alerting.
-      _deliverAttentionNotification(activeSid,'approval',1,'Approval required',d.description||'Tool approval needed');
+      //
+      // The count MUST be the real pending count, not a hardcoded 1. The
+      // sidebar poll derives its dedup key from the server's own
+      // `attention.count` (api/routes.py::_session_attention_summary), so a
+      // second stacked approval makes the poll's key `sid:approval:2` while a
+      // hardcoded SSE key stays `sid:approval:1`. Different keys defeat the
+      // generation-backed pending/delivered dedup entirely and the user gets
+      // two notifications for one ongoing "needs approval" state. That was
+      // inert while the poll excluded the selected session; routing the
+      // selected session through the poll seam makes it live.
+      _deliverAttentionNotification(activeSid,'approval',_approvalCount,'Approval required',d.description||'Tool approval needed');
     });
 
     source.addEventListener('clarify',e=>{
       const d=JSON.parse(e.data);
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
-      playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
-      _deliverAttentionNotification(activeSid,'clarify',1,'Clarification needed',d.question||'Tool clarification needed');
+      // Same key-agreement requirement as the approval handler above.
+      const _clarifyCount=Math.max(1,Number(d.pending_count)||1);
+      playAttentionSound(_attentionSoundKey(activeSid,'clarify',_clarifyCount));
+      _deliverAttentionNotification(activeSid,'clarify',_clarifyCount,'Clarification needed',d.question||'Tool clarification needed');
     });
 
     source.addEventListener('state_saved',e=>{

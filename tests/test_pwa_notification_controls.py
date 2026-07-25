@@ -60,7 +60,15 @@ def test_notification_payload_uses_completion_session_when_provided():
         # _showPwaNotification, so a selected session in a hidden tab still
         # gets its browser notification. The old caller-side guard is gone.
         assert "if(!S.session||S.session.session_id!==activeSid){" not in handler
-        assert f"_deliverAttentionNotification(activeSid,'{kind}',1,'{title}',{body})" in handler
+        # Real pending count, not a literal 1 — a hardcoded count made the SSE
+        # and sidebar-poll dedup keys disagree for a second stacked approval,
+        # which double-alerted once the poll stopped excluding the selected
+        # session.
+        count_expr = "_approvalCount" if kind == "approval" else "_clarifyCount"
+        assert (
+            f"_deliverAttentionNotification(activeSid,'{kind}',{count_expr},'{title}',{body})"
+            in handler
+        )
 
 
 def test_completion_notification_preview_uses_settled_message_not_live_prefix():
