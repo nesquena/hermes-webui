@@ -4151,6 +4151,7 @@ function _sessionUrlForSid(sid){
     const current=new URL(window.location.href);
     current.searchParams.delete('session');
     current.searchParams.delete('session_id');
+    current.searchParams.delete('action');
     current.searchParams.delete('q');
     current.searchParams.delete('prompt');
     current.searchParams.delete('send');
