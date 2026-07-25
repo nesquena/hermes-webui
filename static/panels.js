@@ -10688,6 +10688,13 @@ const enabled=plugin&&plugin.enabled!==false;
 // modal below (source/name + an explicit "executes third-party code"
 // acknowledgement) in addition to the browser having writable+available.
 let _pluginLifecyclePollTimer=null;
+// Tracks whether a poll CYCLE is active, independent of whether a timer
+// happens to be armed right now. The timeout callback clears the timer before
+// re-requesting, so a `running:false` response arriving from that request saw
+// `_pluginLifecyclePollTimer === null` and concluded no poll had been running
+// — which made the completion refresh of the ordinary plugin/hook cards
+// unreachable, leaving them stale after an install or remove.
+let _pluginLifecyclePolling=false;
 let _pluginLifecycleData=null;
 let _pluginLifecycleStatusInFlight=false;
 let _pluginLifecycleStatusSeq=0;
@@ -10777,11 +10784,12 @@ async function loadPluginLifecyclePanel(){
 
 function _stopPluginLifecyclePolling(){
  if(_pluginLifecyclePollTimer){clearTimeout(_pluginLifecyclePollTimer);_pluginLifecyclePollTimer=null;}
+ _pluginLifecyclePolling=false;
 }
 
 function _syncPluginLifecyclePolling(data){
  const shouldPoll=!!(data&&data.running);
- const wasPolling=!!_pluginLifecyclePollTimer;
+ const wasPolling=_pluginLifecyclePolling;
  if(!shouldPoll){
   _stopPluginLifecyclePolling();
   // A poll cycle just observed the in-flight action finish -- refresh the
@@ -10789,6 +10797,7 @@ function _syncPluginLifecyclePolling(data){
   if(wasPolling&&typeof loadPluginsPanel==='function') loadPluginsPanel();
   return;
  }
+ _pluginLifecyclePolling=true;
  if(_pluginLifecyclePollTimer) return;
  // Self-scheduling: the next tick is armed only after the prior request
  // settled (loadPluginLifecyclePanel is single-flight), never stacked.
@@ -10854,6 +10863,12 @@ function _renderPluginLifecycle(data){
 
 function _buildPluginLifecycleRow(plugin,interactive,busy){
  const row=document.createElement('div');
+ // Mutations post the CANONICAL id (the plugin's directory), never the
+ // display name: the manifest `name` is data the checkout controls, and a
+ // hostile manifest that matches a neighbouring plugin's directory could
+ // otherwise steer update/remove onto it. A row with no canonical id is
+ // ambiguous or has no user directory, and is not actionable.
+ const actionId=plugin.id||null;
  row.style.cssText='display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--border2);border-radius:6px;flex-wrap:wrap';
  const info=document.createElement('div');
  info.style.cssText='flex:1;min-width:160px;font-size:12px';
@@ -10862,14 +10877,14 @@ function _buildPluginLifecycleRow(plugin,interactive,busy){
 
  // Only a "git" source (a user plugin dir with a .git checkout) supports
  // `hermes plugins update` -- a plain copied "user" plugin has nothing to pull.
- if(plugin.source==='git'){
+ if(plugin.source==='git'&&actionId){
   const updateBtn=document.createElement('button');
   updateBtn.type='button';
   updateBtn.className='settings-btn';
   updateBtn.style.cssText='font-size:11px;padding:4px 10px;border-radius:6px';
   updateBtn.disabled=!interactive||busy;
   updateBtn.textContent=t('settings_plugin_btn_update')||'Update';
-  updateBtn.addEventListener('click',()=>_updateInstalledPlugin(plugin.name));
+  updateBtn.addEventListener('click',()=>_updateInstalledPlugin(actionId));
   row.appendChild(updateBtn);
  }
 
@@ -10877,9 +10892,9 @@ function _buildPluginLifecycleRow(plugin,interactive,busy){
  removeBtn.type='button';
  removeBtn.className='settings-btn';
  removeBtn.style.cssText='font-size:11px;padding:4px 10px;border-radius:6px;color:#ef4444';
- removeBtn.disabled=!interactive||busy;
+ removeBtn.disabled=!interactive||busy||!actionId;
  removeBtn.textContent=t('settings_plugin_btn_remove')||'Remove';
- removeBtn.addEventListener('click',()=>_removeInstalledPlugin(plugin.name));
+ removeBtn.addEventListener('click',()=>{ if(actionId) _removeInstalledPlugin(actionId); });
  row.appendChild(removeBtn);
 
  return row;

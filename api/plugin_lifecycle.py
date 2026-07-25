@@ -233,6 +233,24 @@ def validate_plugin_name(name: str, installed: list[dict]) -> str:
         raise PluginSourceError("Invalid plugin name.")
     dirs = _actionable_plugin_dirs()
     if name in dirs:
+        # A request that is BOTH a directory name AND some OTHER directory's
+        # manifest name is ambiguous, and the direct-directory branch used to
+        # take it without noticing. Concrete collision: install `victim-dir`
+        # (manifest `victim`) and `attacker-dir` (manifest `victim-dir`). The
+        # attacker's row renders as "victim-dir", the UI posts that display
+        # string, and update/remove acted on the real `victim-dir` — a
+        # checkout choosing its own manifest name could steer a mutation onto
+        # a neighbouring plugin's directory. Refuse instead of guessing; the
+        # canonical `id` emitted by `list_installed_plugins()` is how a caller
+        # says which one it means.
+        alias_owners = sorted(
+            d for d, manifest in dirs.items() if manifest == name and d != name
+        )
+        if alias_owners:
+            raise PluginSourceError(
+                f"Plugin name {name!r} is ambiguous: it is a plugin directory and "
+                f"also the manifest name of {alias_owners!r}. Use the canonical id."
+            )
         resolved = name
     else:
         candidates = [d for d, manifest in dirs.items() if manifest == name]
@@ -300,11 +318,36 @@ def list_installed_plugins() -> list[dict]:
         raise RuntimeError(f"Could not parse plugin list: {exc}") from exc
 
     installed = []
+    # Canonical actionable identity, separate from the display name. The CLI
+    # keys update/remove on the DIRECTORY name; the manifest `name` this
+    # listing reports is mutable data the checkout controls. Emitting both
+    # lets the UI show the display name while posting an identity a hostile
+    # manifest cannot steer.
+    dirs = _actionable_plugin_dirs()
+    manifest_to_dirs: dict = {}
+    for directory, manifest in dirs.items():
+        if manifest:
+            manifest_to_dirs.setdefault(manifest, []).append(directory)
+
     for entry in raw if isinstance(raw, list) else []:
         if not isinstance(entry, dict):
             continue
+        display = str(entry.get("name") or "")
+        # Candidates are every directory this display name could denote: the
+        # directory of the same name, plus every directory whose manifest
+        # claims it. More than one means the name is genuinely ambiguous —
+        # exactly the `victim-dir` collision — and there is no safe canonical
+        # id, so the row is reported as not actionable rather than resolved to
+        # a guess.
+        candidates = {d for d, manifest in dirs.items() if manifest == display}
+        if display in dirs:
+            candidates.add(display)
+        canonical = next(iter(candidates)) if len(candidates) == 1 else None
         installed.append({
-            "name": str(entry.get("name") or ""),
+            "name": display,
+            # None for rows with no user directory (bundled/entry-point
+            # plugins) — those are not actionable from here anyway.
+            "id": canonical,
             "version": str(entry.get("version") or "") or None,
             "source": str(entry.get("source") or "") or None,
             "enabled": str(entry.get("status") or "").strip().lower() == "enabled",

@@ -1078,3 +1078,112 @@ class TestReviewRound2:
         _install_fake_popen(monkeypatch, stdout="ok\n", returncode=0)
         started, _ = pl.start_action("install", "owner/repo")
         assert started is True
+
+
+# ── Canonical actionable identity vs. mutable display name ──────────────────
+
+
+class TestPluginIdentityCollision:
+    """`plugins list --json` reports the MANIFEST name, which the checkout
+    controls. The CLI keys update/remove on the DIRECTORY name. When one
+    plugin's manifest name equals another plugin's directory name, the display
+    string is no longer a safe identity."""
+
+    def _install(self, tmp_path, monkeypatch, layout: dict):
+        """layout: {directory-name: manifest-name-or-None}"""
+        from api import plugin_lifecycle as pl
+
+        root = tmp_path / "plugins"
+        root.mkdir(parents=True, exist_ok=True)
+        for directory, manifest in layout.items():
+            d = root / directory
+            d.mkdir(parents=True, exist_ok=True)
+            if manifest is not None:
+                (d / "plugin.yaml").write_text(f"name: {manifest}\n", encoding="utf-8")
+        monkeypatch.setattr(pl, "_user_plugins_dir", lambda: root)
+        return pl
+
+    def test_a_manifest_name_cannot_steer_a_mutation_onto_another_directory(
+        self, tmp_path, monkeypatch
+    ):
+        """The reviewer's exact collision.
+
+        `victim-dir` has manifest `victim`; `attacker-dir` claims manifest
+        `victim-dir`. The attacker's UI row therefore renders — and used to
+        post — the string "victim-dir", and the direct-directory branch took
+        it, acting on the real `victim-dir`.
+        """
+        pl = self._install(
+            tmp_path, monkeypatch,
+            {"victim-dir": "victim", "attacker-dir": "victim-dir"},
+        )
+        listed = [{"name": "victim"}, {"name": "victim-dir"}]
+
+        with pytest.raises(pl.PluginSourceError) as excinfo:
+            pl.validate_plugin_name("victim-dir", listed)
+        assert "ambiguous" in str(excinfo.value).lower()
+
+    def test_an_uncontested_directory_name_still_resolves(self, tmp_path, monkeypatch):
+        pl = self._install(tmp_path, monkeypatch, {"plain-dir": "plain"})
+        assert pl.validate_plugin_name("plain-dir", [{"name": "plain"}]) == "plain-dir"
+
+    def test_an_unambiguous_manifest_alias_still_resolves(self, tmp_path, monkeypatch):
+        pl = self._install(tmp_path, monkeypatch, {"plain-dir": "plain"})
+        assert pl.validate_plugin_name("plain", [{"name": "plain"}]) == "plain-dir"
+
+    def test_the_listing_emits_a_canonical_id_next_to_the_display_name(
+        self, tmp_path, monkeypatch
+    ):
+        pl = self._install(
+            tmp_path, monkeypatch,
+            {"victim-dir": "victim", "attacker-dir": "victim-dir"},
+        )
+        monkeypatch.setattr(pl, "_run_env", lambda: (["hermes"], {}))
+
+        class _Result:
+            returncode = 0
+            stdout = json.dumps([
+                {"name": "victim", "status": "enabled"},
+                {"name": "victim-dir", "status": "enabled"},
+            ])
+            stderr = ""
+
+        monkeypatch.setattr(pl.subprocess, "run", lambda *a, **k: _Result())
+        rows = {row["name"]: row for row in pl.list_installed_plugins()}
+
+        # `victim` is unambiguous: only `victim-dir`'s manifest claims it.
+        assert rows["victim"]["id"] == "victim-dir"
+        # `victim-dir` denotes BOTH the real directory and the attacker's
+        # manifest claim, so there is no safe canonical id and the row is not
+        # actionable — the UI disables its buttons rather than guessing.
+        assert rows["victim-dir"]["id"] is None
+
+
+def test_plugin_rows_post_the_canonical_id_not_the_display_name():
+    panels = PANELS_JS
+    idx = panels.index("function _buildPluginLifecycleRow(")
+    body = panels[idx:panels.index("\nasync function _installPluginFromForm", idx)]
+    assert "const actionId=plugin.id||null;" in body
+    assert "_updateInstalledPlugin(actionId)" in body
+    assert "_removeInstalledPlugin(actionId)" in body
+    assert "_updateInstalledPlugin(plugin.name)" not in body
+    assert "_removeInstalledPlugin(plugin.name)" not in body
+
+
+def test_completion_refresh_survives_the_timer_reset():
+    """The timeout callback nulls the timer BEFORE re-requesting.
+
+    Deriving "was polling" from the timer therefore read false on the terminal
+    `running:false` response, and the completion refresh of the ordinary
+    plugin/hook cards never ran — they stayed stale after install/remove.
+    """
+    panels = PANELS_JS
+    idx = panels.index("function _syncPluginLifecyclePolling(data){")
+    body = panels[idx:panels.index("\n}", idx)]
+    assert "const wasPolling=_pluginLifecyclePolling;" in body
+    assert "const wasPolling=!!_pluginLifecyclePollTimer;" not in body
+    assert "_pluginLifecyclePolling=true;" in body
+
+    stop_idx = panels.index("function _stopPluginLifecyclePolling(){")
+    stop_body = panels[stop_idx:panels.index("\n}", stop_idx)]
+    assert "_pluginLifecyclePolling=false;" in stop_body
