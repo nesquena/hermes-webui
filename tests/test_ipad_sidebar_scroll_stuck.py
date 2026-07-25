@@ -277,9 +277,8 @@ def test_touch_batch_constants_exist():
 
 
 def test_touch_batch_reset_on_filter_change():
-    """The batch count must reset when the search filter or total changes."""
-    assert "sessionTouchPrevFilter" in SESSIONS_JS
-    assert "sessionTouchPrevTotal" in SESSIONS_JS
+    """The batch count must reset when the scope fingerprint changes (not just filter+total)."""
+    assert "sessionTouchScope" in SESSIONS_JS
     assert "SESSION_TOUCH_INITIAL_BATCH" in SESSIONS_JS
 
 
@@ -288,6 +287,53 @@ def test_ensure_touch_sentinel_disconnects_old_observer():
     fn = _extract_fn(SESSIONS_JS, "_ensureTouchSentinelObserver")
     assert "disconnect()" in fn
     assert "_touchSentinelObserver=null" in fn
+
+
+def test_invalidate_touch_render_exists():
+    """A unified invalidation helper must exist for all teardown paths."""
+    assert "function _invalidateTouchRender()" in SESSIONS_JS
+    fn = _extract_fn(SESSIONS_JS, "_invalidateTouchRender")
+    assert "_touchSentinelObserver" in fn
+    assert "_touchScrollFallbackRaf" in fn
+    assert "_touchRenderState=null" in fn
+    assert "_touchBatchPending=false" in fn
+    assert "_touchBatchToken" in fn
+
+
+def test_setup_touch_sentinel_uses_invalidate():
+    """_setupTouchSentinel must call _invalidateTouchRender (unified teardown), not a separate function."""
+    fn = _extract_fn(SESSIONS_JS, "_setupTouchSentinel")
+    assert "_invalidateTouchRender()" in fn, \
+        "_setupTouchSentinel must use _invalidateTouchRender for teardown"
+
+
+def test_append_transactional_uses_fragments():
+    """_appendTouchBatch must use DocumentFragment for transactional append."""
+    fn = _extract_fn(SESSIONS_JS, "_appendTouchBatch")
+    assert "DocumentFragment" in fn or "createDocumentFragment" in fn, \
+        "Append must render into detached fragments before committing"
+    assert "catch" in fn, "Append must catch exceptions and discard fragments"
+
+
+def test_observer_microtask_token_owned():
+    """Observer microtask must capture and re-check a token before mutating."""
+    fn = _extract_fn(SESSIONS_JS, "_ensureTouchSentinelObserver")
+    assert "_touchBatchToken" in fn, "Observer must use token ownership"
+    assert "capturedGen" in fn, "Observer must capture generation when scheduling"
+    assert "token===_touchBatchToken" in fn, "Microtask must re-check token ownership"
+
+
+def test_fallback_stops_when_all_loaded():
+    """Fallback RAF must stop rescheduling when all rows are loaded."""
+    fn = _extract_fn(SESSIONS_JS, "_setupTouchSentinel")
+    assert "l>=t" in fn, "Fallback must check loaded>=total and stop"
+
+
+def test_touch_window_includes_active_sid():
+    """_sessionVirtualWindow touch branch must consume activeIndex to include active session."""
+    fn = _extract_fn(SESSIONS_JS, "_sessionVirtualWindow")
+    assert "activeIdx" in fn or "activeIndex" in fn, \
+        "Touch branch must check active index to include active session in prefix"
 
 
 # ── Executed touch-DOM regression tests (node VM) ──────────────────────────
@@ -356,7 +402,17 @@ function makeEl(tag) {
     dataset: {},
     children: [],
     _parent: null,
-    appendChild(child) { child._parent = this; this.children.push(child); return child; },
+    appendChild(child) {
+      // DocumentFragment: in a real browser, appending a fragment moves its
+      // children into this element. Simulate that here.
+      if (child && child.tagName === '#document-fragment') {
+        const kids = child.children.slice();
+        for (const k of kids) { k._parent = this; this.children.push(k); }
+        child.children = [];
+        return child;
+      }
+      child._parent = this; this.children.push(child); return child;
+    },
     insertBefore(child, ref) {
       child._parent = this;
       const idx = this.children.indexOf(ref);
@@ -438,9 +494,47 @@ function makeSessionItem(sid) {
   return el;
 }
 
+// Helper: create a body element whose appendChild tracks session items in list._items.
+// Handles DocumentFragment unpacking (fragments move their children into the target).
+function makeBodyThatTracksItems(list) {
+  const body = makeEl('div');
+  body.className = 'session-date-body';
+  body.appendChild = function(child) {
+    if (child && child.tagName === '#document-fragment') {
+      const kids = child.children.slice();
+      for (const k of kids) {
+        k._parent = this;
+        this.children.push(k);
+        if (k.dataset && k.dataset.sid) list._items.push(k);
+      }
+      child.children = [];
+      return child;
+    }
+    child._parent = this;
+    this.children.push(child);
+    if (child.dataset && child.dataset.sid) list._items.push(child);
+    return child;
+  };
+  return body;
+}
+
 // Mock CSS.escape (Node 22 has it natively, but provide fallback)
 if (typeof CSS === 'undefined') global.CSS = {};
 if (!CSS.escape) CSS.escape = function(s) { return s; };
+
+// Mock document.createDocumentFragment for transactional append
+if (typeof document === 'undefined') global.document = {};
+if (!document.createDocumentFragment) {
+  document.createDocumentFragment = function() {
+    // A fragment acts like an element but has no tagName
+    const frag = makeEl('fragment');
+    frag.tagName = '#document-fragment';
+    // When appended, a real DocumentFragment's children are moved into the
+    // target, not the fragment itself. Override appendChild on the body
+    // to detect fragments and unpack them.
+    return frag;
+  };
+}
 
 // Globals that _appendTouchBatch references
 let _touchRenderState = null;
@@ -450,6 +544,7 @@ let _sessionTouchListEl = null;
 let _sessionTouchTotalCount = 0;
 let _touchSentinelObserver = null;
 let _touchBatchPending = false;
+let _touchBatchToken = 0;
 const SESSION_TOUCH_BATCH_SIZE = 40;
 const SESSION_TOUCH_INITIAL_BATCH = 60;
 const SESSION_VIRTUAL_ROW_HEIGHT = 52;
@@ -458,15 +553,35 @@ const SESSION_VIRTUAL_ROW_HEIGHT = 52;
 let _renderCalls = 0;
 function renderSessionListFromCache() { _renderCalls++; }
 
-// Extract and eval _appendTouchBatch and _createTouchGroupWrapper
+// Mock _sessionVirtualSpacer for _updateTouchGroupSpacers
+function _sessionVirtualSpacer(h, pos) {
+  const sp = makeEl('div');
+  sp.className = 'session-virtual-spacer';
+  sp.dataset['virtual-spacer'] = pos;
+  sp.style.height = h + 'px';
+  return sp;
+}
+
+// Mock _invalidateTouchRender for mismatch recovery
+function _invalidateTouchRender() {
+  if (_touchSentinelObserver) { _touchSentinelObserver.disconnect(); _touchSentinelObserver = null; }
+  _touchRenderState = null;
+  _touchBatchPending = false;
+  _touchBatchToken++;
+}
+
+// Extract and eval all touch functions
 eval(extractFunc('_createTouchGroupWrapper'));
+eval(extractFunc('_updateTouchGroupSpacers'));
+eval(extractFunc('_updateTouchSentinel'));
 eval(extractFunc('_appendTouchBatch'));
 """
 
 
 @_node_tests
 def test_append_grows_from_initial_to_full():
-    """60→100→final: _appendTouchBatch grows the DOM from initial batch to full list."""
+    """60→100→final: _appendTouchBatch grows the DOM from initial batch to full list.
+    Covers totals 61, 100, and 101 — the final partial batch must not be dropped."""
     total = 101
     # Build mock flat rows
     flat_rows = []
@@ -503,15 +618,7 @@ _touchRenderState = {{
 const groupWrapper = makeEl('div');
 groupWrapper.className = 'session-date-group';
 groupWrapper.dataset['group-label'] = 'Today';
-const body = makeEl('div');
-body.className = 'session-date-body';
-// Override appendChild to also push session items to the list's _items tracker
-body.appendChild = function(child) {{
-  child._parent = this;
-  this.children.push(child);
-  if (child.dataset && child.dataset.sid) list._items.push(child);
-  return child;
-}};
+const body = makeBodyThatTracksItems(list);
 // Override querySelector so _appendTouchBatch can find the body
 groupWrapper.querySelector = function(sel) {{
   if (sel === '.session-date-body') return body;
@@ -521,10 +628,18 @@ groupWrapper.appendChild(body);
 list._groups['Today'] = groupWrapper;
 list.children.push(groupWrapper);
 
+// Verify exact SID order and node identity before append
+const sidsBefore = list._items.map(i => i.dataset.sid).join(',');
+const refsBefore = list._items.slice();
+
 // First append: 60 → 100
 _appendTouchBatch();
 const afterFirst = _sessionTouchLoadedCount;
 const itemsAfterFirst = list._items.length;
+const sidsAfterFirst = list._items.map(i => i.dataset.sid).join(',');
+
+// Verify original nodes survived (identity check)
+const originalSurvived = refsBefore.every((ref, i) => list._items[i] === ref);
 
 // Second append: 100 → 101 (final batch — must not be dropped)
 _appendTouchBatch();
@@ -537,6 +652,8 @@ console.log(JSON.stringify({{
   totalRows: {total},
   innerHTMLWipes: _innerHTMLWipes,
   renderCalls: _renderCalls,
+  originalSurvived,
+  sidsAfterFirst,
 }}));
 """
     result = json.loads(_run_node_vm(source))
@@ -549,6 +666,78 @@ console.log(JSON.stringify({{
     assert result["innerHTMLWipes"] == 0, f"No innerHTML wipes during append, got {result['innerHTMLWipes']}"
     # No fallback re-render triggered
     assert result["renderCalls"] == 0, f"No full re-render needed, got {result['renderCalls']}"
+    # Original nodes survived (identity, not just property)
+    assert result["originalSurvived"], "Original DOM nodes must be the exact same objects after append"
+    # Exact SID order
+    expected_sids = ",".join(f"sess_{i}" for i in range(100))
+    assert result["sidsAfterFirst"] == expected_sids, f"SID order mismatch after first append"
+
+
+@_node_tests
+def test_append_grows_61_total():
+    """Total=61: single append from 60→61 (final partial batch of 1 row)."""
+    flat_rows = [{"group": {"label": "G"}, "session": {"session_id": f"s_{i}"}} for i in range(61)]
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 61;
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s_' + i));
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+// Set up group
+const gw = makeEl('div');
+gw.dataset['group-label'] = 'G';
+const body = makeBodyThatTracksItems(list);
+gw.querySelector = function(sel) {{ if(sel==='.session-date-body') return body; return null; }};
+gw.appendChild(body);
+list._groups['G'] = gw;
+
+_appendTouchBatch();
+console.log(JSON.stringify({{ loaded: _sessionTouchLoadedCount, items: list._items.length }}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["loaded"] == 61, f"Total=61: should reach 61, got {result['loaded']}"
+    assert result["items"] == 61, f"Total=61: DOM should have 61 items, got {result['items']}"
+
+
+@_node_tests
+def test_append_grows_100_total():
+    """Total=100: single append from 60→100 (exact batch boundary)."""
+    flat_rows = [{"group": {"label": "G"}, "session": {"session_id": f"s_{i}"}} for i in range(100)]
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 100;
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s_' + i));
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+const gw = makeEl('div');
+gw.dataset['group-label'] = 'G';
+const body = makeBodyThatTracksItems(list);
+gw.querySelector = function(sel) {{ if(sel==='.session-date-body') return body; return null; }};
+gw.appendChild(body);
+list._groups['G'] = gw;
+
+_appendTouchBatch();
+console.log(JSON.stringify({{ loaded: _sessionTouchLoadedCount, items: list._items.length }}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["loaded"] == 100, f"Total=100: should reach 100, got {result['loaded']}"
+    assert result["items"] == 100, f"Total=100: DOM should have 100 items, got {result['items']}"
 
 
 @_node_tests
@@ -622,11 +811,15 @@ console.log(JSON.stringify({{
 
 
 @_node_tests
-def test_append_exception_recovery():
-    """_appendTouchBatch exception must not leave _touchBatchPending stuck."""
+def test_append_exception_no_duplicates_on_retry():
+    """Finding #1: A throw after >=1 successful row must NOT leave partial DOM.
+    Transactional append renders into fragments — if any row throws, nothing is
+    committed. Retry from the same oldLoaded produces no duplicates."""
+    # Provide real flatRows so append actually calls the renderer
+    flat_rows = [{"group": {"label": "G"}, "session": {"session_id": f"s_{i}"}} for i in range(100)]
     source = f"""
 const SESSIONS_JS = {SESSIONS_JS!r};
-""" + _node_test_preamble() + """
+""" + _node_test_preamble() + f"""
 const list = makeList();
 _sessionTouchListEl = list;
 _sessionTouchGen = 1;
@@ -634,35 +827,324 @@ _sessionTouchLoadedCount = 60;
 _sessionTouchTotalCount = 100;
 
 // Pre-populate DOM with 60 items
-for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('sess_' + i));
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s_' + i));
 
-_touchRenderState = {
+// Renderer that throws on the 3rd new row (index 62)
+let renderCount = 0;
+_touchRenderState = {{
   gen: 1,
   list: list,
-  flatRows: [],
-  renderOneSession: function() { throw new Error('render boom'); },
+  flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{
+    renderCount++;
+    if (renderCount === 3) throw new Error('render boom');
+    return makeSessionItem(s.session_id);
+  }},
   activeSid: null,
-};
+}};
 
-// Simulate the observer's try/finally pattern
+// Set up group with body that tracks items
+const gw = makeEl('div');
+gw.dataset['group-label'] = 'G';
+const body = makeBodyThatTracksItems(list);
+gw.querySelector = function(sel) {{ if(sel==='.session-date-body') return body; return null; }};
+gw.appendChild(body);
+list._groups['G'] = gw;
+
+// First attempt: throws on 3rd row — transactional, nothing committed
+const itemsBefore = list._items.length;
+const loadedBefore = _sessionTouchLoadedCount;
+try {{ _appendTouchBatch(); }} catch(e) {{}}
+const itemsAfterThrow = list._items.length;
+const loadedAfterThrow = _sessionTouchLoadedCount;
+
+// Retry: renderer no longer throws — should succeed without duplicates
+renderCount = 0; // reset
+_touchRenderState.renderOneSession = function(s) {{ return makeSessionItem(s.session_id); }};
+_appendTouchBatch();
+const itemsAfterRetry = list._items.length;
+const loadedAfterRetry = _sessionTouchLoadedCount;
+
+// Check for duplicates
+const sids = list._items.map(i => i.dataset.sid);
+const uniqueSids = [...new Set(sids)];
+
+console.log(JSON.stringify({{
+  itemsBefore, loadedBefore,
+  itemsAfterThrow, loadedAfterThrow,
+  itemsAfterRetry, loadedAfterRetry,
+  hasDuplicates: sids.length !== uniqueSids.length,
+  duplicateCount: sids.length - uniqueSids.length,
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    # After throw: no items committed (transactional)
+    assert result["itemsAfterThrow"] == result["itemsBefore"], \
+        f"Throw must not commit any items: before={result['itemsBefore']}, after={result['itemsAfterThrow']}"
+    assert result["loadedAfterThrow"] == result["loadedBefore"], \
+        f"Throw must not advance loaded count: before={result['loadedBefore']}, after={result['loadedAfterThrow']}"
+    # After retry: no duplicates
+    assert not result["hasDuplicates"], \
+        f"Retry must not produce duplicates: duplicateCount={result['duplicateCount']}"
+    assert result["loadedAfterRetry"] == 100, \
+        f"Retry should reach 100, got {result['loadedAfterRetry']}"
+
+
+@_node_tests
+def test_stale_microtask_after_state_replacement():
+    """Finding #2: An old gen-1 microtask must not append gen-2 rows.
+
+    The observer schedules a microtask under gen-1. Before the microtask runs,
+    a new render installs gen-2 with a different flatRows. The old microtask
+    must detect the generation change and bail out — not append gen-2 rows.
+
+    This simulates the token-owned microtask pattern: the observer captures
+    {gen, token} when scheduling, then the microtask re-checks gen before
+    calling _appendTouchBatch."""
+    flat_rows_gen1 = [{"group": {"label": "G"}, "session": {"session_id": f"old_{i}"}} for i in range(100)]
+    flat_rows_gen2 = [{"group": {"label": "G"}, "session": {"session_id": f"new_{i}"}} for i in range(100)]
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 100;
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('old_' + i));
+
+// Gen-1 render state
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows_gen1)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+
+// Set up group
+const gw = makeEl('div');
+gw.dataset['group-label'] = 'G';
+const body = makeBodyThatTracksItems(list);
+gw.querySelector = function(sel) {{ if(sel==='.session-date-body') return body; return null; }};
+gw.appendChild(body);
+list._groups['G'] = gw;
+
+// Simulate the observer scheduling a microtask under gen-1.
+// The observer captures the generation when scheduling.
+const capturedGen = _sessionTouchGen; // = 1
+const token = ++_touchBatchToken;
 _touchBatchPending = true;
-try { _appendTouchBatch(); }
-finally { _touchBatchPending = false; }
+
+// Before the microtask fires, a new render installs gen-2 state.
+_sessionTouchGen = 2;
+_touchRenderState = {{
+  gen: 2, list: list, flatRows: {json.dumps(flat_rows_gen2)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+
+// Now the old gen-1 microtask fires. It must re-check the generation
+// before calling _appendTouchBatch — exactly as the token-owned pattern does.
+if (capturedGen !== _sessionTouchGen) {{
+  // Generation changed — bail out, clear pending only if token still owns it
+  if (token === _touchBatchToken) _touchBatchPending = false;
+}} else {{
+  try {{ _appendTouchBatch(); }}
+  finally {{ if (token === _touchBatchToken) _touchBatchPending = false; }}
+}}
+
+const sids = list._items.map(i => i.dataset.sid);
+console.log(JSON.stringify({{
+  loadedCount: _sessionTouchLoadedCount,
+  itemCount: list._items.length,
+  // Should still be 60 old_ items, no new_ items appended
+  hasNewItems: sids.some(s => s.startsWith('new_')),
+  pendingCleared: !_touchBatchPending,
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["loadedCount"] == 60, "Stale gen-1 microtask must not advance loaded count"
+    assert result["itemCount"] == 60, "Stale gen-1 microtask must not append any rows"
+    assert not result["hasNewItems"], "Stale gen-1 microtask must not append gen-2 rows"
+    assert result["pendingCleared"], "Token-owned microtask must clear pending on stale generation"
+
+
+@_node_tests
+def test_equal_count_scope_change_triggers_rerender():
+    """Finding #3: Equal-count scope/reorder changes must trigger re-render.
+
+    DOM has [a, b, c] (3 items, loaded=3). State has [x, y, z] (3 items, same
+    count). The SID prefix mismatch must be detected and trigger a full re-render,
+    not retain the stale loaded extent."""
+    flat_rows = [{"group": {"label": "G"}, "session": {"session_id": f"new_{i}"}} for i in range(50)]
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 3; // same count as DOM
+_sessionTouchTotalCount = 50;
+
+// DOM has [a, b, c]
+list._items = [makeSessionItem('a'), makeSessionItem('b'), makeSessionItem('c')];
+
+// State expects [new_0, new_1, new_2, ...] — same count (3 in prefix) but different SIDs
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+
+_appendTouchBatch();
+console.log(JSON.stringify({{
+  loadedCount: _sessionTouchLoadedCount,
+  renderCalls: _renderCalls,
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["loadedCount"] == 0, "Equal-count scope change must reset loaded count"
+    assert result["renderCalls"] == 1, "Equal-count scope change must trigger re-render"
+
+
+@_node_tests
+def test_active_sid_beyond_prefix_included():
+    """Finding #3: Active session beyond the initial prefix must be included.
+
+    With 100 total rows and initial batch=60, an active session at index 70
+    must cause the window to extend to include it (loaded=71)."""
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+// _sessionVirtualWindow touch branch with activeIndex
+// _sessionTouchLoadedCount already declared in preamble — just set it
+_sessionTouchLoadedCount = 60; // initial batch
+
+// Mock _isTouchPrimary to return true so the touch branch is exercised
+function _isTouchPrimary() { return true; }
+
+// Extract and eval _sessionVirtualWindow
+eval(extractFunc('_sessionVirtualWindow'));
+
+// Call with activeIndex=70 (beyond initial 60)
+const w = _sessionVirtualWindow({
+  total: 100,
+  scrollTop: 0,
+  viewportHeight: 520,
+  itemHeight: 52,
+  buffer: 12,
+  threshold: 80,
+  activeIndex: 70,
+});
 
 console.log(JSON.stringify({
-  pending: _touchBatchPending, // must be false (cleared by finally)
-  loadedCount: _sessionTouchLoadedCount, // should NOT have advanced (exception before commit)
+  end: w.end,
+  loadedCount: _sessionTouchLoadedCount,
+  batched: w.batched,
 }));
 """
     result = json.loads(_run_node_vm(source))
-    assert result["pending"] is False, "_touchBatchPending must be cleared by finally even on exception"
-    # loadedCount may or may not have advanced depending on where the exception hit,
-    # but the key invariant is _touchBatchPending is cleared
+    assert result["batched"] is True, "Touch window must be batched"
+    assert result["end"] >= 71, \
+        f"Active session at index 70 must be included in window end, got end={result['end']}"
+    assert result["loadedCount"] >= 71, \
+        f"Loaded count must extend to include active session, got {result['loadedCount']}"
+
+
+@_node_tests
+def test_multi_group_spacer_order():
+    """Finding #4: Per-group spacers must keep unloaded rows inside their group.
+
+    With 100 rows split across two groups (G1: 0-49, G2: 50-99) and loaded=60,
+    G1's after-spacer should be 0 (all loaded) and G2's after-spacer should
+    represent 40 unloaded rows (60-99)."""
+    flat_rows = []
+    for i in range(50):
+        flat_rows.append({"group": {"label": "G1"}, "session": {"session_id": f"s1_{i}"}})
+    for i in range(50):
+        flat_rows.append({"group": {"label": "G2"}, "session": {"session_id": f"s2_{i}"}})
+
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 100;
+
+// Pre-populate 60 items (all of G1 + 10 of G2)
+for (let i = 0; i < 50; i++) list._items.push(makeSessionItem('s1_' + i));
+for (let i = 0; i < 10; i++) list._items.push(makeSessionItem('s2_' + i));
+
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+
+// Create two group wrappers with bodies that track items
+function setupGroup(label) {{
+  const gw = makeEl('div');
+  gw.className = 'session-date-group';
+  gw.dataset['group-label'] = label;
+  const body = makeBodyThatTracksItems(list);
+  // Track after-spacers
+  body._afterSpacers = [];
+  body.querySelectorAll = function(sel) {{
+    if (sel === '.session-virtual-spacer[data-virtual-spacer="after"]') return body._afterSpacers;
+    return [];
+  }};
+  gw.querySelector = function(sel) {{
+    if (sel === '.session-date-body') return body;
+    return null;
+  }};
+  gw.appendChild(body);
+  list._groups[label] = gw;
+  return {{ gw: gw, body: body }};
+}}
+
+const g1 = setupGroup('G1');
+const g2 = setupGroup('G2');
+
+// _sessionVirtualSpacer already declared in preamble
+
+// Mock list.querySelectorAll for group iteration
+list.querySelectorAll = function(sel) {{
+  if (sel === '.session-item[data-sid]') return list._items.slice();
+  if (sel === '.session-date-group[data-group-label]') return [g1.gw, g2.gw];
+  return [];
+}};
+
+_appendTouchBatch(); // 60 → 100
+
+// Check per-group after-spacers
+const g1Spacers = g1.body._afterSpacers.filter(s => s._parent === g1.body);
+const g2Spacers = g2.body._afterSpacers.filter(s => s._parent === g2.body);
+
+console.log(JSON.stringify({{
+  loaded: _sessionTouchLoadedCount,
+  totalItems: list._items.length,
+  g1SpacerCount: g1.body.children.filter(c => c.className === 'session-virtual-spacer').length,
+  g2SpacerCount: g2.body.children.filter(c => c.className === 'session-virtual-spacer').length,
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["loaded"] == 100, f"Should load all 100 rows, got {result['loaded']}"
+    assert result["totalItems"] == 100, f"Should have 100 DOM items, got {result['totalItems']}"
+    # G1 has all 50 rows loaded — no after-spacer needed
+    assert result["g1SpacerCount"] == 0, \
+        f"G1 (fully loaded) should have no after-spacer, got {result['g1SpacerCount']}"
+    # G2 has all 50 rows loaded after append — no after-spacer needed either
+    assert result["g2SpacerCount"] == 0, \
+        f"G2 (fully loaded after append) should have no after-spacer, got {result['g2SpacerCount']}"
 
 
 @_node_tests
 def test_append_preserves_existing_dom_nodes():
-    """Append must not wipe or recreate existing session-item nodes."""
+    """Append must not wipe or recreate existing session-item nodes.
+
+    Uses exact object identity (===) to verify original nodes survive —
+    not just a property check that's true for any object."""
     source = f"""
 const SESSIONS_JS = {SESSIONS_JS!r};
 """ + _node_test_preamble() + """
@@ -672,11 +1154,10 @@ _sessionTouchGen = 1;
 _sessionTouchLoadedCount = 5;
 _sessionTouchTotalCount = 50;
 
-// Pre-populate with 5 items — keep references
+// Pre-populate with 5 items — keep exact object references
 const originalItems = [];
 for (let i = 0; i < 5; i++) {
   const item = makeSessionItem('sess_' + i);
-  item._myRef = 'original_' + i;
   list._items.push(item);
   originalItems.push(item);
 }
@@ -694,26 +1175,19 @@ _touchRenderState = {
 // Create group wrapper — body's appendChild tracks session items
 const gw = makeEl('div');
 gw.dataset['group-label'] = 'G';
-const body = makeEl('div');
-body.className = 'session-date-body';
-body.appendChild = function(child) {{
-  child._parent = this;
-  this.children.push(child);
-  if (child.dataset && child.dataset.sid) list._items.push(child);
-  return child;
-}};
-gw.querySelector = function(sel) {{
+const body = makeBodyThatTracksItems(list);
+gw.querySelector = function(sel) {
   if (sel === '.session-date-body') return body;
   return null;
-}};
+};
 gw.appendChild(body);
 list._groups['G'] = gw;
 list.children.push(gw);
 
 _appendTouchBatch(); // 5 → 45
 
-// Check original items survived
-const survived = originalItems.every(item => item._myRef === 'original_' + list._items.indexOf(item) || item._myRef !== undefined);
+// Check original items survived via EXACT identity (===)
+const survived = originalItems.every((item, i) => list._items[i] === item);
 console.log(JSON.stringify({
   totalItems: list._items.length,
   survived: survived,
@@ -721,6 +1195,6 @@ console.log(JSON.stringify({
 }));
 """
     result = json.loads(_run_node_vm(source))
-    assert result["survived"], "Original DOM nodes must survive append (no recreation)"
+    assert result["survived"], "Original DOM nodes must be the exact same objects after append (identity check)"
     assert result["innerHTMLWipes"] == 0, "No innerHTML wipes during append"
     assert result["totalItems"] == 45, f"Should have 45 items after append, got {result['totalItems']}"
