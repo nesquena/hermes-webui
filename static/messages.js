@@ -6764,6 +6764,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             // the UI stuck on "Restoring session…" forever. Fall through to
             // _handleStreamError after 8s.
             _restoreTimedOut=true;
+            if(_currentPaneRecoveryOwnerLost()){
+              _closeSource(source);
+              return;
+            }
             if(!_terminalStateReached&&!_streamFinalized){
               if(_deferStreamErrorIfOffline()) return;
               if(_deferStreamErrorIfPageHidden(source)) return;
@@ -7081,6 +7085,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _handleStreamError(source){
+    if(_currentPaneRecoveryOwnerLost()){
+      _closeSource(source);
+      return;
+    }
     if(_isActiveSession() && S.activeStreamId!==streamId){
       _closeSource(source);
       return;
