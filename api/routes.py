@@ -14761,8 +14761,22 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
         unchanged = False
+        request_sid = sid
         with _get_session_agent_lock(sid):
             _draft_mark("acquired_lock")
+            resolved_sid = str(getattr(s, "session_id", "") or "").strip()
+            if not resolved_sid or not is_safe_session_id(resolved_sid):
+                return j(
+                    handler,
+                    {"ok": False, "error": "Session moved", "session_id": request_sid},
+                    status=409,
+                )
+            if resolved_sid != request_sid:
+                return j(
+                    handler,
+                    {"ok": False, "error": "Session moved", "session_id": resolved_sid},
+                    status=409,
+                )
             current_draft = dict(getattr(s, "composer_draft", {}) or {})
             next_draft = dict(current_draft)
             if text is not None:
@@ -14773,7 +14787,45 @@ def handle_post(handler, parsed) -> bool:
                 unchanged = True
                 saved_draft = current_draft
             else:
-                s.composer_draft = next_draft
+                _draft_text = str(next_draft.get("text", "") or "")
+                _draft_files = next_draft.get("files", []) or []
+                _has_meaningful_draft = bool(_draft_text) or bool(_draft_files)
+                if not (SESSION_DIR / f"{sid}.json").exists() and _has_meaningful_draft:
+                    with LOCK:
+                        if SESSIONS.get(sid) is not s:
+                            return j(
+                                handler,
+                                {
+                                    "ok": False,
+                                    "error": "Session no longer active",
+                                    "session_id": sid,
+                                },
+                                status=409,
+                            )
+                        if len(getattr(s, "messages", []) or []) != 0:
+                            return j(
+                                handler,
+                                {
+                                    "ok": False,
+                                    "error": "Session no longer active",
+                                    "session_id": sid,
+                                },
+                                status=409,
+                            )
+                        if (SESSION_DIR / f"{sid}.json").exists():
+                            # Owner appeared while acquiring the shared lock; skip
+                            # materialization and proceed with sidecar save only.
+                            pass
+                        else:
+                            # Publish the small owner record while cache state is locked
+                            # so deletion cannot race first-draft ownership.
+                            draft_session = copy.copy(s)
+                            draft_session.composer_draft = {}
+                            # LOCK is non-reentrant; indexing here would acquire it again.
+                            draft_session.save(
+                                touch_updated_at=False,
+                                skip_index=True,
+                            )
                 # Draft persistence is not conversation activity. Touching updated_at
                 # here makes the active-session external-refresh poll force-reload the
                 # current chat every few seconds while the user is typing, and that
@@ -14781,6 +14833,7 @@ def handle_post(handler, parsed) -> bool:
                 _draft_mark("before_save")
                 _save_session_draft(sid, next_draft)
                 _draft_mark("after_save")
+                s.composer_draft = next_draft
                 saved_draft = s.composer_draft
         _draft_mark("released_lock")
         payload = {"ok": True, "draft": saved_draft}
@@ -14905,6 +14958,7 @@ def handle_post(handler, parsed) -> bool:
         session_lock = _get_session_agent_lock(sid)
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
+        draft_delete_failed = False
         try:
             with LOCK:
                 SESSIONS.pop(sid, None)
@@ -14919,7 +14973,12 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 logger.debug("Failed to unlink session file %s", p)
             sidecar_deleted = not p.exists()
-            _delete_session_draft(sid)
+            try:
+                draft_deleted = bool(_delete_session_draft(sid))
+            except Exception:
+                logger.debug("Failed to delete draft sidecar for session %s", sid, exc_info=True)
+                draft_deleted = False
+            draft_delete_failed = not draft_deleted
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -14990,14 +15049,18 @@ def handle_post(handler, parsed) -> bool:
                 state_db_cleanup_failed = True
                 logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
-        return j(
-            handler,
-            {
-                "ok": True,
-                "state_db_cleanup_failed": state_db_cleanup_failed,
-                **worktree_retained,
-            },
-        )
+        response = {
+            "state_db_cleanup_failed": state_db_cleanup_failed,
+            **worktree_retained,
+        }
+        if draft_delete_failed:
+            response["draft_delete_failed"] = True
+            response.update(
+                {"ok": False, "error": "Failed to delete session draft"}
+            )
+            return j(handler, response, status=500)
+        response["ok"] = True
+        return j(handler, response)
 
     if parsed.path == "/api/session/clear":
         try:
@@ -20657,6 +20720,7 @@ def _handle_memory_read(handler, parsed=None):
 def _handle_sessions_cleanup(handler, body, zero_only=False):
     cleaned = 0
     phase1_removed_ids = set()
+    draft_delete_failed = False
 
     # Phase 1: Clean orphan session files (existing behavior).
     for p in SESSION_DIR.glob("*.json"):
@@ -20671,10 +20735,20 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
             if should_delete:
                 with LOCK:
                     SESSIONS.pop(p.stem, None)
-                p.unlink(missing_ok=True)
-                _delete_session_draft(p.stem)
-                cleaned += 1
-                phase1_removed_ids.add(p.stem)
+                    p.unlink(missing_ok=True)
+                session_deleted = not p.exists()
+                if session_deleted:
+                    phase1_removed_ids.add(p.stem)
+                try:
+                    draft_deleted = bool(_delete_session_draft(p.stem))
+                except Exception:
+                    logger.debug("Failed to delete draft sidecar during cleanup for %s", p.stem, exc_info=True)
+                    draft_delete_failed = True
+                    draft_deleted = False
+                if not draft_deleted:
+                    draft_delete_failed = True
+                if session_deleted:
+                    cleaned += 1
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
 
@@ -20755,6 +20829,17 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     if phase1_touched and not phase2_rewrote_index and SESSION_INDEX_FILE.exists():
         SESSION_INDEX_FILE.unlink(missing_ok=True)
 
+    if draft_delete_failed:
+        return j(
+            handler,
+            {
+                "ok": False,
+                "error": "Failed to delete one or more session drafts",
+                "cleaned": cleaned,
+                "draft_delete_failed": True,
+            },
+            status=500,
+        )
     return j(handler, {"ok": True, "cleaned": cleaned})
 
 

@@ -189,9 +189,9 @@ def _draft_lifecycle_lock_for_session_id(session_id: str) -> threading.Lock:
         raise ValueError(f"Unsafe session_id {session_id!r}; refusing to lock draft lifecycle")
     sid_index = int(hashlib.sha256(sid.encode("utf-8")).hexdigest(), 16)
     lock_index = sid_index % _DRAFT_LIFECYCLE_LOCK_STRIPE_COUNT
-    # ponytail: fixed 64-way lock striping; occasional unrelated collisions
-    # serialize small sessions, so per-sid locks should only be added if
-    # contention is measured.
+    # Fixed lock striping bounds registry growth. Rare hash collisions only
+    # serialize small draft operations; increase the stripe count if measured
+    # contention warrants it.
     return _DRAFT_LIFECYCLE_LOCK_STRIPES[lock_index]
 
 
@@ -309,9 +309,9 @@ def _delete_session_draft_by_dir(session_id: str, sessions_dir: Path) -> bool:
         return True
 
 
-def _delete_session_draft(session_id: str) -> None:
+def _delete_session_draft(session_id: str) -> bool:
     """Delete the dedicated draft sidecar for *session_id*."""
-    _delete_session_draft_by_dir(session_id, SESSION_DIR)
+    return _delete_session_draft_by_dir(session_id, SESSION_DIR)
 
 
 # Serializes index writers so concurrent Session.save() calls cannot race on
@@ -4873,6 +4873,8 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
     if s:
         if cache_on_miss:
             with LOCK:
+                if not (SESSION_DIR / f"{sid}.json").exists():
+                    raise KeyError(sid)
                 SESSIONS[sid] = s
                 if promote_cache:
                     SESSIONS.move_to_end(sid)

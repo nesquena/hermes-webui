@@ -1,5 +1,6 @@
 """Runtime regression coverage for dedicated composer draft sidecars."""
 
+import json
 import sqlite3
 import threading
 from types import SimpleNamespace
@@ -73,7 +74,7 @@ def _cleanup_route(monkeypatch, routes, *, zero_only=False):
     )
 
     assert routes._handle_sessions_cleanup(handler, {}, zero_only=zero_only) is True
-    return captured["payload"]
+    return captured["status"], captured["payload"]
 
 
 def _write_cli_db(path):
@@ -268,8 +269,9 @@ def test_route_session_delete_is_final_after_inflight_autosave(tmp_path, monkeyp
     real_delete_session_draft = routes._delete_session_draft
 
     def delete_session_draft_and_race(sid_to_delete):
-        real_delete_session_draft(sid_to_delete)
+        deleted = real_delete_session_draft(sid_to_delete)
         models._save_session_draft(sid_to_delete, {"text": "inflight", "files": []})
+        return deleted
 
     monkeypatch.setattr(routes, "_delete_session_draft", delete_session_draft_and_race)
 
@@ -288,6 +290,180 @@ def test_route_session_delete_is_final_after_inflight_autosave(tmp_path, monkeyp
     assert not (session_dir / ".drafts" / f"{sid}.json").exists()
 
 
+@pytest.mark.parametrize(
+    ("text", "files"),
+    [
+        ("non-empty", []),
+        ("   ", []),
+        ("", [{"name": "notes.txt"}]),
+    ],
+)
+def test_draft_post_for_diskless_session_materializes_main_session_and_sidecar(
+    tmp_path, monkeypatch, text, files
+):
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = models.new_session().session_id
+    assert not (session_dir / f"{sid}.json").exists()
+
+    status, payload = _post_json(
+        monkeypatch,
+        routes,
+        "/api/session/draft",
+        {"session_id": sid, "text": text, "files": files},
+    )
+
+    assert status == 200
+    assert payload["draft"] == {"text": text, "files": files}
+    assert (session_dir / f"{sid}.json").exists()
+    assert (session_dir / ".drafts" / f"{sid}.json").exists()
+    raw_session = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    assert raw_session.get("composer_draft") == {}
+    assert raw_session.get("message_count") == 0
+
+    models.SESSIONS.clear()
+    loaded = models.Session.load(sid)
+    assert loaded.composer_draft == {"text": text, "files": files}
+
+
+def test_empty_draft_on_diskless_new_chat_does_not_create_draft_file(tmp_path, monkeypatch):
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = models.new_session().session_id
+    assert not (session_dir / f"{sid}.json").exists()
+
+    status, payload = _post_json(
+        monkeypatch,
+        routes,
+        "/api/session/draft",
+        {"session_id": sid, "text": "", "files": []},
+    )
+
+    assert status == 200
+    assert payload["draft"] == {"text": "", "files": []}
+    assert not (session_dir / f"{sid}.json").exists()
+    assert not (session_dir / ".drafts" / f"{sid}.json").exists()
+
+
+def test_draft_post_for_stale_request_sid_does_not_write_under_old_sid(tmp_path, monkeypatch):
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = models.new_session().session_id
+    rotated_sid = f"{sid}-rotated"
+    s = models.get_session(sid)
+    s.composer_draft = {"text": "original", "files": []}
+
+    class _RotateLock:
+        def __enter__(self):
+            s.session_id = rotated_sid
+            with routes.LOCK:
+                routes.SESSIONS.pop(sid, None)
+                routes.SESSIONS[rotated_sid] = s
+                routes.SESSIONS.move_to_end(rotated_sid)
+            assert s.session_id == rotated_sid
+            assert routes.SESSIONS.get(rotated_sid) is s
+            assert sid not in routes.SESSIONS
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: _RotateLock())
+
+    status, payload = _post_json(
+        monkeypatch,
+        routes,
+        "/api/session/draft",
+        {"session_id": sid, "text": "rotating", "files": []},
+    )
+
+    assert status == 409
+    assert payload["ok"] is False
+    assert payload["error"] == "Session moved"
+    assert payload["session_id"] == rotated_sid
+    assert s.composer_draft == {"text": "original", "files": []}
+    assert not (session_dir / f"{sid}.json").exists()
+    assert not (session_dir / f"{rotated_sid}.json").exists()
+    assert not (session_dir / ".drafts" / f"{sid}.json").exists()
+    assert not (session_dir / ".drafts" / f"{rotated_sid}.json").exists()
+
+
+@pytest.mark.parametrize(("cached", "messageful"), [(False, False), (True, True)])
+def test_draft_post_for_missing_owner_rejected(tmp_path, monkeypatch, cached, messageful):
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = "sid-messageful-missing"
+    messages = [{"role": "assistant", "content": "persisted"}] if messageful else []
+    s = models.Session(
+        session_id=sid,
+        title="Route Race",
+        messages=messages,
+        composer_draft={"text": "original", "files": []},
+    )
+    s.save(touch_updated_at=False, skip_index=True)
+    assert (session_dir / f"{sid}.json").exists()
+    s = models.get_session(sid)
+    s.composer_draft = {"text": "original", "files": []}
+    (session_dir / f"{sid}.json").unlink(missing_ok=True)
+
+    if not cached:
+        models._record_webui_deleted_session_tombstone(sid)
+
+    class _DeleteLock:
+        def __enter__(self):
+            if not cached:
+                with routes.LOCK:
+                    routes.SESSIONS.pop(sid, None)
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: _DeleteLock())
+
+    status, payload = _post_json(
+        monkeypatch,
+        routes,
+        "/api/session/draft",
+        {"session_id": sid, "text": "autosave", "files": []},
+    )
+
+    assert status == 409
+    assert payload["ok"] is False
+    assert payload["error"] == "Session no longer active"
+    assert payload["session_id"] == sid
+    assert s.composer_draft == {"text": "original", "files": []}
+    assert not (session_dir / f"{sid}.json").exists()
+    assert not (session_dir / ".drafts" / f"{sid}.json").exists()
+    if not cached:
+        assert sid in models._load_webui_deleted_session_tombstone()
+
+
+def test_resolve_session_does_not_cache_if_owner_vanishes_before_recache(
+    tmp_path, monkeypatch
+):
+    models, _, session_dir = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = "sid-cold-load-race"
+    models.Session(
+        session_id=sid,
+        title="Load Race",
+        messages=[{"role": "assistant", "content": "persisted"}],
+    ).save(touch_updated_at=False, skip_index=True)
+    real_load = models.Session.load
+
+    def load_and_delete(loaded_sid):
+        loaded = real_load(loaded_sid)
+        (session_dir / f"{loaded_sid}.json").unlink(missing_ok=True)
+        models.SESSIONS.clear()
+        return loaded
+
+    monkeypatch.setattr(models.Session, "load", load_and_delete)
+
+    with pytest.raises(KeyError):
+        models.get_session(sid)
+    assert sid not in models.SESSIONS
+    assert not (session_dir / f"{sid}.json").exists()
+
+
 def test_sessions_cleanup_phase1_removes_dedicated_draft_file(tmp_path, monkeypatch):
     models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
 
@@ -298,11 +474,66 @@ def test_sessions_cleanup_phase1_removes_dedicated_draft_file(tmp_path, monkeypa
     )
     routes._save_session_draft(sid, {"text": "draft", "files": []})
 
-    result = _cleanup_route(monkeypatch, routes)
+    status, result = _cleanup_route(monkeypatch, routes)
 
+    assert status == 200
     assert result["cleaned"] == 1
     assert not (session_dir / f"{sid}.json").exists()
     assert not (session_dir / ".drafts" / f"{sid}.json").exists()
+
+
+def test_sessions_cleanup_reports_draft_delete_failure(tmp_path, monkeypatch):
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = "sid-cleanup-fail"
+    models.Session(session_id=sid, title="Untitled").save(
+        touch_updated_at=False,
+        skip_index=True,
+    )
+    routes._save_session_draft(sid, {"text": "from-route", "files": []})
+
+    monkeypatch.setattr(routes, "_delete_session_draft", lambda _sid: False)
+
+    status, result = _cleanup_route(monkeypatch, routes)
+
+    assert status == 500
+    assert result["cleaned"] == 1
+    assert result["ok"] is False
+    assert result["error"] == "Failed to delete one or more session drafts"
+    assert result["draft_delete_failed"] is True
+    assert not (session_dir / f"{sid}.json").exists()
+    assert (session_dir / ".drafts" / f"{sid}.json").exists()
+
+
+def test_session_delete_reports_draft_delete_failure(tmp_path, monkeypatch):
+    import api.routes as routes
+
+    models, _, session_dir = _build_draft_env(tmp_path, monkeypatch)
+    sid = "sid-delete-fail"
+    models.Session(session_id=sid, title="Delete Fail").save(
+        touch_updated_at=False,
+        skip_index=True,
+    )
+    routes._save_session_draft(sid, {"text": "delete fail", "files": []})
+
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
+    monkeypatch.setattr(routes, "_is_messaging_session_id", lambda value: False)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda value: False)
+    monkeypatch.setattr(routes, "_delete_session_draft", lambda sid_value: False)
+
+    status, payload = _post_json(
+        monkeypatch,
+        routes,
+        "/api/session/delete",
+        {"session_id": sid},
+    )
+
+    assert status == 500
+    assert payload["ok"] is False
+    assert payload["error"] == "Failed to delete session draft"
+    assert payload["draft_delete_failed"] is True
+    assert not (session_dir / f"{sid}.json").exists()
+    assert (session_dir / ".drafts" / f"{sid}.json").exists()
 
 
 def test_model_cleanup_removes_draft_artifact(tmp_path, monkeypatch):
@@ -387,10 +618,9 @@ def test_autosave_and_delete_lock_step_does_not_recreate_draft(tmp_path, monkeyp
 
 def test_save_after_missing_main_session_does_not_create_dedicated_draft(tmp_path, monkeypatch):
     models, _, session_dir = _build_draft_env(tmp_path, monkeypatch)
-    sid = "sid-missing-main"
-    assert not (session_dir / f"{sid}.json").exists()
-    models._save_session_draft(sid, {"text": "discarded", "files": []})
-    assert not (session_dir / ".drafts" / f"{sid}.json").exists()
+    models._save_session_draft("sid-missing-main", {"text": "discarded", "files": []})
+    assert not (session_dir / "sid-missing-main.json").exists()
+    assert not (session_dir / ".drafts" / "sid-missing-main.json").exists()
 
 
 def test_draft_path_error_shows_original_input(tmp_path, monkeypatch):
