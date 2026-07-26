@@ -1485,11 +1485,21 @@ window.renderTranscript=function(container, messages, opts){
 // Chained flow: listen → send → (agent processes) → TTS response → listen again
 (function(){
   const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
-  const hasSTT=!(!SpeechRecognition);
+  const hasSR=!(!SpeechRecognition);
+  const _canRecordAudio=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder);
   const hasTTS=!!('speechSynthesis' in window);
 
-  // Need both STT and TTS for turn-based voice mode
-  if(!hasSTT||!hasTTS) return;
+  // Need at least one LISTENING path — the browser recognizer OR a
+  // MediaRecorder→server (/api/transcribe) capture. The latter lets voice mode
+  // run entirely on a self-hosted STT server, including on browsers with no
+  // SpeechRecognition (e.g. Firefox).
+  //
+  // The speaking leg is deliberately NOT a precondition. Requiring
+  // speechSynthesis here switched voice mode off on browsers without it even
+  // when a self-hosted TTS server was configured and confirmed — and silent
+  // reply mode needs no speaking leg at all. It is resolved at activation
+  // instead, via _speakingLegAvailable().
+  if(!hasSR&&!_canRecordAudio) return;
 
   const modeBtn=$('btnVoiceMode');
   const bar=$('voiceModeBar');
@@ -1510,11 +1520,34 @@ window.renderTranscript=function(container, messages, opts){
     catch(_){ return false; }
   }
   let _voiceModeActive=false;
+  // Turn identity + pre-send reply snapshot (see _voiceModeSend).
+  let _vmTurn=0, _vmPreSendAssistant=null, _vmPreSendAssistantText='';
+  let _vmSttFailures=0;
+  // Activation generation. Activation is async (it awaits the STT capability
+  // probe), so the handler's `_voiceModeActive` check no longer covers the
+  // whole start-up — see _activate().
+  let _vmActivateGen=0;
+  // Listen generation. _startListeningServer() awaits getUserMedia() and only
+  // then assigns the module-level capture handles (_vmStream/_vmRecorder/
+  // _vmAudioCtx/_vmMaxTimer) — a SINGLE set. Two overlapping re-arms would both
+  // assign into them and the earlier acquisition would be orphaned: a live
+  // microphone with the tab indicator lit that nothing can stop any more.
+  // Only the newest listen may install itself; older ones stop their tracks.
+  let _vmListenGen=0;
 
   function _applyVoiceModePref(){
     const enabled = _voiceModePrefEnabled();
     modeBtn.style.display = enabled ? '' : 'none';
-    if(!enabled && _voiceModeActive) _deactivate();
+    if(!enabled){
+      // _deactivate() alone is not enough: an activation still awaiting the
+      // capability probe has not set _voiceModeActive yet, so turning the
+      // preference off would miss it and it would resurrect voice mode after
+      // the user switched it off. Bumping the generations invalidates any
+      // pending activation and any in-flight microphone acquisition.
+      _vmActivateGen++;
+      _vmListenGen++;
+      if(_voiceModeActive) _deactivate();
+    }
   }
   _applyVoiceModePref();
   // Expose so the settings pane can re-apply immediately on toggle.
@@ -1523,6 +1556,51 @@ window.renderTranscript=function(container, messages, opts){
   let _voiceModeState='idle'; // idle | listening | thinking | speaking
   let _recognition=null;
   let _silenceTimer=null;
+
+  // Spoken-reply toggle: when off, voice mode still transcribes speech and
+  // sends it to the LLM, but the reply is only shown (not read aloud) — the
+  // mic re-arms as soon as the turn completes. Persisted per browser.
+  let _voiceReplyTts = (function(){
+    try{ return localStorage.getItem('hermes-voice-reply-tts')!=='false'; }catch(_){ return true; }
+  })();
+  // Runtime-only suppression: set when no speaking leg is available, cleared as
+  // soon as one is. It never touches the persisted preference above, so a
+  // transient TTS outage cannot silently become the user's saved choice.
+  let _voiceReplySilentFallback = false;
+  function _voiceReplyEffective(){ return _voiceReplyTts && !_voiceReplySilentFallback; }
+  const _voiceReplyBtn = $('btnVoiceReplyToggle');
+  function _renderVoiceReplyToggle(){
+    if(!_voiceReplyBtn) return;
+    const on = _voiceReplyEffective();
+    _voiceReplyBtn.textContent = on
+      ? (t('voice_reply_on')||'🔊 Reply')
+      : (t('voice_reply_off')||'🔇 Silent');
+    _voiceReplyBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+  if(_voiceReplyBtn){
+    _renderVoiceReplyToggle();
+    _voiceReplyBtn.onclick=function(){
+      // Turning spoken replies ON is only meaningful with a speaking leg.
+      // Without one the toggle would flip, persist, and then silently do
+      // nothing every turn.
+      if(!_voiceReplyTts&&!_speakingLegAvailable()){
+        showToast(t('voice_tts_unavailable_silent')||'No speech output available — replies will be shown, not spoken.',4000);
+        _probeVoiceServerTts();
+        return;
+      }
+      _voiceReplyTts=!_voiceReplyTts;
+      // An explicit click is the user's real intent, so it clears any runtime
+      // suppression — and it is the only thing that writes the preference.
+      if(_voiceReplyTts) _voiceReplySilentFallback=false;
+      try{ localStorage.setItem('hermes-voice-reply-tts', _voiceReplyTts?'true':'false'); }catch(_){}
+      _renderVoiceReplyToggle();
+      // If turning silent mid-speech, stop the current utterance and re-listen.
+      if(!_voiceReplyTts && _voiceModeState==='speaking'){
+        if(typeof stopTTS==='function') stopTTS();
+        if(_voiceModeActive) _startListening();
+      }
+    };
+  }
   // Capture the session id at thinking-time so the TTS callback won't read
   // a different session's last assistant reply if the user navigated away
   // between send and stream completion. (Opus pre-release advisor.)
@@ -1585,6 +1663,345 @@ window.renderTranscript=function(container, messages, opts){
     bar.style.display=_voiceModeActive?(state==='idle'?'none':''):'none';
   }
 
+  // ── Server-STT listening leg (self-hosted /api/transcribe) ─────────────
+  // When a server STT provider is configured we keep the listening audio on
+  // the user's own server instead of the browser's cloud recognizer. Capture
+  // via MediaRecorder, end the utterance with simple energy-based silence
+  // detection (no Web Speech API), then POST the blob to /api/transcribe.
+  let _voiceServerStt=false, _voiceServerSttProbed=false, _voiceServerSttProbe=null;
+  // Server STT availability is a PER-PROFILE answer: /api/transcribe/capability
+  // resolves the provider from the active profile's config. This tab holds one
+  // set of flags, so the profile an answer belongs to has to travel with it —
+  // otherwise profile A's "available" keeps gating profile B after a switch,
+  // in both directions.
+  let _voiceServerSttProfile=null;
+  // Identity of the in-flight STT probe; see _probeVoiceServerStt().
+  let _voiceServerSttOwner=null;
+  function _vmActiveProfile(){
+    return (typeof S!=='undefined'&&S&&S.activeProfile)?String(S.activeProfile):'';
+  }
+  function _vmInvalidateServerSttCapability(){
+    _voiceServerStt=false; _voiceServerSttProbed=false;
+    _voiceServerSttProbe=null; _voiceServerSttProfile=null;
+    // Retiring the owner is what makes any in-flight probe a no-op when
+    // it settles, instead of letting it write back over the new state.
+    _voiceServerSttOwner=null;
+  }
+  let _vmStream=null, _vmRecorder=null, _vmChunks=[], _vmAudioCtx=null, _vmAnalyser=null, _vmVadRaf=null, _vmMaxTimer=null;
+  let _vmSpoke=false, _vmHadVad=false;
+  // Consecutive server-STT failures. Without a browser recognizer to fall back
+  // to (Firefox), a failing /api/transcribe used to be retried every 800 ms
+  // FOREVER: the mic stayed hot, each utterance was re-uploaded to a server
+  // answering 503, and nothing on screen said why voice mode was doing
+  // nothing. Bound it — after this many consecutive failures voice mode says
+  // so and switches itself off.
+  const _VM_MAX_STT_FAILURES=3;
+
+  function _vmNoteSttFailure(){
+    _vmSttFailures++;
+    if(_vmSttFailures<_VM_MAX_STT_FAILURES) return false;
+    _deactivate();
+    if(typeof showToast==='function') showToast(t('voice_stt_unavailable'),5000,'error');
+    return true;
+  }
+  function _vmNoteSttSuccess(){ _vmSttFailures=0; }
+
+  function _probeVoiceServerStt(){
+    if(!_canRecordAudio) return Promise.resolve(false);
+    // Join the in-flight probe rather than answering from the not-yet-updated
+    // flag. The IIFE fires one probe at load; a user who clicks the voice-mode
+    // button before it resolves must wait for THAT answer, not be told "no
+    // server STT" because the fetch hasn't come back yet.
+    const _profile=_vmActiveProfile();
+    // A remembered answer counts only for the profile that earned it.
+    if(_voiceServerSttProfile!==null&&_voiceServerSttProfile!==_profile) _vmInvalidateServerSttCapability();
+    if(_voiceServerSttProbe) return _voiceServerSttProbe;
+    if(_voiceServerSttProbed) return Promise.resolve(_voiceServerStt);
+    _voiceServerSttProbed=true;
+    _voiceServerSttProfile=_profile;
+    // Immutable owner for THIS request. Settlement may only touch the shared
+    // state while this owner is still the current one.
+    //
+    // Without it, a response for profile A that settled after a switch to B
+    // called the invalidator and then cleared the probe slot unconditionally —
+    // destroying B's in-flight promise or its already-settled answer. The late
+    // arrival has to clean up after itself and nothing else.
+    const _owner={profile:_profile};
+    _voiceServerSttOwner=_owner;
+    const _isCurrent=()=>_voiceServerSttOwner===_owner;
+    const _settle=(val)=>{ if(_isCurrent()) _voiceServerSttProbe=null; return val; };
+    try{
+      _voiceServerSttProbe=fetch('api/transcribe/capability',{headers:{'Accept':'application/json'}})
+        .then(r=>r&&r.ok?r.json():null)
+        .then(d=>{
+          // Superseded, or the profile moved on: this answer describes the
+          // previous profile's provider and must not be applied — nor may it
+          // tear down whatever replaced it.
+          if(!_isCurrent()) return false;
+          if(_vmActiveProfile()!==_profile){ _vmInvalidateServerSttCapability(); return false; }
+          if(d){ _voiceServerStt=!!d.available; }
+          else{ _voiceServerSttProbed=false; } // transient failure — retry on next activation
+          return _settle(_voiceServerStt);
+        })
+        .catch(()=>{
+          if(!_isCurrent()) return false;
+          if(_vmActiveProfile()===_profile) _voiceServerSttProbed=false;
+          return _settle(false);
+        });
+      return _voiceServerSttProbe;
+    }catch(_){
+      if(_isCurrent()) _vmInvalidateServerSttCapability();
+      return Promise.resolve(false);
+    }
+  }
+  _probeVoiceServerStt();
+
+  // Server STT requires a CONFIRMED capability — never merely "the browser has
+  // no recognizer, so it must be the server". Activation awaits the probe (see
+  // _activate); if it comes back unavailable on a browser without
+  // SpeechRecognition there is no listening leg at all, and starting voice mode
+  // would just spin the mic against an endpoint that cannot answer.
+  // The profile check is load-bearing, not belt-and-braces: it is what still
+  // holds if a future switch path forgets to invalidate the capability.
+  function _useServerStt(){
+    return _canRecordAudio&&_voiceServerStt&&_voiceServerSttProfile===_vmActiveProfile();
+  }
+
+  // ── Speaking leg ────────────────────────────────────────────────────────
+  // Three ways to read a reply back: the browser's speechSynthesis, a
+  // server-side TTS engine via /api/tts, or none at all in silent-reply mode.
+  // Only the first used to count: the IIFE returned outright without
+  // speechSynthesis, so a browser that lacks it (or has it disabled) had voice
+  // mode switched off entirely — even with a self-hosted TTS server configured
+  // and confirmed. Probe the leg instead of assuming it, scoped per profile
+  // for the same reason the STT capability is.
+  let _voiceServerTts=false, _voiceServerTtsProvider='';
+  let _voiceServerTtsProbed=false, _voiceServerTtsProbe=null, _voiceServerTtsProfile=null;
+  let _voiceServerTtsOwner=null;
+  function _vmInvalidateServerTtsCapability(){
+    _voiceServerTts=false; _voiceServerTtsProvider='';
+    _voiceServerTtsProbed=false; _voiceServerTtsProbe=null; _voiceServerTtsProfile=null;
+    _voiceServerTtsOwner=null;
+  }
+  function _probeVoiceServerTts(){
+    const _profile=_vmActiveProfile();
+    if(_voiceServerTtsProfile!==null&&_voiceServerTtsProfile!==_profile) _vmInvalidateServerTtsCapability();
+    if(_voiceServerTtsProbe) return _voiceServerTtsProbe;
+    if(_voiceServerTtsProbed) return Promise.resolve(_voiceServerTts);
+    _voiceServerTtsProbed=true;
+    _voiceServerTtsProfile=_profile;
+    // Same owner discipline as the STT probe: a late answer may only clean up
+    // after itself, never over whatever superseded it.
+    const _owner={profile:_profile};
+    _voiceServerTtsOwner=_owner;
+    const _isCurrent=()=>_voiceServerTtsOwner===_owner;
+    const _settle=(val)=>{ if(_isCurrent()) _voiceServerTtsProbe=null; return val; };
+    try{
+      _voiceServerTtsProbe=fetch('api/tts/capability',{headers:{'Accept':'application/json'}})
+        .then(r=>r&&r.ok?r.json():null)
+        .then(d=>{
+          if(!_isCurrent()) return false;
+          if(_vmActiveProfile()!==_profile){ _vmInvalidateServerTtsCapability(); return false; }
+          if(d){ _voiceServerTts=!!d.available; _voiceServerTtsProvider=String((d&&d.provider)||''); }
+          else{ _voiceServerTtsProbed=false; }
+          return _settle(_voiceServerTts);
+        })
+        .catch(()=>{
+          if(!_isCurrent()) return false;
+          if(_vmActiveProfile()===_profile) _voiceServerTtsProbed=false;
+          return _settle(false);
+        });
+      return _voiceServerTtsProbe;
+    }catch(_){
+      if(_isCurrent()) _vmInvalidateServerTtsCapability();
+      return Promise.resolve(false);
+    }
+  }
+  function _hasServerSpeakingLeg(){
+    return _voiceServerTts&&_voiceServerTtsProfile===_vmActiveProfile();
+  }
+  function _speakingLegAvailable(){ return hasTTS||_hasServerSpeakingLeg(); }
+
+  function _voiceLang(){
+    const tag=(typeof _locale!=='undefined'&&_locale._speech)||'';
+    const primary=String(tag).replace('_','-').split('-')[0].toLowerCase();
+    return (primary.length>=2&&primary.length<=3)?primary:'';
+  }
+
+  function _vmStopAudio(){
+    if(_vmVadRaf){ try{ cancelAnimationFrame(_vmVadRaf); }catch(_){} _vmVadRaf=null; }
+    if(_vmMaxTimer){ clearTimeout(_vmMaxTimer); _vmMaxTimer=null; }
+    try{ if(_vmRecorder&&_vmRecorder.state!=='inactive') _vmRecorder.stop(); }catch(_){}
+    _vmRecorder=null;
+    try{ if(_vmStream) _vmStream.getTracks().forEach(tr=>tr.stop()); }catch(_){}
+    _vmStream=null;
+    try{ if(_vmAudioCtx&&_vmAudioCtx.state!=='closed') _vmAudioCtx.close(); }catch(_){}
+    _vmAudioCtx=null; _vmAnalyser=null;
+  }
+
+  function _vmStopRecordingForSend(){
+    if(_vmVadRaf){ try{ cancelAnimationFrame(_vmVadRaf); }catch(_){} _vmVadRaf=null; }
+    if(_vmMaxTimer){ clearTimeout(_vmMaxTimer); _vmMaxTimer=null; }
+    try{ if(_vmRecorder&&_vmRecorder.state!=='inactive') _vmRecorder.stop(); }catch(_){}
+  }
+
+  function _vmRunVad(){
+    if(!_vmAnalyser) return; // no analyser → rely on the max-duration timer
+    const buf=new Uint8Array(_vmAnalyser.fftSize);
+    let spoke=false, silenceStart=0;
+    const speechThresh=0.02; // RMS over [-1,1]
+    const tick=()=>{
+      if(!_voiceModeActive||_voiceModeState!=='listening'||!_vmAnalyser) return;
+      _vmAnalyser.getByteTimeDomainData(buf);
+      let sum=0;
+      for(let i=0;i<buf.length;i++){ const v=(buf[i]-128)/128; sum+=v*v; }
+      const rms=Math.sqrt(sum/buf.length);
+      const now=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
+      if(rms>speechThresh){ spoke=true; _vmSpoke=true; silenceStart=0; }
+      else if(spoke){
+        if(!silenceStart){ silenceStart=now; }
+        else if(now-silenceStart>=_voiceSilenceMs()){ _vmStopRecordingForSend(); return; }
+      }
+      _vmVadRaf=requestAnimationFrame(tick);
+    };
+    _vmVadRaf=requestAnimationFrame(tick);
+  }
+
+  async function _startListeningServer(){
+    if(!_voiceModeActive) return;
+    // Claim this listen. Anything that supersedes it — a re-arm, _vmStopAudio(),
+    // _deactivate(), the Preferences toggle — bumps the counter, and every
+    // resume point below checks it before touching the shared handles.
+    const gen=++_vmListenGen;
+    const _superseded=()=>gen!==_vmListenGen||!_voiceModeActive;
+    _clearBrowserTtsRecovery();
+    _setState('listening');
+    let stream;
+    try{ stream=await navigator.mediaDevices.getUserMedia({audio:true}); }
+    catch(e){
+      if(_superseded()) return;
+      if(hasSR){ _voiceServerStt=false; if(_voiceModeActive) _startListening(); return; }
+      _deactivate();
+      const key=_micToastKeyForRecognitionError&&e?_micToastKeyForRecognitionError(e.name):null;
+      showToast(key?t(key):t('mic_error')+((e&&e.name)||''));
+      return;
+    }
+    // The permission prompt can stay open for a long time. If anything moved on
+    // while it did, this stream must die here — it is the one nothing else
+    // holds a reference to.
+    if(_superseded()){ try{ stream.getTracks().forEach(tr=>tr.stop()); }catch(_){} return; }
+    _vmStream=stream; _vmChunks=[]; _vmSpoke=false; _vmHadVad=false;
+    let mime='';
+    const prefs=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/ogg'];
+    for(let i=0;i<prefs.length;i++){ if(window.MediaRecorder&&MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported(prefs[i])){ mime=prefs[i]; break; } }
+    try{ _vmRecorder=mime?new MediaRecorder(stream,{mimeType:mime}):new MediaRecorder(stream); }
+    catch(_){
+      try{ _vmRecorder=new MediaRecorder(stream); }
+      catch(__){
+        _vmStopAudio();
+        if(hasSR){ _voiceServerStt=false; if(!_superseded()) _startListening(); return; }
+        // No browser recognizer to fall back to. Without the same bound the
+        // other failure paths use, this returned silently: voice mode stayed
+        // "on" with nothing listening and nothing on screen saying why.
+        _vmNoteSttFailure();
+        return;
+      }
+    }
+    // Recorder events belong to THIS listen. Without the generation they close
+    // over nothing: an old recorder firing after deactivate/reactivate pushed
+    // audio into the new lifecycle's chunk buffer, and its onstop consumed and
+    // tore down the new lifecycle's stream and recorder.
+    _vmRecorder.ondataavailable=(ev)=>{
+      if(gen!==_vmListenGen) return;
+      if(ev.data&&ev.data.size) _vmChunks.push(ev.data);
+    };
+    _vmRecorder.onstop=()=>{ _vmFinishServerUtterance(gen); };
+    try{
+      const AC=window.AudioContext||window.webkitAudioContext;
+      if(AC){
+        _vmAudioCtx=new AC();
+        const srcNode=_vmAudioCtx.createMediaStreamSource(stream);
+        _vmAnalyser=_vmAudioCtx.createAnalyser();
+        _vmAnalyser.fftSize=2048;
+        srcNode.connect(_vmAnalyser);
+        _vmHadVad=true;
+      }
+    }catch(_){ _vmAnalyser=null; _vmHadVad=false; }
+    try{ _vmRecorder.start(); }
+    catch(_){
+      _vmStopAudio();
+      // Bounded like every other failure path: a recorder that cannot start
+      // usually cannot start on the next attempt either, and this re-armed
+      // every 800 ms forever with the microphone permission held.
+      if(hasSR){ _voiceServerStt=false; if(!_superseded()) _startListening(); return; }
+      if(_vmNoteSttFailure()) return;
+      setTimeout(()=>{ if(gen===_vmListenGen&&_voiceModeActive) _startListening(); },800);
+      return;
+    }
+    // Hard cap so a noisy room / missing analyser can't record forever.
+    _vmMaxTimer=setTimeout(()=>{ _vmStopRecordingForSend(); },20000);
+    _vmRunVad();
+  }
+
+  async function _vmFinishServerUtterance(listenGen){
+    // A superseded listen may clean up only ITS OWN resources. Reaching the
+    // shared handles here would stop the microphone of the lifecycle that
+    // replaced it and swallow its audio.
+    if(listenGen!==undefined&&listenGen!==_vmListenGen) return;
+    const chunks=_vmChunks; _vmChunks=[];
+    try{ if(_vmStream) _vmStream.getTracks().forEach(tr=>tr.stop()); }catch(_){}
+    _vmStream=null;
+    try{ if(_vmAudioCtx&&_vmAudioCtx.state!=='closed') _vmAudioCtx.close(); }catch(_){}
+    _vmAudioCtx=null; _vmAnalyser=null;
+    if(_vmVadRaf){ try{ cancelAnimationFrame(_vmVadRaf); }catch(_){} _vmVadRaf=null; }
+    if(_vmMaxTimer){ clearTimeout(_vmMaxTimer); _vmMaxTimer=null; }
+    const rec=_vmRecorder; _vmRecorder=null;
+    if(!_voiceModeActive||_voiceModeState!=='listening') return;
+    if(listenGen!==undefined&&listenGen!==_vmListenGen) return;
+    const _stillOurs=()=>(listenGen===undefined||listenGen===_vmListenGen)&&_voiceModeActive;
+    const type=(rec&&rec.mimeType)||(chunks[0]&&chunks[0].type)||'audio/webm';
+    const blob=chunks.length?new Blob(chunks,{type}):null;
+    // When the VAD ran and never saw speech (max-duration timer fired on a
+    // silent room), don't post 20s of silence to the STT server — just
+    // listen again. Without a working analyser we can't tell, so we post.
+    if(!blob||blob.size<1200||(_vmHadVad&&!_vmSpoke)){
+      setTimeout(()=>{ if(_stillOurs()) _startListening(); },250);
+      return;
+    }
+    try{
+      const ext=(type.indexOf('ogg')>=0)?'ogg':'webm';
+      const form=new FormData();
+      form.append('file',new File([blob],'voice-input.'+ext,{type}));
+      const lang=_voiceLang(); if(lang) form.append('language',lang);
+      const res=await fetch('api/transcribe',{method:'POST',body:form});
+      const data=await res.json().catch(()=>({}));
+      // The upload came back for a lifecycle that has since been replaced:
+      // neither its verdict nor its re-arm belongs to the current one.
+      if(!_stillOurs()) return;
+      if(!res.ok){
+        if(hasSR){ _voiceServerStt=false; _vmNoteSttSuccess(); if(_stillOurs()) _startListening(); return; }
+        if(_vmNoteSttFailure()) return;
+        setTimeout(()=>{ if(_stillOurs()) _startListening(); },800);
+        return;
+      }
+      _vmNoteSttSuccess();
+      const transcript=String((data&&data.transcript)||'').trim();
+      if(!transcript){ setTimeout(()=>{ if(_stillOurs()) _startListening(); },250); return; }
+      // Re-check after the server round-trip. Not just "is voice mode on" —
+      // an old transcript must not be typed into, and sent from, a lifecycle
+      // that started after this recording was made.
+      if(!_stillOurs()) return;
+      ta.value=transcript; autoResize();
+      _voiceModeSend();
+    }catch(_){
+      if(!_stillOurs()) return;
+      // Network-level failure counts the same as a rejected upload — otherwise
+      // an unreachable server keeps the retry loop alive through this path.
+      if(!hasSR&&_vmNoteSttFailure()) return;
+      setTimeout(()=>{ if(_stillOurs()) _startListening(); },800);
+    }
+  }
+
   function _startListening(){
     if(!_voiceModeActive) return;
     if(_micOriginNeedsSecureContext()){
@@ -1592,9 +2009,23 @@ window.renderTranscript=function(container, messages, opts){
       showToast(t('mic_insecure_origin'));
       return;
     }
+    if(_useServerStt()){ _startListeningServer(); return; }
+    if(!hasSR){
+      // Server STT went away mid-session (config change, agent restart) and
+      // there is no recognizer to fall back to. Stop rather than construct an
+      // undefined SpeechRecognition on every re-arm.
+      _deactivate();
+      if(typeof showToast==='function') showToast(t('voice_stt_unavailable'),5000,'error');
+      return;
+    }
     _clearBrowserTtsRecovery();
     _setState('listening');
 
+    // The browser leg needs the same ownership as the server leg: its callbacks
+    // outlive the recognizer that registered them, so an onend/onerror from a
+    // recognizer that was replaced could re-arm or send into the new lifecycle.
+    const gen=++_vmListenGen;
+    const _ours=()=>gen===_vmListenGen&&_voiceModeActive;
     _recognition=new SpeechRecognition();
     _recognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true';
     _recognition.interimResults=true;
@@ -1605,6 +2036,7 @@ window.renderTranscript=function(container, messages, opts){
     _recognition.onstart=()=>{ _finalText=''; };
 
     _recognition.onresult=(event)=>{
+      if(!_ours()) return;
       // Reset silence timer on any result
       clearTimeout(_silenceTimer);
       let interim='';
@@ -1626,23 +2058,25 @@ window.renderTranscript=function(container, messages, opts){
     };
 
     _recognition.onend=()=>{
+      if(!_ours()) return;
       clearTimeout(_silenceTimer);
       // If we have text and haven't sent yet, send it
-      if(_finalText&&_voiceModeActive&&_voiceModeState==='listening'){
+      if(_finalText&&_voiceModeState==='listening'){
+        _vmNoteSttSuccess();
         _voiceModeSend();
-      } else if(_voiceModeActive&&_voiceModeState==='listening'){
+      } else if(_voiceModeState==='listening'){
         // No speech detected — restart listening
-        setTimeout(()=>{ if(_voiceModeActive) _startListening(); },500);
+        setTimeout(()=>{ if(_ours()) _startListening(); },500);
       }
     };
 
     _recognition.onerror=(event)=>{
+      if(!_ours()) return;
       clearTimeout(_silenceTimer);
       if(event.error==='no-speech'||event.error==='aborted'){
-        // Restart if still active
-        if(_voiceModeActive){
-          setTimeout(()=>{ if(_voiceModeActive) _startListening(); },800);
-        }
+        // Expected idle outcomes, not failures: they must not consume the
+        // failure budget, or a quiet room would switch voice mode off.
+        setTimeout(()=>{ if(_ours()) _startListening(); },800);
         return;
       }
       if(event.error==='not-allowed'||event.error==='service-not-allowed'||event.error==='audio-capture'){
@@ -1651,15 +2085,19 @@ window.renderTranscript=function(container, messages, opts){
         showToast(messageKey?t(messageKey):t('mic_error')+event.error);
         return;
       }
-      // Other errors — try to restart
-      if(_voiceModeActive){
-        setTimeout(()=>{ if(_voiceModeActive) _startListening(); },1500);
-      }
+      // Everything else — `network` above all — was retried every 1.5s forever
+      // against a recognizer that could not answer. Bounded like the server
+      // leg: after _VM_MAX_STT_FAILURES consecutive failures voice mode says
+      // so and switches itself off.
+      if(_vmNoteSttFailure()) return;
+      setTimeout(()=>{ if(_ours()) _startListening(); },1500);
     };
 
     try{ _recognition.start(); }catch(e){
-      // Already started or other error — retry shortly
-      setTimeout(()=>{ if(_voiceModeActive) _startListening(); },1000);
+      // A recognizer that cannot start usually cannot start on the next
+      // attempt either; this retried every second with no bound.
+      if(_vmNoteSttFailure()) return;
+      setTimeout(()=>{ if(_ours()) _startListening(); },1000);
     }
   }
 
@@ -1675,13 +2113,90 @@ window.renderTranscript=function(container, messages, opts){
     // Pin the active session id so the TTS callback won't speak a different
     // session's reply if the user navigates away mid-stream.
     _voiceModeThinkingSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
+    // Identify THIS turn. Everything that later decides "the turn is done, read
+    // the answer" checks the token it captured against the live one, so a
+    // watchdog left over from a previous turn can neither speak nor re-arm.
+    _vmTurn++;
+    // Remember the assistant row that was last on screen BEFORE sending. If the
+    // run ends without producing a new one (cancel, error, dropped stream) the
+    // newest row is still this element, and re-reading it would speak the
+    // PREVIOUS answer as though it were the reply to what the user just said.
+    _vmPreSendAssistant=_lastAssistantRow();
+    _vmPreSendAssistantText=_vmPreSendAssistant?(_vmPreSendAssistant.dataset.rawText||''):'';
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
+    _vmStopAudio();
+    _armThinkingWatchdog();
     // send() is global from boot.js
     if(typeof send==='function') send();
   }
 
+  function _lastAssistantRow(){
+    const rows=document.querySelectorAll('.msg-row[data-role="assistant"], .assistant-segment[data-raw-text]');
+    return rows.length?rows[rows.length-1]:null;
+  }
+
+  // True when the newest assistant row is the same, unchanged row that was
+  // there before this turn was sent — i.e. no reply arrived.
+  function _vmNoNewReply(){
+    const last=_lastAssistantRow();
+    if(!last) return true;
+    if(last!==_vmPreSendAssistant) return false;
+    return (last.dataset.rawText||'')===_vmPreSendAssistantText;
+  }
+
+  // Recovery for a 'thinking' turn that never reaches the done→autoRead hook:
+  // a dropped SSE stream, a cancelled or errored agent run, or a settle that
+  // takes a different code path all leave voice mode stuck on the "thinking"
+  // indicator with the mic never re-arming. Poll S.busy — once the turn is no
+  // longer running, either speak the reply (if one landed) or drop back to
+  // listening. A hard ceiling bounds the wait so a wedged backend can't pin
+  // voice mode forever.
+  let _vmThinkTimer=null, _vmThinkStart=0;
+  // How long to wait for the run to actually start before giving up on it.
+  const _VM_START_TIMEOUT_MS=20000;
+  function _clearThinkingWatchdog(){ if(_vmThinkTimer){ clearInterval(_vmThinkTimer); _vmThinkTimer=null; } }
+  function _armThinkingWatchdog(){
+    _clearThinkingWatchdog();
+    _vmThinkStart=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
+    const myTurn=_vmTurn;
+    // `send()` sets S.busy asynchronously, so the first tick can land BEFORE
+    // the run starts. Treating that initial `S.busy === false` as "the turn
+    // finished" ended the turn one second after it began and spoke whatever
+    // assistant row happened to be last — the previous answer. Only a run we
+    // have actually seen running can be seen finishing.
+    let sawBusy=false;
+    _vmThinkTimer=setInterval(()=>{
+      // A newer turn (or a deactivate) supersedes this watchdog outright.
+      if(myTurn!==_vmTurn){ clearInterval(_vmThinkTimer); _vmThinkTimer=null; return; }
+      if(!_voiceModeActive||_voiceModeState!=='thinking'){ _clearThinkingWatchdog(); return; }
+      const now=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
+      const busy=(typeof S!=='undefined')&&S.busy;
+      if(busy) sawBusy=true;
+      const elapsed=now-_vmThinkStart;
+      // Give the normal done→autoReadLastAssistant path a moment to fire first;
+      // only step in once the run has clearly stopped, or after a hard timeout.
+      if(sawBusy&&!busy){
+        _clearThinkingWatchdog();
+        setTimeout(()=>{
+          if(myTurn!==_vmTurn) return;
+          if(_voiceModeActive&&_voiceModeState==='thinking') _speakResponse();
+        },600);
+      }else if(!sawBusy&&elapsed>_VM_START_TIMEOUT_MS){
+        // The send never became a run at all (rejected, offline, no session).
+        _clearThinkingWatchdog();
+        if(typeof showToast==='function') showToast(t('voice_mode_timeout'),3000);
+        if(_voiceModeActive) _startListening();
+      }else if(elapsed>180000){
+        _clearThinkingWatchdog();
+        if(typeof showToast==='function') showToast(t('voice_mode_timeout'),3000);
+        if(_voiceModeActive) _startListening();
+      }
+    },1000);
+  }
+
   function _speakResponse(){
+    _clearThinkingWatchdog();
     if(!_voiceModeActive) return;
     // Bail out if the user navigated to a different session between send and
     // stream completion. The patched autoReadLastAssistant fires globally;
@@ -1694,12 +2209,29 @@ window.renderTranscript=function(container, messages, opts){
       return;
     }
     _voiceModeThinkingSid=null;
+
+    // The turn produced no new assistant row (cancelled, errored, stream
+    // dropped). Speaking now would read the PREVIOUS turn's answer back as if
+    // it were the reply — worse than silence, because it sounds like a real
+    // response to what was just said. Re-arm instead.
+    if(_vmNoNewReply()){
+      _vmPreSendAssistant=null; _vmPreSendAssistantText='';
+      setTimeout(()=>{ if(_voiceModeActive) _startListening(); },250);
+      return;
+    }
+    _vmPreSendAssistant=null; _vmPreSendAssistantText='';
+
+    // Spoken-reply toggle off → don't synthesize; the reply is on screen, just
+    // re-arm the mic for the next turn (STT + LLM, no TTS).
+    if(!_voiceReplyEffective()){
+      setTimeout(()=>{ if(_voiceModeActive) _startListening(); },250);
+      return;
+    }
     _setState('speaking');
 
     // Find last assistant message
-    const rows=document.querySelectorAll('.msg-row[data-role="assistant"], .assistant-segment[data-raw-text]');
-    if(!rows.length){ _startListening(); return; }
-    const last=rows[rows.length-1];
+    const last=_lastAssistantRow();
+    if(!last){ _startListening(); return; }
     const rawText=last.dataset.rawText||'';
     if(!rawText.trim()){ _startListening(); return; }
 
@@ -1719,212 +2251,93 @@ window.renderTranscript=function(container, messages, opts){
         .trim();
     }
     if(!clean){ _startListening(); return; }
-    const engine=localStorage.getItem("hermes-tts-engine")||"browser";
-    // Extension-registered TTS engine (window.registerHermesTtsEngine): synth
-    // via the extension, then play through the same Audio lifecycle as edge.
-    if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
-      _ttsSpeaking=true;
-      const _opts={
-        voice: localStorage.getItem("hermes-tts-voice")||'',
-        rate: parseFloat(localStorage.getItem("hermes-tts-rate")),
-        pitch: parseFloat(localStorage.getItem("hermes-tts-pitch")),
-      };
-      Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
-        .then(function(buf){
-          const blob=new Blob([buf]);
-          const url=URL.createObjectURL(blob);
-          const audio=new Audio(url);
-          _playingEdgeAudio=audio;
-          audio.onended=function(){
-            _ttsSpeaking=false;
-            if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-            URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},500);
-          };
-          audio.onerror=function(){
-            _ttsSpeaking=false;
-            if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-            URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
-          };
-          audio.play().catch(function(){
-            _ttsSpeaking=false;
-            if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-            URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
-          });
-        })
-        .catch(function(){
-          _ttsSpeaking=false;
-          if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
-        });
-      return;
-    }
-    if(engine==="elevenlabs"){
-      _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, engine: 'elevenlabs'})
-      })
-      .then(r => {
-        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
-        return r.blob();
-      })
-      .then(blob => {
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        _playingEdgeAudio=audio;
-        audio.onended = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
-        };
-        audio.onerror = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        };
-        audio.play().catch(e => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        });
-      })
-      .catch(() => {
-        _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-      });
-      return;
-    }
-    if(engine==="openai"){
-      _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, engine: 'openai'})
-      })
-      .then(r => {
-        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
-        return r.blob();
-      })
-      .then(blob => {
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        _playingEdgeAudio=audio;
-        audio.onended = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
-        };
-        audio.onerror = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        };
-        audio.play().catch(() => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        });
-      })
-      .catch(() => {
-        _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-      });
-      return;
-    }
-    if(engine==="edge"){
-      const voice=localStorage.getItem("hermes-tts-voice")||"zh-CN-XiaoxiaoNeural";
-      const savedRate=parseFloat(localStorage.getItem("hermes-tts-rate"));
-      const savedPitch=parseFloat(localStorage.getItem("hermes-tts-pitch"));
-      let rate='', pitch='';
-      if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
-      if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
-      _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, voice, rate, pitch})
-      })
-      .then(r => {
-        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
-        return r.blob();
-      })
-      .then(blob => {
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        // Register with the shared handle (declared in ui.js, same global scope;
-        // both scripts are fully evaluated before any voice interaction) so
-        // stopTTS() — called from _deactivate() — can actually pause hands-free
-        // Edge playback. Without this the audio is local here and unstoppable.
-        _playingEdgeAudio=audio;
-        audio.onended = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
-        };
-        audio.onerror = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        };
-        audio.play().catch(e => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        });
-      })
-      .catch(() => {
-        _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-      });
-      return;
-    }
-    const utter=new SpeechSynthesisUtterance(clean);
-
-    // Apply saved voice preferences
-    const savedVoice=localStorage.getItem('hermes-tts-voice');
-    const voices=speechSynthesis.getVoices();
-    if(savedVoice&&voices.length){
-      const match=voices.find(v=>v.name===savedVoice);
-      if(match) utter.voice=match;
-    }
-    const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
-    if(!isNaN(savedRate)) utter.rate=Math.min(2,Math.max(0.5,savedRate));
-    const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
-    if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
-
-    utter.onend=()=>{
-      _browserTtsSuppressNextErrorRearm=false;
-      _clearBrowserTtsRecovery();
-      // After speaking, go back to listening
-      if(_voiceModeActive&&_voiceModeState==='speaking') setTimeout(()=>_startListening(),500);
-    };
-    utter.onerror=()=>{
-      _clearBrowserTtsRecovery();
-      if(_browserTtsSuppressNextErrorRearm){
-        _browserTtsSuppressNextErrorRearm=false;
+    // Response splitting (Preferences → "Response splitting"): chunk the RAW
+    // text so paragraph mode still sees blank lines; fall back to the single
+    // stripped blob when ui.js isn't loaded (shared global scope normally).
+    const chunks=(typeof _ttsChunksFor==='function')?_ttsChunksFor(rawText):[clean];
+    if(!chunks.length){ _startListening(); return; }
+    let engine=localStorage.getItem("hermes-tts-engine")||"browser";
+    // The "browser" engine needs speechSynthesis. Without it, use the server
+    // leg when one was confirmed; with neither, skip the read-back and resume
+    // listening rather than calling into an absent API. (Reaching here at all
+    // means reply mode is on — silent mode returns earlier.)
+    if(engine==="browser"&&!hasTTS){
+      if(_hasServerSpeakingLeg()){
+        engine=(_voiceServerTtsProvider&&_voiceServerTtsProvider!=="browser")
+          ? _voiceServerTtsProvider : "edge";
+      }else{
+        if(_voiceModeActive) setTimeout(function(){_startListening();},300);
         return;
       }
-      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-    };
-
-    _armBrowserTtsRecovery(clean, utter.rate);
-    try{
-      speechSynthesis.speak(utter);
-    }catch(_){
-      _clearBrowserTtsRecovery();
-      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
     }
+    // Voice-mode completion hook shared by the chunked players: resume
+    // listening after the last chunk (or after a failure, with backoff).
+    const _resumeAfterTts=function(err){
+      // A failed read-back must not be silent — before this toast, a TTS
+      // timeout/error just dropped voice mode back to listening with no
+      // explanation (the answer stays on screen either way).
+      if(err&&typeof showToast==='function') showToast(t('voice_tts_failed')||('Voice reply TTS failed: '+((err&&err.message)||err)),4000,'error');
+      if(_voiceModeActive) setTimeout(function(){_startListening();}, err?1000:500);
+    };
+    // Extension-registered TTS engine (window.registerHermesTtsEngine): synth
+    // chunk-by-chunk via the extension (shared player from ui.js).
+    if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
+      if(typeof _playRegisteredTtsChunks==='function'){
+        _playRegisteredTtsChunks(engine, chunks, null, _resumeAfterTts);
+        return;
+      }
+    }
+    if(engine==="elevenlabs"||engine==="openai"||engine==="edge"){
+      // Shared sequential chunk player from ui.js (fetches /api/tts per chunk,
+      // prefetches the next chunk while the current one plays, honours
+      // stopTTS() via the queue token so _deactivate() interrupts cleanly).
+      const bodyFor=(engine==="edge")
+        ? _edgeTtsBodyBuilder()
+        : function(chunk){ return {text:chunk, engine:engine}; };
+      _playServerTtsChunks(chunks, bodyFor, null, 'TTS', _resumeAfterTts);
+      return;
+    }
+    // Browser speechSynthesis: speak the chunks sequentially, arming the
+    // stall-recovery watchdog per chunk. Length caps apply on top of the
+    // chosen splitting mode (long single utterances stall Chrome).
+    const bChunks=(typeof _browserTtsChunks==='function')?_browserTtsChunks(rawText):chunks;
+    const savedVoice=localStorage.getItem('hermes-tts-voice');
+    const voices=speechSynthesis.getVoices();
+    const voiceMatch=(savedVoice&&voices.length)?voices.find(v=>v.name===savedVoice):null;
+    const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
+    const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
+    const _speakBrowserChunk=function(idx){
+      if(!_voiceModeActive||_voiceModeState!=='speaking') return;
+      if(idx>=bChunks.length){
+        if(_voiceModeActive&&_voiceModeState==='speaking') setTimeout(()=>_startListening(),500);
+        return;
+      }
+      const utter=new SpeechSynthesisUtterance(bChunks[idx]);
+      if(voiceMatch) utter.voice=voiceMatch;
+      if(!isNaN(savedRate)) utter.rate=Math.min(2,Math.max(0.5,savedRate));
+      if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
+      utter.onend=()=>{
+        _browserTtsSuppressNextErrorRearm=false;
+        _clearBrowserTtsRecovery();
+        _speakBrowserChunk(idx+1);
+      };
+      utter.onerror=()=>{
+        _clearBrowserTtsRecovery();
+        if(_browserTtsSuppressNextErrorRearm){
+          _browserTtsSuppressNextErrorRearm=false;
+          return;
+        }
+        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      };
+      _armBrowserTtsRecovery(bChunks[idx], utter.rate);
+      try{
+        speechSynthesis.speak(utter);
+      }catch(_){
+        _clearBrowserTtsRecovery();
+        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      }
+    };
+    _speakBrowserChunk(0);
   }
 
   // Hook into response completion — observe when the agent finishes
@@ -1955,18 +2368,81 @@ window.renderTranscript=function(container, messages, opts){
   // own speak-and-resume flow instead of the default auto-read.
   const _origAutoRead=(typeof autoReadLastAssistant==='function')?autoReadLastAssistant:null;
   window.autoReadLastAssistant=function(){
-    if(_voiceModeActive&&_voiceModeState==='thinking'){
-      _speakResponse();
+    // While voice mode is active it OWNS reading the reply — never also invoke
+    // the browser auto-read, or a race between the thinking-watchdog and this
+    // done-hook double-reads the answer (watchdog fires first, state leaves
+    // 'thinking', this call would otherwise fall through to _origAutoRead when
+    // the separate "auto-read" preference is on).
+    if(_voiceModeActive){
+      if(_voiceModeState==='thinking') _speakResponse();
       return;
     }
     if(_origAutoRead) _origAutoRead.apply(this,arguments);
   };
 
-  function _activate(){
+  async function _activate(){
     if(_micOriginNeedsSecureContext()){
       showToast(t('mic_insecure_origin'));
       return;
     }
+    // Making activation async opened a window the click handler's
+    // `_voiceModeActive` check cannot see: while the capability probe is
+    // awaited the flag is still false, so a second click started a SECOND
+    // activation and both flows raced over the single set of module-level
+    // capture handles (_vmStream/_vmRecorder/_vmMaxTimer). The later flow
+    // overwrote the earlier one's, orphaning a live MediaStream that nothing
+    // could stop any more — in a browser, a microphone left open with the tab
+    // indicator lit for the rest of the session. They also shared
+    // _vmSttFailures, so the "3 consecutive failures" bound tripped on
+    // interleaved counts.
+    //
+    // A generation counter settles it: only the NEWEST activation may proceed
+    // past the probe. It covers the other half of the same window too — a
+    // _deactivate() (user, or the Preferences toggle) while the probe is in
+    // flight bumps the generation, so the pending activation cannot resurrect
+    // voice mode after it was switched off.
+    const gen=++_vmActivateGen;
+    // Without a browser recognizer, server STT is the ONLY listening leg —
+    // confirm it before turning voice mode on. Activating first and finding
+    // out later is what produced the Firefox failure mode: the button lit up,
+    // the mic opened, and every utterance went to an endpoint that could not
+    // transcribe it.
+    // Resolve the LISTENING leg before the first listen — in BOTH cases.
+    //
+    // With a browser recognizer present this was fire-and-forget, so while the
+    // probe was in flight _useServerStt() answered false and the first
+    // utterance went to the browser/cloud recognizer instead of the configured
+    // self-hosted server. Awaiting costs one round trip at activation and is
+    // the only way the first utterance lands on the leg the operator chose.
+    const _sttReady=await _probeVoiceServerStt();
+    // Superseded while the probe was in flight (the user switched voice mode
+    // off, or the Preferences toggle did). Do not resurrect it.
+    if(gen!==_vmActivateGen) return;
+    if(!hasSR&&!_sttReady){
+      showToast(t('voice_stt_unavailable'),5000,'error');
+      return;
+    }
+    // Resolve the speaking leg the same way. Without speechSynthesis the
+    // browser cannot read anything back, so confirm the server leg before
+    // promising a spoken reply; with neither, run in silent mode rather than
+    // refusing to start — the transcription half works perfectly well on its
+    // own, and that is what the reply toggle is for.
+    if(!hasTTS){
+      await _probeVoiceServerTts();
+      if(gen!==_vmActivateGen) return;
+      // Runtime state only — do NOT write the preference. A TTS server that is
+      // briefly unreachable, or a probe lost to a profile switch, must not
+      // permanently opt the user out of spoken replies; the setting has to
+      // come back on its own once a speaking leg exists again.
+      _voiceReplySilentFallback=!_speakingLegAvailable();
+      if(_voiceReplySilentFallback&&_voiceReplyTts){
+        _renderVoiceReplyToggle();
+        showToast(t('voice_tts_unavailable_silent')||'No speech output available — replies will be shown, not spoken.',4000);
+      }
+    }else{
+      _probeVoiceServerTts();
+    }
+    _vmSttFailures=0;
     _voiceModeActive=true;
     modeBtn.classList.add('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle_active'));
@@ -1985,17 +2461,33 @@ window.renderTranscript=function(container, messages, opts){
     _voiceModeActive=false;
     _voiceModeState='idle';
     _voiceModeThinkingSid=null;
+    // Invalidate any in-flight turn so a watchdog callback that already escaped
+    // clearInterval (the 600 ms settle hop) can't speak or re-arm after this,
+    // and any activation still awaiting its capability probe.
+    _vmTurn++;
+    _vmActivateGen++;
+    // Also invalidate any microphone acquisition still awaiting its permission
+    // prompt, so it stops its tracks instead of installing itself after this.
+    _vmListenGen++;
+    _vmPreSendAssistant=null;
+    _vmPreSendAssistantText='';
+    _vmSttFailures=0;
     _browserTtsSuppressNextErrorRearm=false;
     modeBtn.classList.remove('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle'));
     bar.style.display='none';
     clearTimeout(_silenceTimer);
     _clearBrowserTtsRecovery();
+    _clearThinkingWatchdog();
+    _vmStopAudio();
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     if(typeof stopTTS==='function') stopTTS();
-    // Restore original autoReadLastAssistant
-    if(_origAutoRead) window.autoReadLastAssistant=_origAutoRead;
+    // NOTE: the autoReadLastAssistant wrapper is installed once at init and
+    // left in place — it already delegates to the original whenever voice mode
+    // is inactive (the _voiceModeActive guard above). Restoring the original
+    // here used to break re-activation: after off→on the wrapper was never
+    // re-installed, so the spoken reply + listen-again loop silently stopped.
     // Clear textarea if it was only voice input
     ta.value='';
     autoResize();
@@ -2005,14 +2497,43 @@ window.renderTranscript=function(container, messages, opts){
     if(_voiceModeActive){
       _deactivate();
       showToast(t('voice_mode_off'),1500);
-    }else{
-      _activate();
+      return;
     }
+    // _activate() is async (it may await the STT capability probe). Returning
+    // its promise keeps the handler awaitable; the DOM ignores the value.
+    return _activate();
   };
 
   // Expose for external use
   window._voiceModeActive=()=>_voiceModeActive;
+  // Does voice mode own the completion of THIS session? Used by the completion
+  // chime, which must stay audible for every session voice mode did not send.
+  window._voiceModeOwnsCompletion=function(sid){
+    if(!_voiceModeActive||!sid) return false;
+    const owner=_voiceModeThinkingSid
+      ||((typeof S!=='undefined'&&S.session)?S.session.session_id:null);
+    return !!owner&&String(sid)===String(owner);
+  };
   window._voiceModeDeactivate=_deactivate;
+  // Called by the profile switch: the capability, and any voice mode running
+  // under the old profile's provider, must not survive into the new one.
+  window._voiceModeInvalidateForProfileSwitch=function(){
+    // UNCONDITIONAL, and covering every owner — not just the ones that happen
+    // to be observable right now.
+    //
+    // Deactivating only when _voiceModeActive was already true missed the case
+    // that matters: an activation still awaiting profile A's capability probe
+    // has not set that flag yet, so its generation was never bumped and it
+    // completed under profile B. The turn, listen and activation generations
+    // are bumped first so anything in flight is already stale by the time the
+    // capabilities are dropped.
+    _vmTurn++;
+    _vmActivateGen++;
+    _vmListenGen++;
+    if(_voiceModeActive) _deactivate();
+    _vmInvalidateServerSttCapability();
+    _vmInvalidateServerTtsCapability();
+  };
   window._voiceModeImmediateSend=_voiceModeSend;
 })();
 function _currentSessionIsReusableEmptyChat(){
@@ -3200,6 +3721,7 @@ function _mirrorSpeechSettingsFromServer(s){
     ['tts_voice','hermes-tts-voice'],
     ['tts_rate','hermes-tts-rate'],
     ['tts_pitch','hermes-tts-pitch'],
+    ['tts_split','hermes-tts-split'],
     ['voice_silence_ms','hermes-voice-silence-ms'],
   ].forEach(([settingKey,storageKey])=>{
     if(hasServerValue(settingKey)){

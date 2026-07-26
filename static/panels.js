@@ -6540,6 +6540,19 @@ async function _profileSwitchPanelLoad(){
   if (_currentPanel === 'kanban') await loadKanban();
   if (_currentPanel === 'profiles') await loadProfilesPanel();
   if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
+  // Voice endpoints are per-profile server config, and server-STT availability
+  // is a per-profile answer. Leaving the old form on screen lets the
+  // user save the endpoints of profile A under the cookie of profile B;
+  // leaving the capability cached lets A gate B. Drop both before any
+  // reload, and take down a voice mode still running on the old provider.
+  // `typeof window` guard, not just the property: several test harnesses
+  // extract this function and run it under node, where `window` is undefined
+  // and a bare property read throws ReferenceError.
+  if (typeof window !== 'undefined'
+      && typeof window._voiceModeInvalidateForProfileSwitch === 'function') {
+    window._voiceModeInvalidateForProfileSwitch();
+  }
+  if (_currentPanel === 'settings') await loadSettingsPanel();
 }
 
 function _refreshProfileSwitchBackground(gen){
@@ -8592,6 +8605,7 @@ const _SETTINGS_SPEECH_STORAGE_KEYS={
   tts_voice:'hermes-tts-voice',
   tts_rate:'hermes-tts-rate',
   tts_pitch:'hermes-tts-pitch',
+  tts_split:'hermes-tts-split',
   voice_mode_button:'hermes-voice-mode-button',
   voice_continuous:'hermes-voice-continuous',
   voice_silence_ms:'hermes-voice-silence-ms',
@@ -8724,6 +8738,8 @@ function _speechPreferencesPayloadFromUi(){
   if(ttsRateSlider) _setOwnedSpeechPayload(payload,'tts_rate',parseFloat(ttsRateSlider.value));
   const ttsPitchSlider=$('settingsTtsPitch');
   if(ttsPitchSlider) _setOwnedSpeechPayload(payload,'tts_pitch',parseFloat(ttsPitchSlider.value));
+  const ttsSplitSelP=$('settingsTtsSplit');
+  if(ttsSplitSelP) _setOwnedSpeechPayload(payload,'tts_split',ttsSplitSelP.value||'punctuation');
   const voiceModeCb=$('settingsVoiceModeEnabled');
   if(voiceModeCb) _setOwnedSpeechPayload(payload,'voice_mode_button',voiceModeCb.checked);
   const rawAudioCb=$('settingsRawAudio');
@@ -8875,6 +8891,17 @@ function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
   field.placeholder=(typeof t==='function')
     ? t('settings_placeholder_max_tokens_none')
     : 'No override';
+}
+
+// Voice-endpoint form identity. The values belong to the ACTIVE PROFILE and its
+// server config, so a load that lost a race — or one that answered for a
+// profile the user has since left — must not paint the form, and a save must
+// not carry the values of one profile into the cookie of another.
+let _voiceCfgGen = 0;
+let _voiceCfgProfile = null;
+
+function _voiceCfgActiveProfile(){
+  return (typeof S !== 'undefined' && S && S.activeProfile) ? String(S.activeProfile) : '';
 }
 
 async function loadSettingsPanel(){
@@ -9430,6 +9457,158 @@ async function loadSettingsPanel(){
         window._populateTtsVoices();
         _schedulePreferencesAutosave();
       };
+    }
+    // Response splitting for TTS playback (punctuation | paragraphs | none).
+    const ttsSplitSel=$('settingsTtsSplit');
+    if(ttsSplitSel){
+      const savedSplit=String(_speechSetting('tts_split','hermes-tts-split','punctuation')||'punctuation');
+      ttsSplitSel.value=(savedSplit==='paragraphs'||savedSplit==='none')?savedSplit:'punctuation';
+      _syncSpeechPreferenceCache('tts_split',ttsSplitSel.value);
+      ttsSplitSel.onchange=function(){
+        _markSpeechPreferenceChanged('tts_split');
+        localStorage.setItem('hermes-tts-split',this.value);
+        _schedulePreferencesAutosave();
+      };
+    }
+    // Self-hosted STT/TTS endpoints (server-side config.yaml, via /api/voice/config).
+    _wireVoiceEndpoints();
+    function _wireVoiceEndpoints(){
+      const box=$('settingsVoiceEndpoints');
+      if(!box) return;
+      const g=function(id){return $(id);};
+      const setVal=function(id,v){const el=g(id); if(el) el.value=(v==null?'':String(v));};
+      const status=g('settingsVoiceEndpointsStatus');
+      const roNote=g('settingsVoiceEndpointsRO');
+      const saveBtn=g('settingsVoiceEndpointsSave');
+      const setStatus=function(key,tone){
+        if(!status) return;
+        status.style.color=tone==='err'?'var(--err,#c33)':tone==='ok'?'var(--ok,#3a7)':'var(--muted)';
+        status.textContent=key?t(key):'';
+      };
+      function selectProvider(sel,prov,known){
+        // Known providers select their fixed option; any other configured
+        // provider (e.g. a custom fork engine) is shown as a dynamic option
+        // instead of silently rendering as "(unchanged / not set)".
+        if(!sel) return;
+        if(!prov||known.indexOf(prov)>=0){ sel.value=prov||''; return; }
+        let opt=sel.querySelector('option[data-dynamic]');
+        if(!opt){ opt=document.createElement('option'); opt.setAttribute('data-dynamic','1'); sel.appendChild(opt); }
+        opt.value=prov; opt.textContent=prov+' ('+t('voice_endpoints_engine_current_suffix')+')';
+        sel.value=prov;
+      }
+      function fillSection(prefix,sec){
+        sec=sec||{};
+        const keyPlaceholder=sec.api_key_set?'•••• ('+t('voice_endpoints_api_key_set')+')':'('+t('voice_endpoints_api_key_none')+')';
+        if(prefix==='Stt'){
+          selectProvider(g('settingsSttEngine'),String(sec.provider||''),['openai','local']);
+          setVal('settingsSttBaseUrl',sec.base_url);
+          setVal('settingsSttModel',sec.model);
+          setVal('settingsSttMimeTypes',sec.mime_types);
+          const k=g('settingsSttApiKey'); if(k){k.value=''; k.placeholder=keyPlaceholder;}
+          const c=g('settingsSttApiKeyClear'); if(c){c.checked=false; c.disabled=!sec.api_key_set;}
+        } else {
+          selectProvider(g('settingsTtsEndpointEngine'),String(sec.provider||''),['openai']);
+          setVal('settingsTtsBaseUrl',sec.base_url);
+          setVal('settingsTtsModel',sec.model);
+          setVal('settingsTtsVoiceId',sec.voice);
+          try{ setVal('settingsTtsExtraParams', sec.extra_params&&Object.keys(sec.extra_params).length?JSON.stringify(sec.extra_params):''); }catch(_e){}
+          const k=g('settingsTtsApiKey'); if(k){k.value=''; k.placeholder=keyPlaceholder;}
+          const c=g('settingsTtsApiKeyClear'); if(c){c.checked=false; c.disabled=!sec.api_key_set;}
+        }
+      }
+      // Refetch on EVERY panel load, not once per page. Voice endpoints live in
+      // the config file of the active profile, so a `_wired`-style one-shot guard
+      // left the previous base URLs and api_key_set flags on screen
+      // after a profile switch — and saving from that stale form wrote them
+      // into the new profile.
+      function refresh(){
+        // Identify this load. Two loads can be in flight across a profile
+        // switch, and the slower one must not paint the form — nor re-enable
+        // Save for a profile whose answer never arrived.
+        const _gen=++_voiceCfgGen;
+        const _profile=_voiceCfgActiveProfile();
+        _voiceCfgProfile=null;
+        if(saveBtn) saveBtn.disabled=true;
+        return fetch('api/voice/config',{headers:{'Accept':'application/json'}})
+          .then(function(r){return r.json();})
+          .then(function(d){
+            if(_gen!==_voiceCfgGen||_profile!==_voiceCfgActiveProfile()) return;
+            if(!d||d.ok!==true){ setStatus('voice_endpoints_load_failed','err'); return; }
+            fillSection('Stt',d.stt); fillSection('Tts',d.tts);
+            const writable=d.writable===true;
+            if(roNote) roNote.style.display=writable?'none':'block';
+            if(saveBtn) saveBtn.disabled=!writable;
+            // The form now holds the values of THIS profile; Save may proceed.
+            _voiceCfgProfile=_profile;
+            setStatus('');
+          })
+          .catch(function(){
+            if(_gen!==_voiceCfgGen||_profile!==_voiceCfgActiveProfile()) return;
+            setStatus('voice_endpoints_load_failed','err');
+          });
+      }
+      // Handlers are installed once; the fetch above runs on every load.
+      if(!box._wired){
+        box._wired=true;
+        if(saveBtn){
+          saveBtn.onclick=function(){
+            // Refuse to save a form that does not belong to the active profile:
+            // the request carries the CURRENT profile cookie, so submitting the
+            // previous base URLs and keys would write them into the
+            // new profile. _voiceCfgProfile is null until a load has painted
+            // this form, which also blocks a save before the first answer.
+            const _genAtDispatch=_voiceCfgGen;
+            const _profileNow=_voiceCfgActiveProfile();
+            if(_voiceCfgProfile===null||_voiceCfgProfile!==_profileNow){
+              setStatus('voice_endpoints_load_failed','err');
+              refresh();
+              return;
+            }
+            const val=function(id){const el=g(id); return el?String(el.value||'').trim():'';};
+            const checked=function(id){const el=g(id); return !!(el&&el.checked);};
+            const stt={}, tts={};
+            const se=val('settingsSttEngine'); if(se) stt.provider=se;
+            stt.base_url=val('settingsSttBaseUrl'); stt.model=val('settingsSttModel');
+            stt.mime_types=val('settingsSttMimeTypes');
+            const sk=val('settingsSttApiKey');
+            if(sk) stt.api_key=sk; else if(checked('settingsSttApiKeyClear')) stt.api_key_clear=true;
+            const te=val('settingsTtsEndpointEngine'); if(te) tts.provider=te;
+            tts.base_url=val('settingsTtsBaseUrl'); tts.model=val('settingsTtsModel');
+            tts.voice=val('settingsTtsVoiceId');
+            const tk=val('settingsTtsApiKey');
+            if(tk) tts.api_key=tk; else if(checked('settingsTtsApiKeyClear')) tts.api_key_clear=true;
+            const ep=val('settingsTtsExtraParams');
+            // An emptied field means "remove the block". Omitting the key left
+            // the `"extra_params" in payload` guard on the server false, so the old
+            // value survived and the response repopulated the box with it —
+            // indistinguishable from a failed save.
+            if(ep){ try{ tts.extra_params=JSON.parse(ep); }catch(_e){ setStatus('voice_endpoints_bad_json','err'); return; } }
+            else{ tts.extra_params={}; }
+            setStatus('voice_endpoints_saving');
+            fetch('api/voice/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({stt:stt,tts:tts})})
+              .then(function(r){return r.json().then(function(b){return {ok:r.ok,body:b};});})
+              .then(function(res){
+                // A save answer that outlived its profile must not repaint the
+                // form or report success against the profile now on screen.
+                if(_genAtDispatch!==_voiceCfgGen||_profileNow!==_voiceCfgActiveProfile()) return;
+                if(res.ok && res.body && res.body.ok){
+                  const dropped=res.body.api_key_dropped||{};
+                  // A key the server discarded because the host changed is not
+                  // a silent detail — say so, or the operator assumes their
+                  // credential is still in place.
+                  setStatus((dropped.stt||dropped.tts)?'voice_endpoints_key_dropped':'voice_endpoints_saved','ok');
+                  fillSection('Stt',res.body.stt); fillSection('Tts',res.body.tts);
+                } else {
+                  if(status){
+                    status.style.color='var(--err,#c33)';
+                    status.textContent=(res.body&&res.body.error)||t('voice_endpoints_save_failed');
+                  }
+                }
+              }).catch(function(){ setStatus('voice_endpoints_save_failed','err'); });
+          };
+        }
+      }
+      refresh();
     }
     // Populate voice selector based on engine
     const ttsVoiceSel=$('settingsTtsVoice');
