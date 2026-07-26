@@ -101,6 +101,46 @@ def _write_cli_db(path):
         conn.close()
 
 
+def _build_pre_compression_migration_state(tmp_path, monkeypatch):
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+    import api.streaming as streaming
+
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+
+    old_sid = "sid-rotation-old"
+    continuation_sid = "sid-rotation-new"
+    old_session = models.Session(
+        session_id=old_sid,
+        title="Compression snapshot",
+        messages=[{"role": "user", "content": "question"}],
+    )
+    old_session.save(touch_updated_at=False, skip_index=True)
+
+    continuation = models.Session(
+        session_id=continuation_sid,
+        title="Compression snapshot",
+        parent_session_id=old_sid,
+        messages=[
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "compressed reply"},
+        ],
+    )
+    continuation.save(touch_updated_at=False, skip_index=True)
+    streaming._preserve_pre_compression_snapshot(continuation, old_sid)
+    continuation.save(touch_updated_at=False, skip_index=True)
+
+    with routes.LOCK:
+        models.SESSIONS.clear()
+        models.SESSIONS[continuation_sid] = continuation
+
+    old_lock = routes._get_session_agent_lock(old_sid)
+    with routes.SESSION_AGENT_LOCKS_LOCK:
+        routes.SESSION_AGENT_LOCKS[continuation_sid] = old_lock
+        routes.SESSION_AGENT_LOCKS.pop(old_sid, None)
+
+    return models, routes, session_dir, old_sid, continuation_sid
+
+
 def test_dedicated_draft_overlays_full_and_metadata_loads(tmp_path, monkeypatch):
     models, _, session_dir = _build_draft_env(tmp_path, monkeypatch)
 
@@ -357,12 +397,12 @@ def test_draft_post_for_stale_request_sid_does_not_write_under_old_sid(tmp_path,
         def __enter__(self):
             s.session_id = rotated_sid
             with routes.LOCK:
-                routes.SESSIONS.pop(sid, None)
+                routes.SESSIONS[sid] = s
                 routes.SESSIONS[rotated_sid] = s
                 routes.SESSIONS.move_to_end(rotated_sid)
             assert s.session_id == rotated_sid
             assert routes.SESSIONS.get(rotated_sid) is s
-            assert sid not in routes.SESSIONS
+            assert routes.SESSIONS.get(sid) is s
 
         def __exit__(self, exc_type, exc, tb):
             return None
@@ -376,15 +416,161 @@ def test_draft_post_for_stale_request_sid_does_not_write_under_old_sid(tmp_path,
         {"session_id": sid, "text": "rotating", "files": []},
     )
 
-    assert status == 409
-    assert payload["ok"] is False
-    assert payload["error"] == "Session moved"
+    assert status == 200
     assert payload["session_id"] == rotated_sid
-    assert s.composer_draft == {"text": "original", "files": []}
+    assert payload["draft"] == {"text": "rotating", "files": []}
+    assert s.composer_draft == {"text": "rotating", "files": []}
     assert not (session_dir / f"{sid}.json").exists()
-    assert not (session_dir / f"{rotated_sid}.json").exists()
+    assert (session_dir / f"{rotated_sid}.json").exists()
     assert not (session_dir / ".drafts" / f"{sid}.json").exists()
-    assert not (session_dir / ".drafts" / f"{rotated_sid}.json").exists()
+    assert (session_dir / ".drafts" / f"{rotated_sid}.json").exists()
+
+
+def test_draft_post_for_stale_pre_compression_snapshot_writes_to_continuation(tmp_path, monkeypatch):
+    models, routes, session_dir, old_sid, continuation_sid = _build_pre_compression_migration_state(
+        tmp_path, monkeypatch
+    )
+
+    try:
+        status, payload = _post_json(
+            monkeypatch,
+            routes,
+            "/api/session/draft",
+            {"session_id": old_sid, "text": "recover from archived snapshot", "files": []},
+        )
+
+        assert status == 200
+        assert payload["session_id"] == continuation_sid
+        assert payload["draft"] == {"text": "recover from archived snapshot", "files": []}
+
+        assert not (session_dir / ".drafts" / f"{old_sid}.json").exists()
+        assert (session_dir / ".drafts" / f"{continuation_sid}.json").exists()
+
+        models.SESSIONS.clear()
+        loaded = models.Session.load(continuation_sid)
+        assert loaded.composer_draft == {"text": "recover from archived snapshot", "files": []}
+        assert (session_dir / f"{old_sid}.json").exists()
+    finally:
+        with routes.SESSION_AGENT_LOCKS_LOCK:
+            routes.SESSION_AGENT_LOCKS.pop(old_sid, None)
+            routes.SESSION_AGENT_LOCKS.pop(continuation_sid, None)
+
+
+def test_draft_post_for_stale_pre_compression_snapshot_profile_mismatch_rejected(
+    tmp_path, monkeypatch
+):
+    models, routes, session_dir, old_sid, continuation_sid = _build_pre_compression_migration_state(
+        tmp_path,
+        monkeypatch,
+    )
+
+    continuation = models.Session.load(continuation_sid)
+    assert continuation is not None
+    continuation.save(touch_updated_at=False, skip_index=False)
+
+    continuation_path = session_dir / f"{continuation_sid}.json"
+    continuation_payload = json.loads(continuation_path.read_text(encoding="utf-8"))
+    continuation_payload["profile"] = "mismatch-profile"
+    continuation_path.write_text(json.dumps(continuation_payload, ensure_ascii=False), encoding="utf-8")
+
+    with routes.LOCK:
+        routes.SESSIONS.pop(continuation_sid, None)
+
+    try:
+        status, payload = _post_json(
+            monkeypatch,
+            routes,
+            "/api/session/draft",
+            {"session_id": old_sid, "text": "must fail by profile", "files": []},
+        )
+
+        assert status == 409
+        assert payload["ok"] is False
+        assert payload["error"] == "Session moved"
+        assert payload["session_id"] == continuation_sid
+        assert not (session_dir / ".drafts" / f"{old_sid}.json").exists()
+        assert not (session_dir / ".drafts" / f"{continuation_sid}.json").exists()
+    finally:
+        with routes.SESSION_AGENT_LOCKS_LOCK:
+            routes.SESSION_AGENT_LOCKS.pop(old_sid, None)
+            routes.SESSION_AGENT_LOCKS.pop(continuation_sid, None)
+
+
+def test_draft_post_waits_for_rotation_while_lock_waits_for_authority(tmp_path, monkeypatch):
+    models, routes, session_dir, old_sid, continuation_sid = _build_pre_compression_migration_state(
+        tmp_path,
+        monkeypatch,
+    )
+    lock = routes._get_session_agent_lock(continuation_sid)
+    lock.acquire()
+    lock_waiting = threading.Event()
+
+    result = {}
+    started = threading.Event()
+    done = threading.Event()
+
+    original_get_session_agent_lock = routes._get_session_agent_lock
+
+    class _TrackingLock:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def __enter__(self):
+            lock_waiting.set()
+            self._wrapped.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self._wrapped.release()
+            return None
+
+    def _get_session_agent_lock(sid):
+        if sid in (old_sid, continuation_sid):
+            return _TrackingLock(lock)
+        return original_get_session_agent_lock(sid)
+
+    monkeypatch.setattr(routes, "_get_session_agent_lock", _get_session_agent_lock)
+
+    def _call():
+        started.set()
+        status, payload = _post_json(
+            monkeypatch,
+            routes,
+            "/api/session/draft",
+            {"session_id": old_sid, "text": "rotating while waiting", "files": []},
+        )
+        result["status"] = status
+        result["payload"] = payload
+        done.set()
+
+    thread = threading.Thread(target=_call)
+    thread.start()
+    assert started.wait(timeout=2), "draft request did not start"
+    try:
+        assert lock_waiting.wait(timeout=2), "draft request did not block on authority lock"
+        assert not done.is_set()
+        with routes.SESSION_AGENT_LOCKS_LOCK:
+            routes.SESSION_AGENT_LOCKS[continuation_sid] = lock
+            routes.SESSION_AGENT_LOCKS.pop(old_sid, None)
+        lock.release()
+
+        assert done.wait(timeout=5), "draft request did not complete after rotation lock handoff"
+        thread.join(timeout=1)
+        assert not thread.is_alive()
+    finally:
+        if lock.locked():
+            lock.release()
+        thread.join(timeout=1)
+        with routes.SESSION_AGENT_LOCKS_LOCK:
+            routes.SESSION_AGENT_LOCKS.pop(old_sid, None)
+            routes.SESSION_AGENT_LOCKS.pop(continuation_sid, None)
+
+    assert result["status"] == 200
+    assert result["payload"]["session_id"] == continuation_sid
+    models.SESSIONS.clear()
+    loaded = models.Session.load(continuation_sid)
+    assert loaded.composer_draft == {"text": "rotating while waiting", "files": []}
+    assert not (session_dir / ".drafts" / f"{old_sid}.json").exists()
 
 
 @pytest.mark.parametrize(("cached", "messageful"), [(False, False), (True, True)])

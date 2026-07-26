@@ -14762,83 +14762,170 @@ def handle_post(handler, parsed) -> bool:
         _draft_mark("after_get_session")
         unchanged = False
         request_sid = sid
-        with _get_session_agent_lock(sid):
-            _draft_mark("acquired_lock")
-            resolved_sid = str(getattr(s, "session_id", "") or "").strip()
-            if not resolved_sid or not is_safe_session_id(resolved_sid):
-                return j(
-                    handler,
-                    {"ok": False, "error": "Session moved", "session_id": request_sid},
-                    status=409,
-                )
-            if resolved_sid != request_sid:
-                return j(
-                    handler,
-                    {"ok": False, "error": "Session moved", "session_id": resolved_sid},
-                    status=409,
-                )
-            current_draft = dict(getattr(s, "composer_draft", {}) or {})
-            next_draft = dict(current_draft)
-            if text is not None:
-                next_draft["text"] = text
-            if files is not None:
-                next_draft["files"] = files
-            if next_draft == current_draft:
-                unchanged = True
-                saved_draft = current_draft
-            else:
-                _draft_text = str(next_draft.get("text", "") or "")
-                _draft_files = next_draft.get("files", []) or []
-                _has_meaningful_draft = bool(_draft_text) or bool(_draft_files)
-                if not (SESSION_DIR / f"{sid}.json").exists() and _has_meaningful_draft:
-                    with LOCK:
-                        if SESSIONS.get(sid) is not s:
-                            return j(
-                                handler,
-                                {
-                                    "ok": False,
-                                    "error": "Session no longer active",
-                                    "session_id": sid,
-                                },
-                                status=409,
-                            )
-                        if len(getattr(s, "messages", []) or []) != 0:
-                            return j(
-                                handler,
-                                {
-                                    "ok": False,
-                                    "error": "Session no longer active",
-                                    "session_id": sid,
-                                },
-                                status=409,
-                            )
-                        if (SESSION_DIR / f"{sid}.json").exists():
-                            # Owner appeared while acquiring the shared lock; skip
-                            # materialization and proceed with sidecar save only.
-                            pass
-                        else:
-                            # Publish the small owner record while cache state is locked
-                            # so deletion cannot race first-draft ownership.
-                            draft_session = copy.copy(s)
-                            draft_session.composer_draft = {}
-                            # LOCK is non-reentrant; indexing here would acquire it again.
-                            draft_session.save(
-                                touch_updated_at=False,
-                                skip_index=True,
-                            )
-                # Draft persistence is not conversation activity. Touching updated_at
-                # here makes the active-session external-refresh poll force-reload the
-                # current chat every few seconds while the user is typing, and that
-                # delayed reload can restore an older draft over newer local input.
-                _draft_mark("before_save")
-                _save_session_draft(sid, next_draft)
-                _draft_mark("after_save")
-                s.composer_draft = next_draft
-                saved_draft = s.composer_draft
+        request_session = s
+        request_profile = getattr(request_session, "profile", None)
+        authoritative_sid = request_sid
+        _MAX_DRAFT_AUTHORITY_HOPS = 4
+        _seen_authority_sids = {authoritative_sid}
+        resolved_once = False
+        for _hop in range(_MAX_DRAFT_AUTHORITY_HOPS):
+            with _get_session_agent_lock(authoritative_sid):
+                _draft_mark("acquired_lock")
+                if _hop == 0 and request_session is not None:
+                    resolved_sid = str(getattr(request_session, "session_id", "") or "").strip()
+                    if not resolved_sid or not is_safe_session_id(resolved_sid):
+                        return j(
+                            handler,
+                            {"ok": False, "error": "Session moved", "session_id": request_sid},
+                            status=409,
+                        )
+                    if resolved_sid != authoritative_sid:
+                        with LOCK:
+                            if SESSIONS.get(resolved_sid) is request_session:
+                                if resolved_sid in _seen_authority_sids:
+                                    return j(
+                                        handler,
+                                        {
+                                            "ok": False,
+                                            "error": "Session moved",
+                                            "session_id": resolved_sid,
+                                        },
+                                        status=409,
+                                    )
+                                _seen_authority_sids.add(resolved_sid)
+                                authoritative_sid = resolved_sid
+                                continue
+                try:
+                    request_session = get_session(authoritative_sid)
+                except KeyError:
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "error": "Session no longer active",
+                            "session_id": authoritative_sid,
+                        },
+                        status=409,
+                    )
+
+                resolved_sid = str(getattr(request_session, "session_id", "") or "").strip()
+                if not resolved_sid or not is_safe_session_id(resolved_sid):
+                    return j(
+                        handler,
+                        {"ok": False, "error": "Session moved", "session_id": authoritative_sid},
+                        status=409,
+                    )
+                if not _profiles_match(getattr(request_session, "profile", None), request_profile):
+                    return j(
+                        handler,
+                        {"ok": False, "error": "Session moved", "session_id": authoritative_sid},
+                        status=409,
+                    )
+
+                if resolved_sid != authoritative_sid:
+                    if resolved_sid in _seen_authority_sids:
+                        return j(
+                            handler,
+                            {"ok": False, "error": "Session moved", "session_id": resolved_sid},
+                            status=409,
+                        )
+                    _seen_authority_sids.add(resolved_sid)
+                    authoritative_sid = resolved_sid
+                    continue
+
+                continuation_sid = None
+                if getattr(request_session, "pre_compression_snapshot", False):
+                    continuation_sid = _pre_compression_continuation_session_id(request_session)
+
+                if continuation_sid:
+                    if not is_safe_session_id(continuation_sid):
+                        return j(
+                            handler,
+                            {"ok": False, "error": "Session moved", "session_id": authoritative_sid},
+                            status=409,
+                        )
+                    if continuation_sid in _seen_authority_sids:
+                        return j(
+                            handler,
+                            {"ok": False, "error": "Session moved", "session_id": continuation_sid},
+                            status=409,
+                        )
+                    _seen_authority_sids.add(continuation_sid)
+                    authoritative_sid = continuation_sid
+                    continue
+
+                current_draft = dict(getattr(request_session, "composer_draft", {}) or {})
+                next_draft = dict(current_draft)
+                if text is not None:
+                    next_draft["text"] = text
+                if files is not None:
+                    next_draft["files"] = files
+                if next_draft == current_draft:
+                    unchanged = True
+                    saved_draft = current_draft
+                else:
+                    _draft_text = str(next_draft.get("text", "") or "")
+                    _draft_files = next_draft.get("files", []) or []
+                    _has_meaningful_draft = bool(_draft_text) or bool(_draft_files)
+                    if not (SESSION_DIR / f"{authoritative_sid}.json").exists() and _has_meaningful_draft:
+                        with LOCK:
+                            if SESSIONS.get(authoritative_sid) is not request_session:
+                                return j(
+                                    handler,
+                                    {
+                                        "ok": False,
+                                        "error": "Session no longer active",
+                                        "session_id": authoritative_sid,
+                                    },
+                                    status=409,
+                                )
+                            if len(getattr(request_session, "messages", []) or []) != 0:
+                                return j(
+                                    handler,
+                                    {
+                                        "ok": False,
+                                        "error": "Session no longer active",
+                                        "session_id": authoritative_sid,
+                                    },
+                                    status=409,
+                                )
+                            if (SESSION_DIR / f"{authoritative_sid}.json").exists():
+                                # Owner appeared while acquiring the shared lock; skip
+                                # materialization and proceed with sidecar save only.
+                                pass
+                            else:
+                                # Publish the small owner record while cache state is locked
+                                # so deletion cannot race first-draft ownership.
+                                draft_session = copy.copy(request_session)
+                                draft_session.composer_draft = {}
+                                # LOCK is non-reentrant; indexing here would acquire it again.
+                                draft_session.save(
+                                    touch_updated_at=False,
+                                    skip_index=True,
+                                )
+                    # Draft persistence is not conversation activity. Touching updated_at
+                    # here makes the active-session external-refresh poll force-reload the
+                    # current chat every few seconds while the user is typing, and that
+                    # delayed reload can restore an older draft over newer local input.
+                    _draft_mark("before_save")
+                    _save_session_draft(authoritative_sid, next_draft)
+                    _draft_mark("after_save")
+                    request_session.composer_draft = next_draft
+                    saved_draft = request_session.composer_draft
+                sid = authoritative_sid
+                resolved_once = True
+                break
+        if not resolved_once:
+            return j(
+                handler,
+                {"ok": False, "error": "Session moved", "session_id": request_sid},
+                status=409,
+            )
         _draft_mark("released_lock")
         payload = {"ok": True, "draft": saved_draft}
         if unchanged:
             payload["unchanged"] = True
+        payload["session_id"] = sid
         _draft_mark("before_json")
         j(handler, payload)
         _draft_mark("after_json")
