@@ -1903,7 +1903,6 @@ async function send(){
 }
 
 const LIVE_STREAMS={};
-let _LIVE_STREAM_OWNER_SEQ=0;
 const _STREAM_NOTIFICATION_BACKGROUND={};
 
 // #4416: track whether the tab was hidden at ANY point during a live stream, so
@@ -2073,7 +2072,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
-  const _liveOwnerToken=++_LIVE_STREAM_OWNER_SEQ;
+  const _liveOwnerScope=(typeof globalThis!=='undefined'&&globalThis)
+    || (typeof window!=='undefined'&&window)
+    || {};
+  const _liveOwnerToken=((typeof _liveOwnerScope._LIVE_STREAM_OWNER_SEQ==='number'
+    ? _liveOwnerScope._LIVE_STREAM_OWNER_SEQ
+    : 0)+1);
+  _liveOwnerScope._LIVE_STREAM_OWNER_SEQ=_liveOwnerToken;
   let _closureRetired=false;
   if(!reconnecting&&typeof resetTurnWorkspaceMutations==='function') resetTurnWorkspaceMutations();
   if(!reconnecting&&typeof _resetStreamScrollFollow==='function') _resetStreamScrollFollow();
@@ -2450,7 +2455,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearStreamEndRecovery();
       return true;
     }
-    _finalizeStreamEndFallback(source,{preserveVisibleAnswer:true});
+    _finalizeStreamEndFallback(source);
     return true;
   }
   async function _runStreamEndRecovery(source){
@@ -5679,7 +5684,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(existingLive&&existingLive.source&&existingLive.source!==source){
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
     }
-    LIVE_STREAMS[activeSid]={streamId,source,ownerToken:_liveOwnerToken};
+    LIVE_STREAMS[activeSid]={streamId,source};
+    LIVE_STREAMS[activeSid].ownerToken=_liveOwnerToken;
 
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
@@ -6417,7 +6423,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _scheduleStreamEndRecovery(source,200);
         return;
       }
-      _finalizeStreamEndFallback(source,{preserveVisibleAnswer:true});
+      if(_visibleLiveAssistantAnswerPresent()){
+        _finalizeStreamEndFallback(source,{preserveVisibleAnswer:true});
+        return;
+      }
+      _finalizeStreamEndFallback(source);
     });
 
     source.addEventListener('pending_steer_leftover',e=>{

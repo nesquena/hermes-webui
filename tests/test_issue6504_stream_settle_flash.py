@@ -331,7 +331,25 @@ def test_long_tail_recovery_reattaches_when_stream_status_stays_active():
     assert result["pending"] is False
 
 
-def test_long_tail_recovery_preserves_visible_live_answer_when_stream_turns_inactive():
+def test_direct_inactive_recovery_preserves_visible_live_answer_before_exhaustion():
+    result = _run_recovery_case(
+        active=True,
+        restore_results=[False],
+        attempts=3,
+        assistant_text="final streamed answer",
+        stream_status={"active": False, "replay_available": False},
+    )
+
+    assert result["wireCalls"] == 0
+    assert result["scheduleDelays"] == []
+    assert result["renderCalls"] == 0
+    assert result["clearLiveToolCalls"] == 1
+    assert result["removeThinkingCalls"] == 0
+    assert result["activeStreamId"] is None
+    assert result["finalized"] is True
+
+
+def test_long_tail_recovery_rebuilds_when_stream_turns_inactive_after_exhaustion():
     result = _run_recovery_case(
         active=True,
         restore_results=["active", False],
@@ -342,7 +360,7 @@ def test_long_tail_recovery_preserves_visible_live_answer_when_stream_turns_inac
 
     assert result["wireCalls"] == 0
     assert result["scheduleDelays"] == []
-    assert result["renderCalls"] == 0
+    assert result["renderCalls"] == 1
     assert result["clearLiveToolCalls"] == 1
     assert result["removeThinkingCalls"] == 0
     assert result["activeStreamId"] is None
