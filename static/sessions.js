@@ -2128,6 +2128,7 @@ async function loadSession(sid){
     // appendLiveToolCard() is guarded by S.activeStreamId; restore it before
     // replaying persisted live tools so the compact Activity count survives
     // switching away from and back to an active chat (#1715).
+    if(activeStreamId) _bumpMessagesGeneration();
     S.activeStreamId=activeStreamId;
     const liveToolReplayId=(tc)=>String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
     const replayPersistedLiveToolCards=(opts)=>{
@@ -2274,6 +2275,7 @@ async function loadSession(sid){
 
     if(activeStreamId){
       S.busy=true;
+      _bumpMessagesGeneration();
       S.activeStreamId=activeStreamId;
       if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
       else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
@@ -3169,6 +3171,7 @@ async function _ensureMessagesLoaded(sid, opts) {
     _pendingCarryForwardSnapshot = null;
   }
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
+  _bumpMessagesGeneration();
   S.messages = msgs;
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.
@@ -3622,11 +3625,11 @@ let _loadingOlder = false;
 // oldest message currently loaded in S.messages. Starts at 0 when all
 // messages are loaded, or > 0 when truncated by msg_limit.
 let _oldestIdx = 0;
-// Generation token bumped every time S.messages is wholesale-replaced
-// (rather than incrementally extended). _loadOlderMessages snapshots it
-// before its `await` and re-checks after, so a late-resolving prefetch
-// does not prepend onto a transcript that was rebuilt under it
-// (e.g. by _ensureAllMessagesLoaded after a Start-jump). See #1937.
+// Generation token bumped whenever active-transcript ownership changes through
+// a live-turn claim or wholesale message replacement. _loadOlderMessages and
+// _ensureAllMessagesLoaded snapshot it before their awaits and re-check after,
+// so a late-resolving response cannot prepend onto or replace a transcript
+// that changed under it. See #1937 and PR #6494 round 3.
 let _messagesGeneration = 0;
 function _bumpMessagesGeneration() {
   // Wrap to keep the counter bounded; the only operation that matters is
@@ -3845,6 +3848,7 @@ async function _ensureAllMessagesLoaded() {
   _loadingOlder = true;
   try {
     const sid = S.session.session_id;
+    const startGeneration = _messagesGeneration;
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`, {timeoutMs:120000});
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) return;
@@ -3852,6 +3856,7 @@ async function _ensureAllMessagesLoaded() {
     // overwrite the new session's messages.
     if (!S.session || S.session.session_id !== sid) return;
     if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+    if (_messagesGeneration !== startGeneration) return;
     // A same-session live turn can start while this fetch is in flight. Let the
     // live path own S.messages rather than replace it with settled history.
     if (S.busy || S.activeStreamId) return;

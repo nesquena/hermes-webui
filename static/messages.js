@@ -1643,6 +1643,7 @@ async function send(){
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
   try{
+    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
     S.messages.push(userMsg);renderMessages();setBusy(true);
     if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
     if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
@@ -1701,7 +1702,10 @@ async function send(){
     // backend never receives the turn.
     const message=preStartError&&preStartError.message?preStartError.message:String(preStartError||'unknown error');
     try{console.warn('[webui] pre-start optimistic UI failed; continuing to /api/chat/start', message);}catch(_){ }
-    if(!S.messages.includes(userMsg)) S.messages.push(userMsg);
+    if(!S.messages.includes(userMsg)){
+      if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
+      S.messages.push(userMsg);
+    }
     optimisticMessages=[...S.messages];
     INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
     try{setBusy(true);}catch(_){S.busy=true;}
@@ -1829,6 +1833,7 @@ async function send(){
 
   const startData = postStartData || {};
   streamId = postStartData ? postStartData.stream_id : null;
+  if(streamId&&typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
   S.activeStreamId = streamId;
   // setBusy(true) already ran with activeStreamId=null; refresh now that we
   // have a stream id so the primary button can switch to Stop (see
@@ -2248,6 +2253,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       setBusy(false);
       setComposerStatus('');
       if(typeof setStatus==='function') setStatus('');
+      if(typeof _workspaceArtifactsTabIsActive==='function'&&_workspaceArtifactsTabIsActive()){
+        if(typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
+        else if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
+      }
     }
   }
   function persistInflightState(){
@@ -6617,9 +6626,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             _markSessionViewed(activeSid, S.messages.length);
           }
         }
+        finally{
+          _setActivePaneIdleIfOwner();
+        }
       })();
       renderSessionList();
-      _setActivePaneIdleIfOwner();
     });
 
     for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
@@ -7529,6 +7540,7 @@ function _attachServerInitiatedStream(sid, streamId, recovered) {
     const existingLive = (typeof LIVE_STREAMS !== 'undefined') ? LIVE_STREAMS[sid] : null;
     if (existingLive && existingLive.streamId === streamId) return true;
     S.busy = true;
+    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
     S.activeStreamId = streamId;
     if (S.session && S.session.session_id === sid) {
       S.session.active_stream_id = streamId;
@@ -7830,6 +7842,7 @@ function startSessionStream(sid) {
         // renders from its first token; for a recovered (replay) frame
         // attachLiveStream reconstructs the in-progress stream.
         S.busy = true;
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.activeStreamId = streamId;
         if (S.session && S.session.session_id === sid) {
           S.session.active_stream_id = streamId;

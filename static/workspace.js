@@ -355,6 +355,15 @@ function _workspaceTodosTabIsActive(){
   return !!(tab&&panel&&!tab.hidden&&!panel.hidden);
 }
 
+function _workspaceArtifactsTabIsActive(){
+  if(typeof document==='undefined') return false;
+  const rightPanel=document.querySelector('.rightpanel');
+  if(!rightPanel||!rightPanel.dataset||rightPanel.dataset.activeTab!=='artifacts') return false;
+  const tab=document.getElementById('workspaceArtifactsTab');
+  const panel=document.getElementById('workspaceArtifacts');
+  return !!(tab&&panel&&!tab.hidden&&!panel.hidden);
+}
+
 function _resetWorkspaceTodosRenderCache(){
   _workspaceTodosLastRenderedHash=null;
 }
@@ -570,6 +579,7 @@ function renderSessionArtifacts(){
   const count = $('workspaceArtifactsCount');
   if(!root) return;
   const sid = S.session && S.session.session_id;
+  const artifactsVisible = typeof _workspaceArtifactsTabIsActive==='function' && _workspaceArtifactsTabIsActive();
   const hasTruncatedHistory = !!(
     sid &&
     typeof _messagesTruncated !== 'undefined' &&
@@ -617,15 +627,14 @@ function renderSessionArtifacts(){
   };
   const needsFullLoad = !!(
     sid &&
-    _workspacePanelActiveTab === 'artifacts' &&
+    artifactsVisible &&
     !(S.busy || S.activeStreamId) &&
     typeof _ensureAllMessagesLoaded === 'function' &&
     typeof _messagesTruncated !== 'undefined' &&
     _messagesTruncated
   );
-  if(hasTruncatedHistory && _workspacePanelActiveTab === 'artifacts'){
-    root.innerHTML = '';
-    if(count) count.textContent = '';
+  if(hasTruncatedHistory && artifactsVisible){
+    root.innerHTML = `<div class="workspace-artifact-empty" data-i18n="workspace_artifact_loading_full_history">${esc((typeof t==='function'&&t('workspace_artifact_loading_full_history'))||'Loading full history…')}</div>`;
     if(S.busy || S.activeStreamId) return;
   }
   if(!needsFullLoad){
@@ -635,10 +644,12 @@ function renderSessionArtifacts(){
   return Promise.resolve(_ensureAllMessagesLoaded()).then(() => {
     if(root.isConnected === false) return;
     if(!S.session || S.session.session_id !== sid || _messagesTruncated || S.busy || S.activeStreamId) return;
-    if(_workspacePanelActiveTab !== 'artifacts') return;
+    if(!(typeof _workspaceArtifactsTabIsActive==='function'&&_workspaceArtifactsTabIsActive())) return;
     _renderNow();
   }).catch(e => {
     console.warn('renderSessionArtifacts full-load failed:',e);
+    if(root.isConnected === false) return;
+    if(typeof _workspaceArtifactsTabIsActive==='function'&&_workspaceArtifactsTabIsActive()) _renderNow();
   });
 }
 
