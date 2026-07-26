@@ -3445,9 +3445,36 @@ async function populateModelDropdown(opts={}){
     };
 
     const usedConfiguredFallback=!(Array.isArray(data.groups)&&data.groups.length);
-    const groups=usedConfiguredFallback
+    const sourceGroups=usedConfiguredFallback
       ? _synthGroupsFromConfigured()
       : data.groups;
+    // `/api/models` exposes configured model aliases for slash-command
+    // resolution, but its provider groups intentionally contain only curated
+    // and live-discovered rows. Surface aliases whose target explicitly names
+    // a displayed provider in this picker as well. The selected option retains
+    // the target model ID and the optgroup provider, so it follows the normal
+    // model/provider persistence path rather than sending the alias itself.
+    const groups=(Array.isArray(sourceGroups)?sourceGroups:[]).map(group=>({
+      ...group,
+      models:Array.isArray(group&&group.models)?group.models.slice():[],
+    }));
+    const aliases=data&&data.aliases&&typeof data.aliases==='object' ? data.aliases : {};
+    for(const target of Object.values(aliases)){
+      const rawTarget=String(target||'').trim();
+      let provider='';
+      let modelId='';
+      if(rawTarget.startsWith('@')&&rawTarget.includes(':')){
+        const separator=rawTarget.indexOf(':',1);
+        provider=rawTarget.slice(1,separator).trim();
+        modelId=rawTarget.slice(separator+1).trim();
+      }else if(rawTarget.includes('/')){
+        [provider,modelId]=rawTarget.split('/',2).map(part=>part.trim());
+      }
+      if(!provider||!modelId) continue;
+      const group=groups.find(candidate=>String(candidate&&candidate.provider_id||'').toLowerCase()===provider.toLowerCase());
+      if(!group||group.models.some(candidate=>candidate&&String(candidate.id||'')===modelId)) continue;
+      group.models.push({id:modelId,label:getModelLabel(modelId)});
+    }
     const willRetry=usedConfiguredFallback && requestedFreshness!=='session_visit' && !_modelCatalogFallbackRetried;
 
     if(!groups.length){
