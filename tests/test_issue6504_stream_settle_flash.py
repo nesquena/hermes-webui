@@ -1449,3 +1449,95 @@ def test_restore_timeout_does_not_finalize_after_same_id_owner_token_replacement
     assert result["cleanupCalls"] == 0
     assert result["ownerToken"] == 2
     assert result["activeStreamId"] == "stream-1"
+
+
+@pytest.mark.parametrize(
+    ("event_name", "event_payload"),
+    [
+        ("token", {"text": "stale token"}),
+        ("interim_assistant", {"text": "stale interim"}),
+        ("reasoning", {"text": "stale reasoning"}),
+        ("tool", {"id": "tool-1", "name": "search"}),
+        ("tool_complete", {"id": "tool-1", "name": "search"}),
+    ],
+)
+def test_queued_live_events_do_not_mutate_after_same_id_owner_token_replacement(
+    event_name: str,
+    event_payload: dict,
+):
+    current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
+    owner = _extract("_ownsActiveStreamOrBackground")
+    bail = _extract("_bailOutOfTerminalEventsFromStaleStream")
+    event_body = _extract_event_body(event_name)
+    script = textwrap.dedent(
+        """
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
+        let _terminalStateReached = false;
+        let _streamFinalized = false;
+        let closeCalls = 0;
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'stream-1',
+          messages: [],
+        };
+        globalThis.LIVE_STREAMS = {
+          'sid-1': { streamId: 'stream-1', source: { readyState: 1, close() {} }, ownerToken: 2 }
+        };
+        globalThis.source = { readyState: 1, close() {} };
+        globalThis.assistantText = 'replacement answer';
+        globalThis.reasoningText = 'replacement reasoning';
+        globalThis.liveReasoningText = 'replacement reasoning';
+        globalThis._scheduleAnchorRegistryCleanup = () => {};
+        globalThis._closeSource = () => { closeCalls += 1; };
+        globalThis._isActiveSession = () => true;
+        globalThis._isSessionCurrentPane = () => true;
+        """
+        + current_owner
+        + """
+        """
+        + current_owner_active
+        + """
+        """
+        + owner
+        + """
+        """
+        + bail
+        + """
+        const handler = (e) => {
+        """
+        + event_body
+        + """
+        };
+        handler({ data: JSON.stringify("""
+        + json.dumps(event_payload)
+        + """) });
+        console.log(JSON.stringify({
+          closeCalls,
+          assistantText,
+          reasoningText,
+          liveReasoningText,
+          ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
+          activeStreamId: S.activeStreamId,
+        }));
+        """
+    )
+    proc = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["closeCalls"] == 1
+    assert result["assistantText"] == "replacement answer"
+    assert result["reasoningText"] == "replacement reasoning"
+    assert result["liveReasoningText"] == "replacement reasoning"
+    assert result["ownerToken"] == 2
+    assert result["activeStreamId"] == "stream-1"
