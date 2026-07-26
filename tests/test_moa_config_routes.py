@@ -1205,7 +1205,6 @@ class TestMoaUnsavedEditorProtection:
         body = PANELS_JS[idx:PANELS_JS.index("\nasync function _saveDirtyMoaBeforeClose", idx)]
         # Both close paths (password branch and the ordinary one).
         assert body.count("_saveDirtyMoaBeforeClose()") == 2
-        segments = body.split("_saveDirtyMoaBeforeClose()")
         # Read the markers in source order. Splitting on the gate alone is not
         # enough: a success toast moved ahead of the SECOND gate still lands
         # after the first one, and a per-segment check would wave it through.
