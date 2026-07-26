@@ -93,6 +93,14 @@ class TerminalSession:
     # at its prompt has neither, so it sorts oldest and is evicted before an
     # actively used one.
     last_activity: float = field(default_factory=time.time)
+    # Wall-clock of when the terminal last had zero attached viewers, or None
+    # while at least one is attached. The reaper closes a terminal that has been
+    # unwatched for longer than the idle grace: a client that drops its output
+    # stream without POSTing /api/terminal/close (tab close, crash, network drop)
+    # otherwise leaves the shell running forever (no PDEATHSIG). A terminal is
+    # born unwatched, so a spawn nobody ever attaches to is reaped too. The grace
+    # spans transient reconnects (a tab refresh re-attaches and clears it).
+    unwatched_since: float | None = field(default_factory=time.time)
 
     def is_alive(self) -> bool:
         return not self.closed.is_set() and self.proc.poll() is None
@@ -111,6 +119,7 @@ class TerminalSession:
                 if after_seq is None or item[0] > after_seq:
                     q.put_nowait(item)
             self._subscribers.append(q)
+            self.unwatched_since = None  # a viewer is attached
         return q
 
     def unsubscribe(self, q: queue.Queue) -> None:
@@ -119,6 +128,8 @@ class TerminalSession:
                 self._subscribers.remove(q)
             except ValueError:
                 pass
+            if not self._subscribers:
+                self.unwatched_since = time.time()
 
     def put_output(self, event: str, payload: dict) -> None:
         self.last_activity = time.time()
@@ -162,6 +173,19 @@ _spawn_supervisor_lock = threading.Lock()
 _spawn_supervisor_thread: threading.Thread | None = None
 _terminal_descendant_reaper_lock = threading.Lock()
 _TERMINAL_DESCENDANT_REAPER_LIMIT = 64
+
+# Idle-terminal reaper: proactively close terminals whose viewers have all gone
+# away, instead of leaving an abandoned shell running until the cap evicts it.
+# A terminal unwatched (zero attached output streams) for longer than the grace
+# is closed; the grace spans a tab refresh / brief network drop so a real
+# reconnect keeps the session. Dead-process terminals are swept too as a
+# belt-and-suspenders for the reader-loop retire.
+_TERMINAL_IDLE_GRACE_SECONDS = 900  # 15 min unwatched -> reap
+_TERMINAL_REAPER_INTERVAL_SECONDS = 60
+_terminal_reaper_started = False
+_terminal_reaper_lock = threading.Lock()
+_terminal_reaper_thread: threading.Thread | None = None
+_terminal_reaper_stop = threading.Event()
 
 
 @dataclass
@@ -414,6 +438,101 @@ def _enforce_terminal_cap(*, exclude_sid: str | None = None) -> None:
         close_terminal(victim_sid, expected=victim_term)
 
 
+def _terminals_to_reap(now: float) -> list[tuple[str, TerminalSession]]:
+    """Return (sid, term) pairs the reaper should close: a dead process, or a
+    terminal unwatched for longer than the idle grace. Pure/snapshotted under
+    the lock so it can be unit-tested without threads."""
+    victims = []
+    with _LOCK:
+        for sid, term in _TERMINALS.items():
+            if not term.is_alive():
+                victims.append((sid, term))
+                continue
+            unwatched = term.unwatched_since
+            if unwatched is not None and (now - unwatched) >= _TERMINAL_IDLE_GRACE_SECONDS:
+                victims.append((sid, term))
+    return victims
+
+
+def _claim_reap_victim(sid: str, term: TerminalSession, now: float) -> TerminalSession | None:
+    """Atomically remove *term* from the registry, or refuse.
+
+    ``_terminals_to_reap`` snapshots victims and then releases ``_LOCK``, so by
+    the time we get here a viewer may have reconnected: ``subscribe()`` appends
+    to ``_subscribers`` and clears ``unwatched_since`` under the terminal's
+    ``_sub_lock``, which the selection pass never held. Object identity alone —
+    what ``close_terminal(expected=…)`` checks — is still true in that case, so
+    the reaper would kill a terminal that now has a live viewer.
+
+    The claim therefore re-establishes the *whole* selection predicate while
+    holding both locks, and takes the entry out of ``_TERMINALS`` in the same
+    critical section. A concurrent ``attach_terminal()`` acquires the same two
+    locks in the same order, so exactly one of the two wins: either the viewer
+    is attached (and we refuse) or the entry is already gone (and the attach
+    reports "not running").
+
+    Returns the claimed terminal — the caller owns its teardown — or ``None``.
+    """
+    with _LOCK:
+        if _TERMINALS.get(sid) is not term:
+            return None
+        # A dead process is reaped unconditionally: it cannot come back to life,
+        # and an attached viewer only means someone is watching a corpse.
+        if term.is_alive():
+            with term._sub_lock:
+                if term._subscribers:
+                    return None
+                unwatched = term.unwatched_since
+                if unwatched is None:
+                    return None
+                if (now - unwatched) < _TERMINAL_IDLE_GRACE_SECONDS:
+                    return None
+        del _TERMINALS[sid]
+    return term
+
+
+def _reap_idle_terminals(now: float) -> int:
+    """Close every terminal selected by ``_terminals_to_reap`` that is *still*
+    idle when claimed. Returns the count closed."""
+    reaped = 0
+    for sid, term in _terminals_to_reap(now):
+        claimed = _claim_reap_victim(sid, term, now)
+        if claimed is None:
+            continue
+        # Process/fd teardown runs after both locks are released: killpg + wait
+        # can take seconds and must not block attaches or spawns.
+        _teardown_terminal(claimed)
+        reaped += 1
+    return reaped
+
+
+def _terminal_reaper_loop() -> None:
+    while not _terminal_reaper_stop.wait(_TERMINAL_REAPER_INTERVAL_SECONDS):
+        try:
+            # Wall-clock, consistent with unwatched_since / last_activity.
+            _reap_idle_terminals(time.time())
+        except Exception:
+            # Never let a transient error kill the reaper thread.
+            pass
+
+
+def _ensure_terminal_reaper() -> None:
+    global _terminal_reaper_started, _terminal_reaper_thread
+    if not _TERMINAL_SUPPORTED:
+        return
+    with _terminal_reaper_lock:
+        if (
+            _terminal_reaper_started
+            and _terminal_reaper_thread is not None
+            and getattr(_terminal_reaper_thread, "is_alive", lambda: False)()
+        ):
+            return
+        thread = threading.Thread(target=_terminal_reaper_loop, daemon=True)
+        thread.start()
+        _terminal_reaper_thread = thread
+        _terminal_reaper_started = True
+
+
 def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int = 80, restart: bool = False) -> TerminalSession:
     """Start or return the embedded terminal for a WebUI session."""
     if not _TERMINAL_SUPPORTED:
@@ -475,6 +594,7 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             }
         )
         _ensure_spawn_supervisor()
+        _ensure_terminal_reaper()
         _spawn_queue.put(request)
         try:
             if not request.done.wait(timeout=5.0):
@@ -522,6 +642,42 @@ def get_terminal(session_id: str) -> TerminalSession | None:
         return term
 
 
+def attach_terminal(
+    session_id: str, after_seq: int | None = None
+) -> tuple[TerminalSession, queue.Queue] | None:
+    """Attach a viewer atomically against the idle reaper.
+
+    ``get_terminal()`` followed by ``term.subscribe()`` leaves a window: the
+    reaper can claim and tear the terminal down in between, so the viewer ends
+    up subscribed to a corpse and the caller reports a live stream that will
+    never produce output. Doing the lookup and the subscribe inside the same
+    ``_LOCK`` section — the same lock, in the same order, that
+    ``_claim_reap_victim`` takes — makes the two mutually exclusive:
+
+    * attach wins → ``_subscribers`` is non-empty and ``unwatched_since`` is
+      ``None`` before the reaper can revalidate, so the reap is refused;
+    * reap wins → the entry is already out of ``_TERMINALS``, so this returns
+      ``None`` and the route answers "terminal not running" instead of hanging.
+
+    Registration is the authority, deliberately: both the reaper and
+    ``close_terminal()`` remove the entry *before* tearing the terminal down, so
+    "still in ``_TERMINALS``" is exactly the condition that cannot race. A
+    terminal that is registered but already flagged ``closed`` (its shell exited
+    and the reader loop has not retired it yet) still attaches, so the viewer
+    receives the ``terminal_closed`` event instead of a bare 404.
+
+    Returns ``(term, queue)`` or ``None``.
+    """
+    if not _TERMINAL_SUPPORTED:
+        return None
+    sid = str(session_id or "")
+    with _LOCK:
+        term = _TERMINALS.get(sid)
+        if term is None:
+            return None
+        return term, term.subscribe(after_seq=after_seq)
+
+
 def write_terminal(session_id: str, data: str) -> None:
     if not _TERMINAL_SUPPORTED:
         raise NotImplementedError("Embedded terminal is not supported on Windows")
@@ -565,6 +721,18 @@ def close_terminal(session_id: str, *, expected: TerminalSession | None = None) 
         term = _TERMINALS.pop(sid, None)
     if not term:
         return False
+    _teardown_terminal(term)
+    return True
+
+
+def _teardown_terminal(term: TerminalSession) -> None:
+    """Kill the shell, close the pty master fd and reap descendants.
+
+    Split out of ``close_terminal`` so a caller that has already claimed the
+    registry entry (the idle reaper) can run the teardown without re-entering
+    the registry lookup — and, importantly, without holding any lock while
+    ``killpg``/``wait`` block for up to ~2.5s.
+    """
     term.closed.set()
     try:
         if term.proc.poll() is None:
@@ -592,7 +760,6 @@ def close_terminal(session_id: str, *, expected: TerminalSession | None = None) 
             except OSError:
                 pass
         _reap_terminal_descendants(term.proc.pid)
-    return True
 
 
 def close_all_terminals() -> None:
