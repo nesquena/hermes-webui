@@ -203,6 +203,17 @@ def _wait_until_restart_safe(poll_seconds: float = 2.0, max_wait_seconds: float 
     return snapshot
 
 
+def _windows_hide_flags() -> int:
+    """Win32 ``creationflags`` that hide a short-lived console child's window
+    (``CREATE_NO_WINDOW``) without detaching it, so ``capture_output`` still
+    works. Returns ``0`` on non-Windows — the ``subprocess`` default, a genuine
+    no-op. See #5692.
+    """
+    if sys.platform == "win32":
+        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return 0
+
+
 def _run_git(args, cwd, timeout=10):
     """Run a git command and return (useful output, ok).
 
@@ -214,9 +225,14 @@ def _run_git(args, cwd, timeout=10):
         return 'git executable not found', False
     try:
         r = subprocess.run(
-            [git_executable] + args, cwd=str(cwd), capture_output=True,
-            text=True, timeout=timeout,
-            encoding='utf-8', errors='replace',
+            [git_executable] + args,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding='utf-8',
+            errors='replace',
+            creationflags=_windows_hide_flags(),
         )
         # On non-UTF-8 locales (e.g. Chinese Windows GBK), a binary git
         # output that fails to decode used to leave r.stdout = None and crash

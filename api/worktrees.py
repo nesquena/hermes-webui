@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import time
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
@@ -13,6 +14,15 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _windows_hide_flags() -> int:
+    """Win32 ``creationflags`` that hide a short-lived console child's window.
+    See #5692.
+    """
+    if sys.platform == "win32":
+        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return 0
+
+
 def _run_git(args: list[str], cwd: str | Path, timeout: float = 2) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", *args],
@@ -21,6 +31,7 @@ def _run_git(args: list[str], cwd: str | Path, timeout: float = 2) -> subprocess
         capture_output=True,
         timeout=timeout,
         check=False,
+        creationflags=_windows_hide_flags(),
     )
 
 
@@ -326,6 +337,7 @@ def find_git_repo_root(workspace: str | Path) -> Path:
             capture_output=True,
             timeout=5,
             check=False,
+            creationflags=_windows_hide_flags(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError("Workspace is not inside a git repository") from exc
