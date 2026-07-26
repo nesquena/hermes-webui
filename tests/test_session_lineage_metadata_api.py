@@ -441,38 +441,54 @@ def test_generic_subagent_title_gets_goal_display_title(_isolate):
         conn.close()
 
 
-def test_generic_subagent_title_uses_goal_when_state_db_title_is_null(_isolate):
-    """Current Agent children leave state.db.title null while WebUI keeps the generic sidecar title."""
+@pytest.mark.parametrize(
+    ("state_title", "sidecar_title", "expected_display_title"),
+    [
+        pytest.param(None, "Subagent Session", "Research lesser-known coding agent harnesses", id="null"),
+        pytest.param("", "Subagent Session", "Research lesser-known coding agent harnesses", id="empty"),
+        pytest.param(" \t ", "Subagent Session", "Research lesser-known coding agent harnesses", id="whitespace"),
+        pytest.param(None, "Human-chosen child title", None, id="null-custom-sidecar"),
+    ],
+)
+def test_subagent_goal_title_handles_blank_state_titles_and_custom_sidecar(
+    _isolate,
+    state_title,
+    sidecar_title,
+    expected_display_title,
+):
+    """Blank Agent titles are candidates, but the WebUI sidecar remains authoritative."""
     conn = _ensure_state_db(_isolate)
     _ensure_messages_table(conn)
     t0 = time.time() - 100
+    sid = "lineage_api_subagent_blank_title"
     try:
-        _save_webui_session("lineage_api_subagent_null_title", title="Subagent Session", updated_at=t0)
+        sidecar = _save_webui_session(sid, title=sidecar_title, updated_at=t0)
+        sidecar_before = sidecar.path.read_bytes()
         _insert_state_row(
             conn,
-            "lineage_api_subagent_null_title",
+            sid,
             source="subagent",
             started_at=t0,
         )
-        conn.execute(
-            "UPDATE sessions SET title = NULL WHERE id = ?",
-            ("lineage_api_subagent_null_title",),
-        )
+        conn.execute("UPDATE sessions SET title = ? WHERE id = ?", (state_title, sid))
         conn.commit()
         _insert_state_message(
             conn,
-            "lineage_api_subagent_null_title",
+            sid,
             role="user",
             content="Research lesser-known coding agent harnesses",
             timestamp=t0 + 1,
         )
 
-        row = {row["session_id"]: row for row in all_sessions(include_lineage_metadata=False)}[
-            "lineage_api_subagent_null_title"
-        ]
+        row = {row["session_id"]: row for row in all_sessions(include_lineage_metadata=False)}[sid]
 
-        assert row["title"] == "Subagent Session"
-        assert row["display_title"] == "Research lesser-known coding agent harnesses"
+        assert row["title"] == sidecar_title
+        if expected_display_title is None:
+            assert "display_title" not in row
+        else:
+            assert row["display_title"] == expected_display_title
+        assert conn.execute("SELECT title FROM sessions WHERE id = ?", (sid,)).fetchone()[0] == state_title
+        assert sidecar.path.read_bytes() == sidecar_before
     finally:
         conn.close()
 
