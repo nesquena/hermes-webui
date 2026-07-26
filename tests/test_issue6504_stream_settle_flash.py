@@ -34,6 +34,43 @@ def _extract(name: str) -> str:
     raise AssertionError(f"unclosed function: {name}")
 
 
+def _extract_event_body(event_name: str) -> str:
+    marker = f"source.addEventListener('{event_name}'"
+    start = MESSAGES_JS.find(marker)
+    assert start >= 0, f"missing event listener: {event_name}"
+    brace = MESSAGES_JS.find("{", start)
+    depth = 0
+    for i in range(brace, len(MESSAGES_JS)):
+        ch = MESSAGES_JS[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return MESSAGES_JS[brace + 1 : i]
+    raise AssertionError(f"unclosed event listener: {event_name}")
+
+
+def _extract_reconnect_preflight_body() -> str:
+    anchor = "function _handleStreamError(source){"
+    start = MESSAGES_JS.find(anchor)
+    assert start >= 0, "missing _handleStreamError anchor"
+    marker = "(async()=>{"
+    start = MESSAGES_JS.find(marker, start)
+    assert start >= 0, "missing reconnect preflight IIFE"
+    brace = MESSAGES_JS.find("{", start)
+    depth = 0
+    for i in range(brace, len(MESSAGES_JS)):
+        ch = MESSAGES_JS[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return MESSAGES_JS[brace + 1 : i]
+    raise AssertionError("unclosed reconnect preflight IIFE")
+
+
 def _run_recovery_case(
     *,
     active: bool,
@@ -47,6 +84,7 @@ def _run_recovery_case(
     current_pane: bool | None = None,
 ):
     current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
     owner = _extract("_ownsActiveStreamOrBackground")
     recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
     fallback = _extract("_finalizeStreamEndFallback")
@@ -132,6 +170,7 @@ def _run_recovery_case(
         globalThis._setActivePaneIdleIfOwner = () => {{ idleCalls++; }};
         globalThis._closeSource = () => {{ closeCalls++; }};
         {current_owner}
+        {current_owner_active}
         {owner}
         {recovery_owner}
         {fallback}
@@ -179,6 +218,7 @@ def _run_recovery_case(
 
 def _run_restore_stale_guard_case():
     current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
     owner = _extract("_ownsActiveStreamOrBackground")
     recovery = _extract("_currentPaneRecoveryOwnerLost")
     restore = _extract("_restoreSettledSession")
@@ -213,6 +253,7 @@ def _run_restore_stale_guard_case():
           _streamEndRecoveryTimer = null;
         };
         """ + current_owner + """
+        """ + current_owner_active + """
         """ + owner + """
         """ + recovery + """
         """ + restore + """
@@ -224,6 +265,156 @@ def _run_restore_stale_guard_case():
             apiCalls,
             activeStreamId: S.activeStreamId,
             pending: _pendingStreamEndRecovery,
+          }));
+        })().catch((error) => {
+          console.error(error && error.stack ? error.stack : String(error));
+          process.exit(1);
+        });
+        """
+    )
+    proc = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def _run_restore_same_id_owner_replacement_case(*, reject: bool):
+    current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
+    owner = _extract("_ownsActiveStreamOrBackground")
+    recovery = _extract("_currentPaneRecoveryOwnerLost")
+    restore = _extract("_restoreSettledSession")
+    script = textwrap.dedent(
+        """
+        let closeCalls = 0;
+        let renderCalls = 0;
+        let sessionListCalls = 0;
+        let idleCalls = 0;
+        let clearLiveToolCalls = 0;
+        let removeThinkingCalls = 0;
+        let hydrateCalls = 0;
+        let resolveSession;
+        let rejectSession;
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
+        let _streamFinalized = false;
+        let _pendingStreamEndRecovery = true;
+        let _streamEndRecoveryAttempts = 4;
+        let _streamEndRecoveryTimer = {};
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'stream-1',
+          messages: [{ role: 'assistant', content: 'replacement pane answer' }],
+          toolCalls: [{ id: 'tool-1' }],
+        };
+        globalThis.INFLIGHT = {};
+        globalThis.assistantText = 'replacement pane answer';
+        globalThis.LIVE_STREAMS = {
+          'sid-1': { streamId: 'stream-1', source: { readyState: 1, close() {} }, ownerToken: 1 }
+        };
+        globalThis._loadingSessionId = null;
+        globalThis._isActiveSession = () => true;
+        globalThis._isSessionCurrentPane = () => true;
+        globalThis.api = () => new Promise((resolve, reject) => {
+          resolveSession = resolve;
+          rejectSession = reject;
+        });
+        globalThis._closeSource = () => { closeCalls += 1; };
+        globalThis._clearStreamEndRecovery = () => {
+          _pendingStreamEndRecovery = false;
+          _streamEndRecoveryAttempts = 0;
+          _streamEndRecoveryTimer = null;
+        };
+        globalThis._persistTimer = null;
+        globalThis._cancelThrottledSnapshotTimer = () => {};
+        globalThis._clearAnchorProseIncrementalNode = () => {};
+        globalThis._cancelAnimationFramePendingStreamRender = () => {};
+        globalThis._streamFadeCleanupReduceMotionListener = () => {};
+        globalThis._smdEndParser = () => {};
+        globalThis.finalizeThinkingCard = () => {};
+        globalThis._clearOwnerInflightState = () => {};
+        globalThis._flushReasoningToAnchor = () => {};
+        globalThis._scheduleAnchorRegistryCleanup = () => {};
+        globalThis._clearApprovalForOwner = () => {};
+        globalThis._clearClarifyForOwner = () => {};
+        globalThis._isSessionActivelyViewed = () => true;
+        globalThis._markSessionCompletionUnread = () => {};
+        globalThis.clearLiveToolCards = () => { clearLiveToolCalls += 1; };
+        globalThis.removeThinking = () => { removeThinkingCalls += 1; };
+        globalThis._filterRecoveryControlMessages = (messages) => messages;
+        globalThis._carryForwardEphemeralTurnFields = (_current, next) => next;
+        globalThis._attachProjectedAnchorSceneToLastAssistant = () => {};
+        globalThis._hydrateTodosFromSession = () => { hydrateCalls += 1; };
+        globalThis.localStorage = { setItem: () => {} };
+        globalThis._setActiveSessionUrl = () => {};
+        globalThis._replaceMarkerOnlyAssistantWithStreamError = () => false;
+        globalThis.showToast = () => {};
+        globalThis._mergeSettledToolCallsWithLiveMetadata = (toolCalls) => toolCalls;
+        globalThis._markSessionViewed = () => {};
+        globalThis._messageRenderableMessageCount = () => 1;
+        globalThis._currentMessageRenderWindowSize = () => 50;
+        globalThis._messageRenderWindowSize = 50;
+        globalThis.syncTopbar = () => {};
+        globalThis.renderMessages = () => { renderCalls += 1; };
+        globalThis.renderSessionList = () => { sessionListCalls += 1; };
+        globalThis._setActivePaneIdleIfOwner = () => { idleCalls += 1; };
+        """
+        + current_owner
+        + """
+        """
+        + current_owner_active
+        + """
+        """
+        + owner
+        + """
+        """
+        + recovery
+        + """
+        """
+        + restore
+        + """
+        (async () => {
+          const pending = _restoreSettledSession({}, { status: true, preserveVisibleOnShorterTerminalSnapshot: true });
+          LIVE_STREAMS['sid-1'] = {
+            streamId: 'stream-1',
+            source: { readyState: 1, close() {} },
+            ownerToken: 2,
+          };
+          if ("""
+        + ("true" if reject else "false")
+        + """) {
+            rejectSession(new Error('network failed'));
+          } else {
+            resolveSession({
+              session: {
+                session_id: 'sid-1',
+                messages: [{ role: 'assistant', content: 'stale settled answer' }],
+                tool_calls: [{ id: 'tool-stale' }],
+                message_count: 1,
+              }
+            });
+          }
+          const result = await pending;
+          console.log(JSON.stringify({
+            result,
+            closeCalls,
+            renderCalls,
+            sessionListCalls,
+            idleCalls,
+            clearLiveToolCalls,
+            removeThinkingCalls,
+            hydrateCalls,
+            pending: _pendingStreamEndRecovery,
+            activeStreamId: S.activeStreamId,
+            ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
+            messages: S.messages,
           }));
         })().catch((error) => {
           console.error(error && error.stack ? error.stack : String(error));
@@ -405,6 +596,7 @@ def test_long_tail_recovery_does_not_reattach_stale_stream_over_replacement_owne
 
 def test_long_tail_recovery_does_not_reattach_after_pane_ownership_switch_during_status_await():
     current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
     owner = _extract("_ownsActiveStreamOrBackground")
     recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
     reconcile = _extract("_reconcileStreamEndRecoveryExhaustion")
@@ -449,6 +641,7 @@ def test_long_tail_recovery_does_not_reattach_after_pane_ownership_switch_during
           _streamEndRecoveryTimer = null;
         };
         """ + current_owner + """
+        """ + current_owner_active + """
         """ + owner + """
         """ + recovery_owner + """
         """ + reconcile + """
@@ -492,6 +685,7 @@ def test_long_tail_recovery_does_not_reattach_after_pane_ownership_switch_during
 
 def test_restore_settled_session_does_not_mutate_after_pane_ownership_switch_during_await():
     current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
     owner = _extract("_ownsActiveStreamOrBackground")
     recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
     restore = _extract("_restoreSettledSession")
@@ -566,6 +760,7 @@ def test_restore_settled_session_does_not_mutate_after_pane_ownership_switch_dur
         globalThis.renderSessionList = () => { sessionListCalls += 1; };
         globalThis._setActivePaneIdleIfOwner = () => { idleCalls += 1; };
         """ + current_owner + """
+        """ + current_owner_active + """
         """ + owner + """
         """ + recovery_owner + """
         """ + restore + """
@@ -624,8 +819,43 @@ def test_restore_settled_session_does_not_mutate_after_pane_ownership_switch_dur
     assert result["messages"] == [{"role": "assistant", "content": "replacement pane answer"}]
 
 
+def test_restore_settled_session_does_not_mutate_after_same_stream_token_replacement_during_await():
+    result = _run_restore_same_id_owner_replacement_case(reject=False)
+
+    assert result["result"] == "stale"
+    assert result["closeCalls"] == 1
+    assert result["renderCalls"] == 0
+    assert result["sessionListCalls"] == 0
+    assert result["idleCalls"] == 0
+    assert result["clearLiveToolCalls"] == 0
+    assert result["removeThinkingCalls"] == 0
+    assert result["hydrateCalls"] == 0
+    assert result["pending"] is False
+    assert result["activeStreamId"] == "stream-1"
+    assert result["ownerToken"] == 2
+    assert result["messages"] == [{"role": "assistant", "content": "replacement pane answer"}]
+
+
+def test_restore_settled_session_rejection_does_not_mutate_after_same_stream_token_replacement():
+    result = _run_restore_same_id_owner_replacement_case(reject=True)
+
+    assert result["result"] == "stale"
+    assert result["closeCalls"] == 1
+    assert result["renderCalls"] == 0
+    assert result["sessionListCalls"] == 0
+    assert result["idleCalls"] == 0
+    assert result["clearLiveToolCalls"] == 0
+    assert result["removeThinkingCalls"] == 0
+    assert result["hydrateCalls"] == 0
+    assert result["pending"] is False
+    assert result["activeStreamId"] == "stream-1"
+    assert result["ownerToken"] == 2
+    assert result["messages"] == [{"role": "assistant", "content": "replacement pane answer"}]
+
+
 def test_replacement_owner_blocks_queued_persist_snapshot_render_recovery_and_resume_callbacks():
     current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
     persist = _extract("persistInflightState")
     snapshot = _extract("snapshotLiveTurn")
     throttled_snapshot = _extract("_throttledSnapshotLiveTurn")
@@ -718,6 +948,7 @@ def test_replacement_owner_blocks_queued_persist_snapshot_render_recovery_and_re
           removeEventListener: () => {},
         };
         """ + current_owner + """
+        """ + current_owner_active + """
         """ + persist + """
         """ + snapshot + """
         """ + throttled_snapshot + """
@@ -767,3 +998,353 @@ def test_replacement_owner_blocks_queued_persist_snapshot_render_recovery_and_re
     assert result["activeStreamId"] == "replacement-stream"
     assert result["ownerToken"] == 2
     assert result["deferredBound"] is False
+
+
+def test_reconnect_preflight_rejection_does_not_recreate_same_id_replaced_owner():
+    current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
+    owner = _extract("_ownsActiveStreamOrBackground")
+    recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
+    reconnect_preflight = _extract_reconnect_preflight_body()
+    script = textwrap.dedent(
+        """
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let reconnecting = true;
+        let replayOnly = false;
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
+        let _persistTimer = null;
+        let _snapshotLiveTurnTimer = null;
+        let _streamEndRecoveryTimer = null;
+        let _deferredStreamRecoveryResume = null;
+        let _deferredStreamRecoveryBound = false;
+        let eventSourceCalls = 0;
+        let closeCalls = 0;
+        let resolveStatus;
+        let rejectStatus;
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'stream-1',
+          messages: [],
+        };
+        globalThis.LIVE_STREAMS = {
+          'sid-1': { streamId: 'stream-1', source: { readyState: 1, close() {} }, ownerToken: 1 }
+        };
+        globalThis._isActiveSession = () => true;
+        globalThis._isSessionCurrentPane = () => true;
+        globalThis.api = () => new Promise((resolve, reject) => {
+          resolveStatus = resolve;
+          rejectStatus = reject;
+        });
+        globalThis.EventSource = function(url) {
+          eventSourceCalls += 1;
+          this.url = url;
+          this.readyState = 0;
+          this.close = () => {};
+        };
+        globalThis._runJournalReplayParams = () => '';
+        globalThis.document = { baseURI: 'http://localhost:8787/' };
+        globalThis.location = { href: 'http://localhost:8787/' };
+        globalThis._clearOwnerInflightState = () => {};
+        globalThis._clearApprovalForOwner = () => {};
+        globalThis._clearClarifyForOwner = () => {};
+        globalThis.clearLiveToolCards = () => {};
+        globalThis.removeThinking = () => {};
+        globalThis._setActivePaneIdleIfOwner = () => {};
+        globalThis.renderMessages = () => {};
+        globalThis.renderSessionList = () => {};
+        globalThis.scrollToBottom = () => {};
+        globalThis._isMessagePaneNearBottom = () => true;
+        globalThis._isMessageReaderUnpinned = () => false;
+        globalThis._queueDrainSid = null;
+        globalThis._scheduleAnchorRegistryCleanup = () => {};
+        globalThis._clearStreamEndRecovery = () => {};
+        globalThis._cancelAnimationFramePendingStreamRender = () => {};
+        globalThis._closeSource = () => { closeCalls += 1; };
+        """
+        + current_owner
+        + """
+        """
+        + current_owner_active
+        + """
+        """
+        + owner
+        + """
+        """
+        + recovery_owner
+        + """
+        (async () => {
+          const pending = (async () => {
+        """
+        + reconnect_preflight
+        + """
+          })();
+          LIVE_STREAMS['sid-1'] = {
+            streamId: 'stream-1',
+            source: { readyState: 1, close() {} },
+            ownerToken: 2,
+          };
+          rejectStatus(new Error('lost status probe'));
+          await pending;
+          console.log(JSON.stringify({
+            closeCalls,
+            eventSourceCalls,
+            ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
+            activeStreamId: S.activeStreamId,
+          }));
+        })().catch((error) => {
+          console.error(error && error.stack ? error.stack : String(error));
+          process.exit(1);
+        });
+        """
+    )
+    proc = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["closeCalls"] == 1
+    assert result["eventSourceCalls"] == 0
+    assert result["ownerToken"] == 2
+    assert result["activeStreamId"] == "stream-1"
+
+
+def test_done_fade_completion_does_not_mutate_after_same_id_owner_token_replacement():
+    current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
+    owner = _extract("_ownsActiveStreamOrBackground")
+    bail = _extract("_bailOutOfTerminalEventsFromStaleStream")
+    done_body = _extract_event_body("done")
+    script = textwrap.dedent(
+        """
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
+        let _streamFinalized = false;
+        let _terminalStateReached = false;
+        let _persistTimer = null;
+        let _streamEndRecoveryTimer = null;
+        let delayedFinish = null;
+        let renderCalls = 0;
+        let idleCalls = 0;
+        let sessionListCalls = 0;
+        let closeCalls = 0;
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'stream-1',
+          messages: [{ role: 'assistant', content: 'replacement answer' }],
+          toolCalls: [],
+        };
+        globalThis.LIVE_STREAMS = {
+          'sid-1': { streamId: 'stream-1', source: { readyState: 1, close() {} }, ownerToken: 1 }
+        };
+        globalThis.INFLIGHT = {};
+        globalThis.assistantText = 'replacement answer';
+        globalThis.reasoningText = '';
+        globalThis.liveReasoningText = '';
+        globalThis.assistantBody = { textContent: 'replacement answer' };
+        globalThis.source = {};
+        globalThis._clearStreamEndRecovery = () => {};
+        globalThis._scheduleAnchorRegistryCleanup = () => {};
+        globalThis._closeSource = () => { closeCalls += 1; };
+        globalThis._cancelThrottledSnapshotTimer = () => {};
+        globalThis._cancelAnimationFramePendingStreamRender = () => {};
+        globalThis._streamFadeCleanupReduceMotionListener = () => {};
+        globalThis.finalizeThinkingCard = () => {};
+        globalThis._smdEndParser = () => {};
+        globalThis.requestAnimationFrame = (cb) => cb();
+        globalThis.highlightCode = () => {};
+        globalThis.addCopyButtons = () => {};
+        globalThis.renderKatexBlocks = () => {};
+        globalThis._flushReasoningToAnchor = () => {};
+        globalThis._applyToAnchor = () => {};
+        globalThis._clearAnchorProseIncrementalNode = () => {};
+        globalThis._isSessionCurrentPane = () => true;
+        globalThis._isSessionActivelyViewed = () => true;
+        globalThis._markSessionViewed = () => {};
+        globalThis._clearOwnerInflightState = () => {};
+        globalThis._markSessionCompletedInList = () => {};
+        globalThis._clearApprovalForOwner = () => {};
+        globalThis._clearClarifyForOwner = () => {};
+        globalThis._shouldFollowMessagesOnDomReplace = () => false;
+        globalThis._carryForwardEphemeralTurnFields = (_current, next) => next;
+        globalThis._messagesTruncated = false;
+        globalThis._filterRecoveryControlMessages = (messages) => messages;
+        globalThis._hydrateTodosFromSession = () => {};
+        globalThis.clearVisibleMessageRowCache = () => {};
+        globalThis.localStorage = { setItem: () => {} };
+        globalThis._setActiveSessionUrl = () => {};
+        globalThis._replaceMarkerOnlyAssistantWithStreamError = () => false;
+        globalThis.showToast = () => {};
+        globalThis._splitThinkFromContent = (content, reasoning) => ({ content, reasoning });
+        globalThis._mergeUsageForCtxIndicator = (_usage, fallback) => fallback;
+        globalThis._syncCtxIndicator = () => {};
+        globalThis._attachProjectedAnchorSceneToLastAssistant = () => {};
+        globalThis._mergeSettledToolCallsWithLiveMetadata = (toolCalls) => toolCalls;
+        globalThis.renderSessionArtifacts = () => {};
+        globalThis.clearLiveToolCards = () => {};
+        globalThis.syncTopbar = () => {};
+        globalThis.renderMessages = () => { renderCalls += 1; };
+        globalThis._renderMessagesWithScrollSnapshot = null;
+        globalThis.scrollToBottom = () => {};
+        globalThis.noteWorkspaceMutationsFromToolCalls = () => {};
+        globalThis.loadDir = () => {};
+        globalThis.autoReadLastAssistant = () => {};
+        globalThis.playNotificationSound = () => {};
+        globalThis._shouldForceCompletionNotification = () => false;
+        globalThis._completionNotificationPreviewText = () => '';
+        globalThis.sendBrowserNotification = () => {};
+        globalThis._shouldUseLiveProseFade = () => true;
+        globalThis._drainStreamFadeBeforeDone = (cb) => { delayedFinish = cb; };
+        globalThis.renderSessionList = () => { sessionListCalls += 1; };
+        globalThis._setActivePaneIdleIfOwner = () => { idleCalls += 1; };
+        globalThis._isActiveSession = () => true;
+        """
+        + current_owner
+        + """
+        """
+        + current_owner_active
+        + """
+        """
+        + owner
+        + """
+        """
+        + bail
+        + """
+        const doneHandler = (e) => {
+        """
+        + done_body
+        + """
+        };
+        doneHandler({ data: JSON.stringify({ session: { session_id: 'sid-1', messages: [{ role: 'assistant', content: 'stale settled answer' }], tool_calls: [], message_count: 1 } }) });
+        LIVE_STREAMS['sid-1'] = {
+          streamId: 'stream-1',
+          source: { readyState: 1, close() {} },
+          ownerToken: 2,
+        };
+        delayedFinish();
+        console.log(JSON.stringify({
+          renderCalls,
+          idleCalls,
+          sessionListCalls,
+          closeCalls,
+          ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
+          activeStreamId: S.activeStreamId,
+        }));
+        """
+    )
+    proc = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["renderCalls"] == 0
+    assert result["idleCalls"] == 0
+    assert result["sessionListCalls"] == 0
+    assert result["closeCalls"] == 1
+    assert result["ownerToken"] == 2
+    assert result["activeStreamId"] == "stream-1"
+
+
+@pytest.mark.parametrize("event_name", ["stream_end", "apperror", "error", "cancel"])
+def test_terminal_callbacks_do_not_mutate_after_same_id_owner_token_replacement(event_name: str):
+    current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
+    owner = _extract("_ownsActiveStreamOrBackground")
+    bail = _extract("_bailOutOfTerminalEventsFromStaleStream")
+    event_body = _extract_event_body(event_name)
+    script = textwrap.dedent(
+        """
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
+        let _streamFinalized = false;
+        let _terminalStateReached = false;
+        let closeCalls = 0;
+        let renderCalls = 0;
+        let restoreCalls = 0;
+        let handleErrorCalls = 0;
+        let wireCalls = 0;
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'stream-1',
+          messages: [{ role: 'assistant', content: 'replacement answer' }],
+        };
+        globalThis.LIVE_STREAMS = {
+          'sid-1': { streamId: 'stream-1', source: { readyState: 1, close() {} }, ownerToken: 2 }
+        };
+        globalThis.source = { readyState: 1, close() {} };
+        globalThis._clearStreamEndRecovery = () => {};
+        globalThis._scheduleAnchorRegistryCleanup = () => {};
+        globalThis._closeSource = () => { closeCalls += 1; };
+        globalThis._restoreSettledSession = async () => { restoreCalls += 1; return false; };
+        globalThis._handleStreamError = () => { handleErrorCalls += 1; };
+        globalThis._wireSSE = () => { wireCalls += 1; };
+        globalThis.renderMessages = () => { renderCalls += 1; };
+        globalThis._deferStreamErrorIfOffline = () => false;
+        globalThis._deferStreamErrorIfPageHidden = () => false;
+        globalThis._pendingStreamEndRecovery = false;
+        globalThis._isSessionCurrentPane = () => true;
+        """
+        + current_owner
+        + """
+        """
+        + current_owner_active
+        + """
+        """
+        + owner
+        + """
+        """
+        + bail
+        + """
+        const handler = async (e) => {
+        """
+        + event_body
+        + """
+        };
+        handler({ data: '{}' }).then(() => {
+          console.log(JSON.stringify({
+            closeCalls,
+            renderCalls,
+            restoreCalls,
+            handleErrorCalls,
+            wireCalls,
+            ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
+            activeStreamId: S.activeStreamId,
+          }));
+        }).catch((error) => {
+          console.error(error && error.stack ? error.stack : String(error));
+          process.exit(1);
+        });
+        """
+    )
+    proc = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["closeCalls"] == 1
+    assert result["renderCalls"] == 0
+    assert result["restoreCalls"] == 0
+    assert result["handleErrorCalls"] == 0
+    assert result["wireCalls"] == 0
+    assert result["ownerToken"] == 2
+    assert result["activeStreamId"] == "stream-1"
