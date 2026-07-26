@@ -456,6 +456,21 @@ def test_scripts_raw_returns_source():
     assert data["source"] == content
 
 
+def test_scripts_raw_rejects_nested_script_paths():
+    _clear_scripts_dir()
+    nested_dir = TEST_STATE_DIR / "scripts" / "private"
+    nested_dir.mkdir(parents=True, exist_ok=True)
+    (nested_dir / "credentials.py").write_text('print("secret")\n', encoding="utf-8")
+
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(
+            TEST_BASE + "/api/scripts/raw?path=private/credentials.py",
+            timeout=5,
+        )
+
+    assert exc_info.value.code == 404
+
+
 def test_scripts_raw_rejects_root_symlink_escape():
     _clear_scripts_dir()
     foreign_dir = TEST_STATE_DIR / "foreign-scripts-root-link"
@@ -672,6 +687,39 @@ def test_scripts_list_description_is_bounded():
 
     assert [script["name"] for script in data["scripts"]] == ["long.py"]
     assert len(data["scripts"][0]["description"]) == 512
+
+
+def test_scripts_list_skips_python_recursion_errors(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    active_home = tmp_path / "active-home"
+    scripts_dir = active_home / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (scripts_dir / "deep.py").write_text("x = 1\n", encoding="utf-8")
+    captured = {}
+
+    monkeypatch.setattr(routes, "_hermes_active_home", lambda: active_home)
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200: captured.setdefault(
+            "result", {"handler": handler, "payload": payload, "status": status}
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_parse_script_docstring",
+        lambda data, ext: (_ for _ in ()).throw(RecursionError("nesting exceeded")),
+    )
+
+    handler = object()
+    routes._handle_scripts_list(handler)
+
+    assert captured["result"] == {
+        "handler": handler,
+        "payload": {"scripts": []},
+        "status": 200,
+    }
 
 
 def test_scripts_raw_rejects_oversized_file():

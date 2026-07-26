@@ -20597,7 +20597,7 @@ def _parse_script_docstring(data: bytes, ext: str) -> str:
             tree = ast.parse(text)
             doc = ast.get_docstring(tree)
             return (doc or "").split("\n")[0].strip()[:512]
-        except (SyntaxError, ValueError):
+        except (SyntaxError, ValueError, RecursionError):
             pass
     # .sh and fallback: collect leading # comment lines
     lines = []
@@ -20657,11 +20657,12 @@ def _handle_scripts_list(handler) -> None:
                 data = _read_anchored_file_bytes(
                     active_home, target, 64 * 1024, allow_prefix=True
                 )
-            except (OSError, ValueError):
+                description = _parse_script_docstring(data, ext)
+            except (OSError, ValueError, RecursionError):
                 continue
             scripts.append({
                 "name": name,
-                "description": _parse_script_docstring(data, ext),
+                "description": description,
             })
     finally:
         if dir_fd is not None:
@@ -20677,6 +20678,11 @@ def _handle_scripts_raw(handler, parsed) -> None:
     name = qs.get("path", [""])[0]
     if not name:
         return bad(handler, "path required", 400)
+    requested_path = Path(name)
+    if any(part == ".." for part in requested_path.parts):
+        return bad(handler, "invalid path", 400)
+    if requested_path.anchor or len(requested_path.parts) != 1 or requested_path.name != name:
+        return bad(handler, "script not found", 404)
     try:
         active_home = _hermes_active_home()
     except Exception:
@@ -20693,8 +20699,6 @@ def _handle_scripts_raw(handler, parsed) -> None:
     try:
         target = safe_resolve_ws(active_home, f"scripts/{name}")
     except ValueError:
-        if any(part == ".." for part in Path(name).parts):
-            return bad(handler, "invalid path", 400)
         return bad(handler, "script not found", 404)
     requested_target = active_home / "scripts" / name
     if requested_target.is_symlink():
