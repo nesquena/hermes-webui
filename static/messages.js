@@ -2427,7 +2427,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   async function _reconcileStreamEndRecoveryExhaustion(source){
     if(_currentPaneRecoveryOwnerLost()){
-      _closeSource(source);
+      _closeSource(source,{retainOwner:true});
       _clearStreamEndRecovery();
       return true;
     }
@@ -2455,7 +2455,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }catch(_){ }
     if(await _restoreSettledSession(source,{preserveVisibleOnShorterTerminalSnapshot:true})) return true;
     if(_isActiveSession() && S.activeStreamId!==streamId){
-      _closeSource(source);
+      _closeSource(source,{retainOwner:true});
       _clearStreamEndRecovery();
       return true;
     }
@@ -2755,10 +2755,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _anchorReasoningFlushed=false;
   let _anchorLocalSeq=0;
   if(_anchorRegistryMap&&_anchorRegistry) _anchorRegistryMap.set(streamId,_anchorRegistry);
+  if(_anchorRegistry&&typeof _anchorRegistry==='object') _anchorRegistry._cleanupOwnerToken=_liveOwnerToken;
   function _scheduleAnchorRegistryCleanup(delayMs=600000){
     if(!_anchorRegistryMap||!_anchorRegistry) return;
+    const cleanupOwnerToken=_liveOwnerToken;
+    if(typeof _anchorRegistry==='object') _anchorRegistry._cleanupOwnerToken=cleanupOwnerToken;
     setTimeout(()=>{
-      if(_anchorRegistryMap.get(streamId)===_anchorRegistry) _anchorRegistryMap.delete(streamId);
+      if(
+        _anchorRegistryMap.get(streamId)===_anchorRegistry
+        && _anchorRegistry
+        && _anchorRegistry._cleanupOwnerToken===cleanupOwnerToken
+      ) _anchorRegistryMap.delete(streamId);
     },delayMs);
   }
   // Backstop: schedule an identity-guarded cleanup at creation so this shadow
@@ -6681,6 +6688,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('warning',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       // Non-fatal warning from server (e.g. fallback activated, retrying)
       if(!S.session||S.session.session_id!==activeSid) return;
       try{
@@ -6696,7 +6704,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // Show as a small inline notice, not a full error
         setComposerStatus(`${d.message||'Warning'}`);
         // If it's a fallback notice, show it briefly then clear
-        if(d.type==='fallback') setTimeout(()=>setComposerStatus(''),4000);
+        if(d.type==='fallback') setTimeout(()=>{
+          if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+          setComposerStatus('');
+        },4000);
       }catch(_){}
     });
 
@@ -6712,14 +6723,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // reconnect — recovery polls server state and owns the terminal decision
       // (else its exhaustion could mute a freshly reconnected stream). Opus stage-LK.
       if(_pendingStreamEndRecovery){
-        _closeSource(source);
+        _closeSource(source,{retainOwner:true});
         return;
       }
       if(typeof recordClientSSEError==='function') recordClientSSEError('chat-response',{ready_state:source?source.readyState:null,session_id:activeSid,stream_id:streamId,reason:'chat EventSource.onerror'});
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden(source)) return;
-      _closeSource(source);
+      _closeSource(source,{retainOwner:true});
       // If the user has switched to a different session, don't attempt to
       // reconnect — the old stream's EventSource was closed intentionally
       // during session switch and reconnecting would leak a background stream.
@@ -6852,7 +6863,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;
       }
+      const _cancelOwnerLost=()=>{
+        const live=_currentLiveOwnerEntry();
+        if(live&&live.source===source&&_isSessionCurrentPane(activeSid)) return false;
+        _scheduleAnchorRegistryCleanup(120000);
+        _closeSource(source);
+        return true;
+      };
       const _applyCancelSessionPayload=(sessionPayload)=>{
+        if(_cancelOwnerLost()) return false;
         if(!sessionPayload||typeof sessionPayload!=='object'||!S.session||S.session.session_id!==activeSid) return false;
         // Belt-and-suspenders: the embedded cancel snapshot must be for THIS session.
         // The GET path guarantees it via the URL; the embedded path via the stream→session
@@ -6888,13 +6907,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       (async()=>{
         try{
           if(_applyCancelSessionPayload(_cancelSessionPayload)) return;
+          if(_cancelOwnerLost()) return;
           // Fetch latest session from server to get accurate message list (includes cancel status)
           // This ensures messages stay in sync with server, fixing race condition where local
           // "*Task cancelled.*" message gets lost when done event overwrites S.messages
           const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+          if(_cancelOwnerLost()) return;
           if(data&&data.session) _applyCancelSessionPayload(data.session);
         }catch(_){
           // Fallback to local cancel message if API fails
+          if(_cancelOwnerLost()) return;
           if(S.session&&S.session.session_id===activeSid){
             const _wasFollowingAtCancelFb=((typeof _isMessagePaneNearBottom==='function')
                 ? _isMessagePaneNearBottom(1200)
@@ -6984,7 +7006,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       (_isActiveSession() && S.activeStreamId!==streamId)
     );
     const _staleRestoreResult=()=>{
-      _closeSource(source);
+      _closeSource(source,{retainOwner:true});
       if(_restoreStartedAsCurrentPane) _clearStreamEndRecovery();
       return returnStatus?'stale':true;
     };
