@@ -1305,17 +1305,18 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
     const _persist=()=>{
       try{
         const ownerSnapshot=ownerTransactionSnapshot;
-        if(ownerSnapshot){
-          _saveComposerDraftNow(
-            sid,ownerSnapshot.text,[...(ownerSnapshot.files||[])],ownerSnapshot.profile
-          );
-          return;
-        }
         const stillVisible=(S.session&&S.session.session_id)===sid;
         if(stillVisible){
           const inp=$('msg');
           const liveText=inp?String(inp.value||''):restore;
           _saveComposerDraftNow(sid, liveText, S.pendingFiles?[...S.pendingFiles]:[]);
+        } else if(ownerSnapshot){
+          const snapshotIsCurrent=typeof _composerOwnerSnapshotIsCurrent!=='function'
+            ||_composerOwnerSnapshotIsCurrent(ownerSnapshot);
+          if(!snapshotIsCurrent)return;
+          _saveComposerDraftNow(
+            sid,ownerSnapshot.text,[...(ownerSnapshot.files||[])],ownerSnapshot.profile
+          );
         } else if(!restoredVisible){
           // Background failure (sid was never the visible session): no live
           // composer to read, so persist the captured snapshot — it's the only copy.
@@ -7909,6 +7910,7 @@ let _clarifyHideTimer = null;
 let _clarifyVisibleSince = 0;
 let _clarifySignature = '';
 let _clarifySessionId = null;
+let _clarifyOwnerProfile = null;
 let _clarifyId = null;
 let _clarifyMissingEndpointWarned = false;
 let _clarifyCountdownTimer = null;
@@ -8144,7 +8146,9 @@ function _stashClarifyDraft(reason) {
   const composer = $('msg');
   if (composer) {
     const ownerProfile=String(
-      (S.session&&S.session.session_id===sid&&S.session.profile)||S.activeProfile||'default'
+      (typeof _clarifyOwnerProfile!=='undefined'&&_clarifyOwnerProfile)
+      ||(S.session&&S.session.session_id===sid&&S.session.profile)
+      ||S.activeProfile||'default'
     ).trim()||'default';
     const producer=`clarify-${sid}-${_clarifySignature||'unknown'}`;
     if(typeof _composerAppendText==='function'){
@@ -8170,6 +8174,7 @@ function _resetClarifyCardState() {
   _clearClarifyCountdownTimer();
   _clarifyVisibleSince = 0;
   _clarifySignature = '';
+  _clarifyOwnerProfile = null;
   _clarifyId = null;
 }
 
@@ -8249,6 +8254,9 @@ function showClarifyCard(pending) {
   const input = $("clarifyInput");
   const sameClarify = card.classList.contains("visible") && _clarifySignature === sig;
   _clarifySessionId = sid;
+  _clarifyOwnerProfile=String(
+    (S.session&&S.session.session_id===sid&&S.session.profile)||S.activeProfile||'default'
+  ).trim()||'default';
   _clarifyId = pending.clarify_id || null;
   _clarifySignature = sig;
   if (Number(pending.timeout_seconds) > 0) {
@@ -8406,9 +8414,9 @@ async function respondClarify(response) {
         // the ``loading`` class set above. Clear loading first, otherwise
         // the typed answer is silently dropped (reviewer P1).
         _clarifySetControlsDisabled(false, false);
-        _clarifySessionId = null;
-        _clarifyId = null;
         _clearClarifyPendingForSession(sid);
+        // Keep the captured owner live until hideClarifyCard() stashes the draft;
+        // clearing it first would fall back to whichever session is visible now.
         hideClarifyCard(true, "expired");
         const errMsg = (e.message || "Clarification prompt expired or not found.");
         if (typeof setStatus === "function") setStatus("Clarify: " + errMsg);

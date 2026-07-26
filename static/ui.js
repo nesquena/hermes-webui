@@ -26,16 +26,128 @@ const $=id=>document.getElementById(id);
 let _composerOwnershipTransition=null;
 let _composerOwnershipGeneration=0;
 let _composerProducerSequence=0;
+const _composerOwnerStateByKey=new Map();
+const _composerSettledOwnersByGeneration=new Map();
+const _COMPOSER_OWNER_STATE_LIMIT=128;
+const _COMPOSER_SETTLED_GENERATION_LIMIT=64;
+
+function _composerOwnerKey(sid,profile){
+  return `${String(profile||'default').trim()||'default'}\u0000${String(sid||'')}`;
+}
+function _composerProfilesMatch(left,right){
+  const a=String(left||'default').trim()||'default';
+  const b=String(right||'default').trim()||'default';
+  return a===b;
+}
+function _rememberComposerOwnerState(sid,profile,state,generation){
+  if(!sid||!state)return null;
+  const snapshot={
+    generation:Number(generation||state.generation||0),
+    revision:Number(state.revision||0),
+    text:String(state.text||''),
+    files:[...Array.from(state.files||[]).filter(Boolean)],
+    profile:String(profile||'default').trim()||'default',
+    session_id:sid,
+  };
+  const key=_composerOwnerKey(sid,snapshot.profile);
+  if(_composerOwnerStateByKey.has(key))_composerOwnerStateByKey.delete(key);
+  _composerOwnerStateByKey.set(key,snapshot);
+  while(_composerOwnerStateByKey.size>_COMPOSER_OWNER_STATE_LIMIT){
+    const oldest=_composerOwnerStateByKey.keys().next().value;
+    _composerOwnerStateByKey.delete(oldest);
+  }
+  return snapshot;
+}
+function _composerRememberedOwnerSnapshot(sid,profile){
+  const snapshot=_composerOwnerStateByKey.get(_composerOwnerKey(sid,profile));
+  return snapshot?{...snapshot,files:[...snapshot.files]}:null;
+}
+function _releaseComposerOwnerFiles(sid){
+  if(!sid)return;
+  const suffix=`\u0000${sid}`;
+  for(const [key,snapshot] of _composerOwnerStateByKey){
+    if(key.endsWith(suffix)&&snapshot.files.length){
+      _composerOwnerStateByKey.set(key,{...snapshot,files:[]});
+    }
+  }
+}
+function _forgetComposerOwnerState(sid){
+  if(!sid)return;
+  const suffix=`\u0000${sid}`;
+  for(const key of _composerOwnerStateByKey.keys()){
+    if(key.endsWith(suffix))_composerOwnerStateByKey.delete(key);
+  }
+  for(const [generation,owners] of _composerSettledOwnersByGeneration){
+    if(owners&&(owners.sourceSid===sid||owners.destinationSid===sid)){
+      _composerSettledOwnersByGeneration.delete(generation);
+    }
+  }
+}
+function _rememberComposerSettledOwners(generation,owners){
+  _composerSettledOwnersByGeneration.set(generation,owners);
+  while(_composerSettledOwnersByGeneration.size>_COMPOSER_SETTLED_GENERATION_LIMIT){
+    const oldest=_composerSettledOwnersByGeneration.keys().next().value;
+    _composerSettledOwnersByGeneration.delete(oldest);
+  }
+}
+function _composerOwnerSnapshotIsCurrent(snapshot){
+  if(!snapshot)return false;
+  const current=_composerRememberedOwnerSnapshot(snapshot.session_id,snapshot.profile);
+  return !!current&&(
+    current.generation===snapshot.generation&&current.revision===snapshot.revision
+  );
+}
 
 function _newComposerProducerToken(prefix='producer'){
   _composerProducerSequence+=1;
   return `${prefix}:${_composerProducerSequence}`;
 }
+function _newComposerProducerHandle(prefix='producer'){
+  const tx=_composerOwnershipTransition;
+  const visible=S.session||{};
+  return Object.freeze({
+    producerToken:_newComposerProducerToken(prefix),
+    generation:tx?tx.generation:null,
+    ownerRole:tx?'destination':'owner',
+    ownerSid:tx?null:(visible.session_id||null),
+    ownerProfile:String((tx&&tx.destinationProfile)||visible.profile||S.activeProfile||'default').trim()||'default',
+  });
+}
+function _composerProducerContext(ownerSid,producerToken,ownerProfile){
+  if(!producerToken||typeof producerToken!=='object'){
+    return {ownerSid,producerToken,ownerProfile,drop:false};
+  }
+  const handle=producerToken;
+  let resolvedSid=ownerSid;
+  let resolvedProfile=ownerProfile||handle.ownerProfile;
+  let drop=false;
+  const tx=_composerOwnershipTransition;
+  if(resolvedSid==null&&handle.generation!=null){
+    if(tx&&tx.generation===handle.generation){
+      resolvedSid=handle.ownerRole==='source'?tx.sourceSid:null;
+      resolvedProfile=handle.ownerRole==='source'?tx.sourceProfile:tx.destinationProfile;
+    }else{
+      const settled=_composerSettledOwnersByGeneration.get(handle.generation);
+      if(settled){
+        resolvedSid=handle.ownerRole==='source'?settled.sourceSid:settled.destinationSid;
+        resolvedProfile=handle.ownerRole==='source'?settled.sourceProfile:settled.destinationProfile;
+      }else{
+        // The lifecycle belongs to an ownership generation we can no longer
+        // resolve. Dropping is safer than writing whichever composer is visible.
+        drop=true;
+      }
+    }
+  }
+  if(resolvedSid==null&&handle.generation==null)resolvedSid=handle.ownerSid;
+  return {
+    ownerSid:resolvedSid,producerToken:handle.producerToken,
+    ownerProfile:resolvedProfile,drop,
+  };
+}
 function _composerOwnerSnapshot(sid,profile){
   const tx=_composerOwnershipTransition;
-  if(!tx||!tx.sourceSid||tx.sourceSid!==sid)return null;
-  const requestedProfile=String(profile||'').trim();
-  if(requestedProfile&&requestedProfile!==tx.sourceProfile)return null;
+  if(!tx||!tx.sourceSid||tx.sourceSid!==sid
+    ||!_composerProfilesMatch(profile,tx.sourceProfile))return null;
   const state=tx.sourceState;
   return {
     generation:tx.generation,revision:state.revision,text:state.text,
@@ -58,6 +170,21 @@ function _composerRenderDestinationText(tx){
       : text+String(slot.value||'');
   }
   tx.destinationText=text;
+  return text;
+}
+function _composerRenderAbortText(tx){
+  const slots=tx.abortTextSlots;
+  const hasSet=tx.abortTextOrder.some(token=>{
+    const slot=slots.get(token);return slot&&slot.kind==='text-set';
+  });
+  let text=hasSet?'':String(tx.abortBaseText||'');
+  for(const token of tx.abortTextOrder){
+    const slot=slots.get(token);
+    if(!slot)continue;
+    if(slot.semantics==='block-append')text=_composerBlockJoin(text,slot.value);
+    else text+=String(slot.value||'');
+  }
+  tx.abortState.text=text;
   return text;
 }
 function _composerApplyRecordToState(state,record,useAbortValue=false){
@@ -111,11 +238,15 @@ function _beginComposerOwnershipTransition(sourceSid,sourceProfile){
       files:Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[],
       revision:0,
     },
+    abortBaseText:input?String(input.value||''):'',
+    abortTextSlots:new Map(),
+    abortTextOrder:[],
     destinationSlots:new Map(),
     destinationOrder:[],
     destinationText:'',
   };
   _composerOwnershipTransition=token;
+  _rememberComposerOwnerState(token.sourceSid,token.sourceProfile,token.sourceState,token.generation);
   return token;
 }
 function _bindComposerOwnershipDestination(token,sid,profile){
@@ -133,7 +264,14 @@ function _bindComposerOwnershipDestination(token,sid,profile){
 function _composerTransitionRecord(kind,value,ownerSid,abortValue,options={}){
   const tx=_composerOwnershipTransition;
   if(!tx)return false;
-  const sourceOwned=!!(ownerSid&&tx.sourceSid&&ownerSid===tx.sourceSid);
+  const sourceOwned=!!(
+    ownerSid&&tx.sourceSid&&ownerSid===tx.sourceSid
+    &&_composerProfilesMatch(options.ownerProfile,tx.sourceProfile)
+  );
+  // An immutable producer handle from an older lifecycle can settle while a
+  // different ownership transition is active. Never absorb its explicit owner
+  // into the current destination; let the non-visible-owner path persist it.
+  if(ownerSid&&!sourceOwned)return false;
   const semantics=options.semantics||kind;
   const producerToken=String(options.producerToken||(
     kind==='text-set'?'default-text-producer':_newComposerProducerToken(kind)
@@ -154,12 +292,22 @@ function _composerTransitionRecord(kind,value,ownerSid,abortValue,options={}){
     session_id:sourceOwned?tx.sourceSid:tx.destinationSid,
   };
   tx.mutations.push(record);
-  _composerApplyRecordToState(tx.abortState,record,!sourceOwned);
+  if(kind.startsWith('text-')){
+    if(!tx.abortTextSlots.has(producerToken))tx.abortTextOrder.push(producerToken);
+    tx.abortTextSlots.set(producerToken,{
+      kind,semantics,value:String(kind==='text-set'?record.abortValue:value||''),
+    });
+    _composerRenderAbortText(tx);
+    tx.abortState.revision=record.revision;
+  }else{
+    _composerApplyRecordToState(tx.abortState,record,!sourceOwned);
+  }
 
   if(sourceOwned){
     const state=tx.sourceState;
     _composerApplyRecordToState(state,record);
     state.dirty=true;
+    _rememberComposerOwnerState(tx.sourceSid,tx.sourceProfile,state,tx.generation);
     if(kind.startsWith('text-')){const input=$('msg');if(input)input.value=state.text;}
     else S.pendingFiles=[...state.files];
     return true;
@@ -172,20 +320,59 @@ function _composerTransitionRecord(kind,value,ownerSid,abortValue,options={}){
   }
   return true;
 }
+function _composerMutateNonVisibleOwner(kind,value,ownerSid,ownerProfile,semantics){
+  const visibleSid=(S.session&&S.session.session_id)||null;
+  const visibleProfile=String(
+    (S.session&&S.session.profile)||S.activeProfile||'default'
+  ).trim()||'default';
+  const profile=String(ownerProfile||S.activeProfile||'default').trim()||'default';
+  if(!ownerSid||(ownerSid===visibleSid&&_composerProfilesMatch(profile,visibleProfile)))return false;
+  const remembered=_composerRememberedOwnerSnapshot(ownerSid,profile);
+  // A non-visible delta is only safe when we still have that owner's complete
+  // baseline. Reconstructing from an empty fallback would turn one late file or
+  // transcript into an incomplete draft and silently discard the rest.
+  if(!remembered)return true;
+  const record={
+    kind,value,abortValue:value,semantics:semantics||kind,revision:remembered.revision+1,
+  };
+  _composerApplyRecordToState(remembered,record);
+  const current=_rememberComposerOwnerState(
+    ownerSid,profile,remembered,remembered.generation
+  );
+  if(typeof _saveComposerDraftNow==='function'){
+    try{
+      Promise.resolve(_saveComposerDraftNow(
+        ownerSid,current.text,[...current.files],profile
+      )).catch(()=>{});
+    }catch(_){}
+  }
+  return true;
+}
 function _composerSetText(value,transitionValue,ownerSid,producerToken,ownerProfile){
+  const context=_composerProducerContext(ownerSid,producerToken,ownerProfile);
+  if(context.drop)return false;
+  ownerSid=context.ownerSid;producerToken=context.producerToken;ownerProfile=context.ownerProfile;
   const next=String(value||'');
   const buffered=arguments.length>1?String(transitionValue||''):next;
   if(_composerTransitionRecord('text-set',buffered,ownerSid,next,{
     semantics:'producer-set',producerToken,ownerProfile,
   }))return false;
+  if(_composerMutateNonVisibleOwner('text-set',next,ownerSid,ownerProfile,'producer-set'))return false;
   const input=$('msg');if(input)input.value=next;
   return true;
 }
 function _composerAppendText(value,ownerSid,producerToken,ownerProfile,semantics='append'){
+  const context=_composerProducerContext(ownerSid,producerToken,ownerProfile);
+  if(context.drop)return false;
+  ownerSid=context.ownerSid;producerToken=context.producerToken;ownerProfile=context.ownerProfile;
   const addition=String(value||'');
+  const normalizedSemantics=semantics==='block'?'block-append':'append';
   if(_composerTransitionRecord('text-append',addition,ownerSid,addition,{
-    semantics:semantics==='block'?'block-append':'append',producerToken,ownerProfile,
+    semantics:normalizedSemantics,producerToken,ownerProfile,
   }))return false;
+  if(_composerMutateNonVisibleOwner(
+    'text-append',addition,ownerSid,ownerProfile,normalizedSemantics
+  ))return false;
   const input=$('msg');
   if(input)input.value=semantics==='block'
     ? _composerBlockJoin(input.value,addition)
@@ -193,26 +380,38 @@ function _composerAppendText(value,ownerSid,producerToken,ownerProfile,semantics
   return true;
 }
 function _composerAddFiles(files,ownerSid,producerToken,ownerProfile){
+  const context=_composerProducerContext(ownerSid,producerToken,ownerProfile);
+  if(context.drop)return false;
+  ownerSid=context.ownerSid;producerToken=context.producerToken;ownerProfile=context.ownerProfile;
   const additions=Array.from(files||[]).filter(Boolean);
   if(_composerTransitionRecord('files-add',additions,ownerSid,additions,{
     producerToken,ownerProfile,
   }))return false;
+  if(_composerMutateNonVisibleOwner('files-add',additions,ownerSid,ownerProfile))return false;
   const current=Array.isArray(S.pendingFiles)?S.pendingFiles:[];
   S.pendingFiles=[...current,...additions.filter(file=>!current.includes(file))];
   return true;
 }
 function _composerReplaceFiles(files,ownerSid,producerToken,ownerProfile){
+  const context=_composerProducerContext(ownerSid,producerToken,ownerProfile);
+  if(context.drop)return false;
+  ownerSid=context.ownerSid;producerToken=context.producerToken;ownerProfile=context.ownerProfile;
   const replacement=Array.from(files||[]).filter(Boolean);
   if(_composerTransitionRecord('files-replace',replacement,ownerSid,replacement,{
     producerToken,ownerProfile,
   }))return false;
+  if(_composerMutateNonVisibleOwner('files-replace',replacement,ownerSid,ownerProfile))return false;
   S.pendingFiles=[...replacement];
   return true;
 }
 function _composerRemoveFile(file,ownerSid,producerToken,ownerProfile){
+  const context=_composerProducerContext(ownerSid,producerToken,ownerProfile);
+  if(context.drop)return false;
+  ownerSid=context.ownerSid;producerToken=context.producerToken;ownerProfile=context.ownerProfile;
   if(_composerTransitionRecord('file-remove',file,ownerSid,file,{
     producerToken,ownerProfile,
   }))return false;
+  if(_composerMutateNonVisibleOwner('file-remove',file,ownerSid,ownerProfile))return false;
   S.pendingFiles=(Array.isArray(S.pendingFiles)?S.pendingFiles:[]).filter(item=>item!==file);
   return true;
 }
@@ -229,10 +428,19 @@ function _persistComposerTransitionSource(token){
 }
 function _drainComposerOwnershipTransition(token,aborted=false){
   if(!token||_composerOwnershipTransition!==token)return false;
+  _rememberComposerSettledOwners(token.generation,{
+    sourceSid:token.sourceSid,sourceProfile:token.sourceProfile,
+    destinationSid:aborted?token.sourceSid:token.destinationSid,
+    destinationProfile:aborted?token.sourceProfile:token.destinationProfile,
+  });
   _composerOwnershipTransition=null;
   if(aborted){
     _composerSetText(token.abortState.text);
     _composerReplaceFiles(token.abortState.files);
+    _rememberComposerOwnerState(token.sourceSid,token.sourceProfile,{
+      text:token.abortState.text,files:token.abortState.files,
+      revision:token.abortState.revision,
+    },token.generation);
   }else{
     if(token.destinationSlots.size)_composerSetText(token.destinationText);
     for(const mutation of token.mutations){
@@ -241,6 +449,12 @@ function _drainComposerOwnershipTransition(token,aborted=false){
       else if(mutation.kind==='files-replace')_composerReplaceFiles(mutation.value);
       else if(mutation.kind==='file-remove')_composerRemoveFile(mutation.value);
     }
+    const input=$('msg');
+    _rememberComposerOwnerState(token.destinationSid,token.destinationProfile,{
+      text:input?String(input.value||''):'',
+      files:Array.isArray(S.pendingFiles)?S.pendingFiles:[],
+      revision:token.revision,
+    },token.generation);
   }
   _persistComposerTransitionSource(token);
   return true;

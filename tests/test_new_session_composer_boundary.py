@@ -140,6 +140,11 @@ def _run_review_race_harness(schedule: str) -> dict:
             msg.value='';
             S.pendingFiles=[];
             _restoreComposerDraftAfterFailedSend('failed restore',[restoredFile],'old-session',clearPromise);
+          }}else if(schedule==='failed-send-newer-source'){{
+            msg.value='';
+            S.pendingFiles=[];
+            _restoreComposerDraftAfterFailedSend('failed restore',[restoredFile],'old-session',clearPromise);
+            _composerAppendText('newer clarify','old-session','clarify-newer','default','block');
           }}else if(schedule==='clarify'||schedule==='clarify-terminal'||schedule==='clarify-abort'){{
             _stashClarifyDraft(schedule==='clarify-terminal'?'terminal':'expired');
             if(schedule==='clarify-abort')throw new Error('create failed');
@@ -157,6 +162,11 @@ def _run_review_race_harness(schedule: str) -> dict:
             _composerSetText('source draft interim','interim',null,'voice-producer');
             insertSavedPromptIntoComposer('saved prompt');
             _composerSetText('source draft final','final',null,'voice-producer');
+          }}else if(schedule==='voice-prompt-voice-abort'){{
+            _composerSetText('source draft interim','interim',null,'voice-producer');
+            insertSavedPromptIntoComposer('saved prompt');
+            _composerSetText('source draft final','final',null,'voice-producer');
+            throw new Error('create failed');
           }}
           return {{session:{{session_id:'new-session',profile:'default',workspace:'/workspace',
             messages:[],composer_draft:{{text:'',files:[]}},message_count:0}}}};
@@ -178,9 +188,14 @@ def _run_review_race_harness(schedule: str) -> dict:
           if({json.dumps(schedule)}==='failed-send-after-swap'){{
             _restoreComposerDraftAfterFailedSend('failed restore',[restoredFile],'old-session',clearPromise);
           }}
-          if({json.dumps(schedule)}==='failed-send'||{json.dumps(schedule)}==='failed-send-after-swap'){{
+          if({json.dumps(schedule)}==='failed-send'||{json.dumps(schedule)}==='failed-send-after-swap'||{json.dumps(schedule)}==='failed-send-newer-source'){{
             resolveClear();
             await Promise.resolve();await Promise.resolve();await Promise.resolve();
+          }}
+          if({json.dumps(schedule)}==='late-clarify-after-swap'){{
+            _clarifySessionId='old-session';
+            _stashClarifyDraft('expired');
+            await Promise.resolve();await Promise.resolve();
           }}
           process.stdout.write(JSON.stringify({{
             error,
@@ -722,6 +737,7 @@ def test_immediate_draft_save_can_fail_closed_at_owner_boundary():
         function _clearComposerDraftRestoreSuppression() {{}}
         function _sessionComposerDraftHasPayload() {{ return false; }}
         function _rememberComposerDraftPayloadState() {{}}
+        function _syncComposerOwnerStateFromDraft() {{}}
         function _queueComposerDraftWrite(_sid, write) {{ return Promise.resolve().then(write); }}
         function api() {{ return Promise.reject(new Error('draft endpoint unavailable')); }}
         (async () => {{
@@ -809,6 +825,16 @@ def test_failed_send_restore_after_owner_swap_stays_with_source_session():
     assert source_saves[-1]["files"] == ["restored.txt"]
 
 
+def test_late_failed_send_persist_does_not_overwrite_newer_source_revision():
+    result = _run_review_race_harness("failed-send-newer-source")
+
+    assert result["activeSid"] == "new-session"
+    assert result["text"] == ""
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves[-1]["text"] == "failed restore\n\nnewer clarify"
+    assert source_saves[-1]["files"] == ["restored.txt"]
+
+
 def test_clarify_rescue_during_create_is_persisted_to_its_source_owner():
     result = _run_review_race_harness("clarify")
 
@@ -825,6 +851,93 @@ def test_clarify_terminal_rescue_during_create_is_persisted_to_source_owner():
     assert result["activeSid"] == "new-session"
     source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
     assert source_saves[-1]["text"] == "source draft\n\nclarify answer"
+
+
+def test_late_clarify_rescue_after_owner_swap_never_mutates_new_session():
+    result = _run_review_race_harness("late-clarify-after-swap")
+
+    assert result["activeSid"] == "new-session"
+    assert result["text"] == ""
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves[-1]["text"] == "source draft\n\nclarify answer"
+
+
+def test_clarify_409_after_owner_swap_keeps_captured_old_session_owner():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    stash = _function(MESSAGES_JS, "_stashClarifyDraft", "\n\nfunction _resetClarifyCardState(")
+    hide = _function(MESSAGES_JS, "hideClarifyCard", "\n\nfunction _clarifySetControlsDisabled(")
+    respond_start = MESSAGES_JS.index("async function respondClarify(")
+    respond_end = MESSAGES_JS.index("\n\nvar _clarifyEventSource", respond_start)
+    respond = MESSAGES_JS[respond_start:respond_end]
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:'old draft'}};
+        const clarifyInput={{value:'late answer',focus(){{}}}};
+        const classList={{contains(){{return false;}},remove(){{}}}};
+        const elements={{
+          msg,clarifyInput,clarifySubmit:{{classList}},clarifyCard:{{classList}},
+          clarifyQuestion:{{textContent:''}},clarifyChoices:{{innerHTML:''}}
+        }};
+        const $=id=>elements[id]||null;
+        const S={{
+          session:{{session_id:'old-session',profile:'default'}},
+          activeProfile:'default',pendingFiles:[]
+        }};
+        const sessionStorage={{setItem(){{}}}};
+        const saves=[];
+        let _clarifySessionId='old-session';
+        let _clarifyOwnerProfile='default';
+        let _clarifySignature='sig';
+        let _clarifyId='clarify-1';
+        function _saveComposerDraftNow(sid,text,files,profile){{
+          saves.push({{sid,text,files:[...(files||[])],profile}});return Promise.resolve();
+        }}
+        function _clarifySetControlsDisabled(){{}}
+        function _clearClarifyPendingForSession(){{}}
+        function _resetClarifyCardState(){{
+          _clarifySignature='';_clarifyOwnerProfile=null;_clarifyId=null;
+        }}
+        function _setPromptFlyoutHidden(){{}}
+        function _syncClarifyTranscriptSpace(){{}}
+        function unlockComposerForClarify(){{}}
+        function autoResize(){{}}
+        function updateSendBtn(){{}}
+        function setComposerStatus(){{}}
+        function setStatus(){{}}
+        function showToast(){{}}
+        let rejectClarify;
+        function api(){{
+          return new Promise((_resolve,reject)=>{{rejectClarify=reject;}});
+        }}
+        {authority}
+        {stash}
+        {hide}
+        {respond}
+
+        const pendingResponse=respondClarify();
+        const transition=_beginComposerOwnershipTransition('old-session','default');
+        _bindComposerOwnershipDestination(transition,'new-session','default');
+        S.session={{session_id:'new-session',profile:'default'}};
+        msg.value='';
+        _drainComposerOwnershipTransition(transition);
+        const clarifyError=new Error('expired');
+        clarifyError.status=409;
+        rejectClarify(clarifyError);
+
+        pendingResponse.then(()=>Promise.resolve()).then(()=>{{
+          process.stdout.write(JSON.stringify({{text:msg.value,saves}}));
+        }}).catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["text"] == ""
+    assert result["saves"][-1]["sid"] == "old-session"
+    assert result["saves"][-1]["text"] == "old draft\n\nlate answer"
 
 
 def test_clarify_rescue_survives_aborted_session_creation():
@@ -865,6 +978,14 @@ def test_voice_final_replaces_its_interim_slot_without_dropping_saved_prompt():
 
     assert result["activeSid"] == "new-session"
     assert result["text"] == "final\n\nsaved prompt\n\n"
+
+
+def test_aborted_create_preserves_voice_final_and_interleaved_saved_prompt():
+    result = _run_review_race_harness("voice-prompt-voice-abort")
+
+    assert result["error"] == "create failed"
+    assert result["activeSid"] == "old-session"
+    assert result["text"] == "source draft final\n\nsaved prompt\n\n"
 
 
 def test_failed_handoff_replays_full_source_form_not_destination_delta():
@@ -913,11 +1034,685 @@ def test_new_session_and_clarify_disabled_reasons_do_not_unlock_each_other():
 
 
 def test_async_composer_producers_route_through_ownership_authority():
-    assert "_composerAddFiles([file],null,_micComposerProducerToken)" in BOOT_JS
+    assert "_composerAddFiles([file],null,producerHandle)" in BOOT_JS
     assert BOOT_JS.count("_composerSetText(") >= 5
     assert "_composerAppendText(addition,null,producer,null,'block')" in MESSAGES_JS
     assert "_composerAddFiles(accepted)" in UI_JS
     assert "_composerRemoveFile(f,S.session&&S.session.session_id)" in UI_JS
+    assert "const captureProducerHandle=_micComposerProducerToken" in BOOT_JS
+    assert "const capturePrefixSnapshot=_prefix" in BOOT_JS
+    assert "if(isCurrentProducer)_applyDeferredServerSttFlip()" in BOOT_JS
+    assert "_transcribeBlob(blob,prefixSnapshot,captureProducerHandle)" in BOOT_JS
+
+
+def test_superseded_media_callbacks_route_payload_but_cannot_send_current_composer():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = BOOT_JS.index("function _micProducerIsCurrent(")
+    end = BOOT_JS.index("\n\n  function _isServerSttUnavailable", start)
+    helpers = BOOT_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        const handleA={{producerToken:'A'}};
+        const handleB={{producerToken:'B'}};
+        let _micComposerProducerToken=handleB;
+        let _dictationAppend=false;
+        let _prefix='B prefix';
+        const ta={{value:''}};
+        const S={{pendingFiles:[]}};
+        const window={{_micPendingSend:true}};
+        let sends=0;
+        let resizes=0;
+        let trayRenders=0;
+        let toasts=0;
+        const routed=[];
+        class File {{
+          constructor(_parts,name,options){{this.name=name;this.type=options.type;}}
+        }}
+        function _composerAddFiles(files,_sid,handle){{
+          routed.push({{kind:'file',name:files[0].name,handle}});
+        }}
+        function _composerSetText(value,transition,_sid,handle){{
+          routed.push({{kind:'text',value,transition,handle}});
+        }}
+        function renderTray(){{trayRenders++;}}
+        function send(){{sends++;}}
+        function autoResize(){{resizes++;}}
+        function showToast(){{toasts++;}}
+        function t(value){{return value;}}
+        {helpers}
+        (async()=>{{
+          await _sendRawAudio({{type:'audio/webm'}},handleA);
+          _commitTranscript('late transcript',undefined,handleA);
+          process.stdout.write(JSON.stringify({{
+            routed,sends,resizes,trayRenders,toasts,pendingSend:window._micPendingSend
+          }}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["routed"][0]["kind"] == "file"
+    assert result["routed"][0]["handle"] == {"producerToken": "A"}
+    assert result["routed"][1] == {
+        "kind": "text",
+        "value": "late transcript",
+        "transition": "late transcript",
+        "handle": {"producerToken": "A"},
+    }
+    assert result["sends"] == 0
+    assert result["resizes"] == 0
+    assert result["trayRenders"] == 0
+    assert result["toasts"] == 0
+    assert result["pendingSend"] is True
+
+
+def test_superseded_get_user_media_completion_cannot_clear_new_recording_state():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = BOOT_JS.index("async function _startMicCapture(")
+    end = BOOT_JS.index("\n\n  async function _toggleMicCapture", start)
+    start_capture = BOOT_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        let resolveA,resolveB;
+        const streamA={{getTracks(){{return [{{stop(){{}}}}];}}}};
+        const streamB={{getTracks(){{return [{{stop(){{}}}}];}}}};
+        const pending=[
+          new Promise(resolve=>{{resolveA=()=>resolve(streamA);}}),
+          new Promise(resolve=>{{resolveB=()=>resolve(streamB);}}),
+        ];
+        const navigator={{mediaDevices:{{getUserMedia(){{return pending.shift();}}}}}};
+        class FakeRecorder {{
+          constructor(stream){{this.stream=stream;this.mimeType='audio/webm';this.state='inactive';}}
+          start(){{this.state='recording';}}
+        }}
+        FakeRecorder.isTypeSupported=()=>true;
+        const window={{MediaRecorder:FakeRecorder,_micActive:false,_micPendingSend:false}};
+        const MediaRecorder=FakeRecorder;
+        let _micStartSeq=0;
+        let _isRecording=false;
+        let _finalText='';
+        let _prefix='';
+        let _micComposerProducerToken=null;
+        let _forceMediaRecorder=true;
+        let _rawAudioMode=false;
+        let _canRecordAudio=true;
+        let _micHoldActive=false;
+        let recognition=null;
+        let mediaStream=null;
+        let mediaRecorder=null;
+        let audioChunks=[];
+        let _activeCaptureMode=null;
+        const ta={{value:''}};
+        let producerSequence=0;
+        function _newComposerProducerHandle(){{
+          producerSequence++;
+          return Object.freeze({{producerToken:String(producerSequence)}});
+        }}
+        function _micProducerIsCurrent(handle){{return handle===_micComposerProducerToken;}}
+        function _micButtonAvailable(){{return true;}}
+        function _stopMic(){{_micStartSeq++;_isRecording=false;window._micActive=false;}}
+        function _micOriginNeedsSecureContext(){{return false;}}
+        function _stopTracks(stream){{if(stream)stream.getTracks().forEach(track=>track.stop());}}
+        function _setRecording(active){{window._micActive=active;}}
+        function _applyDeferredServerSttFlip(){{}}
+        function _sendRawAudio(){{return Promise.resolve();}}
+        function _transcribeBlob(){{return Promise.resolve();}}
+        function showToast(){{}}
+        function t(value){{return value;}}
+        {start_capture}
+
+        (async()=>{{
+          const a=_startMicCapture();
+          _micStartSeq++;
+          _isRecording=false;
+          window._micActive=false;
+          const b=_startMicCapture();
+          resolveB();
+          await b;
+          const beforeLateA={{isRecording:_isRecording,micActive:window._micActive}};
+          resolveA();
+          await a;
+          process.stdout.write(JSON.stringify({{
+            beforeLateA,
+            afterLateA:{{isRecording:_isRecording,micActive:window._micActive}},
+            currentProducer:_micComposerProducerToken.producerToken,
+          }}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "beforeLateA": {"isRecording": True, "micActive": True},
+        "afterLateA": {"isRecording": True, "micActive": True},
+        "currentProducer": "2",
+    }
+
+
+def test_voice_mode_callback_uses_immutable_lifecycle_producer_token():
+    start = BOOT_JS.index("function _startListening(){")
+    end = BOOT_JS.index("\n  function _voiceModeSend(){", start)
+    lifecycle = BOOT_JS[start:end]
+
+    assert "const lifecycleProducerToken=" in lifecycle
+    assert "null,lifecycleProducerToken" in lifecycle
+    assert "_recognition=new SpeechRecognition()" in lifecycle
+    assert "const lifecycleRecognition=_recognition" in lifecycle
+    assert lifecycle.count("_recognition!==lifecycleRecognition") >= 3
+
+
+def test_dictation_callback_keeps_lifecycle_local_text_and_handle():
+    start = BOOT_JS.index("function _ensureSpeechRecognition(")
+    end = BOOT_JS.index("\n\n  if(!_forceMediaRecorder)", start)
+    lifecycle = BOOT_JS[start:end]
+
+    assert "const lifecycleProducerHandle=" in lifecycle
+    assert "let lifecycleFinalText=''" in lifecycle
+    assert "let _prefixForLifecycle=_prefix" in lifecycle
+    assert "if(recognition!==sr)return" in lifecycle
+
+
+def test_late_dictation_lifecycle_a_callback_executes_with_handle_a_after_b_starts():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = BOOT_JS.index("function _ensureSpeechRecognition(")
+    end = BOOT_JS.index("\n\n  if(!_forceMediaRecorder)", start)
+    ensure_speech = BOOT_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        class FakeSpeechRecognition {{ start(){{}} }}
+        const SpeechRecognition=FakeSpeechRecognition;
+        let recognition=null;
+        let _micComposerProducerToken='initial';
+        let _prefix='A: ';
+        let _finalText='';
+        let _micRestartCount=0;
+        const _micMaxRestarts=20;
+        let _speechStopRequested=false;
+        let _isRecording=true;
+        let _activeCaptureMode='speech';
+        const window={{_micActive:true,_micPendingSend:false}};
+        const ta={{value:''}};
+        const calls=[];
+        function _micDictationContinuous(){{return false;}}
+        function _micShouldRestartDictation(){{return false;}}
+        function _releaseMicWakeLock(){{return Promise.resolve();}}
+        function _setRecording(){{}}
+        function _applyDeferredServerSttFlip(){{}}
+        function _micToastKeyForRecognitionError(){{return null;}}
+        function showToast(){{}}
+        function t(value){{return value;}}
+        function send(){{}}
+        let resizes=0;
+        function autoResize(){{resizes++;}}
+        function _composerSetText(value,transition,owner,handle){{
+          calls.push({{value,transition,handle}});
+        }}
+        {ensure_speech}
+
+        const handleA={{producerToken:'A'}};
+        recognition=_ensureSpeechRecognition(handleA);
+        const lifecycleA=recognition;
+        lifecycleA.onstart();
+
+        _prefix='B: ';
+        const handleB={{producerToken:'B'}};
+        recognition=_ensureSpeechRecognition(handleB);
+        const lifecycleB=recognition;
+        lifecycleB.onstart();
+
+        const result=text=>({{resultIndex:0,results:[Object.assign([{{transcript:text}}],{{isFinal:true}})]}});
+        lifecycleA.onresult(result('late-a'));
+        lifecycleB.onresult(result('live-b'));
+        process.stdout.write(JSON.stringify({{calls,finalText:_finalText,resizes}}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["calls"] == [
+        {"value": "A: late-a", "transition": "late-a", "handle": {"producerToken": "A"}},
+        {"value": "B: live-b", "transition": "live-b", "handle": {"producerToken": "B"}},
+    ]
+    assert result["finalText"] == "live-b"
+    assert result["resizes"] == 1
+
+
+def test_immediate_draft_save_refreshes_owner_authority_with_profile_and_revision():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    sync_owner = _function(
+        SESSIONS_JS,
+        "_syncComposerOwnerStateFromDraft",
+        "\n\nfunction _sessionComposerDraftHasPayload",
+    )
+    save_now = _function(
+        SESSIONS_JS,
+        "_saveComposerDraftNow",
+        "\n\n// Restore composer draft from server",
+    )
+    script = textwrap.dedent(
+        f"""
+        const S={{session:{{session_id:'sid-a',profile:'work'}},activeProfile:'work'}};
+        let _draftSaveTimer=null;
+        const remembered=[];
+        function clearTimeout(){{}}
+        function _rememberComposerPendingFiles(){{}}
+        function _composerDraftFilesForPersist(files){{return files.map(file=>file.name);}}
+        function _composerDraftHasPayload(text,files){{return !!(text||files.length);}}
+        function _clearComposerDraftRestoreSuppression(){{}}
+        function _sessionComposerDraftHasPayload(){{return false;}}
+        const _composerDraftKnownPayloadSessions=new Set();
+        function _queueComposerDraftWrite(_sid,write){{return Promise.resolve().then(write);}}
+        function api(){{return Promise.resolve({{ok:true}});}}
+        function _rememberComposerDraftPayloadState(){{}}
+        function _composerRememberedOwnerSnapshot(){{
+          return {{generation:7,revision:3,text:'older',files:[],profile:'work',session_id:'sid-a'}};
+        }}
+        function _rememberComposerOwnerState(sid,profile,state,generation){{
+          remembered.push({{sid,profile,state,generation}});
+        }}
+        {sync_owner}
+        {save_now}
+
+        _saveComposerDraftNow('sid-a','draft A',[{{name:'a.txt'}}]).then(()=>{{
+          process.stdout.write(JSON.stringify(remembered));
+        }});
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    remembered = json.loads(proc.stdout)
+    assert remembered == [{
+        "sid": "sid-a",
+        "profile": "work",
+        "state": {"text": "draft A", "files": [{"name": "a.txt"}], "revision": 4},
+        "generation": 7,
+    }]
+
+
+def test_ordinary_switch_save_r2_invalidates_deferred_failed_send_r1_snapshot():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    authority = _composer_authority_helpers()
+    sync_owner = _function(
+        SESSIONS_JS,
+        "_syncComposerOwnerStateFromDraft",
+        "\n\nfunction _sessionComposerDraftHasPayload",
+    )
+    save_now = _function(
+        SESSIONS_JS,
+        "_saveComposerDraftNow",
+        "\n\n// Restore composer draft from server",
+    )
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:''}};
+        const S={{
+          session:{{session_id:'old-session',profile:'default',composer_draft:{{}}}},
+          activeProfile:'default',pendingFiles:[]
+        }};
+        const $=id=>id==='msg'?msg:null;
+        let _draftSaveTimer=null;
+        const _composerDraftKnownPayloadSessions=new Set();
+        const writes=[];
+        function clearTimeout(){{}}
+        function _rememberComposerPendingFiles(){{}}
+        function _composerDraftFilesForPersist(files){{return files.map(f=>f.name||f);}}
+        function _composerDraftHasPayload(text,files){{return !!(text||files.length);}}
+        function _clearComposerDraftRestoreSuppression(){{}}
+        function _sessionComposerDraftHasPayload(){{return false;}}
+        function _rememberComposerDraftPayloadState(){{}}
+        function _queueComposerDraftWrite(_sid,write){{return Promise.resolve().then(write);}}
+        function api(_path,options){{
+          writes.push(JSON.parse(options.body));return Promise.resolve({{ok:true}});
+        }}
+        {authority}
+        {sync_owner}
+        {save_now}
+
+        const tx=_beginComposerOwnershipTransition('old-session','default');
+        const producer=_newComposerProducerToken('failed-send');
+        _composerSetText('r1','r1','old-session',producer,'default');
+        const r1Snapshot=_composerOwnerSnapshot('old-session','default');
+        _bindComposerOwnershipDestination(tx,'new-session','default');
+        S.session={{session_id:'new-session',profile:'default',composer_draft:{{}}}};
+        msg.value='';
+        _drainComposerOwnershipTransition(tx);
+
+        S.session={{session_id:'old-session',profile:'default',composer_draft:{{}}}};
+        msg.value='r2';
+        _saveComposerDraftNow('old-session','r2',[],'default').then(()=>{{
+          S.session={{session_id:'new-session',profile:'default',composer_draft:{{}}}};
+          msg.value='';
+          if(_composerOwnerSnapshotIsCurrent(r1Snapshot)){{
+            return _saveComposerDraftNow(
+              'old-session',r1Snapshot.text,r1Snapshot.files,r1Snapshot.profile
+            );
+          }}
+        }}).then(()=>{{
+          process.stdout.write(JSON.stringify({{
+            writes,current:_composerRememberedOwnerSnapshot('old-session','default')
+          }}));
+        }}).catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["writes"][-1]["text"] == "r2"
+    assert [write["text"] for write in result["writes"]].count("r1") == 1
+    assert result["current"]["text"] == "r2"
+    assert result["current"]["revision"] > 1
+
+
+def test_owner_snapshot_fails_closed_when_authority_is_missing_or_revision_changed():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const S={{session:null,activeProfile:'default',pendingFiles:[]}};
+        const $=()=>null;
+        {authority}
+        const snapshot={{
+          session_id:'sid-a',profile:'default',generation:4,revision:2,text:'r2',files:[]
+        }};
+        const missing=_composerOwnerSnapshotIsCurrent(snapshot);
+        _rememberComposerOwnerState('sid-a','default',snapshot,4);
+        const exact=_composerOwnerSnapshotIsCurrent(snapshot);
+        _rememberComposerOwnerState('sid-a','default',{{
+          text:'r3',files:[],revision:3,
+        }},4);
+        const newer=_composerOwnerSnapshotIsCurrent(snapshot);
+        process.stdout.write(JSON.stringify({{missing,exact,newer}}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"missing": False, "exact": True, "newer": False}
+
+
+def test_foreign_owner_cannot_join_null_source_transition():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:''}};
+        const S={{session:null,activeProfile:'beta',pendingFiles:[]}};
+        const $=id=>id==='msg'?msg:null;
+        const saves=[];
+        function _saveComposerDraftNow(sid,text,files,profile){{
+          saves.push({{sid,text,files:[...(files||[])].map(f=>f.name),profile}});
+          return Promise.resolve();
+        }}
+        {authority}
+        _rememberComposerOwnerState('owner-a','alpha',{{
+          text:'A text',files:[{{name:'a.txt'}}],revision:1,
+        }},1);
+        const lifecycleA=Object.freeze({{
+          producerToken:'voice-a',generation:null,ownerRole:'owner',
+          ownerSid:'owner-a',ownerProfile:'alpha',
+        }});
+        const transitionB=_beginComposerOwnershipTransition(null,'beta');
+        _composerSetText('late A','late A',null,lifecycleA);
+        _bindComposerOwnershipDestination(transitionB,'owner-b','beta');
+        S.session={{session_id:'owner-b',profile:'beta'}};
+        _drainComposerOwnershipTransition(transitionB);
+        Promise.resolve().then(()=>Promise.resolve()).then(()=>{{
+          process.stdout.write(JSON.stringify({{text:msg.value,saves}}));
+        }});
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["text"] == ""
+    assert result["saves"][-1] == {
+        "sid": "owner-a", "text": "late A", "files": ["a.txt"], "profile": "alpha"
+    }
+
+
+def test_non_visible_owner_uses_full_remembered_baseline_for_late_file():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:'B text'}};
+        const original={{name:'original.txt'}};
+        const late={{name:'late.webm'}};
+        const S={{session:{{session_id:'owner-b',profile:'beta'}},activeProfile:'beta',pendingFiles:[]}};
+        const $=id=>id==='msg'?msg:null;
+        const saves=[];
+        function _saveComposerDraftNow(sid,text,files,profile){{
+          saves.push({{sid,text,files:[...(files||[])].map(f=>f.name),profile}});
+          return Promise.resolve();
+        }}
+        {authority}
+        _rememberComposerOwnerState('owner-a','alpha',{{
+          text:'A text',files:[original],revision:4,
+        }},2);
+        _composerAddFiles([late],'owner-a','raw-a','alpha');
+        Promise.resolve().then(()=>Promise.resolve()).then(()=>{{
+          process.stdout.write(JSON.stringify({{text:msg.value,saves}}));
+        }});
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["text"] == "B text"
+    assert result["saves"][-1] == {
+        "sid": "owner-a",
+        "text": "A text",
+        "files": ["original.txt", "late.webm"],
+        "profile": "alpha",
+    }
+
+
+def test_non_visible_owner_without_authoritative_baseline_fails_closed():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:'visible draft'}};
+        const S={{
+          session:{{session_id:'visible',profile:'beta'}},activeProfile:'beta',pendingFiles:[]
+        }};
+        const $=id=>id==='msg'?msg:null;
+        const saves=[];
+        function _saveComposerDraftNow(sid,text,files,profile){{
+          saves.push({{sid,text,files:files.map(file=>file.name),profile}});
+          return Promise.resolve();
+        }}
+        {authority}
+        const late={{name:'late.webm'}};
+        _composerAddFiles([late],'forgotten-owner','raw-a','alpha');
+        process.stdout.write(JSON.stringify({{
+          visibleText:msg.value,
+          visibleFiles:S.pendingFiles.map(file=>file.name),
+          remembered:_composerRememberedOwnerSnapshot('forgotten-owner','alpha'),
+          saves,
+        }}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "visibleText": "visible draft",
+        "visibleFiles": [],
+        "remembered": None,
+        "saves": [],
+    }
+
+
+def test_same_session_id_different_profile_is_non_visible_owner():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:'beta text'}};
+        const S={{
+          session:{{session_id:'shared',profile:'work'}},
+          activeProfile:'work',activeProfileIsDefault:true,pendingFiles:[]
+        }};
+        const $=id=>id==='msg'?msg:null;
+        const saves=[];
+        function _saveComposerDraftNow(sid,text,files,profile){{
+          saves.push({{sid,text,profile}});return Promise.resolve();
+        }}
+        {authority}
+        _rememberComposerOwnerState('shared','default',{{text:'default text',files:[],revision:1}},1);
+        _composerAppendText(' late','shared','default-producer','default');
+        Promise.resolve().then(()=>Promise.resolve()).then(()=>{{
+          process.stdout.write(JSON.stringify({{text:msg.value,saves}}));
+        }});
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["text"] == "beta text"
+    assert result["saves"][-1] == {
+        "sid": "shared", "text": "default text late", "profile": "default"
+    }
+
+
+def test_unresolved_generation_callback_is_dropped_instead_of_using_visible_owner():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:'visible'}};
+        const S={{session:{{session_id:'visible',profile:'default'}},activeProfile:'default',pendingFiles:[]}};
+        const $=id=>id==='msg'?msg:null;
+        {authority}
+        const stale=Object.freeze({{
+          producerToken:'stale',generation:999,ownerRole:'destination',
+          ownerSid:null,ownerProfile:'default',
+        }});
+        _composerSetText('stale text','stale text',null,stale);
+        process.stdout.write(msg.value);
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "visible"
+
+
+def test_owner_file_references_release_on_clear_and_forget_on_delete():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const S={{session:null,activeProfile:'default',pendingFiles:[]}};
+        const $=()=>null;
+        {authority}
+        const file={{name:'private.bin'}};
+        _rememberComposerOwnerState('sid-a','default',{{text:'draft',files:[file],revision:1}},1);
+        _rememberComposerSettledOwners(1,{{sourceSid:'sid-a',destinationSid:'sid-b'}});
+        _releaseComposerOwnerFiles('sid-a');
+        const afterRelease=_composerRememberedOwnerSnapshot('sid-a','default');
+        _rememberComposerOwnerState('sid-a','default',{{text:'draft',files:[file],revision:2}},1);
+        _forgetComposerOwnerState('sid-a');
+        process.stdout.write(JSON.stringify({{
+          releasedFiles:afterRelease.files.length,
+          ownerExists:!!_composerRememberedOwnerSnapshot('sid-a','default'),
+          generationExists:_composerSettledOwnersByGeneration.has(1),
+        }}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "releasedFiles": 0, "ownerExists": False, "generationExists": False
+    }
+    assert "_releaseComposerOwnerFiles(sid)" in _function(
+        SESSIONS_JS, "_clearComposerDraft", "\n\nconst SESSION_VIEWED_COUNTS_KEY"
+    )
+    assert "_forgetComposerOwnerState(sid)" in _function(
+        SESSIONS_JS, "deleteSession", "\n\n// ── Project helpers"
+    )
+    assert "ids.forEach(_forgetComposerOwnerState)" in SESSIONS_JS
+
+
+def test_all_ordinary_draft_saves_refresh_owner_revision_authority():
+    debounced = _function(SESSIONS_JS, "_saveComposerDraft", "\n\nfunction _composerDraftHasPayload")
+    immediate = _function(
+        SESSIONS_JS, "_saveComposerDraftNow", "\n\n// Restore composer draft from server"
+    )
+    assert "_syncComposerOwnerStateFromDraft" in debounced
+    assert "_syncComposerOwnerStateFromDraft" in immediate
+
+
+def test_late_lifecycle_a_callback_cannot_join_transition_b():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:'owner A'}};
+        const S={{
+          session:{{session_id:'owner-a',profile:'default'}},
+          activeProfile:'default',pendingFiles:[]
+        }};
+        const $=id=>id==='msg'?msg:null;
+        const saves=[];
+        function _saveComposerDraftNow(sid,text,files,profile){{
+          saves.push({{sid,text,files:[...(files||[])],profile}});
+          return Promise.resolve();
+        }}
+        {authority}
+
+        const lifecycleA=_newComposerProducerHandle('voice-a');
+        _rememberComposerOwnerState('owner-a','default',{{
+          text:'owner A',files:[],revision:0,
+        }},0);
+        S.session={{session_id:'owner-b',profile:'default'}};
+        msg.value='owner B';
+        const transitionB=_beginComposerOwnershipTransition('owner-b','default');
+        const lifecycleB=_newComposerProducerHandle('voice-b');
+
+        _composerSetText('late A','late A',null,lifecycleA);
+        _bindComposerOwnershipDestination(transitionB,'owner-b-new','default');
+        S.session={{session_id:'owner-b-new',profile:'default'}};
+        msg.value='';
+        _drainComposerOwnershipTransition(transitionB);
+        _composerSetText('late B','late B',null,lifecycleB);
+
+        Promise.resolve().then(()=>Promise.resolve()).then(()=>{{
+          process.stdout.write(JSON.stringify({{text:msg.value,saves}}));
+        }});
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["text"] == "late B"
+    assert result["saves"][-1]["sid"] == "owner-a"
+    assert result["saves"][-1]["text"] == "late A"
 
 
 def test_behavior_harness_uses_fixed_literal_source_only():

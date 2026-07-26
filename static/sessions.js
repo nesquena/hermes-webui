@@ -270,6 +270,7 @@ function _saveComposerDraft(sid, text, files) {
   _rememberComposerPendingFiles(sid, files);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
+  _syncComposerOwnerStateFromDraft(sid, normalizedText, files);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
     _composerDraftKnownPayloadSessions.add(sid);
@@ -289,6 +290,29 @@ function _saveComposerDraft(sid, text, files) {
 
 function _composerDraftHasPayload(text, files) {
   return !!(String(text || '') || (Array.isArray(files) && files.filter(Boolean).length));
+}
+
+function _syncComposerOwnerStateFromDraft(sid, text, files, ownerProfile) {
+  if (!sid || typeof _rememberComposerOwnerState !== 'function') return;
+  const profile = String(
+    ownerProfile || (S.session && S.session.session_id === sid && S.session.profile)
+    || S.activeProfile || 'default'
+  ).trim() || 'default';
+  const remembered = typeof _composerRememberedOwnerSnapshot === 'function'
+    ? _composerRememberedOwnerSnapshot(sid, profile)
+    : null;
+  const normalizedText = String(text || '');
+  const liveFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  const payloadChanged = !!remembered && (
+    remembered.text !== normalizedText
+    || remembered.files.length !== liveFiles.length
+    || remembered.files.some((file, index) => file !== liveFiles[index])
+  );
+  _rememberComposerOwnerState(sid, profile, {
+    text: normalizedText,
+    files: liveFiles,
+    revision: remembered ? remembered.revision + (payloadChanged ? 1 : 0) : 0,
+  }, remembered ? remembered.generation : 0);
 }
 
 function _sessionComposerDraftHasPayload(session) {
@@ -312,13 +336,17 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 
 // Immediate save used before session switches.
 function _saveComposerDraftNow(sid, text, files) {
-  const ownerProfile=arguments[3];
+  const ownerProfile=String(
+    arguments[3]||(S.session&&S.session.session_id===sid&&S.session.profile)
+    ||S.activeProfile||'default'
+  ).trim()||'default';
   const rejectOnError=!!(arguments[4]&&arguments[4].rejectOnError);
   if (!sid) return Promise.resolve();
   clearTimeout(_draftSaveTimer);
   _rememberComposerPendingFiles(sid, files, ownerProfile);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
+  _syncComposerOwnerStateFromDraft(sid, normalizedText, files, ownerProfile);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
   }
@@ -398,6 +426,7 @@ function _clearComposerDraft(sid, text, files) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
   _forgetComposerPendingFiles(sid);
+  if(typeof _releaseComposerOwnerFiles==='function') _releaseComposerOwnerFiles(sid);
   _clearRememberedNewChatDraftSession(sid);
   if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
   else _suppressComposerDraftRestoreAfterSubmit(sid);
@@ -4460,6 +4489,7 @@ function _renderBatchActionBar(){
       const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
       ids.forEach(_clearHandoffStorageForSession);
       ids.forEach(_forgetComposerPendingFiles);
+      if(typeof _forgetComposerOwnerState==='function') ids.forEach(_forgetComposerOwnerState);
       if(S.session&&ids.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
@@ -9199,6 +9229,7 @@ async function deleteSession(sid, beforeDelete=null){
   const response=deleteResult&&deleteResult.response;
   const cleanupFailed=!!(response&&response.state_db_cleanup_failed);
   _forgetComposerPendingFiles(sid);
+  if(typeof _forgetComposerOwnerState==='function') _forgetComposerOwnerState(sid);
   if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
     _pendingSessionReflowPositions=reflowPositions;
