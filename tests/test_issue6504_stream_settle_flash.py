@@ -71,6 +71,23 @@ def _extract_reconnect_preflight_body() -> str:
     raise AssertionError("unclosed reconnect preflight IIFE")
 
 
+def _extract_restore_timeout_body() -> str:
+    anchor = "const _restoreTimer=setTimeout(()=>{"
+    start = MESSAGES_JS.find(anchor)
+    assert start >= 0, "missing reconnect restore timeout"
+    brace = MESSAGES_JS.find("{", start)
+    depth = 0
+    for i in range(brace, len(MESSAGES_JS)):
+        ch = MESSAGES_JS[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return MESSAGES_JS[brace + 1 : i]
+    raise AssertionError("unclosed reconnect restore timeout")
+
+
 def _run_recovery_case(
     *,
     active: bool,
@@ -1346,5 +1363,89 @@ def test_terminal_callbacks_do_not_mutate_after_same_id_owner_token_replacement(
     assert result["restoreCalls"] == 0
     assert result["handleErrorCalls"] == 0
     assert result["wireCalls"] == 0
+    assert result["ownerToken"] == 2
+    assert result["activeStreamId"] == "stream-1"
+
+
+def test_restore_timeout_does_not_finalize_after_same_id_owner_token_replacement():
+    current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
+    owner = _extract("_ownsActiveStreamOrBackground")
+    recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
+    restore_timeout = _extract_restore_timeout_body()
+    script = textwrap.dedent(
+        """
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
+        let _terminalStateReached = false;
+        let _streamFinalized = false;
+        let _restoreTimedOut = false;
+        let closeCalls = 0;
+        let handleErrorCalls = 0;
+        let flushCalls = 0;
+        let cleanupCalls = 0;
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'stream-1',
+          messages: [{ role: 'assistant', content: 'replacement answer' }],
+        };
+        globalThis.LIVE_STREAMS = {
+          'sid-1': { streamId: 'stream-1', source: { readyState: 1, close() {} }, ownerToken: 2 }
+        };
+        globalThis.source = { readyState: 1, close() {} };
+        globalThis._isSessionCurrentPane = () => true;
+        globalThis._isActiveSession = () => true;
+        globalThis._deferStreamErrorIfOffline = () => false;
+        globalThis._deferStreamErrorIfPageHidden = () => false;
+        globalThis._flushReasoningToAnchor = () => { flushCalls += 1; };
+        globalThis._scheduleAnchorRegistryCleanup = () => { cleanupCalls += 1; };
+        globalThis._handleStreamError = () => { handleErrorCalls += 1; };
+        globalThis._closeSource = () => { closeCalls += 1; };
+        """
+        + current_owner
+        + """
+        """
+        + current_owner_active
+        + """
+        """
+        + owner
+        + """
+        """
+        + recovery_owner
+        + """
+        const runRestoreTimeout = () => {
+        """
+        + restore_timeout
+        + """
+        };
+        runRestoreTimeout();
+        console.log(JSON.stringify({
+          restoreTimedOut: _restoreTimedOut,
+          closeCalls,
+          handleErrorCalls,
+          flushCalls,
+          cleanupCalls,
+          ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
+          activeStreamId: S.activeStreamId,
+        }));
+        """
+    )
+    proc = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["restoreTimedOut"] is True
+    assert result["closeCalls"] == 1
+    assert result["handleErrorCalls"] == 0
+    assert result["flushCalls"] == 0
+    assert result["cleanupCalls"] == 0
     assert result["ownerToken"] == 2
     assert result["activeStreamId"] == "stream-1"

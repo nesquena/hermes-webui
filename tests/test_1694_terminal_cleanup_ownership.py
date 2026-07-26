@@ -91,6 +91,7 @@ def test_reconnect_settled_and_error_paths_keep_cleanup_session_scoped():
     assert "stopApprovalPolling();stopClarifyPolling();" not in combined
     assert "renderSessionList();setBusy(false)" not in combined
     assert "_setActivePaneIdleIfOwner" in combined
+    assert "_currentPaneRecoveryOwnerLost()" in error_body
 
 def test_stream_end_without_done_restores_settled_session_before_closing():
     """If a journal/replay emits stream_end without done, the UI must settle from /api/session.
