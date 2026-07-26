@@ -4798,6 +4798,7 @@ async function clearConversation() {
     const data = await api('/api/session/clear', {method:'POST',
       body: JSON.stringify({session_id: S.session.session_id})});
     S.session = data.session;
+    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
     S.messages = [];
     S.toolCalls = [];
     syncTopbar();
