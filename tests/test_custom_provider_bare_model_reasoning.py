@@ -186,12 +186,14 @@ def test_grok_build_stays_hidden_without_agent_support():
     ) == []
 
 
-def test_grok_media_and_non_reasoning_hide_chip():
+def test_grok_models_outside_agent_allowlist_hide_chip():
     for model_id in (
         "xai/grok-imagine-image",
         "xai/grok-imagine-video",
         "xai/grok-tts",
         "xai/grok-4.20-non-reasoning",
+        "xai/grok-4-fast-reasoning",
+        "xai/grok-4.20-0309-reasoning",
     ):
         assert cfg.resolve_model_reasoning_efforts(model_id, provider_id="custom") == [], model_id
 

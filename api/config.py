@@ -3362,7 +3362,6 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
             or "grok-3-mini" in joined
             or "grok-4-5" in joined
             or "grok-4-3" in joined
-            or "reasoning" in token_set
         ):
             return True
         return False
@@ -3578,11 +3577,8 @@ def _filter_reasoning_efforts_for_provider(
         # so advertise only the effective wire ladder.
         if "multi-agent" in bare:
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
-        # Effort-capable chat Grok (4.5 / 4.3 / 3-mini / *-reasoning).
-        if (
-            bare.startswith(("grok-4.5", "grok-4.3", "grok-3-mini"))
-            or "reasoning" in bare
-        ):
+        # Effort-capable chat Grok (4.5 / 4.3 / 3-mini).
+        if bare.startswith(("grok-4.5", "grok-4.3", "grok-3-mini")):
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
         # Unknown grok-* : fail closed (no chip) rather than advertise a ladder
         # the API may reject with HTTP 400.
