@@ -55,6 +55,10 @@ function extractFunctionByName(name) {
 
 function installRuntimeHelpers() {
   const helpers = [
+    "_currentLiveOwnerEntry",
+    "_currentLiveOwnerActive",
+    "_ownsActiveStreamOrBackground",
+    "_currentPaneRecoveryOwnerLost",
     "_isMarkerOnlyAssistantMessage",
     "_streamRecoveryControlMessageText",
     "_streamRecoveryControlMessage",
@@ -81,6 +85,8 @@ function buildRuntime() {
   const calls = [];
   globalThis.activeSid = activeSid;
   globalThis.streamId = streamId;
+  globalThis._liveOwnerToken = 1;
+  globalThis._closureRetired = false;
   globalThis.assistantText = false;
   globalThis.S = JSON.parse(JSON.stringify(scenario.state || {}));
   if (!globalThis.S.session) {
@@ -90,6 +96,9 @@ function buildRuntime() {
     globalThis.S.activeStreamId = streamId;
   }
   globalThis.INFLIGHT = {};
+  globalThis.LIVE_STREAMS = {
+    [activeSid]: { streamId, source: { readyState: 1, close() {} }, ownerToken: globalThis._liveOwnerToken },
+  };
   globalThis._EPHEMERAL_TURN_FIELDS = [
     '_turnUsage',
     '_turnDuration',
