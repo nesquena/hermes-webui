@@ -1006,8 +1006,8 @@ async function loadCronGatewayNotice() {
   }
 }
 
-async function loadCrons(animate) {
-  const options = arguments[1] || {};
+async function loadCrons(animate, options) {
+  options = options || {};
   const allowCache = !!options.allowCache;
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
@@ -1475,6 +1475,37 @@ function openCronDetail(jobOrId, el){
   _closeMobileSidebarAfterPanelSelection();
 }
 
+function _syncTaskDetailEmptyState() {
+  const empty = $('taskDetailEmpty');
+  if (!empty || typeof empty.querySelector !== 'function') return;
+  const title = empty.querySelector('.main-view-empty-title');
+  const sub = empty.querySelector('.main-view-empty-sub');
+  if (!title && !sub) return;
+  const isScripts = _tasksSubtab === 'scripts';
+  const titleKey = isScripts ? 'tasks_scripts_empty_title' : 'tasks_empty_title';
+  const subKey = isScripts ? 'tasks_scripts_empty_sub' : 'tasks_empty_sub';
+  const fallbackTitle = isScripts
+    ? 'Browse scripts in the sidebar'
+    : 'Select a scheduled job';
+  const fallbackSub = isScripts
+    ? 'Expand a script in the sidebar to view its description and source.'
+    : 'Pick a job from the sidebar to view its details and runs, or create a new one.';
+  const titleText = typeof t === 'function'
+    ? ((t(titleKey) && t(titleKey) !== titleKey) ? t(titleKey) : fallbackTitle)
+    : fallbackTitle;
+  const subText = typeof t === 'function'
+    ? ((t(subKey) && t(subKey) !== subKey) ? t(subKey) : fallbackSub)
+    : fallbackSub;
+  if (title) {
+    title.textContent = titleText;
+    title.setAttribute('data-i18n', titleKey);
+  }
+  if (sub) {
+    sub.textContent = subText;
+    sub.setAttribute('data-i18n', subKey);
+  }
+}
+
 function _clearCronDetail(){
   _currentCronDetail = null;
   _currentCronDetailKey = '';
@@ -1485,7 +1516,10 @@ function _clearCronDetail(){
   const empty = $('taskDetailEmpty');
   if (title) title.textContent = '';
   if (body) { body.innerHTML = ''; body.style.display = 'none'; }
-  if (empty) empty.style.display = '';
+  if (empty) {
+    _syncTaskDetailEmptyState();
+    empty.style.display = '';
+  }
   _setCronHeaderButtons('empty');
 }
 
@@ -1502,7 +1536,7 @@ async function _ensureTasksSubtabLoaded(tab) {
     await loadScripts();
     return;
   }
-  await loadCrons(false, { allowCache: true });
+  await loadCrons(false);
 }
 function handleTasksSubtabKeydown(event) {
   if (!event) return;
@@ -1541,6 +1575,7 @@ function switchTasksSubtab(tab, options = {}) {
     b.setAttribute('aria-selected', String(selected));
     b.tabIndex = selected ? 0 : -1;
   });
+  _syncTaskDetailEmptyState();
   if (ensure) void _ensureTasksSubtabLoaded(tab);
 }
 

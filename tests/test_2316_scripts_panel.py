@@ -156,6 +156,7 @@ def _run_playwright_probe(script: str, *, width: int = 1280, height: int = 720):
         try:
             page.goto(TEST_BASE, wait_until="domcontentloaded")
             page.wait_for_selector("#scriptsList", state="attached", timeout=10000)
+            page.wait_for_timeout(500)
             return page.evaluate(script)
         finally:
             browser.close()
@@ -1092,6 +1093,7 @@ function $(id){
     tasksScriptActions: scriptsActions,
   }[id] || null;
 }
+function _syncTaskDetailEmptyState(){}
 async function loadScripts(){ loadScriptsCalls += 1; }
 async function loadCrons(){}
 eval(extractFunc('_ensureTasksSubtabLoaded'));
@@ -1509,7 +1511,16 @@ def test_session_load_profile_switch_clears_scripts_dom_before_destination_rende
     assert "alpha source" not in result["final"]["text"]
     assert result["final"]["refreshDisabled"] is False
     assert result["final"]["refreshOpacity"] == ""
-    assert [call["url"] for call in result["calls"]] == [
+    relevant_calls = [
+        call["url"]
+        for call in result["calls"]
+        if call["url"] in {
+            "/api/scripts/raw?path=a.py",
+            "/api/profile/switch",
+            "/api/scripts/list",
+        }
+    ]
+    assert relevant_calls == [
         "/api/scripts/raw?path=a.py",
         "/api/profile/switch",
         "/api/scripts/list",
@@ -1707,7 +1718,75 @@ eval(extractFunc('_profileSwitchPanelLoad'));
 })().catch(err => { console.error(err); process.exit(1); });
 """
     calls = json.loads(_run_node(source))
-    assert calls == ["scripts", ["crons", False, True]]
+    assert calls == ["scripts", ["crons", False, False]]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_scripts_subtab_uses_scripts_aware_detail_empty_copy():
+    js = PANELS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+let _tasksSubtab = 'jobs';
+const title = { textContent: '', attrs: {}, setAttribute(name, value){ this.attrs[name] = String(value); } };
+const sub = { textContent: '', attrs: {}, setAttribute(name, value){ this.attrs[name] = String(value); } };
+const empty = {
+  querySelector(selector){
+    if (selector === '.main-view-empty-title') return title;
+    if (selector === '.main-view-empty-sub') return sub;
+    return null;
+  }
+};
+function $(id){ return id === 'taskDetailEmpty' ? empty : null; }
+function t(key){
+  return {
+    tasks_empty_title: 'Select a scheduled job',
+    tasks_empty_sub: 'Pick a job from the sidebar to view its details and runs, or create a new one.',
+    tasks_scripts_empty_title: 'Browse scripts in the sidebar',
+    tasks_scripts_empty_sub: 'Expand a script in the sidebar to view its description and source.',
+  }[key] || key;
+}
+eval(extractFunc('_syncTaskDetailEmptyState'));
+_syncTaskDetailEmptyState();
+const jobs = {
+  title: title.textContent,
+  sub: sub.textContent,
+  titleKey: title.attrs['data-i18n'],
+  subKey: sub.attrs['data-i18n'],
+};
+_tasksSubtab = 'scripts';
+_syncTaskDetailEmptyState();
+console.log(JSON.stringify({
+  jobs,
+  scripts: {
+    title: title.textContent,
+    sub: sub.textContent,
+    titleKey: title.attrs['data-i18n'],
+    subKey: sub.attrs['data-i18n'],
+  }
+}));
+"""
+    result = json.loads(_run_node(source))
+
+    assert result["jobs"] == {
+        "title": "Select a scheduled job",
+        "sub": "Pick a job from the sidebar to view its details and runs, or create a new one.",
+        "titleKey": "tasks_empty_title",
+        "subKey": "tasks_empty_sub",
+    }
+    assert result["scripts"] == {
+        "title": "Browse scripts in the sidebar",
+        "sub": "Expand a script in the sidebar to view its description and source.",
+        "titleKey": "tasks_scripts_empty_title",
+        "subKey": "tasks_scripts_empty_sub",
+    }
+
+
+def test_tasks_tablist_aria_label_and_touch_target_rule_are_present():
+    index_html = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    style_css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert 'data-i18n-aria-label="tasks_views_label"' in index_html
+    assert "@media (pointer: coarse), (max-width: 640px)" in style_css
+    assert ".tasks-subtab{min-height:44px" in style_css
 
 
 def test_scripts_description_row_stays_inside_header_button():

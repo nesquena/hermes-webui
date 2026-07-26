@@ -582,6 +582,7 @@ async function loadCrons(animate, options) {{
 }}
 async function loadScripts() {{ loadScriptsCalls += 1; }}
 function _clearCronDetail() {{ clearCronDetailCalls += 1; }}
+function _syncTaskDetailEmptyState() {{}}
 function _invalidateScriptsRequests() {{
   _scriptsRequestId += 1;
   _scriptsRawRequestId += 1;
@@ -622,7 +623,7 @@ function _invalidateScriptsRequests() {{
     assert result["loadCronsCalls"] == [
         {
             "animate": False,
-            "allowCache": True,
+            "allowCache": False,
             "cronListIsNull": True,
             "cronCards": 0,
         }

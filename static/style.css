@@ -7282,6 +7282,9 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 .tasks-subtab{background:none;border:none;padding:4px 10px;font-size:11px;font-weight:600;color:var(--muted);cursor:pointer;border-radius:6px;text-transform:uppercase;letter-spacing:.06em;transition:background .15s,color .15s;}
 .tasks-subtab:hover{background:var(--hover-bg);color:var(--text);}
 .tasks-subtab.active{background:var(--accent-bg);color:var(--accent-text);}
+@media (pointer: coarse), (max-width: 640px){
+  .tasks-subtab{min-height:44px;padding-top:10px;padding-bottom:10px;}
+}
 /* Scripts list */
 .scripts-list{flex:1;min-height:0;overflow-y:auto;padding:8px;}
 .script-expand{margin-left:auto;color:var(--muted);font-size:14px;line-height:1;}
