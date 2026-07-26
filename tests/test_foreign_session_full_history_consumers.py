@@ -12,9 +12,12 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+COMMANDS_JS = (REPO / "static" / "commands.js").read_text(encoding="utf-8")
 I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
+UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 WORKSPACE_JS = (REPO / "static" / "workspace.js").read_text(encoding="utf-8")
 TRANSCRIPT_FN = MESSAGES_JS[
     MESSAGES_JS.index("function transcript(") : MESSAGES_JS.index("let _composerAutoResizeRaf=0;")
@@ -297,13 +300,16 @@ async function _ensureAllMessagesLoaded() {{ {ensure_body} }}
 """
 
 
-def _ensure_all_messages_loaded_script(*, start_and_settle_during_fetch: bool = False) -> str:
+def _ensure_all_messages_loaded_script(*, goal_turn_during_fetch: bool = False) -> str:
     sessions_path = str(REPO / "static" / "sessions.js")
+    commands_path = str(REPO / "static" / "commands.js")
     return f"""
 const fs = require('fs');
 const sessionsSrc = fs.readFileSync({json.dumps(sessions_path)}, 'utf8');
+const commandsSrc = fs.readFileSync({json.dumps(commands_path)}, 'utf8');
 function extractFunction(source, name) {{
-  const start = source.indexOf(`async function ${{name}}(`);
+  let start = source.indexOf(`async function ${{name}}(`);
+  if (start < 0) start = source.indexOf(`function ${{name}}(`);
   if (start < 0) throw new Error(`missing function ${{name}}`);
   const brace = source.indexOf('{{', start);
   let depth = 0;
@@ -318,6 +324,7 @@ function extractFunction(source, name) {{
   throw new Error(`unterminated function ${{name}}`);
 }}
 const ensureAllSrc = extractFunction(sessionsSrc, '_ensureAllMessagesLoaded');
+const cmdGoalSrc = extractFunction(commandsSrc, 'cmdGoal');
 let _messagesTruncated = true;
 let _loadingOlder = false;
 let _loadingSessionId = null;
@@ -331,7 +338,7 @@ const fullMessages = [
   {{ role: 'assistant', content: 'tail latest' }},
 ];
 const S = {{
-  session: {{ session_id: 'foreign-1', message_count: 1 }},
+  session: {{ session_id: 'foreign-1', message_count: 1, workspace: '/ws', model: 'goal-model' }},
   messages: originalMessages.slice(),
   toolCalls: [{{ id: 'live-tc' }}],
   busy: false,
@@ -348,31 +355,71 @@ function _syncToolCallsForLoadedMessages(_messages, toolCalls) {{
   syncCalls += 1;
   S.toolCalls = Array.isArray(toolCalls) ? toolCalls.map((tc) => ({{ ...tc }})) : [];
 }}
-async function api() {{
-  if ({str(start_and_settle_during_fetch).lower()}) {{
-    S.busy = true;
-    S.activeStreamId = 'live-1';
-    _bumpMessagesGeneration();
-    S.messages = [
-      {{ role: 'user', content: 'NEW TURN' }},
-      {{ role: 'assistant', content: 'NEW ANSWER' }},
-    ];
-    S.toolCalls = [{{ id: 'live-tc' }}];
-    S.session.message_count = 2;
-    S.busy = false;
-    S.activeStreamId = null;
+let resolveFullLoad = null;
+function $(id) {{
+  if (id === 'modelSelect') return {{ value: 'goal-model' }};
+  return null;
+}}
+function t(key) {{ return key; }}
+function renderMessages() {{}}
+function showToast() {{}}
+function clearLiveToolCards() {{}}
+function appendThinking() {{}}
+function setBusy(v) {{ S.busy = v; }}
+function setComposerStatus() {{}}
+async function renderSessionList() {{}}
+async function newSession() {{
+  S.session = {{ session_id: 'foreign-1', message_count: 1, workspace: '/ws', model: 'goal-model' }};
+}}
+function markInflight() {{}}
+function saveInflightState() {{}}
+function startApprovalPolling() {{}}
+function startClarifyPolling() {{}}
+function _fetchYoloState() {{}}
+const INFLIGHT = {{}};
+function attachLiveStream(sid, streamId) {{
+  if (!S.session || S.session.session_id !== sid || streamId !== 'goal-1') return;
+  S.messages = [
+    {{ role: 'user', content: 'NEW TURN' }},
+    {{ role: 'assistant', content: 'NEW ANSWER' }},
+  ];
+  S.toolCalls = [{{ id: 'goal-tc' }}];
+  S.session.message_count = 2;
+  S.busy = false;
+  S.activeStreamId = null;
+  S.session.active_stream_id = null;
+}}
+async function api(url) {{
+  if (String(url).startsWith('/api/session?')) {{
+    return await new Promise((resolve) => {{
+      resolveFullLoad = resolve;
+    }});
   }}
-  return {{
+  if (url === '/api/goal') {{
+    return {{
+      message: 'Goal status',
+      stream_id: 'goal-1',
+      pending_started_at: 123,
+    }};
+  }}
+  throw new Error('Unexpected API call: ' + String(url));
+}}
+{ENSURE_ALL_FN}
+eval(cmdGoalSrc);
+(async () => {{
+  const ensurePromise = _ensureAllMessagesLoaded();
+  if ({str(goal_turn_during_fetch).lower()}) {{
+    await cmdGoal('ship it');
+  }}
+  if (typeof resolveFullLoad !== 'function') throw new Error('full-history load was not requested');
+  resolveFullLoad({{
     session: {{
       messages: fullMessages,
       tool_calls: [{{ id: 'old-tc' }}],
       message_count: fullMessages.length,
     }},
-  }};
-}}
-{ENSURE_ALL_FN}
-(async () => {{
-  await _ensureAllMessagesLoaded();
+  }});
+  await ensurePromise;
   console.log(JSON.stringify({{
     messages: S.messages,
     toolCalls: S.toolCalls,
@@ -514,17 +561,17 @@ def test_artifacts_renderer_skips_full_load_when_panel_is_not_really_visible():
 
 
 def test_ensure_all_messages_loaded_preserves_settled_turn_that_finished_mid_fetch():
-    result = _run_node(_ensure_all_messages_loaded_script(start_and_settle_during_fetch=True))
+    result = _run_node(_ensure_all_messages_loaded_script(goal_turn_during_fetch=True))
 
     assert result["messages"] == [
         {"role": "user", "content": "NEW TURN"},
         {"role": "assistant", "content": "NEW ANSWER"},
     ]
-    assert result["toolCalls"] == [{"id": "live-tc"}]
+    assert result["toolCalls"] == [{"id": "goal-tc"}]
     assert result["truncated"] is True
     assert result["busy"] is False
     assert result["activeStreamId"] is None
-    assert result["bumpCalls"] == 1
+    assert result["bumpCalls"] >= 1
     assert result["syncCalls"] == 0
     assert result["oldestIdx"] == 99
     assert result["count"] == 2
@@ -547,7 +594,7 @@ def test_ensure_all_messages_loaded_still_hydrates_when_generation_is_stable():
     assert result["count"] == 2
 
 
-def test_messages_generation_wiring_covers_full_load_and_live_turn_claims():
+def test_messages_generation_wiring_covers_full_load_live_turn_claims_and_same_session_replacements():
     assert "const startGeneration = _messagesGeneration;" in SESSIONS_JS
     assert "if (_messagesGeneration !== startGeneration) return;" in SESSIONS_JS
     assert "_bumpMessagesGeneration();\n  S.messages = msgs;" in SESSIONS_JS
@@ -557,6 +604,13 @@ def test_messages_generation_wiring_covers_full_load_and_live_turn_claims():
     assert "if(streamId&&typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n  S.activeStreamId = streamId;" in MESSAGES_JS
     assert "S.busy = true;\n    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n    S.activeStreamId = streamId;" in MESSAGES_JS
     assert "S.busy = true;\n        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n        S.activeStreamId = streamId;" in MESSAGES_JS
+    assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n      S.messages.push({role:'assistant',content:msg,_ts:Date.now()/1000,_goalStatus:true,_transient:true});" in COMMANDS_JS
+    assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n    appendThinking();setBusy(true);" in COMMANDS_JS
+    assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n      S.messages=data.session.messages||[];" in COMMANDS_JS
+    assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n      S.messages=live.session.messages||[];" in COMMANDS_JS
+    assert "if(data&&data.session){if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();S.messages=data.session.messages||[];" in COMMANDS_JS
+    assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n    S.messages = data.session.messages || [];" in UI_JS
+    assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n    S.messages = [];" in PANELS_JS
 
 
 def test_terminal_paths_route_artifacts_refresh_through_shared_idle_helper():

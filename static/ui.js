@@ -9600,6 +9600,7 @@ async function refreshSession() {
   try {
     const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
     S.session = data.session;
+    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
     S.messages = data.session.messages || [];
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
@@ -18668,6 +18669,7 @@ async function submitEdit(msgIdx, newText) {
     // let this recovery apply session A's intent (truncate/re-arm/send) to the
     // newly-visible session.
     if(!S.session || S.session.session_id !== initialSid) return;
+    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
     S.messages = S.messages.slice(0, absoluteKeepCount);
     renderMessages();
     $('msg').value = newText;
@@ -18702,6 +18704,7 @@ async function regenerateResponse(btn) {
       session_id: initialSid,
       keep_count: absoluteKeepCount
     })});
+    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
     S.messages = S.messages.slice(0, absoluteKeepCount);
     renderMessages();
     $('msg').value = lastUserText;
