@@ -108,7 +108,8 @@ def test_session_list_render_path_uses_virtual_spacers_and_scroll_rerender():
     render_body = js[render_start:render_end]
 
     assert "_sessionVirtualWindow" in render_body
-    assert "_sessionVirtualSpacer" in js
+    assert "body.insertBefore(_sessionVirtualSpacer(groupTopPad,'before'), body.firstChild);" in render_body
+    assert "body.appendChild(_sessionVirtualSpacer(groupBottomPad,'after'));" in render_body
     assert "const groupedMode=!!window._sidebarGroupByProject" in render_body
     assert "virtualized:false,start:0,end:flatSessionRows.length" in render_body
     assert "spacer.dataset.virtualSpacer=where||'gap'" in js

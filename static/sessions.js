@@ -8031,12 +8031,18 @@ function renderSessionListFromCache(){
       renderSessionListFromCache();
     };
     wrapper.appendChild(hdr);
+    let groupTopPad=0;
+    let groupBottomPad=0;
     for(const s of g.items){
       if(isGroupCollapsed) continue;
       const rowIndex=globalSessionRowIndex++;
       const inWindow=!virtualWindow.virtualized||(rowIndex>=virtualWindow.start&&rowIndex<virtualWindow.end);
       if(inWindow){ body.appendChild(_renderOneSession(s, Boolean(g.isPinned))); }
+      else if(rowIndex<virtualWindow.start){ groupTopPad+=virtualWindow.itemHeight; }
+      else { groupBottomPad+=virtualWindow.itemHeight; }
     }
+    if(groupTopPad>0){ body.insertBefore(_sessionVirtualSpacer(groupTopPad,'before'), body.firstChild); }
+    if(groupBottomPad>0){ body.appendChild(_sessionVirtualSpacer(groupBottomPad,'after')); }
     wrapper.appendChild(body);
     list.appendChild(wrapper);
   }

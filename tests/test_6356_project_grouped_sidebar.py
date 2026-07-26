@@ -325,53 +325,197 @@ process.stdout.write(JSON.stringify({
 
 def test_grouped_production_dom_geometry_covers_middle_bottom_and_active_anchor():
     playwright_factory = _require_playwright()
-    groups = _extract_js_function(SESSIONS_JS, "_buildSessionSidebarGroups")
-    fixture = f"""
-{groups}
-const _sessionSortTimestampMs = (s) => s.ts;
-const _sessionTimeBucketLabel = () => 'Today';
-const t = (key) => key === 'sidebar_group_unassigned' ? 'Unassigned' : key;
-const sessions = Array.from({{length:96}}, (_, index) => ({{session_id:`session-${{index}}`, project_id:`project-${{index}}`, ts:index}}));
-const projects = sessions.map((s) => ({{project_id:s.project_id, name:`Project ${{s.project_id.slice(8)}}`}}));
-const groups = _buildSessionSidebarGroups(sessions, true, projects, 0);
-const list = document.createElement('div');
-list.style.cssText = 'height:320px;overflow:auto;width:360px;';
-for (const group of groups) {{
-  const wrapper = document.createElement('div');
-  const header = document.createElement('div');
-  header.className = 'session-date-header project-session-header';
-  header.style.cssText = 'height:28px;line-height:28px;';
-  const body = document.createElement('div');
-  for (const session of group.items) {{
-    const row = document.createElement('div');
-    row.className = 'session-item'; row.dataset.sid = session.session_id;
-    row.textContent = session.session_id; row.style.cssText = 'height:32px;line-height:32px;';
-    body.appendChild(row);
-  }}
-  wrapper.append(header, body); list.appendChild(wrapper);
-}}
-document.body.appendChild(list);
-const visibleIds = () => {{
-  const bounds = list.getBoundingClientRect();
-  return [...list.querySelectorAll('.session-item')].filter((row) => {{
-    const rect = row.getBoundingClientRect();
-    return rect.bottom > bounds.top && rect.top < bounds.bottom;
-  }}).map((row) => row.dataset.sid);
-}};
-const middleScroll = Math.floor(list.scrollHeight / 2);
-list.scrollTop = middleScroll;
-const middle = visibleIds();
-list.scrollTop = list.scrollHeight;
-const bottomScroll = list.scrollTop;
-const bottom = visibleIds();
-const active = list.querySelector('[data-sid="session-95"]');
-const listRect = list.getBoundingClientRect();
-const activeRect = active.getBoundingClientRect();
-const targetScrollTop = Math.max(0, list.scrollTop + activeRect.top - listRect.top - (list.clientHeight - activeRect.height) / 2);
-list.scrollTop = targetScrollTop;
-const anchoredRect = active.getBoundingClientRect();
-window.groupedGeometry = {{totalRows:list.querySelectorAll('.session-item').length, headers:list.querySelectorAll('.project-session-header').length, middleScroll, middle, bottomScroll, bottom, targetScrollTop, activeVisible:anchoredRect.top >= listRect.top && anchoredRect.bottom <= listRect.bottom}};
+    fixture = """
+document.body.innerHTML = '<input id="sessionSearch" value=""><div id="sessionList" style="height:320px;overflow:auto;width:360px;"></div><div id="batchActionBar"></div>';
+const style = document.createElement('style');
+style.textContent = `
+  .session-date-header{height:28px;line-height:28px;display:block;}
+  .session-date-body{display:block;}
+  .session-item{height:32px;line-height:32px;display:block;}
+`;
+document.head.appendChild(style);
+const storageState = new Map([['hermes-date-groups-collapsed', '{}']]);
+Object.defineProperty(window, 'localStorage', {
+  configurable: true,
+  value: {
+    getItem(key) { return storageState.has(key) ? storageState.get(key) : null; },
+    setItem(key, value) { storageState.set(key, String(value)); },
+  },
+});
+const ICONS = new Proxy({}, {get: () => ''});
+function li() { return ''; }
+function $(id) { return document.getElementById(id); }
+window._sidebarGroupByProject = true;
+window._showCliSessions = false;
+window._projectQuickCreate = false;
+let S = {activeProfile: '', activeProfileIsDefault: false};
+let activeSid = null;
+let _sessionVisibleSidebarIds = [];
+let _selectedSessions = new Set();
+let _allProjects = Array.from({length:96}, (_, index) => ({project_id:`project-${index}`, name:`Project ${index}`}));
+let _allSessions = Array.from({length:96}, (_, index) => ({session_id:`session-${index}`, project_id:`project-${index}`, ts:index}));
+let _sessionListSkeletonActive = false;
+let _renamingSid = null;
+let _sessionActionMenu = null;
+let _sessionSourceFilter = 'webui';
+let _contentSearchResults = [];
+let _serverWebuiSessionCount = null;
+let _serverCliSessionCount = null;
+let _sessionListRefreshAnimationPending = false;
+let _sessionListEnterAllAnimationPending = false;
+let _sessionSelectMode = false;
+let _sessionListLoadError = null;
+let _activeProject = null;
+let _otherProfileCount = 0;
+let _showAllProfiles = false;
+let _showArchived = false;
+let _archivedRowsLoadedLimit = 0;
+let _archivedCliCount = 0;
+let _archivedWebuiCount = 0;
+let _pendingSessionReflowPositions = null;
+let _expandedChildSessionKeys = new Set();
+const _sessionSwipeReturnOffsets = new Map();
+const NO_PROJECT_FILTER = '__none__';
+const SESSION_SWIPE_DURATION_MS = 0;
+const SESSION_SWIPE_REFLOW_LEAD_MS = 0;
+const SESSION_VIRTUAL_ROW_HEIGHT = 32;
+const SESSION_VIRTUAL_BUFFER_ROWS = 0;
+const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
+const SESSION_ARCHIVED_PAGE_SIZE = 25;
+const SESSION_ARCHIVED_MAX_LOADED_LIMIT = 100;
+const SESSION_LIST_FLIP_TIMEOUT_MS = 0;
+const SESSION_REFLOW_TIMEOUT_MS = 0;
+function closeSessionActionMenu() {}
+function _purgeStaleInflightEntries() {}
+function _activeSessionIdForSidebar() { return activeSid; }
+function _sessionRowsWithActiveEphemeralSession(rows) { return rows; }
+function _sessionSearchMergeMatches(rows) { return rows; }
+function _ensureActiveSessionRowPresent(rows) { return rows; }
+function _partitionSidebarSessionRows(rows) {
+  return {
+    cliSessionCount: 0,
+    profileFiltered: rows,
+    sessionsRaw: rows,
+    archivedCount: 0,
+    webuiReferenceRaw: [],
+    cliReferenceRaw: [],
+    webuiSessionsRaw: rows,
+    cliSessionsRaw: [],
+  };
+}
+function _scopedSidebarReferenceRows() { return []; }
+function _renderSidebarRowsFromRawSessions(rows) { return rows; }
+function _sessionSourceTabCount(_filter, webuiCount) { return webuiCount ?? 0; }
+function _syncSidebarExpansionForActiveSession() {}
+function _sessionPrefersReducedMotion() { return true; }
+function _serverNowMs() { return 0; }
+function _sessionSidebarSortCompare(a, b) { return (a.ts || 0) - (b.ts || 0); }
+function _sidebarLineageKeyForRow(session) { return session.session_id; }
+function _isReadOnlySession() { return false; }
+function _ensureSessionVirtualScrollHandler() {}
+function _sessionLineageContainsSession(session, sid) { return !!(session && sid && session.session_id === sid); }
+function _isSessionEffectivelyStreaming() { return false; }
+function _rememberRenderedStreamingState() {}
+function _rememberRenderedSessionSnapshot() {}
+function _hasUnreadForSession() { return false; }
+function _sessionAttentionState() { return {}; }
+function _sessionDisplayTitle(session) { return session.session_id; }
+function _sessionTitleTags() { return []; }
+function _sessionTimestampMs(session) { return session.ts || 0; }
+function _formatRelativeSessionTime() { return ''; }
+function _isMessagingSession() { return false; }
+function _sessionSegmentCount() { return 0; }
+function _sessionLineageBadgeTooltip() { return ''; }
+function _sessionForkTooltip() { return ''; }
+function _sessionFullTitleTooltip() { return ''; }
+function _sourceKeyForSession() { return 'webui'; }
+function _getChannelLabel() { return ''; }
+function _truncatedSessionId(session) { return session.session_id; }
+function _sessionTitleForForkParent(session) { return session.session_id; }
+function _lineageSegmentsForRender() { return []; }
+function _lineageReportCacheKey() { return ''; }
+function _sessionSearchContentPreview() { return ''; }
+function _buildSessionRenameStarter() { return () => {}; }
+function _sessionStateTooltip() { return ''; }
+function _sessionArchivePagingFilterActive() { return false; }
+function _isCliSession() { return false; }
+function toggleSessionSelectMode() {}
+function _playSessionRowsReflowFromPositions() {}
+function _updateBatchActionBar() {}
+function _bindGroupedProjectDropTarget() {}
+function _sessionSortTimestampMs(session) { return session.ts || 0; }
+function _sessionTimeBucketLabel() { return 'Today'; }
+function _sessionVirtualWindow(opts) {
+  const total = Number(opts.total || 0);
+  const virtualized = total > SESSION_VIRTUAL_THRESHOLD_ROWS;
+  const viewportRows = 40;
+  const start = virtualized ? Math.max(0, Math.floor(Number(opts.scrollTop || 0) / opts.itemHeight) - opts.buffer) : 0;
+  const end = virtualized ? Math.min(total, start + viewportRows) : total;
+  return {
+    total,
+    start,
+    end,
+    virtualized,
+    topPad: virtualized ? start * opts.itemHeight : 0,
+    bottomPad: virtualized ? Math.max(0, total - end) * opts.itemHeight : 0,
+    itemHeight: opts.itemHeight,
+  };
+}
+function _sessionVirtualSpacer(height, where) {
+  const spacer = document.createElement('div');
+  spacer.className = 'session-virtual-spacer';
+  spacer.dataset.virtualSpacer = where || 'gap';
+  spacer.setAttribute('aria-hidden', 'true');
+  spacer.style.height = Math.max(0, Math.round(height || 0)) + 'px';
+  return spacer;
+}
+function _resyncSessionVirtualWindowAfterRender() {}
+function _renderOneSession(session) {
+  const row = document.createElement('div');
+  row.className = 'session-item' + (session.session_id === activeSid ? ' active' : '');
+  row.dataset.sid = session.session_id;
+  row.textContent = session.session_id;
+  return row;
+}
+function t(key) { return key === 'sidebar_group_unassigned' ? 'Unassigned' : key; }
+__GROUPS__
+__RENDER__
+window.groupedGeometry = {
+  error: null,
+};
+try {
+  renderSessionListFromCache();
+  const list = $('sessionList');
+  const visibleIds = () => {
+    const bounds = list.getBoundingClientRect();
+    return [...list.querySelectorAll('.session-item')].filter((row) => {
+      const rect = row.getBoundingClientRect();
+      return rect.bottom > bounds.top && rect.top < bounds.bottom;
+    }).map((row) => row.dataset.sid);
+  };
+  window.groupedGeometry.totalRows = list.querySelectorAll('.session-item').length;
+  window.groupedGeometry.headers = list.querySelectorAll('.project-session-header').length;
+  list.scrollTop = Math.floor(list.scrollHeight / 2);
+  renderSessionListFromCache();
+  window.groupedGeometry.middleScroll = list.scrollTop;
+  window.groupedGeometry.middle = visibleIds();
+  list.scrollTop = list.scrollHeight;
+  renderSessionListFromCache();
+  window.groupedGeometry.bottomScroll = list.scrollTop;
+  window.groupedGeometry.bottom = visibleIds();
+  activeSid = 'session-95';
+  renderSessionListFromCache();
+  const active = list.querySelector('[data-sid="session-95"]');
+  const listRect = list.getBoundingClientRect();
+  const activeRect = active.getBoundingClientRect();
+  window.groupedGeometry.anchorScrollTop = list.scrollTop;
+  window.groupedGeometry.activeVisible = activeRect.top >= listRect.top && activeRect.bottom <= listRect.bottom;
+} catch (error) {
+  window.groupedGeometry.error = String(error);
+}
 """
+    fixture = fixture.replace("__GROUPS__", _extract_js_function(SESSIONS_JS, "_buildSessionSidebarGroups"))
+    fixture = fixture.replace("__RENDER__", _extract_js_function(SESSIONS_JS, "renderSessionListFromCache"))
     with playwright_factory() as playwright:
         browser = playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         page = browser.new_page(viewport={"width":500, "height":500})
@@ -379,6 +523,7 @@ window.groupedGeometry = {{totalRows:list.querySelectorAll('.session-item').leng
         page.add_script_tag(content=fixture)
         observed = page.evaluate("window.groupedGeometry")
         browser.close()
+    assert observed["error"] is None, observed["error"]
     assert observed["totalRows"] == 96
     assert observed["headers"] == 96
     assert observed["middleScroll"] > 0
@@ -386,7 +531,7 @@ window.groupedGeometry = {{totalRows:list.querySelectorAll('.session-item').leng
     assert observed["middle"]
     assert observed["bottom"]
     assert "session-95" in observed["bottom"]
-    assert observed["targetScrollTop"] > 0
+    assert observed["anchorScrollTop"] > 0
     assert observed["activeVisible"] is True
 
 
