@@ -965,7 +965,7 @@ def test_cron_batch_no_reader_call_after_budget_exhaustion(monkeypatch, tmp_path
     )
 
 
-def test_read_cron_output_bounded_short_read_accounts_actual_bytes(tmp_path):
+def test_read_cron_output_bounded_short_read_accounts_actual_bytes(tmp_path, monkeypatch):
     """Round-5 #3: bytes_read must reflect the ACTUAL bytes returned by the
     descriptor, not the planned fstat window lengths. If the inode shrinks or
     returns short reads after fstat, the accounting must use len(raw)."""
@@ -998,17 +998,8 @@ def test_read_cron_output_bounded_short_read_accounts_actual_bytes(tmp_path):
         if str(name) == str(f):
             return ShortReadFile(str(f))
         return real_open(name, *a, **k)
-    monkeypatch_obj = type("M", (), {"setattr": staticmethod(lambda *a, **k: None)})()
-    # Use pytest monkeypatch via the module-level tmp_path test signature —
-    # this test takes monkeypatch implicitly through pytest collection.
-    import pytest as _pt  # noqa
-    # Actually use the real monkeypatch by changing the test signature below.
-    real_builtin_open = builtins.open
-    builtins.open = short_open
-    try:
-        text, trunc, ok, bytes_read, declined = _read_cron_output_bounded(f)
-    finally:
-        builtins.open = real_builtin_open
+    monkeypatch.setattr(builtins, "open", short_open)
+    text, trunc, ok, bytes_read, declined = _read_cron_output_bounded(f)
     # The planned windows were head_len + tail_len = 2 * cap. With short reads
     # (half returned), bytes_read must be ~cap, not 2*cap.
     assert bytes_read < _FILE_READ_MAX_BYTES * 2, (
