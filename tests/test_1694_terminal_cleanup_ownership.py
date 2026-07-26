@@ -128,6 +128,7 @@ def test_settled_restore_and_error_close_only_the_event_source_owner():
     assert "_handleStreamError(source)" in event_body
     assert "_restoreSettledSession())" not in event_body
     assert "_handleStreamError();" not in event_body
+    assert "_closeSource(source,{retainOwner:true});" in event_body
 
 def test_done_handler_is_idempotent_for_replay_or_duplicate_done_events():
     """Duplicate/replayed done events must not replay completion sound or duplicate render."""

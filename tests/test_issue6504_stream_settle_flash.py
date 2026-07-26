@@ -1,6 +1,7 @@
 import json
 import shutil
 import subprocess
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -86,6 +87,37 @@ def _extract_restore_timeout_body() -> str:
             if depth == 0:
                 return MESSAGES_JS[brace + 1 : i]
     raise AssertionError("unclosed reconnect restore timeout")
+
+
+def _run_node_script(script: str) -> subprocess.CompletedProcess[str]:
+    wrapped = textwrap.dedent(
+        f"""
+        (async()=>{{
+        {script}
+        }})().catch((error)=>{{
+          console.error(error);
+          process.exit(1);
+        }});
+        """
+    )
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        suffix=".cjs",
+        delete=False,
+    ) as handle:
+        handle.write(wrapped)
+        script_path = Path(handle.name)
+    try:
+        return subprocess.run(
+            [NODE, str(script_path)],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    finally:
+        script_path.unlink(missing_ok=True)
 
 
 def _run_recovery_case(
@@ -222,13 +254,7 @@ def _run_recovery_case(
         }});
         """
     )
-    proc = subprocess.run(
-        [NODE, "-e", script],
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    proc = _run_node_script(script)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)
 
@@ -289,13 +315,7 @@ def _run_restore_stale_guard_case():
         });
         """
     )
-    proc = subprocess.run(
-        [NODE, "-e", script],
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    proc = _run_node_script(script)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)
 
@@ -439,13 +459,7 @@ def _run_restore_same_id_owner_replacement_case(*, reject: bool):
         });
         """
     )
-    proc = subprocess.run(
-        [NODE, "-e", script],
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    proc = _run_node_script(script)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)
 
@@ -682,13 +696,7 @@ def test_long_tail_recovery_does_not_reattach_after_pane_ownership_switch_during
         });
         """
     )
-    proc = subprocess.run(
-        [NODE, "-e", script],
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    proc = _run_node_script(script)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
 
@@ -813,13 +821,7 @@ def test_restore_settled_session_does_not_mutate_after_pane_ownership_switch_dur
         });
         """
     )
-    proc = subprocess.run(
-        [NODE, "-e", script],
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    proc = _run_node_script(script)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
 
@@ -997,13 +999,7 @@ def test_replacement_owner_blocks_queued_persist_snapshot_render_recovery_and_re
         }));
         """
     )
-    proc = subprocess.run(
-        [NODE, "-e", script],
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    proc = _run_node_script(script)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
 
@@ -1058,6 +1054,7 @@ def test_reconnect_preflight_rejection_does_not_recreate_same_id_replaced_owner(
           eventSourceCalls += 1;
           this.url = url;
           this.readyState = 0;
+          this.addEventListener = () => {};
           this.close = () => {};
         };
         globalThis._runJournalReplayParams = () => '';
@@ -1116,13 +1113,7 @@ def test_reconnect_preflight_rejection_does_not_recreate_same_id_replaced_owner(
         });
         """
     )
-    proc = subprocess.run(
-        [NODE, "-e", script],
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    proc = _run_node_script(script)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
 
@@ -1257,13 +1248,7 @@ def test_done_fade_completion_does_not_mutate_after_same_id_owner_token_replacem
         }));
         """
     )
-    proc = subprocess.run(
-        [NODE, "-e", script],
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    proc = _run_node_script(script)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
 
@@ -1348,13 +1333,7 @@ def test_terminal_callbacks_do_not_mutate_after_same_id_owner_token_replacement(
         });
         """
     )
-    proc = subprocess.run(
-        [NODE, "-e", script],
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    proc = _run_node_script(script)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
 
@@ -1432,13 +1411,7 @@ def test_restore_timeout_does_not_finalize_after_same_id_owner_token_replacement
         }));
         """
     )
-    proc = subprocess.run(
-        [NODE, "-e", script],
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    proc = _run_node_script(script)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
 
@@ -1525,6 +1498,478 @@ def test_queued_live_events_do_not_mutate_after_same_id_owner_token_replacement(
         }));
         """
     )
+    proc = _run_node_script(script)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["closeCalls"] == 1
+    assert result["assistantText"] == "replacement answer"
+    assert result["reasoningText"] == "replacement reasoning"
+    assert result["liveReasoningText"] == "replacement reasoning"
+    assert result["ownerToken"] == 2
+    assert result["activeStreamId"] == "stream-1"
+
+
+def test_current_owner_reconnect_path_keeps_owner_alive_until_rewire():
+    current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
+    owner = _extract("_ownsActiveStreamOrBackground")
+    recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
+    close_source = _extract("_closeSource")
+    wire = _extract("_wireSSE")
+    error_body = _extract_event_body("error")
+    script = textwrap.dedent(
+        """
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
+        let _terminalStateReached = false;
+        let _streamFinalized = false;
+        let _pendingStreamEndRecovery = false;
+        let _reconnectAttempted = false;
+        let eventSourceCalls = 0;
+        let oldSourceCloseCalls = 0;
+        let resolveStatus;
+        const timers = [];
+        const oldSource = {
+          readyState: 1,
+          close() { oldSourceCloseCalls += 1; this.readyState = 2; },
+        };
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'stream-1',
+          messages: [],
+        };
+        globalThis.LIVE_STREAMS = {
+          'sid-1': { streamId: 'stream-1', source: oldSource, ownerToken: 1 }
+        };
+        globalThis.source = oldSource;
+        globalThis._isActiveSession = () => true;
+        globalThis._isSessionCurrentPane = () => true;
+        globalThis._deferStreamErrorIfOffline = () => false;
+        globalThis._deferStreamErrorIfPageHidden = () => false;
+        globalThis.recordClientSSEError = () => {};
+        globalThis.api = () => new Promise((resolve) => { resolveStatus = resolve; });
+        globalThis.setComposerStatus = () => {};
+        globalThis.snapshotLiveTurnHtmlForSession = () => {};
+        globalThis._clearLiveRunStatusTimer = () => {};
+        globalThis.hideLiveRunStatus = () => {};
+        globalThis.closeLiveStream = () => { throw new Error('owner retired during reconnect'); };
+        globalThis._runJournalReplayParams = () => '';
+        globalThis.document = { baseURI: 'http://localhost:8787/' };
+        globalThis.location = { href: 'http://localhost:8787/' };
+        globalThis.EventSource = function(url) {
+          eventSourceCalls += 1;
+          this.url = url;
+          this.readyState = 0;
+          this.addEventListener = () => {};
+          this.close = () => {};
+        };
+        globalThis.setTimeout = (cb) => { timers.push(cb); return timers.length; };
+        globalThis.clearTimeout = () => {};
+        globalThis._restoreSettledSession = async () => false;
+        function _bailOutOfTerminalEventsFromStaleStream(){ return false; }
+        function _retireLiveClosure(src){
+          if(src&&typeof src.close==='function') src.close();
+          _closureRetired = true;
+        }
+        """
+        + current_owner
+        + """
+        """
+        + current_owner_active
+        + """
+        """
+        + owner
+        + """
+        """
+        + recovery_owner
+        + """
+        """
+        + close_source
+        + """
+        """
+        + wire
+        + """
+        const handler = async (e) => {
+        """
+        + error_body
+        + """
+        };
+        await handler({ data: '{}' });
+        timers.shift()();
+        resolveStatus({ active: true });
+        await Promise.resolve();
+        await Promise.resolve();
+        console.log(JSON.stringify({
+          eventSourceCalls,
+          oldSourceCloseCalls,
+          ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
+          currentSourceIsOld: LIVE_STREAMS['sid-1'].source === oldSource,
+          hasLiveSource: !!LIVE_STREAMS['sid-1'].source,
+          closureRetired: _closureRetired,
+        }));
+        """
+    )
+    proc = _run_node_script(script)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["eventSourceCalls"] == 1
+    assert result["oldSourceCloseCalls"] >= 1
+    assert result["ownerToken"] == 1
+    assert result["currentSourceIsOld"] is False
+    assert result["hasLiveSource"] is True
+    assert result["closureRetired"] is False
+
+
+def test_reconnect_probe_does_not_replace_same_id_new_owner_after_status_await():
+    current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
+    owner = _extract("_ownsActiveStreamOrBackground")
+    recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
+    close_source = _extract("_closeSource")
+    wire = _extract("_wireSSE")
+    error_body = _extract_event_body("error")
+    script = textwrap.dedent(
+        """
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
+        let _terminalStateReached = false;
+        let _streamFinalized = false;
+        let _pendingStreamEndRecovery = false;
+        let _reconnectAttempted = false;
+        let eventSourceCalls = 0;
+        let resolveStatus;
+        const timers = [];
+        const oldSource = { readyState: 1, close() { this.readyState = 2; } };
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'stream-1',
+          messages: [],
+        };
+        globalThis.LIVE_STREAMS = {
+          'sid-1': { streamId: 'stream-1', source: oldSource, ownerToken: 1 }
+        };
+        globalThis.source = oldSource;
+        globalThis._isActiveSession = () => true;
+        globalThis._isSessionCurrentPane = () => true;
+        globalThis._deferStreamErrorIfOffline = () => false;
+        globalThis._deferStreamErrorIfPageHidden = () => false;
+        globalThis.recordClientSSEError = () => {};
+        globalThis.api = () => new Promise((resolve) => { resolveStatus = resolve; });
+        globalThis.setComposerStatus = () => {};
+        globalThis.snapshotLiveTurnHtmlForSession = () => {};
+        globalThis._clearLiveRunStatusTimer = () => {};
+        globalThis.hideLiveRunStatus = () => {};
+        globalThis.closeLiveStream = () => { throw new Error('owner retired during reconnect'); };
+        globalThis._runJournalReplayParams = () => '';
+        globalThis.document = { baseURI: 'http://localhost:8787/' };
+        globalThis.location = { href: 'http://localhost:8787/' };
+        globalThis.EventSource = function(url) {
+          eventSourceCalls += 1;
+          this.url = url;
+          this.readyState = 0;
+          this.close = () => {};
+        };
+        globalThis.setTimeout = (cb) => { timers.push(cb); return timers.length; };
+        globalThis.clearTimeout = () => {};
+        globalThis._restoreSettledSession = async () => false;
+        function _bailOutOfTerminalEventsFromStaleStream(){ return false; }
+        function _retireLiveClosure(src){
+          if(src&&typeof src.close==='function') src.close();
+          _closureRetired = true;
+        }
+        """
+        + current_owner
+        + """
+        """
+        + current_owner_active
+        + """
+        """
+        + owner
+        + """
+        """
+        + recovery_owner
+        + """
+        """
+        + close_source
+        + """
+        """
+        + wire
+        + """
+        const handler = async (e) => {
+        """
+        + error_body
+        + """
+        };
+        await handler({ data: '{}' });
+        timers.shift()();
+        LIVE_STREAMS['sid-1'] = {
+          streamId: 'stream-1',
+          source: { readyState: 1, close() {} },
+          ownerToken: 2,
+        };
+        resolveStatus({ active: true });
+        await Promise.resolve();
+        await Promise.resolve();
+        console.log(JSON.stringify({
+          eventSourceCalls,
+          ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
+          activeStreamId: S.activeStreamId,
+        }));
+        """
+    )
+    proc = _run_node_script(script)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["eventSourceCalls"] == 0
+    assert result["ownerToken"] == 2
+    assert result["activeStreamId"] == "stream-1"
+
+
+def test_same_stream_replacement_transfers_anchor_cleanup_lease():
+    schedule_cleanup = _extract("_scheduleAnchorRegistryCleanup")
+    script = textwrap.dedent(
+        """
+        let streamId = 'stream-1';
+        let _liveOwnerToken = 1;
+        const registry = {};
+        const timers = [];
+        globalThis._anchorRegistry = registry;
+        globalThis._anchorRegistryMap = new Map([['stream-1', registry]]);
+        globalThis.setTimeout = (cb) => { timers.push(cb); return timers.length; };
+        """
+        + schedule_cleanup
+        + """
+        _scheduleAnchorRegistryCleanup(10);
+        _anchorRegistry._cleanupOwnerToken = 2;
+        timers[0]();
+        const retained = _anchorRegistryMap.has('stream-1');
+        _liveOwnerToken = 2;
+        _scheduleAnchorRegistryCleanup(10);
+        timers[1]();
+        const cleaned = !_anchorRegistryMap.has('stream-1');
+        console.log(JSON.stringify({ retained, cleaned }));
+        """
+    )
+    proc = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["retained"] is True
+    assert result["cleaned"] is True
+
+
+@pytest.mark.parametrize("reject", [False, True])
+def test_cancel_continuation_does_not_mutate_after_same_id_owner_token_replacement(reject: bool):
+    current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
+    owner = _extract("_ownsActiveStreamOrBackground")
+    bail = _extract("_bailOutOfTerminalEventsFromStaleStream")
+    close_source = _extract("_closeSource")
+    cancel_body = _extract_event_body("cancel")
+    script = textwrap.dedent(
+        """
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
+        let _terminalStateReached = false;
+        let _streamFinalized = false;
+        let _persistTimer = null;
+        let renderCalls = 0;
+        let attachCalls = 0;
+        let closeSourceCalls = 0;
+        let resolveSession;
+        let rejectSession;
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'stream-1',
+          messages: [{ role: 'assistant', content: 'old cancel state' }],
+          toolCalls: [],
+        };
+        const liveSource = { readyState: 1, close() { closeSourceCalls += 1; } };
+        globalThis.LIVE_STREAMS = {
+          'sid-1': { streamId: 'stream-1', source: liveSource, ownerToken: 1 }
+        };
+        globalThis.source = liveSource;
+        globalThis.api = () => new Promise((resolve, rejectPromise) => {
+          resolveSession = resolve;
+          rejectSession = rejectPromise;
+        });
+        globalThis._isActiveSession = () => true;
+        globalThis._isSessionCurrentPane = () => true;
+        globalThis._clearStreamEndRecovery = () => {};
+        globalThis._cancelThrottledSnapshotTimer = () => {};
+        globalThis._clearAnchorProseIncrementalNode = () => {};
+        globalThis._cancelAnimationFramePendingStreamRender = () => {};
+        globalThis._streamFadeCleanupReduceMotionListener = () => {};
+        globalThis._smdEndParser = () => {};
+        globalThis.finalizeThinkingCard = () => {};
+        globalThis._clearOwnerInflightState = () => {};
+        globalThis._clearStreamHidden = () => {};
+        globalThis._clearStreamNotificationBackground = () => {};
+        globalThis._clearApprovalForOwner = () => {};
+        globalThis._clearClarifyForOwner = () => {};
+        globalThis._flushReasoningToAnchor = () => {};
+        globalThis._applyToAnchor = () => {};
+        globalThis._scheduleAnchorRegistryCleanup = () => {};
+        globalThis._isMessagePaneNearBottom = () => true;
+        globalThis._isMessageReaderUnpinned = () => false;
+        globalThis._attachProjectedAnchorSceneToLastAssistant = () => { attachCalls += 1; };
+        globalThis._carryForwardEphemeralTurnFields = (_current, next) => next;
+        globalThis._hydrateTodosFromSession = () => {};
+        globalThis._retireLiveClosure = () => { closeSourceCalls += 1; _closureRetired = true; };
+        globalThis.clearLiveToolCards = () => {};
+        globalThis.removeThinking = () => {};
+        globalThis._markSessionViewed = () => {};
+        globalThis.renderMessages = () => { renderCalls += 1; };
+        globalThis.scrollToBottom = () => {};
+        globalThis.assistantDisplayName = () => 'Hermes';
+        globalThis.renderSessionList = () => {};
+        globalThis._setActivePaneIdleIfOwner = () => {};
+        """
+        + current_owner
+        + """
+        """
+        + current_owner_active
+        + """
+        """
+        + owner
+        + """
+        """
+        + bail
+        + """
+        """
+        + close_source
+        + """
+        const handler = async (e) => {
+        """
+        + cancel_body
+        + """
+        };
+        const handlerPromise = handler({ data: JSON.stringify({ message: 'cancelled' }) });
+        await Promise.resolve();
+        S.activeStreamId = 'stream-1';
+        S.messages = [{ role: 'assistant', content: 'replacement answer' }];
+        LIVE_STREAMS['sid-1'] = {
+          streamId: 'stream-1',
+          source: { readyState: 1, close() {} },
+          ownerToken: 2,
+        };
+        if("""
+        + ("true" if reject else "false")
+        + """){
+          rejectSession(new Error('cancel fetch failed'));
+        }else{
+          resolveSession({
+            session: {
+              session_id: 'sid-1',
+              messages: [{ role: 'assistant', content: 'stale cancel snapshot' }],
+              message_count: 1,
+            }
+          });
+        }
+        await handlerPromise;
+        Promise.resolve().then(() => Promise.resolve()).then(() => {
+          console.log(JSON.stringify({
+            renderCalls,
+            attachCalls,
+            closeSourceCalls,
+            messages: S.messages,
+            ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
+            activeStreamId: S.activeStreamId,
+          }));
+        });
+        """
+    )
+    proc = _run_node_script(script)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["renderCalls"] == 0
+    assert result["attachCalls"] == 0
+    assert result["messages"] == [{"role": "assistant", "content": "replacement answer"}]
+    assert result["ownerToken"] == 2
+    assert result["activeStreamId"] == "stream-1"
+
+
+def test_warning_clear_timer_does_not_clear_replacement_owner_status():
+    current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
+    owner = _extract("_ownsActiveStreamOrBackground")
+    bail = _extract("_bailOutOfTerminalEventsFromStaleStream")
+    warning_body = _extract_event_body("warning")
+    script = textwrap.dedent(
+        """
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
+        let _terminalStateReached = false;
+        let _streamFinalized = false;
+        let closeCalls = 0;
+        const statusCalls = [];
+        const timers = [];
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'stream-1',
+          messages: [],
+        };
+        globalThis.LIVE_STREAMS = {
+          'sid-1': { streamId: 'stream-1', source: { readyState: 1, close() {} }, ownerToken: 1 }
+        };
+        globalThis.source = { readyState: 1, close() {} };
+        globalThis.setComposerStatus = (value) => { statusCalls.push(value); };
+        globalThis.showToast = () => {};
+        globalThis.t = (key) => key;
+        globalThis.setTimeout = (cb) => { timers.push(cb); return timers.length; };
+        globalThis._scheduleAnchorRegistryCleanup = () => {};
+        globalThis._closeSource = () => { closeCalls += 1; };
+        globalThis._isActiveSession = () => true;
+        globalThis._isSessionCurrentPane = () => true;
+        """
+        + current_owner
+        + """
+        """
+        + current_owner_active
+        + """
+        """
+        + owner
+        + """
+        """
+        + bail
+        + """
+        const handler = (e) => {
+        """
+        + warning_body
+        + """
+        };
+        handler({ data: JSON.stringify({ type: 'fallback', message: 'Stale fallback warning' }) });
+        LIVE_STREAMS['sid-1'] = {
+          streamId: 'stream-1',
+          source: { readyState: 1, close() {} },
+          ownerToken: 2,
+        };
+        timers[0]();
+        console.log(JSON.stringify({
+          closeCalls,
+          statusCalls,
+          ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
+        }));
+        """
+    )
     proc = subprocess.run(
         [NODE, "-e", script],
         text=True,
@@ -1536,8 +1981,5 @@ def test_queued_live_events_do_not_mutate_after_same_id_owner_token_replacement(
     result = json.loads(proc.stdout)
 
     assert result["closeCalls"] == 1
-    assert result["assistantText"] == "replacement answer"
-    assert result["reasoningText"] == "replacement reasoning"
-    assert result["liveReasoningText"] == "replacement reasoning"
+    assert result["statusCalls"] == ["Stale fallback warning"]
     assert result["ownerToken"] == 2
-    assert result["activeStreamId"] == "stream-1"
