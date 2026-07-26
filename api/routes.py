@@ -1597,20 +1597,26 @@ def _read_cron_output_bounded(
         size = st.st_size
         cap = max_bytes
         if size <= cap:
-            # Under cap: cap the read by BOTH the growth-detection limit (cap+1)
-            # AND the remaining budget, so we never materialize more bytes than
-            # the caller's allowance permits. (#6141 r2 #1, r5 #1)
-            read_amount = cap + 1
-            if budget is not None and read_amount > budget:
-                # Decline BEFORE reading: a small file that exceeds the remaining
-                # allowance must not be read-then-discarded.
+            # Under cap. Admit when the ACTUAL pinned size fits the remaining
+            # budget — not when cap+1 fits (a 10-byte file with 10 bytes of
+            # allowance must be admitted, not declined because cap+1 > 10).
+            # (#6141 r6 #3)
+            if budget is not None and size > budget:
                 return "", False, False, 0, True
+            # Physical read cap: min(cap+1 growth probe, budget+1 if budgeted)
+            # so we never materialize more than budget+1 bytes. (#6141 r5 #1)
+            read_amount = cap + 1
+            if budget is not None and read_amount > budget + 1:
+                read_amount = budget + 1
             try:
                 raw = fh.read(read_amount)
             except OSError:
                 return "", False, False, 0, False
-            # Actual bytes consumed from this descriptor (not the planned size).
-            bytes_read = min(len(raw), cap)
+            # Charge EVERY byte physically returned by the descriptor, including
+            # the cap+1 growth-probe byte when the file grew under us. The
+            # physical-I/O bound counts what was read, not what's returned.
+            # (#6141 r6 #1)
+            bytes_read = len(raw)
             if len(raw) > cap:
                 return raw[:cap].decode("utf-8", errors="replace"), True, True, bytes_read, False
             return raw.decode("utf-8", errors="replace"), False, True, bytes_read, False
@@ -1626,17 +1632,29 @@ def _read_cron_output_bounded(
         # read up to two caps and then discard. (#6141 r4, r5 #1)
         if budget is not None and planned > budget:
             return "", False, False, 0, True
+        head_raw = b""
+        tail_raw = b""
+        consumed = 0  # bytes physically consumed so far (survives partial failure)
         try:
             fh.seek(0)
             head_raw = fh.read(head_len)
+            consumed = len(head_raw)
             tail_start = max(cap, size - cap)
             fh.seek(tail_start)
             tail_raw = fh.read(tail_len)
+            consumed = len(head_raw) + len(tail_raw)
         except OSError:
+            # Partial failure: if head succeeded but tail's seek/read raised,
+            # the consumed head bytes must still be charged — they were
+            # physically read and cannot disappear from the batch budget.
+            # Return ok=False (the read is incomplete) but report `consumed` so
+            # the handler charges it. (#6141 r6 #2)
+            if consumed > 0:
+                return "", False, False, consumed, False
             return "", False, False, 0, False
         # Actual bytes consumed from the descriptor (handles short reads and
         # shrink-after-fstat, where len(raw) < the planned window). (#6141 r5 #3)
-        bytes_read = len(head_raw) + len(tail_raw)
+        bytes_read = consumed
     finally:
         fh.close()
     head_text = head_raw.decode("utf-8", errors="replace")
@@ -21441,6 +21459,11 @@ def _handle_cron_output(handler, parsed):
                 logger.debug("Failed to read cron output file %s", f)
                 continue
             if not read_ok:
+                # Even on failure, charge any bytes physically consumed from the
+                # descriptor (e.g. head read succeeded but tail seek/read raised).
+                # Those bytes were read and cannot disappear from the batch
+                # budget. (#6141 r6 #2)
+                spent += bytes_read
                 # Distinguish I/O failure from budget decline (#6141 r5 #3):
                 # - declined=True: the file was readable but its bounded windows
                 #   exceeded the remaining allowance. Mark truncated and stop —
