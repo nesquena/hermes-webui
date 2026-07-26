@@ -1695,7 +1695,24 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         default_model = model_cfg
     elif isinstance(model_cfg, dict):
         default_model = model_cfg.get('default')
-        default_model_provider = model_cfg.get('provider')
+        raw_provider = model_cfg.get('provider')
+        # Normalize provider IDs so colon-bearing custom provider slugs
+        # (e.g. ``custom:192.168.5.242:8000``) are converted to the
+        # canonical hyphenated form (``custom:192.168.5.242-8000``) that the
+        # frontend uses in window._activeProvider. Without this the
+        # /api/profile/switch response leaks the raw value, causing a
+        # provider-id mismatch in the UI. (#6516 follow-up)
+        if raw_provider:
+            from api.config import _resolve_configured_provider_id
+            resolved = _resolve_configured_provider_id(
+                raw_provider, cfg, base_url=model_cfg.get("base_url", ""),
+            )
+            if resolved:
+                default_model_provider = resolved
+            else:
+                default_model_provider = str(raw_provider)
+        else:
+            default_model_provider = str(raw_provider) if raw_provider else None
 
     # Read the target profile's workspace directly from *home* rather than via
     # get_last_workspace() which routes through the thread-local/process-global active
