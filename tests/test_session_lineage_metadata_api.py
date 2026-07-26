@@ -59,14 +59,16 @@ def _ensure_state_db(path):
 
 
 def _ensure_messages_table(conn):
-    conn.execute(
+    conn.executescript(
         """
         CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT,
             role TEXT,
             content TEXT,
             timestamp REAL
-        )
+        );
+        CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
         """
     )
 
@@ -489,6 +491,48 @@ def test_subagent_goal_title_handles_blank_state_titles_and_custom_sidecar(
             assert row["display_title"] == expected_display_title
         assert conn.execute("SELECT title FROM sessions WHERE id = ?", (sid,)).fetchone()[0] == state_title
         assert sidecar.path.read_bytes() == sidecar_before
+    finally:
+        conn.close()
+
+
+def test_subagent_goal_title_breaks_equal_timestamps_by_message_id(_isolate):
+    """The first persisted goal wins even when an added index reorders timestamp ties."""
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    sid = "lineage_api_subagent_tied_goals"
+    t0 = time.time() - 100
+    try:
+        _save_webui_session(sid, title="Subagent Session", updated_at=t0)
+        _insert_state_row(conn, sid, source="subagent", started_at=t0)
+        conn.execute("UPDATE sessions SET title = NULL WHERE id = ?", (sid,))
+        _insert_state_message(
+            conn,
+            sid,
+            role="user",
+            content="Alpha goal arrived first",
+            timestamp=t0 + 1,
+        )
+        _insert_state_message(
+            conn,
+            sid,
+            role="user",
+            content="Zulu goal arrived second",
+            timestamp=t0 + 1,
+        )
+        # The old timestamp-only query may legally read this covering index in
+        # content-descending order. A deterministic query must still choose the
+        # lower message id, matching the canonical transcript reader.
+        conn.execute(
+            """
+            CREATE INDEX idx_messages_tied_goal_adversarial
+            ON messages(session_id, timestamp, content DESC, role)
+            """
+        )
+        conn.commit()
+
+        row = {row["session_id"]: row for row in all_sessions(include_lineage_metadata=False)}[sid]
+
+        assert row["display_title"] == "Alpha goal arrived first"
     finally:
         conn.close()
 

@@ -36,7 +36,7 @@ SESSIONS_JS = ROOT / "static" / "sessions.js"
 
 
 def _make_state_db(path: Path, sid: str, *, message_count: int = 2,
-                   title: str = "tui session", model: str = "MiniMax-M3",
+                   title: str | None = "tui session", model: str = "MiniMax-M3",
                    source: str = "tui", cwd: str = "/root") -> None:
     """Create a minimal state.db with one session and a few messages.
 
@@ -259,6 +259,53 @@ def test_state_db_source_helper_reads_subagent(routes_module, isolated_state_db)
     assert routes_module._state_db_session_source("sa-1") == "subagent"
     assert routes_module._is_subagent_child_session_id("sa-1") is True
     assert routes_module._is_subagent_child_session_id("does-not-exist") is False
+
+
+def test_state_db_only_null_title_subagent_uses_goal_in_sidebar(isolated_state_db):
+    """A delegated child needs its goal title even when it has no WebUI sidecar."""
+    import api.models as models
+
+    sid = "subagent-no-sidecar-null-title"
+    custom_sid = "subagent-no-sidecar-custom-title"
+    _make_state_db(
+        isolated_state_db["db"],
+        sid,
+        source="subagent",
+        title=None,
+        message_count=2,
+    )
+    _make_state_db(
+        isolated_state_db["db"],
+        custom_sid,
+        source="subagent",
+        title="Human-chosen state title",
+        message_count=2,
+    )
+    conn = sqlite3.connect(str(isolated_state_db["db"]))
+    try:
+        conn.execute(
+            "UPDATE messages SET content = ? WHERE session_id = ? AND role = 'user'",
+            ("Map the state-only delegated child path", sid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    rows = models._load_cli_sessions_uncached(
+        isolated_state_db["state_dir"],
+        isolated_state_db["db"],
+        "default",
+        source_filter="subagent",
+        visible_session_limit=20,
+        include_claude_code=False,
+    )
+    row = next(row for row in rows if row["session_id"] == sid)
+    custom_row = next(row for row in rows if row["session_id"] == custom_sid)
+
+    assert row["title"] == "Subagent Session"
+    assert row["display_title"] == "Map the state-only delegated child path"
+    assert custom_row["title"] == "Human-chosen state title"
+    assert "display_title" not in custom_row
 
 
 def test_import_cli_endpoint_does_not_materialize_subagent_child():

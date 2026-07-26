@@ -5475,6 +5475,7 @@ def _read_state_db_sidebar_overrides(
             messages_has_session_id = False
             messages_has_timestamp = False
             messages_has_title_fields = False
+            message_cols: set[str] = set()
             if has_messages_table:
                 cur.execute("PRAGMA table_info(messages)")
                 message_cols = {str(row[1]) for row in cur.fetchall()}
@@ -5558,27 +5559,46 @@ def _read_state_db_sidebar_overrides(
                             except (TypeError, ValueError):
                                 pass
             if messages_has_title_fields and delegated_title_ids:
-                seen_user_messages: set[str] = set()
                 delegated_title_ids = list(delegated_title_ids)
+                message_order_col = 'id' if 'id' in message_cols else 'rowid'
                 for i in range(0, len(delegated_title_ids), chunk_size):
                     chunk = delegated_title_ids[i:i + chunk_size]
-                    placeholders = ','.join('?' * len(chunk))
-                    cur.execute(
-                        f"""
-                        SELECT session_id, role, content, timestamp
-                        FROM messages
-                        WHERE session_id IN ({placeholders}) AND role = 'user'
-                        ORDER BY session_id, timestamp ASC
-                        """,
-                        chunk,
-                    )
-                    for row in cur.fetchall():
-                        sid = str(row['session_id'])
-                        if sid in seen_user_messages:
-                            continue
-                        display_title = title_from([dict(row)], fallback='')
+                    candidate_values = ','.join('(?)' for _ in chunk)
+                    try:
+                        cur.execute(
+                            f"""
+                            WITH candidate_sessions(session_id) AS (
+                                VALUES {candidate_values}
+                            )
+                            SELECT candidate_sessions.session_id,
+                                   (
+                                       SELECT substr(CAST(m.content AS TEXT), 1, 4096)
+                                       FROM messages m
+                                       WHERE m.session_id = candidate_sessions.session_id
+                                         AND m.role = 'user'
+                                         AND m.content IS NOT NULL
+                                         AND TRIM(CAST(m.content AS TEXT)) != ''
+                                       ORDER BY m.timestamp ASC, m.{message_order_col} ASC
+                                       LIMIT 1
+                                   ) AS content
+                            FROM candidate_sessions
+                            """,
+                            chunk,
+                        )
+                        title_rows = cur.fetchall()
+                    except Exception:
+                        # Legacy WITHOUT ROWID tables that also lack an explicit
+                        # message id cannot provide a deterministic tie-breaker.
+                        # Keep their generic title while preserving all cheaper
+                        # source/count metadata already collected above.
+                        continue
+                    for row in title_rows:
+                        display_title = title_from(
+                            [{'role': 'user', 'content': row['content']}],
+                            fallback='',
+                        )
                         if display_title:
-                            seen_user_messages.add(sid)
+                            sid = str(row['session_id'])
                             overrides.setdefault(sid, {})['_state_db_display_title'] = display_title
             return overrides
     except Exception:
@@ -7169,6 +7189,7 @@ def _load_cli_sessions_uncached(
         return None
 
     profile_value = _cli_profile or 'default'
+    state_projection_subagent_ids: set[str] = set()
     # A deleted WebUI session is tombstoned (see _record_webui_deleted_session_tombstone)
     # so recovery/audit/claim treat it as gone. The sidebar's own state.db projection
     # must honor the same tombstone, or a deleted WebUI session reappears here as an
@@ -7197,6 +7218,8 @@ def _load_cli_sessions_uncached(
         profile = profile_value  # CLI DB has no profile column; use active profile
 
         _source = row['source'] or 'cli'
+        if _source == 'subagent':
+            state_projection_subagent_ids.add(str(sid))
         # Honor the deleted-WebUI tombstone: a WebUI row the user deleted must
         # not resurface in this projection (the #5498 ghost). Live sidecar wins.
         if (
@@ -7256,6 +7279,20 @@ def _load_cli_sessions_uncached(
             '_compression_segment_count': row.get('_compression_segment_count'),
             'is_cli_session': is_cli_session_row({**row, **_source_meta}),
         })
+
+    if state_projection_subagent_ids:
+        try:
+            state_projection_metadata = _read_state_db_sidebar_overrides(
+                db_path,
+                state_projection_subagent_ids,
+                count_session_ids=state_projection_subagent_ids,
+            )
+        except Exception:
+            state_projection_metadata = {}
+        _apply_sidebar_state_db_override_metadata(
+            cli_sessions,
+            state_projection_metadata,
+        )
 
     if source_filter is not None:
         return cli_sessions
