@@ -280,24 +280,117 @@ def test_provider_quota_refresh_follows_each_authoritative_provider_transition()
     assert "refreshProviderQuotaIndicator();" not in boot_prefix
 
 
-def test_empty_composer_boot_refresh_uses_retained_provider_or_default_fallback():
+def test_restored_empty_session_keeps_provider_through_boot_demotion():
     assert NODE is not None
     boot = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
-    helper = _between(boot, "const _refreshQuotaForEmptyComposer=()=>", "const urlSession")
+    sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    ui_js = UI_JS.read_text(encoding="utf-8")
+    remember_override = _between(
+        sessions,
+        "function _rememberEmptyComposerModelOverride",
+        "let _newSessionWorkspaceAnnouncementClearTimer",
+    )
+    clear_override = "if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();"
+    assert clear_override in sessions
+    load_session = sessions[sessions.index("async function loadSession") :]
+    load_transition = _between(
+        load_session,
+        "S.session=data.session;",
+        "// Loading a real existing session abandons",
+    )
+    load_quota_refresh = "if(typeof refreshProviderQuotaIndicator==='function') void refreshProviderQuotaIndicator(S.session.model_provider||null);"
+    assert load_quota_refresh in sessions
+    quota_provider = _between(ui_js, "function _currentQuotaProvider", "window.addEventListener('visibilitychange'")
+    refresh_helper = _between(boot, "const _refreshQuotaForEmptyComposer=()=>", "const urlSession")
+    demotion = _between(
+        boot,
+        "if(S.session && (S.session.message_count||0) === 0 && !_restoredInFlight && !_restoredHasDraft){",
+        "// Restore the panel from localStorage when the session has a workspace.",
+    )
     script = f"""
-function run(provider) {{
-  const calls = [];
-  const S = {{session: null}};
-  const refreshProviderQuotaIndicator = value => calls.push(value);
-  const _currentQuotaProvider = provider === undefined ? undefined : () => provider;
-  const refresh = (function() {{
-    {helper}
-    return _refreshQuotaForEmptyComposer;
-  }})();
-  refresh();
-  return calls;
+const source = {json.dumps(_quota_region())};
+const requests = [];
+const pending = [];
+const window = {{_showQuotaChip: true, addEventListener: () => {{}}}};
+const localStorage = {{getItem: () => null}};
+const S = {{session: null, messages: []}};
+const _emptyComposerModelOverrideHost = window;
+function makeNode() {{
+  return {{
+    hidden: false,
+    title: '',
+    textContent: '',
+    style: {{display: ''}},
+    removeAttribute(name) {{ if(name === 'title') this.title = ''; }},
+  }};
 }}
-process.stdout.write(JSON.stringify({{retained: run('ollama-cloud'), fallback: run(undefined)}}));
+const nodes = {{
+  providerQuotaChip: makeNode(),
+  providerQuotaChipLabel: makeNode(),
+  composerMobileQuotaAction: makeNode(),
+  composerMobileQuotaLabel: makeNode(),
+  emptyState: makeNode(),
+}};
+function $(id) {{ return nodes[id] || null; }}
+{remember_override}
+{quota_provider}
+function api(url) {{
+  requests.push(url);
+  return new Promise((resolve, reject) => pending.push({{resolve, reject}}));
+}}
+eval(source);
+async function _maybeBindFreshDefaultWorkspaceSession() {{}}
+function _isCompactWorkspaceViewport() {{ return false; }}
+function syncTopbar() {{}}
+function syncWorkspacePanelState() {{}}
+async function renderSessionList() {{}}
+async function _finalizeComposerPrefillOnBoot() {{}}
+function startGatewaySSE() {{}}
+{refresh_helper}
+async function run(session) {{
+  window._emptyComposerModelOverride = {{model: 'stale-model', model_provider: 'stale-provider'}};
+  const data = {{session}};
+  {load_transition}
+  {load_quota_refresh}
+  const _restoredInFlight = false;
+  const _restoredHasDraft = false;
+  const prefillIntent = null;
+  let _workspacePanelMode = null;
+  {demotion}
+}}
+function snapshot() {{
+  return {{
+    desktop: {{hidden: nodes.providerQuotaChip.hidden, label: nodes.providerQuotaChipLabel.textContent}},
+    mobile: {{hidden: nodes.composerMobileQuotaAction.hidden, label: nodes.composerMobileQuotaLabel.textContent}},
+  }};
+}}
+async function main() {{
+  await run({{session_id: 'saved-empty', message_count: 0, model: 'llama-3.3', model_provider: 'ollama-cloud'}});
+  const retainedRequests = requests.splice(0);
+  const retainedPending = pending.splice(0);
+  retainedPending[1].resolve({{
+    status: 'available', display_name: 'Ollama Cloud',
+    account_limits: {{windows: [{{remaining_percent: 25}}]}},
+  }});
+  await Promise.resolve();
+  retainedPending[0].resolve({{
+    status: 'available', display_name: 'Stale provider',
+    account_limits: {{windows: [{{remaining_percent: 50}}]}},
+  }});
+  await Promise.all(retainedPending);
+  const retained = {{requests: retainedRequests, finalState: snapshot()}};
+  nodes.providerQuotaChip.hidden = false;
+  nodes.providerQuotaChipLabel.textContent = 'old';
+  nodes.composerMobileQuotaAction.hidden = false;
+  nodes.composerMobileQuotaLabel.textContent = 'old';
+  await run({{session_id: 'saved-empty-default', message_count: 0, model: 'default-model', model_provider: null}});
+  const fallback = {{requests: requests.splice(0)}};
+  return {{retained, fallback}};
+}}
+main().then(report => process.stdout.write(JSON.stringify(report))).catch(error => {{
+  console.error(error && error.stack || String(error));
+  process.exit(1);
+}});
 """
     result = subprocess.run(
         [NODE, "-e", script],
@@ -308,8 +401,15 @@ process.stdout.write(JSON.stringify({{retained: run('ollama-cloud'), fallback: r
     )
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    assert report["retained"] == ["ollama-cloud"]
-    assert report["fallback"] == [None]
+    assert report["retained"]["requests"] == [
+        "/api/provider/quota?provider=ollama-cloud",
+        "/api/provider/quota?provider=ollama-cloud",
+    ]
+    assert report["retained"]["finalState"] == {
+        "desktop": {"hidden": False, "label": "25%"},
+        "mobile": {"hidden": False, "label": "25%"},
+    }
+    assert report["fallback"]["requests"] == ["/api/provider/quota", "/api/provider/quota"]
 
 
 def test_visibility_and_settings_refresh_use_current_quota_provider_helper():
