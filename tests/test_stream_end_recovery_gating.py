@@ -112,7 +112,7 @@ def test_stream_end_recovery_exhaustion_reconciles_stream_status_before_terminal
     assert "_currentPaneRecoveryOwnerLost()" in fn
     assert "_wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`" in fn
     assert "if(await _restoreSettledSession(source,{preserveVisibleOnShorterTerminalSnapshot:true})) return true;" in fn
-    assert "_finalizeStreamEndFallback(source,{preserveVisibleAnswer:true});" in fn
+    assert "_finalizeStreamEndFallback(source);" in fn
 
 
 def test_stream_end_live_scene_detection_includes_empty_text_activity():
