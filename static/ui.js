@@ -1683,11 +1683,12 @@ function _isLoopbackHostname(hostname){
     return true;
   }
   if(normalized==='::1') return true;
-  // IPv4-mapped IPv6 loopback (::ffff:7f00:0/104), as emitted by Chromium
-  // e.g. [::ffff:7f00:1] -> 127.0.0.1
-  const m=normalized.match(/^::ffff:7f00:([0-9a-f]{1,4})$/);
+  // IPv4-mapped IPv6 loopback (::ffff:7f00:0/104), as emitted by Chromium.
+  // First hextet covers 0x7f00-0x7fff (127.0.0.0/8). Second hextet is the
+  // remaining 16 bits of the 32-bit IPv4 address.
+  const m=normalized.match(/^::ffff:7f[0-9a-f]{2}:([0-9a-f]{1,4})$/);
   if(m){
-    return true; // 0x7f00 already pins the /8; low group is validated by regex
+    return true;
   }
   return false;
 }
