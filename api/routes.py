@@ -1213,6 +1213,29 @@ _SKILLS_HUB_GATE_MESSAGE = (
     "Skills Hub actions are disabled. Set HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE=1 to enable."
 )
 
+
+def _skills_hub_principal(handler) -> str:
+    """Who owns a Skills Hub run — the identity, not the profile cookie.
+
+    The profile name is derived from a client-controlled cookie, so keying run
+    state by profile alone let two unrelated callers that resolve to the same
+    profile string read each other's transcript and error text, and knock each
+    other out of the single-flight slot. The owner is therefore the
+    authenticated username when there is a session, and otherwise the
+    local-peer pseudo-principal that matches the posture the mutation routes
+    already enforce (an authenticated session OR a spoof-resistant local peer).
+    A request that is neither gets the empty principal, which owns nothing.
+    """
+    from api.auth import ensure_trusted_auth_session
+
+    session_info = ensure_trusted_auth_session(handler)
+    username = str((session_info or {}).get("username") or "").strip()
+    if username:
+        return f"user:{username}"
+    if _onboarding_request_is_local(handler):
+        return "local"
+    return ""
+
 _GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 
 # Server-side single-flight guard for gateway lifecycle actions. The client
@@ -13686,9 +13709,16 @@ def handle_get(handler, parsed) -> bool:
         from api.profiles import get_active_profile_name as _hub_profile
         from api.skills_hub_actions import get_status
 
-        # Profile-owned (gate finding 3): only the requesting profile's own
-        # target/log/error/scan metadata is ever returned.
-        status = get_status(_hub_profile())
+        # Owner-scoped (gate finding 3): the run belongs to an authenticated
+        # principal plus the canonical profile, and `run_id` is the caller's
+        # proof of WHICH run it is asking about. A continuation issued before a
+        # profile switch therefore reads "idle" instead of quietly reporting on
+        # the run that occupies the slot now.
+        status = get_status(
+            _hub_profile(),
+            principal=_skills_hub_principal(handler),
+            run_id=(parse_qs(parsed.query).get("run_id", [""])[0] or "").strip(),
+        )
         status["allowed"] = _truthy_env("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE")
         return j(handler, status)
 
@@ -15661,6 +15691,7 @@ def handle_post(handler, parsed) -> bool:
                 name_override=str(body.get("name_override", "") or "").strip(),
                 identifier=str(body.get("identifier", "") or "").strip(),
                 profile=_hub_profile(),
+                principal=_skills_hub_principal(handler),
             )
         except ValueError as exc:
             return bad(handler, str(exc), 400)

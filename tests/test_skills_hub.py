@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import pathlib
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import pytest
@@ -65,7 +67,20 @@ def _write_hub_lock(skills_dir, installed: dict) -> None:
     lock_path.write_text(json.dumps({"installed": installed}), encoding="utf-8")
 
 
-def _lock_entry(identifier: str, *, name: str, stamp: str = "2026-01-01T00:00:00Z") -> dict:
+# What a lock entry installed long before this run looks like.
+_OLD_STAMP = "2026-01-01T00:00:00Z"
+
+
+def _lock_entry(identifier: str, *, name: str, stamp: str | None = None) -> dict:
+    """A lock entry as the CLI writes it.
+
+    The default stamp is NOW because that is what `tools.skills_hub` records
+    (`datetime.now(timezone.utc).isoformat()`) whenever it writes an entry. A
+    mutation is only credited to the run that observed it, so a fake CLI that
+    stamped the past would be claiming someone else's work.
+    """
+    if stamp is None:
+        stamp = datetime.now(timezone.utc).isoformat()
     return {
         "source": "skills-sh",
         "identifier": identifier,
@@ -90,7 +105,7 @@ class _FakeStdin:
 
 
 def _make_fake_popen(lines: list[str], returncode: int = 0, on_spawn=None):
-    """Build a fake ``subprocess.Popen`` replacement with a writable stdin
+    """Build a fake ``api.skills_hub_actions._spawn`` replacement with a writable stdin
     (needed for the scan/uninstall stdin pre-answer) and a readline-able
     stdout (via io.StringIO, which naturally yields '' at EOF)."""
 
@@ -119,19 +134,24 @@ def _reset_skills_hub_state():
 
     def _reset():
         with sha._REGISTRY_LOCK:
-            sha._PROFILES.clear()
+            sha._SLOTS.clear()
 
     _reset()
     yield
     _reset()
 
 
-def _wait_until_not_running(timeout=5.0):
+# Routes resolve the owner of a run: an authenticated username, or this
+# pseudo-principal for the spoof-resistant local-peer posture the tests use.
+_LOCAL_PRINCIPAL = "local"
+
+
+def _wait_until_not_running(timeout=5.0, principal=_LOCAL_PRINCIPAL):
     from api import skills_hub_actions as sha
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        status = sha.get_status("default")
+        status = sha.get_status("default", principal=principal)
         if status["status"] != "running":
             return status
         time.sleep(0.02)
@@ -211,7 +231,7 @@ def test_hub_status_redacts_scan_transcripts_and_common_credentials(monkeypatch)
     parsed_scan_result = sha.parse_scan_report(raw_log)
     assert parsed_scan_result is not None
     assert parsed_scan_result["decision_reason"] == "synthetic-decision-marker"
-    hub = sha._profile_hub("default")
+    hub = sha._open_slot(_LOCAL_PRINCIPAL, "default")
     with hub.state_lock:
         hub.state.update(
             {
@@ -222,7 +242,7 @@ def test_hub_status_redacts_scan_transcripts_and_common_credentials(monkeypatch)
             }
         )
 
-    direct = sha.get_status("default")
+    direct = sha.get_status("default", principal=_LOCAL_PRINCIPAL)
     handler = _call_get(monkeypatch, "/api/skills/hub/status")
     routed = handler.get_json()
 
@@ -330,7 +350,7 @@ def test_hub_search_and_installed_stay_open_when_gate_closed(monkeypatch, tmp_pa
     def fake_run(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
 
-    monkeypatch.setattr(sha.subprocess, "run", fake_run)
+    monkeypatch.setattr(sha, "_run_capture", fake_run)
     handler = _call_get(monkeypatch, "/api/skills/hub/search?q=pdf")
     assert handler.status == 200
     handler2 = _call_get(monkeypatch, "/api/skills/hub/installed")
@@ -352,7 +372,7 @@ def test_hub_search_parses_json_and_builds_expected_command(monkeypatch, tmp_pat
                     "source": "skills.sh", "trust_level": "trusted", "description": "PDF tools"}]
         return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
 
-    monkeypatch.setattr(sha.subprocess, "run", fake_run)
+    monkeypatch.setattr(sha, "_run_capture", fake_run)
     handler = _call_get(monkeypatch, "/api/skills/hub/search?q=pdf&source=all&limit=5")
     data = handler.get_json()
     assert handler.status == 200
@@ -377,7 +397,7 @@ def test_hub_search_treats_leading_dash_query_as_positional(monkeypatch, tmp_pat
         calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
 
-    monkeypatch.setattr(sha.subprocess, "run", fake_run)
+    monkeypatch.setattr(sha, "_run_capture", fake_run)
     handler = _call_get(monkeypatch, "/api/skills/hub/search?q=-h")
 
     assert handler.status == 200
@@ -393,7 +413,7 @@ def test_hub_search_empty_query_returns_empty_without_spawning(monkeypatch, tmp_
     from api import skills_hub_actions as sha
 
     spawned = []
-    monkeypatch.setattr(sha.subprocess, "run", lambda cmd, **kw: spawned.append(cmd))
+    monkeypatch.setattr(sha, "_run_capture", lambda cmd, **kw: spawned.append(cmd))
     handler = _call_get(monkeypatch, "/api/skills/hub/search?q=")
     data = handler.get_json()
     assert handler.status == 200
@@ -409,7 +429,7 @@ def test_hub_search_nonzero_exit_returns_502(monkeypatch, tmp_path):
     def fake_run(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
 
-    monkeypatch.setattr(sha.subprocess, "run", fake_run)
+    monkeypatch.setattr(sha, "_run_capture", fake_run)
     handler = _call_get(monkeypatch, "/api/skills/hub/search?q=pdf")
     assert handler.status == 502
 
@@ -426,7 +446,7 @@ def test_hub_scan_action_preanswers_stdin_n_and_parses_verdict(monkeypatch, tmp_
     fake_proc = _make_fake_popen(
         [_SCAN_TRANSCRIPT], returncode=0, on_spawn=lambda cmd, kw: spawned.append((cmd, kw))
     )
-    monkeypatch.setattr(sha.subprocess, "Popen", fake_proc)
+    monkeypatch.setattr(sha, "_spawn", fake_proc)
 
     handler, data = _call_post(monkeypatch, "/api/skills/hub/scan", {"identifier": "skills-sh/anthropics/skills/pdf"})
     assert handler.status == 200
@@ -465,7 +485,7 @@ def test_hub_install_action_uses_yes_flag_and_no_stdin_interaction(monkeypatch, 
     fake_proc = _make_fake_popen(
         ["Installed: pdf\n"], returncode=0, on_spawn=_on_spawn
     )
-    monkeypatch.setattr(sha.subprocess, "Popen", fake_proc)
+    monkeypatch.setattr(sha, "_spawn", fake_proc)
 
     handler, data = _call_post(
         monkeypatch, "/api/skills/hub/install",
@@ -526,7 +546,7 @@ def test_hub_uninstall_action_preanswers_stdin_y(monkeypatch, tmp_path):
     fake_proc = _make_fake_popen(
         ["Uninstalled 'pdf' from skills/user/pdf\n"], returncode=0, on_spawn=_on_spawn
     )
-    monkeypatch.setattr(sha.subprocess, "Popen", fake_proc)
+    monkeypatch.setattr(sha, "_spawn", fake_proc)
 
     handler, data = _call_post(monkeypatch, "/api/skills/hub/uninstall", {"name": "pdf"})
     assert handler.status == 200
@@ -550,7 +570,7 @@ _BLOCKED_SCAN_TRANSCRIPT = (
 
 
 def _make_phase_popen(transcripts, spawned, on_phase=None):
-    """Fake Popen returning the next canned transcript per spawn.
+    """Fake ``_spawn`` returning the next canned transcript per spawn.
 
     ``on_phase(index, cmd)`` lets a test mutate the hub lock artifact for the
     phase that would really have changed it — completion is established from
@@ -600,7 +620,7 @@ def test_hub_update_is_scan_gated_and_two_phase(monkeypatch, tmp_path):
     # Installed before; the update phase advances the lock entry's revision.
     _write_hub_lock(
         tmp_path / "skills",
-        {"pdf": _lock_entry("anthropics/skills/pdf", name="pdf")},
+        {"pdf": _lock_entry("anthropics/skills/pdf", name="pdf", stamp=_OLD_STAMP)},
     )
     spawned = []
 
@@ -612,20 +632,20 @@ def test_hub_update_is_scan_gated_and_two_phase(monkeypatch, tmp_path):
                     "pdf": _lock_entry(
                         "anthropics/skills/pdf",
                         name="pdf",
-                        stamp="2026-02-02T00:00:00Z",
                     )
                 },
             )
 
     monkeypatch.setattr(
-        sha.subprocess,
-        "Popen",
+        sha,
+        "_spawn",
         _make_phase_popen(
             [_ALLOWED_SCAN_TRANSCRIPT, "Updated 1 skill(s).\n"], spawned, on_phase=_on_phase
         ),
     )
     started, _ = sha.start_action(
-        "update", "pdf", identifier="anthropics/skills/pdf", profile="default"
+        "update", "pdf", identifier="anthropics/skills/pdf", profile="default",
+        principal=_LOCAL_PRINCIPAL,
     )
     assert started is True
     final = _wait_until_not_running()
@@ -647,12 +667,13 @@ def test_hub_update_blocked_scan_never_invokes_update_cli(monkeypatch, tmp_path)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     spawned = []
     monkeypatch.setattr(
-        sha.subprocess,
-        "Popen",
+        sha,
+        "_spawn",
         _make_phase_popen([_BLOCKED_SCAN_TRANSCRIPT], spawned),
     )
     started, _ = sha.start_action(
-        "update", "evil", identifier="x/evil", profile="default"
+        "update", "evil", identifier="x/evil", profile="default",
+        principal=_LOCAL_PRINCIPAL,
     )
     assert started is True
     final = _wait_until_not_running()
@@ -667,7 +688,7 @@ def test_hub_action_failure_is_reported(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     fake_proc = _make_fake_popen(["Error: not found\n"], returncode=1)
-    monkeypatch.setattr(sha.subprocess, "Popen", fake_proc)
+    monkeypatch.setattr(sha, "_spawn", fake_proc)
 
     _call_post(monkeypatch, "/api/skills/hub/scan", {"identifier": "bogus"})
     final = _wait_until_not_running()
@@ -696,14 +717,14 @@ def test_hub_action_lock_is_released_when_profile_home_resolution_raises(monkeyp
     )
 
     with pytest.raises(RuntimeError):
-        sha.start_action("scan", "some-identifier")
+        sha.start_action("scan", "some-identifier", principal=_LOCAL_PRINCIPAL)
 
-    assert sha._profile_hub("default").running is False, "slot leaked after get_active_hermes_home() raised"
+    assert sha._open_slot(_LOCAL_PRINCIPAL, "default").running is False, "slot leaked after get_active_hermes_home() raised"
 
     # Prove the leak doesn't linger: a normal call right after must still work.
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(sha.subprocess, "Popen", _make_fake_popen(["ok\n"], returncode=0))
-    started, _status = sha.start_action("scan", "some-identifier")
+    monkeypatch.setattr(sha, "_spawn", _make_fake_popen(["ok\n"], returncode=0))
+    started, _status = sha.start_action("scan", "some-identifier", principal=_LOCAL_PRINCIPAL)
     assert started is True
     _wait_until_not_running()
 
@@ -743,7 +764,7 @@ def test_hub_action_timeout_reaps_zombie_via_background_thread(monkeypatch, tmp_
         def kill(self):
             pass
 
-    monkeypatch.setattr(sha.subprocess, "Popen", _StuckProc)
+    monkeypatch.setattr(sha, "_spawn", _StuckProc)
 
     handler, data = _call_post(monkeypatch, "/api/skills/hub/scan", {"identifier": "x"})
     assert handler.status == 200
@@ -800,11 +821,11 @@ def test_hub_action_contention_returns_409_without_spawning(monkeypatch, tmp_pat
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     spawned = []
     monkeypatch.setattr(
-        sha.subprocess, "Popen",
+        sha, "_spawn",
         _make_fake_popen(["x\n"], on_spawn=lambda cmd, kw: spawned.append(cmd)),
     )
 
-    hub = sha._profile_hub("default")
+    hub = sha._open_slot(_LOCAL_PRINCIPAL, "default")
     with hub.state_lock:
         assert hub.running is False, "slot should be free at test start"
         hub.running = True
@@ -869,7 +890,7 @@ def test_two_profiles_have_isolated_status_and_slots(monkeypatch, tmp_path):
     from api import profiles, skills_hub_actions as sha
 
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
-    hub_a = sha._profile_hub("profile-a")
+    hub_a = sha._open_slot("", "profile-a")
     with hub_a.state_lock:
         hub_a.running = True
         hub_a.state.update({
@@ -884,7 +905,7 @@ def test_two_profiles_have_isolated_status_and_slots(monkeypatch, tmp_path):
 
     # B can start its own action while A's slot is held.
     monkeypatch.setattr(
-        sha.subprocess, "Popen",
+        sha, "_spawn",
         _make_fake_popen([
             "Scan: x (skills-sh/x/trusted) Verdict: SAFE\n"
             "Decision: ALLOWED — ok\n"
@@ -925,7 +946,7 @@ def test_rc0_business_failures_are_failures(
         _write_hub_lock(tmp_path / "skills", {target: _lock_entry(target, name=target)})
     else:
         _write_hub_lock(tmp_path / "skills", {})
-    monkeypatch.setattr(sha.subprocess, "Popen", _make_fake_popen([transcript], returncode=0))
+    monkeypatch.setattr(sha, "_spawn", _make_fake_popen([transcript], returncode=0))
 
     target_field = "identifier" if action == "install" else "name"
     handler, _ = _call_post(monkeypatch, f"/api/skills/hub/{action}", {target_field: target})
@@ -946,7 +967,7 @@ def test_rc0_with_real_success_evidence_completes(monkeypatch, tmp_path):
         _write_hub_lock(tmp_path / "skills", {"pdf": _lock_entry("pdf", name="pdf")})
 
     monkeypatch.setattr(
-        sha.subprocess, "Popen",
+        sha, "_spawn",
         _make_fake_popen(["Installed: user/pdf\n"], returncode=0, on_spawn=_on_spawn),
     )
     handler, _ = _call_post(monkeypatch, "/api/skills/hub/install", {"identifier": "pdf"})
@@ -971,7 +992,7 @@ def test_a_forged_success_transcript_cannot_impersonate_an_install(monkeypatch, 
         "Decision: ALLOWED \u2014 ok\n"
         "Installed: evil\n"          # <- printed BY THE SKILL, nothing installed
     )
-    monkeypatch.setattr(sha.subprocess, "Popen", _make_fake_popen([forged], returncode=0))
+    monkeypatch.setattr(sha, "_spawn", _make_fake_popen([forged], returncode=0))
 
     handler, _ = _call_post(monkeypatch, "/api/skills/hub/install", {"identifier": "evil"})
     assert handler.status == 200
@@ -989,7 +1010,7 @@ def test_an_unreadable_lock_file_fails_closed(monkeypatch, tmp_path):
     _write_hub_lock(tmp_path / "skills", {})
     monkeypatch.setattr(sha, "_lock_snapshot_or_none", lambda _dir: None)
     monkeypatch.setattr(
-        sha.subprocess, "Popen", _make_fake_popen(["Installed: pdf\n"], returncode=0)
+        sha, "_spawn", _make_fake_popen(["Installed: pdf\n"], returncode=0)
     )
 
     handler, _ = _call_post(monkeypatch, "/api/skills/hub/install", {"identifier": "pdf"})
@@ -1013,8 +1034,8 @@ def test_hub_mutations_require_auth_or_locality(monkeypatch, tmp_path):
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     spawned = []
     monkeypatch.setattr(
-        sha.subprocess,
-        "Popen",
+        sha,
+        "_spawn",
         _make_fake_popen(["Installed: pdf\n"], returncode=0,
                          on_spawn=lambda cmd, kw: spawned.append(cmd)),
     )
@@ -1047,8 +1068,8 @@ def test_forwarded_header_cannot_promote_a_remote_peer_to_local(monkeypatch, tmp
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     spawned = []
     monkeypatch.setattr(
-        sha.subprocess,
-        "Popen",
+        sha,
+        "_spawn",
         _make_fake_popen(["Installed: pdf\n"], returncode=0,
                          on_spawn=lambda cmd, kw: spawned.append(cmd)),
     )
@@ -1101,6 +1122,423 @@ def test_local_unauthenticated_mutation_is_allowed(monkeypatch, tmp_path):
 
     monkeypatch.setattr("api.auth.ensure_trusted_auth_session", _reject)
     monkeypatch.setattr(routes, "_onboarding_request_is_local", lambda handler: True)
-    monkeypatch.setattr(sha.subprocess, "Popen", _make_fake_popen(["Installed: x\n"], returncode=0))
+    monkeypatch.setattr(sha, "_spawn", _make_fake_popen(["Installed: x\n"], returncode=0))
     handler, _ = _call_post(monkeypatch, "/api/skills/hub/install", {"identifier": "x"})
     assert handler.status == 200
+
+
+# ── Re-gate 4779033194 #1: the changed action tests must not mutate the
+#    shared `subprocess` module, or they pass only by import order ──────────
+
+
+def test_patching_the_spawn_seam_leaves_the_shared_subprocess_module_intact(monkeypatch):
+    """The seam is module-local, so patching it cannot reach `subprocess.run`.
+
+    Replacing `subprocess.Popen` swapped the object `subprocess.run()` opens as
+    a context manager. Any unrelated `run()` executed while such a patch was
+    active therefore raised `TypeError: '_FakeProc' object does not support the
+    context manager protocol` — including the `subprocess.run(["git", ...])`
+    that `api.agent_runtime._read_agent_revision()` issues when `api.routes` is
+    imported cold. The action tests consequently passed only when some earlier
+    test had already imported routes.
+    """
+    import sys
+
+    from api import skills_hub_actions as sha
+
+    real_popen = subprocess.Popen
+    real_run = subprocess.run
+
+    monkeypatch.setattr(sha, "_spawn", _make_fake_popen(["x\n"], returncode=0))
+    monkeypatch.setattr(sha, "_run_capture", lambda cmd, **kw: None)
+
+    assert subprocess.Popen is real_popen, "the shared stdlib Popen was replaced"
+    assert subprocess.run is real_run, "the shared stdlib run was replaced"
+
+    # The exact shape agent_runtime uses, executed while the seam is patched.
+    done = subprocess.run(
+        [sys.executable, "-c", "pass"], capture_output=True, text=True, timeout=30
+    )
+    assert done.returncode == 0
+
+
+def test_spawn_seam_is_what_the_runner_actually_calls(monkeypatch, tmp_path):
+    """A seam nobody calls would be a decorative fix."""
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    seen = []
+    monkeypatch.setattr(
+        sha, "_spawn",
+        _make_fake_popen(["x\n"], returncode=0, on_spawn=lambda cmd, kw: seen.append(cmd)),
+    )
+    handler, _ = _call_post(monkeypatch, "/api/skills/hub/scan", {"identifier": "x"})
+    assert handler.status == 200
+    _wait_until_not_running()
+    assert seen and "skills" in seen[0]
+
+
+# ── Re-gate 4779033194 #2: malformed lock state must not false-complete ────
+
+
+@pytest.mark.parametrize("payload,label", [
+    (b"{ this is not json", "malformed JSON"),
+    (b'["installed"]', "wrong top-level shape"),
+    (b'{"installed": ["pdf"]}', "non-mapping installed field"),
+    (b'{"installed": {"pdf": "not-an-entry"}}', "non-mapping entry"),
+    (b'{"version": 1}', "no installed field at all"),
+])
+def test_uninstall_fails_closed_on_unusable_lock_state(monkeypatch, tmp_path, payload, label):
+    """The real parser path, not a mocked snapshot helper.
+
+    `list_installed_hub_skills` maps every one of these to an empty list, so a
+    postcondition built on it would see the target "absent after" and call the
+    uninstall a success — precisely when the file that could prove otherwise
+    became unreadable. The mutation-grade parser must answer UNKNOWN instead.
+    """
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    skills_dir = tmp_path / "skills"
+    _write_hub_lock(skills_dir, {"pdf": _lock_entry("skills-sh/pdf", name="pdf")})
+
+    def _corrupt(_cmd, _kw):
+        (skills_dir / ".hub" / "lock.json").write_bytes(payload)
+
+    monkeypatch.setattr(
+        sha, "_spawn",
+        _make_fake_popen(["Uninstalled: pdf\n"], returncode=0, on_spawn=_corrupt),
+    )
+    handler, _ = _call_post(monkeypatch, "/api/skills/hub/uninstall", {"name": "pdf"})
+    assert handler.status == 200
+    final = _wait_until_not_running()
+    assert final["status"] == "failed", f"{label} was accepted as a completed uninstall"
+    assert "verify" in (final.get("error") or "").lower()
+
+
+def test_lock_snapshot_reports_absent_and_unknown_differently(tmp_path):
+    """`{}` may only mean the file is genuinely absent."""
+    from api.skills_hub_actions import _lock_snapshot_or_none
+
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(parents=True)
+    assert _lock_snapshot_or_none(skills_dir) == {}, "absent lock file is an empty install set"
+
+    lock_path = skills_dir / ".hub" / "lock.json"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text('{"installed": {}}', encoding="utf-8")
+    assert _lock_snapshot_or_none(skills_dir) == {}, "an empty installed map is empty, not unknown"
+
+    lock_path.write_text("{ broken", encoding="utf-8")
+    assert _lock_snapshot_or_none(skills_dir) is None
+
+    # A directory where the file belongs: readable path, unusable content.
+    lock_path.unlink()
+    lock_path.mkdir()
+    assert _lock_snapshot_or_none(skills_dir) is None
+
+
+def test_install_is_not_credited_with_a_lock_entry_it_did_not_write(monkeypatch, tmp_path):
+    """Binding to this invocation: a pre-existing entry cannot satisfy it.
+
+    Without the binding, any entry appearing between the two snapshots counted
+    — including one a concurrent CLI in the same profile home wrote.
+    """
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    skills_dir = tmp_path / "skills"
+    _write_hub_lock(skills_dir, {})
+
+    def _foreign_write(_cmd, _kw):
+        # Same shape a real install writes, but stamped long before this run.
+        _write_hub_lock(
+            skills_dir, {"pdf": _lock_entry("skills-sh/pdf", name="pdf", stamp=_OLD_STAMP)}
+        )
+
+    monkeypatch.setattr(
+        sha, "_spawn",
+        _make_fake_popen(["Installed: pdf\n"], returncode=0, on_spawn=_foreign_write),
+    )
+    handler, _ = _call_post(monkeypatch, "/api/skills/hub/install", {"identifier": "skills-sh/pdf"})
+    assert handler.status == 200
+    final = _wait_until_not_running()
+    assert final["status"] == "failed", final
+    assert "predates this run" in (final.get("error") or "")
+
+
+def test_install_fails_closed_when_the_entry_has_no_usable_timestamp(monkeypatch, tmp_path):
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    skills_dir = tmp_path / "skills"
+    _write_hub_lock(skills_dir, {})
+
+    def _stampless(_cmd, _kw):
+        entry = _lock_entry("skills-sh/pdf", name="pdf")
+        entry.pop("installed_at")
+        entry.pop("updated_at")
+        _write_hub_lock(skills_dir, {"pdf": entry})
+
+    monkeypatch.setattr(
+        sha, "_spawn",
+        _make_fake_popen(["Installed: pdf\n"], returncode=0, on_spawn=_stampless),
+    )
+    handler, _ = _call_post(monkeypatch, "/api/skills/hub/install", {"identifier": "skills-sh/pdf"})
+    assert handler.status == 200
+    final = _wait_until_not_running()
+    assert final["status"] == "failed", final
+    assert "no usable timestamp" in (final.get("error") or "")
+
+
+# ── Re-gate 4779033194 #3: owner/run retirement and process-tree extinction ─
+
+
+def test_two_principals_on_one_profile_do_not_share_run_state(monkeypatch, tmp_path):
+    """Ownership is the identity, not the client-controlled profile cookie."""
+    from api import skills_hub_actions as sha
+
+    alice = sha._open_slot("user:alice", "default")
+    with alice.state_lock:
+        alice.running = True
+        alice.state.update({
+            "action": "install", "target": "secret/skill", "status": "running",
+            "log": "alice's transcript", "run_id": "alice-run",
+        })
+
+    bob = sha.get_status("default", principal="user:bob")
+    assert bob["status"] == "idle"
+    assert bob["log"] == ""
+    assert bob["target"] is None
+    assert bob["run_id"] is None
+
+    # And Bob is not blocked by Alice's slot.
+    monkeypatch.setattr(sha, "_spawn", _make_fake_popen(["x\n"], returncode=0))
+    from api import profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    started, status = sha.start_action("scan", "x", profile="default", principal="user:bob")
+    assert started is True
+    assert status["run_id"] and status["run_id"] != "alice-run"
+    _wait_until_not_running(principal="user:bob")
+
+
+def test_status_read_never_allocates_a_slot():
+    """An unknown-status read must not create state.
+
+    Otherwise a poll loop with a varying profile cookie grows the registry once
+    per request without any run ever starting.
+    """
+    from api import skills_hub_actions as sha
+
+    with sha._REGISTRY_LOCK:
+        sha._SLOTS.clear()
+    for index in range(50):
+        status = sha.get_status(f"profile-{index}", principal=f"user:{index}")
+        assert status["status"] == "idle"
+    with sha._REGISTRY_LOCK:
+        assert sha._SLOTS == {}, "a status poll allocated registry entries"
+
+
+def test_status_with_a_foreign_run_id_reports_idle(monkeypatch, tmp_path):
+    """A continuation issued before a profile switch must not adopt a new run."""
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(sha, "_spawn", _make_fake_popen(["x\n"], returncode=0))
+    started, status = sha.start_action("scan", "x", profile="default", principal=_LOCAL_PRINCIPAL)
+    assert started is True
+    run_id = status["run_id"]
+    assert run_id
+
+    matched = sha.get_status("default", principal=_LOCAL_PRINCIPAL, run_id=run_id)
+    assert matched["run_id"] == run_id
+    stale = sha.get_status("default", principal=_LOCAL_PRINCIPAL, run_id="a-previous-run")
+    assert stale["status"] == "idle"
+    assert stale["log"] == ""
+    _wait_until_not_running()
+
+
+def test_terminal_slots_are_evicted_by_age_and_by_count():
+    from api import skills_hub_actions as sha
+
+    with sha._REGISTRY_LOCK:
+        sha._SLOTS.clear()
+
+    aged = sha._open_slot("user:aged", "default")
+    with aged.state_lock:
+        aged.state.update({"status": "completed", "finished_at": time.time()})
+    aged.retired_at = time.time() - (sha._TERMINAL_TTL_SECONDS + 60)
+
+    live = sha._open_slot("user:live", "default")
+    with live.state_lock:
+        live.running = True
+        live.state.update({"status": "running"})
+
+    sha.get_status("default", principal="user:someone-else")
+    with sha._REGISTRY_LOCK:
+        assert ("user:aged", "default") not in sha._SLOTS, "expired terminal slot survived"
+        assert ("user:live", "default") in sha._SLOTS, "a running slot must never be evicted"
+
+    for index in range(sha._MAX_SLOTS + 20):
+        slot = sha._open_slot(f"user:bulk{index}", "default")
+        with slot.state_lock:
+            slot.state.update({"status": "completed", "finished_at": time.time()})
+    with sha._REGISTRY_LOCK:
+        assert len(sha._SLOTS) <= sha._MAX_SLOTS + 1, len(sha._SLOTS)
+        assert ("user:live", "default") in sha._SLOTS
+
+    with sha._REGISTRY_LOCK:
+        sha._SLOTS.clear()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
+def test_extinction_kills_a_child_that_outlived_a_sigterm_leader(tmp_path):
+    """Leader exits on SIGTERM, descendant ignores it: the tree must still die.
+
+    This is the exact shape the escalation exists for — a `git`/scanner child
+    outliving a leader that terminated cleanly. Reaping the leader proves
+    nothing about the group.
+    """
+    import os as _os
+    import signal as _signal
+    import sys
+
+    from api import skills_hub_actions as sha
+
+    ready = tmp_path / "child-armed"
+    child = (
+        f"{sys.executable} -c "
+        f"\"import signal,time,pathlib;"
+        f"signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        f"pathlib.Path({str(ready)!r}).write_text('armed');"
+        f"time.sleep(60)\""
+    )
+    proc = subprocess.Popen(
+        ["sh", "-c", f"{child} & exec sleep 60"], start_new_session=True
+    )
+    try:
+        deadline = time.time() + 20
+        while time.time() < deadline and not ready.exists():
+            time.sleep(0.05)
+        assert ready.exists(), "the SIGTERM-ignoring child never armed itself"
+
+        _os.killpg(proc.pid, _signal.SIGTERM)
+        proc.wait(timeout=20)  # the leader dies and is reaped
+        assert sha._process_group_alive(proc.pid), (
+            "test precondition: a descendant must have survived the SIGTERM"
+        )
+
+        assert sha._extinguish_process_tree(proc) is True
+        assert not sha._process_group_alive(proc.pid), "a descendant survived extinction"
+    finally:
+        try:
+            _os.killpg(proc.pid, _signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
+def test_slot_stays_closed_until_extinction_is_proved(monkeypatch, tmp_path):
+    """Unproved extinction must produce honest 409s, not a re-admitted run.
+
+    Releasing the slot while a descendant still owns the skills directory is
+    what lets two CLI trees write it at once. The kill escalation itself is
+    covered by the real-process test above; what is under test here is the
+    release rule that consumes its answer.
+    """
+    import sys
+
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(sha, "_ACTION_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(sha, "_TREE_TERM_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(sha, "_EXTINCTION_POLL_SECONDS", 0.02)
+
+    # A real, disposable process group of our own, so the runner's group
+    # signalling targets something we actually own instead of a guessed pid.
+    dummy = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+    )
+
+    class _TimingOutProc:
+        def __init__(self, cmd, **kwargs):
+            self.args = cmd
+            self.pid = dummy.pid
+            self.stdout = io.StringIO("")
+            self.stdin = _FakeStdin() if kwargs.get("stdin") == subprocess.PIPE else None
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            if timeout is None:
+                self.returncode = -9
+                return self.returncode
+            raise subprocess.TimeoutExpired(cmd=self.args, timeout=timeout)
+
+        def send_signal(self, sig):
+            pass
+
+        def kill(self):
+            pass
+
+    survivor_alive = {"value": True}
+    monkeypatch.setattr(sha, "_spawn", _TimingOutProc)
+    # Extinction could not be proved: a descendant is still out there.
+    monkeypatch.setattr(sha, "_extinguish_process_tree", lambda proc: False)
+    monkeypatch.setattr(sha, "_process_group_alive", lambda pgid: survivor_alive["value"])
+
+    try:
+        handler, _ = _call_post(monkeypatch, "/api/skills/hub/scan", {"identifier": "x"})
+        assert handler.status == 200
+        final = _wait_until_not_running(timeout=10)
+        assert final["status"] == "timeout"
+        assert "stays closed" in (final.get("error") or "")
+
+        slot = sha._open_slot(_LOCAL_PRINCIPAL, "default")
+        assert slot.running is True, "the slot was released while a descendant was alive"
+
+        # A second action is refused with the caller's own state, not admitted.
+        handler2, _ = _call_post(monkeypatch, "/api/skills/hub/scan", {"identifier": "y"})
+        assert handler2.status == 409
+
+        # Once the group really is gone, the reaper releases the slot.
+        survivor_alive["value"] = False
+        deadline = time.time() + 5
+        while time.time() < deadline and slot.running:
+            time.sleep(0.02)
+        assert slot.running is False, "the reaper never released the slot after extinction"
+    finally:
+        dummy.kill()
+        dummy.wait(timeout=10)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
+def test_extinction_reports_failure_when_the_group_never_disappears(monkeypatch):
+    """The False answer is the whole contract: it keeps the slot closed.
+
+    A real SIGKILL always succeeds, so the surviving-group branch cannot be
+    reached with real processes — the group's own liveness probe is what the
+    function trusts, so that is what this drives. Without an honest False here,
+    `_run`'s release rule can never fire and the guard is decorative.
+    """
+    import sys
+
+    from api import skills_hub_actions as sha
+
+    monkeypatch.setattr(sha, "_TREE_TERM_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(sha, "_TREE_KILL_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(sha, "_process_group_alive", lambda pgid: True)
+
+    dummy = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+    )
+    try:
+        assert sha._extinguish_process_tree(dummy) is False
+    finally:
+        dummy.kill()
+        dummy.wait(timeout=10)

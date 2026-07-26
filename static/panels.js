@@ -4919,10 +4919,14 @@ function resetSkillsHubClientState() {
   _skillsHubInstalled = [];
   _skillsHubScanResults = {};
   _skillsHubLastAction = null;
+  _skillsHubRunId = '';
   if (_skillsHubPollTimer) { clearInterval(_skillsHubPollTimer); _skillsHubPollTimer = null; }
 }
 let _skillsHubAllowed = true; // optimistic default; corrected by the first /status poll
 let _skillsHubLastAction = null;
+// Opaque id of the run THIS client started. Sent with every status poll so the
+// server answers about that run and not about whatever occupies the slot now.
+let _skillsHubRunId = '';
 
 function switchSkillsTab(tab) {
   _skillsHubTab = tab;
@@ -5093,12 +5097,20 @@ function _syncSkillsHubPolling(data) {
 }
 
 async function loadSkillsHubStatus() {
+  // Gate finding 3 (client half): a poll started before a profile switch must
+  // not paint the new profile's panel, and it must not adopt a run it did not
+  // start. The generation fences the switch; the run id fences the run.
+  const gen = _skillsHubGeneration;
+  const runId = _skillsHubRunId;
   let data;
   try {
-    data = await api('/api/skills/hub/status', {timeoutToast:false});
+    const suffix = runId ? ('?run_id=' + encodeURIComponent(runId)) : '';
+    data = await api('/api/skills/hub/status' + suffix, {timeoutToast:false});
   } catch (e) {
     return; // best-effort; keep showing the last known state
   }
+  if (gen !== _skillsHubGeneration) return; // profile switched mid-flight
+  if (runId && runId !== _skillsHubRunId) return; // superseded by a newer action
   _skillsHubAllowed = !!data.allowed;
   const wasRunning = _skillsHubLastAction && _skillsHubLastAction.status === 'running';
   const justFinished = wasRunning && data.status !== 'running';
@@ -5121,20 +5133,32 @@ async function _startSkillsHubAction(action, body) {
   return api('/api/skills/hub/' + action, {method:'POST', body:JSON.stringify(body || {}), timeoutMs:15000, timeoutToast:false});
 }
 
+function _adoptSkillsHubRun(gen, result) {
+  // The POST returns the run's opaque id. Adopting it is what makes every
+  // later poll ask about THIS run; dropping the result when the generation
+  // moved is what keeps a run started under the old profile from painting
+  // (and polling under) the new one.
+  if (gen !== _skillsHubGeneration) return;
+  if (result && result.run_id) _skillsHubRunId = String(result.run_id);
+  renderSkillsHubActionStatus(result);
+  _syncSkillsHubPolling(result);
+}
+
 function _skillsHubActionErrorToast(e) {
   const msg = e && e.message ? e.message : String(e || '');
   if (typeof showToast === 'function') showToast(`${t('skills_hub_action_failed')}${msg ? ': ' + msg : ''}`, 5000, 'error');
 }
 
 async function scanSkillsHubResult(identifier) {
+  const gen = _skillsHubGeneration;
   try {
     const result = await _startSkillsHubAction('scan', {identifier});
-    renderSkillsHubActionStatus(result);
-    _syncSkillsHubPolling(result);
+    _adoptSkillsHubRun(gen, result);
   } catch (e) { _skillsHubActionErrorToast(e); }
 }
 
 async function installSkillsHubResult(identifier) {
+  const gen = _skillsHubGeneration;
   const scan = _skillsHubScanResults[identifier];
   let message = t('skills_hub_confirm_install');
   let danger = false;
@@ -5164,16 +5188,20 @@ async function installSkillsHubResult(identifier) {
   }
   const confirmed = await showConfirmDialog({title:t('skills_hub_install'), message, danger, confirmLabel:t('skills_hub_install')});
   if (!confirmed) return;
+  // The dialog is an await: the profile can have been switched while it was
+  // open. Consent was given for the OLD profile's store, so it does not carry
+  // over to the new one — fire nothing.
+  if (gen !== _skillsHubGeneration) return;
   try {
     const result = await _startSkillsHubAction('install', {identifier});
-    renderSkillsHubActionStatus(result);
-    _syncSkillsHubPolling(result);
+    _adoptSkillsHubRun(gen, result);
   } catch (e) { _skillsHubActionErrorToast(e); }
 }
 
 async function updateSkillsHubSkill(name) {
   // Verified update (gate finding 1): the server scan-gates the update and
   // needs the installed skill's hub identifier for the scan phase.
+  const gen = _skillsHubGeneration;
   const row = (_skillsHubInstalled || []).find(e => e && e.name === name) || {};
   if (!row.identifier) {
     if (typeof showToast === 'function') showToast(t('skills_hub_update_no_identifier') || 'Cannot verify this skill (no hub identifier recorded); update refused.', 5000, 'error');
@@ -5181,18 +5209,20 @@ async function updateSkillsHubSkill(name) {
   }
   try {
     const result = await _startSkillsHubAction('update', {name, identifier: row.identifier});
-    renderSkillsHubActionStatus(result);
-    _syncSkillsHubPolling(result);
+    _adoptSkillsHubRun(gen, result);
   } catch (e) { _skillsHubActionErrorToast(e); }
 }
 
 async function uninstallSkillsHubSkill(name) {
+  const gen = _skillsHubGeneration;
   const confirmed = await showConfirmDialog({title:t('skills_hub_uninstall'), message:t('skills_hub_confirm_uninstall').replace('{name}', name), danger:true, confirmLabel:t('skills_hub_uninstall')});
   if (!confirmed) return;
+  // Destructive and profile-scoped: consent for the old profile's store must
+  // never be replayed against the profile that is active now.
+  if (gen !== _skillsHubGeneration) return;
   try {
     const result = await _startSkillsHubAction('uninstall', {name});
-    renderSkillsHubActionStatus(result);
-    _syncSkillsHubPolling(result);
+    _adoptSkillsHubRun(gen, result);
   } catch (e) { _skillsHubActionErrorToast(e); }
 }
 
