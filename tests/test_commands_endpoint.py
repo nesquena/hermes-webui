@@ -965,6 +965,8 @@ def test_agents_command_renders_the_real_process_registry(monkeypatch):
                 "pid": 4242,
                 "status": "running",
                 "uptime_seconds": 12,
+                "profile": "alpha",
+                "principal": "alice",
             },
             {
                 "session_id": "s-2",
@@ -972,6 +974,8 @@ def test_agents_command_renders_the_real_process_registry(monkeypatch):
                 "pid": 4243,
                 "status": "exited",
                 "exit_code": 1,
+                "profile": "alpha",
+                "principal": "alice",
             },
         ]
     )
@@ -982,7 +986,7 @@ def test_agents_command_renders_the_real_process_registry(monkeypatch):
     pr.process_registry = registry
     monkeypatch.setitem(sys.modules, "tools.process_registry", pr)
 
-    out = commands._run_agents_command()
+    out = commands._run_agents_command(profile="alpha", principal="alice")
 
     assert "Tracked processes (2):" in out
     assert "npm run dev — running (pid 4242)" in out
@@ -1003,7 +1007,7 @@ def test_agents_command_reports_an_empty_registry_as_nothing_running(monkeypatch
     pr.process_registry = types.SimpleNamespace(list_sessions=lambda: [])
     monkeypatch.setitem(sys.modules, "tools.process_registry", pr)
 
-    assert commands._run_agents_command() == (
+    assert commands._run_agents_command(profile="alpha", principal="alice") == (
         "No background agents or tracked processes are currently running."
     )
 
@@ -1017,7 +1021,10 @@ def test_agents_command_does_not_call_the_nonexistent_list_processes(monkeypatch
 
     class Registry:
         def list_sessions(self):
-            return [{"session_id": "s-1", "command": "sleep 1", "pid": 7, "status": "running"}]
+            return [{
+                "session_id": "s-1", "command": "sleep 1", "pid": 7, "status": "running",
+                "profile": "alpha", "principal": "alice",
+            }]
 
         def __getattr__(self, name):  # pragma: no cover - only hit on regression
             raise AssertionError(f"handler reached for absent registry attribute {name!r}")
@@ -1029,7 +1036,9 @@ def test_agents_command_does_not_call_the_nonexistent_list_processes(monkeypatch
     pr.process_registry = Registry()
     monkeypatch.setitem(sys.modules, "tools.process_registry", pr)
 
-    assert "sleep 1 — running (pid 7)" in commands._run_agents_command()
+    assert "sleep 1 — running (pid 7)" in commands._run_agents_command(
+        profile="alpha", principal="alice"
+    )
 
 
 def test_webui_safe_agent_commands_are_allowlisted(monkeypatch):
@@ -1047,7 +1056,7 @@ def test_webui_safe_agent_command_aliases_resolve_to_allowlisted_handlers(monkey
     """Registry aliases must not be intercepted by the frontend then rejected by the API."""
     from api import commands
 
-    monkeypatch.setattr(commands, "_run_agents_command", lambda: "agents ok")
+    monkeypatch.setattr(commands, "_run_agents_command", lambda **_kw: "agents ok")
     monkeypatch.setattr(commands, "_run_suggestions_command", lambda arg: f"suggestions {arg}")
     monkeypatch.setattr(commands, "_run_blueprint_command", lambda arg: f"blueprint {arg}")
     monkeypatch.setattr(commands, "_run_version_command", lambda: "version ok")
@@ -1092,3 +1101,106 @@ def test_list_commands_degrades_when_agent_missing(monkeypatch):
     # the stubbed-None module, raising ImportError, taking the fallback path.
     from api.commands import list_commands
     assert list_commands() == []
+
+
+# ── Re-gate 2026-07-25: the process registry is process-global ──────────────
+
+
+def _registry_with(rows):
+    """Build a fake tools.process_registry returning *rows*."""
+    import types
+
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.__path__ = []
+    pr = types.ModuleType("tools.process_registry")
+    pr.process_registry = types.SimpleNamespace(list_sessions=lambda: rows)
+    return tools_pkg, pr
+
+
+_TWO_PROFILE_ROWS = [
+    {"session_id": "a-run", "command": "alpha-secret --token=A", "pid": 11,
+     "status": "running", "profile": "alpha", "principal": "alice"},
+    {"session_id": "a-done", "command": "alpha-finished", "pid": 12,
+     "status": "exited", "exit_code": 0, "profile": "alpha", "principal": "alice"},
+    {"session_id": "b-run", "command": "beta-secret --token=B", "pid": 21,
+     "status": "running", "profile": "beta", "principal": "bob"},
+    {"session_id": "b-done", "command": "beta-finished", "pid": 22,
+     "status": "exited", "exit_code": 2, "profile": "beta", "principal": "bob"},
+    # Same profile, different principal — a profile-only filter would leak this.
+    {"session_id": "a2-run", "command": "alpha-other-user", "pid": 31,
+     "status": "running", "profile": "alpha", "principal": "carol"},
+    # Pre-ownership row: unattributable, therefore nobody's.
+    {"session_id": "legacy", "command": "legacy-no-owner", "pid": 41,
+     "status": "running"},
+]
+
+
+def _agents_for(monkeypatch, *, profile, principal, rows=None):
+    import sys
+
+    from api import commands
+
+    tools_pkg, pr = _registry_with(_TWO_PROFILE_ROWS if rows is None else rows)
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    monkeypatch.setitem(sys.modules, "tools.process_registry", pr)
+    return commands._run_agents_command(profile=profile, principal=principal)
+
+
+def test_one_profile_never_sees_another_profiles_processes(monkeypatch):
+    """`tools.process_registry` is ONE registry for every profile served.
+
+    Projecting it unfiltered handed profile A the command lines, PIDs and
+    statuses of profile B. Command lines routinely carry paths, hostnames and
+    sometimes credentials, so this is disclosure rather than noise.
+    """
+    out = _agents_for(monkeypatch, profile="alpha", principal="alice")
+
+    assert "alpha-secret --token=A" in out
+    assert "alpha-finished" in out
+    for foreign in ("beta-secret --token=B", "beta-finished", "21", "22"):
+        assert foreign not in out, f"another profile's data leaked: {foreign}"
+
+
+def test_one_principal_never_sees_another_principal_in_the_same_profile(monkeypatch):
+    """A profile-only filter would still show every user inside that profile."""
+    out = _agents_for(monkeypatch, profile="alpha", principal="alice")
+    assert "alpha-other-user" not in out, "a second principal's process was shown"
+
+
+def test_both_running_and_finished_rows_are_filtered(monkeypatch):
+    """Status must not decide visibility — ownership does."""
+    out = _agents_for(monkeypatch, profile="beta", principal="bob")
+    assert "beta-secret --token=B — running (pid 21)" in out
+    assert "beta-finished — exited (2) (pid 22)" in out
+    assert "alpha" not in out
+
+
+def test_a_row_without_an_owner_is_shown_to_nobody(monkeypatch):
+    """Unattributable rows fail CLOSED.
+
+    "We cannot tell whose this is" must not resolve to "yours" for whichever
+    profile happens to ask first.
+    """
+    for profile, principal in (("alpha", "alice"), ("beta", "bob"), ("gamma", "dave")):
+        out = _agents_for(monkeypatch, profile=profile, principal=principal)
+        assert "legacy-no-owner" not in out, (
+            f"an ownerless row was shown to {profile}/{principal}"
+        )
+
+
+def test_a_missing_request_identity_shows_nothing(monkeypatch):
+    """Without a server-derived identity there is nothing to filter against."""
+    for profile, principal in ((None, "alice"), ("alpha", None), (None, None)):
+        out = _agents_for(monkeypatch, profile=profile, principal=principal)
+        assert "alpha-secret" not in out and "beta-secret" not in out
+        assert "currently visible" in out
+
+
+def test_the_identity_is_never_taken_from_the_row_being_filtered(monkeypatch):
+    """A row must not be able to name itself into the caller's view."""
+    rows = [{
+        "session_id": "forged", "command": "forged-row", "pid": 99, "status": "running",
+        "profile": "alpha", "principal": "alice", "owner": "alice",
+    }]
+    out = _agents_for(monkeypatch, profile="beta", principal="bob", rows=rows)
+    assert "forged-row" not in out

@@ -266,6 +266,39 @@ def execute_agent_command(command: str) -> str | dict[str, Any]:
         return _dispatch_agent_command(canonical, command, arg_string)
 
 
+def _request_identity() -> "tuple[str | None, str | None]":
+    """(profile, principal) for the CURRENT request, derived server-side.
+
+    Both halves come from the server: the profile from the active-profile
+    resolver the command scope already uses, the principal from the
+    authenticated session. Neither is read from a client-supplied field, and a
+    half-known identity is returned as unknown — a filter that falls back to
+    "profile only" would still show every principal in that profile.
+    """
+    profile = None
+    principal = None
+    try:
+        from api.profiles import get_active_profile_name
+
+        profile = str(get_active_profile_name() or "") or None
+    except Exception:
+        profile = None
+    try:
+        from api.auth import is_auth_enabled
+
+        if not is_auth_enabled():
+            # Single-user deployment: one principal by construction, so the
+            # profile alone is a complete identity.
+            principal = "local"
+        else:
+            from api.auth import current_session_principal
+
+            principal = str(current_session_principal() or "") or None
+    except Exception:
+        principal = None
+    return profile, principal
+
+
 def _dispatch_agent_command(
     canonical: str, command: str, arg_string: str
 ) -> str | dict[str, Any]:
@@ -296,7 +329,8 @@ def _dispatch_agent_command(
     if canonical in {'profile', 'whoami'}:
         return _run_profile_command()
     if canonical == 'agents':
-        return _run_agents_command()
+        _profile, _principal = _request_identity()
+        return _run_agents_command(profile=_profile, principal=_principal)
     if canonical == 'sessions':
         return _run_sessions_command(arg_string)
     if canonical == 'resume':
@@ -725,16 +759,54 @@ def _run_profile_command() -> str:
     return "\n".join(lines)
 
 
-def _run_agents_command() -> str:
+def _registry_row_owner(proc: dict) -> "tuple[str, str] | None":
+    """(profile, principal) a registry row belongs to, or None when unknown.
+
+    An unknown owner is NOT "mine". Rows predating owner tracking, or written by
+    a component that does not record it, cannot be attributed — so they are
+    withheld rather than shown to whoever asks first.
+    """
+    if not isinstance(proc, dict):
+        return None
+    profile = proc.get("profile") or proc.get("hermes_profile")
+    principal = proc.get("principal") or proc.get("owner")
+    if not profile or not principal:
+        return None
+    return (str(profile), str(principal))
+
+
+def _run_agents_command(*, profile: str | None = None, principal: str | None = None) -> str:
+    """Render the tracked-process list for THIS profile and principal.
+
+    ``tools.process_registry`` is process-global: one registry for every profile
+    the WebUI serves. Projecting it unfiltered handed profile A the command
+    lines, PIDs and statuses of profile B — command lines routinely carry paths,
+    hostnames and occasionally credentials, so this is disclosure, not just
+    noise.
+
+    The identity is passed in by the caller, which derives it server-side from
+    the request. It is never read from the row being filtered, and never from a
+    client-supplied value.
+    """
     # The Agent's registry exposes `list_sessions()`; there is no `list_processes()`.
     # Calling the wrong name raised an AttributeError that this `except` swallowed,
     # so /agents and /tasks always rendered the empty fallback.
     try:
         from tools.process_registry import process_registry
-        processes = process_registry.list_sessions()
+        raw_rows = process_registry.list_sessions()
     except Exception:
         logger.warning("Agents/process registry unavailable", exc_info=True)
         return "No background agents or tracked processes are currently visible."
+    if profile is None or principal is None:
+        # No server-derived identity means nothing can be attributed. Fail
+        # closed rather than fall back to the unfiltered list.
+        logger.warning("Agents/process listing refused: no request identity")
+        return "No background agents or tracked processes are currently visible."
+    want = (str(profile), str(principal))
+    processes = [
+        row for row in (raw_rows or [])
+        if _registry_row_owner(row) == want
+    ]
     if not processes:
         return "No background agents or tracked processes are currently running."
     lines = [f"Tracked processes ({len(processes)}):"]
