@@ -4856,24 +4856,18 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
 MOA_DEFAULT_PRESET_NAME = "default"
 
 _MOA_SLOT_KEYS = {"provider", "model", "reasoning_effort"}
-# Transport-only handle: GET stamps each slot with the persisted slot it came
-# from, PUT echoes it back, and the write path uses it to merge unknown fields
-# from THAT EXACT slot. It is never persisted. Accepted as an input field so a
-# round-tripped slot does not trip the unknown-field validator.
-_MOA_SLOT_ORIGIN_KEY = "origin"
-_MOA_SLOT_INPUT_KEYS = _MOA_SLOT_KEYS | {_MOA_SLOT_ORIGIN_KEY}
+# Provenance travels in its OWN top-level envelope, never inside a slot.
+#
+# The previous revision put an `origin` key into the slot dict itself. That
+# collides with opaque config: a persisted, tool-owned field literally named
+# `origin` was excluded from the extras merge and therefore deleted by an
+# ordinary round trip. Slots are again pure config content — a slot-level
+# `origin` is just another unknown field, rejected on input like any other and
+# preserved on write like any other.
+_MOA_ORIGINS_KEY = "slot_origins"
+_MOA_SLOT_INPUT_KEYS = _MOA_SLOT_KEYS
 _MOA_AGGREGATOR_ORIGIN = "aggregator"
-
-
-def _moa_slot_origin(slot) -> str | None:
-    """The persisted slot this UI row was loaded from, if it declares one."""
-    if not isinstance(slot, dict):
-        return None
-    raw = slot.get(_MOA_SLOT_ORIGIN_KEY)
-    if not isinstance(raw, str):
-        return None
-    raw = raw.strip()
-    return raw or None
+_MOA_REF_ORIGIN_RE = re.compile(r"^ref:(0|[1-9][0-9]*)$")
 _MOA_PRESET_KEYS = {
     "enabled",
     "reference_models",
@@ -4974,10 +4968,10 @@ def _moa_merge_slot_extras(new_slots: list[dict], old_slots, origins=None) -> li
     for slot, origin in zip(new_slots, origins, strict=True):
         old = _moa_slot_for_origin(origin, old_list)
         if isinstance(old, dict):
-            extras = {
-                k: v for k, v in old.items()
-                if k not in _MOA_SLOT_KEYS and k != _MOA_SLOT_ORIGIN_KEY
-            }
+            # Every persisted key that is not UI-owned survives — including a
+            # tool-owned field literally named `origin`, which the previous
+            # in-band handle silently deleted.
+            extras = {k: v for k, v in old.items() if k not in _MOA_SLOT_KEYS}
             merged.append({**extras, **slot})
         else:
             merged.append(dict(slot))
@@ -4985,31 +4979,103 @@ def _moa_merge_slot_extras(new_slots: list[dict], old_slots, origins=None) -> li
 
 
 def _moa_slot_for_origin(origin, old_list: list):
-    """Resolve an origin handle to its persisted slot, or None."""
+    """Resolve an ALREADY VALIDATED origin handle to its persisted slot.
+
+    Validation (type, shape, range, uniqueness) happens up front in
+    ``_moa_resolved_origins`` so a bad handle is a 400 with no write. This
+    resolver therefore only has to map a good handle onto its slot.
+    """
     if not isinstance(origin, str) or not origin:
         return None
     if origin == _MOA_AGGREGATOR_ORIGIN:
         # The aggregator is a stable singleton: its origin is itself,
         # regardless of how its provider/model changed.
         return old_list[0] if old_list and isinstance(old_list[0], dict) else None
-    if not origin.startswith("ref:"):
+    match = _MOA_REF_ORIGIN_RE.match(origin)
+    if not match:
         return None
-    try:
-        index = int(origin[4:])
-    except ValueError:
-        return None
+    index = int(match.group(1))
     if 0 <= index < len(old_list) and isinstance(old_list[index], dict):
         return old_list[index]
     return None
 
 
-def _moa_read_slot(slot, origin: str | None = None) -> dict:
+def _moa_resolved_origins(
+    raw_origins, *, row_count: int, old_ref_count: int, pinned: bool
+) -> list[str | None]:
+    """Validate the reference-model provenance envelope. Raises → 400, no write.
+
+    A handle is a claim about which persisted slot a row came from, and acting
+    on a wrong claim moves another tool's metadata onto the wrong row. So the
+    claims are checked exactly rather than degraded:
+
+    * absent envelope → every row is new and carries nothing (legacy client);
+    * present → a list of exactly one entry per submitted row;
+    * an entry is null (a new row) or the exact string ``ref:<n>``;
+    * ``n`` must index a slot that exists in the persisted preset;
+    * no two rows may claim the same slot — replaying one handle twice would
+      clone the source's hidden metadata onto both output rows;
+    * any handle at all requires the caller to have pinned preset+revision,
+      because an index is only meaningful against the snapshot it was read
+      from.
+    """
+    if raw_origins is None:
+        return [None] * row_count
+    if not isinstance(raw_origins, list):
+        raise ValueError("reference_models origins must be a list")
+    if len(raw_origins) != row_count:
+        raise ValueError(
+            "reference_models origins must have exactly one entry per agent row "
+            f"({row_count} row(s), {len(raw_origins)} origin(s))"
+        )
+    resolved: list[str | None] = []
+    claimed: set[str] = set()
+    for index, entry in enumerate(raw_origins):
+        label = f"agent {index + 1}"
+        if entry is None or entry == "":
+            resolved.append(None)
+            continue
+        if not isinstance(entry, str):
+            raise ValueError(f"{label}: origin must be a string or null")
+        match = _MOA_REF_ORIGIN_RE.match(entry)
+        if not match:
+            raise ValueError(f"{label}: unrecognized origin {entry!r}")
+        if int(match.group(1)) >= old_ref_count:
+            raise ValueError(
+                f"{label}: origin {entry!r} does not refer to a saved agent; reload before saving"
+            )
+        if entry in claimed:
+            raise ValueError(f"{label}: origin {entry!r} is claimed by more than one row")
+        claimed.add(entry)
+        resolved.append(entry)
+    if any(resolved) and not pinned:
+        raise ValueError("origins require the preset and revision handles from GET")
+    return resolved
+
+
+def _moa_resolved_aggregator_origin(raw_origin, *, has_aggregator: bool, pinned: bool):
+    """Same contract for the aggregator, which is a singleton handle."""
+    if raw_origin is None or raw_origin == "":
+        return None
+    if not isinstance(raw_origin, str) or raw_origin != _MOA_AGGREGATOR_ORIGIN:
+        raise ValueError(f"aggregator: unrecognized origin {raw_origin!r}")
+    if not has_aggregator:
+        raise ValueError(
+            "aggregator: origin does not refer to a saved aggregator; reload before saving"
+        )
+    if not pinned:
+        raise ValueError("origins require the preset and revision handles from GET")
+    return _MOA_AGGREGATOR_ORIGIN
+
+
+def _moa_read_slot(slot) -> dict:
     """Lenient read-side slot view — shows exactly what's persisted, even if
     incomplete, so the editor never substitutes hardcoded example agents for
     a user's real (possibly blank) saved state.
 
-    *origin* is the opaque handle the editor echoes back on save so unknown
-    fields written by other tooling can be merged from the exact source slot.
+    Slot content only: provenance rides in the response's own
+    ``slot_origins`` envelope, so nothing here can collide with a persisted
+    field name.
     """
     if not isinstance(slot, dict):
         slot = {}
@@ -5020,8 +5086,6 @@ def _moa_read_slot(slot, origin: str | None = None) -> dict:
     effort = _moa_effort_string(slot.get("reasoning_effort"))
     if effort:
         out["reasoning_effort"] = effort
-    if origin:
-        out[_MOA_SLOT_ORIGIN_KEY] = origin
     return out
 
 
@@ -5161,11 +5225,9 @@ def _moa_preset_for_read(preset: dict) -> dict:
     enabled_default = bool(preset)
     return {
         "enabled": bool(preset.get("enabled", enabled_default)),
-        "reference_models": [
-            _moa_read_slot(slot, origin=f"ref:{index}") for index, slot in enumerate(refs)
-        ],
+        "reference_models": [_moa_read_slot(slot) for slot in refs],
         "aggregator": (
-            _moa_read_slot(aggregator, origin=_MOA_AGGREGATOR_ORIGIN)
+            _moa_read_slot(aggregator)
             if isinstance(aggregator, dict)
             else {"provider": "", "model": ""}
         ),
@@ -5184,17 +5246,42 @@ def get_moa_config() -> dict:
     unlike hermes_cli.moa_config's runtime normalizer, which substitutes
     hardcoded example agents so a chat turn never crashes, an editor must
     reflect the user's actual (possibly unset) saved state.
+
+    Reads the RAW document — the same authority PUT writes against. Reading
+    through the env-expanded module-global ``cfg`` made GET and PUT hash
+    different bytes: a ``${VAR}`` anywhere in the selected preset was hashed
+    expanded on the way out and raw on the way back in, so an untouched
+    GET→PUT round trip failed its own revision check with a false 409. Raw is
+    also the honest thing to show in an editor that writes raw: the placeholder
+    is what is stored, and its resolved value is a secret this response has no
+    business carrying.
     """
-    reload_config()
-    raw_moa = cfg.get("moa") if isinstance(cfg, dict) else None
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file_raw(config_path)
+    raw_moa = config_data.get("moa") if isinstance(config_data, dict) else None
     raw_moa = raw_moa if isinstance(raw_moa, dict) else {}
     preset_name, preset, other_presets = _moa_locate_preset(raw_moa)
+    refs = preset.get("reference_models")
+    if not isinstance(refs, list):
+        refs = [refs] if isinstance(refs, dict) else []
     return {
         **_moa_preset_for_read(preset),
         "preset": preset_name,
         "other_presets": other_presets,
         # Optimistic-concurrency handle (gate finding 4): PUT must echo both.
         "revision": _moa_preset_revision(preset),
+        # Provenance envelope, outside the slot namespace: which persisted slot
+        # each displayed row came from. PUT echoes it back so unknown fields
+        # written by other tooling merge from the exact source slot.
+        _MOA_ORIGINS_KEY: {
+            "reference_models": [f"ref:{index}" for index in range(len(refs))],
+            "aggregator": (
+                _MOA_AGGREGATOR_ORIGIN
+                if isinstance(preset.get("aggregator"), dict)
+                else None
+            ),
+        },
     }
 
 
@@ -5214,6 +5301,17 @@ def set_moa_config(payload: dict) -> dict:
     # Concurrency handles from GET (gate finding 4) — not preset content.
     target_preset = payload.pop("preset", None)
     client_revision = payload.pop("revision", None)
+    origins_envelope = payload.pop(_MOA_ORIGINS_KEY, None)
+    if origins_envelope is not None and not isinstance(origins_envelope, dict):
+        raise ValueError(f"{_MOA_ORIGINS_KEY} must be an object")
+    origins_envelope = origins_envelope or {}
+    unknown_origin_keys = sorted(set(origins_envelope) - {"reference_models", "aggregator"})
+    if unknown_origin_keys:
+        raise ValueError(
+            f"{_MOA_ORIGINS_KEY} has unknown field(s): {', '.join(unknown_origin_keys)}"
+        )
+    # A handle is only meaningful against the snapshot it was read from.
+    origins_pinned = target_preset is not None and client_revision is not None
 
     unknown_top = sorted(set(payload) - _MOA_PRESET_KEYS)
     if unknown_top:
@@ -5226,7 +5324,10 @@ def set_moa_config(payload: dict) -> dict:
 
     problems: list[str] = []
     clean_refs: list[dict] = []
-    ref_origins: list[str | None] = []
+    # Which SUBMITTED row each surviving slot came from. The origins envelope
+    # is parallel to the submitted rows (blanks included), so provenance has to
+    # be re-indexed once blank rows drop out.
+    kept_rows: list[int] = []
     for index, slot in enumerate(refs_raw):
         if _moa_slot_is_blank(slot):
             continue
@@ -5235,7 +5336,7 @@ def set_moa_config(payload: dict) -> dict:
             problems.append(issue)
         else:
             clean_refs.append(_moa_clean_slot(slot))
-            ref_origins.append(_moa_slot_origin(slot))
+            kept_rows.append(index)
     if enabled and not clean_refs:
         problems.append("at least one agent with provider and model is required when enabled")
 
@@ -5300,8 +5401,25 @@ def set_moa_config(payload: dict) -> dict:
         merged = dict(existing_preset) if isinstance(existing_preset, dict) else {}
         old_refs = merged.get("reference_models")
         old_refs = old_refs if isinstance(old_refs, list) else []
+
+        # Provenance is validated against the snapshot we just pinned, and
+        # BEFORE anything is written: a duplicate, malformed, out-of-range or
+        # unresolvable handle is a 400 with the file untouched, not a silent
+        # degrade to "new row".
+        resolved_rows = _moa_resolved_origins(
+            origins_envelope.get("reference_models"),
+            row_count=len(refs_raw),
+            old_ref_count=len(old_refs),
+            pinned=origins_pinned,
+        )
+        ref_origins = [resolved_rows[index] for index in kept_rows]
         preset_update["reference_models"] = _moa_merge_slot_extras(
             preset_update["reference_models"], old_refs, ref_origins
+        )
+        aggregator_origin = _moa_resolved_aggregator_origin(
+            origins_envelope.get("aggregator"),
+            has_aggregator=isinstance(merged.get("aggregator"), dict),
+            pinned=origins_pinned,
         )
         if not aggregator_blank:
             # The aggregator is a stable singleton: its origin is itself, so an
@@ -5309,7 +5427,7 @@ def set_moa_config(payload: dict) -> dict:
             preset_update["aggregator"] = _moa_merge_slot_extras(
                 [preset_update["aggregator"]],
                 [merged.get("aggregator")],
-                [_moa_slot_origin(aggregator_raw) or _MOA_AGGREGATOR_ORIGIN],
+                [aggregator_origin],
             )[0]
         merged.update(preset_update)
 

@@ -146,8 +146,8 @@ class TestMoaSettingsJS:
         """Live-executes _moaSlotPayload (pure, DOM-free) to prove the fix, not
         just that the right substrings are present."""
         # Scanner-clean harness: the function under test is extracted in
-        # PYTHON and embedded as ordinary program text -- node never eval()s
-        # runtime-assembled code (gate safety-boundary requirement).
+        # PYTHON and embedded as ordinary program text, so node only ever runs
+        # a literal source file (gate safety-boundary requirement).
         src = PANELS_JS
         start = src.find("function _moaSlotPayload(")
         assert start >= 0
@@ -185,6 +185,29 @@ console.log(JSON.stringify({withEffort, blankEffort, missingField}));
         assert result["missingField"] == {"provider": "openrouter", "model": "x"}
 
 
+def _extract_js_function(src: str, name: str) -> str:
+    """Return one brace-balanced function definition as ordinary program text.
+
+    The extraction happens in PYTHON and the result is embedded as a literal
+    source file, so node only ever runs code that already exists in the repo
+    (gate safety-boundary requirement).
+    """
+    start = src.index(f"function {name}(")
+    while start > 0 and src[start - 1] in "async ":
+        start -= 1
+    i = src.index("{", src.index(f"function {name}("))
+    depth = 0
+    while i < len(src):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    return src[start:i + 1]
+
+
 class TestMoaSettingsI18n:
     """MoA i18n keys must be translated into every mandatory-parity locale.
 
@@ -214,6 +237,15 @@ class TestMoaSettingsI18n:
         "settings_moa_loading",
         "settings_moa_load_failed",
         "settings_moa_other_presets_note",
+        # Blocker 3: the partial-persistence report and the explicit
+        # Reload/Discard choice on a stale save are user-facing text too.
+        "settings_saved_partial",
+        "settings_moa_stale_title",
+        "settings_moa_stale_body",
+        "settings_moa_stale_choice",
+        "settings_moa_stale_reload",
+        "settings_moa_stale_keep",
+        "settings_moa_stale_kept",
     ]
 
     # Every locale block in i18n.js. settings_label_moa/settings_desc_moa are
@@ -305,25 +337,32 @@ class TestMoaBackendBehavior:
         assert data["preset"] == "default"
         assert data["other_presets"] == []
 
-    def test_get_reflects_saved_incomplete_state_without_substituting_defaults(self, monkeypatch):
+    def test_get_reflects_saved_incomplete_state_without_substituting_defaults(self, monkeypatch, tmp_path):
         """A config editor must show the user's real (possibly incomplete) data,
         not hermes_cli's runtime fallback to hardcoded example agents."""
         from api import config
 
-        monkeypatch.setattr(config, "reload_config", lambda: None)
-        monkeypatch.setattr(config, "cfg", {
-            "moa": {"enabled": False, "reference_models": [{"provider": "openai", "model": ""}], "aggregator": {}},
-        })
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "moa:\n"
+            "  enabled: false\n"
+            "  reference_models:\n"
+            "    - {provider: openai, model: ''}\n"
+            "  aggregator: {}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
 
         data = config.get_moa_config()
 
-        assert data["reference_models"] == [
-            {"provider": "openai", "model": "", "origin": "ref:0"}
-        ]
+        # Slots are pure content: provenance rides in its own envelope, so a
+        # persisted field named `origin` can never be confused with a handle.
+        assert data["reference_models"] == [{"provider": "openai", "model": ""}]
+        assert data["aggregator"] == {"provider": "", "model": ""}
         # An empty aggregator mapping IS persisted state, so it gets a handle:
         # filling it in later must still merge onto that same singleton slot.
-        assert data["aggregator"] == {
-            "provider": "", "model": "", "origin": "aggregator",
+        assert data["slot_origins"] == {
+            "reference_models": ["ref:0"], "aggregator": "aggregator",
         }
 
     def test_set_writes_flat_moa_key_and_round_trips(self, monkeypatch, tmp_path):
@@ -489,14 +528,13 @@ class TestMoaBackendBehavior:
 
         assert data["enabled"] is True
         assert data["reference_models"] == [
-            {
-                "provider": "openai-codex", "model": "gpt-5.5",
-                "reasoning_effort": "low", "origin": "ref:0",
-            }
+            {"provider": "openai-codex", "model": "gpt-5.5", "reasoning_effort": "low"}
         ]
         assert data["aggregator"] == {
             "provider": "openrouter", "model": "anthropic/claude-opus-4.8",
-            "origin": "aggregator",
+        }
+        assert data["slot_origins"] == {
+            "reference_models": ["ref:0"], "aggregator": "aggregator",
         }
         assert data["max_tokens"] == 2048
         assert data["fanout"] == "user_turn"
@@ -609,13 +647,16 @@ class TestMoaGateFollowups:
             "    model: agg\n"
             "    agg_extra: keep-me-three\n",
         )
-        # Round-trip the slots the editor actually loaded: they carry the
-        # origin handle the merge binds on (see TestMoaSlotOriginMerge).
+        # Round-trip exactly what the editor loaded, provenance envelope
+        # included — that is what binds the merge (see TestMoaSlotOriginMerge).
         current = config.get_moa_config()
         config.set_moa_config({
             "enabled": True,
             "reference_models": current["reference_models"],
             "aggregator": current["aggregator"],
+            "preset": current["preset"],
+            "revision": current["revision"],
+            "slot_origins": current["slot_origins"],
         })
         saved = config._load_yaml_config_file_raw(config_path)["moa"]
         assert saved["future_root_flag"] == "keep-me"
@@ -726,21 +767,26 @@ class TestMoaGateFollowups:
 
     # ── Finding 5: runtime-semantic parity ──────────────────────────────
 
-    def test_preset_without_enabled_key_reads_as_enabled(self, monkeypatch):
+    def test_preset_without_enabled_key_reads_as_enabled(self, monkeypatch, tmp_path):
         from api import config
 
-        monkeypatch.setattr(config, "reload_config", lambda: None)
-        monkeypatch.setattr(config, "cfg", {
-            "moa": {"reference_models": [{"provider": "a", "model": "b"}],
-                     "aggregator": {"provider": "c", "model": "d"}},
-        })
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "moa:\n"
+            "  reference_models:\n"
+            "    - {provider: a, model: b}\n"
+            "  aggregator: {provider: c, model: d}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
         assert config.get_moa_config()["enabled"] is True
 
-    def test_truly_unset_moa_still_reads_disabled(self, monkeypatch):
+    def test_truly_unset_moa_still_reads_disabled(self, monkeypatch, tmp_path):
         from api import config
 
-        monkeypatch.setattr(config, "reload_config", lambda: None)
-        monkeypatch.setattr(config, "cfg", {})
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("model:\n  provider: openai\n", encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
         assert config.get_moa_config()["enabled"] is False
 
     def test_yaml_false_reasoning_effort_reads_and_saves_as_none(
@@ -837,40 +883,92 @@ class TestMoaSlotOriginMerge:
         config.reload_config()
         return config.get_moa_config()
 
-    def _put(self, config, refs, *, aggregator=None, current=None):
+    def _put(self, config, refs, *, origins=None, aggregator=None,
+             aggregator_origin="aggregator", current=None, pin=True):
+        """Save *refs* with an explicit provenance envelope.
+
+        Provenance is a top-level envelope, never a slot field: a slot key
+        called `origin` is ordinary config, and the previous in-band handle
+        deleted exactly such a field on every round trip.
+        """
         current = current or self._current(config)
-        return config.set_moa_config({
+        payload = {
             "enabled": True,
             "reference_models": refs,
             "aggregator": aggregator if aggregator is not None else current["aggregator"],
-            "preset": current["preset"],
-            "revision": current["revision"],
-        })
+            "slot_origins": {
+                "reference_models": (
+                    origins if origins is not None else [None] * len(refs)
+                ),
+                "aggregator": aggregator_origin,
+            },
+        }
+        if pin:
+            payload["preset"] = current["preset"]
+            payload["revision"] = current["revision"]
+        return config.set_moa_config(payload)
 
     def _saved(self, config, config_path):
         return config._load_yaml_config_file_raw(config_path)["moa"]
 
-    def test_get_stamps_an_origin_handle_on_every_slot(self, monkeypatch, tmp_path):
+    def test_get_exposes_origins_outside_the_slots(self, monkeypatch, tmp_path):
         config, _config_path = self._seed_two_slots(tmp_path, monkeypatch)
         current = self._current(config)
-        assert [slot["origin"] for slot in current["reference_models"]] == ["ref:0", "ref:1"]
-        assert current["aggregator"]["origin"] == "aggregator"
+        for slot in current["reference_models"]:
+            assert "origin" not in slot
+        assert "origin" not in current["aggregator"]
+        assert current["slot_origins"]["reference_models"] == ["ref:0", "ref:1"]
+        assert current["slot_origins"]["aggregator"] == "aggregator"
 
     def test_the_handle_is_never_persisted(self, monkeypatch, tmp_path):
         config, config_path = self._seed_two_slots(tmp_path, monkeypatch)
         current = self._current(config)
-        self._put(config, current["reference_models"], current=current)
+        self._put(config, current["reference_models"], origins=["ref:0", "ref:1"],
+                  current=current)
         saved = self._saved(config, config_path)
         for slot in saved["reference_models"]:
             assert "origin" not in slot
         assert "origin" not in saved["aggregator"]
+
+    def test_a_persisted_field_named_origin_survives_a_round_trip(
+        self, monkeypatch, tmp_path
+    ):
+        """The collision the in-band handle caused: `origin` is ordinary config.
+
+        The previous revision excluded every persisted key literally named
+        `origin` from the extras merge, so an ordinary save deleted a
+        future/tool-owned field with that name.
+        """
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "moa:\n"
+            "  enabled: true\n"
+            "  reference_models:\n"
+            "    - provider: prov-a\n"
+            "      model: model-a\n"
+            "      origin: tool-owned-value\n"
+            "  aggregator: {provider: agg, model: agg-m, origin: agg-owned-value}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        current = self._current(config)
+        edited = dict(current["reference_models"][0])
+        edited["model"] = "model-a-v2"
+        self._put(config, [edited], origins=["ref:0"], current=current)
+        saved = self._saved(config, config_path)
+        assert saved["reference_models"][0]["origin"] == "tool-owned-value"
+        assert saved["reference_models"][0]["model"] == "model-a-v2"
+        assert saved["aggregator"]["origin"] == "agg-owned-value"
 
     def test_removing_the_first_slot_keeps_extras_on_the_right_agent(
         self, monkeypatch, tmp_path
     ):
         config, config_path = self._seed_two_slots(tmp_path, monkeypatch)
         current = self._current(config)
-        self._put(config, current["reference_models"][1:], current=current)
+        self._put(config, current["reference_models"][1:], origins=["ref:1"],
+                  current=current)
         saved = self._saved(config, config_path)["reference_models"]
         assert len(saved) == 1
         assert saved[0]["future_owner"] == "second-slot"
@@ -878,7 +976,8 @@ class TestMoaSlotOriginMerge:
     def test_reordering_slots_keeps_extras_with_their_rows(self, monkeypatch, tmp_path):
         config, config_path = self._seed_two_slots(tmp_path, monkeypatch)
         current = self._current(config)
-        self._put(config, list(reversed(current["reference_models"])), current=current)
+        self._put(config, list(reversed(current["reference_models"])),
+                  origins=["ref:1", "ref:0"], current=current)
         saved = self._saved(config, config_path)["reference_models"]
         assert saved[0]["future_owner"] == "second-slot"
         assert saved[1]["future_owner"] == "first-slot"
@@ -893,7 +992,8 @@ class TestMoaSlotOriginMerge:
         current = self._current(config)
         edited = dict(current["reference_models"][0])
         edited["model"] = "model-a-v2"
-        self._put(config, [edited, current["reference_models"][1]], current=current)
+        self._put(config, [edited, current["reference_models"][1]],
+                  origins=["ref:0", "ref:1"], current=current)
         saved = self._saved(config, config_path)["reference_models"]
         assert saved[0]["model"] == "model-a-v2"
         assert saved[0]["future_owner"] == "first-slot"
@@ -905,44 +1005,131 @@ class TestMoaSlotOriginMerge:
         current = self._current(config)
         aggregator = dict(current["aggregator"])
         aggregator["model"] = "agg-m-v2"
-        self._put(config, current["reference_models"], aggregator=aggregator, current=current)
+        self._put(config, current["reference_models"], origins=["ref:0", "ref:1"],
+                  aggregator=aggregator, current=current)
         saved = self._saved(config, config_path)
         assert saved["aggregator"]["model"] == "agg-m-v2"
         assert saved["aggregator"]["future_owner"] == "agg-slot"
 
-    def test_duplicating_a_row_gives_both_copies_its_metadata(
-        self, monkeypatch, tmp_path
-    ):
-        """A duplicate is a copy OF a row, so it legitimately inherits it.
-
-        Under identity matching the duplicate made the pair ambiguous and BOTH
-        rows lost the metadata.
-        """
+    def test_replaying_one_handle_on_two_rows_is_rejected(self, monkeypatch, tmp_path):
+        """Cloning hidden metadata onto a second row is not a save the client
+        may ask for: one persisted slot has one successor."""
         config, config_path = self._seed_two_slots(tmp_path, monkeypatch)
+        before = config_path.read_text(encoding="utf-8")
         current = self._current(config)
         first = current["reference_models"][0]
-        self._put(config, [first, dict(first)], current=current)
-        saved = self._saved(config, config_path)["reference_models"]
-        assert len(saved) == 2
-        assert saved[0]["future_owner"] == "first-slot"
-        assert saved[1]["future_owner"] == "first-slot"
+        with pytest.raises(ValueError, match="more than one row"):
+            self._put(config, [first, dict(first)], origins=["ref:0", "ref:0"],
+                      current=current)
+        assert config_path.read_text(encoding="utf-8") == before, "rejected write touched the file"
 
     def test_a_brand_new_row_carries_nothing(self, monkeypatch, tmp_path):
         config, config_path = self._seed_two_slots(tmp_path, monkeypatch)
         current = self._current(config)
         added = {"provider": "prov-c", "model": "model-c"}  # no origin handle
-        self._put(config, current["reference_models"] + [added], current=current)
+        self._put(config, current["reference_models"] + [added],
+                  origins=["ref:0", "ref:1", None], current=current)
         saved = self._saved(config, config_path)["reference_models"]
         assert "future_owner" not in saved[2]
 
-    def test_an_unresolvable_handle_carries_nothing(self, monkeypatch, tmp_path):
-        """A stale/forged handle must not bind another slot's metadata."""
+    @pytest.mark.parametrize("origins,expected", [
+        (["ref:99"], "does not refer to a saved agent"),
+        (["nope"], "unrecognized origin"),
+        (["ref:01"], "unrecognized origin"),
+        (["ref:-1"], "unrecognized origin"),
+        (["aggregator"], "unrecognized origin"),
+        ([7], "must be a string or null"),
+        (["ref:0", "ref:1"], "exactly one entry per agent row"),
+    ])
+    def test_bad_handles_are_rejected_with_no_write(
+        self, monkeypatch, tmp_path, origins, expected
+    ):
+        """Degrading to "new row" hid a client bug and silently dropped the
+        metadata it was asked to carry. These are 400s with the file untouched.
+        """
         config, config_path = self._seed_two_slots(tmp_path, monkeypatch)
+        before = config_path.read_text(encoding="utf-8")
         current = self._current(config)
-        bogus = {"provider": "prov-c", "model": "model-c", "origin": "ref:99"}
-        self._put(config, [bogus], current=current)
-        saved = self._saved(config, config_path)["reference_models"]
-        assert "future_owner" not in saved[0]
+        row = {"provider": "prov-c", "model": "model-c"}
+        with pytest.raises(ValueError, match=expected):
+            self._put(config, [row], origins=origins, current=current)
+        assert config_path.read_text(encoding="utf-8") == before, "rejected write touched the file"
+
+    @pytest.mark.parametrize("origins,aggregator_origin", [
+        (["ref:0"], None),          # the reference-model path alone
+        ([None], "aggregator"),     # the aggregator path alone
+    ])
+    def test_a_handle_without_a_pinned_snapshot_is_rejected(
+        self, monkeypatch, tmp_path, origins, aggregator_origin
+    ):
+        """An index means nothing without the snapshot it was read from.
+
+        Parametrized so each path carries its own guard: with both handles in
+        one payload, a single surviving check would mask the other's removal.
+        """
+        config, config_path = self._seed_two_slots(tmp_path, monkeypatch)
+        before = config_path.read_text(encoding="utf-8")
+        current = self._current(config)
+        with pytest.raises(ValueError, match="preset and revision"):
+            self._put(config, [current["reference_models"][0]], origins=origins,
+                      aggregator_origin=aggregator_origin, current=current, pin=False)
+        assert config_path.read_text(encoding="utf-8") == before
+
+    def test_an_aggregator_handle_without_a_saved_aggregator_is_rejected(
+        self, monkeypatch, tmp_path
+    ):
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "moa:\n"
+            "  enabled: true\n"
+            "  reference_models:\n"
+            "    - {provider: prov-a, model: model-a}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        current = self._current(config)
+        assert current["slot_origins"]["aggregator"] is None
+        before = config_path.read_text(encoding="utf-8")
+        with pytest.raises(ValueError, match="does not refer to a saved aggregator"):
+            self._put(config, current["reference_models"], origins=["ref:0"],
+                      aggregator={"provider": "agg", "model": "agg-m"},
+                      aggregator_origin="aggregator", current=current)
+        assert config_path.read_text(encoding="utf-8") == before
+
+    def test_get_and_put_hash_the_same_authority(self, monkeypatch, tmp_path):
+        """Blocker 1: an untouched GET→PUT must not 409 against itself.
+
+        GET used to build the preset from the env-EXPANDED module-global `cfg`
+        while PUT hashed the RAW document, so a `${VAR}` inside the selected
+        preset produced two different revisions and an unchanged round trip
+        failed its own concurrency check.
+        """
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "moa:\n"
+            "  enabled: true\n"
+            "  reference_models:\n"
+            "    - {provider: prov-a, model: model-a}\n"
+            "  aggregator: {provider: agg, model: agg-m}\n"
+            "  future_endpoint: ${MOA_SECRET_ENDPOINT}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("MOA_SECRET_ENDPOINT", "https://secret.example/inference")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+
+        current = self._current(config)
+        # The placeholder must not travel to the browser resolved, either.
+        assert "secret.example" not in json.dumps(current)
+
+        self._put(config, current["reference_models"], origins=["ref:0"], current=current)
+
+        text = config_path.read_text(encoding="utf-8")
+        assert "${MOA_SECRET_ENDPOINT}" in text
+        assert "secret.example" not in text
 
     def test_a_moa_save_does_not_materialize_env_placeholders(
         self, monkeypatch, tmp_path
@@ -1007,16 +1194,39 @@ class TestMoaUnsavedEditorProtection:
         body = self._fn("_discardSettings")
         assert "_moaDirty = false" in body
 
-    def test_save_and_close_saves_moa_before_closing(self):
+    def test_save_and_close_settles_moa_before_reporting_success(self):
+        """Blocker 3: the overall result is coordinated BEFORE it is announced.
+
+        Both branches used to show "settings saved", clear `_settingsDirty` and
+        hide the unsaved bar and only THEN await the MoA write, so a MoA
+        failure left the UI claiming a success that had not happened.
+        """
         idx = PANELS_JS.index("async function saveSettings(andClose)")
         body = PANELS_JS[idx:PANELS_JS.index("\nasync function _saveDirtyMoaBeforeClose", idx)]
         # Both close paths (password branch and the ordinary one).
         assert body.count("_saveDirtyMoaBeforeClose()") == 2
-        for segment in body.split("_saveDirtyMoaBeforeClose()")[1:]:
-            head = segment[:120]
-            assert "_hideSettingsPanel()" in head, (
-                "the MoA save must gate the close, not follow it"
-            )
+        segments = body.split("_saveDirtyMoaBeforeClose()")
+        # Read the markers in source order. Splitting on the gate alone is not
+        # enough: a success toast moved ahead of the SECOND gate still lands
+        # after the first one, and a per-segment check would wave it through.
+        markers = {
+            "gate": "_saveDirtyMoaBeforeClose()",
+            "partial": "settings_saved_partial",
+            "success": "showToast(t('settings_saved')",
+            "success_pw": "showToast(t(saved.auth_just_enabled?",
+            "close": "_hideSettingsPanel()",
+        }
+        found = []
+        for kind, needle in markers.items():
+            position = body.find(needle)
+            while position >= 0:
+                found.append((position, "success" if kind == "success_pw" else kind))
+                position = body.find(needle, position + 1)
+        sequence = [kind for _position, kind in sorted(found)]
+        assert sequence == [
+            "gate", "partial", "success", "close",
+            "gate", "partial", "success", "close",
+        ], f"unexpected save/report/close order: {sequence}"
 
     def test_a_failed_moa_save_keeps_the_panel_open(self):
         body = self._fn("_saveDirtyMoaBeforeClose")
@@ -1030,8 +1240,114 @@ class TestMoaUnsavedEditorProtection:
         assert "return true" in body
         assert "return false" in body
 
-    def test_the_editor_round_trips_the_origin_handle(self):
-        body = self._fn("_moaSlotPayload")
-        assert "out.origin=slot.origin" in body
-        assert "origin:(a&&a.origin)||''" in PANELS_JS
-        assert "origin:(_moaMeta.aggregator&&_moaMeta.aggregator.origin)||''" in PANELS_JS
+    def test_the_editor_round_trips_provenance_outside_the_slots(self):
+        """The handle must not ride inside a slot: `origin` is ordinary config."""
+        payload = self._fn("_moaSlotPayload")
+        assert "out.origin" not in payload
+        save = self._fn("_saveMoaConfig")
+        assert "body.slot_origins=" in save
+        assert "reference_models:keptAgents.map(a=>a.origin||null)" in save
+        # Only claimed against a pinned snapshot — the server rejects it otherwise.
+        assert "if(_moaMeta.preset&&_moaMeta.revision){" in save
+
+    @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+    @pytest.mark.parametrize("answer,expect_reload", [(False, False), (True, True)])
+    def test_a_stale_save_discards_the_draft_only_when_the_user_says_so(
+        self, answer, expect_reload
+    ):
+        """Blocker 3, executed rather than pattern-matched.
+
+        The 409 path used to call `_loadMoaConfig()` immediately, and that
+        loader replaces the editor contents outright — so the conflict path
+        destroyed the very draft it exists to protect. A substring check cannot
+        tell a real conditional from a short-circuited one, so this runs the
+        function with a stubbed environment and observes what it does.
+        """
+        script = _extract_js_function(PANELS_JS, "_moaSlotPayload") + "\n" \
+            + _extract_js_function(PANELS_JS, "_saveMoaConfig") + r"""
+
+const calls = {load: 0, toasts: [], confirms: 0};
+let _moaGeneration = 0;
+let _moaLoaded = true;
+let _moaDirty = true;
+let _moaAgentsState = [{provider:'p', model:'m', origin:'ref:0'}];
+let _moaAggregatorState = {provider:'agg', model:'aggm', origin:'aggregator'};
+let _moaMeta = {preset:'default', revision:'rev-1', max_tokens:4096};
+const $ = () => ({checked:true});
+const t = (key) => key;
+const showToast = (msg) => calls.toasts.push(msg);
+const showConfirmDialog = async () => { calls.confirms += 1; return ANSWER; };
+const _loadMoaConfig = async () => { calls.load += 1; };
+const api = async () => { const e = new Error('Reload before saving'); e.status = 409; throw e; };
+
+_saveMoaConfig().then(result => {
+  console.log(JSON.stringify({result, ...calls}));
+});
+"""
+        script = script.replace("ANSWER", "true" if answer else "false")
+        proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=20)
+        assert proc.returncode == 0, f"node probe failed:\n{proc.stderr}"
+        result = json.loads(proc.stdout.strip().splitlines()[-1])
+        assert result["result"] is False, "a stale save must report that it did not persist"
+        assert result["confirms"] == 1, "the user must be asked before the draft is touched"
+        assert result["load"] == (1 if expect_reload else 0), (
+            "the draft was reloaded against the user's answer"
+        )
+        if not expect_reload:
+            assert "settings_moa_stale_kept" in result["toasts"]
+
+    @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+    def test_a_stale_save_sends_provenance_outside_the_slots(self):
+        """The envelope the backend now requires, observed on the real request."""
+        script = _extract_js_function(PANELS_JS, "_moaSlotPayload") + "\n" \
+            + _extract_js_function(PANELS_JS, "_saveMoaConfig") + r"""
+
+let sent = null;
+let _moaGeneration = 0;
+let _moaLoaded = true;
+let _moaDirty = true;
+let _moaAgentsState = [
+  {provider:'p', model:'m', origin:'ref:0'},
+  {provider:'q', model:'n', origin:''},
+];
+let _moaAggregatorState = {provider:'agg', model:'aggm', origin:'aggregator'};
+let _moaMeta = {preset:'default', revision:'rev-1'};
+const $ = () => ({checked:true});
+const t = (key) => key;
+const showToast = () => {};
+const showConfirmDialog = async () => false;
+const _loadMoaConfig = async () => {};
+const api = async (_url, opts) => { sent = JSON.parse(opts.body); return {}; };
+
+_saveMoaConfig().then(() => { console.log(JSON.stringify(sent)); });
+"""
+        proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=20)
+        assert proc.returncode == 0, f"node probe failed:\n{proc.stderr}"
+        sent = json.loads(proc.stdout.strip().splitlines()[-1])
+        for slot in sent["reference_models"]:
+            assert "origin" not in slot
+        assert "origin" not in sent["aggregator"]
+        assert sent["slot_origins"] == {
+            "reference_models": ["ref:0", None], "aggregator": "aggregator",
+        }
+
+    def test_loads_and_saves_are_generation_fenced(self):
+        """A stale completion must not paint the editor or mark newer work clean."""
+        load = self._fn("_loadMoaConfig")
+        assert "const gen=++_moaGeneration;" in load
+        assert load.count("if(gen!==_moaGeneration) return;") >= 2
+        assert load.index("const gen=++_moaGeneration;") < load.index("await Promise.all")
+        pre_request = load[:load.index("await Promise.all")]
+        assert "_moaDirty=false" not in pre_request, (
+            "a load that fails or is superseded would have marked the draft clean"
+        )
+        save = self._fn("_saveMoaConfig")
+        assert "const gen=++_moaGeneration;" in save
+        assert "if(gen!==_moaGeneration)" in save
+
+    def test_the_editor_takes_provenance_from_the_envelope(self):
+        """Handles come from `slot_origins`, not from a field inside a slot."""
+        load = self._fn("_loadMoaConfig")
+        assert "const slotOrigins=(_moaMeta&&_moaMeta.slot_origins)||{};" in load
+        assert "origin:refOrigins[index]||''" in load
+        assert "origin:slotOrigins.aggregator||''" in load
