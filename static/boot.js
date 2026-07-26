@@ -3266,6 +3266,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     );
     window._workspaceTodosTab=!!s.workspace_todos_tab;
     if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
+    window._artifactsEnabled=!!s.artifacts_enabled;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
     window._inflightStateLimits={

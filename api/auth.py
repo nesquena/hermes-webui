@@ -1056,6 +1056,10 @@ def check_auth(handler, parsed) -> bool:
     if (
         parsed.path in PUBLIC_PATHS
         or parsed.path.startswith('/share/')
+        # /artifact/<token> pages enforce their own access model in the route:
+        # public artifacts serve anonymously, non-public ones 404 without a
+        # valid session cookie (api/routes.py _handle_artifact_get).
+        or parsed.path.startswith('/artifact/')
         or (
             parsed.path.startswith('/api/share/')
             and parsed.path not in {'/api/share/create', '/api/share/revoke'}
