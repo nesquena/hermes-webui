@@ -72,19 +72,19 @@ def test_stream_end_fallback_does_not_finalize_when_session_is_still_active():
     assert "const status=await _restoreSettledSession(source,{status:true});" in body
     assert "if(status==='active'&&S.activeStreamId===streamId)" in body
     assert "_scheduleStreamEndRecovery(source,200);" in body
-    assert "_finalizeStreamEndFallback(source);" in body
+    assert "_finalizeStreamEndFallback(source,{preserveVisibleAnswer:true});" in body
 
 
 def test_stream_end_recovery_helper_retries_while_session_is_still_active():
     fn = _function_body("_runStreamEndRecovery")
-    assert "if(_streamFinalized || _terminalStateReached || !_pendingStreamEndRecovery)" in fn
+    assert "if(_streamFinalized || _terminalStateReached || !_pendingStreamEndRecovery || _closureRetired || !_currentLiveOwnerEntry())" in fn
     assert "_restoreSettledSession(source,{status:true})" in fn
     assert "status==='stale'" in fn
     assert "if(status==='active'){" in fn
     assert "if(_streamEndRecoveryAttempts<16){" in fn
     assert "_scheduleStreamEndRecovery(source,_streamEndRecoveryAttempts<10?200:1000);" in fn
     assert "await _reconcileStreamEndRecoveryExhaustion(source);" in fn
-    assert "_finalizeStreamEndFallback(source);" in fn
+    assert "_finalizeStreamEndFallback(source,{preserveVisibleAnswer:true});" in fn
 
 
 def test_stream_end_fallback_helper_clears_owner_state_before_closing():
@@ -103,7 +103,7 @@ def test_stream_end_fallback_helper_clears_owner_state_before_closing():
 def test_stream_end_recovery_closes_dead_chat_stream_owner_before_slow_polling():
     fn = _function_body("_runStreamEndRecovery")
     assert "if(_streamEndRecoveryAttempts===10){" in fn
-    assert "_closeSource(source);" in fn
+    assert "_closeSource(source,{retainOwner:true});" in fn
 
 
 def test_stream_end_recovery_exhaustion_reconciles_stream_status_before_terminal_escape():
@@ -112,7 +112,7 @@ def test_stream_end_recovery_exhaustion_reconciles_stream_status_before_terminal
     assert "_currentPaneRecoveryOwnerLost()" in fn
     assert "_wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`" in fn
     assert "if(await _restoreSettledSession(source,{preserveVisibleOnShorterTerminalSnapshot:true})) return true;" in fn
-    assert "_finalizeStreamEndFallback(source);" in fn
+    assert "_finalizeStreamEndFallback(source,{preserveVisibleAnswer:true});" in fn
 
 
 def test_stream_end_live_scene_detection_includes_empty_text_activity():

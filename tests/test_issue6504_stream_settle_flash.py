@@ -46,6 +46,7 @@ def _run_recovery_case(
     stream_id: str = "stream-1",
     current_pane: bool | None = None,
 ):
+    current_owner = _extract("_currentLiveOwnerEntry")
     owner = _extract("_ownsActiveStreamOrBackground")
     recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
     fallback = _extract("_finalizeStreamEndFallback")
@@ -72,6 +73,8 @@ def _run_recovery_case(
         let liveReasoningText = '';
         let reasoningText = '';
         let _persistTimer = null;
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
         let _terminalStateReached = false;
         let _streamFinalized = false;
         let _pendingStreamEndRecovery = true;
@@ -81,6 +84,9 @@ def _run_recovery_case(
           session: {{ session_id: 'sid-1' }},
           activeStreamId: {current_active_stream!r},
           messages: [{{ role: 'assistant', content: 'rebuilt transcript placeholder' }}]
+        }};
+        globalThis.LIVE_STREAMS = {{
+          'sid-1': {{ streamId: {stream_id!r}, source: {{}}, ownerToken: 1 }}
         }};
         globalThis.assistantText = {assistant_text!r};
         globalThis.INFLIGHT = {{}};
@@ -125,6 +131,7 @@ def _run_recovery_case(
         globalThis.renderSessionList = () => {{ sessionListCalls++; }};
         globalThis._setActivePaneIdleIfOwner = () => {{ idleCalls++; }};
         globalThis._closeSource = () => {{ closeCalls++; }};
+        {current_owner}
         {owner}
         {recovery_owner}
         {fallback}
@@ -171,6 +178,7 @@ def _run_recovery_case(
 
 
 def _run_restore_stale_guard_case():
+    current_owner = _extract("_currentLiveOwnerEntry")
     owner = _extract("_ownsActiveStreamOrBackground")
     recovery = _extract("_currentPaneRecoveryOwnerLost")
     restore = _extract("_restoreSettledSession")
@@ -180,6 +188,8 @@ def _run_restore_stale_guard_case():
         let apiCalls = 0;
         let activeSid = 'sid-1';
         let streamId = 'old-stream';
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
         let _streamFinalized = false;
         let _pendingStreamEndRecovery = true;
         let _streamEndRecoveryAttempts = 3;
@@ -188,6 +198,7 @@ def _run_restore_stale_guard_case():
           session: { session_id: 'sid-1' },
           activeStreamId: 'replacement-stream',
         };
+        globalThis.LIVE_STREAMS = {};
         globalThis._loadingSessionId = null;
         globalThis._isActiveSession = () => true;
         globalThis._isSessionCurrentPane = (sid) => !globalThis._loadingSessionId || globalThis._loadingSessionId === sid;
@@ -195,12 +206,13 @@ def _run_restore_stale_guard_case():
           apiCalls += 1;
           return { session: null };
         };
-        globalThis._closeSource = () => { closeCalls += 1; };
+        globalThis._closeSource = () => { closeCalls += 1; delete LIVE_STREAMS['sid-1']; };
         globalThis._clearStreamEndRecovery = () => {
           _pendingStreamEndRecovery = false;
           _streamEndRecoveryAttempts = 0;
           _streamEndRecoveryTimer = null;
         };
+        """ + current_owner + """
         """ + owner + """
         """ + recovery + """
         """ + restore + """
@@ -319,7 +331,7 @@ def test_long_tail_recovery_reattaches_when_stream_status_stays_active():
     assert result["pending"] is False
 
 
-def test_long_tail_recovery_terminates_without_rescheduling_when_stream_is_inactive():
+def test_long_tail_recovery_preserves_visible_live_answer_when_stream_turns_inactive():
     result = _run_recovery_case(
         active=True,
         restore_results=["active", False],
@@ -330,9 +342,27 @@ def test_long_tail_recovery_terminates_without_rescheduling_when_stream_is_inact
 
     assert result["wireCalls"] == 0
     assert result["scheduleDelays"] == []
-    assert result["renderCalls"] == 1
+    assert result["renderCalls"] == 0
     assert result["clearLiveToolCalls"] == 1
     assert result["removeThinkingCalls"] == 0
+    assert result["activeStreamId"] is None
+    assert result["finalized"] is True
+
+
+def test_long_tail_recovery_without_visible_live_answer_still_rebuilds_when_stream_turns_inactive():
+    result = _run_recovery_case(
+        active=True,
+        restore_results=["active", False],
+        attempts=15,
+        assistant_text="",
+        stream_status={"active": False, "replay_available": False},
+    )
+
+    assert result["wireCalls"] == 0
+    assert result["scheduleDelays"] == []
+    assert result["renderCalls"] == 1
+    assert result["clearLiveToolCalls"] == 1
+    assert result["removeThinkingCalls"] == 1
     assert result["activeStreamId"] is None
     assert result["finalized"] is True
 
@@ -356,6 +386,7 @@ def test_long_tail_recovery_does_not_reattach_stale_stream_over_replacement_owne
 
 
 def test_long_tail_recovery_does_not_reattach_after_pane_ownership_switch_during_status_await():
+    current_owner = _extract("_currentLiveOwnerEntry")
     owner = _extract("_ownsActiveStreamOrBackground")
     recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
     reconcile = _extract("_reconcileStreamEndRecoveryExhaustion")
@@ -366,18 +397,22 @@ def test_long_tail_recovery_does_not_reattach_after_pane_ownership_switch_during
         let composerStatuses = [];
         let activeSid = 'sid-1';
         let streamId = 'stream-1';
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
         let _streamFinalized = false;
         let _terminalStateReached = false;
         let _pendingStreamEndRecovery = true;
         let _streamEndRecoveryAttempts = 15;
         let _streamEndRecoveryTimer = {};
         let resolveStatus;
+        const source = {};
         globalThis.S = {
           session: { session_id: 'sid-1' },
           activeStreamId: 'stream-1',
           messages: [],
         };
         globalThis.LIVE_STREAMS = {};
+        LIVE_STREAMS['sid-1'] = { streamId: 'stream-1', source, ownerToken: 1 };
         globalThis._loadingSessionId = null;
         globalThis._isActiveSession = () => true;
         globalThis._isSessionCurrentPane = (sid) => !globalThis._loadingSessionId || globalThis._loadingSessionId === sid;
@@ -389,17 +424,18 @@ def test_long_tail_recovery_does_not_reattach_after_pane_ownership_switch_during
         globalThis._wireSSE = () => { wireCalls += 1; LIVE_STREAMS[activeSid] = { owner: streamId }; };
         globalThis.document = { baseURI: 'http://localhost:8787/' };
         globalThis.location = { href: 'http://localhost:8787/' };
-        globalThis._closeSource = () => { closeCalls += 1; };
+        globalThis._closeSource = () => { closeCalls += 1; delete LIVE_STREAMS['sid-1']; };
         globalThis._clearStreamEndRecovery = () => {
           _pendingStreamEndRecovery = false;
           _streamEndRecoveryAttempts = 0;
           _streamEndRecoveryTimer = null;
         };
+        """ + current_owner + """
         """ + owner + """
         """ + recovery_owner + """
         """ + reconcile + """
         (async () => {
-          const pending = _reconcileStreamEndRecoveryExhaustion({});
+          const pending = _reconcileStreamEndRecoveryExhaustion(source);
           globalThis._loadingSessionId = 'sid-2';
           S.activeStreamId = 'replacement-stream';
           resolveStatus({ active: true, replay_available: false });
@@ -437,6 +473,7 @@ def test_long_tail_recovery_does_not_reattach_after_pane_ownership_switch_during
 
 
 def test_restore_settled_session_does_not_mutate_after_pane_ownership_switch_during_await():
+    current_owner = _extract("_currentLiveOwnerEntry")
     owner = _extract("_ownsActiveStreamOrBackground")
     recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
     restore = _extract("_restoreSettledSession")
@@ -452,6 +489,8 @@ def test_restore_settled_session_does_not_mutate_after_pane_ownership_switch_dur
         let resolveSession;
         let activeSid = 'sid-1';
         let streamId = 'stream-1';
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
         let _streamFinalized = false;
         let _pendingStreamEndRecovery = true;
         let _streamEndRecoveryAttempts = 4;
@@ -464,6 +503,7 @@ def test_restore_settled_session_does_not_mutate_after_pane_ownership_switch_dur
         };
         globalThis.INFLIGHT = {};
         globalThis.assistantText = 'replacement pane answer';
+        globalThis.LIVE_STREAMS = { 'sid-1': { streamId: 'stream-1', source: {}, ownerToken: 1 } };
         globalThis._loadingSessionId = null;
         globalThis._isActiveSession = () => true;
         globalThis._isSessionCurrentPane = (sid) => !globalThis._loadingSessionId || globalThis._loadingSessionId === sid;
@@ -507,6 +547,7 @@ def test_restore_settled_session_does_not_mutate_after_pane_ownership_switch_dur
         globalThis.renderMessages = () => { renderCalls += 1; };
         globalThis.renderSessionList = () => { sessionListCalls += 1; };
         globalThis._setActivePaneIdleIfOwner = () => { idleCalls += 1; };
+        """ + current_owner + """
         """ + owner + """
         """ + recovery_owner + """
         """ + restore + """
@@ -563,3 +604,148 @@ def test_restore_settled_session_does_not_mutate_after_pane_ownership_switch_dur
     assert result["pending"] is False
     assert result["activeStreamId"] == "replacement-stream"
     assert result["messages"] == [{"role": "assistant", "content": "replacement pane answer"}]
+
+
+def test_replacement_owner_blocks_queued_persist_snapshot_render_recovery_and_resume_callbacks():
+    current_owner = _extract("_currentLiveOwnerEntry")
+    persist = _extract("persistInflightState")
+    snapshot = _extract("snapshotLiveTurn")
+    throttled_snapshot = _extract("_throttledSnapshotLiveTurn")
+    throttled_persist = _extract("_throttledPersist")
+    schedule_recovery = _extract("_scheduleStreamEndRecovery")
+    page_hidden = _extract("_pageHiddenForStreamError")
+    defer_hidden = _extract("_deferStreamErrorIfPageHidden")
+    schedule_render = _extract("_scheduleRender")
+    script = textwrap.dedent(
+        """
+        let activeSid = 'sid-1';
+        let streamId = 'old-stream';
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
+        let _streamFinalized = false;
+        let _terminalStateReached = false;
+        let _pendingStreamEndRecovery = false;
+        let _streamEndRecoveryTimer = null;
+        let _streamEndRecoveryAttempts = 0;
+        let _persistTimer = null;
+        let _snapshotLiveTurnTimer = null;
+        let _deferredStreamRecoveryBound = false;
+        let _deferredStreamRecoveryResume = null;
+        let _pendingRafHandle = null;
+        let _renderPending = false;
+        let _lastRenderMs = 0;
+        let _cachedParsed = null;
+        let _cachedParsedText = '';
+        let _cachedParsedReasoning = '';
+        let assistantText = 'visible answer';
+        let liveReasoningText = '';
+        let reasoningText = '';
+        let segmentStart = 0;
+        let renderCalls = 0;
+        let persistWrites = 0;
+        let snapshotWrites = 0;
+        let recoveryCalls = 0;
+        let reattachCalls = 0;
+        let timerId = 0;
+        const timers = new Map();
+        const rafs = [];
+        const listeners = [];
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'old-stream',
+          messages: [{ role: 'assistant', content: 'visible answer' }],
+        };
+        globalThis.LIVE_STREAMS = {
+          'sid-1': { streamId: 'old-stream', source: { readyState: 1, close() {} }, ownerToken: 1 }
+        };
+        globalThis.INFLIGHT = {
+          'sid-1': { messages: [{ role: 'assistant', content: 'visible answer' }], uploaded: [], toolCalls: [] }
+        };
+        globalThis.uploaded = [];
+        globalThis.saveInflightState = () => { persistWrites += 1; };
+        globalThis.snapshotLiveTurnHtmlForSession = () => { snapshotWrites += 1; };
+        globalThis._runStreamEndRecovery = () => { recoveryCalls += 1; };
+        globalThis._reattachOrRestoreAfterDeferredStreamError = () => { reattachCalls += 1; };
+        globalThis._isSessionCurrentPane = () => true;
+        globalThis._pageHiddenForStreamError = () => (
+          document.visibilityState === 'hidden' || document.wasDiscarded === true
+        );
+        globalThis.setComposerStatus = () => {};
+        globalThis.performance = { now: () => 100 };
+        globalThis.requestAnimationFrame = (cb) => { rafs.push(cb); return ++timerId; };
+        globalThis.cancelAnimationFrame = () => {};
+        globalThis.setTimeout = (cb) => {
+          const id = ++timerId;
+          timers.set(id, cb);
+          return id;
+        };
+        globalThis.clearTimeout = (id) => { timers.delete(id); };
+        globalThis._parseStreamState = () => ({ displayText: 'visible answer' });
+        globalThis._renderLiveThinking = () => { renderCalls += 1; };
+        globalThis._stripXmlToolCalls = (text) => text;
+        globalThis._shouldUseLiveProseFade = () => false;
+        globalThis._upsertAnchorProcessProse = () => { renderCalls += 1; };
+        globalThis.scrollIfPinned = () => {};
+        globalThis.assistantBody = null;
+        globalThis._fixMobileScrollJank = null;
+        globalThis.window = {
+          addEventListener: (_name, cb) => { listeners.push(cb); },
+          removeEventListener: () => {},
+          _fixMobileScrollJank: null,
+        };
+        globalThis.document = {
+          visibilityState: 'hidden',
+          wasDiscarded: false,
+          addEventListener: (_name, cb) => { listeners.push(cb); },
+          removeEventListener: () => {},
+        };
+        """ + current_owner + """
+        """ + persist + """
+        """ + snapshot + """
+        """ + throttled_snapshot + """
+        """ + throttled_persist + """
+        """ + schedule_recovery + """
+        """ + page_hidden + """
+        """ + defer_hidden + """
+        """ + schedule_render + """
+        _throttledPersist();
+        _throttledSnapshotLiveTurn();
+        _scheduleStreamEndRecovery({});
+        _scheduleRender();
+        _deferStreamErrorIfPageHidden({});
+        LIVE_STREAMS['sid-1'] = { streamId: 'replacement-stream', source: { readyState: 1, close() {} }, ownerToken: 2 };
+        S.activeStreamId = 'replacement-stream';
+        document.visibilityState = 'visible';
+        for (const cb of [...timers.values()]) cb();
+        while (rafs.length) rafs.shift()();
+        for (const cb of [...listeners]) cb();
+        console.log(JSON.stringify({
+          persistWrites,
+          snapshotWrites,
+          recoveryCalls,
+          reattachCalls,
+          renderCalls,
+          activeStreamId: S.activeStreamId,
+          ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
+          deferredBound: _deferredStreamRecoveryBound,
+        }));
+        """
+    )
+    proc = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["persistWrites"] == 0
+    assert result["snapshotWrites"] == 0
+    assert result["recoveryCalls"] == 0
+    assert result["reattachCalls"] == 0
+    assert result["renderCalls"] == 0
+    assert result["activeStreamId"] == "replacement-stream"
+    assert result["ownerToken"] == 2
+    assert result["deferredBound"] is False
