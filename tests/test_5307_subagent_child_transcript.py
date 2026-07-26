@@ -92,6 +92,8 @@ def _make_state_db(path: Path, sid: str, *, message_count: int = 2,
             tool_calls TEXT,
             tool_call_count INTEGER DEFAULT 0
         );
+        CREATE INDEX IF NOT EXISTS idx_messages_session
+            ON messages(session_id, timestamp);
         """
     )
     conn.execute(
@@ -261,7 +263,14 @@ def test_state_db_source_helper_reads_subagent(routes_module, isolated_state_db)
     assert routes_module._is_subagent_child_session_id("does-not-exist") is False
 
 
-def test_state_db_only_null_title_subagent_uses_goal_in_sidebar(isolated_state_db):
+@pytest.mark.parametrize(
+    "state_title",
+    [pytest.param(None, id="null"), pytest.param("", id="empty"), pytest.param(" \t ", id="whitespace")],
+)
+def test_state_db_only_blank_title_subagent_uses_goal_in_sidebar(
+    isolated_state_db,
+    state_title,
+):
     """A delegated child needs its goal title even when it has no WebUI sidecar."""
     import api.models as models
 
@@ -271,7 +280,7 @@ def test_state_db_only_null_title_subagent_uses_goal_in_sidebar(isolated_state_d
         isolated_state_db["db"],
         sid,
         source="subagent",
-        title=None,
+        title=state_title,
         message_count=2,
     )
     _make_state_db(
@@ -306,6 +315,72 @@ def test_state_db_only_null_title_subagent_uses_goal_in_sidebar(isolated_state_d
     assert row["display_title"] == "Map the state-only delegated child path"
     assert custom_row["title"] == "Human-chosen state title"
     assert "display_title" not in custom_row
+
+
+def test_state_db_only_subagent_ignores_show_agent_sessions_toggle(
+    routes_module,
+    isolated_state_db,
+    monkeypatch,
+):
+    """Delegated children are non-CLI and remain visible for established installs."""
+    import api.models as models
+
+    sid = "subagent-public-payload-no-sidecar"
+    _make_state_db(
+        isolated_state_db["db"],
+        sid,
+        source="subagent",
+        title=None,
+        message_count=2,
+    )
+    conn = sqlite3.connect(str(isolated_state_db["db"]))
+    try:
+        conn.execute(
+            "UPDATE messages SET content = ? WHERE session_id = ? AND role = 'user'",
+            ("Keep delegated children outside the CLI toggle", sid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(routes_module, "all_sessions", lambda diag=None, include_lineage_metadata=False: [])
+
+    def _real_state_projection(
+        source_filter=None,
+        all_profiles=False,
+        include_claude_code=True,
+    ):
+        del all_profiles, include_claude_code
+        return models._load_cli_sessions_uncached(
+            isolated_state_db["state_dir"],
+            isolated_state_db["db"],
+            "default",
+            source_filter=source_filter,
+            visible_session_limit=20,
+            include_claude_code=False,
+        )
+
+    monkeypatch.setattr(routes_module, "get_cli_sessions", _real_state_projection)
+
+    rows_by_toggle = {}
+    for show_cli_sessions in (False, True):
+        payload = routes_module._build_session_list_cache_payload(
+            active_profile="default",
+            all_profiles=False,
+            show_cli_sessions=show_cli_sessions,
+            show_previous_messaging_sessions=False,
+            show_cron_sessions=False,
+            show_webhook_sessions=False,
+        )
+        rows_by_toggle[show_cli_sessions] = {
+            row["session_id"]: row for row in payload["sessions"]
+        }
+
+    for rows in rows_by_toggle.values():
+        row = rows[sid]
+        assert row["display_title"] == "Keep delegated children outside the CLI toggle"
+        assert row["read_only"] is True
+        assert row["is_cli_session"] is False
 
 
 def test_import_cli_endpoint_does_not_materialize_subagent_child():

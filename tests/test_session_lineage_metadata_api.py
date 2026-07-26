@@ -537,6 +537,83 @@ def test_subagent_goal_title_breaks_equal_timestamps_by_message_id(_isolate):
         conn.close()
 
 
+def test_subagent_goal_title_fails_closed_without_session_message_index(_isolate):
+    """Legacy/read-only DBs without the session index keep cheaper metadata but skip title work."""
+    conn = _ensure_state_db(_isolate)
+    conn.execute(
+        """
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            role TEXT,
+            content TEXT,
+            timestamp REAL
+        )
+        """
+    )
+    sid = "lineage_api_subagent_no_message_index"
+    t0 = time.time() - 100
+    try:
+        _save_webui_session(sid, title="Subagent Session", updated_at=t0)
+        _insert_state_row(conn, sid, source="subagent", started_at=t0)
+        conn.execute("UPDATE sessions SET title = NULL WHERE id = ?", (sid,))
+        _insert_state_message(
+            conn,
+            sid,
+            role="user",
+            content="Do not scan the whole table for this title",
+            timestamp=t0 + 1,
+        )
+
+        row = {row["session_id"]: row for row in all_sessions(include_lineage_metadata=False)}[sid]
+        metadata = models._read_state_db_sidebar_overrides(
+            _isolate,
+            {sid},
+            count_session_ids={sid},
+        )[sid]
+
+        assert row["title"] == "Subagent Session"
+        assert "display_title" not in row
+        assert row["message_count"] == 2
+        assert metadata["_state_db_source"] == "subagent"
+        assert metadata["_state_db_message_count"] == 2
+        assert "_state_db_display_title" not in metadata
+    finally:
+        conn.close()
+
+
+def test_malformed_blob_title_is_isolated_from_healthy_sibling(_isolate):
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    bad_sid = "lineage_api_subagent_bad_blob"
+    good_sid = "lineage_api_subagent_good_sibling"
+    t0 = time.time() - 100
+    try:
+        for sid in (bad_sid, good_sid):
+            _save_webui_session(sid, title="Subagent Session", updated_at=t0)
+            _insert_state_row(conn, sid, source="subagent", started_at=t0)
+            conn.execute("UPDATE sessions SET title = NULL WHERE id = ?", (sid,))
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'user', ?, ?)",
+            (bad_sid, sqlite3.Binary(b"\xff\xfe"), t0 + 1),
+        )
+        _insert_state_message(
+            conn,
+            good_sid,
+            role="user",
+            content="Healthy sibling goal",
+            timestamp=t0 + 1,
+        )
+        conn.commit()
+
+        rows = {row["session_id"]: row for row in all_sessions(include_lineage_metadata=False)}
+
+        assert "display_title" not in rows[bad_sid]
+        assert rows[good_sid]["display_title"] == "Healthy sibling goal"
+    finally:
+        conn.close()
+
+
 def test_custom_subagent_title_stays_authoritative(_isolate):
     conn = _ensure_state_db(_isolate)
     _ensure_messages_table(conn)
@@ -595,35 +672,44 @@ def test_generic_subagent_title_falls_back_without_first_user_message(_isolate):
         conn.close()
 
 
-def test_generic_subagent_title_skips_null_first_user_message(_isolate):
+@pytest.mark.parametrize(
+    "blank_content",
+    [
+        pytest.param(None, id="null"),
+        pytest.param("\t\n\r", id="python-whitespace"),
+        pytest.param("\n\n[Attached files: /tmp/no-goal.txt]", id="attachment-marker-only"),
+    ],
+)
+def test_generic_subagent_title_skips_blank_first_user_message(_isolate, blank_content):
     conn = _ensure_state_db(_isolate)
     _ensure_messages_table(conn)
     t0 = time.time() - 100
+    sid = "lineage_api_subagent_blank_first"
     try:
-        _save_webui_session("lineage_api_subagent_null_first", title="Subagent Session", updated_at=t0)
+        _save_webui_session(sid, title="Subagent Session", updated_at=t0)
         _insert_state_row(
             conn,
-            "lineage_api_subagent_null_first",
+            sid,
             title="Subagent Session",
             source="subagent",
             started_at=t0,
         )
         _insert_state_message(
             conn,
-            "lineage_api_subagent_null_first",
+            sid,
             role="user",
-            content=None,
+            content=blank_content,
             timestamp=t0 + 1,
         )
         _insert_state_message(
             conn,
-            "lineage_api_subagent_null_first",
+            sid,
             role="user",
             content="Recover the next usable delegated title",
             timestamp=t0 + 2,
         )
 
-        row = {row["session_id"]: row for row in all_sessions(include_lineage_metadata=False)}["lineage_api_subagent_null_first"]
+        row = {row["session_id"]: row for row in all_sessions(include_lineage_metadata=False)}[sid]
 
         assert row["title"] == "Subagent Session"
         assert row["display_title"] == "Recover the next usable delegated title"
