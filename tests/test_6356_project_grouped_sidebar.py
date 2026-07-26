@@ -323,6 +323,73 @@ process.stdout.write(JSON.stringify({
     }
 
 
+def test_grouped_production_dom_geometry_covers_middle_bottom_and_active_anchor():
+    playwright_factory = _require_playwright()
+    groups = _extract_js_function(SESSIONS_JS, "_buildSessionSidebarGroups")
+    fixture = f"""
+{groups}
+const _sessionSortTimestampMs = (s) => s.ts;
+const _sessionTimeBucketLabel = () => 'Today';
+const t = (key) => key === 'sidebar_group_unassigned' ? 'Unassigned' : key;
+const sessions = Array.from({{length:96}}, (_, index) => ({{session_id:`session-${{index}}`, project_id:`project-${{index}}`, ts:index}}));
+const projects = sessions.map((s) => ({{project_id:s.project_id, name:`Project ${{s.project_id.slice(8)}}`}}));
+const groups = _buildSessionSidebarGroups(sessions, true, projects, 0);
+const list = document.createElement('div');
+list.style.cssText = 'height:320px;overflow:auto;width:360px;';
+for (const group of groups) {{
+  const wrapper = document.createElement('div');
+  const header = document.createElement('div');
+  header.className = 'session-date-header project-session-header';
+  header.style.cssText = 'height:28px;line-height:28px;';
+  const body = document.createElement('div');
+  for (const session of group.items) {{
+    const row = document.createElement('div');
+    row.className = 'session-item'; row.dataset.sid = session.session_id;
+    row.textContent = session.session_id; row.style.cssText = 'height:32px;line-height:32px;';
+    body.appendChild(row);
+  }}
+  wrapper.append(header, body); list.appendChild(wrapper);
+}}
+document.body.appendChild(list);
+const visibleIds = () => {{
+  const bounds = list.getBoundingClientRect();
+  return [...list.querySelectorAll('.session-item')].filter((row) => {{
+    const rect = row.getBoundingClientRect();
+    return rect.bottom > bounds.top && rect.top < bounds.bottom;
+  }}).map((row) => row.dataset.sid);
+}};
+const middleScroll = Math.floor(list.scrollHeight / 2);
+list.scrollTop = middleScroll;
+const middle = visibleIds();
+list.scrollTop = list.scrollHeight;
+const bottomScroll = list.scrollTop;
+const bottom = visibleIds();
+const active = list.querySelector('[data-sid="session-95"]');
+const listRect = list.getBoundingClientRect();
+const activeRect = active.getBoundingClientRect();
+const targetScrollTop = Math.max(0, list.scrollTop + activeRect.top - listRect.top - (list.clientHeight - activeRect.height) / 2);
+list.scrollTop = targetScrollTop;
+const anchoredRect = active.getBoundingClientRect();
+window.groupedGeometry = {{totalRows:list.querySelectorAll('.session-item').length, headers:list.querySelectorAll('.project-session-header').length, middleScroll, middle, bottomScroll, bottom, targetScrollTop, activeVisible:anchoredRect.top >= listRect.top && anchoredRect.bottom <= listRect.bottom}};
+"""
+    with playwright_factory() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page(viewport={"width":500, "height":500})
+        page.set_content("<!doctype html><html><body></body></html>")
+        page.add_script_tag(content=fixture)
+        observed = page.evaluate("window.groupedGeometry")
+        browser.close()
+    assert observed["totalRows"] == 96
+    assert observed["headers"] == 96
+    assert observed["middleScroll"] > 0
+    assert observed["bottomScroll"] > observed["middleScroll"]
+    assert observed["middle"]
+    assert observed["bottom"]
+    assert "session-95" in observed["bottom"]
+    assert observed["targetScrollTop"] > 0
+    assert observed["activeVisible"] is True
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_locale_switch_rerenders_grouped_sidebar_strings_immediately():
     match = re.search(
@@ -668,8 +735,63 @@ def test_grouped_drag_uses_title_row_and_blocks_embedded_controls():
     assert "titleRow.draggable=true;" in SESSIONS_JS
     assert "dragHandle.draggable=true;" not in SESSIONS_JS
     assert "titleRow.addEventListener('dragstart',(e)=>{" in SESSIONS_JS
-    assert "closest('button,input,label,.session-tag,[contenteditable=\"\"],[contenteditable=\"true\"]')" in SESSIONS_JS
+    assert ".session-lineage-count,.session-child-count,.session-child-sessions" in SESSIONS_JS
+    assert "titleRow.addEventListener('pointerdown',(e)=>{" in SESSIONS_JS
     assert "_setSessionProjectDragData(e.dataTransfer,s.session_id);" in SESSIONS_JS
+
+
+def test_grouped_drag_production_row_preserves_pointer_origin_for_controls():
+    playwright_factory = _require_playwright()
+    binding_start = SESSIONS_JS.index("const isGroupedDragControl=")
+    binding_end = SESSIONS_JS.index("const dragHandle=", binding_start)
+    binding = SESSIONS_JS[binding_start:binding_end]
+    helper_lines = "\n".join(
+        _extract_js_line(SESSIONS_JS, prefix)
+        for prefix in (
+            "const SESSION_PROJECT_DRAG_MIME=",
+            "const SESSION_PROJECT_DRAG_TEXT_PREFIX=",
+            "let _activeSidebarProjectDragSessionId=",
+        )
+    )
+    set_helper = _extract_js_function(SESSIONS_JS, "_setSessionProjectDragData")
+    clear_helper = _extract_js_function(SESSIONS_JS, "_clearSessionProjectDragData")
+    fixture = f"""
+{helper_lines}
+{set_helper}
+{clear_helper}
+const s = {{session_id:'drag-session'}};
+const el = document.createElement('div');
+const titleRow = document.createElement('div');
+const title = document.createElement('span'); title.className = 'session-title'; title.textContent = 'Title';
+const lineage = document.createElement('span'); lineage.className = 'session-lineage-count'; lineage.setAttribute('role','button');
+const childCount = document.createElement('span'); childCount.className = 'session-child-count';
+titleRow.append(title, lineage, childCount); el.appendChild(titleRow); document.body.appendChild(el);
+{binding}
+window.probe = (target) => {{
+  _clearSessionProjectDragData();
+  target.dispatchEvent(new PointerEvent('pointerdown', {{bubbles:true, pointerId:1, pointerType:'mouse'}}));
+  const dataTransfer = new DataTransfer();
+  const drag = new DragEvent('dragstart', {{bubbles:true, cancelable:true, dataTransfer}});
+  const allowed = titleRow.dispatchEvent(drag);
+  return {{allowed, prevented:!allowed, payload:dataTransfer.getData(SESSION_PROJECT_DRAG_MIME)}};
+}};
+"""
+    with playwright_factory() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page()
+        page.set_content("<!doctype html><html><body></body></html>")
+        page.add_script_tag(content=fixture)
+        observed = page.evaluate("""({
+          title: window.probe(document.querySelector('.session-title')),
+          lineage: window.probe(document.querySelector('.session-lineage-count')),
+          child: window.probe(document.querySelector('.session-child-count')),
+        })""")
+        browser.close()
+    assert observed == {
+        "title": {"allowed": True, "prevented": False, "payload": "drag-session"},
+        "lineage": {"allowed": False, "prevented": True, "payload": ""},
+        "child": {"allowed": False, "prevented": True, "payload": ""},
+    }
 
 
 def test_grouped_drag_affordance_is_hover_revealed_and_unassigned_header_is_styled_target():
@@ -772,6 +894,8 @@ def test_grouped_drag_playwright_covers_move_eligibility_and_redraw():
         + [
             _extract_js_function(SESSIONS_JS, name)
             for name in (
+                "_profileNameIsRoot",
+                "_profileNamesEquivalent",
                 "_setSessionProjectDragData",
                 "_clearSessionProjectDragData",
                 "_sessionProjectDragSid",
@@ -784,7 +908,8 @@ def test_grouped_drag_playwright_covers_move_eligibility_and_redraw():
         ]
     )
     fixture = """
-const _allSessions = [
+    const _profilesCache = {profiles: []};
+    const _allSessions = [
   {session_id:'compatible', project_id:'source', profile:'alpha'},
   {session_id:'to-unassigned', project_id:'source', profile:'alpha'},
   {session_id:'same', project_id:'target', profile:'alpha'},

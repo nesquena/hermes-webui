@@ -12601,7 +12601,6 @@ async function saveSettings(andClose){
     const payload={...body,_set_password:pw.trim()};
     if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
     try{
-      // Keep the password-save path visibly on the shared api('/api/settings'...) surface the preflight guard audits.
       const saved=await _writeSettingsWithAppearanceBarrier(payload);
       if(modelChanged && model){
         try{

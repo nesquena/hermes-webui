@@ -146,11 +146,21 @@ function _isComposerDraftRestoreSuppressed(sid, text, files) {
   return false;
 }
 
+function _profileNameIsRoot(name){
+  return typeof _cronProfileNameIsRootAlias==='function'
+    ? _cronProfileNameIsRootAlias(name)
+    : name==='default';
+}
+
+function _profileNamesEquivalent(first,second){
+  const firstName=(typeof first==='string'&&first.trim())?first.trim():'default';
+  const secondName=(typeof second==='string'&&second.trim())?second.trim():'default';
+  if(firstName===secondName) return true;
+  return _profileNameIsRoot(firstName)&&_profileNameIsRoot(secondName);
+}
+
 function _profileMatchesActiveProfile(profile, activeProfile){
-  const eventName = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
-  const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
-  if(eventName === activeName) return true;
-  return eventName === 'default' && !!S.activeProfileIsDefault;
+  return _profileNamesEquivalent(profile,activeProfile);
 }
 
 function _sessionEventProfilesMatch(eventProfile, activeProfile){
@@ -620,6 +630,9 @@ function _cronProfileNameIsRootAlias(name) {
     const entry = _profilesCache.profiles.find((p) => p && p.name === name);
     if (entry && entry.is_default) return true;
   }
+  if (typeof S !== 'undefined' && S && S.activeProfileIsDefault
+    && typeof S.activeProfile === 'string'
+    && S.activeProfile.trim() === name) return true;
   return false;
 }
 
@@ -7292,6 +7305,7 @@ function _sessionVirtualSpacer(height, where){
 }
 
 function _scheduleSessionVirtualizedRender(){
+  if(window._sidebarGroupByProject) return;
   _sessionListLastScrollAt=Date.now();
   // While a profile-switch skeleton is up, ignore virtual-scroll events: the
   // cached rows are the PREVIOUS profile's, and repainting them here would
@@ -7586,9 +7600,7 @@ function _buildSessionSidebarGroups(orderedSessions,groupByProject,projects,now)
 
 function _groupedProjectProfileHides(sessionProfile,projectProfile){
   if(!sessionProfile||!projectProfile) return false;
-  if(sessionProfile===projectProfile) return false;
-  if(sessionProfile==='default'||projectProfile==='default') return false;
-  return true;
+  return !_profileNamesEquivalent(sessionProfile,projectProfile);
 }
 
 const SESSION_PROJECT_DRAG_MIME='application/x-hermes-webui-session-id';
@@ -7922,6 +7934,7 @@ function renderSessionListFromCache(){
   try{_groupCollapsed=JSON.parse(localStorage.getItem('hermes-date-groups-collapsed')||'{}');}catch(e){}
   const _saveCollapsed=()=>{try{localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(_groupCollapsed));}catch(e){}};
   const groups=_buildSessionSidebarGroups(orderedSessions,!!window._sidebarGroupByProject,_allProjects,now);
+  const groupedMode=!!window._sidebarGroupByProject;
   const flatSessionRows=[];
   for(const g of groups){
     const groupKey=g.collapseKey||g.label;
@@ -7946,27 +7959,34 @@ function renderSessionListFromCache(){
     list.dataset.sessionVirtualActiveAnchor!==activeSidForSidebar||
     list.dataset.sessionVirtualFilter!==q
   );
-  const virtualWindowBeforeActiveAnchor=_sessionVirtualWindow({
-    total:flatSessionRows.length,
-    scrollTop:listScrollTopBeforeRender,
-    viewportHeight:list.clientHeight||520,
-    itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
-    buffer:SESSION_VIRTUAL_BUFFER_ROWS,
-    threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
-    activeIndex:-1,
-  });
+  const virtualWindowBeforeActiveAnchor=groupedMode
+    ? {start:0,end:flatSessionRows.length}
+    : _sessionVirtualWindow({
+      total:flatSessionRows.length,
+      scrollTop:listScrollTopBeforeRender,
+      viewportHeight:list.clientHeight||520,
+      itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
+      buffer:SESSION_VIRTUAL_BUFFER_ROWS,
+      threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
+      activeIndex:-1,
+    });
   const activeWasAlreadyVisible=activeIndex>=virtualWindowBeforeActiveAnchor.start&&activeIndex<virtualWindowBeforeActiveAnchor.end;
-  const shouldMoveSidebarToActive=shouldAnchorActive&&!activeWasAlreadyVisible;
-  let virtualWindow=_sessionVirtualWindow({
-    total:flatSessionRows.length,
-    scrollTop:listScrollTopBeforeRender,
-    viewportHeight:list.clientHeight||520,
-    itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
-    buffer:SESSION_VIRTUAL_BUFFER_ROWS,
-    threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
-    activeIndex:shouldMoveSidebarToActive?activeIndex:-1,
-  });
+  const shouldMoveSidebarToActive=groupedMode
+    ? !!shouldAnchorActive
+    : shouldAnchorActive&&!activeWasAlreadyVisible;
+  let virtualWindow=groupedMode
+    ? {virtualized:false,start:0,end:flatSessionRows.length,topPad:0,bottomPad:0,itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,total:flatSessionRows.length}
+    : _sessionVirtualWindow({
+      total:flatSessionRows.length,
+      scrollTop:listScrollTopBeforeRender,
+      viewportHeight:list.clientHeight||520,
+      itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
+      buffer:SESSION_VIRTUAL_BUFFER_ROWS,
+      threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
+      activeIndex:shouldMoveSidebarToActive?activeIndex:-1,
+    });
   let virtualAnchorScrollTop=null;
+  let groupedActiveNeedsGeometry=groupedMode&&shouldMoveSidebarToActive;
   if(shouldMoveSidebarToActive&&virtualWindow.virtualized){
     list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
     virtualAnchorScrollTop=virtualWindow.topPad;
@@ -7979,9 +7999,8 @@ function renderSessionListFromCache(){
   list.dataset.sessionVirtualFilter=q;
   list.dataset.sessionVirtualStart=String(virtualWindow.start);
   list.dataset.sessionVirtualEnd=String(virtualWindow.end);
-  // Render groups with collapsible headers. Large sidebars render only the
-  // current session-row window plus top/bottom spacers inside each group body;
-  // headers remain real DOM so pin/archive/date grouping and clicks survive.
+  // Grouped mode renders the complete header-and-row projection so browser geometry
+  // remains authoritative; flat mode retains its fixed-height row virtualizer.
   let globalSessionRowIndex=0;
   for(const g of groups){
     const wrapper=document.createElement('div');
@@ -8012,20 +8031,22 @@ function renderSessionListFromCache(){
       renderSessionListFromCache();
     };
     wrapper.appendChild(hdr);
-    let groupTopPad=0;
-    let groupBottomPad=0;
     for(const s of g.items){
       if(isGroupCollapsed) continue;
       const rowIndex=globalSessionRowIndex++;
       const inWindow=!virtualWindow.virtualized||(rowIndex>=virtualWindow.start&&rowIndex<virtualWindow.end);
       if(inWindow){ body.appendChild(_renderOneSession(s, Boolean(g.isPinned))); }
-      else if(rowIndex<virtualWindow.start){ groupTopPad+=virtualWindow.itemHeight; }
-      else { groupBottomPad+=virtualWindow.itemHeight; }
     }
-    if(groupTopPad>0){ body.insertBefore(_sessionVirtualSpacer(groupTopPad,'before'), body.firstChild); }
-    if(groupBottomPad>0){ body.appendChild(_sessionVirtualSpacer(groupBottomPad,'after')); }
     wrapper.appendChild(body);
     list.appendChild(wrapper);
+  }
+  if(groupedActiveNeedsGeometry){
+    const activeEl=list.querySelector('.session-item.active');
+    if(activeEl){
+      const listRect=list.getBoundingClientRect();
+      const activeRect=activeEl.getBoundingClientRect();
+      virtualAnchorScrollTop=Math.max(0,list.scrollTop+activeRect.top-listRect.top-(list.clientHeight-activeRect.height)/2);
+    }
   }
   if(virtualAnchorScrollTop!==null){
     list.scrollTop=virtualAnchorScrollTop;
@@ -8137,13 +8158,21 @@ function renderSessionListFromCache(){
       titleRow.draggable=true;
       const isGroupedDragControl=(target)=>{
         const dragTarget=target&&target.nodeType===1?target:target&&target.parentElement;
-        return !!(dragTarget&&dragTarget.closest('button,input,label,.session-tag,[contenteditable=""],[contenteditable="true"]'));
+        return !!(dragTarget&&dragTarget.closest('button,input,label,.session-tag,.session-lineage-count,.session-child-count,.session-child-sessions,[contenteditable=""],[contenteditable="true"]'));
       };
+      let groupedDragPointerOriginInteractive=false;
+      titleRow.addEventListener('pointerdown',(e)=>{
+        groupedDragPointerOriginInteractive=isGroupedDragControl(e.target);
+      },true);
+      titleRow.addEventListener('pointerup',()=>{groupedDragPointerOriginInteractive=false;},true);
+      titleRow.addEventListener('pointercancel',()=>{groupedDragPointerOriginInteractive=false;},true);
       titleRow.addEventListener('dragstart',(e)=>{
-        if(isGroupedDragControl(e.target)){
+        if(groupedDragPointerOriginInteractive||isGroupedDragControl(e.target)){
           e.preventDefault();
+          groupedDragPointerOriginInteractive=false;
           return;
         }
+        groupedDragPointerOriginInteractive=false;
         e.stopPropagation();
         if(!e.dataTransfer) return;
         e.dataTransfer.effectAllowed='move';

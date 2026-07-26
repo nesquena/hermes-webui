@@ -108,7 +108,9 @@ def test_session_list_render_path_uses_virtual_spacers_and_scroll_rerender():
     render_body = js[render_start:render_end]
 
     assert "_sessionVirtualWindow" in render_body
-    assert "_sessionVirtualSpacer" in render_body
+    assert "_sessionVirtualSpacer" in js
+    assert "const groupedMode=!!window._sidebarGroupByProject" in render_body
+    assert "virtualized:false,start:0,end:flatSessionRows.length" in render_body
     assert "spacer.dataset.virtualSpacer=where||'gap'" in js
     assert "list.addEventListener('scroll', _scheduleSessionVirtualizedRender" in js
     assert "requestAnimationFrame(()=>{" in js
@@ -129,9 +131,9 @@ def test_session_list_only_moves_to_active_when_active_row_is_not_visible():
     render_end = js.index("async function _handleActiveSessionStorageEvent", render_start)
     render_body = js[render_start:render_end]
 
-    before_idx = render_body.index("const virtualWindowBeforeActiveAnchor=_sessionVirtualWindow({")
+    before_idx = render_body.index("const virtualWindowBeforeActiveAnchor=groupedMode")
     visible_idx = render_body.index("const activeWasAlreadyVisible=activeIndex>=virtualWindowBeforeActiveAnchor.start&&activeIndex<virtualWindowBeforeActiveAnchor.end")
-    move_idx = render_body.index("const shouldMoveSidebarToActive=shouldAnchorActive&&!activeWasAlreadyVisible")
+    move_idx = render_body.index("const shouldMoveSidebarToActive=groupedMode")
     final_idx = render_body.index("activeIndex:shouldMoveSidebarToActive?activeIndex:-1")
     anchor_idx = render_body.index("if(shouldMoveSidebarToActive&&virtualWindow.virtualized){")
 
