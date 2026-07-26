@@ -1603,11 +1603,16 @@ def _read_cron_output_bounded(
             # (#6141 r6 #3)
             if budget is not None and size > budget:
                 return "", False, False, 0, True
-            # Physical read cap: min(cap+1 growth probe, budget+1 if budgeted)
-            # so we never materialize more than budget+1 bytes. (#6141 r5 #1)
+            # Physical read cap: NEVER request more than the remaining allowance.
+            # The growth-detection probe (cap+1) is only used when there is room
+            # for it within the budget; otherwise the read is capped at exactly
+            # the budget so a same-inode growth between fstat and read cannot
+            # return more than the caller's remaining allowance. (#6141 r7)
             read_amount = cap + 1
-            if budget is not None and read_amount > budget + 1:
-                read_amount = budget + 1
+            probed_growth = True  # True when the cap+1 probe is in the read
+            if budget is not None and read_amount > budget:
+                read_amount = budget
+                probed_growth = False
             try:
                 raw = fh.read(read_amount)
             except OSError:
@@ -1619,6 +1624,16 @@ def _read_cron_output_bounded(
             bytes_read = len(raw)
             if len(raw) > cap:
                 return raw[:cap].decode("utf-8", errors="replace"), True, True, bytes_read, False
+            # If the growth probe was in the read and returned more than the
+            # pinned size, the file grew — truncated.
+            if probed_growth and len(raw) > size:
+                return raw[:cap].decode("utf-8", errors="replace"), True, True, bytes_read, False
+            # If the read was capped at the budget (no room for the growth probe)
+            # and filled the allowance exactly, the file may have grown beyond
+            # what we read — conservatively mark truncated since we can't probe
+            # for more. (#6141 r7)
+            if not probed_growth and len(raw) >= read_amount and read_amount == budget:
+                return raw.decode("utf-8", errors="replace"), True, True, bytes_read, False
             return raw.decode("utf-8", errors="replace"), False, True, bytes_read, False
         # Over cap: read DISJOINT head + tail from this one descriptor.
         # Head = [0, cap). Tail starts at max(cap, size-cap) so the two ranges
