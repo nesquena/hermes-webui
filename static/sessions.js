@@ -1801,7 +1801,12 @@ async function loadSession(sid){
       }
       try{
         if(typeof showToast==='function') showToast(`Switching to ${profileMismatch.profile} profile for this session…`,2200);
-        await _switchProfileForSessionLoad(profileMismatch.profile);
+        const switched = await _switchProfileForSessionLoad(profileMismatch.profile);
+        if (switched !== true) {
+          if (_isCurrentLoad()) _loadingSessionId = null;
+          _rearmActiveSessionStream();
+          return;
+        }
         // Post-await stale-load guard (Codex): the profile switch above does a
         // network POST + session-list re-render, during which the user may have
         // navigated to a different session. If we no longer own the load, bail

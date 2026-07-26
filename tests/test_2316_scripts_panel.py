@@ -16,6 +16,7 @@ from tests.conftest import TEST_STATE_DIR, TEST_BASE
 pytestmark = pytest.mark.usefixtures("test_server")
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 PANELS_JS_PATH = REPO_ROOT / "static" / "panels.js"
+SESSIONS_JS_PATH = REPO_ROOT / "static" / "sessions.js"
 NODE = shutil.which("node")
 
 
@@ -1777,6 +1778,93 @@ def test_session_load_profile_switch_retires_first_profile_owner_after_return():
         {"url": "/api/scripts/list", "profile": "a"},
         {"url": "/api/scripts/raw?path=a.py", "profile": "a"},
     ]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_loadsession_profile_switch_failure_does_not_force_retry_under_stale_profile():
+    sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(sessions_js) + """
+const apiCalls = [];
+const switchCalls = [];
+const toasts = [];
+let rearmCalls = 0;
+let startSessionStreamCalls = 0;
+const msgInner = { innerHTML: '' };
+const window = { _clearPendingSelections() {} };
+const localStorage = { removeItem() {}, getItem() { return null; } };
+const history = { replaceState() {} };
+const S = {
+  session: { session_id: 'current', message_count: 0 },
+  messages: [],
+  toolCalls: [],
+  pendingFiles: [],
+  busy: false,
+  activeStreamId: null,
+};
+let _loadingSessionId = null;
+let _loadSessionGeneration = 0;
+let _loadingOlder = false;
+let _pendingCarryForwardSnapshot = null;
+let _messagesTruncated = false;
+let _oldestIdx = 0;
+let _yoloEnabled = false;
+const INFLIGHT = {};
+function $(id) { return id === 'msgInner' ? msgInner : null; }
+function _resolveSessionIdFromSidebarLineage(sid) { return sid; }
+function _hermesNotifySessionOpen() { return null; }
+function _rearmActiveSessionStream() { rearmCalls += 1; }
+function stopApprovalPolling() {}
+function hideApprovalCard() {}
+function stopSessionStream() {}
+function _updateYoloPill() {}
+function stopClarifyPolling() {}
+function hideClarifyCard() {}
+async function _saveComposerDraftNow() {}
+function _clearQueueCardDisplay() {}
+function _sessionVisitHasUnreadState() { return false; }
+function _acknowledgeSessionVisit() {}
+function _clearSameSessionForceReloadHint() {}
+function _clearStuckSessionOnBoot() {}
+function _appRootPath() { return '/'; }
+function startSessionStream() { startSessionStreamCalls += 1; }
+function showToast(message) { toasts.push(message); }
+async function _switchProfileForSessionLoad(profile) {
+  switchCalls.push(profile);
+  return false;
+}
+async function api(url) {
+  apiCalls.push(url);
+  const err = new Error('profile mismatch');
+  err.status = 409;
+  err.body = JSON.stringify({
+    code: 'session_profile_mismatch',
+    profile: 'other',
+    session_id: 'foreign',
+  });
+  throw err;
+}
+eval(extractFunc('_sessionProfileMismatchFromError'));
+eval(extractFunc('loadSession'));
+(async () => {
+  await loadSession('foreign');
+  console.log(JSON.stringify({
+    apiCalls,
+    switchCalls,
+    toasts,
+    rearmCalls,
+    startSessionStreamCalls,
+    loadingSessionId: _loadingSessionId,
+  }));
+})().catch(err => { console.error(err); process.exit(1); });
+"""
+    result = json.loads(_run_node(source))
+    assert result["apiCalls"] == ["/api/session?session_id=foreign&messages=0&resolve_model=0"]
+    assert result["switchCalls"] == ["other"]
+    assert result["rearmCalls"] == 2
+    assert result["startSessionStreamCalls"] == 0
+    assert result["loadingSessionId"] is None
+    assert len(result["toasts"]) == 1
+    assert result["toasts"][0].startswith("Switching to other profile for this session")
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
