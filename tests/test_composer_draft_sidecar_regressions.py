@@ -1,6 +1,5 @@
 """Runtime regression coverage for dedicated composer draft sidecars."""
 
-import json
 import sqlite3
 from types import SimpleNamespace
 
