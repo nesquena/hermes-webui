@@ -72,7 +72,7 @@ def test_stream_end_fallback_does_not_finalize_when_session_is_still_active():
     assert "const status=await _restoreSettledSession(source,{status:true});" in body
     assert "if(status==='active'&&S.activeStreamId===streamId)" in body
     assert "_scheduleStreamEndRecovery(source,200);" in body
-    assert "_finalizeStreamEndFallback(source,{preserveVisibleAnswer:true});" in body
+    assert "_finalizeStreamEndFallback(source);" in body
 
 
 def test_stream_end_recovery_helper_retries_while_session_is_still_active():
@@ -84,7 +84,7 @@ def test_stream_end_recovery_helper_retries_while_session_is_still_active():
     assert "if(_streamEndRecoveryAttempts<16){" in fn
     assert "_scheduleStreamEndRecovery(source,_streamEndRecoveryAttempts<10?200:1000);" in fn
     assert "await _reconcileStreamEndRecoveryExhaustion(source);" in fn
-    assert "_finalizeStreamEndFallback(source,{preserveVisibleAnswer:true});" in fn
+    assert "_finalizeStreamEndFallback(source);" in fn
 
 
 def test_stream_end_fallback_helper_clears_owner_state_before_closing():

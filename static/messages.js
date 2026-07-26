@@ -2483,7 +2483,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       await _reconcileStreamEndRecoveryExhaustion(source);
       return;
     }
-    _finalizeStreamEndFallback(source,{preserveVisibleAnswer:true});
+    _finalizeStreamEndFallback(source);
   }
   function _stripLiveVisibleAssistantEchoFromThinking(text, snippets){
     let out=String(text||'');
@@ -6185,10 +6185,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(status==='active'&&S.activeStreamId===streamId){
         _scheduleStreamEndRecovery(source,200);
-        return;
-      }
-      if(_visibleLiveAssistantAnswerPresent()){
-        _finalizeStreamEndFallback(source,{preserveVisibleAnswer:true});
         return;
       }
       _finalizeStreamEndFallback(source);
