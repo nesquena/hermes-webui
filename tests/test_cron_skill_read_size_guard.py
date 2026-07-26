@@ -724,7 +724,7 @@ def test_cron_batch_real_read_failure_not_charged(monkeypatch, tmp_path):
 
     def failing_for_unreadable(path, *a, **kw):
         if path.name in ("run-1.md", "run-2.md"):
-            return "", False, False  # real read failure
+            return "", False, False, 0, False  # real I/O failure (5-tuple)
         return original(path, *a, **kw)
 
     monkeypatch.setattr(routes, "_read_cron_output_bounded", failing_for_unreadable)
@@ -937,12 +937,12 @@ def test_cron_batch_no_reader_call_after_budget_exhaustion(monkeypatch, tmp_path
     def instrumented_reader(path, *a, **kw):
         result = original(path, *a, **kw)
         text, trunc, ok, bytes_read, declined = result
-        # Record EVERY physical read (successful or declined), with the path.
-        if ok:
-            physical_bytes.append(bytes_read)
-        else:
-            # A declined read still means the reader was called; track whether
-            # it happened after budget exhaustion.
+        # Record EVERY physical read (successful or failed), with the path and
+        # the descriptor-derived bytes consumed. This independently observes
+        # what the reader reports as physically read, including growth-probe
+        # bytes and partial-failure consumption. (#6141 r6)
+        physical_bytes.append(bytes_read)
+        if not ok:
             calls_after_exhaustion.append((path.name, declined))
         return result
 
@@ -953,11 +953,19 @@ def test_cron_batch_no_reader_call_after_budget_exhaustion(monkeypatch, tmp_path
         handler, SimpleNamespace(query="job_id=job1&limit=10")
     )
     body = _payload(handler)
-    successful_total = sum(physical_bytes)
-    # Total successful bytes must stay within the four-cap bound.
-    assert successful_total <= _FILE_READ_MAX_BYTES * 4, (
-        f"total successful reads must stay within 4 caps; got "
-        f"{successful_total} ({successful_total / _FILE_READ_MAX_BYTES:.1f} caps)"
+    # Total physical bytes (successful + failed-consumed) must stay within the
+    # four-cap bound — every byte the descriptor returned is charged.
+    physical_total = sum(physical_bytes)
+    assert physical_total <= _FILE_READ_MAX_BYTES * 4, (
+        f"total physical reads must stay within 4 caps; got "
+        f"{physical_total} ({physical_total / _FILE_READ_MAX_BYTES:.1f} caps)"
+    )
+    # No reader should be called after budget exhaustion — the handler stops.
+    assert calls_after_exhaustion == [] or all(
+        not d for _, d in calls_after_exhaustion
+    ), (
+        f"no reader call after exhaustion (only I/O failures may appear after "
+        f"budget remains); got {calls_after_exhaustion}"
     )
     # The batch is marked truncated (some files were skipped).
     assert body.get("truncated") is True, (
@@ -1007,3 +1015,109 @@ def test_read_cron_output_bounded_short_read_accounts_actual_bytes(tmp_path, mon
         f"got {bytes_read} (planned would be {_FILE_READ_MAX_BYTES * 2})"
     )
     assert ok is True
+
+
+# ── Gate round-6 (2026-07-26): physical-read bound contract tests ────────────
+
+
+def test_read_cron_output_bounded_growth_probe_byte_is_charged(tmp_path, monkeypatch):
+    """Round-6 #1: the cap+1 growth-probe byte must be charged. A file that
+    grows under the read returns cap+1 bytes physically; bytes_read must be
+    cap+1 (the physical-I/O bound counts what was read, not what's returned)."""
+    from api.routes import _read_cron_output_bounded
+
+    f = tmp_path / "grow.md"
+    f.write_text("x" * _FILE_READ_MAX_BYTES)  # exactly cap bytes
+    real_open = open
+
+    class GrowFile:
+        def __init__(self, name):
+            self._real = real_open(name, "rb")
+            self.name = name
+            self.fileno = self._real.fileno
+        def seek(self, *a): return self._real.seek(*a)
+        def read(self, n=-1):
+            data = self._real.read(n)
+            # Append 1 byte when the growth probe (cap+1) read runs.
+            if n and n > _FILE_READ_MAX_BYTES:
+                return data + b"G"
+            return data
+        def close(self): return self._real.close()
+
+    import builtins
+    def grow_open(name, *a, **k):
+        if str(name) == str(f):
+            return GrowFile(str(f))
+        return real_open(name, *a, **k)
+    monkeypatch.setattr(builtins, "open", grow_open)
+
+    text, trunc, ok, bytes_read, declined = _read_cron_output_bounded(f)
+    assert bytes_read == _FILE_READ_MAX_BYTES + 1, (
+        f"growth-probe byte must be charged; got {bytes_read} "
+        f"(expected {_FILE_READ_MAX_BYTES + 1})"
+    )
+    assert trunc is True  # file grew past the cap
+
+
+def test_read_cron_output_bounded_partial_failure_preserves_head_bytes(tmp_path, monkeypatch):
+    """Round-6 #2: if head read succeeds but tail seek/read raises OSError,
+    the consumed head bytes must still be reported (bytes_read > 0) so the
+    handler can charge them. They were physically read and cannot vanish."""
+    from api.routes import _read_cron_output_bounded
+
+    f = tmp_path / "big.md"
+    f.write_text("## Response\n" + ("B" * (_FILE_READ_MAX_BYTES * 3)))
+    real_open = open
+
+    class PartialFailFile:
+        def __init__(self, name):
+            self._real = real_open(name, "rb")
+            self.name = name
+            self.fileno = self._real.fileno
+            self._head_done = False
+        def seek(self, pos):
+            # Second seek (tail) raises — simulates tail seek/read failure.
+            if self._head_done:
+                raise OSError("simulated tail seek failure")
+            self._real.seek(pos)
+        def read(self, n=-1):
+            data = self._real.read(n)
+            if n and n >= _FILE_READ_MAX_BYTES:
+                self._head_done = True  # head read done; next seek will fail
+            return data
+        def close(self): return self._real.close()
+
+    import builtins
+    def partial_open(name, *a, **k):
+        if str(name) == str(f):
+            return PartialFailFile(str(f))
+        return real_open(name, *a, **k)
+    monkeypatch.setattr(builtins, "open", partial_open)
+
+    text, trunc, ok, bytes_read, declined = _read_cron_output_bounded(f)
+    # ok=False (read incomplete), but the consumed head bytes must be reported.
+    assert ok is False, f"partial failure must return ok=False; got ok={ok}"
+    assert bytes_read > 0, (
+        f"consumed head bytes must be preserved on partial failure; got "
+        f"bytes_read={bytes_read}"
+    )
+    assert bytes_read >= _FILE_READ_MAX_BYTES, (
+        f"head read (~1 cap) must be charged; got {bytes_read}"
+    )
+
+
+def test_read_cron_output_bounded_small_file_admitted_when_actual_size_fits(tmp_path):
+    """Round-6 #3: a pinned small file must be admitted when its ACTUAL size
+    fits the remaining budget, not declined because cap+1 > budget. A 10-byte
+    file with budget=10 must succeed."""
+    from api.routes import _read_cron_output_bounded
+
+    f = tmp_path / "tiny.md"
+    f.write_text("x" * 10)
+    text, trunc, ok, bytes_read, declined = _read_cron_output_bounded(f, budget=10)
+    assert ok is True, (
+        f"10-byte file with budget=10 must be admitted (actual size fits); "
+        f"got ok={ok}, declined={declined}"
+    )
+    assert declined is False
+    assert bytes_read == 10
