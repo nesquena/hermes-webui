@@ -1,9 +1,4 @@
-"""Regression coverage for foreign-session complete-history consumers on PR #6494.
-
-The backend now bounds initial foreign-session loads. These tests pin the two
-frontend consumers that still need complete history before they can claim
-complete-session output: Markdown download and the Artifacts tab.
-"""
+"""Regression coverage for foreign-session full-history consumers on PR #6494."""
 
 from __future__ import annotations
 
@@ -17,16 +12,28 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 WORKSPACE_JS = (REPO / "static" / "workspace.js").read_text(encoding="utf-8")
-TRANSCRIPT_FN = MESSAGES_JS[MESSAGES_JS.index("function transcript("):MESSAGES_JS.index("let _composerAutoResizeRaf=0;")]
-ENSURE_ALL_FN = SESSIONS_JS[SESSIONS_JS.index("async function _ensureAllMessagesLoaded() {"):SESSIONS_JS.index("const SESSION_ARCHIVED_PAGE_SIZE")]
-WORKSPACE_CONSUMER_BLOCK = WORKSPACE_JS[WORKSPACE_JS.index("function _normalizeArtifactPath("):WORKSPACE_JS.index("async function _workspacePathExists(")]
-WORKSPACE_ARTIFACT_CONSTS = "\n".join([
-    r"const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:\/|$)/;",
-    "const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);",
-])
+TRANSCRIPT_FN = MESSAGES_JS[
+    MESSAGES_JS.index("function transcript(") : MESSAGES_JS.index("let _composerAutoResizeRaf=0;")
+]
+ENSURE_ALL_FN = SESSIONS_JS[
+    SESSIONS_JS.index("async function _ensureAllMessagesLoaded() {") : SESSIONS_JS.index("const SESSION_ARCHIVED_PAGE_SIZE")
+]
+WORKSPACE_HELPERS = WORKSPACE_JS[
+    WORKSPACE_JS.index("function _workspaceTodosTabIsActive(){") : WORKSPACE_JS.index("function _resetWorkspaceTodosRenderCache(){")
+]
+WORKSPACE_CONSUMER_BLOCK = WORKSPACE_JS[
+    WORKSPACE_JS.index("function _normalizeArtifactPath(") : WORKSPACE_JS.index("async function _workspacePathExists(")
+]
+WORKSPACE_ARTIFACT_CONSTS = "\n".join(
+    [
+        r"const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:\/|$)/;",
+        "const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);",
+    ]
+)
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -47,8 +54,8 @@ def _run_node(script: str) -> dict:
 
 def _download_script(
     *,
-    switch_session: bool = False,
     fail_load: bool = False,
+    switch_session: bool = False,
     active_stream: bool = False,
 ) -> str:
     boot_path = str(REPO / "static" / "boot.js")
@@ -92,6 +99,12 @@ function extractAssignment(source, marker, nextMarker) {{
 }}
 const transcriptSrc = extractFunction(messagesSrc, 'transcript');
 const downloadAssign = extractAssignment(bootSrc, "$('btnDownload').onclick=", "$('btnExportJSON').onclick=");
+const translations = {{
+  download_transcript_preparing_full: 'Preparing full transcript…',
+  download_transcript_busy_full: 'Wait for the current response to finish before downloading the full transcript.',
+  download_transcript_failed_full: 'Failed to load the full transcript.',
+  download_transcript_changed_full: 'The conversation changed while the full transcript was loading. Try again.',
+}};
 const OLD = 'OLD_TRANSCRIPT_UNIQUE';
 const fullMessages = [
   {{ role: 'user', content: OLD }},
@@ -103,6 +116,7 @@ let objectHref = null;
 let revokedHref = null;
 let downloadName = null;
 let downloadedText = null;
+const toasts = [];
 class Blob {{
   constructor(parts, opts) {{
     downloadedText = parts.join('');
@@ -138,13 +152,17 @@ const document = {{
 }};
 const btns = {{ btnDownload: {{}}, btnExportJSON: {{}} }};
 function $(id) {{ return btns[id]; }}
+function t(key) {{ return translations[key] || key; }}
+function showToast(message, duration, kind) {{
+  toasts.push({{ message, duration, kind: kind || null }});
+}}
 let _messagesTruncated = true;
-    const S = {{
-      session: {{ session_id: 'foreign-1', workspace: '/ws', model: 'model' }},
-      messages: [fullMessages[1]],
-      busy: {str(active_stream).lower()},
-      activeStreamId: {json.dumps('live-1' if active_stream else None)},
-    }};
+const S = {{
+  session: {{ session_id: 'foreign-1', workspace: '/ws', model: 'model' }},
+  messages: [fullMessages[1]],
+  busy: {str(active_stream).lower()},
+  activeStreamId: {json.dumps('live-1' if active_stream else None)},
+}};
 async function _ensureAllMessagesLoaded() {{ {ensure_body} }}
 {TRANSCRIPT_FN}
 eval(downloadAssign);
@@ -159,6 +177,7 @@ eval(downloadAssign);
     revokedHref,
     sessionId: S.session && S.session.session_id,
     truncated: _messagesTruncated,
+    toasts,
   }}));
 }})().catch((err) => {{
   console.error(err && err.stack ? err.stack : String(err));
@@ -169,9 +188,11 @@ eval(downloadAssign);
 
 def _artifact_script(
     *,
-    switch_context: bool = False,
     fail_load: bool = False,
     active_stream: bool = False,
+    active_tab: str = "artifacts",
+    tab_hidden: bool = False,
+    panel_hidden: bool = False,
     seed_existing_dom: bool = False,
 ) -> str:
     workspace_path = str(REPO / "static" / "workspace.js")
@@ -179,39 +200,11 @@ def _artifact_script(
     initial_count = "1" if seed_existing_dom else ""
     if fail_load:
         ensure_body = "ensureCalls += 1; throw new Error('load failed');"
-    elif switch_context:
-        ensure_body = (
-            "ensureCalls += 1; "
-            "S.session = { session_id: 'foreign-2', workspace: '/ws' }; "
-            "S.messages = fullMessages; "
-            "_workspacePanelActiveTab = 'files'; "
-            "_messagesTruncated = false;"
-        )
     else:
         ensure_body = "ensureCalls += 1; S.messages = fullMessages; _messagesTruncated = false;"
     return f"""
 const fs = require('fs');
 const workspaceSrc = fs.readFileSync({json.dumps(workspace_path)}, 'utf8');
-function extractConst(name) {{
-  const match = workspaceSrc.match(new RegExp(`const ${{name}} = .*?;`));
-  if (!match) throw new Error(`missing const ${{name}}`);
-  return match[0];
-}}
-function extractFunction(signature) {{
-  const start = workspaceSrc.indexOf(signature);
-  if (start < 0) throw new Error(`missing function ${{signature}}`);
-  const brace = workspaceSrc.indexOf('{{', start);
-  let depth = 0;
-  for (let i = brace; i < workspaceSrc.length; i++) {{
-    const ch = workspaceSrc[i];
-    if (ch === '{{') depth++;
-    else if (ch === '}}') {{
-      depth--;
-      if (depth === 0) return workspaceSrc.slice(start, i + 1);
-    }}
-  }}
-  throw new Error(`unterminated function ${{signature}}`);
-}}
 const fullMessages = [
   {{
     role: 'assistant',
@@ -238,9 +231,23 @@ const fullMessages = [
 ];
 let ensureCalls = 0;
 let _messagesTruncated = true;
-let _workspacePanelActiveTab = 'artifacts';
-const root = {{ innerHTML: {json.dumps(initial_html)}, isConnected: true }};
+let _workspacePanelActiveTab = {json.dumps(active_tab)};
+const rightPanel = {{ dataset: {{ activeTab: {json.dumps(active_tab)} }} }};
+const root = {{
+  innerHTML: {json.dumps(initial_html)},
+  isConnected: true,
+  hidden: {str(panel_hidden).lower()},
+}};
 const count = {{ textContent: {json.dumps(initial_count)} }};
+const artifactsTab = {{ hidden: {str(tab_hidden).lower()} }};
+const document = {{
+  querySelector: (selector) => selector === '.rightpanel' ? rightPanel : null,
+  getElementById: (id) => {{
+    if (id === 'workspaceArtifactsTab') return artifactsTab;
+    if (id === 'workspaceArtifacts') return root;
+    return null;
+  }},
+}};
 function $(id) {{
   if (id === 'workspaceArtifacts') return root;
   if (id === 'workspaceArtifactsCount') return count;
@@ -254,7 +261,9 @@ function esc(value) {{
     .replace(/"/g, '&quot;');
 }}
 function t(key) {{
-  return key === 'workspace_artifact_source_session' ? 'session' : key;
+  if (key === 'workspace_artifact_source_session') return 'session';
+  if (key === 'workspace_artifact_loading_full_history') return 'Loading full history…';
+  return key;
 }}
 const S = {{
   session: {{ session_id: 'foreign-1', workspace: '/ws' }},
@@ -264,6 +273,7 @@ const S = {{
   activeStreamId: {json.dumps('live-1' if active_stream else None)},
 }};
 async function _ensureAllMessagesLoaded() {{ {ensure_body} }}
+{WORKSPACE_HELPERS}
 {WORKSPACE_ARTIFACT_CONSTS}
 {WORKSPACE_CONSUMER_BLOCK}
 (async () => {{
@@ -278,8 +288,6 @@ async function _ensureAllMessagesLoaded() {{ {ensure_body} }}
     countBeforeAwait,
     html: root.innerHTML,
     count: count.textContent,
-    sessionId: S.session && S.session.session_id,
-    tab: _workspacePanelActiveTab,
     truncated: _messagesTruncated,
   }}));
 }})().catch((err) => {{
@@ -289,80 +297,7 @@ async function _ensureAllMessagesLoaded() {{ {ensure_body} }}
 """
 
 
-def test_download_handler_requires_full_history_before_serializing_markdown():
-    assert "$('btnDownload').onclick=async()=>{" in BOOT_JS
-    assert "if(S.busy||S.activeStreamId) return;" in BOOT_JS
-    assert "await _ensureAllMessagesLoaded();" in BOOT_JS
-    assert "if(!S.session||S.session.session_id!==sid||_messagesTruncated||S.busy||S.activeStreamId)return;" in BOOT_JS
-
-    result = _run_node(_download_script())
-
-    assert result["ensureCalls"] == 1
-    assert result["clicked"] is True
-    assert result["downloadName"] == "hermes-foreign-1.md"
-    assert "OLD_TRANSCRIPT_UNIQUE" in result["downloadedText"]
-    assert result["truncated"] is False
-
-
-def test_download_handler_aborts_stale_or_failed_full_load():
-    stale = _run_node(_download_script(switch_session=True))
-    assert stale["ensureCalls"] == 1
-    assert stale["clicked"] is False
-    assert stale["downloadedText"] is None
-    assert stale["sessionId"] == "foreign-2"
-
-    failed = _run_node(_download_script(fail_load=True))
-    assert failed["ensureCalls"] == 1
-    assert failed["clicked"] is False
-    assert failed["downloadedText"] is None
-
-    active = _run_node(_download_script(active_stream=True))
-    assert active["ensureCalls"] == 0
-    assert active["clicked"] is False
-    assert active["downloadedText"] is None
-    assert active["truncated"] is True
-
-
-def test_artifacts_renderer_requires_full_history_before_collecting():
-    assert "typeof _ensureAllMessagesLoaded === 'function'" in WORKSPACE_JS
-    assert "if(S.busy || S.activeStreamId) return;" in WORKSPACE_JS
-    assert "if(!S.session || S.session.session_id !== sid || _messagesTruncated || S.busy || S.activeStreamId) return;" in WORKSPACE_JS
-    assert "if(_workspacePanelActiveTab !== 'artifacts') return;" in WORKSPACE_JS
-
-    result = _run_node(_artifact_script(seed_existing_dom=True))
-
-    assert result["ensureCalls"] == 1
-    assert result["htmlBeforeAwait"] == ""
-    assert result["countBeforeAwait"] == ""
-    assert result["count"] == "2"
-    assert 'data-artifact-path="old/deep.txt"' in result["html"]
-    assert 'data-artifact-path="new/live.txt"' in result["html"]
-    assert result["truncated"] is False
-
-
-def test_artifacts_renderer_aborts_stale_or_failed_full_load():
-    stale = _run_node(_artifact_script(switch_context=True))
-    assert stale["ensureCalls"] == 1
-    assert stale["html"] == ""
-    assert stale["count"] == ""
-    assert stale["sessionId"] == "foreign-2"
-    assert stale["tab"] == "files"
-
-    failed = _run_node(_artifact_script(fail_load=True))
-    assert failed["ensureCalls"] == 1
-    assert failed["html"] == ""
-    assert failed["count"] == ""
-
-    active = _run_node(_artifact_script(active_stream=True, seed_existing_dom=True))
-    assert active["ensureCalls"] == 0
-    assert active["htmlBeforeAwait"] == ""
-    assert active["countBeforeAwait"] == ""
-    assert active["html"] == ""
-    assert active["count"] == ""
-    assert active["truncated"] is True
-
-
-def _ensure_all_messages_loaded_script(*, live_during_load: bool = False) -> str:
+def _ensure_all_messages_loaded_script(*, start_and_settle_during_fetch: bool = False) -> str:
     sessions_path = str(REPO / "static" / "sessions.js")
     return f"""
 const fs = require('fs');
@@ -387,6 +322,7 @@ let _messagesTruncated = true;
 let _loadingOlder = false;
 let _loadingSessionId = null;
 let _oldestIdx = 99;
+let _messagesGeneration = 0;
 let bumpCalls = 0;
 let syncCalls = 0;
 const originalMessages = [{{ role: 'assistant', content: 'tail latest', _transient: true }}];
@@ -397,6 +333,7 @@ const fullMessages = [
 const S = {{
   session: {{ session_id: 'foreign-1', message_count: 1 }},
   messages: originalMessages.slice(),
+  toolCalls: [{{ id: 'live-tc' }}],
   busy: false,
   activeStreamId: null,
 }};
@@ -405,19 +342,30 @@ const window = {{
 }};
 function _bumpMessagesGeneration() {{
   bumpCalls += 1;
+  _messagesGeneration = (_messagesGeneration + 1) % 2147483647;
 }}
-function _syncToolCallsForLoadedMessages() {{
+function _syncToolCallsForLoadedMessages(_messages, toolCalls) {{
   syncCalls += 1;
+  S.toolCalls = Array.isArray(toolCalls) ? toolCalls.map((tc) => ({{ ...tc }})) : [];
 }}
 async function api() {{
-  if ({str(live_during_load).lower()}) {{
+  if ({str(start_and_settle_during_fetch).lower()}) {{
     S.busy = true;
     S.activeStreamId = 'live-1';
+    _bumpMessagesGeneration();
+    S.messages = [
+      {{ role: 'user', content: 'NEW TURN' }},
+      {{ role: 'assistant', content: 'NEW ANSWER' }},
+    ];
+    S.toolCalls = [{{ id: 'live-tc' }}];
+    S.session.message_count = 2;
+    S.busy = false;
+    S.activeStreamId = null;
   }}
   return {{
     session: {{
       messages: fullMessages,
-      tool_calls: [{{ id: 'tc-1' }}],
+      tool_calls: [{{ id: 'old-tc' }}],
       message_count: fullMessages.length,
     }},
   }};
@@ -427,6 +375,7 @@ async function api() {{
   await _ensureAllMessagesLoaded();
   console.log(JSON.stringify({{
     messages: S.messages,
+    toolCalls: S.toolCalls,
     truncated: _messagesTruncated,
     busy: S.busy,
     activeStreamId: S.activeStreamId,
@@ -442,14 +391,197 @@ async function api() {{
 """
 
 
-def test_ensure_all_messages_loaded_bails_if_live_stream_starts_mid_fetch():
-    result = _run_node(_ensure_all_messages_loaded_script(live_during_load=True))
+def test_download_handler_uses_localized_feedback_and_full_history_gate():
+    assert "showToast((typeof t==='function'&&t('download_transcript_busy_full'))" in BOOT_JS
+    assert "showToast((typeof t==='function'&&t('download_transcript_failed_full'))" in BOOT_JS
+    assert "showToast((typeof t==='function'&&t('download_transcript_preparing_full'))" in BOOT_JS
+    assert "showToast((typeof t==='function'&&t('download_transcript_changed_full'))" in BOOT_JS
+    assert "await _ensureAllMessagesLoaded();" in BOOT_JS
 
-    assert result["messages"] == [{"role": "assistant", "content": "tail latest", "_transient": True}]
+    result = _run_node(_download_script())
+
+    assert result["ensureCalls"] == 1
+    assert result["clicked"] is True
+    assert result["downloadName"] == "hermes-foreign-1.md"
+    assert "OLD_TRANSCRIPT_UNIQUE" in result["downloadedText"]
+    assert result["truncated"] is False
+    assert result["toasts"] == [
+        {
+            "message": "Preparing full transcript…",
+            "duration": 2000,
+            "kind": None,
+        }
+    ]
+
+
+def test_download_handler_emits_feedback_for_busy_changed_and_failed_states():
+    active = _run_node(_download_script(active_stream=True))
+    assert active["ensureCalls"] == 0
+    assert active["clicked"] is False
+    assert active["downloadedText"] is None
+    assert active["toasts"] == [
+        {
+            "message": "Wait for the current response to finish before downloading the full transcript.",
+            "duration": 3000,
+            "kind": "warning",
+        }
+    ]
+
+    switched = _run_node(_download_script(switch_session=True))
+    assert switched["ensureCalls"] == 1
+    assert switched["clicked"] is False
+    assert switched["downloadedText"] is None
+    assert switched["sessionId"] == "foreign-2"
+    assert switched["toasts"] == [
+        {
+            "message": "Preparing full transcript…",
+            "duration": 2000,
+            "kind": None,
+        },
+        {
+            "message": "The conversation changed while the full transcript was loading. Try again.",
+            "duration": 3000,
+            "kind": "warning",
+        },
+    ]
+
+    failed = _run_node(_download_script(fail_load=True))
+    assert failed["ensureCalls"] == 1
+    assert failed["clicked"] is False
+    assert failed["downloadedText"] is None
+    assert failed["toasts"] == [
+        {
+            "message": "Preparing full transcript…",
+            "duration": 2000,
+            "kind": None,
+        },
+        {
+            "message": "Failed to load the full transcript.",
+            "duration": 4000,
+            "kind": "error",
+        },
+    ]
+
+
+def test_artifacts_renderer_uses_placeholder_preserved_count_and_full_load():
+    result = _run_node(_artifact_script(seed_existing_dom=True))
+
+    assert result["ensureCalls"] == 1
+    assert "Loading full history…" in result["htmlBeforeAwait"]
+    assert result["countBeforeAwait"] == "1"
+    assert result["count"] == "2"
+    assert 'data-artifact-path="old/deep.txt"' in result["html"]
+    assert 'data-artifact-path="new/live.txt"' in result["html"]
+    assert result["truncated"] is False
+
+
+def test_artifacts_renderer_falls_back_to_partial_list_after_failure():
+    result = _run_node(_artifact_script(fail_load=True, seed_existing_dom=True))
+
+    assert result["ensureCalls"] == 1
+    assert "Loading full history…" in result["htmlBeforeAwait"]
+    assert result["countBeforeAwait"] == "1"
+    assert result["count"] == "1"
+    assert 'data-artifact-path="new/live.txt"' in result["html"]
+    assert 'data-artifact-path="old/deep.txt"' not in result["html"]
     assert result["truncated"] is True
-    assert result["busy"] is True
-    assert result["activeStreamId"] == "live-1"
-    assert result["bumpCalls"] == 0
+
+
+def test_artifacts_renderer_keeps_placeholder_during_live_turn_on_truncated_session():
+    result = _run_node(_artifact_script(active_stream=True, seed_existing_dom=True))
+
+    assert result["ensureCalls"] == 0
+    assert "Loading full history…" in result["htmlBeforeAwait"]
+    assert "Loading full history…" in result["html"]
+    assert result["countBeforeAwait"] == "1"
+    assert result["count"] == "1"
+    assert result["truncated"] is True
+
+
+def test_artifacts_renderer_skips_full_load_when_panel_is_not_really_visible():
+    hidden_states = [
+        {"active_tab": "files", "tab_hidden": False, "panel_hidden": False},
+        {"active_tab": "artifacts", "tab_hidden": True, "panel_hidden": False},
+        {"active_tab": "artifacts", "tab_hidden": False, "panel_hidden": True},
+    ]
+
+    for state in hidden_states:
+        result = _run_node(_artifact_script(seed_existing_dom=True, **state))
+        assert result["ensureCalls"] == 0
+        assert 'data-artifact-path="new/live.txt"' in result["html"]
+        assert result["count"] == "1"
+        assert result["truncated"] is True
+
+
+def test_ensure_all_messages_loaded_preserves_settled_turn_that_finished_mid_fetch():
+    result = _run_node(_ensure_all_messages_loaded_script(start_and_settle_during_fetch=True))
+
+    assert result["messages"] == [
+        {"role": "user", "content": "NEW TURN"},
+        {"role": "assistant", "content": "NEW ANSWER"},
+    ]
+    assert result["toolCalls"] == [{"id": "live-tc"}]
+    assert result["truncated"] is True
+    assert result["busy"] is False
+    assert result["activeStreamId"] is None
+    assert result["bumpCalls"] == 1
     assert result["syncCalls"] == 0
     assert result["oldestIdx"] == 99
-    assert result["count"] == 1
+    assert result["count"] == 2
+
+
+def test_ensure_all_messages_loaded_still_hydrates_when_generation_is_stable():
+    result = _run_node(_ensure_all_messages_loaded_script())
+
+    assert result["messages"] == [
+        {"role": "user", "content": "older"},
+        {"role": "assistant", "content": "tail latest"},
+    ]
+    assert result["toolCalls"] == [{"id": "old-tc"}]
+    assert result["truncated"] is False
+    assert result["busy"] is False
+    assert result["activeStreamId"] is None
+    assert result["bumpCalls"] == 1
+    assert result["syncCalls"] == 1
+    assert result["oldestIdx"] == 0
+    assert result["count"] == 2
+
+
+def test_messages_generation_wiring_covers_full_load_and_live_turn_claims():
+    assert "const startGeneration = _messagesGeneration;" in SESSIONS_JS
+    assert "if (_messagesGeneration !== startGeneration) return;" in SESSIONS_JS
+    assert "_bumpMessagesGeneration();\n  S.messages = msgs;" in SESSIONS_JS
+    assert "if(activeStreamId) _bumpMessagesGeneration();\n    S.activeStreamId=activeStreamId;" in SESSIONS_JS
+    assert "S.busy=true;\n      _bumpMessagesGeneration();\n      S.activeStreamId=activeStreamId;" in SESSIONS_JS
+    assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n    S.messages.push(userMsg);renderMessages();setBusy(true);" in MESSAGES_JS
+    assert "if(streamId&&typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n  S.activeStreamId = streamId;" in MESSAGES_JS
+    assert "S.busy = true;\n    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n    S.activeStreamId = streamId;" in MESSAGES_JS
+    assert "S.busy = true;\n        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n        S.activeStreamId = streamId;" in MESSAGES_JS
+
+
+def test_terminal_paths_route_artifacts_refresh_through_shared_idle_helper():
+    assert "if(typeof _workspaceArtifactsTabIsActive==='function'&&_workspaceArtifactsTabIsActive()){" in MESSAGES_JS
+    assert "if(typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();" in MESSAGES_JS
+    assert "renderSessionList();\n        _setActivePaneIdleIfOwner();" in MESSAGES_JS
+    assert "_setActivePaneIdleIfOwner();\n      renderSessionList(); // clear streaming indicator immediately on apperror" in MESSAGES_JS
+    assert "finally{\n          _setActivePaneIdleIfOwner();\n        }" in MESSAGES_JS
+    assert "renderSessionList();\n      _setActivePaneIdleIfOwner();\n      return returnStatus?'restored':true;" in MESSAGES_JS
+    assert "_setActivePaneIdleIfOwner();\n  }\n\n  (async()=>{" in MESSAGES_JS
+
+
+def test_locale_blocks_cover_loading_and_download_feedback_keys():
+    locale_count = I18N_JS.count("download_transcript:")
+    assert locale_count == 15
+
+    for key in [
+        "workspace_artifact_loading_full_history:",
+        "download_transcript_preparing_full:",
+        "download_transcript_busy_full:",
+        "download_transcript_failed_full:",
+        "download_transcript_changed_full:",
+    ]:
+        assert I18N_JS.count(key) == locale_count, f"{key} must exist in every locale block"
+
+    assert "workspace_artifact_loading_full_history: 'Loading full history…'" in I18N_JS
+    assert "download_transcript_preparing_full: 'Preparing full transcript…'" in I18N_JS
+    assert "download_transcript_busy_full: 'Wait for the current response to finish before downloading the full transcript.'" in I18N_JS
