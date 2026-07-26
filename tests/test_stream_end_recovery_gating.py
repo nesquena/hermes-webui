@@ -77,7 +77,7 @@ def test_stream_end_fallback_does_not_finalize_when_session_is_still_active():
 
 def test_stream_end_recovery_helper_retries_while_session_is_still_active():
     fn = _function_body("_runStreamEndRecovery")
-    assert "if(_streamFinalized || _terminalStateReached || !_pendingStreamEndRecovery || _closureRetired || !_currentLiveOwnerEntry())" in fn
+    assert "if(_streamFinalized || _terminalStateReached || !_pendingStreamEndRecovery || !_currentLiveOwnerActive())" in fn
     assert "_restoreSettledSession(source,{status:true})" in fn
     assert "status==='stale'" in fn
     assert "if(status==='active'){" in fn
@@ -131,6 +131,7 @@ def test_restore_settled_session_can_report_active_pending_status():
     assert "const returnStatus=!!(options&&options.status);" in fn
     assert "const _restoreStartedAsCurrentPane=_isSessionCurrentPane(activeSid);" in fn
     assert "const _restoreOwnerLost=()=>(" in fn
+    assert "const _restoreBackgroundOwnerLost=()=>(" in fn
     assert "return returnStatus?'stale':true;" in fn
     assert "return returnStatus?'active':false;" in fn
     assert "return returnStatus?'restored':true;" in fn
