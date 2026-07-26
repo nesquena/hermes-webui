@@ -5619,7 +5619,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('approval',e=>{
       const d=JSON.parse(e.data);
       _applyToAnchor('approval',d,e);
-      const _approvalCount=Math.max(1,Number(d.pending_count)||1);
+      const _approvalCount=_attentionPendingCount(d.pending_count);
       showApprovalForSession(activeSid, d, _approvalCount);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',_approvalCount));
       // Unconditional (gate follow-up #1): the visibility/active gate lives
@@ -5644,7 +5644,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
       // Same key-agreement requirement as the approval handler above.
-      const _clarifyCount=Math.max(1,Number(d.pending_count)||1);
+      const _clarifyCount=_attentionPendingCount(d.pending_count);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',_clarifyCount));
       _deliverAttentionNotification(activeSid,'clarify',_clarifyCount,'Clarification needed',d.question||'Tool clarification needed');
     });
@@ -8569,10 +8569,29 @@ function playNotificationSound(){
 }
 
 
+function _attentionPendingCount(raw){
+  // The explicit missing/malformed contract for an attention count.
+  //
+  // Every production producer stamps the authoritative count from the same
+  // locked mutation that created the state: `api/clarify.py::submit_pending`
+  // via `_queue_head_snapshot`, the approval mirror reconcile in
+  // `api/streaming.py`, and `api/routes.py::_session_attention_summary` for the
+  // sidebar poll. A missing, non-numeric, non-finite, fractional or
+  // non-positive value therefore never comes from one of them.
+  //
+  // It normalizes to a whole number >= 1 rather than being passed through,
+  // because the SSE path and the poll path must derive the SAME dedup key from
+  // the same state. Two spellings of one count are two keys, and two keys mean
+  // the user is alerted twice for a single ongoing request.
+  const value=Number(raw);
+  if(!Number.isFinite(value)||value<1) return 1;
+  return Math.floor(value);
+}
+
 function _attentionSoundKey(sid,kind,count){
   const safeSid=String(sid||'');
   const safeKind=String(kind||'attention');
-  const safeCount=Math.max(1,Number(count)||1);
+  const safeCount=_attentionPendingCount(count);
   return `${safeSid}:${safeKind}:${safeCount}`;
 }
 

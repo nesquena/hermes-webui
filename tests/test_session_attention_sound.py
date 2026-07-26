@@ -57,6 +57,9 @@ def _run_attention_notification_probe(steps: str) -> list[dict]:
         pytest.skip("node not on PATH")
     functions = "\n".join(
         (
+            # `_attentionSoundKey` derives its count through this normalizer,
+            # so a probe that injects the key helper must inject it too.
+            _function_source(MESSAGES_JS, "_attentionPendingCount"),
             _function_source(MESSAGES_JS, "_attentionSoundKey"),
             _function_source(MESSAGES_JS, "_hasAttentionNotificationKey"),
             _function_source(MESSAGES_JS, "_markAttentionNotificationKey"),
@@ -150,6 +153,9 @@ def _run_attention_delivery_race_probe(*, active_sid: str, service_worker_succee
         pytest.skip("node not on PATH")
     functions = "\n".join(
         (
+            # `_attentionSoundKey` derives its count through this normalizer,
+            # so a probe that injects the key helper must inject it too.
+            _function_source(MESSAGES_JS, "_attentionPendingCount"),
             _function_source(MESSAGES_JS, "_attentionSoundKey"),
             _function_source(MESSAGES_JS, "_hasAttentionNotificationKey"),
             _function_source(MESSAGES_JS, "_markAttentionNotificationKey"),
@@ -206,6 +212,9 @@ def _run_bounded_attention_retry_probe() -> dict:
         pytest.skip("node not on PATH")
     functions = "\n".join(
         (
+            # `_attentionSoundKey` derives its count through this normalizer,
+            # so a probe that injects the key helper must inject it too.
+            _function_source(MESSAGES_JS, "_attentionPendingCount"),
             _function_source(MESSAGES_JS, "_attentionSoundKey"),
             _function_source(MESSAGES_JS, "_hasAttentionNotificationKey"),
             _function_source(MESSAGES_JS, "_markAttentionNotificationKey"),
@@ -278,6 +287,9 @@ def _run_backoff_rearm_probe() -> dict:
         pytest.skip("node not on PATH")
     functions = "\n".join(
         (
+            # `_attentionSoundKey` derives its count through this normalizer,
+            # so a probe that injects the key helper must inject it too.
+            _function_source(MESSAGES_JS, "_attentionPendingCount"),
             _function_source(MESSAGES_JS, "_attentionSoundKey"),
             _function_source(MESSAGES_JS, "_hasAttentionNotificationKey"),
             _function_source(MESSAGES_JS, "_markAttentionNotificationKey"),
@@ -353,6 +365,9 @@ def _run_active_switch_before_delivery_probe() -> dict:
         pytest.skip("node not on PATH")
     functions = "\n".join(
         (
+            # `_attentionSoundKey` derives its count through this normalizer,
+            # so a probe that injects the key helper must inject it too.
+            _function_source(MESSAGES_JS, "_attentionPendingCount"),
             _function_source(MESSAGES_JS, "_attentionSoundKey"),
             _function_source(MESSAGES_JS, "_hasAttentionNotificationKey"),
             _function_source(MESSAGES_JS, "_markAttentionNotificationKey"),
@@ -419,7 +434,11 @@ def test_attention_signature_tracks_kind_and_count_for_badge_changes():
     assert "count<=0" in signature_body
     assert "approval" in signature_body
     assert "clarify" in signature_body
-    assert "return `${kind}:${Math.max(1,count||1)}`;" in signature_body
+    # The count must go through the SHARED normalizer, not a local spelling:
+    # the poll signature and the SSE handlers derive the same dedup key, and
+    # a second normalization here would let them disagree again.
+    assert "return `${kind}:${_attentionPendingCount(count)}`;" in signature_body
+    assert "Math.max(1,count||1)" not in signature_body
 
 
 def test_clearing_attention_does_not_notify_and_rearms_same_request():

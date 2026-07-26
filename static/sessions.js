@@ -5265,7 +5265,12 @@ function _sessionAttentionSoundSignature(s){
   const count=Number(attention&&attention.count);
   if(!attention||!attention.kind||!Number.isFinite(count)||count<=0)return null;
   const kind=String(attention.kind)==='approval'?'approval':(String(attention.kind)==='clarify'?'clarify':'attention');
-  return `${kind}:${Math.max(1,count||1)}`;
+  // The SAME normalizer the SSE handlers use, called directly rather than
+  // behind a typeof guard: a guard needs a fallback, a fallback is a second
+  // spelling of the count, and two spellings of one count are two dedup keys
+  // — the exact defect this PR exists to close. Both files are deferred
+  // scripts and this runs on a poll response, so the helper is always there.
+  return `${kind}:${_attentionPendingCount(count)}`;
 }
 
 function _syncSessionAttentionSoundState(sessions){
