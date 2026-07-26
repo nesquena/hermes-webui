@@ -837,7 +837,7 @@ def test_cron_batch_total_successful_bytes_within_four_caps(monkeypatch, tmp_pat
 
     def recording_reader(path, *a, **kw):
         result = original(path, *a, **kw)
-        text, trunc, ok, bytes_read = result
+        text, trunc, ok, bytes_read, declined = result
         if ok:
             total_read.append(bytes_read)
         return result
