@@ -2080,6 +2080,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     : 0)+1);
   _liveOwnerScope._LIVE_STREAM_OWNER_SEQ=_liveOwnerToken;
   let _closureRetired=false;
+  LIVE_STREAMS[activeSid]={streamId,source:null,ownerToken:_liveOwnerToken};
   if(!reconnecting&&typeof resetTurnWorkspaceMutations==='function') resetTurnWorkspaceMutations();
   if(!reconnecting&&typeof _resetStreamScrollFollow==='function') _resetStreamScrollFollow();
   // Phase D: restore bottom run status after closeLiveStream(); that helper
@@ -6885,7 +6886,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(reconnecting){
       try{
         const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
-        if(_currentPaneRecoveryOwnerLost()) return;
+        if(_currentPaneRecoveryOwnerLost()){
+          _closeSource(null);
+          return;
+        }
         if(!st.active&&st.replay_available){
           replayOnly=true;
         }else if(!st.active){
@@ -6912,6 +6916,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(_wasFollowingAtReconnectDead && typeof scrollToBottom==='function') scrollToBottom();
             renderSessionList();
           }
+          _closeSource(null);
           _scheduleAnchorRegistryCleanup(120000);
           return;
         }
