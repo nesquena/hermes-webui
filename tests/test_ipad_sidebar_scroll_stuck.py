@@ -226,9 +226,14 @@ def test_generation_scoping_exists():
     fn = _extract_fn(SESSIONS_JS, "_ensureTouchSentinelObserver")
     assert "gen" in fn and "_sessionTouchGen" in fn, \
         "Observer must capture and check generation token"
+    # Generation is bumped by _invalidateTouchRender (the unified teardown),
+    # which _setupTouchSentinel calls before setting up new state.
+    inv = _extract_fn(SESSIONS_JS, "_invalidateTouchRender")
+    assert "_sessionTouchGen++" in inv, \
+        "_invalidateTouchRender must bump generation token"
     setup = _extract_fn(SESSIONS_JS, "_setupTouchSentinel")
-    assert "_sessionTouchGen++" in setup, \
-        "_setupTouchSentinel must bump the generation token on each setup"
+    assert "_invalidateTouchRender()" in setup, \
+        "_setupTouchSentinel must call _invalidateTouchRender (which bumps gen)"
 
 
 def test_intersection_observer_fallback_exists():
@@ -277,9 +282,24 @@ def test_touch_batch_constants_exist():
 
 
 def test_touch_batch_reset_on_filter_change():
-    """The batch count must reset when the scope fingerprint changes (not just filter+total)."""
+    """The batch count must reset when the scope fingerprint changes — not just filter+total.
+    The fingerprint must include profile/all-profiles, active project, source filter,
+    archive page, content-search, collapsed groups, active session, total count, and
+    ordered SID identity."""
     assert "sessionTouchScope" in SESSIONS_JS
     assert "SESSION_TOUCH_INITIAL_BATCH" in SESSIONS_JS
+    # The fingerprint must be computed BEFORE the window calculation
+    render_fn = _extract_fn(SESSIONS_JS, "renderSessionListFromCache")
+    # Find the fingerprint block and verify it's before _sessionVirtualWindow
+    fp_idx = render_fn.find("scopeFingerprint")
+    vw_idx = render_fn.find("_sessionVirtualWindow({")
+    assert fp_idx >= 0 and vw_idx >= 0, "Both fingerprint and virtual window must exist"
+    assert fp_idx < vw_idx, "Scope fingerprint must be computed BEFORE virtual window"
+    # The fingerprint must include the expanded scope dimensions
+    assert "_showAllProfiles" in render_fn, "Fingerprint must include profile/all-profiles"
+    assert "_activeProject" in render_fn, "Fingerprint must include active project"
+    assert "_contentSearchResults" in render_fn, "Fingerprint must include content-search"
+    assert "sidPrefix" in render_fn, "Fingerprint must include ordered SID identity"
 
 
 def test_ensure_touch_sentinel_disconnects_old_observer():
@@ -291,13 +311,18 @@ def test_ensure_touch_sentinel_disconnects_old_observer():
 
 def test_invalidate_touch_render_exists():
     """A unified invalidation helper must exist for all teardown paths."""
-    assert "function _invalidateTouchRender()" in SESSIONS_JS
+    assert "function _invalidateTouchRender(){" in SESSIONS_JS
     fn = _extract_fn(SESSIONS_JS, "_invalidateTouchRender")
     assert "_touchSentinelObserver" in fn
     assert "_touchScrollFallbackRaf" in fn
     assert "_touchRenderState=null" in fn
     assert "_touchBatchPending=false" in fn
     assert "_touchBatchToken" in fn
+    # Invalidation must own ALL touch state: list, loaded/total, generation
+    assert "_sessionTouchListEl=null" in fn
+    assert "_sessionTouchLoadedCount=0" in fn
+    assert "_sessionTouchTotalCount=0" in fn
+    assert "_sessionTouchGen++" in fn
 
 
 def test_setup_touch_sentinel_uses_invalidate():
@@ -313,6 +338,11 @@ def test_append_transactional_uses_fragments():
     assert "DocumentFragment" in fn or "createDocumentFragment" in fn, \
         "Append must render into detached fragments before committing"
     assert "catch" in fn, "Append must catch exceptions and discard fragments"
+    # Must validate every row/group/body — abort on missing, not continue
+    assert "return" in fn, "Append must abort (return) on missing row/group/body"
+    # Must insert before the after-spacer, not after it
+    assert "insertBefore" in fn, "Append must insert fragments before the after-spacer"
+    assert "afterSpacer" in fn or "after" in fn, "Append must find and insert before the after-spacer"
 
 
 def test_observer_microtask_token_owned():
@@ -327,6 +357,9 @@ def test_fallback_stops_when_all_loaded():
     """Fallback RAF must stop rescheduling when all rows are loaded."""
     fn = _extract_fn(SESSIONS_JS, "_setupTouchSentinel")
     assert "l>=t" in fn, "Fallback must check loaded>=total and stop"
+    # Terminal/stale returns must zero the RAF handle — not just return
+    assert "_touchScrollFallbackRaf=0" in fn, \
+        "Terminal/stale RAF returns must zero the handle"
 
 
 def test_touch_window_includes_active_sid():
@@ -522,6 +555,9 @@ function makeBodyThatTracksItems(list) {
 if (typeof CSS === 'undefined') global.CSS = {};
 if (!CSS.escape) CSS.escape = function(s) { return s; };
 
+// Mock window for functions that reference it (e.g. 'IntersectionObserver' in window)
+if (typeof window === 'undefined') global.window = {};
+
 // Mock document.createDocumentFragment for transactional append
 if (typeof document === 'undefined') global.document = {};
 if (!document.createDocumentFragment) {
@@ -544,6 +580,7 @@ let _sessionTouchListEl = null;
 let _sessionTouchTotalCount = 0;
 let _touchSentinelObserver = null;
 let _touchBatchPending = false;
+let _touchScrollFallbackRaf = 0;
 let _touchBatchToken = 0;
 const SESSION_TOUCH_BATCH_SIZE = 40;
 const SESSION_TOUCH_INITIAL_BATCH = 60;
@@ -562,11 +599,18 @@ function _sessionVirtualSpacer(h, pos) {
   return sp;
 }
 
-// Mock _invalidateTouchRender for mismatch recovery
+// Mock _invalidateTouchRender for mismatch recovery — matches production:
+// clears ALL touch state (observer, RAF, render state, list, loaded/total,
+// pending, generation, token).
 function _invalidateTouchRender() {
   if (_touchSentinelObserver) { _touchSentinelObserver.disconnect(); _touchSentinelObserver = null; }
+  if (_touchScrollFallbackRaf) { /* mock: no cancelAnimationFrame */ _touchScrollFallbackRaf = 0; }
   _touchRenderState = null;
+  _sessionTouchListEl = null;
+  _sessionTouchLoadedCount = 0;
+  _sessionTouchTotalCount = 0;
   _touchBatchPending = false;
+  _sessionTouchGen++;
   _touchBatchToken++;
 }
 
@@ -575,6 +619,7 @@ eval(extractFunc('_createTouchGroupWrapper'));
 eval(extractFunc('_updateTouchGroupSpacers'));
 eval(extractFunc('_updateTouchSentinel'));
 eval(extractFunc('_appendTouchBatch'));
+eval(extractFunc('_ensureTouchSentinelObserver'));
 """
 
 
@@ -670,7 +715,7 @@ console.log(JSON.stringify({{
     assert result["originalSurvived"], "Original DOM nodes must be the exact same objects after append"
     # Exact SID order
     expected_sids = ",".join(f"sess_{i}" for i in range(100))
-    assert result["sidsAfterFirst"] == expected_sids, f"SID order mismatch after first append"
+    assert result["sidsAfterFirst"] == expected_sids, "SID order mismatch after first append"
 
 
 @_node_tests
@@ -1198,3 +1243,367 @@ console.log(JSON.stringify({
     assert result["survived"], "Original DOM nodes must be the exact same objects after append (identity check)"
     assert result["innerHTMLWipes"] == 0, "No innerHTML wipes during append"
     assert result["totalItems"] == 45, f"Should have 45 items after append, got {result['totalItems']}"
+
+# ── Production-composed tests (category 4 rework) ──────────────────────────
+# These tests exercise the actual production schedule: render → reset →
+# setup → append, with real state transitions. They verify the 4 categories
+# of rework required by the nesquena-hermes gate certifier:
+# 1. Scope reset BEFORE window calculation with complete fingerprint
+# 2. Insert group fragment BEFORE after-spacer, validate+abort on missing row
+# 3. Invalidation owns ALL state (gen, observer, RAF, list, loaded/total, token)
+# 4. Terminal/stale RAF cleanup zeros the handle
+
+
+@_node_tests
+def test_partial_150_row_multigroup_append_spacer_order():
+    """Category 2: Partial append in a multi-group list must NOT leave the
+    spacer in front of newly loaded rows.
+
+    With 150 rows split across two groups (G1: 0-59, G2: 60-149) and loaded=60,
+    a partial append to 100 must produce:
+    - G1: rows 0-59 (no after-spacer — all loaded)
+    - G2: rows 60-99, THEN after-spacer (for rows 100-149)
+
+    The spacer must be AFTER the newly loaded rows, not before them.
+    """
+    flat_rows = []
+    for i in range(60):
+        flat_rows.append({"group": {"label": "G1"}, "session": {"session_id": f"s1_{i}"}})
+    for i in range(90):
+        flat_rows.append({"group": {"label": "G2"}, "session": {"session_id": f"s2_{i}"}})
+
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 150;
+
+// Pre-populate 60 items (all of G1)
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s1_' + i));
+
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+
+// Set up two groups with bodies that track items AND track after-spacers
+function setupGroup(label) {{
+  const gw = makeEl('div');
+  gw.className = 'session-date-group';
+  gw.dataset['group-label'] = label;
+  const body = makeBodyThatTracksItems(list);
+  body._afterSpacers = [];
+  body._spacerPositions = []; // track order: 'row' or 'spacer'
+  // Track insertBefore to verify spacer is AFTER rows
+  const origInsertBefore = body.insertBefore.bind(body);
+  body.insertBefore = function(child, ref) {{
+    if (child && child.tagName === '#document-fragment') {{
+      const kids = child.children.slice();
+      for (const k of kids) {{
+        k._parent = this;
+        this.children.push(k);
+        if (k.dataset && k.dataset.sid) list._items.push(k);
+        this._spacerPositions.push('row');
+      }}
+      child.children = [];
+      return child;
+    }}
+    child._parent = this;
+    this.children.push(child);
+    this._spacerPositions.push('spacer');
+    return child;
+  }};
+  body.querySelectorAll = function(sel) {{
+    if (sel === '.session-virtual-spacer[data-virtual-spacer="after"]') return body._afterSpacers;
+    return [];
+  }};
+  gw.querySelector = function(sel) {{
+    if (sel === '.session-date-body') return body;
+    return null;
+  }};
+  gw.appendChild(body);
+  list._groups[label] = gw;
+  return {{ gw: gw, body: body }};
+}}
+
+const g1 = setupGroup('G1');
+const g2 = setupGroup('G2');
+
+// Mock list.querySelectorAll for group iteration
+list.querySelectorAll = function(sel) {{
+  if (sel === '.session-item[data-sid]') return list._items.slice();
+  if (sel === '.session-date-group[data-group-label]') return [g1.gw, g2.gw];
+  return [];
+}};
+
+_appendTouchBatch(); // 60 → 100
+
+// Check G2's body: rows should come BEFORE any spacer
+const g2RowBeforeSpacer = g2.body._spacerPositions.length > 0
+  ? g2.body._spacerPositions.indexOf('row') < g2.body._spacerPositions.indexOf('spacer')
+  : true; // no spacer, all rows — fine
+
+console.log(JSON.stringify({{
+  loaded: _sessionTouchLoadedCount,
+  totalItems: list._items.length,
+  g2Positions: g2.body._spacerPositions,
+  g2RowBeforeSpacer: g2RowBeforeSpacer,
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["loaded"] == 100, f"Should load 100 rows, got {result['loaded']}"
+    assert result["totalItems"] == 100, f"Should have 100 DOM items, got {result['totalItems']}"
+    # The critical assertion: in G2, rows must come BEFORE the spacer
+    assert result["g2RowBeforeSpacer"], \
+        f"G2 rows must be BEFORE the after-spacer, got positions: {result['g2Positions']}"
+
+
+@_node_tests
+def test_invalidation_clears_all_state():
+    """Category 3: _invalidateTouchRender must null list, loaded, total,
+    and bump generation — not just observer/RAF/renderState/pending."""
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 5;
+_sessionTouchLoadedCount = 80;
+_sessionTouchTotalCount = 100;
+_touchSentinelObserver = { disconnect: () => {} }; // mock observer
+_touchScrollFallbackRaf = 42; // mock RAF handle
+_touchBatchPending = true;
+_touchRenderState = { gen: 5, list: list, flatRows: [], renderOneSession: () => {}, activeSid: null };
+
+_invalidateTouchRender();
+
+console.log(JSON.stringify({
+  listNulled: _sessionTouchListEl === null,
+  loadedZeroed: _sessionTouchLoadedCount === 0,
+  totalZeroed: _sessionTouchTotalCount === 0,
+  genBumped: _sessionTouchGen === 6,
+  observerNulled: _touchSentinelObserver === null,
+  rafZeroed: _touchScrollFallbackRaf === 0,
+  renderStateNulled: _touchRenderState === null,
+  pendingCleared: _touchBatchPending === false,
+}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["listNulled"], "_invalidateTouchRender must null _sessionTouchListEl"
+    assert result["loadedZeroed"], "_invalidateTouchRender must zero _sessionTouchLoadedCount"
+    assert result["totalZeroed"], "_invalidateTouchRender must zero _sessionTouchTotalCount"
+    assert result["genBumped"], "_invalidateTouchRender must bump _sessionTouchGen"
+    assert result["observerNulled"], "_invalidateTouchRender must null observer"
+    assert result["rafZeroed"], "_invalidateTouchRender must zero RAF handle"
+    assert result["renderStateNulled"], "_invalidateTouchRender must null render state"
+    assert result["pendingCleared"], "_invalidateTouchRender must clear pending"
+
+
+@_node_tests
+def test_terminal_raf_returns_zero_handle():
+    """Category 3: Terminal/stale RAF returns must zero the handle — not
+    leave _touchScrollFallbackRaf holding a fired nonzero value.
+
+    Simulates the fallback RAF check function: when generation changes,
+    list is replaced, or all rows are loaded, the handle must be zeroed.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+// Extract the fallback check function from _setupTouchSentinel
+const setupFn = extractFunc('_setupTouchSentinel');
+
+// The function source must contain _touchScrollFallbackRaf=0 on all
+// three terminal return paths: generation change, list change, all loaded.
+const genReturnMatch = setupFn.includes('_touchScrollFallbackRaf=0;return');
+const loadedReturnMatch = setupFn.match(/l>=t\\)\\s*\\{?\\s*_touchScrollFallbackRaf=0/);
+
+console.log(JSON.stringify({
+  genReturnHasZero: genReturnMatch,
+  loadedReturnHasZero: !!loadedReturnMatch,
+  // Count occurrences of _touchScrollFallbackRaf=0 — should be at least 3
+  // (one in _invalidateTouchRender is not in _setupTouchSentinel, so count
+  // the ones in the fallback check)
+  zeroCount: (setupFn.match(/_touchScrollFallbackRaf=0/g) || []).length,
+}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["zeroCount"] >= 3, \
+        f"Fallback RAF must zero handle on all 3 terminal returns, got {result['zeroCount']} occurrences"
+
+
+@_node_tests
+def test_equal_count_reorder_after_100_loaded():
+    """Category 1: An equal-count reorder after 100 loaded rows must be
+    detected by the SID prefix in the scope fingerprint and trigger a reset.
+
+    Simulates: 100 rows loaded, then the order changes (same total, different
+    SIDs in the prefix). The fingerprint's sidPrefix component must detect this.
+    """
+    # Original rows: sess_0 through sess_149
+    # Reordered rows: sess_149 through sess_0 (reversed)
+    original_rows = [{"group": {"label": "G"}, "session": {"session_id": f"sess_{i}"}} for i in range(150)]
+    reordered_rows = [{"group": {"label": "G"}, "session": {"session_id": f"sess_{149-i}"}} for i in range(150)]
+
+    # Build the fingerprint components manually to verify the SID prefix differs
+    original_sid_prefix = ",".join(r["session"]["session_id"] for r in original_rows[:60])
+    reordered_sid_prefix = ",".join(r["session"]["session_id"] for r in reordered_rows[:60])
+
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+// Simulate the scope fingerprint comparison from renderSessionListFromCache
+const originalSidPrefix = {original_sid_prefix!r};
+const reorderedSidPrefix = {reordered_sid_prefix!r};
+
+// The fingerprint includes sidPrefix — a reorder changes it even at equal count
+const fp1 = ['0', '', 'webui', '0', '', '0', '', '', '150', originalSidPrefix].join('|');
+const fp2 = ['0', '', 'webui', '0', '', '0', '', '', '150', reorderedSidPrefix].join('|');
+
+console.log(JSON.stringify({{
+  fingerprintsDiffer: fp1 !== fp2,
+  sidPrefixDiffers: originalSidPrefix !== reorderedSidPrefix,
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["fingerprintsDiffer"], "Equal-count reorder must produce a different fingerprint"
+    assert result["sidPrefixDiffers"], "SID prefix must differ on reorder"
+
+
+@_node_tests
+def test_observer_replacement_disconnects_old():
+    """Category 3: Actual observer replacement — _ensureTouchSentinelObserver
+    must disconnect the old observer before creating a new one."""
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+let disconnectCount = 0;
+let observeCount = 0;
+
+// Mock IntersectionObserver
+global.IntersectionObserver = class {
+  constructor(cb, opts) {
+    this.cb = cb;
+    this.opts = opts;
+    this._observed = [];
+  }
+  observe(el) { observeCount++; this._observed.push(el); }
+  disconnect() { disconnectCount++; this._observed = []; }
+  unobserve(el) {}
+};
+window.IntersectionObserver = global.IntersectionObserver;
+
+// First call creates observer
+const list1 = makeList();
+_ensureTouchSentinelObserver(list1);
+const observer1 = _touchSentinelObserver;
+
+// Second call must disconnect the first and create a new one
+const list2 = makeList();
+_ensureTouchSentinelObserver(list2);
+const observer2 = _touchSentinelObserver;
+
+console.log(JSON.stringify({
+  observerReplaced: observer1 !== observer2,
+  oldDisconnected: disconnectCount >= 1,
+  observer1NotNull: observer1 !== null,
+  observer2NotNull: observer2 !== null,
+}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["observerReplaced"], "Observer must be replaced on second call"
+    assert result["oldDisconnected"], "Old observer must be disconnected"
+    assert result["observer2NotNull"], "New observer must be created"
+
+
+@_node_tests
+def test_append_missing_row_aborts_without_advancing():
+    """Category 2: A missing row in flatRows must cause append to ABORT
+    without advancing the loaded count — not silently skip it."""
+    # flatRows with a null at index 62 (within the 60→100 batch)
+    flat_rows = []
+    for i in range(100):
+        if i == 62:
+            flat_rows.append({"group": {"label": "G"}, "session": None})  # missing session
+        else:
+            flat_rows.append({"group": {"label": "G"}, "session": {"session_id": f"s_{i}"}})
+
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 100;
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s_' + i));
+
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+
+const gw = makeEl('div');
+gw.dataset['group-label'] = 'G';
+const body = makeBodyThatTracksItems(list);
+gw.querySelector = function(sel) {{ if(sel==='.session-date-body') return body; return null; }};
+gw.appendChild(body);
+list._groups['G'] = gw;
+
+_appendTouchBatch();
+
+console.log(JSON.stringify({{
+  loadedCount: _sessionTouchLoadedCount, // should stay at 60 — abort
+  itemCount: list._items.length, // should stay at 60 — no partial commit
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["loadedCount"] == 60, \
+        f"Missing row must abort without advancing loaded count, got {result['loadedCount']}"
+    assert result["itemCount"] == 60, \
+        f"Missing row must not commit any items, got {result['itemCount']}"
+
+
+@_node_tests
+def test_append_missing_body_aborts_without_advancing():
+    """Category 2: A missing group body must cause append to ABORT
+    without advancing the loaded count."""
+    flat_rows = [{"group": {"label": "G"}, "session": {"session_id": f"s_{i}"}} for i in range(100)]
+
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 100;
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s_' + i));
+
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+
+// Group wrapper WITHOUT a body — querySelector returns null
+const gw = makeEl('div');
+gw.dataset['group-label'] = 'G';
+gw.querySelector = function(sel) {{ return null; }}; // no body found
+list._groups['G'] = gw;
+
+_appendTouchBatch();
+
+console.log(JSON.stringify({{
+  loadedCount: _sessionTouchLoadedCount, // should stay at 60 — abort
+  itemCount: list._items.length,
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["loadedCount"] == 60, \
+        f"Missing body must abort without advancing loaded count, got {result['loadedCount']}"

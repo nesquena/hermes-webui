@@ -5175,6 +5175,12 @@ const _SESSION_SKELETON_GROUPS = [
 function showSessionListSkeleton(targetProfile){
   const list = $('sessionList');
   if(!list) return;
+  // Invalidate touch render state when the skeleton replaces the list —
+  // the observer, RAF, render state, loaded count, and generation must all
+  // be torn down so stale callbacks can't mutate the skeleton DOM.
+  if(typeof _invalidateTouchRender==='function' && _isTouchPrimary && _isTouchPrimary()){
+    _invalidateTouchRender();
+  }
   // Tear down any active virtual-scroll state up front so a pending scroll-driven
   // render can't repaint the previous profile's cached rows over the skeleton
   // (#4662 Codex gate). Cancel the queued RAF and drop the data-session-virtual-*
@@ -5378,15 +5384,21 @@ let _touchBatchToken=0; // monotonic token for token-owned microtask work
 // append more rows without re-deriving from mutable _allSessions.
 let _touchRenderState=null;
 
-/// Unified invalidation: disconnects observer, cancels RAF, clears state,
-/// clears pending, and bumps the token so any in-flight microtask knows it's
-/// stale. Called from setup, profile/skeleton changes, cache replacement,
-/// filter changes, and touch-mode exit — one path for all teardown.
+/// Unified invalidation: disconnects observer, cancels RAF, clears ALL
+/// touch render state (generation, list, loaded/total, pending token,
+/// render state), and bumps the generation+token so any in-flight
+/// microtask knows it's stale. Called from setup, profile/skeleton changes,
+/// cache replacement, filter changes, and touch-mode exit — one path for
+/// all teardown. Every piece of state is released here.
 function _invalidateTouchRender(){
   if(_touchSentinelObserver){_touchSentinelObserver.disconnect();_touchSentinelObserver=null;}
   if(_touchScrollFallbackRaf){cancelAnimationFrame(_touchScrollFallbackRaf);_touchScrollFallbackRaf=0;}
   _touchRenderState=null;
+  _sessionTouchListEl=null;
+  _sessionTouchLoadedCount=0;
+  _sessionTouchTotalCount=0;
   _touchBatchPending=false;
+  _sessionTouchGen++; // bump generation to invalidate stale observer callbacks
   _touchBatchToken++; // invalidate any pending token-owned microtask
 }
 
@@ -5467,16 +5479,25 @@ function _appendTouchBatch(){
   const renderOne=state.renderOneSession;
   if(typeof renderOne!=='function') return; // renderer not available
   const fragmentsByGroup={}; // label -> DocumentFragment
+  const groupOrder=[]; // preserve first-seen order for deterministic commit
   try{
     for(let i=oldLoaded;i<targetEnd;i++){
       const row=state.flatRows[i];
-      if(!row||!row.session) continue;
+      // Validate every row — a missing row/body/renderer must ABORT, not
+      // silently continue while advancing the loaded count.
+      if(!row||!row.session||!row.group){
+        return; // abort without advancing state
+      }
       const g=row.group;
       const label=g.label;
       if(!fragmentsByGroup[label]){
         fragmentsByGroup[label]=document.createDocumentFragment();
+        groupOrder.push(label);
       }
       const node=renderOne(row.session, Boolean(g.isPinned));
+      if(!node){
+        return; // renderer returned null — abort without advancing state
+      }
       fragmentsByGroup[label].appendChild(node);
     }
   }catch(e){
@@ -5486,7 +5507,12 @@ function _appendTouchBatch(){
     return;
   }
   // Commit: attach fragments to the live DOM. This is the point of no return.
-  for(const label in fragmentsByGroup){
+  // Validate every group/body before committing. Insert each group fragment
+  // BEFORE its after-spacer (not after it) — the after-spacer represents
+  // unloaded rows and must remain at the END of the group body, after the
+  // newly loaded rows. A partial 60->100 append would otherwise produce
+  // rows 0-59, spacer, rows 60-99 — with the spacer in front of the new rows.
+  for(const label of groupOrder){
     let wrapper=list.querySelector('.session-date-group[data-group-label="'+CSS.escape(label)+'"]');
     if(!wrapper){
       // Group doesn't exist in DOM yet — create it before the sentinel.
@@ -5496,7 +5522,18 @@ function _appendTouchBatch(){
       else list.appendChild(wrapper);
     }
     const body=wrapper.querySelector('.session-date-body');
-    if(body) body.appendChild(fragmentsByGroup[label]);
+    if(!body){
+      // Missing body — abort without advancing the loaded count.
+      return;
+    }
+    // Insert the fragment BEFORE the after-spacer so newly loaded rows sit
+    // between the existing rows and the spacer (not after the spacer).
+    const afterSpacer=body.querySelector('.session-virtual-spacer[data-virtual-spacer="after"]');
+    if(afterSpacer){
+      body.insertBefore(fragmentsByGroup[label], afterSpacer);
+    }else{
+      body.appendChild(fragmentsByGroup[label]);
+    }
   }
   // Commit the loaded count only after all fragments are in the live DOM.
   _sessionTouchLoadedCount=targetEnd;
@@ -5590,16 +5627,16 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid)
   // Touch-mode exit: if we were previously in touch mode but no longer are,
   // invalidate all touch state (observer, RAF, pending, render state).
   if(!list||!_isTouchPrimary()){
-    if(_touchSentinelObserver||_touchRenderState||_touchScrollFallbackRaf||_touchBatchPending){
+    if(_touchSentinelObserver||_touchRenderState||_touchScrollFallbackRaf||_touchBatchPending||_sessionTouchListEl){
       _invalidateTouchRender();
     }
     return;
   }
-  // Unified invalidation before setting up new state.
+  // Unified invalidation before setting up new state. _invalidateTouchRender
+  // bumps _sessionTouchGen, so the new render state's gen is already current.
   _invalidateTouchRender();
   _sessionTouchListEl=list;
   _sessionTouchTotalCount=total;
-  _sessionTouchGen++; // bump generation to invalidate stale observer callbacks
   // Save canonical render state for incremental appends.
   _touchRenderState={
     gen:_sessionTouchGen,
@@ -5644,12 +5681,12 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid)
   if(!('IntersectionObserver' in window)){
     const fallbackGen=_sessionTouchGen;
     _touchScrollFallbackRaf=requestAnimationFrame(function check(){
-      if(_sessionTouchGen!==fallbackGen) return; // generation changed — stop
-      if(!_sessionTouchListEl||_sessionTouchListEl!==list) return;
+      if(_sessionTouchGen!==fallbackGen){_touchScrollFallbackRaf=0;return;} // generation changed — stop, zero handle
+      if(!_sessionTouchListEl||_sessionTouchListEl!==list){_touchScrollFallbackRaf=0;return;} // list replaced — zero handle
       const el=_sessionTouchListEl;
       const t=_sessionTouchTotalCount||0;
       const l=_sessionTouchLoadedCount||0;
-      if(l>=t) return; // all rows loaded — stop RAF
+      if(l>=t){_touchScrollFallbackRaf=0;return;} // all rows loaded — stop, zero handle
       const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<200;
       if(nearBottom&&!_touchBatchPending){
         // Token-owned: same guard as the observer path.
@@ -5790,15 +5827,33 @@ function _applySessionListPayload(sessData, projData, opts){
     : [];
   _reconcileActiveSessionIdleStateFromList(serverSessions);
   _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions);
+  // Invalidate touch render state when the cache scope changes (profile
+  // switch, all-profiles toggle). The observer, RAF, render state, and
+  // loaded count all reference the PREVIOUS cache's rows — stale callbacks
+  // could splice the new cache's suffix onto the old cache's prefix.
+  // Compare the new scope against the previous one; only invalidate on a
+  // real scope change, not on an idle poll with the same scope.
+  const _newScope = {
+    profile: (typeof sessData.active_profile === 'string' && sessData.active_profile)
+      ? sessData.active_profile
+      : (S.activeProfile || 'default'),
+    allProfiles: !!_showAllProfiles,
+  };
+  if(_allSessionsScope && (
+    _allSessionsScope.profile !== _newScope.profile ||
+    _allSessionsScope.allProfiles !== _newScope.allProfiles
+  )){
+    if(typeof _invalidateTouchRender==='function' && typeof _isTouchPrimary==='function' && _isTouchPrimary()){
+      _invalidateTouchRender();
+    }
+  }
   // Tag the cache with the scope it was loaded under (active profile +
   // all-profiles flag). If a later /api/sessions fails right after a profile
   // switch, the catch path checks this so it won't re-render the PRIOR
   // profile's rows as if they were current (#4167 review item 3).
   _allSessionsScope = {
-    profile: (typeof sessData.active_profile === 'string' && sessData.active_profile)
-      ? sessData.active_profile
-      : (S.activeProfile || 'default'),
-    allProfiles: !!_showAllProfiles,
+    profile: _newScope.profile,
+    allProfiles: _newScope.allProfiles,
     sidebarSource: _requestedSessionSidebarSource(),
     excludeHidden: _sessionListExcludeHiddenEnabled(),
   };
@@ -8342,6 +8397,43 @@ function renderSessionListFromCache(){
     }
   }
   _ensureSessionVirtualScrollHandler(list);
+  // Touch scope fingerprint: reset the canonical touch state BEFORE calculating
+  // either render window. The fingerprint covers ALL row-affecting scope/order
+  // dimensions: profile/all-profiles, active project, source filter, archive
+  // page, search query, content-search results, collapsed group state, active
+  // session, total row count, and the ordered SID identity of the first prefix.
+  // An equal-count scope change (profile switch, project change, reorder) that
+  // keeps the same total but changes row identity must reset — otherwise the old
+  // loaded extent is retained and _appendTouchBatch can splice a new-cache suffix
+  // onto an old-cache prefix.
+  if(_isTouchPrimary()){
+    const collapsedKeys=Object.keys(_groupCollapsed).sort().map(k=>k+':'+_groupCollapsed[k]).join(',');
+    // Ordered SID identity of the visible rows — changes on reorder/replace even
+    // when the total count is unchanged. Truncated to the fingerprint window so
+    // large lists don't produce an enormous string.
+    const sidPrefix=flatSessionRows.slice(0,SESSION_TOUCH_INITIAL_BATCH)
+      .map(row=>row.session&&row.session.session_id||'')
+      .join(',');
+    const scopeFingerprint=[
+      _showAllProfiles?'1':'0',             // profile/all-profiles toggle
+      _activeProject||'',                   // active project filter
+      _sessionSourceFilter||'',             // cli/webui source filter
+      _showArchived?'1':'0',                // archive page toggle
+      q,                                    // search query
+      (_contentSearchResults||[]).length,   // content-search generation
+      collapsedKeys,                        // collapsed group state
+      activeSidForSidebar||'',              // active session
+      String(flatSessionRows.length),       // total row count
+      sidPrefix,                            // ordered SID identity
+    ].join('|');
+    const prevFingerprint=list.dataset.sessionTouchScope||'';
+    if(prevFingerprint!==scopeFingerprint){
+      // Reset the canonical touch loaded count BEFORE the window calculation so
+      // _sessionVirtualWindow sees the correct _sessionTouchLoadedCount.
+      _sessionTouchLoadedCount=SESSION_TOUCH_INITIAL_BATCH;
+      list.dataset.sessionTouchScope=scopeFingerprint;
+    }
+  }
   const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
   const shouldAnchorActive=activeSidForSidebar&&activeIndex>=0&&(
     list.dataset.sessionVirtualActiveAnchor!==activeSidForSidebar||
@@ -8380,27 +8472,6 @@ function renderSessionListFromCache(){
   list.dataset.sessionVirtualFilter=q;
   list.dataset.sessionVirtualStart=String(virtualWindow.start);
   list.dataset.sessionVirtualEnd=String(virtualWindow.end);
-  // Touch scope fingerprint: reset the batch count when ANY row-affecting
-  // scope changes — not just query+total. Equal-count profile/source/project/
-  // archive/collapse/reorder changes would otherwise retain a stale loaded
-  // extent. The fingerprint is computed before the window calculation below so
-  // _sessionVirtualWindow sees the correct _sessionTouchLoadedCount.
-  if(_isTouchPrimary()){
-    const collapsedKeys=Object.keys(_groupCollapsed).sort().map(k=>k+':'+_groupCollapsed[k]).join(',');
-    const scopeFingerprint=[
-      q,                              // search query
-      _sessionSourceFilter||'',       // cli/webui source filter
-      _showArchived?'1':'0',          // archive toggle
-      collapsedKeys,                  // collapsed group state
-      activeSidForSidebar||'',        // active session
-      String(flatSessionRows.length), // total row count
-    ].join('|');
-    const prevFingerprint=list.dataset.sessionTouchScope||'';
-    if(prevFingerprint!==scopeFingerprint){
-      _sessionTouchLoadedCount=SESSION_TOUCH_INITIAL_BATCH;
-      list.dataset.sessionTouchScope=scopeFingerprint;
-    }
-  }
   // Render groups with collapsible headers. Large sidebars render only the
   // current session-row window plus top/bottom spacers inside each group body;
   // headers remain real DOM so pin/archive/date grouping and clicks survive.
