@@ -331,10 +331,10 @@ def test_long_tail_recovery_reattaches_when_stream_status_stays_active():
     assert result["pending"] is False
 
 
-def test_direct_inactive_recovery_preserves_visible_live_answer_before_exhaustion():
+def test_direct_error_recovery_rebuilds_even_with_visible_live_answer():
     result = _run_recovery_case(
         active=True,
-        restore_results=[False],
+        restore_results=["error"],
         attempts=3,
         assistant_text="final streamed answer",
         stream_status={"active": False, "replay_available": False},
@@ -342,7 +342,7 @@ def test_direct_inactive_recovery_preserves_visible_live_answer_before_exhaustio
 
     assert result["wireCalls"] == 0
     assert result["scheduleDelays"] == []
-    assert result["renderCalls"] == 0
+    assert result["renderCalls"] == 1
     assert result["clearLiveToolCalls"] == 1
     assert result["removeThinkingCalls"] == 0
     assert result["activeStreamId"] is None
