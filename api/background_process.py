@@ -50,6 +50,7 @@ from typing import Any, Optional
 
 from api.process_event_utils import (
     ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+    async_delegation_wakeup_meta,
     claim_async_delegation_delivery,
     complete_async_delegation_delivery,
     completion_delivery_id,
@@ -956,6 +957,7 @@ def _start_async_delegation_wakeup_turn(
     evt: dict,
     claim,
     process_registry,
+    wakeup_meta: dict | None = None,
 ) -> None:
     """Start one autonomous delegation turn and ACK only after acceptance."""
 
@@ -967,6 +969,7 @@ def _start_async_delegation_wakeup_turn(
                 session_id,
                 wakeup_prompt,
                 source="process_wakeup",
+                wakeup_meta=wakeup_meta,
             )
             raw_status = (resp or {}).get("_status")
             if raw_status is None:
@@ -1038,9 +1041,8 @@ def _process_async_delegation_event(
         return
 
     try:
-        wakeup_prompt_raw = format_wakeup_prompt(evt)
-        wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
-        if not wakeup_prompt:
+        wakeup_prompt = format_wakeup_prompt(evt) or ""
+        if not wakeup_prompt.strip():
             raise RuntimeError("async delegation completion could not be formatted")
 
         # Do not persist async results in the process-local deferred list. If a
@@ -1058,6 +1060,7 @@ def _process_async_delegation_event(
             evt=evt,
             claim=claim,
             process_registry=process_registry,
+            wakeup_meta=async_delegation_wakeup_meta(evt),
         )
     except Exception:
         release_async_delegation_delivery(evt, claim)

@@ -42,7 +42,7 @@ from api.agent_sessions import (
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
-from api.process_event_utils import stamp_message_source
+from api.process_event_utils import normalize_wakeup_display_meta, stamp_message_source
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
@@ -868,12 +868,13 @@ def _append_recovered_context_projection(
     recovered_text = _normalize_journal_recovery_text(recovered.get('content'))
     if recovered_text:
         if recovered.get('role') == 'user':
-            if _message_matches_pending_checkpoint(
+            if _reconcile_pending_checkpoint(
                 context_messages[-1] if context_messages else None,
                 recovered.get('content'),
                 recovered.get('timestamp'),
                 recovered.get('_source'),
                 recovered.get('attachments'),
+                recovered.get('_wakeup_meta'),
             ):
                 return
         else:
@@ -920,7 +921,8 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
         '_recovered': True,
     }
     pending_source = getattr(session, 'pending_user_source', None)
-    stamp_message_source(recovered, pending_source)
+    pending_wakeup_meta = getattr(session, 'pending_user_wakeup_meta', None)
+    stamp_message_source(recovered, pending_source, pending_wakeup_meta)
     if session.pending_attachments:
         recovered['attachments'] = list(session.pending_attachments)
     session.messages.append(recovered)
@@ -1200,6 +1202,7 @@ class Session:
                  pending_attachments=None,
                  pending_started_at=None,
                  pending_user_source: str=None,
+                 pending_user_wakeup_meta=None,
                  context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
@@ -1269,6 +1272,9 @@ class Session:
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
         self.pending_user_source = pending_user_source
+        self.pending_user_wakeup_meta = normalize_wakeup_display_meta(
+            pending_user_wakeup_meta
+        )
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
@@ -1374,7 +1380,7 @@ class Session:
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
-            'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
+            'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source', 'pending_user_wakeup_meta',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
@@ -2280,7 +2286,15 @@ def _normalize_journal_recovery_text(value) -> str:
     return " ".join(str(value or "").split())
 
 
-def _message_matches_pending_checkpoint(message, pending_text, timestamp, source, attachments):
+def _reconcile_pending_checkpoint(
+    message,
+    pending_text,
+    timestamp,
+    source,
+    attachments,
+    wakeup_meta=None,
+) -> bool:
+    """Match a pending user checkpoint and restore trusted wakeup fields."""
     if not isinstance(message, dict) or message.get('role') != 'user':
         return False
     try:
@@ -2288,13 +2302,20 @@ def _message_matches_pending_checkpoint(message, pending_text, timestamp, source
         expected_timestamp = int(timestamp)
     except (TypeError, ValueError):
         return False
-    return (
-        _normalize_journal_recovery_text(message.get('content'))
-        == _normalize_journal_recovery_text(pending_text)
-        and message_timestamp == expected_timestamp
-        and (message.get('_source') or 'webui') == (source or 'webui')
-        and list(message.get('attachments') or []) == list(attachments or [])
-    )
+    if (
+        message_timestamp != expected_timestamp
+        or (message.get('_source') or 'webui') != (source or 'webui')
+        or list(message.get('attachments') or []) != list(attachments or [])
+        or _normalize_journal_recovery_text(message.get('content'))
+        != _normalize_journal_recovery_text(pending_text)
+    ):
+        return False
+    expected_wakeup_meta = normalize_wakeup_display_meta(wakeup_meta)
+    if expected_wakeup_meta is None:
+        return True
+    message['content'] = pending_text
+    stamp_message_source(message, source, expected_wakeup_meta)
+    return True
 
 
 def _message_matches_pending_text(message, pending_text):
@@ -2577,12 +2598,13 @@ def _append_journaled_partial_output(
             return False
 
         pending_text = _normalize_journal_recovery_text(session.pending_user_message)
-        if pending_text and not _message_matches_pending_checkpoint(
+        if pending_text and not _reconcile_pending_checkpoint(
             messages[owner_idx],
             session.pending_user_message,
             session.pending_started_at,
             session.pending_user_source,
             session.pending_attachments,
+            session.pending_user_wakeup_meta,
         ):
             return False
 
@@ -2591,12 +2613,13 @@ def _append_journaled_partial_output(
             if not isinstance(candidate, dict) or candidate.get('role') != 'user':
                 continue
             candidate_text = _normalize_journal_recovery_text(candidate.get('content'))
-            candidate_matches_checkpoint = pending_text and _message_matches_pending_checkpoint(
+            candidate_matches_checkpoint = pending_text and _reconcile_pending_checkpoint(
                 candidate,
                 session.pending_user_message,
                 session.pending_started_at,
                 session.pending_user_source,
                 session.pending_attachments,
+                session.pending_user_wakeup_meta,
             )
             if candidate_matches_checkpoint and candidate.get('_recovered'):
                 continue
@@ -3141,21 +3164,35 @@ def _apply_core_sync_or_error_marker(
         _recovered_ts = int(time.time())
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
-        _already_checkpointed = _message_matches_pending_checkpoint(
+        _already_checkpointed = _reconcile_pending_checkpoint(
             session.messages[-1],
             session.pending_user_message,
             _recovered_ts,
             session.pending_user_source,
             session.pending_attachments,
+            session.pending_user_wakeup_meta,
         )
-        _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-            session.messages[-1],
-            session.pending_user_message,
+        _pending_wakeup_meta = normalize_wakeup_display_meta(
+            session.pending_user_wakeup_meta
+        )
+        _tail_user_already_checkpointed = _already_checkpointed or (
+            _pending_wakeup_meta is None
+            and _message_matches_pending_text(
+                session.messages[-1],
+                session.pending_user_message,
+            )
         )
         _stream_id = stream_id_for_recheck or session.active_stream_id
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
-            if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
+            _legacy_text_checkpointed = (
+                _pending_wakeup_meta is None
+                and _latest_user_matches_pending_text(
+                    session.messages,
+                    session.pending_user_message,
+                )
+            )
+            if not (_already_checkpointed or _legacy_text_checkpointed):
                 _append_recovered_pending_turn(session, timestamp=_recovered_ts)
             _append_journaled_partial_output(
                 session,
@@ -3167,6 +3204,7 @@ def _apply_core_sync_or_error_marker(
             session.pending_attachments = []
             session.pending_started_at = None
             session.pending_user_source = None
+            session.pending_user_wakeup_meta = None
             session.save(touch_updated_at=touch_updated_at)
             logger.info(
                 "Session %s: cleared stale pending state for completed stream %s without error marker",
@@ -3184,8 +3222,8 @@ def _apply_core_sync_or_error_marker(
                 '_recovered': True,
             }
             pending_source = getattr(session, 'pending_user_source', None)
-            if pending_source and pending_source != 'webui':
-                recovered['_source'] = pending_source
+            pending_wakeup_meta = getattr(session, 'pending_user_wakeup_meta', None)
+            stamp_message_source(recovered, pending_source, pending_wakeup_meta)
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
             _append_recovered_turn_to_context(session, recovered)
@@ -3198,6 +3236,7 @@ def _apply_core_sync_or_error_marker(
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
+        session.pending_user_wakeup_meta = None
         session.messages.append(
             _build_recovery_marker_with_retry_hook(
                 recovered_output=recovered_output,
@@ -3229,16 +3268,23 @@ def _apply_core_sync_or_error_marker(
             _recovered_ts = int(time.time())
             if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
                 _recovered_ts = int(session.pending_started_at)
-            _already_checkpointed = _message_matches_pending_checkpoint(
+            _already_checkpointed = _reconcile_pending_checkpoint(
                 session.messages[-1] if session.messages else None,
                 session.pending_user_message,
                 _recovered_ts,
                 session.pending_user_source,
                 session.pending_attachments,
+                session.pending_user_wakeup_meta,
             )
-            _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
+            _pending_wakeup_meta = normalize_wakeup_display_meta(
+                session.pending_user_wakeup_meta
+            )
+            _tail_user_already_checkpointed = _already_checkpointed or (
+                _pending_wakeup_meta is None
+                and _message_matches_pending_text(
+                    session.messages[-1] if session.messages else None,
+                    session.pending_user_message,
+                )
             )
             if (
                 _pending_text
@@ -3257,6 +3303,7 @@ def _apply_core_sync_or_error_marker(
             session.pending_attachments = []
             session.pending_started_at = None
             session.pending_user_source = None
+            session.pending_user_wakeup_meta = None
             if recovered_output:
                 session.messages.append(
                     _interrupted_recovery_marker(
@@ -3305,6 +3352,7 @@ def _apply_core_sync_or_error_marker(
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+    session.pending_user_wakeup_meta = None
     session.messages.append(
         _build_recovery_marker_with_retry_hook(
             recovered_output=recovered_output,
@@ -3662,6 +3710,7 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         locked.pending_attachments = []
         locked.pending_started_at = None
         locked.pending_user_source = None
+        locked.pending_user_wakeup_meta = None
         try:
             locked.save(touch_updated_at=True)
         except Exception:
@@ -3680,6 +3729,7 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
+        session.pending_user_wakeup_meta = None
         logger.info(
             "Session %s: synced sidecar from newer state.db transcript (%d -> %d messages)",
             sid,
@@ -7992,6 +8042,7 @@ _SESSION_MESSAGE_DISPLAY_METADATA_KEYS = (
     "_usedModel",
     "_gatewayRouting",
     "_statusCard",
+    "_wakeup_meta",
     "_anchor_stream_id",
     "_anchor_activity_scene",
 )

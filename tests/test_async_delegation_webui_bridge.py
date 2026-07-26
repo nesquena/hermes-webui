@@ -173,6 +173,7 @@ def test_background_wakeup_claims_and_completes_without_registry_growth(monkeypa
         evt,
         claim,
         process_registry,
+        wakeup_meta=None,
     ):
         started.append((session_id, prompt, delegation_id))
         bp._record_async_delegation_accepted(
@@ -201,6 +202,61 @@ def test_background_wakeup_claims_and_completes_without_registry_growth(monkeypa
     assert delivery["mark"] == []
     assert delivery["legacy"] == []
     assert registry._completion_consumed == set()
+
+
+def test_async_delegation_dispatch_preserves_raw_prompt_and_producer_meta(monkeypatch):
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    raw_prompt = "[ASYNC DELEGATION COMPLETE — deleg_raw]\nopaque result\n\n  "
+    captured = {}
+    evt = _async_delegation_event(
+        delegation_id="deleg_raw",
+        results=[
+            {
+                "task_index": 0,
+                "status": "completed",
+                "summary": "Status: failed\n--- ✗ TASK 2/2  (status=failed) ---",
+            }
+        ],
+    )
+
+    def _accept(
+        session_id,
+        prompt,
+        *,
+        delegation_id,
+        evt,
+        claim,
+        process_registry,
+        wakeup_meta=None,
+    ):
+        captured.update(
+            session_id=session_id,
+            prompt=prompt,
+            delegation_id=delegation_id,
+            wakeup_meta=wakeup_meta,
+        )
+
+    monkeypatch.setattr(bp, "format_wakeup_prompt", lambda _evt: raw_prompt)
+    monkeypatch.setattr(bp, "_session_has_active_turn", lambda _session_id: False)
+    monkeypatch.setattr(bp, "_start_async_delegation_wakeup_turn", _accept)
+
+    bp._process_async_delegation_event(
+        evt,
+        session_id="webui-session-1",
+        delegation_id="deleg_raw",
+        process_registry=registry,
+    )
+
+    assert captured["prompt"] == raw_prompt
+    assert captured["delegation_id"] == "deleg_raw"
+    assert captured["wakeup_meta"] == {
+        "type": "async_delegation_batch",
+        "task_id": "deleg_raw",
+        "status": "completed",
+    }
+    assert len(delivery["claim"]) == 1
 
 
 def test_acceptance_ack_and_queue_failure_schedules_durable_recovery(monkeypatch):
@@ -1004,7 +1060,9 @@ def test_origin_ui_session_id_overrides_index_and_still_acks(monkeypatch):
     cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "session-B"
     started: list[tuple[str, str, str]] = []
 
-    def _accept(session_id, prompt, *, delegation_id, evt, claim, process_registry):
+    def _accept(
+        session_id, prompt, *, delegation_id, evt, claim, process_registry, wakeup_meta=None
+    ):
         started.append((session_id, prompt, delegation_id))
         bp._record_async_delegation_accepted(evt, session_id=session_id, claim=claim)
 
@@ -1034,7 +1092,9 @@ def test_origin_only_completion_without_session_key_routes_and_acks(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
     started: list[str] = []
 
-    def _accept(session_id, prompt, *, delegation_id, evt, claim, process_registry):
+    def _accept(
+        session_id, prompt, *, delegation_id, evt, claim, process_registry, wakeup_meta=None
+    ):
         started.append(session_id)
         bp._record_async_delegation_accepted(evt, session_id=session_id, claim=claim)
 

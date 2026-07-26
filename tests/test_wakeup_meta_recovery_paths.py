@@ -172,3 +172,38 @@ def test_cancel_stream_recovery_webui_turn_unmarked():
     )
     assert "_source" not in recovered
     assert "_wakeup_meta" not in recovered
+
+
+def test_cancel_stream_recovery_preserves_raw_async_body_and_explicit_meta():
+    stream_id = "stream-meta"
+    raw_body = "[ASYNC DELEGATION COMPLETE — deleg_cancel]\nopaque result\n\n  "
+    wakeup_meta = {
+        "type": "async_delegation",
+        "task_id": "deleg_cancel",
+        "status": "partial",
+    }
+    s = Session(
+        session_id="cancel-meta-raw",
+        title="t",
+        messages=[{"role": "assistant", "content": "prior report"}],
+    )
+    s.pending_user_message = raw_body
+    s.pending_user_source = "process_wakeup"
+    s.pending_user_wakeup_meta = wakeup_meta
+    s.pending_attachments = []
+    s.pending_started_at = None
+    s.active_stream_id = stream_id
+    s.save()
+    models.SESSIONS[s.session_id] = s
+    _wire_cancel_state(s.session_id, stream_id)
+
+    assert cancel_stream(stream_id) is True
+
+    recovered = next(
+        message
+        for message in reversed(models.SESSIONS[s.session_id].messages)
+        if isinstance(message, dict) and message.get("role") == "user"
+    )
+    assert recovered["content"] == raw_body
+    assert recovered["_source"] == "process_wakeup"
+    assert recovered["_wakeup_meta"] == wakeup_meta

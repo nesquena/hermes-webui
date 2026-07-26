@@ -8,6 +8,14 @@ from api.routes import _checkpoint_user_message_for_eager_session_save
 from api.streaming import _materialize_pending_user_turn_before_error, _merge_display_messages_after_agent_result
 
 
+RAW_ASYNC_WAKEUP = "[ASYNC DELEGATION COMPLETE — deleg_raw]\nopaque result\n\n  "
+ASYNC_WAKEUP_META = {
+    "type": "async_delegation",
+    "task_id": "deleg_raw",
+    "status": "completed",
+}
+
+
 def test_append_recovered_pending_turn_stamps_process_wakeup_source():
     """Verify _append_recovered_pending_turn stamps _source when pending_user_source is process_wakeup."""
     s = Session(
@@ -49,6 +57,22 @@ def test_append_recovered_pending_turn_defaults_to_no_source():
     assert recovered is not None
     assert recovered["role"] == "user"
     assert "_source" not in recovered
+
+
+def test_append_recovered_pending_turn_preserves_raw_async_body_and_meta():
+    s = Session(
+        session_id="test-session-raw-recovery",
+        pending_user_message=RAW_ASYNC_WAKEUP,
+        pending_user_source="process_wakeup",
+        pending_user_wakeup_meta=ASYNC_WAKEUP_META,
+    )
+
+    recovered = _append_recovered_pending_turn(s)
+
+    assert recovered is not None
+    assert recovered["content"] == RAW_ASYNC_WAKEUP
+    assert recovered["_source"] == "process_wakeup"
+    assert recovered["_wakeup_meta"] == ASYNC_WAKEUP_META
 
 
 def test_checkpoint_user_message_stamps_process_wakeup_source():
@@ -176,6 +200,50 @@ def test_materialize_pending_user_turn_before_error_stamps_process_wakeup_source
 
     assert _materialize_pending_user_turn_before_error(s) is True
     assert s.messages[0]["_source"] == "process_wakeup"
+
+
+def test_materialize_pending_user_turn_before_error_preserves_raw_async_wakeup():
+    s = Session(
+        session_id="test-session-raw-error",
+        pending_user_message=RAW_ASYNC_WAKEUP,
+        pending_user_source="process_wakeup",
+        pending_user_wakeup_meta=ASYNC_WAKEUP_META,
+        pending_started_at=123.0,
+    )
+    s.messages = []
+
+    assert _materialize_pending_user_turn_before_error(s) is True
+    assert s.messages[0]["content"] == RAW_ASYNC_WAKEUP
+    assert s.messages[0]["_wakeup_meta"] == ASYNC_WAKEUP_META
+
+
+def test_recovered_pending_wakeup_reconciles_existing_checkpoint_without_duplicate(tmp_path):
+    s = Session(
+        session_id="test-session-upgrade-recovery",
+        pending_user_message=RAW_ASYNC_WAKEUP,
+        pending_user_source="process_wakeup",
+        pending_user_wakeup_meta=ASYNC_WAKEUP_META,
+        pending_started_at=123.0,
+    )
+    s.messages = [
+        {
+            "role": "user",
+            "content": RAW_ASYNC_WAKEUP.rstrip(),
+            "timestamp": 123,
+            "_source": "process_wakeup",
+        }
+    ]
+    s.save = lambda *args, **kwargs: None
+
+    assert _apply_core_sync_or_error_marker(
+        s, Path(tmp_path / "missing-core.json")
+    ) is True
+
+    users = [message for message in s.messages if message.get("role") == "user"]
+    assert len(users) == 1
+    assert users[0]["content"] == RAW_ASYNC_WAKEUP
+    assert users[0]["_wakeup_meta"] == ASYNC_WAKEUP_META
+    assert s.pending_user_wakeup_meta is None
 
 
 def test_apply_core_sync_or_error_marker_clears_pending_user_source(tmp_path):

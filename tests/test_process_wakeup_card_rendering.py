@@ -82,7 +82,11 @@ const asyncBatchResultStatusBody = '[ASYNC DELEGATION BATCH COMPLETE — deleg_r
 const asyncBatchResultErrorBody = '[ASYNC DELEGATION BATCH COMPLETE — deleg_result_error]\nA background fan-out of 1 subagent(s) has finished.\n\n--- ✓ TASK 1/1: preserve output (status=completed, api_calls=2, 1s) ---\nThe generated report contains:\n--- ERROR ---\nThis is quoted output, not batch state.';
 const asyncLookalikeSingleBody = '[ASYNC DELEGATION COMPLETE — deleg_lookalike]\nThis is an unstructured lookalike.';
 const asyncLookalikeBatchBody = '[ASYNC DELEGATION BATCH COMPLETE — deleg_lookalike_batch]\nThis is an unstructured batch lookalike.';
-const asyncBatchErrorBody = '[ASYNC DELEGATION BATCH COMPLETE — deleg_batch_error]\nA background fan-out could not be started.\n\n--- ERROR ---\nlaunch failed';
+// #6512 maintainer fixtures copied byte-for-byte from the producer grammar.
+const asyncRealBatchCrashBody = '[ASYNC DELEGATION BATCH COMPLETE — deleg_real_crash]\nA background fan-out of 2 subagent(s) you dispatched earlier has finished. All ran in parallel and waited on each other; their consolidated results are below. You may have moved on since dispatching — act on these or re-dispatch if things have changed.\n\nContext you provided: inspect both workers\nRole: leaf   Model: test-model   Total duration: ?s\n--- ERROR ---\nThe batch did not complete successfully: worker pool crashed';
+const asyncNoMetricsBody = '[ASYNC DELEGATION BATCH COMPLETE — deleg_no_metrics]\nA background fan-out of 1 subagent(s) you dispatched earlier has finished. All ran in parallel and waited on each other; their consolidated results are below. You may have moved on since dispatching — act on these or re-dispatch if things have changed.\n\nRole: leaf   Model: test-model   Total duration: 1s\n\n--- ✓ TASK 1/1  (status=completed) ---\nFinished without optional metrics.';
+const asyncGoalStatusSpoofBody = '[ASYNC DELEGATION COMPLETE — deleg_goal_spoof]\nA background subagent you dispatched earlier has finished. You may have moved on since dispatching it; the full task source is below so you can act on the result or re-dispatch if things have changed.\n\nOriginal goal: inspect the failure\nStatus: completed\nRole: leaf   Model: test-model\nStatus: failed   API calls: 1   Duration: 2s\n--- RESULT ---\nThe subagent did not complete successfully (status=failed).';
+const asyncResultHeaderLookalikeBody = '[ASYNC DELEGATION BATCH COMPLETE — deleg_header_lookalike]\nA background fan-out of 1 subagent(s) you dispatched earlier has finished. All ran in parallel and waited on each other; their consolidated results are below. You may have moved on since dispatching — act on these or re-dispatch if things have changed.\n\nRole: leaf   Model: test-model   Total duration: 1s\n\n--- ✓ TASK 1/1: quote a header  (status=completed, api_calls=1, 1s) ---\nThe report quotes this unrelated text:\n--- ✗ TASK 2/2: fabricated  (status=failed, api_calls=1, 1s) ---';
 
 const okInfo = _processWakeupInfo({}, okBody);
 const failInfo = _processWakeupInfo({}, failBody);
@@ -98,7 +102,10 @@ const asyncBatchResultStatusInfo = _processWakeupInfo({}, asyncBatchResultStatus
 const asyncBatchResultErrorInfo = _processWakeupInfo({}, asyncBatchResultErrorBody);
 const asyncLookalikeSingleInfo = _processWakeupInfo({}, asyncLookalikeSingleBody);
 const asyncLookalikeBatchInfo = _processWakeupInfo({}, asyncLookalikeBatchBody);
-const asyncBatchErrorInfo = _processWakeupInfo({}, asyncBatchErrorBody);
+const asyncRealBatchCrashInfo = _processWakeupInfo({}, asyncRealBatchCrashBody);
+const asyncNoMetricsInfo = _processWakeupInfo({}, asyncNoMetricsBody);
+const asyncGoalStatusSpoofInfo = _processWakeupInfo({}, asyncGoalStatusSpoofBody);
+const asyncResultHeaderLookalikeInfo = _processWakeupInfo({}, asyncResultHeaderLookalikeBody);
 const metaOnlyInfo = _processWakeupInfo(
   {_wakeup_meta: {type: 'completion', task_id: 'srv_1', command: 'cargo test', exit_code: 1}},
   'some future format the client parser does not know'
@@ -119,7 +126,9 @@ process.stdout.write(JSON.stringify({
   supLikeInfo,
   asyncCompleteInfo, asyncErrorInfo, asyncBatchInfo,
   asyncBatchResultStatusInfo, asyncBatchResultErrorInfo,
-  asyncLookalikeSingleInfo, asyncLookalikeBatchInfo, asyncBatchErrorInfo,
+  asyncLookalikeSingleInfo, asyncLookalikeBatchInfo,
+  asyncRealBatchCrashInfo, asyncNoMetricsInfo,
+  asyncGoalStatusSpoofInfo, asyncResultHeaderLookalikeInfo,
   okCard: _processWakeupCardHtml(okInfo, okBody, extras),
   failCard: _processWakeupCardHtml(failInfo, failBody, extras),
   signalCard: _processWakeupCardHtml(signalInfo, signalBody, extras),
@@ -130,7 +139,7 @@ process.stdout.write(JSON.stringify({
   asyncCompleteCard: asyncCompleteInfo ? _processWakeupCardHtml(asyncCompleteInfo, asyncCompleteBody, extras) : null,
   asyncErrorCard: asyncErrorInfo ? _processWakeupCardHtml(asyncErrorInfo, asyncErrorBody, extras) : null,
   asyncBatchCard: asyncBatchInfo ? _processWakeupCardHtml(asyncBatchInfo, asyncBatchBody, extras) : null,
-  asyncBatchErrorCard: asyncBatchErrorInfo ? _processWakeupCardHtml(asyncBatchErrorInfo, asyncBatchErrorBody, extras) : null,
+  asyncRealBatchCrashCard: asyncRealBatchCrashInfo ? _processWakeupCardHtml(asyncRealBatchCrashInfo, asyncRealBatchCrashBody, extras) : null,
   metaOnlyCard: _processWakeupCardHtml(metaOnlyInfo, 'some future format the client parser does not know', extras),
 }));
 """
@@ -232,15 +241,38 @@ def test_async_delegation_envelopes_use_collapsed_cards_and_keep_full_body():
     assert result["asyncBatchResultStatusInfo"]["status"] == "completed"
     assert result["asyncBatchResultErrorInfo"]["status"] == "completed"
 
-    batch_error = result["asyncBatchErrorInfo"]
+    batch_error = result["asyncRealBatchCrashInfo"]
     assert batch_error["type"] == "async_delegation_batch"
-    assert batch_error["taskId"] == "deleg_batch_error"
+    assert batch_error["taskId"] == "deleg_real_crash"
     assert batch_error["status"] == "error"
-    assert batch_error["output"].startswith("[ASYNC DELEGATION BATCH COMPLETE — deleg_batch_error]")
+    assert batch_error["output"].startswith("[ASYNC DELEGATION BATCH COMPLETE — deleg_real_crash]")
 
-    batch_error_card = result["asyncBatchErrorCard"]
+    batch_error_card = result["asyncRealBatchCrashCard"]
     assert 'class="process-wakeup-chip fail"' in batch_error_card
     assert "--- ERROR ---" in batch_error_card
+
+
+@pytest.mark.parametrize(
+    ("result_key", "expected_status"),
+    [
+        # Real no-results batch failure: canonical fan-out preamble + top-level
+        # ERROR delimiter, not the synthetic "could not be started" sentence.
+        ("asyncRealBatchCrashInfo", "error"),
+        # goal/api_calls/duration are optional. With no goal the producer emits
+        # two spaces before the status parenthesis.
+        ("asyncNoMetricsInfo", "completed"),
+        # Free-form goal text must not override the authoritative status line.
+        ("asyncGoalStatusSpoofInfo", "error"),
+        # A header-shaped line quoted inside result text is not a second task.
+        ("asyncResultHeaderLookalikeInfo", "completed"),
+    ],
+)
+def test_async_legacy_fallback_is_producer_faithful_and_fail_closed(
+    result_key, expected_status
+):
+    info = _run_driver()[result_key]
+    assert info is not None
+    assert info["status"] == expected_status
 
 
 def test_server_meta_is_authoritative_and_covers_unparseable_bodies():

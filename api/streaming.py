@@ -68,6 +68,7 @@ from api.process_event_utils import (
     claim_async_delegation_delivery,
     complete_async_delegation_delivery,
     completion_delivery_id,
+    normalize_wakeup_display_meta,
     release_async_delegation_delivery,
     requeue_async_delegation_event,
     schedule_async_delegation_claim_retry,
@@ -1564,6 +1565,7 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+    session.pending_user_wakeup_meta = None
     if not _session_has_cancel_marker(session):
         agent_name = _preferred_agent_display_name_for_session(session)
         session.messages.append({
@@ -1583,6 +1585,7 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+    session.pending_user_wakeup_meta = None
     try:
         import pathlib
         pathlib.Path(session.path).unlink(missing_ok=True)
@@ -4005,11 +4008,15 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             saved_pending_attachments = list(getattr(s, 'pending_attachments', []) or [])
             saved_pending_started_at = getattr(s, 'pending_started_at', None)
             saved_pending_user_source = getattr(s, 'pending_user_source', None)
+            saved_pending_user_wakeup_meta = getattr(
+                s, 'pending_user_wakeup_meta', None
+            )
             s.active_stream_id = None
             s.pending_user_message = None
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
+            s.pending_user_wakeup_meta = None
             try:
                 # skip_index=False so the snapshot appears in _index.json with
                 # the pre_compression_snapshot marker. The sidebar projection
@@ -4029,6 +4036,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 s.pending_attachments = saved_pending_attachments
                 s.pending_started_at = saved_pending_started_at
                 s.pending_user_source = saved_pending_user_source
+                s.pending_user_wakeup_meta = saved_pending_user_wakeup_meta
             return
         # Existing file is already at least as complete as memory; stamp only
         # the snapshot marker so index/sidebar projection can hide it without
@@ -4050,6 +4058,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             snapshot.pending_attachments = []
             snapshot.pending_started_at = None
             snapshot.pending_user_source = None
+            snapshot.pending_user_wakeup_meta = None
             snapshot.save(touch_updated_at=False, skip_index=False)
             logger.info(
                 "Marked pre-compression session %s as sidebar-hidden snapshot",
@@ -5650,7 +5659,14 @@ def _advance_truncation_watermark_after_commit(session) -> None:
     session.truncation_watermark = time.time()
 
 
-def _merge_display_messages_after_agent_result(previous_display, previous_context, result_messages, msg_text, source: str = "webui"):
+def _merge_display_messages_after_agent_result(
+    previous_display,
+    previous_context,
+    result_messages,
+    msg_text,
+    source: str = "webui",
+    wakeup_meta=None,
+):
     """Keep UI transcript durable while allowing model context to compact.
 
     If Hermes Agent returns a normal append-only history, append that delta to
@@ -5881,6 +5897,14 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             or _looks_like_current_user_turn(merged[-1], msg_text)
         )
     )
+    normalized_wakeup_meta = normalize_wakeup_display_meta(wakeup_meta)
+    if normalized_wakeup_meta is not None and current_user_already_checkpointed:
+        # Reconcile the durable boundary row with the producer-owned body and
+        # metadata before deduping the provider echo for this same turn.
+        checkpoint = copy.deepcopy(merged[-1])
+        checkpoint['content'] = msg_text
+        stamp_message_source(checkpoint, source, normalized_wakeup_meta)
+        merged[-1] = checkpoint
     if (
         current_user_key is not None
         and not current_user_in_candidates
@@ -5897,7 +5921,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         # exchange and then clear the pending prompt. Materialize the current
         # turn at the transcript boundary before the assistant/tool response.
         current_user_msg = {'role': 'user', 'content': msg_text}
-        stamp_message_source(current_user_msg, source)
+        stamp_message_source(current_user_msg, source, wakeup_meta)
         insert_at = 0
         while insert_at < len(candidates) and _is_context_compression_marker(candidates[insert_at]):
             insert_at += 1
@@ -5958,7 +5982,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         ):
             display_msg = copy.deepcopy(msg)
             display_msg['content'] = msg_text
-            stamp_message_source(display_msg, source)
+            stamp_message_source(display_msg, source, wakeup_meta)
         merged.append(copy.deepcopy(display_msg))
         if key is not None:
             seen.add(key)
@@ -6025,6 +6049,7 @@ def _turn_transcript_lacks_final_assistant_answer(
     previous_display,
     msg_text,
     source: str = "webui",
+    wakeup_meta=None,
     drop_replayed_assistant: bool = False,
 ) -> bool:
     """Return True when an already-merged transcript still lacks a final assistant answer."""
@@ -6039,8 +6064,7 @@ def _turn_transcript_lacks_final_assistant_answer(
             'role': 'user',
             'content': msg_text,
         }
-        if source and source != 'webui':
-            pending_user['_source'] = source
+        stamp_message_source(pending_user, source, wakeup_meta)
         merged_messages.append(pending_user)
         current_user_idx = len(merged_messages) - 1
 
@@ -6077,6 +6101,7 @@ def _merged_transcript_lacks_final_assistant_answer(
     result_messages,
     msg_text,
     source: str = "webui",
+    wakeup_meta=None,
     drop_replayed_assistant: bool = False,
 ) -> bool:
     """Return True when the current turn still lacks a final assistant answer."""
@@ -6087,12 +6112,14 @@ def _merged_transcript_lacks_final_assistant_answer(
         _restore_reasoning_metadata(previous_display, result_messages),
         msg_text,
         source=source,
+        wakeup_meta=wakeup_meta,
     )
     return _turn_transcript_lacks_final_assistant_answer(
         merged_messages,
         previous_display,
         msg_text,
         source=source,
+        wakeup_meta=wakeup_meta,
         drop_replayed_assistant=drop_replayed_assistant,
     )
 
@@ -6446,6 +6473,9 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     if isinstance(pending_started_at, (int, float)) and pending_started_at > 0:
         recovered_ts = int(pending_started_at)
     pending_source = getattr(session, 'pending_user_source', None) or 'webui'
+    pending_wakeup_meta = normalize_wakeup_display_meta(
+        getattr(session, 'pending_user_wakeup_meta', None)
+    )
     pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
 
     def is_exact_checkpoint(messages):
@@ -6459,12 +6489,29 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
             existing_ts = int(existing.get('timestamp'))
         except (TypeError, ValueError):
             return False
-        return (
-            _normalize_user_text(existing.get('content')) == _normalize_user_text(pending_text)
-            and existing_ts == recovered_ts
+        checkpoint_fields_match = (
+            existing_ts == recovered_ts
             and existing_source == pending_source
             and list(existing.get('attachments') or []) == pending_attachments
         )
+        if not checkpoint_fields_match:
+            return False
+        if pending_wakeup_meta is None:
+            return _normalize_user_text(existing.get('content')) == _normalize_user_text(
+                pending_text
+            )
+        if str(existing.get('content') or '') == pending_text and (
+            normalize_wakeup_display_meta(existing.get('_wakeup_meta'))
+            == pending_wakeup_meta
+        ):
+            return True
+        if _normalize_user_text(existing.get('content')) != _normalize_user_text(
+            pending_text
+        ):
+            return False
+        existing['content'] = pending_text
+        stamp_message_source(existing, pending_source, pending_wakeup_meta)
+        return True
 
     if is_exact_checkpoint(getattr(session, 'messages', None)):
         return False
@@ -6474,7 +6521,7 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         'timestamp': recovered_ts,
         '_recovered': True,
     }
-    stamp_message_source(recovered, pending_source)
+    stamp_message_source(recovered, pending_source, pending_wakeup_meta)
     if pending_attachments:
         recovered['attachments'] = pending_attachments
     session.messages.append(recovered)
@@ -7552,6 +7599,7 @@ def _run_agent_streaming(
     _turn_session_identity_tokens = None
     _streaming_cron_profile_home_token = None
     _turn_pending_source = 'webui'
+    _turn_pending_wakeup_meta = None
     _streaming_hermes_home_override_ctx = (None, None, False)
     _streaming_skill_home_snapshot = None
     _restore_streaming_skill_home_modules = False
@@ -7576,6 +7624,7 @@ def _run_agent_streaming(
         _turn_session_identity_tokens = _set_turn_session_identity(session_id)
         s = get_session(session_id)
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
+        _turn_pending_wakeup_meta = getattr(s, 'pending_user_wakeup_meta', None)
         update_active_run(stream_id, phase="running", session_id=session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
         _last_persisted_model = None
@@ -9225,7 +9274,8 @@ def _run_agent_streaming(
                         _previous_context_messages,
                         _restore_display_reasoning_metadata(_previous_messages, _result_messages),
                         msg_text,
-                        source=getattr(s, 'pending_user_source', None) or 'webui',
+                        source=_turn_pending_source,
+                        wakeup_meta=_turn_pending_wakeup_meta,
                     )
                     _compact_session_image_parts_for_persistence(s)
                     _advance_truncation_watermark_after_commit(s)  # #3831
@@ -9410,7 +9460,8 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     _all_result_messages,
                     msg_text,
-                    source=getattr(s, 'pending_user_source', None) or 'webui',
+                    source=_turn_pending_source,
+                    wakeup_meta=_turn_pending_wakeup_meta,
                     drop_replayed_assistant=_drop_replayed_assistant,
                 )
                 _is_agent_result_terminal = _agent_result_terminal_failure(result)
@@ -9570,7 +9621,8 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
-                                    source=getattr(s, 'pending_user_source', None) or 'webui',
+                                    source=_turn_pending_source,
+                                    wakeup_meta=_turn_pending_wakeup_meta,
                                 )
                                 _compact_session_image_parts_for_persistence(s)
                                 _advance_truncation_watermark_after_commit(s)  # #3831
@@ -9648,6 +9700,7 @@ def _run_agent_streaming(
                         s.pending_attachments = []
                         s.pending_started_at = None
                         s.pending_user_source = None
+                        s.pending_user_wakeup_meta = None
                         try:
                             _snapshot_and_append_partial_on_error(s, stream_id)
                         except Exception:
@@ -9849,6 +9902,7 @@ def _run_agent_streaming(
                 s.pending_attachments = []
                 s.pending_started_at = None
                 s.pending_user_source = None
+                s.pending_user_wakeup_meta = None
                 # Tag the matching user message with attachment filenames for display on reload
                 # Only tag a user message whose content relates to this turn's text
                 # (msg_text is the full message including the [Attached files: ...] suffix)
@@ -10793,7 +10847,8 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
-                                    source=getattr(s, 'pending_user_source', None) or 'webui',
+                                    source=_turn_pending_source,
+                                    wakeup_meta=_turn_pending_wakeup_meta,
                                 )
                                 _compact_session_image_parts_for_persistence(s)
                                 _advance_truncation_watermark_after_commit(s)  # #3831
@@ -10884,6 +10939,7 @@ def _run_agent_streaming(
                 s.pending_attachments = []
                 s.pending_started_at = None
                 s.pending_user_source = None
+                s.pending_user_wakeup_meta = None
                 try:
                     _snapshot_and_append_partial_on_error(s, stream_id)
                 except Exception:
@@ -11398,6 +11454,9 @@ def cancel_stream(stream_id: str) -> bool:
                 try:
                     _pending_user = getattr(_cs, 'pending_user_message', None)
                     _pending_source = getattr(_cs, 'pending_user_source', None)
+                    _pending_wakeup_meta = getattr(
+                        _cs, 'pending_user_wakeup_meta', None
+                    )
                     _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
                     _pending_atts = list(_pending_atts_raw) if isinstance(_pending_atts_raw, (list, tuple)) else []
                     _pending_started = getattr(_cs, 'pending_started_at', None) or 0
@@ -11431,7 +11490,11 @@ def cancel_stream(stream_id: str) -> bool:
                                 'content': _pending_user,
                                 'timestamp': _recovered_ts,
                             }
-                            stamp_message_source(_user_turn, _pending_source)
+                            stamp_message_source(
+                                _user_turn,
+                                _pending_source,
+                                _pending_wakeup_meta,
+                            )
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
                             _msgs_for_recovery.append(_user_turn)
@@ -11445,6 +11508,7 @@ def cancel_stream(stream_id: str) -> bool:
                 _cs.pending_attachments = []
                 _cs.pending_started_at = None
                 _cs.pending_user_source = None
+                _cs.pending_user_wakeup_meta = None
                 # Persist any partial assistant text that was streamed before cancel (#893).
                 # Preserving partial content means the user sees what the agent had
                 # produced rather than losing it entirely.  The marker is _partial=True
