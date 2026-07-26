@@ -338,11 +338,7 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _safe_webui_print(message: str) -> None:
-        """Emit a request log line without letting logging break responses.
-
-        Agent/tool code can rebind or close process-wide sys.stdout in another
-        thread, so write through the fd duplicated at startup (#0095).
-        """
+        """Emit via startup's fd duplicate; agent code can hijack sys.stdout."""
         durable_print(message)
 
     def log_request(self, code: str='-', size: str='-') -> None:
