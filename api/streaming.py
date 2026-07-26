@@ -719,6 +719,10 @@ def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
         "- Write to external notes or durable memory only for explicit captures, durable user preferences, decisions, blockers/open issues, runbook-worthy workflows, or other clearly reusable signals; otherwise leave notes unchanged.",
         "- When you do write or update a durable note, briefly tell the user what note/section changed so the write is reviewable.",
     ]
+    if surface_context.get("temporary"):
+        lines.append(
+            "- This is a temporary chat: do not write durable memory or external notes unless the user explicitly asks."
+        )
     fields = (
         ("source", "Source"),
         ("session_id", "Session ID"),
@@ -8970,6 +8974,7 @@ def _run_agent_streaming(
                     'session_id': session_id,
                     'profile': getattr(s, 'profile', None),
                     'workspace': s.workspace,
+                    'temporary': bool(getattr(s, 'temporary', False)),
                 },
                 config_data=_cfg,
             )

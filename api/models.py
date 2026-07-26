@@ -1234,6 +1234,7 @@ class Session:
                  process_wakeup_pause=None,
                  share_token=None,
                  share_created_at=None,
+                 temporary: bool=False,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -1322,6 +1323,11 @@ class Session:
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
+        # Temporary chats are WebUI-owned sessions with memory commit skipped.
+        # Ephemeral WebUI chat: excluded from default /api/sessions + search,
+        # skipped for durable memory commit. Still persisted on first message so
+        # the active tab can reload mid-conversation; clients delete on leave.
+        self.temporary = bool(temporary)
         # #5854: a compact fingerprint of anchor_activity_scenes ({scene_key:
         # updated_at}) persisted BEFORE the messages array so the sidebar-poll
         # freshness check can compare scene freshness without parsing the full
@@ -1393,6 +1399,7 @@ class Session:
             'enabled_toolsets', 'composer_draft',
             'process_wakeup_pause',
             'share_token', 'share_created_at',
+            'temporary',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         # #5854: message_count and a compact anchor-scene fingerprint go in the
@@ -1776,6 +1783,7 @@ class Session:
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,
+            'temporary': bool(getattr(self, 'temporary', False)),
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,
@@ -4650,7 +4658,7 @@ def _profile_default_model_state(profile=None):
     return default_model or get_effective_default_model(), default_provider
 
 
-def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None, enabled_toolsets=None):
+def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None, enabled_toolsets=None, temporary=False):
     """Create a new in-memory session.
 
     The session lives in the SESSIONS dict only — no disk write happens until
@@ -4674,6 +4682,13 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
     on different profiles don't fight over a shared process-global.  If not
     supplied, we fall back to the process-level active profile (the pre-#798
     behaviour, preserved for calls that originate outside a request context).
+
+    *temporary* — when True, the session is flagged as an ephemeral WebUI chat:
+    excluded from the default ``GET /api/sessions`` history list and search
+    (opt in with ``?include_temporary=1``), skipped for durable memory commit.
+    Still saved on first message so the active tab can reload mid-conversation;
+    clients are expected to delete on leave / tab close. Direct
+    ``GET /api/session?session_id=`` remains available while the sidecar exists.
     """
     if profile is None:
         # Fallback: read process-level global (single-client or startup path)
@@ -4704,6 +4719,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         worktree_repo_root=wt.get('repo_root') if wt else None,
         worktree_created_at=wt.get('created_at') if wt else None,
         enabled_toolsets=enabled_toolsets,
+        temporary=bool(temporary),
     )
     # #4985: defensive — auto-generated uuids don't collide with the
     # tombstone, but if a future caller ever passes an explicit id that

@@ -1911,6 +1911,7 @@ def _session_list_cache_key(
     archived_limit: int | None = None,
     archived_offset: int = 0,
     show_claude_code_sessions: bool = True,
+    exclude_temporary: bool = False,
 ) -> tuple:
     return _route_session_list_cache_key(
         active_profile=active_profile,
@@ -1926,7 +1927,7 @@ def _session_list_cache_key(
         sidebar_source=sidebar_source,
         archived_limit=archived_limit,
         archived_offset=archived_offset,
-    ) + (bool(show_claude_code_sessions),)
+    ) + (bool(show_claude_code_sessions), bool(exclude_temporary))
 
 _ROUTE_SESSION_LIST_CACHE_DYNAMIC_EXPORTS = {
     "_SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION",
@@ -2171,6 +2172,7 @@ def _build_session_list_cache_payload(
     sidebar_source: str | None = None,
     archived_limit: int | None = None,
     archived_offset: int = 0,
+    exclude_temporary: bool = False,
     diag=None,
 ) -> dict:
     diag_stage = diag.stage if diag is not None else lambda *_a, **_k: None
@@ -2219,6 +2221,10 @@ def _build_session_list_cache_payload(
     show_cron_sessions = bool(show_cron_sessions)
     show_webhook_sessions = bool(show_webhook_sessions)
     webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
+    # Temporary chats are addressable by id but excluded from the default
+    # history/sidebar list unless the caller opts in (?include_temporary=1).
+    if exclude_temporary:
+        webui_sessions = [s for s in webui_sessions if not s.get("temporary")]
     if show_cli_sessions:
         diag_stage("get_cli_sessions")
         if _callable_accepts_kwarg(get_cli_sessions, "include_claude_code"):
@@ -9818,6 +9824,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "worktree_branch",
     "parent_session_id",
     "parent_title",
+    "temporary",
     "parent_source",
     "relationship_type",
     "pre_compression_snapshot",
@@ -13128,6 +13135,9 @@ def handle_get(handler, parsed) -> bool:
             all_profiles = _all_profiles_enabled(parsed)
             include_archived = _query_flag(parsed, "include_archived")
             exclude_hidden = _query_flag(parsed, "exclude_hidden")
+            # Default sidebar/history excludes temporary chats; opt in with
+            # ?include_temporary=1 (admin/debug). Direct GET /api/session?id= still works.
+            exclude_temporary = not _query_flag(parsed, "include_temporary")
             archived_limit = _query_positive_int(parsed, "archived_limit", default=None, maximum=2000)
             archived_offset = _query_positive_int(parsed, "archived_offset", default=0, maximum=200000)
             sidebar_source = parse_qs(parsed.query).get("sidebar_source", [""])[0].strip().lower() or None
@@ -13150,6 +13160,7 @@ def handle_get(handler, parsed) -> bool:
                 sidebar_source=sidebar_source,
                 archived_limit=archived_limit,
                 archived_offset=archived_offset,
+                exclude_temporary=exclude_temporary,
             )
             # Keep the visible /api/sessions contract unchanged even though the
             # heavy lifting now lives in the cache builder: profile scoping via
@@ -13172,6 +13183,7 @@ def handle_get(handler, parsed) -> bool:
                     sidebar_source=sidebar_source,
                     archived_limit=archived_limit,
                     archived_offset=archived_offset,
+                    exclude_temporary=exclude_temporary,
                     diag=diag,
                 ),
                 diag=diag,
@@ -14296,6 +14308,15 @@ def handle_post(handler, parsed) -> bool:
                 # the new session (#5420).
                 prev_session_id = None
             if prev_session_id:
+                # Skip durable memory commit for temporary chats — they are
+                # ephemeral by contract and must not seed long-term memory.
+                try:
+                    prev_obj = get_session(prev_session_id)
+                except Exception:
+                    prev_obj = None
+                if prev_obj is not None and bool(getattr(prev_obj, "temporary", False)):
+                    prev_session_id = None
+            if prev_session_id:
                 # Fire-and-forget: commit_memory_session() can take 1-5+ seconds
                 # (extraction call to the memory provider), and blocking the
                 # response here made "+ New Chat" feel slow/unresponsive.
@@ -14339,6 +14360,11 @@ def handle_post(handler, parsed) -> bool:
                 # thread the drain snapshot already missed).
                 if _register_background_commit_thread(t):
                     t.start()
+        raw_temporary = body.get("temporary")
+        temporary = (
+            raw_temporary is True
+            or str(raw_temporary).strip().lower() in {"1", "true", "yes", "on"}
+        ) if raw_temporary is not None else False
         s = new_session(
             workspace=workspace,
             model=model,
@@ -14347,6 +14373,7 @@ def handle_post(handler, parsed) -> bool:
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,
+            temporary=temporary,
         )
         if worktree_info:
             publish_session_list_changed(
@@ -16858,6 +16885,10 @@ def _handle_sessions_search(handler, parsed):
             s for s in sessions
             if _profiles_match(s.get("profile"), active_profile)
         ]
+    # Match /api/sessions: temporary chats stay out of default search unless
+    # ?include_temporary=1. Direct open-by-id remains available.
+    if not _query_flag(parsed, "include_temporary"):
+        sessions = [s for s in sessions if not s.get("temporary")]
     # Reject a malformed depth instead of letting int() raise ValueError and
     # surface as a confusing 500. Clamp to >= 0 so a negative value can't reach
     # the messages[:depth] slice below — messages[:-n] would silently exclude
