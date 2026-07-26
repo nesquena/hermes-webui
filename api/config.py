@@ -1434,11 +1434,12 @@ def _named_custom_provider_slug_for_provider(
     if not raw:
         return ""
     raw_suffix = raw.removeprefix("custom:")
-    # Also try stripping the "custom:" prefix's colon-hyphen variant
-    # (e.g., config.yaml has provider: custom:192.168.5.242:8000 but the
-    # custom_providers entry name "192.168.5.242:8000" slugifies to
-    # custom:192.168.5.242-8000 because colons are replaced with hyphens).
-    raw_suffix_hyphen = raw_suffix.replace(":", "-")
+    # Normalise the raw suffix through the same slug function the custom
+    # provider entry name goes through, so punctuation such as colons in
+    # ``custom:192.168.5.242:8000`` matches the hyphenated slug suffix
+    # ``192.168.5.242-8000`` produced by ``_custom_provider_slug_from_name``.
+    raw_slug = _custom_provider_slug_from_name(raw_suffix)
+    normalized_suffix = raw_slug.removeprefix("custom:") if raw_slug else ""
     for entry in _custom_provider_entries(config_obj):
         entry_name = str(entry.get("name") or "").strip().lower()
         slug = _custom_provider_slug_from_name(entry_name)
@@ -1448,7 +1449,7 @@ def _named_custom_provider_slug_for_provider(
         if (
             raw in {entry_name, slug}
             or raw_suffix == slug_suffix
-            or raw_suffix_hyphen == slug_suffix
+            or normalized_suffix == slug_suffix
         ):
             return slug
     return ""
