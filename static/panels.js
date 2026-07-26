@@ -7480,6 +7480,7 @@ let _settingsPreferencesAutosaveTimer = null;
 let _settingsPreferencesAutosaveRetryPayload = null;
 let _settingsPreferencesAutosaveGeneration = 0;
 let _settingsPreferencesAutosaveChain = Promise.resolve();
+let _settingsPanelLoadGeneration = 0;
 
 // ── Sidebar tab visibility/order ────────────────────────────────────────────
 const _ALWAYS_VISIBLE_TABS = new Set(['chat','settings']);
@@ -9080,10 +9081,16 @@ async function _setupTtsSettings(settings){
 }
 
 async function loadSettingsPanel(){
-  const speechSettingsGeneration=window.HermesTTS?window.HermesTTS.captureSettingsGeneration():undefined;
+  let speechSettingsGeneration=window.HermesTTS?window.HermesTTS.captureSettingsGeneration():undefined;
+  const settingsLoadGeneration=++_settingsPanelLoadGeneration;
+  const settingsLoadProfile=typeof S!=='undefined'?String(S.activeProfile||S.profile||'default'):'default';
+  const settingsLoadIdentityIsCurrent=()=>settingsLoadGeneration===_settingsPanelLoadGeneration
+    &&settingsLoadProfile===(typeof S!=='undefined'?String(S.activeProfile||S.profile||'default'):'default');
+  const settingsLoadIsCurrent=()=>settingsLoadIdentityIsCurrent()
+    &&(!window.HermesTTS||window.HermesTTS.isSettingsGenerationCurrent(speechSettingsGeneration));
   try{
     const settings=await api('/api/settings');
-    if(window.HermesTTS&&!window.HermesTTS.isSettingsGenerationCurrent(speechSettingsGeneration))return;
+    if(!settingsLoadIsCurrent())return;
     checkWebUIVersionSkew(settings);
     // Populate the version badges from the server — keeps them in sync with git
     // tags automatically without any manual release step.
@@ -9308,6 +9315,7 @@ async function loadSettingsPanel(){
       let models=null;
       try{
         models=await api('/api/models');
+        if(!settingsLoadIsCurrent())return;
         for(const g of ((models||{}).groups||[])){
           const og=document.createElement('optgroup');
           og.label=g.provider;
@@ -9553,6 +9561,7 @@ async function loadSettingsPanel(){
         _schedulePreferencesAutosave();
       },{once:false});
     }
+    if(!settingsLoadIsCurrent())return;
     if(typeof window._mirrorSpeechSettingsFromServer==='function') window._mirrorSpeechSettingsFromServer(settings,speechSettingsGeneration);
     const persistedSpeechKeys = new Set(
       Array.isArray(settings && settings.persisted_speech_keys)
@@ -9644,6 +9653,9 @@ async function loadSettingsPanel(){
       ttsVoiceSel.onchange=function(){_markSpeechPreferenceChanged('tts_voice');localStorage.setItem('hermes-tts-voice',this.value);_schedulePreferencesAutosave();};
     }
     await _setupTtsSettings(settings);
+    if(!settingsLoadIdentityIsCurrent())return;
+    speechSettingsGeneration=window.HermesTTS?window.HermesTTS.captureSettingsGeneration():undefined;
+    if(!settingsLoadIsCurrent())return;
     // TTS rate/pitch sliders
     const ttsRateSlider=$('settingsTtsRate');
     const ttsRateValue=$('settingsTtsRateValue');
@@ -9730,6 +9742,7 @@ async function loadSettingsPanel(){
     // Show auth buttons only when auth is active
     try{
       const authStatus=await api('/api/auth/status');
+      if(!settingsLoadIsCurrent())return;
       _settingsPasswordAuthEnabled=!!authStatus.password_auth_enabled;
       _setSettingsAuthButtonsVisible(!!authStatus.auth_enabled);
       _syncPasswordlessButton(authStatus);

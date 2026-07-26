@@ -12,6 +12,8 @@ window.registerHermesTtsEngine = function registerHermesTtsEngineTombstone(){
   let active=null;
   let capabilityCache=null;
   let capabilityProfile='';
+  let capabilityInflight=null;
+  let capabilityInflightProfile='';
   let capabilityGeneration=0;
   let settingsGeneration=0;
   let migrationPending=false;
@@ -79,19 +81,28 @@ window.registerHermesTtsEngine = function registerHermesTtsEngineTombstone(){
   async function getCapability({refresh=false}={}){
     const profile=_profileKey();
     if(!refresh&&capabilityCache&&capabilityProfile===profile)return capabilityCache;
+    if(!refresh&&capabilityInflight&&capabilityInflightProfile===profile)return capabilityInflight;
     const requestGeneration=++capabilityGeneration;
-    const result=await api('/api/tts/capability',{
-      method:'GET',timeoutMs:15000,retries:0,retryTimeouts:false,timeoutToast:false
-    });
-    if(!result||typeof result!=='object')throw new Error('Invalid Agent TTS capability response.');
-    if(requestGeneration!==capabilityGeneration||profile!==_profileKey()){
-      const error=new Error('Stale Agent TTS capability response.');
-      error.name='AbortError';
-      throw error;
+    const request=(async()=>{
+      const result=await api('/api/tts/capability',{
+        method:'GET',timeoutMs:15000,retries:0,retryTimeouts:false,timeoutToast:false
+      });
+      if(!result||typeof result!=='object')throw new Error('Invalid Agent TTS capability response.');
+      if(requestGeneration!==capabilityGeneration||profile!==_profileKey()){
+        const error=new Error('Stale Agent TTS capability response.');
+        error.name='AbortError';
+        throw error;
+      }
+      capabilityCache=result;
+      capabilityProfile=profile;
+      return result;
+    })();
+    capabilityInflight=request;
+    capabilityInflightProfile=profile;
+    try{return await request;}
+    finally{
+      if(capabilityInflight===request){capabilityInflight=null;capabilityInflightProfile='';}
     }
-    capabilityCache=result;
-    capabilityProfile=profile;
-    return result;
   }
 
   function invalidateCapability(){
@@ -99,6 +110,8 @@ window.registerHermesTtsEngine = function registerHermesTtsEngineTombstone(){
     settingsGeneration+=1;
     capabilityCache=null;
     capabilityProfile='';
+    capabilityInflight=null;
+    capabilityInflightProfile='';
     stop('profile-changed');
   }
 
@@ -183,7 +196,10 @@ window.registerHermesTtsEngine = function registerHermesTtsEngineTombstone(){
     const legacy=String(snapshot.values.tts_engine||'');
     if(!['edge','elevenlabs','openai'].includes(legacy))throw new Error('The saved engine is not migratable.');
     if(!capability||capability.provider_write_supported!==true)throw new Error('Hermes Agent provider changes are unavailable.');
-    const row=(capability.providers||[]).find(candidate=>candidate.provider_id===legacy&&candidate.selectable===true);
+    const builtinLabelKey=`tts_provider_${legacy}`;
+    const row=(capability.providers||[]).find(candidate=>
+      candidate.provider_id===legacy&&candidate.label_key===builtinLabelKey&&candidate.selectable===true
+    );
     if(!row)throw new Error('The matching Hermes Agent provider is unavailable.');
     const operationId=_operationId();
     const migration={
@@ -220,6 +236,7 @@ window.registerHermesTtsEngine = function registerHermesTtsEngineTombstone(){
         const authoritative=await api('/api/settings',{method:'GET',retries:0,timeoutToast:false});
         if(generation!==settingsGeneration||profile!==_profileKey())throw _abortError('stale-migration');
         _captureSettings(authoritative);
+        if(!settingsSnapshot.present.has('tts_engine')||settingsSnapshot.values.tts_engine!=='agent')throw error;
         if(settingsSnapshot.present.has('tts_engine'))localStorage.setItem('hermes-tts-engine',String(settingsSnapshot.values.tts_engine));
         return {reconciled:true,settings:authoritative};
       }
@@ -319,6 +336,7 @@ window.registerHermesTtsEngine = function registerHermesTtsEngineTombstone(){
       const finish=error=>{
         if(settled)return;
         settled=true;
+        if(state.watchdog){clearTimeout(state.watchdog);state.watchdog=null;}
         if(state.chunkReject===abort)state.chunkReject=null;
         audio.onended=null;audio.onerror=null;
         if(error)reject(error);else resolve();
@@ -327,6 +345,17 @@ window.registerHermesTtsEngine = function registerHermesTtsEngineTombstone(){
       state.chunkReject=abort;
       audio.onended=()=>finish();
       audio.onerror=()=>finish(new Error('Agent TTS audio could not be played.'));
+      // Mirrors _browserChunk: estimate a conservative upper bound on playback
+      // duration from the artifact size so a hung audio element cannot stall
+      // the speak() promise indefinitely. 4 KB/s approximates the slowest
+      // realistic compressed codec (32 kbps MP3); real audio finishes well
+      // before this expires.
+      const watchdogMs=Math.max(4000,Math.round(length/4)+10000);
+      state.watchdog=setTimeout(()=>{
+        if(settled)return;
+        try{audio.pause();}catch(_){}
+        finish(new Error('Agent TTS audio playback timed out.'));
+      },watchdogMs);
       try{
         const pending=audio.play();
         if(pending&&typeof pending.catch==='function')pending.catch(finish);

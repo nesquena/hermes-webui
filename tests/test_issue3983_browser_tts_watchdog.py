@@ -36,6 +36,18 @@ def test_stop_clears_every_browser_recovery_resource():
     assert "window.speechSynthesis.cancel()" in clear
 
 
+def test_agent_chunk_has_playback_watchdog_matching_browser_contract():
+    agent = _function_region(TTS_JS, "async function _agentChunk", "async function _browserChunk")
+    # The agent path must own its own watchdog so a hung HTMLAudioElement
+    # cannot stall speak() indefinitely — same defensive pattern as
+    # _browserChunk. The estimate uses the artifact byte length with a
+    # 4 KB/s floor (slowest realistic compressed codec).
+    assert "state.watchdog=setTimeout" in agent
+    assert "length/4" in agent
+    assert "Agent TTS audio playback timed out." in agent
+    assert "clearTimeout(state.watchdog)" in agent
+
+
 def test_voice_mode_routes_through_controller_and_rearms_at_most_once():
     speak = _function_region(BOOT_JS, "function _speakResponse", "// Hook into response completion")
     assert "window.HermesTTS.speak(clean" in speak
@@ -44,6 +56,8 @@ def test_voice_mode_routes_through_controller_and_rearms_at_most_once():
     assert "voiceGeneration===_voiceTtsGeneration" in speak
     assert "onEnd:()=>rearm(500)" in speak
     assert "onError:error=>" in speak
+    assert "onStop:()=>" in speak
+    assert "_deactivate()" in speak
     assert "SpeechSynthesisUtterance" not in speak
     assert "fetch(" not in speak
 

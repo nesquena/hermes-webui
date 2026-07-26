@@ -14,7 +14,6 @@ import api.auth as auth
 import api.routes as routes
 import api.profiles as profiles
 from tests.js_source_extract import extract_function
-from api.agent_tts import AgentTtsAudio
 
 
 PANELS_JS = (Path(__file__).resolve().parents[1] / "static" / "panels.js").read_text(encoding="utf-8")
@@ -837,15 +836,13 @@ def test_first_trusted_header_request_can_read_tts_capability(monkeypatch):
     assert handler.json_body()["state"] == "ready"
 
 
-def test_first_trusted_header_request_can_post_agent_tts(monkeypatch):
+def test_first_trusted_header_request_cannot_post_agent_tts_without_csrf(monkeypatch):
     _trusted_env(monkeypatch)
     monkeypatch.setattr(routes, "_tts_synthesis_limiter", routes._TtsRateLimiter(0))
     monkeypatch.setattr(
         routes,
         "synthesize_agent_tts",
-        lambda *_a, **_k: AgentTtsAudio(
-            b"RIFF\x08\0\0\0WAVEdata", "audio/wav", "edge"
-        ),
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("worker called")),
     )
     handler = _first_trusted_tts_handler(
         {"engine": "agent", "text": "hello"},
@@ -858,22 +855,17 @@ def test_first_trusted_header_request_can_post_agent_tts(monkeypatch):
     assert "Cookie" not in handler.headers
     routes.handle_post(handler, parsed)
 
-    assert handler.status == 200
-    assert handler.header_values("Content-Type") == ["audio/wav"]
+    assert handler.status == 403
+    assert handler.json_body()["error"] == "Session expired - reload the page"
 
 
-def test_first_trusted_header_request_can_post_tts_provider(monkeypatch):
+def test_first_trusted_header_request_cannot_post_tts_provider_without_csrf(monkeypatch):
     _trusted_env(monkeypatch)
     monkeypatch.setattr(routes, "_tts_provider_limiter", routes._TtsRateLimiter(0))
     monkeypatch.setattr(
         routes,
         "run_agent_tts_operation",
-        lambda *_a, **_k: {
-            "active_provider": "edge",
-            "active_provider_name": "Microsoft Edge TTS",
-            "active_provider_available": True,
-            "config_fingerprint": "sha256:" + "1" * 64,
-        },
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("worker called")),
     )
     handler = _first_trusted_tts_handler(
         {
@@ -889,5 +881,5 @@ def test_first_trusted_header_request_can_post_tts_provider(monkeypatch):
     assert "Cookie" not in handler.headers
     routes.handle_post(handler, parsed)
 
-    assert handler.status == 200
-    assert handler.json_body()["active_provider"] == "edge"
+    assert handler.status == 403
+    assert handler.json_body()["error"] == "Session expired - reload the page"

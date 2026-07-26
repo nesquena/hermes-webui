@@ -5482,16 +5482,6 @@ def _check_csrf(handler) -> bool:
     if not is_auth_enabled():
         return True
     cookie_val = parse_cookie(handler)
-    if (
-        not cookie_val
-        and getattr(handler, "_trusted_auth_session_info", None)
-        and getattr(handler, "_trusted_auth_session_cookie_value", None)
-    ):
-        # The trusted proxy authenticated this first request and check_auth()
-        # queued its new session cookie on the same response. There is no
-        # pre-existing browser session from which an attacker could obtain a
-        # CSRF token, so allow this one authenticated bootstrap request.
-        return True
     submitted = handler.headers.get(CSRF_HEADER_NAME) or handler.headers.get("X-CSRF-Token")
     if verify_csrf_token(cookie_val or "", submitted or ""):
         return True
@@ -18377,7 +18367,7 @@ def _tts_agent_error(handler, exc):
 
 
 def _tts_request_owner(handler, profile_name: str) -> str:
-    """Return a bounded opaque identity/profile key without trusting proxy headers."""
+    """Return a bounded opaque identity/profile key with trusted-proxy scoping."""
     from api.auth import ensure_trusted_auth_session, parse_cookie
 
     info = ensure_trusted_auth_session(handler)
@@ -18390,7 +18380,16 @@ def _tts_request_owner(handler, profile_name: str) -> str:
         principal = f"user:{info['username']}"
     else:
         peer = getattr(handler, "client_address", ("unknown",))[0]
-        principal = f"peer:{peer}"
+        forwarded_client = None
+        if _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_FOR") and _raw_peer_is_trusted_proxy(handler):
+            forwarded_client = _forwarded_client_ip_from_trusted_proxy(handler)
+        # Malformed/untrusted forwarding data falls back to the unspoofable raw
+        # peer, preserving the safe shared bucket rather than trusting a header.
+        principal = (
+            f"peer:{peer}:client:{forwarded_client}"
+            if forwarded_client
+            else f"peer:{peer}"
+        )
     digest = hashlib.sha256(principal.encode("utf-8", errors="replace")).hexdigest()[:24]
     return f"{profile_name}:{digest}"
 
@@ -18428,7 +18427,7 @@ def _handle_agent_tts_capability(handler):
         payload = run_agent_tts_operation(
             "capability",
             profile_scope=scope,
-            owner_key=f"capability:{owner}",
+            owner_key=owner,
         )
     except Exception as exc:
         return _tts_agent_error(handler, exc)
@@ -18577,7 +18576,7 @@ def _run_tts_migration(scope, owner: str, worker_payload: dict, migration: dict)
                 "select_provider",
                 selected_payload,
                 profile_scope=scope,
-                owner_key=f"provider:{owner}",
+                owner_key=owner,
             )
         except Exception as exc:
             from api.agent_tts import AgentTtsError
@@ -18608,7 +18607,7 @@ def _run_tts_migration(scope, owner: str, worker_payload: dict, migration: dict)
                         "expected_post_fingerprint": selected.get("config_fingerprint"),
                     },
                     profile_scope=scope,
-                    owner_key=f"provider:{owner}",
+                    owner_key=owner,
                 )
             except Exception:
                 logger.error(
@@ -18665,7 +18664,7 @@ def _handle_agent_tts_provider(handler):
             "select_provider",
             worker_payload,
             profile_scope=scope,
-            owner_key=f"provider:{owner}",
+            owner_key=owner,
         )
     except Exception as exc:
         return _tts_agent_error(handler, exc)
@@ -18712,7 +18711,7 @@ def _handle_tts(handler, parsed):
         audio = synthesize_agent_tts(
             text,
             profile_scope=scope,
-            owner_key=f"synthesis:{owner}",
+            owner_key=owner,
             cancellation_check=lambda: _tts_client_disconnected(handler),
         )
     except Exception as exc:

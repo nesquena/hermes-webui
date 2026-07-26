@@ -100,3 +100,63 @@ def test_replace_failure_keeps_old_referent_and_cleans_temp(tmp_path, monkeypatc
 
     assert target.read_text(encoding="utf-8") == "value: old\n"
     assert _temp_names(tmp_path) == []
+
+
+def test_directory_fsync_is_skipped_on_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(config.os, "name", "nt")
+    monkeypatch.setattr(
+        config.os,
+        "open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("opened directory")),
+    )
+
+    config._fsync_directory(tmp_path)
+
+
+def test_symlink_retarget_while_waiting_for_lock_fails_before_transaction(
+    tmp_path, monkeypatch
+):
+    fcntl = pytest.importorskip("fcntl")
+    first = tmp_path / "first.yaml"
+    second = tmp_path / "second.yaml"
+    first.write_text("value: first\n", encoding="utf-8")
+    second.write_text("value: second\n", encoding="utf-8")
+    link = tmp_path / "config.yaml"
+    link.symlink_to(first)
+    real_flock = fcntl.flock
+
+    def retarget_on_lock(fd, operation):
+        result = real_flock(fd, operation)
+        if operation == fcntl.LOCK_EX:
+            link.unlink()
+            link.symlink_to(second)
+        return result
+
+    monkeypatch.setattr(fcntl, "flock", retarget_on_lock)
+
+    with pytest.raises(RuntimeError, match="binding changed"):
+        config.update_yaml_config_file(link, lambda data: data.update(value="new"))
+
+    assert first.read_text(encoding="utf-8") == "value: first\n"
+    assert second.read_text(encoding="utf-8") == "value: second\n"
+
+
+def test_symlink_retarget_during_mutation_does_not_write_either_target(tmp_path):
+    first = tmp_path / "first.yaml"
+    second = tmp_path / "second.yaml"
+    first.write_text("value: first\n", encoding="utf-8")
+    second.write_text("value: second\n", encoding="utf-8")
+    link = tmp_path / "config.yaml"
+    link.symlink_to(first)
+
+    def retarget(data):
+        assert data == {"value": "first"}
+        link.unlink()
+        link.symlink_to(second)
+        data["value"] = "new"
+
+    with pytest.raises(RuntimeError, match="binding changed"):
+        config.update_yaml_config_file(link, retarget)
+
+    assert first.read_text(encoding="utf-8") == "value: first\n"
+    assert second.read_text(encoding="utf-8") == "value: second\n"

@@ -372,6 +372,100 @@ def test_read_only_or_managed_save_is_detected_by_authoritative_reprobe(
     assert cfg.current == original
 
 
+def test_post_save_reprobe_failure_restores_prior_tts_subtree(tmp_path, monkeypatch):
+    """When `_save_agent_config` succeeds but the authoritative reprobe fails,
+    the worker's prior `tts` subtree must be restored so the persisted saved
+    choice is never silently overwritten by an unverified commit."""
+    path = tmp_path / "config.yaml"
+    original = {"model": {"default": "x"}, "tts": {"provider": "edge"}}
+    _tts, _tools, cfg = _install(monkeypatch, path, original)
+    saved_snapshots = []
+    load_calls = {"count": 0}
+
+    real_save = cfg.save_config
+
+    def save_with_transient_reprobe_drift(config):
+        # Capture what was committed (cfg.current is updated by real_save).
+        real_save(config)
+        saved_snapshots.append(copy.deepcopy(cfg.current))
+
+    cfg.save_config = save_with_transient_reprobe_drift
+
+    real_load = cfg.load_config
+
+    def load_with_transient_drift():
+        load_calls["count"] += 1
+        # The first load_config is the pre-save fingerprint check (must
+        # return the original state so the request isn't rejected as
+        # config_conflict). The second load_config is the post-save
+        # authoritative reprobe — simulate drift here so the reprobe fails.
+        # Subsequent loads see the actual on-disk file (cfg.current),
+        # so the rollback can verify.
+        if load_calls["count"] == 2:
+            return {
+                "model": {"default": "x"},
+                "tts": {"provider": "neutts"},  # not active for openai row
+            }
+        return real_load()
+
+    cfg.load_config = load_with_transient_drift
+
+    with pytest.raises(agent_tts_worker.WorkerOperationError) as exc_info:
+        agent_tts_worker.select_provider_payload(
+            "OpenAI TTS", "openai", _fingerprint(original)
+        )
+
+    assert exc_info.value.code == "config_write_failed"
+    # Two save attempts: the candidate write and the inline rollback.
+    assert len(cfg.saved) == 2
+    # The final on-disk state (loaded into cfg.current by save_config) must
+    # match the prior sparse `tts` subtree, not the failed candidate.
+    assert cfg.current["tts"] == original["tts"]
+    assert cfg.current["model"] == original["model"]
+    # Confirm the second saved snapshot is the rollback, not another candidate.
+    assert saved_snapshots[1]["tts"] == original["tts"]
+
+
+def test_post_save_compensation_failure_raises_compensation_code(
+    tmp_path, monkeypatch
+):
+    """If the inline rollback itself cannot confirm authoritative state
+    (e.g. fingerprint drift mid-compensation), the caller must surface a
+    distinct `config_write_compensation_failed` so the route handler can
+    mark the response like `migration_inconsistent`."""
+    path = tmp_path / "config.yaml"
+    original = {"tts": {"provider": "edge"}}
+    _tts, _tools, cfg = _install(monkeypatch, path, original)
+    load_calls = {"count": 0}
+
+    real_load = cfg.load_config
+
+    def load_with_reprobe_drift():
+        load_calls["count"] += 1
+        # First load: pre-save fingerprint check, return original.
+        # Second load: post-save reprobe, return drifted state.
+        # Third load (inside rollback): simulate a concurrent writer replacing
+        # the candidate before compensation can claim ownership. The rollback
+        # must refuse to overwrite that third-party state.
+        if load_calls["count"] in (2, 3):
+            return {
+                "tts": {"provider": "neutts" if load_calls["count"] == 2 else "third-party"}
+            }
+        return real_load()
+
+    cfg.load_config = load_with_reprobe_drift
+
+    with pytest.raises(agent_tts_worker.WorkerOperationError) as exc_info:
+        agent_tts_worker.select_provider_payload(
+            "OpenAI TTS", "openai", _fingerprint(original)
+        )
+
+    assert exc_info.value.code == "config_write_compensation_failed"
+    # The candidate save succeeded; the rollback short-circuited because the
+    # drift made the on-disk state unsafe to overwrite.
+    assert len(cfg.saved) == 1
+
+
 def test_compensation_refuses_silent_non_write(tmp_path, monkeypatch):
     post = {"model": {"default": "x"}, "tts": {"provider": "openai"}}
     _tts, _tools, cfg = _install(

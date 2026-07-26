@@ -1610,6 +1610,9 @@ window.renderTranscript=function(container, messages, opts){
         if(typeof showToast==='function')showToast((error&&error.message)||t('tts_not_supported'),4000,'error');
         rearm(1000);
       },
+      onStop:()=>{
+        if(_voiceModeActive&&voiceGeneration===_voiceTtsGeneration)_deactivate();
+      },
       onDegraded:()=>{
         if(typeof showToast==='function')showToast(t('tts_effective_browser_fallback'),3500,'warning');
       },

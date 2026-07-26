@@ -26,7 +26,7 @@ globalThis.window=globalThis;
 globalThis.addEventListener=()=>{{}};
 const stored=new Map([['hermes-tts-engine','edge'],['hermes-tts-voice','en-US-AriaNeural']]);
 globalThis.localStorage={{getItem:key=>stored.has(key)?stored.get(key):null,setItem:(key,value)=>stored.set(key,String(value)),removeItem:key=>stored.delete(key)}};
-globalThis.S={{profile:'default'}};
+globalThis.S={{activeProfile:'default'}};
 globalThis.api={api_impl};
 globalThis.crypto={{randomUUID:()=> '12345678-1234-4678-9234-567812345678'}};
 {TTS_JS}
@@ -52,6 +52,7 @@ def _capability():
             {
                 "name": "Microsoft Edge TTS",
                 "provider_id": "edge",
+                "label_key": "tts_provider_edge",
                 "available": True,
                 "configured": True,
                 "selectable": True,
@@ -101,6 +102,40 @@ Promise.resolve()
     assert _node(body, api_impl) == {"calls": 1, "provider": "edge"}
 
 
+def test_capability_cache_is_isolated_by_real_active_profile_state():
+    capability = json.dumps(_capability())
+    api_impl = f"""async(path)=>{{
+  if(path==='/api/tts/capability'){{globalThis.capabilityCalls=(globalThis.capabilityCalls||0)+1;return {capability};}}
+  throw new Error('unexpected '+path);
+}}"""
+    body = """
+Promise.resolve()
+  .then(()=>HermesTTS.getCapability())
+  .then(()=>{S.activeProfile='other';return HermesTTS.getCapability();})
+  .then(()=>process.stdout.write(JSON.stringify({calls:capabilityCalls,profile:S.activeProfile})));
+"""
+
+    assert _node(body, api_impl) == {"calls": 2, "profile": "other"}
+
+
+def test_concurrent_capability_consumers_share_one_profile_request():
+    capability = json.dumps(_capability())
+    api_impl = f"""async(path)=>{{
+  if(path==='/api/tts/capability'){{
+    globalThis.capabilityCalls=(globalThis.capabilityCalls||0)+1;
+    return await new Promise(resolve=>setTimeout(()=>resolve({capability}),0));
+  }}
+  throw new Error('unexpected '+path);
+}}"""
+    body = """
+Promise.all([HermesTTS.getCapability(),HermesTTS.getCapability()]).then(results=>{
+  process.stdout.write(JSON.stringify({calls:capabilityCalls,providers:results.map(value=>value.active_provider)}));
+});
+"""
+
+    assert _node(body, api_impl) == {"calls": 1, "providers": ["edge", "edge"]}
+
+
 def test_provider_save_updates_cached_capability_without_forced_reload():
     capability = _capability()
     capability["providers"].append(
@@ -148,7 +183,7 @@ HermesTTS.getSettingsState(settings,{refresh:true})
 
 def test_timeout_reconciliation_cannot_apply_after_profile_switch():
     api_impl = """async(path,opts)=>{
-  if(path==='/api/tts/capability')return {synthesis_supported:true,active_provider_available:true,provider_write_supported:true,config_fingerprint:'fp',providers:[{provider_id:'edge',name:'Edge',selectable:true}]};
+  if(path==='/api/tts/capability')return {synthesis_supported:true,active_provider_available:true,provider_write_supported:true,config_fingerprint:'fp',providers:[{provider_id:'edge',label_key:'tts_provider_edge',name:'Edge',selectable:true}]};
   if(path==='/api/tts/provider')return await new Promise((resolve,reject)=>setTimeout(()=>{const error=new Error('timeout');error.name='TimeoutError';reject(error);},0));
   if(path==='/api/settings')return {tts_engine:'agent',persisted_speech_keys:['tts_engine'],speech_settings_revision:9};
   throw new Error('unexpected '+path);
@@ -191,6 +226,43 @@ HermesTTS.getSettingsState(settings,{refresh:true}).then(state=>HermesTTS.migrat
     assert result["posted"]["provider"] == "Microsoft Edge TTS"
 
 
+def test_openai_migration_chooses_direct_builtin_row_not_managed_nous_row():
+    capability = _capability()
+    capability["providers"] = [
+        {
+            "name": "Nous Research",
+            "provider_id": "openai",
+            "label_key": None,
+            "available": True,
+            "configured": True,
+            "selectable": True,
+        },
+        {
+            "name": "OpenAI TTS",
+            "provider_id": "openai",
+            "label_key": "tts_provider_openai",
+            "available": True,
+            "configured": True,
+            "selectable": True,
+        },
+    ]
+    api_impl = """async(path,opts)=>{
+  if(path==='/api/tts/provider'){
+    globalThis.posted=JSON.parse(opts.body);
+    return {speech_settings:{revision:8,present_keys:['tts_engine'],values:{tts_engine:'agent'}}};
+  }
+  throw new Error('unexpected '+path);
+}"""
+    body = f"""
+const settings={{tts_engine:'openai',persisted_speech_keys:['tts_engine'],speech_settings_revision:7}};
+HermesTTS.migrateLegacyEngine(settings,{json.dumps(capability)}).then(()=>{{
+  process.stdout.write(JSON.stringify({{provider:posted.provider}}));
+}});
+"""
+
+    assert _node(body, api_impl) == {"provider": "OpenAI TTS"}
+
+
 def test_known_failure_preserves_exact_local_selection_and_voice():
     capability = json.dumps(_capability())
     api_impl = f"""async(path,opts)=>{{
@@ -228,6 +300,25 @@ HermesTTS.getSettingsState(settings,{refresh:true}).then(state=>HermesTTS.migrat
     assert _node(body, api_impl) == {"reconciled": True, "persisted": "agent"}
 
 
+def test_timeout_reconciliation_rejects_when_legacy_engine_is_still_authoritative():
+    capability = json.dumps(_capability())
+    api_impl = f"""async(path,opts)=>{{
+  if(path==='/api/tts/capability')return {capability};
+  if(path==='/api/tts/provider'){{const error=new Error('timeout');error.name='TimeoutError';throw error;}}
+  if(path==='/api/settings')return {{tts_engine:'edge',persisted_speech_keys:['tts_engine'],speech_settings_revision:7}};
+  throw new Error('unexpected');
+}}"""
+    body = """
+const settings={tts_engine:'edge',persisted_speech_keys:['tts_engine'],speech_settings_revision:7};
+HermesTTS.getSettingsState(settings,{refresh:true})
+  .then(state=>HermesTTS.migrateLegacyEngine(settings,state.capability))
+  .then(()=>process.exit(2))
+  .catch(error=>process.stdout.write(JSON.stringify({name:error.name,persisted:stored.get('hermes-tts-engine')})));
+"""
+
+    assert _node(body, api_impl) == {"name": "TimeoutError", "persisted": "edge"}
+
+
 def test_migration_suppresses_engine_voice_autosave_and_boot_mirror():
     assert "isAutosaveSuppressed(settingKey)" in PANELS_JS
     assert "shouldMirrorSetting(settingKey,generation)" in BOOT_JS
@@ -251,16 +342,32 @@ process.stdout.write(JSON.stringify({
     assert _node(body, "async()=>({})") == {"stale": False, "current": True}
 
 
+def test_settings_hydration_rechecks_profile_and_generation_after_every_await():
+    assert "let _settingsPanelLoadGeneration = 0;" in PANELS_JS
+    assert "const settingsLoadGeneration=++_settingsPanelLoadGeneration;" in PANELS_JS
+    assert "const settingsLoadIsCurrent=()=>" in PANELS_JS
+    assert "settingsLoadProfile===" in PANELS_JS
+    assert PANELS_JS.count("if(!settingsLoadIsCurrent())return;") >= 5
+    for awaited in (
+        "const settings=await api('/api/settings');",
+        "models=await api('/api/models');",
+        "await _setupTtsSettings(settings);",
+        "const authStatus=await api('/api/auth/status');",
+    ):
+        start = PANELS_JS.index(awaited) + len(awaited)
+        assert "if(!settingsLoadIsCurrent())return;" in PANELS_JS[start : start + 260]
+
+
 def test_provider_completion_after_profile_switch_is_aborted():
     capability = json.dumps(_capability())
     api_impl = "(path,opts)=>new Promise(resolve=>{globalThis.resolveProvider=resolve})"
     body = f"""
 const pending=HermesTTS.selectProvider('Microsoft Edge TTS',{capability});
-S.profile='other';
+S.activeProfile='other';
 HermesTTS.invalidateCapability();
-resolveProvider({{ok:true}});
+resolveProvider({{"active_provider":"edge","active_provider_name":"Microsoft Edge TTS","config_fingerprint":"sha256:{'0' * 64}"}});
 pending.then(()=>process.exit(2)).catch(error=>{{
-  process.stdout.write(JSON.stringify({{name:error.name,profile:S.profile}}));
+  process.stdout.write(JSON.stringify({{name:error.name,profile:S.activeProfile}}));
 }});
 """
     assert _node(body, api_impl) == {"name": "AbortError", "profile": "other"}

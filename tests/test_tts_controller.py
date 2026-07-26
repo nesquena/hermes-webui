@@ -203,6 +203,26 @@ pending.then(result=>process.stdout.write(JSON.stringify({result,audioCount,revo
     assert _node(script) == {"result": "AbortError", "audioCount": 1, "revoked": 1}
 
 
+def test_agent_media_watchdog_uses_four_kilobytes_per_second_and_settles():
+    api_impl = """async(path)=>path==='/api/tts/capability'
+ ? {synthesis_supported:true,active_provider_available:true,request_max_text_length:100}
+ : {data:new Uint8Array(4000).buffer,contentType:'audio/mpeg',contentLength:4000,status:200,headers:{}}"""
+    script = _controller_prelude(api_impl, engine="agent") + """
+let watchdogMs=0,paused=0;
+globalThis.setTimeout=(callback,ms)=>{watchdogMs=ms;queueMicrotask(callback);return 1};
+globalThis.clearTimeout=()=>{};
+globalThis.Audio=class Audio{play(){return Promise.resolve();}pause(){paused+=1}removeAttribute(){}load(){}};
+HermesTTS.speak('hello',{engine:'agent'}).then(()=>process.exit(2)).catch(error=>{
+  process.stdout.write(JSON.stringify({message:error.message,watchdogMs,paused}));
+});
+"""
+    assert _node(script) == {
+        "message": "Agent TTS audio playback timed out.",
+        "watchdogMs": 11000,
+        "paused": 2,
+    }
+
+
 def test_split_text_never_splits_astral_code_points():
     api_impl = "async()=>({})"
     script = _controller_prelude(api_impl) + """

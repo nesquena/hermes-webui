@@ -594,6 +594,79 @@ def _active_exact_row(
         return bool(tools_config._is_provider_active(row, copy.deepcopy(config)))
 
 
+def _rollback_tts_subtree(
+    config_module: Any,
+    previous_tts: Any,
+    previous_tts_present: bool,
+    expected_post_fingerprint: str,
+) -> bool:
+    """Inline compensation for a failed post-save reprobe.
+
+    Runs under the caller's ``_serialized_provider_write`` lock, so it
+    re-acquires the file lock rather than calling ``restore_tts_payload``
+    (which would deadlock on the same non-reentrant flock). Restores the
+    exact sparse prior ``tts`` subtree, re-saves, and re-verifies, mirroring
+    ``restore_tts_payload``'s contract without spawning a nested worker.
+
+    Returns ``True`` when the authoritative state matches the prior
+    subtree (either because the post-save write was a no-op and the file
+    was already at the prior state, or because the explicit restore
+    succeeded). Returns ``False`` only when compensation cannot be
+    confirmed authoritative (caller surfaces
+    ``config_write_compensation_failed`` so the route handler can mark the
+    response like ``migration_inconsistent``).
+    """
+    if previous_tts_present and not isinstance(previous_tts, dict):
+        return False
+    load_config = getattr(config_module, "load_config", None)
+    if not callable(load_config):
+        return False
+    try:
+        current = load_config()
+        if not isinstance(current, dict):
+            current = {}
+        current = copy.deepcopy(current)
+    except Exception:
+        return False
+
+    # If the file already matches the prior sparse subtree (e.g. the
+    # post-save write was a silent no-op), no compensation is required —
+    # the on-disk state is already what the caller wanted.
+    has_tts = "tts" in current
+    tts_matches = has_tts and current.get("tts") == previous_tts
+    if has_tts == previous_tts_present and (
+        not previous_tts_present or tts_matches
+    ):
+        return True
+
+    # Disk state does not match what we just wrote AND does not already
+    # match the prior state. Only safe to restore when we own the disk
+    # state — i.e. when it matches the snapshot of what we wrote.
+    if _config_fingerprint(current) != expected_post_fingerprint:
+        return False
+    if previous_tts_present:
+        current["tts"] = copy.deepcopy(previous_tts)
+    else:
+        current.pop("tts", None)
+    try:
+        _save_agent_config(config_module, current)
+    except WorkerOperationError:
+        return False
+    except Exception:
+        return False
+    try:
+        authoritative = load_config()
+    except Exception:
+        return False
+    if not isinstance(authoritative, dict):
+        return False
+    if ("tts" in authoritative) != previous_tts_present:
+        return False
+    if previous_tts_present and authoritative.get("tts") != previous_tts:
+        return False
+    return True
+
+
 @_serialized_provider_write
 def select_provider_payload(
     provider_name: str,
@@ -686,33 +759,45 @@ def select_provider_payload(
         edge_section["voice"] = legacy_edge_voice
 
     _save_agent_config(config_module, candidate)
+    post_save_fingerprint = _config_fingerprint(candidate)
     try:
-        authoritative = load_config()
-        if not isinstance(authoritative, dict):
-            authoritative = {}
-        authoritative = copy.deepcopy(authoritative)
-    except Exception as exc:
-        raise WorkerOperationError("config_write_failed") from exc
-    try:
-        is_active = _active_exact_row(tools_config, exact_row, authoritative)
-        is_available = _requirements_for_config(tts_tool, authoritative)
-    except Exception as exc:
-        raise WorkerOperationError("config_write_failed") from exc
-    if not is_active or not is_available:
-        raise WorkerOperationError("config_write_failed")
-    authoritative_tts = authoritative.get("tts")
-    if not isinstance(authoritative_tts, dict):
-        authoritative_tts = {}
-    try:
-        provider_limit, request_limit, limit_source = _resolve_text_limits(
-            tts_tool, provider_id, authoritative_tts
+        try:
+            authoritative = load_config()
+            if not isinstance(authoritative, dict):
+                authoritative = {}
+            authoritative = copy.deepcopy(authoritative)
+        except Exception as exc:
+            raise WorkerOperationError("config_write_failed") from exc
+        try:
+            is_active = _active_exact_row(tools_config, exact_row, authoritative)
+            is_available = _requirements_for_config(tts_tool, authoritative)
+        except Exception as exc:
+            raise WorkerOperationError("config_write_failed") from exc
+        if not is_active or not is_available:
+            raise WorkerOperationError("config_write_failed")
+        authoritative_tts = authoritative.get("tts")
+        if not isinstance(authoritative_tts, dict):
+            authoritative_tts = {}
+        try:
+            provider_limit, request_limit, limit_source = _resolve_text_limits(
+                tts_tool, provider_id, authoritative_tts
+            )
+        except Exception as exc:
+            raise WorkerOperationError("config_write_failed") from exc
+        resolved_provider = _resolve_runtime_provider(
+            tts_tool, provider_id, bool(is_available)
         )
-    except Exception as exc:
-        raise WorkerOperationError("config_write_failed") from exc
-    resolved_provider = _resolve_runtime_provider(
-        tts_tool, provider_id, bool(is_available)
-    )
-
+    except WorkerOperationError as exc:
+        # Post-save reprobe failed: the new provider is committed to disk but
+        # the authoritative state is not what we just wrote. Roll back to the
+        # exact sparse prior `tts` subtree so the persisted saved choice is
+        # never silently overwritten. Mirrors restore_tts_payload's contract:
+        # fingerprint-check, sparse restore, re-save, re-verify.
+        if not _rollback_tts_subtree(
+            config_module, previous_tts, previous_tts_present, post_save_fingerprint
+        ):
+            raise WorkerOperationError("config_write_compensation_failed") from exc
+        raise
     return {
         "active_provider": provider_id,
         "active_provider_name": provider_name,

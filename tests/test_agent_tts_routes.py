@@ -99,6 +99,55 @@ def test_capability_route_returns_sanitized_worker_projection(monkeypatch):
     assert "api_key" not in handler.wfile.getvalue().decode("utf-8")
 
 
+def test_capability_and_synthesis_share_one_canonical_owner_key(monkeypatch):
+    scope = SimpleNamespace(name="named", home=None)
+    owners = []
+    monkeypatch.setattr(routes, "capture_agent_tts_profile_scope", lambda: scope)
+    monkeypatch.setattr(routes, "_tts_request_owner", lambda *_args: "principal:named")
+
+    def capability(*_args, **kwargs):
+        owners.append(kwargs["owner_key"])
+        return {"ok": True, "providers": []}
+
+    def synthesis(*_args, **kwargs):
+        owners.append(kwargs["owner_key"])
+        return AgentTtsAudio(b"RIFF\x08\0\0\0WAVEdata", "audio/wav", "edge")
+
+    monkeypatch.setattr(routes, "run_agent_tts_operation", capability)
+    monkeypatch.setattr(routes, "synthesize_agent_tts", synthesis)
+
+    routes._handle_agent_tts_capability(Handler(command="GET"))
+    routes._handle_tts(Handler({"engine": "agent", "text": "hello"}), None)
+
+    assert owners == ["principal:named", "principal:named"]
+
+
+def test_auth_disabled_trusted_proxy_clients_get_distinct_owner_keys(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setattr(auth, "ensure_trusted_auth_session", lambda _handler: None)
+    monkeypatch.setattr(auth, "parse_cookie", lambda _handler: None)
+
+    first = Handler(headers={"X-Forwarded-For": "198.51.100.10"})
+    second = Handler(headers={"X-Forwarded-For": "198.51.100.11"})
+
+    assert routes._tts_request_owner(first, "default") != routes._tts_request_owner(
+        second, "default"
+    )
+
+
+def test_untrusted_proxy_forwarding_cannot_split_owner_bucket(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setattr(auth, "ensure_trusted_auth_session", lambda _handler: None)
+    monkeypatch.setattr(auth, "parse_cookie", lambda _handler: None)
+
+    first = Handler(headers={"X-Forwarded-For": "198.51.100.10"}, client="203.0.113.5")
+    second = Handler(headers={"X-Forwarded-For": "198.51.100.11"}, client="203.0.113.5")
+
+    assert routes._tts_request_owner(first, "default") == routes._tts_request_owner(
+        second, "default"
+    )
+
+
 def test_capability_maps_sanitized_agent_error(monkeypatch):
     def fail(*_args, **_kwargs):
         raise AgentTtsError("agent_timeout", 504, "Agent TTS operation timed out.")

@@ -68,6 +68,7 @@ _ERROR_STATUS = {
     "provider_unavailable": 503,
     "managed_config": 503,
     "config_write_failed": 503,
+    "config_write_compensation_failed": 503,
     "agent_worker_start": 503,
     "agent_cancelled": 499,
     "agent_timeout": 504,
@@ -89,6 +90,7 @@ _ERROR_MESSAGES = {
     "provider_unavailable": "The selected Agent TTS provider is unavailable.",
     "managed_config": "This Hermes configuration is read-only.",
     "config_write_failed": "The Agent TTS configuration could not be saved.",
+    "config_write_compensation_failed": "The Agent TTS configuration could not be restored after a failed write.",
     "agent_worker_start": "Agent TTS worker could not be started.",
     "agent_cancelled": "Agent TTS synthesis was cancelled.",
     "agent_timeout": "Agent TTS synthesis timed out.",
@@ -542,6 +544,49 @@ def _audio_signature(data: bytes) -> tuple[str, set[str]] | None:
     return None
 
 
+def _open_artifact_beneath(request_root: Path, candidate: Path) -> int:
+    """Open a request artifact without following any path component symlinks."""
+    try:
+        relative = candidate.relative_to(request_root)
+    except ValueError as exc:
+        raise _error("tts_artifact_invalid") from exc
+    if not relative.parts:
+        raise _error("tts_artifact_invalid")
+
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    file_flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    if os.name == "posix":
+        directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        directory_flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        directory_fd = os.open(request_root, directory_flags)
+        try:
+            for component in relative.parts[:-1]:
+                next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = next_fd
+            return os.open(relative.parts[-1], file_flags, dir_fd=directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    # Windows workers are placed in a kill-on-close Job Object before artifacts
+    # are consumed, so no provider descendant remains to race this fallback.
+    resolved_root = request_root.resolve(strict=True)
+    resolved_candidate = candidate.resolve(strict=True)
+    try:
+        resolved_candidate.relative_to(resolved_root)
+    except ValueError as exc:
+        raise _error("tts_artifact_invalid") from exc
+    before = os.lstat(candidate)
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise _error("tts_artifact_invalid")
+    fd = os.open(candidate, file_flags)
+    opened = os.fstat(fd)
+    if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+        os.close(fd)
+        raise _error("tts_artifact_invalid")
+    return fd
+
+
 def _consume_audio_artifact(
     status_payload: dict[str, Any], request_dir: Path
 ) -> AgentTtsAudio:
@@ -560,23 +605,12 @@ def _consume_audio_artifact(
     except ValueError as exc:
         raise _error("tts_artifact_invalid") from exc
     try:
-        before = os.lstat(lexical_candidate)
-    except OSError as exc:
-        raise _error("tts_artifact_invalid") from exc
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-        raise _error("tts_artifact_invalid")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    try:
-        fd = os.open(lexical_candidate, flags)
+        fd = _open_artifact_beneath(request_root, lexical_candidate)
     except OSError as exc:
         raise _error("tts_artifact_invalid") from exc
     try:
         opened = os.fstat(fd)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
-        ):
+        if not stat.S_ISREG(opened.st_mode):
             raise _error("tts_artifact_invalid")
         if opened.st_size <= 0:
             raise _error("tts_artifact_invalid")

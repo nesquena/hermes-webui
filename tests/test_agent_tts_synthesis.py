@@ -158,6 +158,22 @@ def test_descriptor_validator_rejects_escape_symlink_fifo_and_oversize(
             {"artifact_path": str(link), "provider": "x"}, tmp_path
         )
 
+    outside_dir = tmp_path.parent / "outside-artifacts"
+    outside_dir.mkdir()
+    outside_audio = outside_dir / "audio.mp3"
+    outside_audio.write_bytes(VALID_AUDIO["speech.mp3"])
+    directory_link = tmp_path / "linked-directory"
+    directory_link.symlink_to(outside_dir, target_is_directory=True)
+    with pytest.raises(agent_tts.AgentTtsError) as exc_info:
+        agent_tts._consume_audio_artifact(
+            {
+                "artifact_path": str(directory_link / "audio.mp3"),
+                "provider": "x",
+            },
+            tmp_path,
+        )
+    assert exc_info.value.code == "tts_artifact_invalid"
+
     if hasattr(os, "mkfifo"):
         fifo = tmp_path / "audio.mp3"
         os.mkfifo(fifo)
