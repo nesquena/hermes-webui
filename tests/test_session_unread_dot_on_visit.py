@@ -33,6 +33,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 
 
 def _load_session_block() -> str:
@@ -169,6 +170,287 @@ def _extract_if_present(name: str) -> str:
 def _run_node(script: str) -> dict:
     result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
     return json.loads(result.stdout)
+
+
+
+
+def _extract_message_function(name: str) -> str:
+    marker_options = [
+        f"async function {name}(",
+        f"function {name}(",
+    ]
+    for marker in marker_options:
+        if marker not in MESSAGES_JS:
+            continue
+        start = MESSAGES_JS.index(marker)
+        brace = MESSAGES_JS.index("{", start)
+        depth = 0
+        for idx in range(brace, len(MESSAGES_JS)):
+            ch = MESSAGES_JS[idx]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return MESSAGES_JS[start:idx + 1]
+    raise AssertionError(f"function {name} not found in messages.js")
+
+
+def _extract_message_listener_body(event_name: str) -> str:
+    marker = f"source.addEventListener('{event_name}',e=>{{"
+    start = MESSAGES_JS.index(marker)
+    brace = MESSAGES_JS.index("{", start)
+    depth = 0
+    for idx in range(brace, len(MESSAGES_JS)):
+        ch = MESSAGES_JS[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return MESSAGES_JS[brace + 1 : idx]
+    raise AssertionError(f"listener for {event_name} not found")
+
+
+def _restore_settled_session_migration_script() -> str:
+    migrate = _extract("_migrateSessionCompletionUnreadToFinalSession")
+    get_unread = _extract("_getSessionCompletionUnread")
+    save_unread = _extract("_saveSessionCompletionUnread")
+    restore = _extract_message_function("_restoreSettledSession")
+    save_unread = save_unread.replace(
+        "function _saveSessionCompletionUnread() {",
+        "function _saveSessionCompletionUnread() { saves += 1;",
+    )
+    lines = [
+        "const _store = {};",
+        "const localStorage = {",
+        "  getItem: (k) => (k in _store ? _store[k] : null),",
+        "  setItem: (k, v) => { _store[k] = String(v); },",
+        "};",
+        "const SESSION_COMPLETION_UNREAD_KEY = 'u';",
+        "let _sessionCompletionUnread = null;",
+        "let saves = 0;",
+        "let S = {",
+        "  session: {",
+        "    session_id: 'old',",
+        "    message_count: 4,",
+        "  },",
+        "  messages: [{ role: 'assistant', content: 'old' }],",
+        "  activeStreamId: 'stream-restore',",
+        "};",
+        "let _streamFinalized = false;",
+        "let _persistTimer = null;",
+        "let _queueDrainSid = null;",
+        "let activeSid = 'old';",
+        "let streamId = 'stream-restore';",
+        "let apiRequests = [];",
+        "",
+        "function api(path) {",
+        "  apiRequests.push(path);",
+        "  return Promise.resolve({",
+        "    session: {",
+        "      session_id: 'final',",
+        "      message_count: 9,",
+        "      last_message_at: 123,",
+        "      messages: [{ role: 'assistant', content: 'final' }],",
+        "    },",
+        "  });",
+        "}",
+        "function _isActiveSession() { return true; }",
+        "function _isSessionCurrentPane() { return false; }",
+        "function _isSessionActivelyViewed() { return false; }",
+        "function _isSessionActivelyViewedForList() { return false; }",
+        "function _closeSource() {}",
+        "function _clearStreamEndRecovery() {}",
+        "function _clearAnchorProseIncrementalNode() {}",
+        "function _cancelThrottledSnapshotTimer() {}",
+        "function _cancelAnimationFramePendingStreamRender() {}",
+        "function _streamFadeCleanupReduceMotionListener() {}",
+        "function _smdEndParser() {}",
+        "function finalizeThinkingCard() {}",
+        "function _clearOwnerInflightState() {}",
+        "function _flushReasoningToAnchor() {}",
+        "function _clearApprovalForOwner() {}",
+        "function _clearClarifyForOwner() {}",
+        "function _scheduleAnchorRegistryCleanup() {}",
+        "function _markSessionCompletionUnread() {}",
+        "function _markSessionViewed() {}",
+        "function _rememberSessionListSource() {}",
+        "function _forgetObservedStreamingSession() {}",
+        "function renderSessionList() {}",
+        "function _setActivePaneIdleIfOwner() {}",
+        "function _carryForwardEphemeralTurnFields(_prev, next) { return next; }",
+        "function _attachProjectedAnchorSceneToLastAssistant() {}",
+        "function _filterRecoveryControlMessages(messages) { return messages; }",
+        "function _hydrateTodosFromSession() {}",
+        "function _replaceMarkerOnlyAssistantWithStreamError() { return null; }",
+        "function _mergeSettledToolCallsWithLiveMetadata(toolCalls) { return toolCalls; }",
+        "function _messageRenderableMessageCount() { return 100; }",
+        "let _currentMessageRenderWindowSize = 50;",
+        "function _isTerminalStreamErrorMarkerMessage() { return false; }",
+        "function syncTopbar() {}",
+        "function renderMessages() {}",
+        "",
+        get_unread,
+        save_unread,
+        migrate,
+        restore,
+        "",
+        "const unread = _getSessionCompletionUnread();",
+        "unread.old = {",
+        "  message_count: 3,",
+        "  completed_at: 7,",
+        "  source: 'completion',",
+        "  manual: true,",
+        "  manual_pending: true,",
+        "};",
+        "unread.final = {",
+        "  message_count: 6,",
+        "  completed_at: 9,",
+        "  source: 'completion',",
+        "  manual: false,",
+        "};",
+        "_saveSessionCompletionUnread();",
+        "saves = 0;",
+        "(async () => {",
+        "  const out = await _restoreSettledSession({}, {});",
+        "  const after = _getSessionCompletionUnread();",
+        "  console.log(JSON.stringify({",
+        "    out,",
+        "    out_saves: saves,",
+        "    old_present: Object.prototype.hasOwnProperty.call(after, 'old'),",
+        "    final_marker: after.final,",
+        "    active_sid: S.session.session_id,",
+        "    api_path: apiRequests[0],",
+        "  }));",
+        "})();",
+    ]
+    return "\n".join(lines)
+
+
+def _apperror_settlement_migration_script() -> str:
+    migrate = _extract("_migrateSessionCompletionUnreadToFinalSession")
+    get_unread = _extract("_getSessionCompletionUnread")
+    save_unread = _extract("_saveSessionCompletionUnread")
+    handler = _extract_message_listener_body("apperror")
+    save_unread = save_unread.replace(
+        "function _saveSessionCompletionUnread() {",
+        "function _saveSessionCompletionUnread() { saves += 1;",
+    )
+    lines = [
+        "const _store = {};",
+        "const localStorage = {",
+        "  getItem: (k) => (k in _store ? _store[k] : null),",
+        "  setItem: (k, v) => { _store[k] = String(v); },",
+        "};",
+        "const SESSION_COMPLETION_UNREAD_KEY = 'u';",
+        "let _sessionCompletionUnread = null;",
+        "let saves = 0;",
+        "let showToastCalled = 0;",
+        "let renderMessagesCalled = 0;",
+        "let renderSessionListCalled = 0;",
+        "let activeSid = 'old';",
+        "let streamId = 'stream-apperror';",
+        "let _persistTimer = null;",
+        "let _streamFinalized = false;",
+        "let _terminalStateReached = false;",
+        "const _allSessions = [];",
+        "let S = {",
+        "  session: {",
+        "    session_id: 'old',",
+        "    message_count: 4,",
+        "    messages: [{ role: 'user', content: 'x' }],",
+        "  },",
+        "  messages: [{ role: 'user', content: 'x' }],",
+        "};",
+        "let assistantText = '';",
+        "function t(key) { return key; }",
+        "function showToast() { showToastCalled += 1; }",
+        "function trackBackgroundError() {}",
+        "function _filterRecoveryControlMessages(messages) { return messages; }",
+        "function _markSessionViewed() {}",
+        "function _setActiveSessionUrl() {}",
+        "function _applyToAnchor() {}",
+        "function clearLiveToolCards() {}",
+        "function _scheduleAnchorRegistryCleanup() {}",
+        "function clearCompressionUi() {}",
+        "function finalizeThinkingCard() {}",
+        "function _clearApprovalForOwner() {}",
+        "function _clearClarifyForOwner() {}",
+        "function _clearOwnerInflightState() {}",
+        "function _clearStreamNotificationBackground() {}",
+        "function _clearStreamHidden() {}",
+        "function _closeSource() {}",
+        "function _setActivePaneIdleIfOwner() {}",
+        "function _clearAnchorProseIncrementalNode() {}",
+        "function _cancelThrottledSnapshotTimer() {}",
+        "function _cancelAnimationFramePendingStreamRender() {}",
+        "function _streamFadeCleanupReduceMotionListener() {}",
+        "function _smdEndParser() {}",
+        "function _bailOutOfTerminalEventsFromStaleStream() { return false; }",
+        "function _flushReasoningToAnchor() {}",
+        "function _streamRecoveryControlMessageText() { return false; }",
+        "function _carryForwardEphemeralTurnFields(_prev, next) { return next; }",
+        "function _attachProjectedAnchorSceneToLastAssistant() {}",
+        "function removeThinking() {}",
+        "function renderMessages() { renderMessagesCalled += 1; }",
+        "function renderSessionList() { renderSessionListCalled += 1; }",
+        "function _clearStreamEndRecovery() {}",
+        "const window = { _compressionUi: {} };",
+        get_unread,
+        save_unread,
+        migrate,
+        "function runApperror(e) {",
+        "  const source = {",
+        "    readyState: 1,",
+        "    close() { this.closed = true; },",
+        "  };",
+        handler,
+        "}",
+        "",
+        "const unread = _getSessionCompletionUnread();",
+        "unread.old = {",
+        "  message_count: 3,",
+        "  completed_at: 7,",
+        "  source: 'completion',",
+        "  manual: true,",
+        "  manual_pending: true,",
+        "};",
+        "unread.final = {",
+        "  message_count: 5,",
+        "  completed_at: 9,",
+        "  source: 'completion',",
+        "  manual: false,",
+        "};",
+        "_saveSessionCompletionUnread();",
+        "saves = 0;",
+        "runApperror({",
+        "  data: JSON.stringify({",
+        "    session_id: 'old',",
+        "    new_session_id: 'final',",
+        "    type: 'error',",
+        "    message: 'provider failed',",
+        "    details: 'detail',",
+        "    session: {",
+        "      session_id: 'final',",
+        "      message_count: 8,",
+        "      messages: [{ role: 'assistant', content: 'final message' }],",
+        "      last_message_at: 77,",
+        "    },",
+        "  }),",
+        "});",
+        "console.log(JSON.stringify({",
+        "  old_present: Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(), 'old'),",
+        "  final_marker: _getSessionCompletionUnread().final,",
+        "  session_sid: S.session && S.session.session_id,",
+        "  message_len: S.messages.length,",
+        "  render_messages_called: renderMessagesCalled,",
+        "  render_list_called: renderSessionListCalled,",
+        "  show_toast_called: showToastCalled,",
+        "  saves,",
+        "}));",
+    ]
+    return "\n".join(lines)
 
 
 def test_acknowledge_visit_clears_completion_unread_marker():
@@ -715,3 +997,24 @@ def test_settled_rotation_merges_manual_state_with_newer_completion_metadata():
     }
     assert out["saves"] == 1
     assert out["session_ids"] == ["final"]
+
+def test_restore_settled_session_migrates_completion_unread_to_final_sid():
+    out = _run_node(_restore_settled_session_migration_script())
+    assert out["old_present"] is False
+    assert out["final_marker"]["manual"] is True
+    assert out["final_marker"].get("manual_pending") is True
+    assert out["out_saves"] == 1
+    assert out["out"] is True
+    assert out["api_path"] == "/api/session?session_id=old"
+
+
+def test_apperror_event_migrates_completion_unread_to_final_sid():
+    out = _run_node(_apperror_settlement_migration_script())
+    assert out["old_present"] is False
+    assert out["final_marker"]["manual"] is True
+    assert out["final_marker"]["manual_pending"] is True
+    assert out["render_messages_called"] == 1
+    assert out["show_toast_called"] == 0
+    assert out["saves"] == 1
+    assert out["session_sid"] == "final"
+
