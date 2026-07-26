@@ -11,7 +11,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.conftest import requires_agent
 from api import agent_tts, routes
+
+
+pytestmark = requires_agent
 
 
 class _Handler:

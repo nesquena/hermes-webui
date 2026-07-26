@@ -466,9 +466,15 @@ else
     fi
     chmod -R u+w "$_stage_src" \
       || error_exit "Failed to make staged hermes-agent source writable (rsync/cp preserved :ro mount perms)"
-    uv pip install "$_stage_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org \
+    # Hermes Agent intentionally blocks wheel/sdist builds. Install the locked
+    # dependency graph into the active WebUI venv without installing the Agent
+    # project itself; runtime imports resolve from the mounted source tree.
+    uv sync --project "$_stage_src" --locked --extra all --active --inexact --no-install-project \
       || error_exit "Failed to install hermes-agent's requirements"
     rm -rf "$_stage_src"
+    # The project itself was intentionally not installed. Make the canonical
+    # read-only source mount importable by the WebUI and every worker child.
+    export PYTHONPATH="$_agent_src${PYTHONPATH:+:$PYTHONPATH}"
   else
     echo ""
     _agent_package_requirement="hermes-agent==0.19.0"

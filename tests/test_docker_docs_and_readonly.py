@@ -155,57 +155,36 @@ def test_docker_md_documents_isolation_model():
     )
 
 
-# ── 5: docker_init.bash stages agent source to a writable build dir ─────────
+# ── 5: docker_init.bash stages Agent source for dependency resolution ────────
 #
-# The :ro mount fixed in PR #2470 broke a second, less obvious surface:
-# `uv pip install "$_agent_src[all]"` invokes setuptools' egg_info build step,
-# which touches `hermes_agent.egg-info/` *inside the source tree* even under
-# PEP 517 build isolation. On a `:ro` mount this returns `EROFS` and (under
-# `set -e`) kills container startup. The fix: copy the source tree into a
-# writable tmpfs build dir, run the install against THAT, then clean up.
-#
-# This was caught the first time the Docker smoke gate ran on its own PR — a
-# real regression that 5800+ source-level pytests had no way to surface
-# because none of them invoked `docker_init.bash` against a real :ro mount.
+# The multi-container source mount is read-only. Hermes Agent now deliberately
+# rejects wheel/sdist builds, so docker_init must sync the locked dependency
+# graph without installing the Agent project itself. Runtime imports continue
+# to resolve from the mounted source tree.
 
 
-def test_docker_init_stages_agent_source_for_writable_install():
-    """docker_init.bash must NOT pass the raw _agent_src path to `uv pip
-    install` — that hits the :ro mount and fails. It must stage the source
-    into a writable build dir first (the staged path is used in the install
-    invocation)."""
+def test_docker_init_syncs_agent_dependencies_without_building_project():
     src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
 
-    # The fix uses a /tmp staging path that's clearly distinct from the
-    # mounted source path. Pin the staging marker.
-    assert "_stage_src=" in src, (
-        "docker_init.bash must declare a _stage_src writable build dir "
-        "before invoking `uv pip install` against the (potentially :ro) "
-        "hermes-agent source."
-    )
-
-    # The install line must reference the staged path, NOT the raw _agent_src
-    # path. The pre-fix code was:
-    #   uv pip install "$_agent_src[all]" ...
-    # The fixed code is:
-    #   uv pip install "$_stage_src[all]" ...
-    install_lines = [
+    assert "_stage_src=" in src
+    sync_lines = [
         line for line in src.splitlines()
-        if "uv pip install" in line and "[all]" in line
+        if "uv sync" in line and "_stage_src" in line
     ]
-    assert install_lines, "expected an `uv pip install ...[all]` line in docker_init.bash"
-    for line in install_lines:
-        assert '"$_agent_src[all]"' not in line, (
-            "docker_init.bash invokes `uv pip install $_agent_src[all]` "
-            "directly — this fails with EROFS when the hermes-agent volume "
-            "is mounted :ro (the production multi-container default). "
-            "Use the writable $_stage_src path instead. "
-            f"Offending line: {line!r}"
-        )
-        assert "_stage_src" in line, (
-            "the `uv pip install ...[all]` line must use the staged writable "
-            f"path. Offending line: {line!r}"
-        )
+    assert sync_lines, "expected an Agent dependency `uv sync` in docker_init.bash"
+    sync_line = sync_lines[0]
+    for flag in (
+        "--locked",
+        "--extra all",
+        "--active",
+        "--inexact",
+        "--no-install-project",
+    ):
+        assert flag in sync_line, f"Agent dependency sync is missing {flag}: {sync_line!r}"
+    assert 'uv pip install "$_stage_src[all]"' not in src
+    source_path = 'export PYTHONPATH="$_agent_src${PYTHONPATH:+:$PYTHONPATH}"'
+    assert source_path in src
+    assert src.index(source_path) < src.index("from tools import tts_tool")
 
 
 def test_docker_init_excludes_egg_info_during_staging():
@@ -224,8 +203,8 @@ def test_docker_init_excludes_egg_info_during_staging():
     # Find the staging block: rsync invocation OR cp-fallback. Both must
     # actually exclude *.egg-info — a comment mention is not enough.
     stage_idx = src.index("_stage_src=")
-    install_idx = src.index("uv pip install", stage_idx)
-    stage_block = src[stage_idx:install_idx]
+    sync_idx = src.index("uv sync", stage_idx)
+    stage_block = src[stage_idx:sync_idx]
 
     # Rsync path must carry --exclude='*.egg-info'.
     assert "--exclude='*.egg-info'" in stage_block, (
@@ -269,18 +248,16 @@ def test_docker_init_makes_staged_dir_writable_after_ro_mount_copy():
     Permission denied" failure on :ro multi-container mounts.
 
     `rsync -a` / `cp -a` preserve the source tree's mode bits, so a hermes-agent
-    source mounted mode 555 leaves the staged copy also mode 555 even though the
-    staging dir itself was created writable by hermeswebui. setuptools then can't
-    create `<pkg>.egg-info/` next to the package and dies with "Permission denied"
-    during `uv pip install`. The fix is a `chmod -R u+w` on the staged tree AFTER
-    both copy paths and BEFORE the install. This test pins that ordering and the
-    `u+w` form (so the staged tree isn't accidentally made world-writable).
+    source mounted mode 555 leaves the staged copy mode 555. Keep the established
+    shared staging hardening even though `uv sync --no-install-project` avoids the
+    old setuptools build: `chmod -R u+w` must run after either copy path and before
+    dependency resolution.
     """
     src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
 
     stage_idx = src.index("_stage_src=")
-    install_idx = src.index("uv pip install", stage_idx)
-    stage_block = src[stage_idx:install_idx]
+    sync_idx = src.index("uv sync", stage_idx)
+    stage_block = src[stage_idx:sync_idx]
 
     # The fix MUST add owner-write to the staged tree after the rsync/cp copy.
     # A naked `chmod` call that strips 0555 (or equivalent) would also work,

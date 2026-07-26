@@ -16,6 +16,9 @@ def test_clean_container_installs_pinned_agent_package_when_source_is_absent():
 
 
 def test_container_dependency_setup_verifies_agent_tts_imports():
+    source_path = 'export PYTHONPATH="$_agent_src${PYTHONPATH:+:$PYTHONPATH}"'
+    assert source_path in INIT
+    assert INIT.index(source_path) < INIT.index("from tools import tts_tool")
     assert "from tools import tts_tool" in INIT
     assert "from hermes_cli import config, tools_config" in INIT
     assert 'error_exit "Hermes Agent TTS imports are unavailable"' in INIT
