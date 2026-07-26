@@ -9426,6 +9426,8 @@ from api.models import (
     _clear_webui_zero_message_orphan_tombstone,
     _load_webui_deleted_session_tombstone,
     _record_webui_deleted_session_tombstone,
+    _save_session_draft,
+    _delete_session_draft,
     ensure_cron_project,
     _profile_has_user_projects,
     is_cron_session,
@@ -14777,7 +14779,7 @@ def handle_post(handler, parsed) -> bool:
                 # current chat every few seconds while the user is typing, and that
                 # delayed reload can restore an older draft over newer local input.
                 _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
+                _save_session_draft(sid, next_draft)
                 _draft_mark("after_save")
                 saved_draft = s.composer_draft
         _draft_mark("released_lock")
@@ -14911,6 +14913,7 @@ def handle_post(handler, parsed) -> bool:
                 p.relative_to(SESSION_DIR.resolve())
             except Exception:
                 return bad(handler, "Invalid session_id", 400)
+            _delete_session_draft(sid)
             sidecar_deleted = False
             try:
                 p.unlink(missing_ok=True)
@@ -20668,6 +20671,7 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
             if should_delete:
                 with LOCK:
                     SESSIONS.pop(p.stem, None)
+                _delete_session_draft(p.stem)
                 p.unlink(missing_ok=True)
                 cleaned += 1
                 phase1_removed_ids.add(p.stem)
