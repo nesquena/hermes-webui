@@ -441,6 +441,42 @@ def test_generic_subagent_title_gets_goal_display_title(_isolate):
         conn.close()
 
 
+def test_generic_subagent_title_uses_goal_when_state_db_title_is_null(_isolate):
+    """Current Agent children leave state.db.title null while WebUI keeps the generic sidecar title."""
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_api_subagent_null_title", title="Subagent Session", updated_at=t0)
+        _insert_state_row(
+            conn,
+            "lineage_api_subagent_null_title",
+            source="subagent",
+            started_at=t0,
+        )
+        conn.execute(
+            "UPDATE sessions SET title = NULL WHERE id = ?",
+            ("lineage_api_subagent_null_title",),
+        )
+        conn.commit()
+        _insert_state_message(
+            conn,
+            "lineage_api_subagent_null_title",
+            role="user",
+            content="Research lesser-known coding agent harnesses",
+            timestamp=t0 + 1,
+        )
+
+        row = {row["session_id"]: row for row in all_sessions(include_lineage_metadata=False)}[
+            "lineage_api_subagent_null_title"
+        ]
+
+        assert row["title"] == "Subagent Session"
+        assert row["display_title"] == "Research lesser-known coding agent harnesses"
+    finally:
+        conn.close()
+
+
 def test_custom_subagent_title_stays_authoritative(_isolate):
     conn = _ensure_state_db(_isolate)
     _ensure_messages_table(conn)

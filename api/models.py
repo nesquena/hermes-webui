@@ -5507,7 +5507,10 @@ def _read_state_db_sidebar_overrides(
                     if (
                         state_source == 'subagent'
                         and sid in count_wanted
-                        and ' '.join(state_title.split()) == 'Subagent Session'
+                        and (
+                            not state_title
+                            or ' '.join(state_title.split()) == 'Subagent Session'
+                        )
                     ):
                         delegated_title_ids.add(sid)
                     if state_source:
