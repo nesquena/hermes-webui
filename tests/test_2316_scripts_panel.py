@@ -1430,6 +1430,430 @@ eval(extractFunc('_switchProfileForSessionLoad'));
     }
 
 
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_session_load_profile_switch_treats_already_active_profile_as_success():
+    js = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+let _profileSwitchOpeningExistingSession = false;
+const S = { activeProfile: 'b' };
+const calls = [];
+async function switchToProfile(name){
+  calls.push(name);
+  return false;
+}
+eval(extractFunc('_switchProfileForSessionLoad'));
+(async () => {
+  const result = await _switchProfileForSessionLoad('b');
+  console.log(JSON.stringify({ result, calls, guard: _profileSwitchOpeningExistingSession }));
+})().catch(err => { console.error(err); process.exit(1); });
+"""
+    assert json.loads(_run_node(source)) == {
+        "result": True,
+        "calls": [],
+        "guard": False,
+    }
+
+
+def test_loadsession_retries_when_mismatch_target_is_already_active():
+    """A 409 target that became active before the helper runs must still retry once."""
+    result = _run_playwright_probe(
+        """
+        async () => {
+          const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+          const settle = async (cycles = 4) => {
+            for (let i = 0; i < cycles; i += 1) await tick();
+          };
+          const deferred = () => {
+            let resolve;
+            let reject;
+            const promise = new Promise((res, rej) => {
+              resolve = res;
+              reject = rej;
+            });
+            return { promise, resolve, reject };
+          };
+
+          const calls = [];
+          const toasts = [];
+          const firstMetadata = deferred();
+          let metadataCalls = 0;
+
+          window.api = async (url, opts) => {
+            const sidMatch = /session_id=([^&]+)/.exec(url);
+            calls.push({
+              url,
+              sid: sidMatch ? decodeURIComponent(sidMatch[1]) : null,
+              profile: S.activeProfile,
+              loadingSessionId: typeof _loadingSessionId !== 'undefined' ? _loadingSessionId : null,
+              loadGeneration: typeof _loadSessionGeneration !== 'undefined' ? _loadSessionGeneration : null,
+            });
+            if (url === '/api/profile/switch') {
+              const body = JSON.parse(opts.body);
+              return { active: body.name, is_default: false };
+            }
+            if (url === '/api/session?session_id=foreign&messages=0&resolve_model=0') {
+              metadataCalls += 1;
+              if (metadataCalls === 1) {
+                return firstMetadata.promise;
+              }
+              return {
+                session: {
+                  session_id: 'foreign',
+                  message_count: 0,
+                  updated_at: 1,
+                  last_message_at: 1,
+                  pending_attachments: [],
+                  active_stream_id: null,
+                  profile: 'b',
+                },
+              };
+            }
+            throw new Error('unexpected api ' + url);
+          };
+
+          window.showToast = (message) => {
+            toasts.push({ message, profileBefore: S.activeProfile });
+          };
+          window.renderSessionList = async () => {};
+          window.loadDir = async () => {};
+          window.t = (key, value) => key === 'profile_switched' ? `Switched to ${value}` : key;
+          window._refreshProfileSwitchBackground = () => {};
+          window.animateNextSessionListRefresh = () => {};
+          window.startGatewaySSE = () => {};
+          window._resetCronUnreadForProfileSwitch = () => {};
+          window._clearPersistedModelState = () => {};
+          window.refreshProfileTransitionReasoningChip = () => {};
+          window._setProfileSwitchListEmbargo = () => {};
+          window.showSessionListSkeleton = () => {};
+          window.bumpWorkspaceTreeGen = () => {};
+          window.showWorkspaceTreeSkeleton = () => {};
+          window.clearWorkspaceTreeSkeleton = () => {};
+          window.renderSessionListFromCache = () => {};
+          window._openProfileSwitchSessionBrowser = () => {};
+          window.applyBotName = () => {};
+          window._saveComposerDraftNow = async () => {};
+          window.stopApprovalPolling = () => {};
+          window.hideApprovalCard = () => {};
+          window.stopSessionStream = () => {};
+          window._updateYoloPill = () => {};
+          window.stopClarifyPolling = () => {};
+          window.hideClarifyCard = () => {};
+          window._uploadPendingFilesSyncProgressForSession = () => {};
+          window._clearQueueCardDisplay = () => {};
+          window._sessionVisitHasUnreadState = () => false;
+          window._clearSameSessionForceReloadHint = () => {};
+          window._clearDeferredActiveSessionExternalRefresh = () => {};
+          window._clearEmptyComposerModelOverride = () => {};
+          window._hydrateTodosFromSession = () => {};
+          window._applyPendingSessionModelForSession = () => {};
+          window._resolveSessionModelForDisplaySoon = () => {};
+          window._setActiveSessionUrl = () => {};
+          window.startSessionStream = () => {};
+          window._ensureMessagesLoaded = async () => {
+            S.messages = [{ role: 'user', content: 'retried once' }];
+          };
+          window.renderMessages = () => {};
+          window.syncTopbar = () => {};
+          window._acknowledgeSessionVisit = () => {};
+          window.setBusy = () => {};
+          window.setComposerStatus = () => {};
+          window._deferWorkspaceRefreshForSession = () => {};
+          window.startApprovalPolling = () => {};
+          window.startClarifyPolling = () => {};
+          window._fetchYoloState = () => {};
+          window.populateModelDropdown = null;
+          window._hermesNotifySessionOpen = null;
+
+          _currentPanel = 'chat';
+          _workspacePanelMode = 'closed';
+          S.activeProfile = 'a';
+          S.activeProfileIsDefault = false;
+          S.session = null;
+          S.messages = [];
+          S.toolCalls = [];
+          S.pendingFiles = [];
+          S.busy = false;
+          S.activeStreamId = null;
+
+          const loadPromise = loadSession('foreign');
+          await settle();
+
+          await switchToProfile('b');
+          await settle();
+
+          const err = new Error('profile mismatch');
+          err.status = 409;
+          err.body = JSON.stringify({
+            code: 'session_profile_mismatch',
+            profile: 'b',
+            session_id: 'foreign',
+          });
+          firstMetadata.reject(err);
+          await loadPromise;
+          await settle();
+
+          return {
+            calls: calls.filter(call => (
+              call.url === '/api/profile/switch' ||
+              call.url.startsWith('/api/session?session_id=')
+            )),
+            toasts,
+            profile: S.activeProfile,
+            sessionId: S.session && S.session.session_id,
+            loadingSessionId: typeof _loadingSessionId !== 'undefined' ? _loadingSessionId : null,
+            loadGeneration: typeof _loadSessionGeneration !== 'undefined' ? _loadSessionGeneration : null,
+          };
+        }
+        """
+    )
+
+    assert result["calls"] == [
+        {
+            "url": "/api/session?session_id=foreign&messages=0&resolve_model=0",
+            "sid": "foreign",
+            "profile": "a",
+            "loadingSessionId": "foreign",
+            "loadGeneration": 1,
+        },
+        {
+            "url": "/api/profile/switch",
+            "sid": None,
+            "profile": "a",
+            "loadingSessionId": "foreign",
+            "loadGeneration": 1,
+        },
+        {
+            "url": "/api/session?session_id=foreign&messages=0&resolve_model=0",
+            "sid": "foreign",
+            "profile": "b",
+            "loadingSessionId": "foreign",
+            "loadGeneration": 2,
+        },
+    ]
+    assert result["profile"] == "b"
+    assert result["sessionId"] == "foreign"
+    assert result["loadingSessionId"] is None
+    assert result["loadGeneration"] == 2
+    mismatch_toasts = [
+        toast for toast in result["toasts"]
+        if toast["message"].startswith("Switching to b profile for this session")
+    ]
+    assert len(mismatch_toasts) == 1
+    assert mismatch_toasts[0]["profileBefore"] == "b"
+
+
+def test_stale_loadsession_profile_switch_keeps_newer_loading_owner():
+    """A stale mismatched load must not clear or retry over a newer current load."""
+    result = _run_playwright_probe(
+        """
+        async () => {
+          const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+          const settle = async (cycles = 4) => {
+            for (let i = 0; i < cycles; i += 1) await tick();
+          };
+          const deferred = () => {
+            let resolve;
+            let reject;
+            const promise = new Promise((res, rej) => {
+              resolve = res;
+              reject = rej;
+            });
+            return { promise, resolve, reject };
+          };
+
+          const switchDeferred = deferred();
+          const newerMetadata = deferred();
+          const calls = [];
+
+          window.switchToProfile = async (name) => {
+            calls.push({
+              kind: 'switch',
+              name,
+              profile: S.activeProfile,
+              loadingSessionId: typeof _loadingSessionId !== 'undefined' ? _loadingSessionId : null,
+              loadGeneration: typeof _loadSessionGeneration !== 'undefined' ? _loadSessionGeneration : null,
+            });
+            await switchDeferred.promise;
+            S.activeProfile = name;
+            S.activeProfileIsDefault = false;
+            return true;
+          };
+          window.api = async (url) => {
+            const sidMatch = /session_id=([^&]+)/.exec(url);
+            calls.push({
+              kind: 'api',
+              url,
+              sid: sidMatch ? decodeURIComponent(sidMatch[1]) : null,
+              profile: S.activeProfile,
+              loadingSessionId: typeof _loadingSessionId !== 'undefined' ? _loadingSessionId : null,
+              loadGeneration: typeof _loadSessionGeneration !== 'undefined' ? _loadSessionGeneration : null,
+            });
+            if (url === '/api/session?session_id=foreign&messages=0&resolve_model=0') {
+              const err = new Error('profile mismatch');
+              err.status = 409;
+              err.body = JSON.stringify({
+                code: 'session_profile_mismatch',
+                profile: 'b',
+                session_id: 'foreign',
+              });
+              throw err;
+            }
+            if (url === '/api/session?session_id=newer&messages=0&resolve_model=0') {
+              return newerMetadata.promise;
+            }
+            throw new Error('unexpected api ' + url);
+          };
+
+          window.showToast = () => {};
+          window._saveComposerDraftNow = async () => {};
+          window.stopApprovalPolling = () => {};
+          window.hideApprovalCard = () => {};
+          window.stopSessionStream = () => {};
+          window._updateYoloPill = () => {};
+          window.stopClarifyPolling = () => {};
+          window.hideClarifyCard = () => {};
+          window._uploadPendingFilesSyncProgressForSession = () => {};
+          window._clearQueueCardDisplay = () => {};
+          window._sessionVisitHasUnreadState = () => false;
+          window._clearSameSessionForceReloadHint = () => {};
+          window._clearDeferredActiveSessionExternalRefresh = () => {};
+          window._clearEmptyComposerModelOverride = () => {};
+          window._hydrateTodosFromSession = () => {};
+          window._applyPendingSessionModelForSession = () => {};
+          window._resolveSessionModelForDisplaySoon = () => {};
+          window._setActiveSessionUrl = () => {};
+          window.startSessionStream = () => {};
+          window._ensureMessagesLoaded = async () => {
+            S.messages = [{ role: 'user', content: 'newer load wins' }];
+          };
+          window.renderMessages = () => {};
+          window.syncTopbar = () => {};
+          window._acknowledgeSessionVisit = () => {};
+          window.setBusy = () => {};
+          window.setComposerStatus = () => {};
+          window._deferWorkspaceRefreshForSession = () => {};
+          window.startApprovalPolling = () => {};
+          window.startClarifyPolling = () => {};
+          window._fetchYoloState = () => {};
+          window.populateModelDropdown = null;
+          window._hermesNotifySessionOpen = null;
+
+          S.activeProfile = 'a';
+          S.activeProfileIsDefault = false;
+          S.session = { session_id: 'current', message_count: 0, updated_at: 0, last_message_at: 0 };
+          S.messages = [];
+          S.toolCalls = [];
+          S.pendingFiles = [];
+          S.busy = false;
+          S.activeStreamId = null;
+
+          const first = loadSession('foreign');
+          await settle();
+
+          const second = loadSession('newer');
+          await settle();
+
+          const beforeSwitchResolve = {
+            loadingSessionId: typeof _loadingSessionId !== 'undefined' ? _loadingSessionId : null,
+            loadGeneration: typeof _loadSessionGeneration !== 'undefined' ? _loadSessionGeneration : null,
+          };
+
+          switchDeferred.resolve();
+          await settle();
+
+          const afterSwitchResolve = {
+            loadingSessionId: typeof _loadingSessionId !== 'undefined' ? _loadingSessionId : null,
+            loadGeneration: typeof _loadSessionGeneration !== 'undefined' ? _loadSessionGeneration : null,
+          };
+
+          newerMetadata.resolve({
+            session: {
+              session_id: 'newer',
+              message_count: 0,
+              updated_at: 2,
+              last_message_at: 2,
+              pending_attachments: [],
+              active_stream_id: null,
+              profile: 'a',
+            },
+          });
+          await first;
+          await second;
+          await settle();
+
+          return {
+            beforeSwitchResolve,
+            afterSwitchResolve,
+            final: {
+              sessionId: S.session && S.session.session_id,
+              profile: S.activeProfile,
+              loadingSessionId: typeof _loadingSessionId !== 'undefined' ? _loadingSessionId : null,
+              loadGeneration: typeof _loadSessionGeneration !== 'undefined' ? _loadSessionGeneration : null,
+            },
+            calls,
+          };
+        }
+        """
+    )
+
+    assert result["beforeSwitchResolve"] == {
+        "loadingSessionId": "newer",
+        "loadGeneration": 2,
+    }
+    assert result["afterSwitchResolve"] == {
+        "loadingSessionId": "newer",
+        "loadGeneration": 2,
+    }
+    assert result["final"] == {
+        "sessionId": "newer",
+        "profile": "b",
+        "loadingSessionId": None,
+        "loadGeneration": 2,
+    }
+    relevant = [
+        {
+            "kind": call["kind"],
+            "sid": call.get("sid"),
+            "url": call.get("url"),
+            "name": call.get("name"),
+            "profile": call["profile"],
+            "loadingSessionId": call["loadingSessionId"],
+            "loadGeneration": call["loadGeneration"],
+        }
+        for call in result["calls"]
+        if call["kind"] == "switch" or call.get("url", "").startswith("/api/session?session_id=")
+    ]
+    assert relevant == [
+        {
+            "kind": "api",
+            "sid": "foreign",
+            "url": "/api/session?session_id=foreign&messages=0&resolve_model=0",
+            "name": None,
+            "profile": "a",
+            "loadingSessionId": "foreign",
+            "loadGeneration": 1,
+        },
+        {
+            "kind": "switch",
+            "sid": None,
+            "url": None,
+            "name": "b",
+            "profile": "a",
+            "loadingSessionId": "foreign",
+            "loadGeneration": 1,
+        },
+        {
+            "kind": "api",
+            "sid": "newer",
+            "url": "/api/session?session_id=newer&messages=0&resolve_model=0",
+            "name": None,
+            "profile": "a",
+            "loadingSessionId": "newer",
+            "loadGeneration": 2,
+        },
+    ]
+
+
 def test_session_load_profile_switch_clears_scripts_dom_before_destination_render():
     """The real session-load ingress must retire prior-profile Scripts DOM before B renders."""
     result = _run_playwright_probe(
@@ -1789,15 +2213,28 @@ const switchCalls = [];
 const toasts = [];
 let rearmCalls = 0;
 let startSessionStreamCalls = 0;
+let renderMessagesCalls = 0;
+let renderTrayCalls = 0;
+let syncTopbarCalls = 0;
+let clearPendingSelectionsCalls = 0;
+let restoredSelections = null;
 const msgInner = { innerHTML: '' };
-const window = { _clearPendingSelections() {} };
+const window = {
+  _clearPendingSelections() { clearPendingSelectionsCalls += 1; },
+  _snapshotPendingSelections() {
+    return [{ id: 'ctx-1', name: 'Context 1', text: 'selected block' }];
+  },
+  _restorePendingSelections(selections) {
+    restoredSelections = selections;
+  },
+};
 const localStorage = { removeItem() {}, getItem() { return null; } };
 const history = { replaceState() {} };
 const S = {
   session: { session_id: 'current', message_count: 0 },
-  messages: [],
-  toolCalls: [],
-  pendingFiles: [],
+  messages: [{ role: 'assistant', content: 'current transcript' }],
+  toolCalls: [{ id: 'old-tool' }],
+  pendingFiles: [{ name: 'report.txt' }],
   busy: false,
   activeStreamId: null,
 };
@@ -1826,6 +2263,12 @@ function _acknowledgeSessionVisit() {}
 function _clearSameSessionForceReloadHint() {}
 function _clearStuckSessionOnBoot() {}
 function _appRootPath() { return '/'; }
+function renderMessages() {
+  renderMessagesCalls += 1;
+  msgInner.innerHTML = S.messages.map(m => m.content || '').join('\\n');
+}
+function renderTray() { renderTrayCalls += 1; }
+function syncTopbar() { syncTopbarCalls += 1; }
 function startSessionStream() { startSessionStreamCalls += 1; }
 function showToast(message) { toasts.push(message); }
 async function _switchProfileForSessionLoad(profile) {
@@ -1846,14 +2289,25 @@ async function api(url) {
 eval(extractFunc('_sessionProfileMismatchFromError'));
 eval(extractFunc('loadSession'));
 (async () => {
+  renderMessages();
   await loadSession('foreign');
   console.log(JSON.stringify({
     apiCalls,
     switchCalls,
     toasts,
     rearmCalls,
+    renderMessagesCalls,
+    renderTrayCalls,
+    syncTopbarCalls,
     startSessionStreamCalls,
+    clearPendingSelectionsCalls,
     loadingSessionId: _loadingSessionId,
+    sessionId: S.session && S.session.session_id,
+    messages: S.messages,
+    toolCalls: S.toolCalls,
+    pendingFiles: S.pendingFiles,
+    restoredSelections,
+    msgInner: msgInner.innerHTML,
   }));
 })().catch(err => { console.error(err); process.exit(1); });
 """
@@ -1861,10 +2315,244 @@ eval(extractFunc('loadSession'));
     assert result["apiCalls"] == ["/api/session?session_id=foreign&messages=0&resolve_model=0"]
     assert result["switchCalls"] == ["other"]
     assert result["rearmCalls"] == 2
+    assert result["renderMessagesCalls"] == 2
+    assert result["renderTrayCalls"] == 1
+    assert result["syncTopbarCalls"] == 1
     assert result["startSessionStreamCalls"] == 0
+    assert result["clearPendingSelectionsCalls"] == 1
     assert result["loadingSessionId"] is None
+    assert result["sessionId"] == "current"
+    assert result["messages"] == [{"role": "assistant", "content": "current transcript"}]
+    assert result["toolCalls"] == [{"id": "old-tool"}]
+    assert result["pendingFiles"] == [{"name": "report.txt"}]
+    assert result["restoredSelections"] == [{"id": "ctx-1", "name": "Context 1", "text": "selected block"}]
+    assert result["msgInner"] == "current transcript"
     assert len(result["toasts"]) == 1
     assert result["toasts"][0].startswith("Switching to other profile for this session")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_stale_failed_profile_switch_does_not_restore_over_newer_session():
+    sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(sessions_js) + """
+const apiCalls = [];
+const switchCalls = [];
+let rearmCalls = 0;
+let renderMessagesCalls = 0;
+let renderTrayCalls = 0;
+let restoredSelections = null;
+const msgInner = { innerHTML: '' };
+const deferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+};
+const settle = async (cycles = 4) => {
+  for (let i = 0; i < cycles; i += 1) {
+    await Promise.resolve();
+  }
+};
+const switchDeferred = deferred();
+const newerMetadata = deferred();
+const document = {
+  getElementById() { return null; },
+};
+const window = {
+  _clearPendingSelections() {},
+  _snapshotPendingSelections() {
+    return [{ id: 'ctx-1', name: 'Context 1', text: 'selected block' }];
+  },
+  _restorePendingSelections(selections) {
+    restoredSelections = selections;
+  },
+};
+const localStorage = { removeItem() {}, getItem() { return null; } };
+const history = { replaceState() {} };
+const S = {
+  activeProfile: 'a',
+  activeProfileIsDefault: false,
+  session: { session_id: 'current', message_count: 0, updated_at: 0, last_message_at: 0 },
+  messages: [{ role: 'assistant', content: 'current transcript' }],
+  toolCalls: [{ id: 'old-tool' }],
+  pendingFiles: [{ name: 'report.txt' }],
+  busy: false,
+  activeStreamId: null,
+};
+let _loadingSessionId = null;
+let _loadSessionGeneration = 0;
+let _loadingOlder = false;
+let _pendingCarryForwardSnapshot = null;
+let _messagesTruncated = false;
+let _oldestIdx = 0;
+let _yoloEnabled = false;
+const INFLIGHT = {};
+function $(id) { return id === 'msgInner' ? msgInner : null; }
+function _resolveSessionIdFromSidebarLineage(sid) { return sid; }
+function _hermesNotifySessionOpen() { return null; }
+function _rearmActiveSessionStream() { rearmCalls += 1; }
+function _selectLiveRecoveryInflight() { return null; }
+function stopApprovalPolling() {}
+function hideApprovalCard() {}
+function stopSessionStream() {}
+function _updateYoloPill() {}
+function stopClarifyPolling() {}
+function hideClarifyCard() {}
+async function _saveComposerDraftNow() {}
+function _clearQueueCardDisplay() {}
+function _sessionVisitHasUnreadState() { return false; }
+function _acknowledgeSessionVisit() {}
+function _clearSameSessionForceReloadHint() {}
+function _clearStuckSessionOnBoot() {}
+function _appRootPath() { return '/'; }
+function renderMessages() {
+  renderMessagesCalls += 1;
+  msgInner.innerHTML = S.messages.map(m => m.content || '').join('\\n');
+}
+function renderTray() { renderTrayCalls += 1; }
+function syncTopbar() {}
+function startSessionStream() {}
+function showToast() {}
+async function _switchProfileForSessionLoad(profile) {
+  switchCalls.push({
+    profile,
+    loadingSessionId: _loadingSessionId,
+    loadGeneration: _loadSessionGeneration,
+  });
+  await switchDeferred.promise;
+  return false;
+}
+async function api(url) {
+  apiCalls.push({
+    url,
+    profile: S.activeProfile,
+    loadingSessionId: _loadingSessionId,
+    loadGeneration: _loadSessionGeneration,
+  });
+  if (url === '/api/session?session_id=foreign&messages=0&resolve_model=0') {
+    const err = new Error('profile mismatch');
+    err.status = 409;
+    err.body = JSON.stringify({
+      code: 'session_profile_mismatch',
+      profile: 'other',
+      session_id: 'foreign',
+    });
+    throw err;
+  }
+  if (url === '/api/session?session_id=newer&messages=0&resolve_model=0') {
+    return newerMetadata.promise;
+  }
+  throw new Error('unexpected api ' + url);
+}
+async function _ensureMessagesLoaded(sid) {
+  if (sid === 'newer') {
+    S.messages = [{ role: 'assistant', content: 'newer transcript' }];
+  }
+}
+function _uploadPendingFilesSyncProgressForSession() {}
+function _clearDeferredActiveSessionExternalRefresh() {}
+function _clearEmptyComposerModelOverride() {}
+function _hydrateTodosFromSession() {}
+function _applyPendingSessionModelForSession() {}
+function _resolveSessionModelForDisplaySoon() {}
+function _setActiveSessionUrl() {}
+function _mergePendingSessionMessage() {}
+function setBusy() {}
+function setStatus() {}
+function setComposerStatus() {}
+function updateSendBtn() {}
+function updateQueueBadge() {}
+function loadDir() { return Promise.resolve(); }
+function _deferWorkspaceRefreshForSession() {}
+function startApprovalPolling() {}
+function startClarifyPolling() {}
+function _fetchYoloState() {}
+function refreshSessionList() { return Promise.resolve(); }
+function _announceNewSessionWorkspace() {}
+function _isMessagingSession() { return false; }
+function _isSessionActivelyViewedForList() { return true; }
+function _hideHandoffHint() {}
+function renderSessionArtifacts() {}
+const populateModelDropdown = null;
+eval(extractFunc('_sessionProfileMismatchFromError'));
+eval(extractFunc('loadSession'));
+(async () => {
+  renderMessages();
+  const first = loadSession('foreign');
+  await settle();
+  const second = loadSession('newer');
+  await settle();
+  newerMetadata.resolve({
+    session: {
+      session_id: 'newer',
+      message_count: 0,
+      updated_at: 2,
+      last_message_at: 2,
+      pending_attachments: [],
+      active_stream_id: null,
+      profile: 'a',
+    },
+  });
+  await settle();
+  switchDeferred.resolve();
+  await first;
+  await second;
+  await settle();
+  console.log(JSON.stringify({
+    apiCalls,
+    switchCalls,
+    rearmCalls,
+    renderMessagesCalls,
+    renderTrayCalls,
+    restoredSelections,
+    loadingSessionId: _loadingSessionId,
+    loadGeneration: _loadSessionGeneration,
+    sessionId: S.session && S.session.session_id,
+    messages: S.messages,
+    toolCalls: S.toolCalls,
+    pendingFiles: S.pendingFiles,
+    msgInner: msgInner.innerHTML,
+  }));
+})().catch(err => { console.error(err); process.exit(1); });
+"""
+    result = json.loads(_run_node(source))
+    assert [
+        {
+            "url": call["url"],
+            "profile": call["profile"],
+            "loadingSessionId": call["loadingSessionId"],
+            "loadGeneration": call["loadGeneration"],
+        }
+        for call in result["apiCalls"]
+    ] == [
+        {
+            "url": "/api/session?session_id=foreign&messages=0&resolve_model=0",
+            "profile": "a",
+            "loadingSessionId": "foreign",
+            "loadGeneration": 1,
+        },
+        {
+            "url": "/api/session?session_id=newer&messages=0&resolve_model=0",
+            "profile": "a",
+            "loadingSessionId": "newer",
+            "loadGeneration": 2,
+        },
+    ]
+    assert result["switchCalls"] == [{
+        "profile": "other",
+        "loadingSessionId": "foreign",
+        "loadGeneration": 1,
+    }]
+    assert result["renderTrayCalls"] == 0
+    assert result["restoredSelections"] is None
+    assert result["loadingSessionId"] is None
+    assert result["loadGeneration"] == 2
+    assert result["sessionId"] == "newer"
+    assert result["messages"] == [{"role": "assistant", "content": "newer transcript"}]
+    assert result["msgInner"] == "newer transcript"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -2096,6 +2784,163 @@ eval(extractFunc('_renderScriptsList'));
     assert result["cachedSource"] == "#!/bin/bash\necho test\n"
     assert result["rerenderedSource"] == "#!/bin/bash\necho test\n"
     assert result["loaded"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_scripts_panel_parallel_raw_source_loads_keep_each_expanded_card_owned():
+    """A second expanded script must not invalidate the first card's rightful raw response."""
+    js = PANELS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""{_extract_func_script(js)}
+function escapeHtml(value) {{
+  return String(value == null ? '' : value).replace(/[&<>\"']/g, ch => (
+    {{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}}[ch]
+  ));
+}}
+function unescapeHtml(value) {{
+  return String(value)
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '\"')
+    .replace(/&#39;/g, \"'\")
+    .replace(/&amp;/g, '&');
+}}
+class FakeClassList {{
+  constructor() {{ this.items = new Set(); }}
+  add(name) {{ this.items.add(name); }}
+  remove(name) {{ this.items.delete(name); }}
+  toggle(name) {{
+    if (this.items.has(name)) {{ this.items.delete(name); return false; }}
+    this.items.add(name);
+    return true;
+  }}
+  contains(name) {{ return this.items.has(name); }}
+}}
+class FakeElement {{
+  constructor(kind='div') {{
+    this.kind = kind;
+    this.children = [];
+    this.style = {{}};
+    this.listeners = {{}};
+    this.classList = new FakeClassList();
+    this._innerHTML = '';
+    this._textContent = '';
+  }}
+  appendChild(child) {{
+    this.children.push(child);
+    return child;
+  }}
+  addEventListener(type, handler) {{
+    this.listeners[type] = handler;
+  }}
+  setAttribute(name, value) {{
+    this[name] = String(value);
+  }}
+  querySelector(selector) {{
+    if (selector === '.script-header') return this.header || null;
+    if (selector === '.script-source') return this.source || null;
+    if (selector === '.script-expand') return this.expand || null;
+    if (selector === 'code') return this.code || null;
+    return null;
+  }}
+  set innerHTML(html) {{
+    this._innerHTML = html;
+    this.children = [];
+    this.header = null;
+    this.source = null;
+    this.code = null;
+    this.expand = null;
+    if (!html) return;
+    if (html.includes('script-header')) {{
+      const header = new FakeElement('header');
+      const source = new FakeElement('source');
+      const code = new FakeElement('code');
+      const expand = new FakeElement('expand');
+      const match = html.match(/<code class="[^"]*">([\\s\\S]*)<\\/code>/);
+      code.textContent = match ? unescapeHtml(match[1]) : '';
+      source.style.display = 'none';
+      source.querySelector = selector => selector === 'code' ? code : null;
+      this.header = header;
+      this.source = source;
+      this.code = code;
+      header.querySelector = selector => selector === '.script-expand' ? expand : null;
+      this.expand = expand;
+    }}
+  }}
+  get innerHTML() {{ return this._innerHTML; }}
+  set textContent(value) {{ this._textContent = String(value); }}
+  get textContent() {{ return this._textContent; }}
+}}
+const box = new FakeElement('box');
+const document = {{ createElement(){{ return new FakeElement(); }} }};
+const window = {{ Prism: null }};
+let _scriptsRawRequestId = 0;
+function $(id){{ return id === 'scriptsList' ? box : null; }}
+function esc(value){{ return escapeHtml(value); }}
+function t(key){{
+  if (key === 'scripts_no_scripts') return 'No scripts';
+  if (key === 'scripts_load_error') return 'Failed to load source.';
+  if (key === 'loading') return 'Loading...';
+  return key;
+}}
+const pending = new Map();
+const apiCalls = [];
+async function api(url) {{
+  apiCalls.push(url);
+  return new Promise(resolve => {{
+    pending.set(url, resolve);
+  }});
+}}
+eval(extractFunc('_renderScriptsList'));
+(async () => {{
+  const scripts = [
+    {{ name: 'a.py', description: '' }},
+    {{ name: 'b.py', description: '' }},
+  ];
+  _renderScriptsList(scripts);
+  const first = box.children[0];
+  const second = box.children[1];
+  const firstPromise = first.querySelector('.script-header').listeners.click();
+  const secondPromise = second.querySelector('.script-header').listeners.click();
+  pending.get('/api/scripts/raw?path=a.py')({{ source: 'print(\"A\")\\n' }});
+  await firstPromise;
+  const firstSettled = {{
+    firstText: first.querySelector('.script-source').querySelector('code').textContent,
+    secondText: second.querySelector('.script-source').querySelector('code').textContent,
+    firstLoaded: !!scripts[0]._loaded,
+    secondLoaded: !!scripts[1]._loaded,
+  }};
+  pending.get('/api/scripts/raw?path=b.py')({{ source: 'print(\"B\")\\n' }});
+  await secondPromise;
+  console.log(JSON.stringify({{
+    apiCalls,
+    firstSettled,
+    final: {{
+      firstText: first.querySelector('.script-source').querySelector('code').textContent,
+      secondText: second.querySelector('.script-source').querySelector('code').textContent,
+      firstLoaded: !!scripts[0]._loaded,
+      secondLoaded: !!scripts[1]._loaded,
+    }},
+  }}));
+}})().catch(err => {{ console.error(err); process.exit(1); }});
+"""
+    result = json.loads(_run_node(source))
+    assert result["apiCalls"] == [
+        "/api/scripts/raw?path=a.py",
+        "/api/scripts/raw?path=b.py",
+    ]
+    assert result["firstSettled"] == {
+        "firstText": 'print("A")\n',
+        "secondText": "Loading...",
+        "firstLoaded": True,
+        "secondLoaded": False,
+    }
+    assert result["final"] == {
+        "firstText": 'print("A")\n',
+        "secondText": 'print("B")\n',
+        "firstLoaded": True,
+        "secondLoaded": True,
+    }
+
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_scripts_panel_keeps_source_hidden_if_card_collapses_before_fetch_settles():

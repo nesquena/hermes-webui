@@ -1629,7 +1629,7 @@ function _sessionProfileMismatchFromError(e){
 async function _switchProfileForSessionLoad(profile){
   const name=String(profile||'').trim();
   if(!name) throw new Error('missing profile');
-  if(name===S.activeProfile) return;
+  if(name===S.activeProfile) return true;
   _profileSwitchOpeningExistingSession=true;
   try{
     return await switchToProfile(name);
@@ -1659,6 +1659,21 @@ async function loadSession(sid){
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
   const sameSessionForceReload = forceReload && currentSid===sid;
+  const _previousConversationOnSwitchFailure = (currentSid && currentSid !== sid)
+    ? {
+        session: S.session,
+        messages: Array.isArray(S.messages) ? [...S.messages] : [],
+        toolCalls: Array.isArray(S.toolCalls) ? [...S.toolCalls] : [],
+        pendingFiles: Array.isArray(S.pendingFiles) ? [...S.pendingFiles] : [],
+        pendingSelections: (typeof window!=='undefined' && typeof window._snapshotPendingSelections==='function')
+          ? window._snapshotPendingSelections()
+          : null,
+        busy: !!S.busy,
+        activeStreamId: S.activeStreamId || null,
+        messagesTruncated: !!_messagesTruncated,
+        oldestIdx: _oldestIdx,
+      }
+    : null;
   // Clicking the already-open session in the sidebar is a no-op. Reloading it
   // tears down active pane state and can reset the long-session scroll window
   // to the top even though the user did not navigate anywhere. Explicit
@@ -1803,7 +1818,17 @@ async function loadSession(sid){
         if(typeof showToast==='function') showToast(`Switching to ${profileMismatch.profile} profile for this session…`,2200);
         const switched = await _switchProfileForSessionLoad(profileMismatch.profile);
         if (switched !== true) {
+          if (!_isCurrentLoad()) {
+            _rearmActiveSessionStream();
+            return;
+          }
           if (_isCurrentLoad()) _loadingSessionId = null;
+          if (!_restorePreviousConversationAfterFailedSwitch()) {
+            const _msgInner = $('msgInner');
+            if (_msgInner) {
+              _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load conversation. Try switching sessions or refreshing.</div>';
+            }
+          }
           _rearmActiveSessionStream();
           return;
         }
@@ -1869,28 +1894,10 @@ async function loadSession(sid){
       }
     }
     _clearSameSessionForceReloadHint(sid);
-    // Capture whether this failure self-healed away the current session (a
-    // 404 on the *current* session whose sidecar was deleted server-side).
-    // In that case there is no live session left to stream for, so we must
-    // NOT restart — doing so would spin the SSE reconnect loop against a dead
-    // session_id.
     const _selfHealedCurrent = (e.status===404) && (currentSid===sid);
     if (_isCurrentLoad()) _loadingSessionId = null;
-    // The session stream was stopped unconditionally at the top of this load
-    // (mirroring stopApprovalPolling). On the happy path it's restarted ~120
-    // lines below, but this failure exit never reaches that point — leaving
-    // the session still on screen permanently silenced. bg_task_complete
-    // events (the new feature's primary delivery path) would be dropped until
-    // the user explicitly navigates to a session again. Restart the stream for
-    // the session that remains on screen. Skip when a newer load is already in
-    // flight (_loadingSessionId !== null after the reset above): that load owns
-    // the stream and starts its own. Skip the self-healed-current case (no live
-    // session to stream).
-    // #2971: this fetch-error path keeps its bespoke guarded restart (rather
-    // than the shared _rearmActiveSessionStream helper used on the other
-    // early-returns) because only here can the current session have just
-    // self-healed away — re-arming a 404'd/deleted session_id would spin the
-    // SSE reconnect loop against a dead session.
+    // Restart the on-screen session unless this 404 just self-healed it away,
+    // or a newer load already owns the restart.
     if (currentSid && !_selfHealedCurrent && _loadingSessionId === null
         && typeof startSessionStream === 'function') {
       startSessionStream(currentSid);
@@ -1978,6 +1985,27 @@ async function loadSession(sid){
   // so a server_turn_started that attaches a live stream MID-RELOAD is honored
   // by the attach/idle decision instead of being clobbered by the stale snapshot.
   let activeStreamId=S.session.active_stream_id||null;
+  function _restorePreviousConversationAfterFailedSwitch(){
+    if (!_previousConversationOnSwitchFailure) return false;
+    S.session = _previousConversationOnSwitchFailure.session;
+    S.messages = [..._previousConversationOnSwitchFailure.messages];
+    S.toolCalls = [..._previousConversationOnSwitchFailure.toolCalls];
+    S.pendingFiles = [..._previousConversationOnSwitchFailure.pendingFiles];
+    S.busy = _previousConversationOnSwitchFailure.busy;
+    S.activeStreamId = _previousConversationOnSwitchFailure.activeStreamId;
+    _messagesTruncated = _previousConversationOnSwitchFailure.messagesTruncated;
+    _oldestIdx = _previousConversationOnSwitchFailure.oldestIdx;
+    try{
+      if(typeof window!=='undefined' && typeof window._restorePendingSelections==='function'){
+        window._restorePendingSelections(_previousConversationOnSwitchFailure.pendingSelections || []);
+      }
+    }catch(_){}
+    try{if(typeof renderTray==='function') renderTray();}catch(_){}
+    try{if(typeof updateSendBtn==='function') updateSendBtn();}catch(_){}
+    try{if(typeof syncTopbar==='function') syncTopbar();}catch(_){}
+    try{if(typeof renderMessages==='function') renderMessages();}catch(_){}
+    return true;
+  }
   // If the server says the session is idle, reset browser-side streaming flags
   // NOW — BEFORE _acknowledgeSessionVisit() below (whose sidebar repaint would
   // otherwise inherit the PREVIOUS session's busy/stream state) and before the

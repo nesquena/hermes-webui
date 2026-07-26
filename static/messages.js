@@ -921,7 +921,27 @@ function _clearPendingSelections(){
   _renderSelectionChips();
   return true;
 }
-if(typeof window!=='undefined') window._clearPendingSelections=_clearPendingSelections;
+function _snapshotPendingSelections(){
+  return _pendingSelections.map(s=>({id:s.id,name:s.name,text:s.text}));
+}
+
+function _restorePendingSelections(selections){
+  if(!Array.isArray(selections)) return false;
+  _pendingSelections=selections
+    .filter(Boolean)
+    .map(s=>({id:String(s.id||''),name:String(s.name||''),text:String(s.text||'')}));
+  _selectionIdCounter=_pendingSelections.reduce((max,s)=>{
+    const match=/^ctx-(\d+)$/.exec(s.id);
+    return match?Math.max(max,Number(match[1])):max;
+  },0);
+  _renderSelectionChips();
+  return true;
+}
+if(typeof window!=='undefined'){
+  window._clearPendingSelections=_clearPendingSelections;
+  window._snapshotPendingSelections=_snapshotPendingSelections;
+  window._restorePendingSelections=_restorePendingSelections;
+}
 
 function _selectedContextPreview(text){
   const normalized=String(text||'').replace(/\r\n?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
