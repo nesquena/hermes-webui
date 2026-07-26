@@ -176,6 +176,25 @@ def _safe_replace(src: Path, dst: Path) -> None:
             delay *= 2  # 50 -> 100 -> 200 -> 400 -> 800 ms
 
 
+_DRAFT_LIFECYCLE_LOCK_STRIPES: "tuple[threading.Lock, ...]" = tuple(
+    threading.Lock() for _ in range(64)
+)
+_DRAFT_LIFECYCLE_LOCK_STRIPE_COUNT = len(_DRAFT_LIFECYCLE_LOCK_STRIPES)
+
+
+def _draft_lifecycle_lock_for_session_id(session_id: str) -> threading.Lock:
+    """Return the per-session lock that serializes draft save/delete operations."""
+    sid = _normalize_session_id_for_path(session_id)
+    if not sid:
+        raise ValueError(f"Unsafe session_id {session_id!r}; refusing to lock draft lifecycle")
+    sid_index = int(hashlib.sha256(sid.encode("utf-8")).hexdigest(), 16)
+    lock_index = sid_index % _DRAFT_LIFECYCLE_LOCK_STRIPE_COUNT
+    # ponytail: fixed 64-way lock striping; occasional unrelated collisions
+    # serialize small sessions, so per-sid locks should only be added if
+    # contention is measured.
+    return _DRAFT_LIFECYCLE_LOCK_STRIPES[lock_index]
+
+
 def _session_draft_path(session_id: str) -> Path:
     """Return the per-session draft sidecar path.
 
@@ -234,34 +253,65 @@ def _save_session_draft(session_id: str, draft) -> None:
     """Persist a draft payload to the dedicated per-session draft sidecar."""
     if not _normalize_session_id_for_path(session_id):
         raise ValueError(f"Unsafe session_id {session_id!r}; refusing to persist dedicated draft")
-    _session_draft_dir().mkdir(parents=True, exist_ok=True)
-    path = _session_draft_path(session_id)
-    payload = draft if isinstance(draft, dict) else {}
-    tmp = path.with_name(f'{path.name}.tmp.{os.getpid()}.{threading.current_thread().ident}')
-    body = json.dumps(payload, ensure_ascii=False, indent=2)
-    try:
-        with open(tmp, 'w', encoding='utf-8') as f:
-            f.write(body)
-            f.flush()
-            os.fsync(f.fileno())
-        _safe_replace(tmp, path)
-    except Exception:
+    sid = _normalize_session_id_for_path(session_id)
+    lock = _draft_lifecycle_lock_for_session_id(sid)
+    with lock:
+        _session_draft_dir().mkdir(parents=True, exist_ok=True)
+        path = _session_draft_path(sid)
+        payload = draft if isinstance(draft, dict) else {}
+        tmp = path.with_name(
+            f'{path.name}.tmp.{os.getpid()}.{threading.current_thread().ident}'
+        )
+        body = json.dumps(payload, ensure_ascii=False, indent=2)
         try:
-            tmp.unlink(missing_ok=True)
+            with open(tmp, 'w', encoding='utf-8') as f:
+                f.write(body)
+                f.flush()
+                os.fsync(f.fileno())
+            if not (SESSION_DIR / f"{sid}.json").exists():
+                return
+            _safe_replace(tmp, path)
         except Exception:
-            pass
-        raise
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _delete_session_draft_by_dir(session_id: str, sessions_dir: Path) -> bool:
+    """Delete the dedicated draft sidecar for session_id under sessions_dir.
+
+    Returns True when deletion succeeds or the file is already absent; False
+    when the path cannot be removed due to unexpected IO/error.
+    """
+    if not _normalize_session_id_for_path(session_id):
+        return True
+    sid = _normalize_session_id_for_path(session_id)
+    lock = _draft_lifecycle_lock_for_session_id(sid)
+    with lock:
+        try:
+            draft_path = sessions_dir / ".drafts" / f"{sid}.json"
+            draft_path.unlink(missing_ok=True)
+        except Exception:
+            logger.debug(
+                "Failed to delete draft sidecar for %s in %s",
+                session_id,
+                sessions_dir,
+                exc_info=True,
+            )
+            return False
+        return True
 
 
 def _delete_session_draft(session_id: str) -> None:
     """Delete the dedicated draft sidecar for *session_id*."""
-    if not _normalize_session_id_for_path(session_id):
-        return
-    try:
-        path = _session_draft_path(session_id)
-        path.unlink(missing_ok=True)
-    except Exception:
-        logger.debug("Failed to delete draft sidecar for %s", session_id, exc_info=True)
+    _delete_session_draft_by_dir(session_id, SESSION_DIR)
 
 
 # Serializes index writers so concurrent Session.save() calls cannot race on
@@ -9887,17 +9937,13 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
                             suffix,
                             exc_info=True,
                         )
-                draft_artifact = sessions_dir / ".drafts" / f"{removed_id}.json"
-                if draft_artifact.exists():
-                    try:
-                        draft_artifact.unlink(missing_ok=True)
-                    except OSError:
-                        ok = False
-                        logger.warning(
-                            "Failed to remove draft sidecar %s",
-                            removed_id,
-                            exc_info=True,
-                        )
+                if not _delete_session_draft_by_dir(removed_id, sessions_dir):
+                    ok = False
+                    logger.warning(
+                        "Failed to remove draft sidecar %s",
+                        removed_id,
+                        exc_info=True,
+                    )
                 try:
                     for path in list(
                         sessions_dir.glob(f"request_dump_{removed_id}_*.json")
@@ -10080,12 +10126,8 @@ def _clean_pending_artifact(sessions_dir, removed_id):
             artifact.unlink(missing_ok=True)
         except OSError:
             ok = False
-    draft_artifact = sessions_dir / ".drafts" / f"{removed_id}.json"
-    if draft_artifact.exists():
-        try:
-            draft_artifact.unlink(missing_ok=True)
-        except OSError:
-            ok = False
+    if not _delete_session_draft_by_dir(removed_id, sessions_dir):
+        ok = False
     try:
         for path in list(sessions_dir.glob(f"request_dump_{removed_id}_*.json")):
             try:

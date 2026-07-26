@@ -14913,13 +14913,13 @@ def handle_post(handler, parsed) -> bool:
                 p.relative_to(SESSION_DIR.resolve())
             except Exception:
                 return bad(handler, "Invalid session_id", 400)
-            _delete_session_draft(sid)
             sidecar_deleted = False
             try:
                 p.unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink session file %s", p)
             sidecar_deleted = not p.exists()
+            _delete_session_draft(sid)
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -20671,8 +20671,8 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
             if should_delete:
                 with LOCK:
                     SESSIONS.pop(p.stem, None)
-                _delete_session_draft(p.stem)
                 p.unlink(missing_ok=True)
+                _delete_session_draft(p.stem)
                 cleaned += 1
                 phase1_removed_ids.add(p.stem)
         except Exception:

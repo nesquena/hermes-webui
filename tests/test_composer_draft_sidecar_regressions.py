@@ -1,6 +1,7 @@
 """Runtime regression coverage for dedicated composer draft sidecars."""
 
 import sqlite3
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -248,6 +249,45 @@ def test_session_delete_removes_dedicated_draft_file(tmp_path, monkeypatch):
     assert not (session_dir / ".drafts" / f"{sid}.json").exists()
 
 
+def test_route_session_delete_is_final_after_inflight_autosave(tmp_path, monkeypatch):
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+    sid = "sid-route-race"
+    models.Session(
+        session_id=sid,
+        title="Route Race",
+        messages=[{"role": "assistant", "content": "x"}],
+    ).save(
+        touch_updated_at=False,
+        skip_index=True,
+    )
+
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
+    monkeypatch.setattr(routes, "_is_messaging_session_id", lambda value: False)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda value: False)
+
+    real_delete_session_draft = routes._delete_session_draft
+
+    def delete_session_draft_and_race(sid_to_delete):
+        real_delete_session_draft(sid_to_delete)
+        models._save_session_draft(sid_to_delete, {"text": "inflight", "files": []})
+
+    monkeypatch.setattr(routes, "_delete_session_draft", delete_session_draft_and_race)
+
+    delete_status = {}
+
+    delete_status["status"], delete_status["payload"] = _post_json(
+        monkeypatch,
+        routes,
+        "/api/session/delete",
+        {"session_id": sid},
+    )
+
+    assert delete_status["status"] == 200
+    assert delete_status["payload"]["ok"] is True
+    assert not (session_dir / f"{sid}.json").exists()
+    assert not (session_dir / ".drafts" / f"{sid}.json").exists()
+
+
 def test_sessions_cleanup_phase1_removes_dedicated_draft_file(tmp_path, monkeypatch):
     models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
 
@@ -284,6 +324,73 @@ def test_model_cleanup_removes_draft_artifact(tmp_path, monkeypatch):
     assert models.delete_cli_session(sid) is True
     assert not (session_dir / f"{sid}.json").exists()
     assert not draft_path.exists()
+
+
+def test_autosave_and_delete_lock_step_does_not_recreate_draft(tmp_path, monkeypatch):
+    models, _, session_dir = _build_draft_env(tmp_path, monkeypatch)
+    sid = "sid-race"
+    models.Session(session_id=sid, title="Race", messages=[{"role": "assistant", "content": "x"}]).save(
+        touch_updated_at=False,
+        skip_index=True,
+    )
+
+    saved_to_replace = threading.Event()
+    allow_replace = threading.Event()
+    original_safe_replace = models._safe_replace
+    replace_error = {}
+
+    def slow_safe_replace(src, dst):
+        saved_to_replace.set()
+        allow_replace.wait()
+        try:
+            return original_safe_replace(src, dst)
+        except Exception as exc:
+            replace_error["error"] = exc
+            raise
+
+    monkeypatch.setattr(models, "_safe_replace", slow_safe_replace)
+
+    def autosave_worker(errors):
+        try:
+            models._save_session_draft(sid, {"text": "inflight", "files": []})
+        except Exception as exc:
+            errors["autosave"] = str(exc)
+
+    def delete_worker(errors):
+        try:
+            (session_dir / f"{sid}.json").unlink(missing_ok=True)
+            models._delete_session_draft(sid)
+        except Exception as exc:
+            errors["delete"] = str(exc)
+
+    autosave_errors: dict[str, str] = {}
+    delete_errors: dict[str, str] = {}
+    autosave_thread = threading.Thread(target=autosave_worker, args=(autosave_errors,))
+    delete_thread = threading.Thread(target=delete_worker, args=(delete_errors,))
+
+    autosave_thread.start()
+    assert saved_to_replace.wait(timeout=2), "autosave did not reach replace wait point"
+    delete_thread.start()
+
+    allow_replace.set()
+    autosave_thread.join(timeout=5)
+    delete_thread.join(timeout=5)
+
+    assert not autosave_thread.is_alive()
+    assert not delete_thread.is_alive()
+    assert not autosave_errors
+    assert not delete_errors
+    assert not replace_error
+    assert not (session_dir / f"{sid}.json").exists()
+    assert not (session_dir / ".drafts" / f"{sid}.json").exists()
+
+
+def test_save_after_missing_main_session_does_not_create_dedicated_draft(tmp_path, monkeypatch):
+    models, _, session_dir = _build_draft_env(tmp_path, monkeypatch)
+    sid = "sid-missing-main"
+    assert not (session_dir / f"{sid}.json").exists()
+    models._save_session_draft(sid, {"text": "discarded", "files": []})
+    assert not (session_dir / ".drafts" / f"{sid}.json").exists()
 
 
 def test_draft_path_error_shows_original_input(tmp_path, monkeypatch):
