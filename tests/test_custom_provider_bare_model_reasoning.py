@@ -171,12 +171,19 @@ def test_grok_45_custom_and_gateway_namespaces_expose_reasoning(model_id, provid
     )
 
 
-def test_grok_multi_agent_keeps_xhigh():
+def test_grok_multi_agent_matches_agent_wire_ladder():
     efforts = cfg.resolve_model_reasoning_efforts(
         "xai/grok-4.20-multi-agent",
         provider_id="custom",
     )
-    assert efforts == ["low", "medium", "high", "xhigh"]
+    assert efforts == ["low", "medium", "high"]
+
+
+def test_grok_build_stays_hidden_without_agent_support():
+    assert cfg.resolve_model_reasoning_efforts(
+        "xai/grok-build-latest",
+        provider_id="custom",
+    ) == []
 
 
 def test_grok_media_and_non_reasoning_hide_chip():

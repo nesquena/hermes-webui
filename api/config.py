@@ -3362,7 +3362,6 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
             or "grok-3-mini" in joined
             or "grok-4-5" in joined
             or "grok-4-3" in joined
-            or "grok-build" in joined
             or "reasoning" in token_set
         ):
             return True
@@ -3575,16 +3574,13 @@ def _filter_reasoning_efforts_for_provider(
             return []
         if "non-reasoning" in bare or "non_reasoning" in bare:
             return []
-        # multi-agent variants accept xhigh as an agent-count / effort tier.
+        # Agent's xAI Responses transport clamps stronger generic values to high,
+        # so advertise only the effective wire ladder.
         if "multi-agent" in bare:
-            return [
-                eff
-                for eff in normalized
-                if eff in {"low", "medium", "high", "xhigh"}
-            ]
-        # Effort-capable chat Grok (4.5 / 4.3 / 3-mini / build / *-reasoning).
+            return [eff for eff in normalized if eff in {"low", "medium", "high"}]
+        # Effort-capable chat Grok (4.5 / 4.3 / 3-mini / *-reasoning).
         if (
-            bare.startswith(("grok-4.5", "grok-4.3", "grok-3-mini", "grok-build"))
+            bare.startswith(("grok-4.5", "grok-4.3", "grok-3-mini"))
             or "reasoning" in bare
         ):
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
