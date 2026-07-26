@@ -245,7 +245,10 @@ def build_report(root: Path) -> dict[str, object]:
         (
             ("startup_install_function", r"auto_install_agent_deps"),
             ("agent_dir_env", r"HERMES_WEBUI_AGENT_DIR"),
-            ("agent_source_install", r"uv pip install.*\[all\]"),
+            (
+                "agent_source_install",
+                r"(?:uv pip install.*\[all\]|uv sync.*--extra\s+all.*--no-install-project)",
+            ),
             ("agent_source_staging", r"_agent_src|_stage_src"),
         ),
     )

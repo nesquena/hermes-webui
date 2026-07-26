@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from tests.conftest import requires_agent
 from api import agent_tts, agent_tts_worker
 from api.profiles import build_profile_subprocess_env
 
@@ -413,6 +414,7 @@ def test_public_synthesis_consumes_artifact_before_request_cleanup(tmp_path, mon
     assert not list(request_root.glob("request-*"))
 
 
+@requires_agent
 def test_real_installed_agent_offline_command_provider(tmp_path):
     profile_home = tmp_path / "offline-profile"
     profile_home.mkdir()
