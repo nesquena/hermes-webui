@@ -205,3 +205,18 @@ def test_attach_live_stream_registers_one_source_per_session_stream():
     assert "if(source&&live.source!==source) return;" in close_body
     assert "existingLive&&existingLive.streamId===streamId" in attach_body
     assert "_closeSource(source);" in error_body
+
+
+def test_reconnecting_attach_registers_owner_before_preflight_status_check():
+    """Reconnect preflight must not self-classify as stale before _wireSSE runs."""
+    attach_body = _function_body("attachLiveStream")
+    owner_idx = attach_body.find("LIVE_STREAMS[activeSid]={streamId,source:null,ownerToken:_liveOwnerToken};")
+    reconnect_idx = attach_body.find("if(reconnecting){")
+    owner_lost_idx = attach_body.find("if(_currentPaneRecoveryOwnerLost()){", reconnect_idx)
+    assert owner_idx != -1, "attachLiveStream should publish a placeholder owner before reconnect preflight"
+    assert reconnect_idx != -1, "reconnect preflight block not found"
+    assert owner_idx < reconnect_idx, "placeholder owner must exist before reconnect status probes run"
+    assert owner_lost_idx != -1, "reconnect preflight should still check for real ownership loss"
+    assert "_closeSource(null);" in attach_body[owner_lost_idx:owner_lost_idx + 120], (
+        "preflight owner-loss exit should retire the placeholder owner"
+    )
