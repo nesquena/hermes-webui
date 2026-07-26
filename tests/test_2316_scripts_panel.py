@@ -144,6 +144,7 @@ def _run_playwright_probe(script: str, *, width: int = 1280, height: int = 720):
     except ImportError:
         pytest.skip("playwright not installed")
 
+    bootstrap_workspace = "__playwright_bootstrap__"
     with sync_playwright() as pw:
         try:
             browser = pw.chromium.launch(
@@ -154,9 +155,26 @@ def _run_playwright_probe(script: str, *, width: int = 1280, height: int = 720):
             pytest.skip(f"Chromium unavailable: {exc}")
         page = browser.new_page(viewport={"width": width, "height": height})
         try:
+            page.route(
+                "**/api/profile/active",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps({
+                        "name": "default",
+                        "is_default": True,
+                        "default_workspace": bootstrap_workspace,
+                    }),
+                ),
+            )
             page.goto(TEST_BASE, wait_until="domcontentloaded")
             page.wait_for_selector("#scriptsList", state="attached", timeout=10000)
-            page.wait_for_timeout(500)
+            page.wait_for_function(
+                f"() => typeof S !== 'undefined'"
+                f" && S.activeProfile === 'default'"
+                f" && S._profileDefaultWorkspace === '{bootstrap_workspace}'",
+                timeout=10000,
+            )
             return page.evaluate(script)
         finally:
             browser.close()
@@ -1560,7 +1578,7 @@ def test_session_load_profile_switch_clears_scripts_dom_before_destination_rende
     assert result["final"]["refreshDisabled"] is False
     assert result["final"]["refreshOpacity"] == ""
     relevant_calls = [
-        call["url"]
+        {"url": call["url"], "profile": call["profile"]}
         for call in result["calls"]
         if call["url"] in {
             "/api/scripts/raw?path=a.py",
@@ -1569,9 +1587,9 @@ def test_session_load_profile_switch_clears_scripts_dom_before_destination_rende
         }
     ]
     assert relevant_calls == [
-        "/api/scripts/raw?path=a.py",
-        "/api/profile/switch",
-        "/api/scripts/list",
+        {"url": "/api/scripts/raw?path=a.py", "profile": "a"},
+        {"url": "/api/profile/switch", "profile": "a"},
+        {"url": "/api/scripts/list", "profile": "b"},
     ]
 
 
@@ -1599,10 +1617,12 @@ def test_session_load_profile_switch_retires_first_profile_owner_after_return():
           const listB = deferred();
           const listSecondA = deferred();
           let aRawCalls = 0;
+          const calls = [];
           const scriptsList = document.querySelector('#scriptsList');
           const refreshBtn = document.querySelector('#scriptsRefreshBtn');
 
           window.api = async (url, opts) => {
+            calls.push({ url, profile: S.activeProfile });
             if (url === '/api/profile/switch') {
               const body = JSON.parse(opts.body);
               return { active: body.name, is_default: false };
@@ -1711,6 +1731,7 @@ def test_session_load_profile_switch_retires_first_profile_owner_after_return():
               hasStaleSource: scriptsList.textContent.includes('stale first A source'),
             },
             aRawCalls,
+            calls,
           };
         }
         """
@@ -1739,6 +1760,23 @@ def test_session_load_profile_switch_retires_first_profile_owner_after_return():
         "hasStaleSource": False,
     }
     assert result["aRawCalls"] == 2
+    relevant_calls = [
+        {"url": call["url"], "profile": call["profile"]}
+        for call in result["calls"]
+        if call["url"] in {
+            "/api/scripts/raw?path=a.py",
+            "/api/profile/switch",
+            "/api/scripts/list",
+        }
+    ]
+    assert relevant_calls == [
+        {"url": "/api/scripts/raw?path=a.py", "profile": "a"},
+        {"url": "/api/profile/switch", "profile": "a"},
+        {"url": "/api/scripts/list", "profile": "b"},
+        {"url": "/api/profile/switch", "profile": "b"},
+        {"url": "/api/scripts/list", "profile": "a"},
+        {"url": "/api/scripts/raw?path=a.py", "profile": "a"},
+    ]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
