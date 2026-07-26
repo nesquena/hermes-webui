@@ -49,6 +49,30 @@ requires_fork = pytest.mark.skipif(
 # conftest.py lives at <repo>/tests/conftest.py
 TESTS_DIR  = pathlib.Path(__file__).parent.resolve()
 REPO_ROOT  = TESTS_DIR.parent.resolve()
+
+# Force the agent-config bridge (api/agent_config_bridge.py) to its standalone
+# fallback for the whole test run, including spawned server subprocesses, which
+# inherit this environment. On developer machines the agent-dir discovery would
+# otherwise find a real checkout (e.g. ~/.hermes/hermes-agent) and route config
+# writes through it — making unit tests machine-dependent. Bridge-specific tests
+# opt back in by clearing this variable and resetting the probe cache.
+#
+# Deliberately module-level (not a fixture) and never torn down:
+#   - It must be set before the FIRST subprocess spawn, which can happen from a
+#     session-scoped fixture; a fixture-based kill-switch would only be
+#     guaranteed to run first via fixture-ordering dependencies, which is more
+#     fragile than "first thing conftest.py does on import" and risks a server
+#     subprocess spawning before the switch is set — silently defeating it.
+#   - No teardown is needed: this mutates only this pytest process's own
+#     os.environ, which does not outlive the process. It cannot leak into the
+#     real `hermes-webui` service — that runs as a separate OS process (its own
+#     systemd unit / shell session) that never inherits a test run's
+#     environment, so setting this here poses no production risk.
+#   - setdefault() (not a plain assignment) means an operator who explicitly
+#     exports HERMES_WEBUI_DISABLE_AGENT_CONFIG_BRIDGE=0 before running tests
+#     (e.g. to force-enable the bridge for a live-checkout test run) is
+#     respected rather than silently overridden.
+os.environ.setdefault("HERMES_WEBUI_DISABLE_AGENT_CONFIG_BRIDGE", "1")
 HOME       = pathlib.Path.home()
 HERMES_HOME = pathlib.Path(os.getenv('HERMES_HOME', str(HOME / '.hermes')))
 

@@ -13699,6 +13699,10 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/mcp/servers":
         return _handle_mcp_servers_list(handler)
 
+    if parsed.path.startswith("/api/mcp/servers/") and parsed.path.endswith("/test"):
+        name = parsed.path[len("/api/mcp/servers/"):-len("/test")]
+        return _handle_mcp_server_test(handler, name)
+
     # ── MCP Tools (GET) ──
     if parsed.path == "/api/mcp/tools":
         return _handle_mcp_tools_list(handler)
@@ -14571,6 +14575,7 @@ def handle_post(handler, parsed) -> bool:
         import api.routes as _routes
         _routes.get_session = _models.get_session
         _routes.Session = _models.Session
+        _routes.compact = _models.compact
         return j(handler, {"status": "ok", "reloaded": "api.models"})
 
     if parsed.path == "/api/sessions/cleanup":
@@ -17841,7 +17846,18 @@ def _handle_terminal_output(handler, parsed):
     sid = qs.get("session_id", [""])[0]
     if not sid:
         return bad(handler, "session_id required")
-    from api.terminal import attach_terminal
+    from api.terminal import get_terminal
+    term = get_terminal(sid)
+    if term is None:
+        return j(handler, {"error": "terminal not running"}, status=404)
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("X-Accel-Buffering", "no")
+    handler.send_header("Connection", "close")
+    end_sse_headers(handler)
+    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
     # EventSource automatically returns the last received SSE id on transport
     # reconnect. Seed only newer backlog entries in that case so already-rendered
     # terminal bytes (including ANSI cursor controls) are not written twice. A
@@ -17853,32 +17869,8 @@ def _handle_terminal_output(handler, parsed):
             after_seq = max(0, int(last_event_id))
         except ValueError:
             pass
-    # Look up and subscribe in one atomic step. A separate `get_terminal()` then
-    # `term.subscribe()` leaves a window in which the idle reaper can claim and
-    # tear the terminal down, leaving this stream attached to a corpse after we
-    # already committed a 200. Attaching atomically means we either hold a live
-    # viewer (which makes the terminal un-reapable) or learn it is gone in time
-    # to answer 404.
-    attached = attach_terminal(sid, after_seq=after_seq)
-    if attached is None:
-        return j(handler, {"error": "terminal not running"}, status=404)
-    term, output = attached
-
-    # The subscription is live from here on, so EVERY exit path — including a
-    # failure while writing the response headers — must unsubscribe. Writing
-    # headers to a client that already dropped raises BrokenPipeError, and if
-    # that escaped before the try block the queue would stay in
-    # `_subscribers` forever, pinning `unwatched_since` at None and making the
-    # terminal permanently unreapable: the exact fd/thread leak this reaper
-    # exists to prevent. Hence the try starts immediately after the attach.
+    output = term.subscribe(after_seq=after_seq)
     try:
-        handler.send_response(200)
-        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        handler.send_header("Cache-Control", "no-cache")
-        handler.send_header("X-Accel-Buffering", "no")
-        handler.send_header("Connection", "close")
-        end_sse_headers(handler)
-        _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
         while True:
             try:
                 event_seq, event, data = output.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
@@ -25625,6 +25617,30 @@ def _handle_skill_toggle(handler, body):
     if not skill_md:
         return bad(handler, f"Skill '{name}' not found", 404)
 
+    from api import agent_config_bridge as _bridge
+
+    if _bridge.bridge_available():
+        home = get_active_hermes_home()
+        with _cfg_lock:
+            cfg = _bridge.load_agent_config(home)
+            skills_cfg = cfg.get("skills") if isinstance(cfg.get("skills"), dict) else {}
+            skills_cfg["disabled"] = _toggle_name_in_list(
+                skills_cfg.get("disabled"), name, enabled
+            )
+            platform_disabled = skills_cfg.get("platform_disabled")
+            if isinstance(platform_disabled, dict) and "webui" in platform_disabled:
+                platform_disabled["webui"] = _toggle_name_in_list(
+                    platform_disabled["webui"], name, enabled
+                )
+            _bridge.save_skills_config(skills_cfg, home)
+        reload_config()
+        _SKILLS_STATS_CACHE.clear()
+        return j(handler, {"ok": True, "name": name, "enabled": enabled})
+    try:
+        _bridge.require_bridge()
+    except _bridge.AgentBridgeUnavailable as exc:
+        return j(handler, {"error": f"Agent config layer unavailable: {exc}"}, status=503)
+
     config_path = _active_profile_config_path()
     with _cfg_lock:
         cfg = _load_yaml_config_file(config_path)
@@ -26114,10 +26130,51 @@ def _mcp_runtime_status_by_name() -> dict[str, dict]:
     }
 
 
+# Fields the MCP server form actually owns. An edit replaces these and leaves
+# everything else in the stored entry untouched.
+#
+# The handler used to build a FRESH mapping and hand it to save_mcp_server(),
+# which replaces the named server wholesale. The form sends neither `enabled`
+# nor `connect_timeout`, so editing a disabled server silently re-enabled it,
+# dropped its connect timeout, and discarded any key this WebUI version has
+# never heard of — including ones a newer agent added.
+_MCP_FORM_OWNED_FIELDS = frozenset({
+    "url", "command", "args", "headers", "env", "timeout",
+})
+
+
+def _mcp_entry_revision(entry) -> str:
+    """Opaque revision of one stored server entry.
+
+    Concurrency control for the form: a save carrying a revision that no longer
+    matches is refused instead of overwriting whatever the CLI, another browser
+    or a second tab wrote in between.
+    """
+    import hashlib
+    import json as _json
+
+    try:
+        payload = _json.dumps(entry if isinstance(entry, dict) else {}, sort_keys=True, default=str)
+    except Exception:
+        payload = repr(entry)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _merge_mcp_entry(existing, form_cfg: dict) -> dict:
+    """Overlay the form's fields onto the stored entry, preserving the rest."""
+    base = {k: v for k, v in (existing or {}).items()
+            if isinstance(existing, dict) and k not in _MCP_FORM_OWNED_FIELDS}
+    base.update(form_cfg)
+    return base
+
+
 def _server_summary(name, cfg, runtime_status=None):
     """Return a safe summary of an MCP server config."""
     runtime_status = runtime_status if isinstance(runtime_status, dict) else {}
-    out = {"name": name}
+    # The revision travels with every summary so the form can send back the one
+    # it was populated from; without it there is nothing to detect a concurrent
+    # edit against.
+    out = {"name": name, "revision": _mcp_entry_revision(cfg)}
     if not isinstance(cfg, dict):
         out.update({
             "transport": "invalid",
@@ -26829,6 +26886,31 @@ def _handle_notes_item(handler, parsed):
         return j(handler, {"source": "joplin", "error": str(exc)}, status=502)
 
 
+def _mcp_write_capability() -> dict:
+    """Report whether MCP config writes (add/edit/delete/toggle) can succeed
+    right now, for the frontend to disable write controls instead of letting
+    them fail. Mirrors the same fail-closed check ``_mcp_bridge_or_legacy``
+    performs before a write: an agent checkout that IS configured but whose
+    config layer failed to import must not offer write buttons that would
+    just 503 (a half-wired deployment problem, distinct from "no checkout at
+    all", which writes fine through the legacy YAML path)."""
+    from api import agent_config_bridge as _bridge
+
+    conflict = _bridge.config_path_conflict(get_active_hermes_home())
+    if conflict:
+        # One authority or none: rather than write through a layer that would
+        # target a different file from every read, report the capability as
+        # unavailable and say why.
+        return {"writable": False, "unavailable_reason": conflict}
+    if _bridge.bridge_available():
+        return {"writable": True}
+    try:
+        _bridge.require_bridge()
+    except _bridge.AgentBridgeUnavailable as exc:
+        return {"writable": False, "unavailable_reason": str(exc)}
+    return {"writable": True}
+
+
 def _handle_mcp_servers_list(handler):
     """List configured MCP servers with safe, read-only runtime visibility."""
     cfg = get_config_for_profile_home(get_active_hermes_home())
@@ -26844,7 +26926,28 @@ def _handle_mcp_servers_list(handler):
         "servers": result,
         "toggle_supported": True,
         "reload_required": True,
+        **_mcp_write_capability(),
     })
+
+
+def _mcp_bridge_or_legacy(handler):
+    """Resolve the MCP write path for this request.
+
+    Returns ``(use_bridge, home)`` or ``None`` after answering the request
+    when the agent checkout is configured but not importable (fail closed —
+    a half-wired deployment must not silently fall back to the legacy
+    comment-destroying writer).
+    """
+    from api import agent_config_bridge as _bridge
+
+    if _bridge.bridge_available():
+        return True, get_active_hermes_home()
+    try:
+        _bridge.require_bridge()
+    except _bridge.AgentBridgeUnavailable as exc:
+        j(handler, {"error": f"Agent config layer unavailable: {exc}"}, status=503)
+        return None
+    return False, None
 
 
 def _handle_mcp_server_delete(handler, name):
@@ -26853,6 +26956,17 @@ def _handle_mcp_server_delete(handler, name):
     name = unquote(name)
     if not name:
         return bad(handler, "name is required")
+    route = _mcp_bridge_or_legacy(handler)
+    if route is None:
+        return True
+    use_bridge, home = route
+    if use_bridge:
+        from api import agent_config_bridge as _bridge
+
+        if not _bridge.remove_mcp_server(name, home):
+            return bad(handler, f"MCP server '{name}' not found", 404)
+        reload_config()
+        return j(handler, {"ok": True, "deleted": name})
     cfg = get_config()
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
@@ -26875,6 +26989,17 @@ def _handle_mcp_server_toggle(handler, name, body):
     if "enabled" not in body:
         return bad(handler, "enabled field is required")
     enabled = bool(body["enabled"])
+    route = _mcp_bridge_or_legacy(handler)
+    if route is None:
+        return True
+    use_bridge, home = route
+    if use_bridge:
+        from api import agent_config_bridge as _bridge
+
+        if not _bridge.set_mcp_server_enabled(name, enabled, home):
+            return bad(handler, f"MCP server '{name}' not found", 404)
+        reload_config()
+        return j(handler, {"ok": True, "name": name, "enabled": enabled})
     cfg = get_config()
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
@@ -26893,8 +27018,25 @@ def _handle_mcp_server_toggle(handler, name, body):
 _MASKED_PLACEHOLDER = "••••••"
 
 
-def _strip_masked_values(submitted, existing):
-    """Remove masked placeholder values from submitted dict, keeping originals."""
+class MaskedValueUnresolvable(Exception):
+    """A masked placeholder was submitted but there is no original to restore.
+
+    The edit form round-trips stored secrets as ``••••••``. If the value that
+    placeholder stands for is no longer in the authoritative config — the
+    server was deleted or renamed between the form load and the submit, or the
+    read returned a config without it — then dropping the key silently removes
+    a credential and re-creates the server unauthenticated. The caller must
+    reject the request instead.
+    """
+
+
+def _strip_masked_values(submitted, existing, *, _path=()):
+    """Replace masked placeholders with the originals they stand for.
+
+    Raises ``MaskedValueUnresolvable`` when a placeholder has no original.
+    Silently dropping the key was a quiet credential loss: the request still
+    succeeded and the saved server simply lost its Authorization header.
+    """
     if not isinstance(submitted, dict) or not isinstance(existing, dict):
         return submitted
     cleaned = {}
@@ -26903,8 +27045,13 @@ def _strip_masked_values(submitted, existing):
             if k in existing and isinstance(existing[k], str):
                 cleaned[k] = existing[k]  # preserve original real value
                 continue
+            raise MaskedValueUnresolvable(".".join(str(p) for p in (*_path, k)))
         elif isinstance(v, dict) and k in existing and isinstance(existing[k], dict):
-            cleaned[k] = _strip_masked_values(v, existing[k])
+            cleaned[k] = _strip_masked_values(v, existing[k], _path=(*_path, k))
+        elif isinstance(v, dict):
+            # No counterpart to restore from: any placeholder nested in here is
+            # unresolvable, and must not be dropped either.
+            cleaned[k] = _strip_masked_values(v, {}, _path=(*_path, k))
         else:
             cleaned[k] = v
     return cleaned
@@ -26916,32 +27063,232 @@ def _handle_mcp_server_update(handler, name, body):
     name = unquote(name)
     if not name:
         return bad(handler, "name is required")
+    route = _mcp_bridge_or_legacy(handler)
+    if route is None:
+        return True
+    use_bridge, home = route
     # Validate: must have url (http) or command (stdio)
     server_cfg = {}
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    existing_cfg = servers.get(name, {})
-    if body.get("url"):
-        server_cfg["url"] = body["url"].strip()
-        if body.get("headers"):
-            server_cfg["headers"] = _strip_masked_values(body["headers"], existing_cfg.get("headers", {}))
-    elif body.get("command"):
-        server_cfg["command"] = body["command"].strip()
-        if body.get("args"):
-            server_cfg["args"] = body["args"] if isinstance(body["args"], list) else [body["args"]]
-        if body.get("env"):
-            server_cfg["env"] = _strip_masked_values(body["env"], existing_cfg.get("env", {}))
+    if use_bridge:
+        from api import agent_config_bridge as _bridge
+
+        # Read the existing server through the SAME home-scoped bridge
+        # reader the write path below uses — not the WebUI's own get_config()
+        # cache. The two can diverge (different profile resolution, stale
+        # in-memory cache), which would make _strip_masked_values() below
+        # miss the real header/env value and silently persist the literal
+        # •••••• placeholder as the "secret" instead of preserving the
+        # original (a quiet secret loss, not a leak).
+        #
+        # Therefore this read must FAIL CLOSED. Substituting `{}` for a failed
+        # read re-creates exactly the loss the comment above describes: with the
+        # real config hidden behind a transient filesystem/parser/profile error,
+        # `_strip_masked_values()` has nothing to restore from, so an unrelated
+        # timeout-only edit silently drops the existing Authorization header and
+        # still answers 200. A read we could not perform is not "no config".
+        try:
+            agent_cfg = _bridge.load_agent_config(home)
+        except Exception:
+            logger.warning(
+                "MCP update aborted: agent config read failed for server %r", name,
+                exc_info=True,
+            )
+            return j(
+                handler,
+                {"error": "Could not read the agent configuration; no changes were saved."},
+                status=500,
+            )
+        agent_servers = agent_cfg.get("mcp_servers", {})
+        if not isinstance(agent_servers, dict):
+            agent_servers = {}
+        existing_cfg = agent_servers.get(name, {})
     else:
-        return bad(handler, "url or command is required")
+        cfg = get_config()
+        servers = cfg.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            servers = {}
+        existing_cfg = servers.get(name, {})
+    # Optimistic concurrency. The form had no revision at all, so a CLI edit or
+    # a second browser between load and save was silently overwritten.
+    _submitted_rev = body.get("revision")
+    if _submitted_rev is not None and existing_cfg:
+        if str(_submitted_rev) != _mcp_entry_revision(existing_cfg):
+            return j(
+                handler,
+                {
+                    "error": "This server changed since the form was loaded; "
+                             "reload it and reapply your edit.",
+                    "revision": _mcp_entry_revision(existing_cfg),
+                },
+                status=409,
+            )
+    # A masked placeholder with no original to restore is not a value we may
+    # silently drop — the server would be re-created without its credential.
+    try:
+        if body.get("url"):
+            server_cfg["url"] = body["url"].strip()
+            if body.get("headers"):
+                server_cfg["headers"] = _strip_masked_values(
+                    body["headers"], existing_cfg.get("headers", {})
+                )
+        elif body.get("command"):
+            server_cfg["command"] = body["command"].strip()
+            if body.get("args"):
+                server_cfg["args"] = body["args"] if isinstance(body["args"], list) else [body["args"]]
+            if body.get("env"):
+                server_cfg["env"] = _strip_masked_values(
+                    body["env"], existing_cfg.get("env", {})
+                )
+        else:
+            return bad(handler, "url or command is required")
+    except MaskedValueUnresolvable as exc:
+        logger.warning(
+            "MCP update aborted: masked value %s has no stored original for %r",
+            exc, name,
+        )
+        return j(
+            handler,
+            {
+                "error": (
+                    "This form still shows a placeholder for a stored secret, but "
+                    "that secret is no longer in the configuration. Reload the "
+                    "server list and re-enter the value."
+                )
+            },
+            status=409,
+        )
     if body.get("timeout") is not None:
         try:
             server_cfg["timeout"] = int(body["timeout"])
         except (ValueError, TypeError):
             pass
-    servers[name] = server_cfg
+    if use_bridge:
+        from api import agent_config_bridge as _bridge
+
+        bearer_token = str(body.get("bearer_token") or "").strip()
+        _secret_state = None  # set only when a secret is actually written
+        if bearer_token and bearer_token != _MASKED_PLACEHOLDER:
+            # Validate BEFORE the secret is written. `save_mcp_bearer_token()`
+            # persists into the profile's `.env`, but `save_mcp_server()` only
+            # validates afterwards — so a rejected entry used to strand a fresh
+            # credential in `.env` that no config.yaml entry ever referenced.
+            # Pre-validating the entry as it stands (without the auth header the
+            # token would add) rejects bad url/command/args input before any
+            # secret is persisted.
+            pre_issues = _bridge.validate_mcp_entry(name, server_cfg)
+            if pre_issues:
+                return j(
+                    handler,
+                    {"error": "Server configuration rejected", "issues": pre_issues},
+                    status=400,
+                )
+            # Secret goes to the profile's .env; config.yaml only stores the
+            # ${MCP_<NAME>_API_KEY} interpolation template (agent convention).
+            #
+            # Pre-validation narrows the window but does not close it: the save
+            # below can still fail on validation the entry only fails WITH the
+            # auth header, or on persistence (unwritable file, full disk). So
+            # snapshot both places the write touches — the dotenv file and the
+            # agent's process-global os.environ — and put them back on every
+            # later failure. Otherwise a rejected request leaves a live
+            # credential no config entry references.
+            _secret_state = _bridge.snapshot_bearer_token_state(name, home)
+            try:
+                token_headers = _bridge.save_mcp_bearer_token(name, bearer_token, home)
+            except ValueError as exc:
+                _bridge.restore_bearer_token_state(_secret_state)
+                return bad(handler, str(exc))
+            except Exception:
+                _bridge.restore_bearer_token_state(_secret_state)
+                raise
+            merged_headers = dict(server_cfg.get("headers") or {})
+            merged_headers.update(token_headers)
+            server_cfg["headers"] = merged_headers
+        try:
+            issues = _bridge.save_mcp_server(
+                name, _merge_mcp_entry(existing_cfg, server_cfg), home,
+            )
+        except Exception:
+            if _secret_state is not None:
+                _bridge.restore_bearer_token_state(_secret_state)
+            raise
+        if issues:
+            if _secret_state is not None:
+                _bridge.restore_bearer_token_state(_secret_state)
+            return j(handler, {"error": "Server configuration rejected", "issues": issues}, status=400)
+        reload_config()
+        return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})
+    if body.get("bearer_token"):
+        return bad(handler, "bearer_token requires a Hermes agent checkout (set HERMES_WEBUI_AGENT_DIR); use headers instead")
+    servers[name] = _merge_mcp_entry(existing_cfg, server_cfg)
     cfg["mcp_servers"] = servers
     _save_yaml_config_file(_get_config_path(), cfg)
     reload_config()
     return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})
+
+
+MCP_SERVER_TEST_CONNECT_TIMEOUT_SECONDS = 30
+"""Maximum connect timeout for the WebUI's explicit MCP "Test server" action.
+
+This deliberately applies only to the interactive test route. It never changes
+stored MCP configuration or the agent's normal runtime connection policy.
+"""
+
+
+def _handle_mcp_server_test(handler, name):
+    """Connection test for one MCP server (GET /api/mcp/servers/{name}/test).
+
+    Read-only probe: no write gate needed. Auth/CSRF boundary matches the
+    neighboring MCP GET routes (enforced upstream in server.py).
+    """
+    from urllib.parse import unquote
+    name = unquote(name)
+    if not name:
+        return bad(handler, "name is required")
+    cfg = get_config_for_profile_home(get_active_hermes_home())
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict) or name not in servers:
+        return bad(handler, f"MCP server '{name}' not found", 404)
+    server_cfg = servers[name]
+
+    from api import agent_config_bridge as _bridge
+
+    if _bridge.bridge_available():
+        home = get_active_hermes_home()
+        started = time.monotonic()
+        try:
+            result = _bridge.probe_mcp_server(
+                name,
+                home,
+                timeout=MCP_SERVER_TEST_CONNECT_TIMEOUT_SECONDS,
+            )
+        except KeyError:
+            return bad(handler, f"MCP server '{name}' not found", 404)
+        except Exception as exc:
+            return j(handler, {"ok": False, "error": str(exc)})
+        latency_ms = int((time.monotonic() - started) * 1000)
+        return j(handler, {
+            "ok": True,
+            "latency_ms": latency_ms,
+            "tools_count": result.get("tools_count"),
+            "prompts": result.get("prompts"),
+            "resources": result.get("resources"),
+        })
+
+    try:
+        _bridge.require_bridge()
+    except _bridge.AgentBridgeUnavailable as exc:
+        return j(handler, {"ok": False, "error": f"Agent config layer unavailable: {exc}"}, status=503)
+
+    # Standalone WebUI deployments have no MCP client. Do not turn configured
+    # URLs into arbitrary server-side HTTP targets; testing is unsupported
+    # until an agent checkout supplies the authenticated MCP probe.
+    if not isinstance(server_cfg, dict):
+        return j(handler, {"ok": False, "error": "invalid server configuration"})
+    if server_cfg.get("url") or server_cfg.get("command"):
+        return j(handler, {
+            "ok": False,
+            "supported": False,
+            "reason": "MCP server connection tests require a Hermes agent checkout",
+        })
+    return j(handler, {"ok": False, "error": "invalid server configuration"})
