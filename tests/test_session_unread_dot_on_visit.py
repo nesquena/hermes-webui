@@ -317,6 +317,7 @@ def _hidden_completion_script(*, hidden: bool) -> str:
     delayed messages fetch, marks a completion mid-fetch, and reports whether the
     completion-unread marker survives."""
     ensure = _extract_async("_ensureMessagesLoaded")
+    bump_generation = _extract("_bumpMessagesGeneration")
     set_viewed = _extract("_setSessionViewedCount")
     clear_unread = _extract("_clearSessionCompletionUnread")
     get_unread = _extract("_getSessionCompletionUnread")
@@ -348,6 +349,7 @@ let _msgLimitMax = _MSG_LIMIT_MAX;
 let _pendingCarryForwardSnapshot = null;
 let _loadingSessionId = 'open';
 let _loadSessionGeneration = 0;
+let _messagesGeneration = 0;
 const window = {{}};
 // Tab starts VISIBLE+FOCUSED: the load begins while the user is watching.
 let _visibility = 'visible';
@@ -379,6 +381,7 @@ async function api(url) {{ _apiCalled = true; return _apiResult; }}
 {mark_unread}
 {set_viewed}
 {actively_viewed}
+{bump_generation}
 {ensure}
 
 function _hasMarker() {{
