@@ -1185,6 +1185,67 @@ def model_explicit_pick_signature(model, model_provider) -> str:
     return f"{_m}\x1f{_p}"
 
 
+def _deduplicate_exact_stable_messages(messages):
+    """Drop only exact replay copies that carry stable event identity.
+
+    Repeated role/content without both an id and timestamp can be a legitimate
+    later turn, so those rows are deliberately preserved.  The complete
+    dictionary is canonicalized before hashing: same-event rows with enriched
+    metadata or changed content remain distinct.
+    """
+    if not isinstance(messages, list) or len(messages) < 2:
+        return messages, 0
+
+    seen_by_identity = {}
+    guarded = []
+    removed = 0
+
+    def _is_stable_identity_value(value):
+        return value is not None and (
+            not isinstance(value, str) or bool(value.strip())
+        )
+
+    for message in messages:
+        if not isinstance(message, dict):
+            guarded.append(message)
+            continue
+        message_id = message.get("id")
+        timestamp = message.get("timestamp")
+        if not _is_stable_identity_value(timestamp):
+            timestamp = message.get("_ts")
+        if not (
+            _is_stable_identity_value(message_id)
+            and _is_stable_identity_value(timestamp)
+        ):
+            guarded.append(message)
+            continue
+        identity = (
+            "event",
+            repr(message_id),
+            "timestamp",
+            repr(timestamp),
+        )
+        try:
+            canonical = json.dumps(
+                message,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            guarded.append(message)
+            continue
+        fingerprint = hashlib.sha256(canonical).digest()
+        identity_variants = seen_by_identity.setdefault(identity, {})
+        prior_variants = identity_variants.setdefault(fingerprint, [])
+        if any(prior == message for prior in prior_variants):
+            removed += 1
+            continue
+        prior_variants.append(message)
+        guarded.append(message)
+    return guarded, removed
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL,
@@ -1394,6 +1455,13 @@ class Session:
             'process_wakeup_pause',
             'share_token', 'share_created_at',
         ]
+        self.messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
+        if exact_replay_rows_removed:
+            logger.warning(
+                "Removed %d exact stable replay messages before saving session %s",
+                exact_replay_rows_removed,
+                self.session_id,
+            )
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
@@ -1435,9 +1503,17 @@ class Session:
         try:
             if self.path.exists():
                 existing_text = self.path.read_text(encoding='utf-8')
+                existing = None
+                existing_guarded_messages = None
+                existing_exact_replay_rows_removed = 0
                 try:
                     existing = json.loads(existing_text)
-                    existing_msg_count = len(existing.get('messages') or [])
+                    existing_messages = existing.get('messages') or []
+                    existing_msg_count = len(existing_messages)
+                    (
+                        existing_guarded_messages,
+                        existing_exact_replay_rows_removed,
+                    ) = _deduplicate_exact_stable_messages(existing_messages)
                 except (json.JSONDecodeError, ValueError):
                     existing_msg_count = -1  # corrupt → always back up
                 incoming_msg_count = len(self.messages or [])
@@ -1466,11 +1542,26 @@ class Session:
                     # this fix the backup either lands cleanly or doesn't
                     # land at all.
                     try:
+                        backup_text = existing_text
+                        if (
+                            existing_exact_replay_rows_removed
+                            and isinstance(existing, dict)
+                            and isinstance(existing_guarded_messages, list)
+                        ):
+                            cleaned_existing = dict(existing)
+                            cleaned_existing['messages'] = existing_guarded_messages
+                            cleaned_existing['message_count'] = len(existing_guarded_messages)
+                            backup_text = json.dumps(cleaned_existing, ensure_ascii=False, indent=2)
+                            logger.warning(
+                                "Removed %d exact stable replay messages from backup for session %s",
+                                existing_exact_replay_rows_removed,
+                                self.session_id,
+                            )
                         bak_tmp = bak_path.with_suffix(
                             f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
                         )
                         with open(bak_tmp, 'w', encoding='utf-8') as bf:
-                            bf.write(existing_text)
+                            bf.write(backup_text)
                             bf.flush()
                             os.fsync(bf.fileno())
                         _safe_replace(bak_tmp, bak_path)
@@ -1496,6 +1587,7 @@ class Session:
             except Exception:
                 pass
             raise
+
         if not skip_index:
             _write_session_index(updates=[self])
 
