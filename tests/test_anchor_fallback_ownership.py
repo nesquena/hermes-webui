@@ -507,7 +507,7 @@ def test_render_messages_preserves_action_and_activity_ownership_boundaries():
           querySelector(selector) {{
             return this.querySelectorAll(selector)[0] || null;
           }}
-          insertAdjacentHTML() {{}}
+          insertAdjacentHTML(_position, html) {{ this.innerHTML += String(html || ''); }}
         }}
         function dataKey(name) {{
           return String(name).slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
@@ -857,10 +857,12 @@ def test_render_messages_preserves_action_and_activity_ownership_boundaries():
         }};
         renderMessages();
         const hiddenWakeupUserRow = elements.msgInner.querySelector('[data-role="user"]');
+        const hiddenWakeupAssistantSegments = elements.msgInner.querySelectorAll('.assistant-segment');
         const hiddenWakeupSummary = {{
           wakeupRows: elements.msgInner.querySelectorAll('[data-role="process_wakeup"]').length,
           assistantTurns: elements.msgInner.querySelectorAll('.assistant-turn').length,
           oldHumanHasEdit: !!(hiddenWakeupUserRow && hiddenWakeupUserRow.innerHTML.includes('onclick="editMessage(this)"')),
+          assistantRegenerate: hiddenWakeupAssistantSegments.map(segment => segment.innerHTML.includes('onclick="regenerateResponse(this)"')),
         }};
 
         elements.msgInner = new FakeElement('div');
@@ -876,8 +878,29 @@ def test_render_messages_preserves_action_and_activity_ownership_boundaries():
         }};
         renderMessages();
         const latestHumanRow = elements.msgInner.querySelector('[data-role="user"]');
+        const normalAssistantSegment = elements.msgInner.querySelector('.assistant-segment');
         const normalEditSummary = {{
           latestHumanHasEdit: !!(latestHumanRow && latestHumanRow.innerHTML.includes('onclick="editMessage(this)"')),
+          terminalAssistantHasRegenerate: !!(normalAssistantSegment && normalAssistantSegment.innerHTML.includes('onclick="regenerateResponse(this)"')),
+        }};
+
+        elements.msgInner = new FakeElement('div');
+        window._showBackgroundWakeups = false;
+        S = {{
+          session: {{ session_id: 'trailing-hidden-wakeup' }},
+          messages: [
+            {{ role: 'user', content: 'human question before background task' }},
+            {{ role: 'assistant', content: 'assistant response before background completion' }},
+            {{ role: 'user', content: 'background completed', _source: 'process_wakeup' }},
+          ],
+          toolCalls: [],
+          busy: false,
+        }};
+        renderMessages();
+        const preWakeupAssistantSegment = elements.msgInner.querySelector('.assistant-segment');
+        const trailingHiddenWakeupSummary = {{
+          wakeupRows: elements.msgInner.querySelectorAll('[data-role="process_wakeup"]').length,
+          preWakeupAssistantHasRegenerate: !!(preWakeupAssistantSegment && preWakeupAssistantSegment.innerHTML.includes('onclick="regenerateResponse(this)"')),
         }};
 
         console.log(JSON.stringify({{
@@ -888,6 +911,7 @@ def test_render_messages_preserves_action_and_activity_ownership_boundaries():
           duplicateReferenceSummary,
           hiddenWakeupSummary,
           normalEditSummary,
+          trailingHiddenWakeupSummary,
         }}));
         """
     )
@@ -939,8 +963,16 @@ def test_render_messages_preserves_action_and_activity_ownership_boundaries():
         "wakeupRows": 0,
         "assistantTurns": 2,
         "oldHumanHasEdit": False,
+        "assistantRegenerate": [False, True],
     }
-    assert result["normalEditSummary"] == {"latestHumanHasEdit": True}
+    assert result["normalEditSummary"] == {
+        "latestHumanHasEdit": True,
+        "terminalAssistantHasRegenerate": True,
+    }
+    assert result["trailingHiddenWakeupSummary"] == {
+        "wakeupRows": 0,
+        "preWakeupAssistantHasRegenerate": False,
+    }
 
 
 def test_settled_legacy_tool_rebuild_excludes_anchor_owned_turns():
