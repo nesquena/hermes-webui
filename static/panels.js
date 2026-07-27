@@ -7465,6 +7465,7 @@ async function switchToProfile(name, opts = {}) {
     }
 
     await _profileSwitchPanelLoad();
+    if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
     _refreshProfileSwitchBackground(_switchGen);
     return _settleSwitchTransaction('committed');
 

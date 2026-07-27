@@ -1405,6 +1405,144 @@ eval(extractFunc('switchToProfile'));
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_switch_to_profile_reports_superseded_when_newer_switch_starts_during_panel_reload():
+    """A stale switch must not commit after the final panel reload await."""
+    js = PANELS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+const deferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+};
+const settle = async (cycles = 4) => {
+  for (let i = 0; i < cycles; i += 1) {
+    await Promise.resolve();
+  }
+};
+let _profileSwitchGeneration = 0;
+let _profileSwitchTransaction = null;
+let _profilesCache = null;
+let _profileDropdownFetchPromise = null;
+let _profileDropdownCacheLoadedFromStorage = false;
+let _skillsData = ['old'];
+let _workspaceList = ['old'];
+let _showAllProfiles = true;
+let _scriptsRequestId = 0;
+let _scriptsRawRequestId = 0;
+let _cronsRequestId = 0;
+let _cronList = ['stale-job'];
+let _showAllCronProfiles = true;
+let _cronOtherProfileCount = 3;
+let _cronPreFormDetail = { id: 'stale-job' };
+let _editingCronId = 'stale-job';
+let _cronIsDuplicate = true;
+const panelDeferreds = { b: deferred(), c: deferred() };
+const panelLoads = [];
+const localStorage = { removeItem() {} };
+const window = {};
+const S = { activeProfile: 'a', session: null, messages: [] };
+const cronList = { children: [{}], replaceChildren(){ this.children = []; } };
+const cronRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
+const scriptsList = { children: [{}], replaceChildren(){ this.children = []; } };
+const scriptsRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
+function $(id){
+  return {
+    cronList,
+    cronRefreshBtn,
+    scriptsList,
+    scriptsRefreshBtn,
+  }[id] || null;
+}
+async function api(url, opts){
+  if (url !== '/api/profile/switch') throw new Error('unexpected api: ' + url);
+  const body = JSON.parse(opts.body);
+  return { active: body.name, is_default: false };
+}
+async function renderSessionList(){}
+function syncTopbar(){}
+function loadDir(){ return Promise.resolve(); }
+function showToast(){}
+function t(key){ return key; }
+function _clearCronDetail(){}
+function _invalidateScriptsRequests(){
+  _scriptsRequestId += 1;
+  _scriptsRawRequestId += 1;
+  _scriptsData = null;
+}
+async function _profileSwitchPanelLoad(){
+  panelLoads.push(S.activeProfile);
+  await panelDeferreds[S.activeProfile].promise;
+}
+function _refreshProfileSwitchBackground(){}
+function animateNextSessionListRefresh(){}
+eval(extractFunc('_resetTasksForProfileTransition'));
+eval(extractFunc('switchToProfile'));
+(async () => {
+  const stale = switchToProfile('b', { returnTransaction: true });
+  await settle();
+  const newer = switchToProfile('c', { returnTransaction: true });
+  await settle();
+  panelDeferreds.c.resolve();
+  const newerResult = await newer;
+  await settle();
+  panelDeferreds.b.resolve();
+  const staleResult = await stale;
+  const terminal = await staleResult.terminalResult;
+  console.log(JSON.stringify({
+    staleResult: {
+      generation: staleResult.generation,
+      from: staleResult.from,
+      target: staleResult.target,
+      outcome: staleResult.outcome,
+    },
+    terminal: {
+      generation: terminal.generation,
+      from: terminal.from,
+      target: terminal.target,
+      outcome: terminal.outcome,
+    },
+    newerResult: {
+      generation: newerResult.generation,
+      from: newerResult.from,
+      target: newerResult.target,
+      outcome: newerResult.outcome,
+    },
+    activeProfile: S.activeProfile,
+    switchGeneration: _profileSwitchGeneration,
+    panelLoads,
+  }));
+})().catch(err => { console.error(err); process.exit(1); });
+"""
+    assert json.loads(_run_node(source)) == {
+        "staleResult": {
+            "generation": 1,
+            "from": "a",
+            "target": "b",
+            "outcome": "superseded",
+        },
+        "terminal": {
+            "generation": 2,
+            "from": "b",
+            "target": "c",
+            "outcome": "committed",
+        },
+        "newerResult": {
+            "generation": 2,
+            "from": "b",
+            "target": "c",
+            "outcome": "committed",
+        },
+        "activeProfile": "c",
+        "switchGeneration": 2,
+        "panelLoads": ["b", "c"],
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_session_load_profile_switch_delegates_to_canonical_transaction():
     """Session-load profile changes must use the canonical switch transaction."""
     js = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
