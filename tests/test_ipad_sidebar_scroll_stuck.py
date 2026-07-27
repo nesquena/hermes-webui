@@ -1845,32 +1845,32 @@ def test_touch_exit_teardown_reachable():
     """
     source = f"""
 const SESSIONS_JS = {SESSIONS_JS!r};
-""" + _node_test_preamble() + f"""
+""" + _node_test_preamble() + """
 const list = makeList();
 _sessionTouchGen = 1;
 _sessionTouchListEl = list;
 _sessionTouchLoadedCount = 60;
 _sessionTouchTotalCount = 100;
-_touchRenderState = {{ gen: 1, list: list, flatRows: [], renderOneSession: null, activeSid: null }};
+_touchRenderState = { gen: 1, list: list, flatRows: [], renderOneSession: null, activeSid: null };
 _touchBatchPending = true;
-_touchSentinelObserver = {{ disconnect: function() {{}}, observe: function() {{}}, unobserve: function() {{}} }};
+_touchSentinelObserver = { disconnect: function() {}, observe: function() {}, unobserve: function() {} };
 
 // Mock _isTouchPrimary to return FALSE — simulating touch→desktop transition
-function _isTouchPrimary() {{ return false; }}
+function _isTouchPrimary() { return false; }
 
 eval(extractFunc('_setupTouchSentinel'));
 
 // Call _setupTouchSentinel with non-touch — must invalidate old state.
 // The paintedExtent argument (60) is ignored in the exit path.
-_setupTouchSentinel(list, 100, [], function(){{}}, null, 60);
+_setupTouchSentinel(list, 100, [], function(){}, null, 60);
 
-console.log(JSON.stringify({{
+console.log(JSON.stringify({
   observerNull: _touchSentinelObserver === null,
   renderStateNull: _touchRenderState === null,
   listElNull: _sessionTouchListEl === null,
   loadedCountZero: _sessionTouchLoadedCount === 0,
   batchPendingFalse: _touchBatchPending === false,
-}}));
+}));
 """
     result = json.loads(_run_node_vm(source))
     assert result["observerNull"], "Observer must be disconnected on touch exit"
