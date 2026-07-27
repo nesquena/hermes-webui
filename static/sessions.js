@@ -5516,27 +5516,43 @@ function _appendTouchBatch(){
   // group body, after the newly loaded rows. A partial 60->100 append would
   // otherwise produce rows 0-59, spacer, rows 60-99 — with the spacer in front
   // of the new rows.
-  // Phase 1: validate all targets exist.
+  //
+  // Phase 1: validate all targets exist. Newly created wrappers are kept
+  // DETACHED — do NOT insert into live DOM during validation. If any group's
+  // body is missing, abort without touching the DOM at all. This ensures the
+  // validation phase is genuinely side-effect-free: no wrapper, fragment, or
+  // node is committed until every target has been resolved.
   const commitTargets=[];
+  const newWrappers=[]; // wrappers created during validation, attached in Phase 2
   for(const label of groupOrder){
     let wrapper=list.querySelector('.session-date-group[data-group-label="'+CSS.escape(label)+'"]');
+    let isNew=false;
     if(!wrapper){
-      // Group doesn't exist in DOM yet — create it (but don't attach fragment yet).
+      // Group doesn't exist in DOM yet — create it but keep DETACHED.
+      // It will only be attached in Phase 2 after every target validates.
       wrapper=_createTouchGroupWrapper({label:label,isPinned:false}, state);
-      const sentinel=list.querySelector('[data-touch-sentinel]');
-      if(sentinel) list.insertBefore(wrapper,sentinel);
-      else list.appendChild(wrapper);
+      isNew=true;
+      newWrappers.push(wrapper);
     }
     const body=wrapper.querySelector('.session-date-body');
     if(!body){
-      // Missing body — abort the entire commit without advancing the loaded count.
+      // Missing body — abort the entire commit without advancing the loaded
+      // count. No wrappers have been attached (new ones are still detached),
+      // so the live DOM is untouched.
       return;
     }
     const afterSpacer=body.querySelector('.session-virtual-spacer[data-virtual-spacer="after"]');
-    commitTargets.push({body:body, afterSpacer:afterSpacer, label:label});
+    commitTargets.push({wrapper:wrapper, body:body, afterSpacer:afterSpacer, label:label, isNew:isNew});
   }
-  // Phase 2: attach all fragments. By this point every target is guaranteed to
-  // exist, so no partial-commit-duplicate-on-retry is possible.
+  // Phase 2: attach newly created wrappers to the live DOM. By this point every
+  // target (existing and new) has been validated — body exists for all groups.
+  for(const wrapper of newWrappers){
+    const sentinel=list.querySelector('[data-touch-sentinel]');
+    if(sentinel) list.insertBefore(wrapper,sentinel);
+    else list.appendChild(wrapper);
+  }
+  // Phase 3: attach all fragments. Every target is guaranteed to exist, so no
+  // partial-commit-duplicate-on-retry is possible.
   for(const target of commitTargets){
     if(target.afterSpacer){
       target.body.insertBefore(fragmentsByGroup[target.label], target.afterSpacer);
