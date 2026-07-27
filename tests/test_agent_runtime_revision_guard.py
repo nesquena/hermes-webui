@@ -84,7 +84,7 @@ try:
     streaming._get_ai_agent()
 except RuntimeError as exc:
     message = str(exc)
-    assert "Hermes Agent was updated" in message
+    assert "Hermes Agent source revision changed" in message
     assert "Restart Hermes WebUI" in message
 else:
     raise AssertionError("stale in-process AIAgent was reused after its source revision changed")
