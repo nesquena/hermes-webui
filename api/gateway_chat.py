@@ -1,6 +1,7 @@
 """Default-off Hermes Gateway bridge for browser-originated chat turns."""
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -242,6 +243,9 @@ def _open_gateway_stream(req: urllib.request.Request, timeout: float, max_attemp
     tool-call side effects on the gateway. This only covers the narrower,
     safe case where the request never reached the server at all, so nothing
     has happened yet and a retry is a no-op from the gateway's perspective.
+
+    Connection reset / broken pipe after the request may have been accepted are
+    NOT retried — those can mean the gateway already started the turn.
     """
     last_exc: Exception | None = None
     for attempt in range(max_attempts):
@@ -251,7 +255,13 @@ def _open_gateway_stream(req: urllib.request.Request, timeout: float, max_attemp
             raise  # a real response from the gateway, not a connection failure
         except urllib.error.URLError as exc:
             last_exc = exc
-            if attempt + 1 < max_attempts and isinstance(exc.reason, OSError):
+            reason = exc.reason
+            # Only retry hard "never connected" failures.
+            refused = isinstance(reason, ConnectionRefusedError) or (
+                isinstance(reason, OSError)
+                and getattr(reason, "errno", None) in (errno.ECONNREFUSED, errno.ENOENT)
+            )
+            if attempt + 1 < max_attempts and refused:
                 time.sleep(0.5 * (attempt + 1))
                 continue
             raise

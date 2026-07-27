@@ -22278,14 +22278,15 @@ def _handle_chat_start(handler, body, diag=None):
             else getattr(s, "model_provider", None)
         )
         _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
-        # Treat a model the client explicitly supplied as a deliberate pick.
+        # Treat a model the client explicitly marked as a deliberate pick.
         # Without this, cross-family bare model names (e.g. ``gpt-4o``,
         # ``claude-3-5-sonnet``) fall into the profile-default repair path and
         # get silently rewritten to the profile default model — the backend then
         # reports ``effective_model`` as the default and the WebUI adopts it,
         # so the user's chosen model "switches" to the default on every message.
-        # Honoring the explicit pick keeps the user's selection intact.
-        explicit_model_pick = bool(body.get("explicit_model_pick")) or bool(requested_model)
+        # Only honor the client flag — do NOT infer "explicit" from a non-empty
+        # model id, or every session-carried model would skip provider repair.
+        explicit_model_pick = bool(body.get("explicit_model_pick"))
         moa_config = None
         config_snapshot = get_config_snapshot()
         gateway_chat_enabled = webui_gateway_chat_enabled(config_snapshot)

@@ -16,8 +16,9 @@ def handle_notes_local_search(handler, parsed):
     if not kb_dir.is_dir():
         return _json(handler, {"results": []})
     try:
+        # `-e` + `--` keep crafted queries like `-v` from being parsed as flags.
         result = subprocess.run(
-            ["rg", "--no-heading", "--line-number", "-i", query, "--", str(kb_dir)],
+            ["rg", "--no-heading", "--line-number", "-i", "-e", query, "--", str(kb_dir)],
             capture_output=True, text=True, timeout=10
         )
         lines = [l for l in result.stdout.split("\n") if l.strip()]
@@ -61,9 +62,11 @@ def handle_notes_local_read(handler, parsed):
 
 
 def _json(handler, data):
+    # Same-origin only — never advertise Access-Control-Allow-Origin: *.
+    # Passwordless binds already expose the API to loopback; wildcard CORS would
+    # let any visited site read knowledge files via the user's browser.
     handler.send_response(200)
     handler.send_header("Content-Type", "application/json")
-    handler.send_header("Access-Control-Allow-Origin", "*")
     handler.end_headers()
     handler.wfile.write(json.dumps(data).encode())
     return True
@@ -72,7 +75,6 @@ def _json(handler, data):
 def _bad(handler, msg, status=400):
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
-    handler.send_header("Access-Control-Allow-Origin", "*")
     handler.end_headers()
     handler.wfile.write(json.dumps({"error": msg}).encode())
     return True

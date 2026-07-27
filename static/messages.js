@@ -1340,13 +1340,25 @@ async function send(){
   // flag for the chat/start payload, and hides the prefix from chat display.
   window._pendingChatMode = null;
   const _askMatch = text.match(/^\/ask\s+(.*)/s) || text.match(/^\/ask$/s);
-  const _planMatch = text.match(/^\/plan\s+(.*)/s);
+  const _planMatch = text.match(/^\/plan\s+(.*)/s) || text.match(/^\/plan$/s);
   if (_askMatch) {
-    text = _askMatch[1] || '';
+    text = (_askMatch[1] || '').trim();
+    if (!text && !S.pendingFiles.length) {
+      if (typeof showToast === 'function') showToast('Usage: /ask <question>', 2500);
+      _sendInProgress = false;
+      _sendInProgressSid = null;
+      return;
+    }
     window._pendingChatMode = 'ask';
     $('msg').value = text;
   } else if (_planMatch) {
-    text = _planMatch[1] || '';
+    text = (_planMatch[1] || '').trim();
+    if (!text && !S.pendingFiles.length) {
+      if (typeof showToast === 'function') showToast('Usage: /plan <request>', 2500);
+      _sendInProgress = false;
+      _sendInProgressSid = null;
+      return;
+    }
     window._pendingChatMode = 'plan';
     $('msg').value = text;
   }
