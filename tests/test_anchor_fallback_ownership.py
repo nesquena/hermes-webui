@@ -416,6 +416,9 @@ def test_render_messages_preserves_action_and_activity_ownership_boundaries():
     legacy_metadata_source = _function_source(
         _ui_js(), "_legacySettledFallbackHasToolMetadata"
     )
+    worklog_ownership_source = _function_source(
+        _ui_js(), "_assistantMessageBelongsInWorklog"
+    )
     script = textwrap.dedent(
         f"""
         class FakeClassList {{
@@ -634,7 +637,6 @@ def test_render_messages_preserves_action_and_activity_ownership_boundaries():
         function _isAssistantEmptyPlaceholderContent() {{ return false; }}
         function _assistantTurnAnchorSettledFinalAnswer() {{ return null; }}
         function _worklogReasoningTextFromMessage() {{ return ''; }}
-        function _assistantMessageBelongsInWorklog() {{ return false; }}
         function _assistantThinkingBelongsInWorklog() {{ return false; }}
         function _assistantReasoningPayloadText() {{ return ''; }}
         function _statusCardHtml() {{ return ''; }}
@@ -706,6 +708,7 @@ def test_render_messages_preserves_action_and_activity_ownership_boundaries():
 
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
+        eval({json.dumps(worklog_ownership_source)});
         eval({json.dumps(render_source)});
 
         const toolResult = {{ role: 'tool', tool_call_id: 'toolu_1', content: 'tool result' }};
@@ -848,7 +851,7 @@ def test_render_messages_preserves_action_and_activity_ownership_boundaries():
           session: {{ session_id: 'hidden-wakeup' }},
           messages: [
             {{ role: 'user', content: 'original human question' }},
-            {{ role: 'assistant', content: 'first assistant answer' }},
+            {{ role: 'assistant', content: 'first assistant answer', _activityBurstId: 'before-wakeup' }},
             {{ role: 'user', content: 'background completed', _source: 'process_wakeup' }},
             {{ role: 'assistant', content: 'assistant answer after wakeup' }},
           ],
@@ -863,6 +866,8 @@ def test_render_messages_preserves_action_and_activity_ownership_boundaries():
           assistantTurns: elements.msgInner.querySelectorAll('.assistant-turn').length,
           oldHumanHasEdit: !!(hiddenWakeupUserRow && hiddenWakeupUserRow.innerHTML.includes('onclick="editMessage(this)"')),
           assistantRegenerate: hiddenWakeupAssistantSegments.map(segment => segment.innerHTML.includes('onclick="regenerateResponse(this)"')),
+          assistantHidden: hiddenWakeupAssistantSegments.map(segment => segment.hidden),
+          assistantWorklogSource: hiddenWakeupAssistantSegments.map(segment => segment.classList.contains('assistant-segment-worklog-source')),
         }};
 
         elements.msgInner = new FakeElement('div');
@@ -964,6 +969,8 @@ def test_render_messages_preserves_action_and_activity_ownership_boundaries():
         "assistantTurns": 2,
         "oldHumanHasEdit": False,
         "assistantRegenerate": [False, True],
+        "assistantHidden": [False, False],
+        "assistantWorklogSource": [False, False],
     }
     assert result["normalEditSummary"] == {
         "latestHumanHasEdit": True,
