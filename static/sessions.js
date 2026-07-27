@@ -1629,10 +1629,9 @@ function _sessionProfileMismatchFromError(e){
 async function _switchProfileForSessionLoad(profile){
   const name=String(profile||'').trim();
   if(!name) throw new Error('missing profile');
-  if(name===S.activeProfile) return true;
   _profileSwitchOpeningExistingSession=true;
   try{
-    return await switchToProfile(name);
+    return await switchToProfile(name, {returnTransaction:true});
   } finally {
     _profileSwitchOpeningExistingSession=false;
   }
@@ -1701,6 +1700,9 @@ async function loadSession(sid){
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
+  const _retireCurrentLoad = () => {
+    if (_isCurrentLoad()) _loadingSessionId = null;
+  };
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
@@ -1816,49 +1818,56 @@ async function loadSession(sid){
       }
       try{
         if(typeof showToast==='function') showToast(`Switching to ${profileMismatch.profile} profile for this session…`,2200);
-        const _expectedProfileSwitchGeneration = (typeof _profileSwitchGeneration === 'number')
-          ? (_profileSwitchGeneration + 1)
-          : null;
-        const _previousActiveProfileBeforeSwitch = (S && S.activeProfile) || 'default';
-        const switched = await _switchProfileForSessionLoad(profileMismatch.profile);
-        if (switched !== true) {
+        const _normalizeProfileSwitchResult = result => {
+          if (result && typeof result === 'object' && result.outcome) return result;
+          if (result === true) return { outcome: 'committed', terminalResult: null };
+          return { outcome: 'failed', terminalResult: null };
+        };
+        const _resolveFinalSupersededSwitchResult = async result => {
+          let current = result;
+          while (current && current.outcome === 'superseded' && current.terminalResult) {
+            current = await current.terminalResult;
+          }
+          return _normalizeProfileSwitchResult(current);
+        };
+        let switched = _normalizeProfileSwitchResult(await _switchProfileForSessionLoad(profileMismatch.profile));
+        if (!_isCurrentLoad()) {
+          _rearmActiveSessionStream();
+          return;
+        }
+        if (switched.outcome === 'superseded') {
+          const terminal = await _resolveFinalSupersededSwitchResult(switched);
           if (!_isCurrentLoad()) {
             _rearmActiveSessionStream();
             return;
           }
-          const _activeProfileAfterSwitch = (S && S.activeProfile) || 'default';
-          const _profileSwitchSuperseded = _expectedProfileSwitchGeneration !== null
-            && typeof _profileSwitchGeneration === 'number'
-            && _profileSwitchGeneration !== _expectedProfileSwitchGeneration;
-          if (_activeProfileAfterSwitch === profileMismatch.profile) {
-            if (_isCurrentLoad()) _loadingSessionId = null;
-            return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
+          _retireCurrentLoad();
+          if (terminal.outcome === 'failed') {
+            if (!_restorePreviousConversationAfterFailedSwitch()) {
+              const _msgInner = $('msgInner');
+              if (_msgInner) {
+                _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load conversation. Try switching sessions or refreshing.</div>';
+              }
+            }
           }
-          if (_profileSwitchSuperseded || _activeProfileAfterSwitch !== _previousActiveProfileBeforeSwitch) {
-            _rearmActiveSessionStream();
-            return;
-          }
-          if (_isCurrentLoad()) _loadingSessionId = null;
+          _rearmActiveSessionStream();
+          return;
+        }
+        if (switched.outcome === 'already_active' || switched.outcome === 'committed') {
+          _retireCurrentLoad();
+          return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
+        }
+        _retireCurrentLoad();
+        if (switched.outcome === 'failed') {
           if (!_restorePreviousConversationAfterFailedSwitch()) {
             const _msgInner = $('msgInner');
             if (_msgInner) {
               _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load conversation. Try switching sessions or refreshing.</div>';
             }
           }
-          _rearmActiveSessionStream();
-          return;
         }
-        // Post-await stale-load guard (Codex): the profile switch above does a
-        // network POST + session-list re-render, during which the user may have
-        // navigated to a different session. If we no longer own the load, bail
-        // before clearing _loadingSessionId or retrying so the stale
-        // continuation can't hijack the UI back to the old target.
-        if (!_isCurrentLoad()) {
-          _rearmActiveSessionStream();
-          return;
-        }
-        if (_isCurrentLoad()) _loadingSessionId = null;
-        return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
+        _rearmActiveSessionStream();
+        return;
       }catch(switchErr){
         e=switchErr;
       }
@@ -1892,7 +1901,7 @@ async function loadSession(sid){
         if(!currentSid || currentSid===sid){
           try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
           try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
-          if (_isCurrentLoad()) _loadingSessionId = null;
+          _retireCurrentLoad();
           if(!currentSid){
             throw e;
           }
@@ -1911,7 +1920,7 @@ async function loadSession(sid){
     }
     _clearSameSessionForceReloadHint(sid);
     const _selfHealedCurrent = (e.status===404) && (currentSid===sid);
-    if (_isCurrentLoad()) _loadingSessionId = null;
+    _retireCurrentLoad();
     // Restart the on-screen session unless this 404 just self-healed it away,
     // or a newer load already owns the restart.
     if (currentSid && !_selfHealedCurrent && _loadingSessionId === null
@@ -1927,7 +1936,7 @@ async function loadSession(sid){
   // send users to empty state after re-login (#4028 follow-up).
   if (!data) {
     _clearSameSessionForceReloadHint(sid);
-    if (_isCurrentLoad()) _loadingSessionId = null;
+    _retireCurrentLoad();
     // #2971: re-arm the still-displayed session's stream (defensive — harmless
     // if the 401 redirect is already tearing the page down). Idempotent.
     _rearmActiveSessionStream();
@@ -1951,7 +1960,7 @@ async function loadSession(sid){
   // cross-profile continuation can't poison restore state with an unusable id.
   const continuationSid=(data.session&&data.session.continuation_session_id)||'';
   if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
-    _loadingSessionId=null;
+    _retireCurrentLoad();
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
@@ -2252,7 +2261,7 @@ async function loadSession(sid){
         _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
-      if (_isCurrentLoad()) _loadingSessionId = null;
+      _retireCurrentLoad();
       return;
     }
     // Stale? A newer loadSession() call has already started (#1060).
@@ -2375,7 +2384,7 @@ async function loadSession(sid){
   }
 
   // Clear the in-flight session marker now that this load has completed (#1060).
-  if (_isCurrentLoad()) _loadingSessionId = null;
+  _retireCurrentLoad();
 
   // Re-acknowledge the visit after the async message-load gap. A deferred
   // sidebar /api/sessions poll can land while _ensureMessagesLoaded is in

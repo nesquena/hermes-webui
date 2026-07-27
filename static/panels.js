@@ -6675,6 +6675,7 @@ let _profileDropdownCacheLoadedFromStorage = false;
 const PROFILE_DROPDOWN_CACHE_KEY = 'hermes-webui-profile-dropdown-cache-v1';
 const PROFILE_DROPDOWN_CACHE_TTL_MS = 5 * 60 * 1000;
 let _profileSwitchGeneration = 0;
+let _profileSwitchTransaction = null;
 let _profileDropdownTrigger = null;  // tracks which element triggered the dropdown
 let _profileDropdownOpenGeneration = 0;
 
@@ -7140,7 +7141,7 @@ function _openProfileSwitchSessionBrowser(){
   }catch(_){}
 }
 
-async function switchToProfile(name) {
+async function switchToProfile(name, opts = {}) {
   // ── #4671 profile-switch loading-skeleton — FOUR-GUARD CONTRACT ───────────────
   // The skeleton must never be clobbered by the OLD profile's content and must never
   // strand. Four interacting pieces of state cooperate; an edit touching one without
@@ -7164,7 +7165,20 @@ async function switchToProfile(name) {
   // already on this profile, so paths like activateCurrentProfile() (which
   // doesn't pre-check) can't flash a skeleton→restore for a click that changes
   // nothing. (#4662 Opus gate)
-  if (name && name === S.activeProfile) return true;
+  const _returnTransaction = !!(opts && opts.returnTransaction);
+  const _previousProfile = S.activeProfile || 'default';
+  const _returnSwitchResult = result => _returnTransaction
+    ? result
+    : (result.outcome === 'already_active' || result.outcome === 'committed');
+  if (name && name === S.activeProfile) {
+    return _returnSwitchResult({
+      generation: _profileSwitchGeneration,
+      from: _previousProfile,
+      target: name,
+      outcome: 'already_active',
+      terminalResult: null,
+    });
+  }
   S._pendingSessionToolsets=null;
   // Profile switches are per-client cookie/TLS scoped, so a running stream in
   // the current session can safely continue while this tab moves to another
@@ -7179,6 +7193,29 @@ async function switchToProfile(name) {
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
+  let _resolveSwitchTransaction;
+  const _switchTransaction = {
+    generation: _switchGen,
+    from: _previousProfile,
+    target: name,
+    outcome: null,
+    terminalResult: null,
+    settled: new Promise(resolve => { _resolveSwitchTransaction = resolve; }),
+  };
+  _profileSwitchTransaction = _switchTransaction;
+  const _settleSwitchTransaction = (outcome, terminalResult = null) => {
+    if (_switchTransaction.outcome) return _returnSwitchResult(_switchTransaction);
+    _switchTransaction.outcome = outcome;
+    _switchTransaction.terminalResult = terminalResult;
+    _resolveSwitchTransaction(_switchTransaction);
+    return _returnSwitchResult(_switchTransaction);
+  };
+  const _supersededSwitchResult = () => _settleSwitchTransaction(
+    'superseded',
+    _profileSwitchTransaction !== _switchTransaction && _profileSwitchTransaction
+      ? _profileSwitchTransaction.settled
+      : Promise.resolve(null)
+  );
   const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
@@ -7245,7 +7282,7 @@ async function switchToProfile(name) {
     // the single source of truth for switch failure and is gated on _switchGen, so the
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
-    if (_switchGen !== _profileSwitchGeneration) return false;
+    if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
     S.activeProfile = data.active || name;
     if (typeof _resetTasksForProfileTransition === 'function') _resetTasksForProfileTransition();
     S.activeProfileIsDefault = !!data.is_default;
@@ -7366,7 +7403,7 @@ async function switchToProfile(name) {
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return false;
+      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       showToast(t('profile_switched', name));
     } else if (sessionInProgress) {
@@ -7374,7 +7411,7 @@ async function switchToProfile(name) {
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
-      if (_switchGen !== _profileSwitchGeneration) return false;
+      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.
       syncTopbar();
@@ -7388,7 +7425,7 @@ async function switchToProfile(name) {
       // the superseded switch would clear the newer switch's workspace skeleton
       // and pop a stale toast. Mirrors the no-messages branch guard below.
       // (@rodboev/greptile review, #4662)
-      if (_switchGen !== _profileSwitchGeneration) return false;
+      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       // Safety net: if the new session has no workspace, newSession() won't have
       // painted the file tree — clear the up-front skeleton so it can't strand
@@ -7411,7 +7448,7 @@ async function switchToProfile(name) {
       // #4671: lift the embargo immediately before the switch-owned render (see above).
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return;
+      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       syncTopbar();
       // Refresh workspace file tree so the right panel shows the new
@@ -7429,7 +7466,7 @@ async function switchToProfile(name) {
 
     await _profileSwitchPanelLoad();
     _refreshProfileSwitchBackground(_switchGen);
-    return true;
+    return _settleSwitchTransaction('committed');
 
   } catch (e) {
     // Revert the optimistic name update on error
@@ -7458,7 +7495,8 @@ async function switchToProfile(name) {
       }
       if (_currentPanel === 'tasks') await _ensureTasksSubtabLoaded(_tasksSubtab);
     }
-    return false;
+    if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
+    return _settleSwitchTransaction('failed');
   } finally {
     // Always remove loading indicator regardless of success or failure
     if (_switchGen === _profileSwitchGeneration && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
