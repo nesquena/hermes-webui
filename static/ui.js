@@ -17015,7 +17015,7 @@ function renderMessages(options){
       const turnVisibleContents=assistantTurnVisibleContentByRawIdx.get(rawIdx)||[];
       thinkingText=_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents);
     }
-    const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
+    const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1&&rawIdx>lastUserRawIdx;
     const nextRendered=renderVisWithIdx[vi+1];
     const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant');
     let filesHtml='';
