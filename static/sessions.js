@@ -1995,16 +1995,16 @@ async function loadSession(sid){
   // Sync workspace display immediately so the chip label reflects the new session's workspace
   // before any async message-loading begins (mirrors how model is handled).
   if(typeof syncTopbar==='function') syncTopbar();
-  // Acknowledge the visit as soon as the session metadata is accepted for the
-  // in-flight load: clears the viewed count + any stale completion-unread marker
+  // Do not acknowledge unread state on metadata arrival. The transcript fetch can
+  // still fail or be superseded by a newer navigation; only the final successful
+  // load block below is allowed to mark this selected session read.
   // `let` (not const): re-read below, after the awaited _ensureMessagesLoaded,
   // so a server_turn_started that attaches a live stream MID-RELOAD is honored
   // by the attach/idle decision instead of being clobbered by the stale snapshot.
   let activeStreamId=S.session.active_stream_id||null;
   // If the server says the session is idle, reset browser-side streaming flags
-  // NOW — BEFORE _acknowledgeSessionVisit() below (whose sidebar repaint would
-  // otherwise inherit the PREVIOUS session's busy/stream state) and before the
-  // async _ensureMessagesLoaded gap. Without this, S.busy can remain true from a
+  // NOW — before any sidebar repaint and before the async
+  // _ensureMessagesLoaded gap. Without this, S.busy can remain true from a
   // still-running stream in the PREVIOUS session while S.session.session_id has
   // already advanced to the new one. _isSessionLocallyStreaming() checks
   // (isActive && S.busy), so the new session would appear locally-streaming
@@ -2020,14 +2020,6 @@ async function loadSession(sid){
       if(typeof clearInflightState==='function') clearInflightState(sid);
     }
   }
-
-  // and syncs the polling snapshot so a deferred /api/sessions poll landing
-  // during the async message-load gap below cannot re-flag a stale unread dot.
-  _acknowledgeSessionVisit(
-    S.session.session_id,
-    Number(data.session.message_count || 0),
-    Number(data.session.last_message_at || data.session.updated_at || 0)
-  );
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);

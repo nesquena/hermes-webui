@@ -64,18 +64,19 @@ def test_acknowledge_visit_syncs_viewed_snapshot_and_repaints():
     assert "renderSessionListFromCache" in body
 
 
-def test_load_session_acknowledges_visit_before_and_after_message_load():
+def test_load_session_acknowledges_only_after_successful_message_load():
     block = _load_session_block()
-    # Metadata-arrival acknowledgment.
-    first_ack = block.find("_acknowledgeSessionVisit(\n    S.session.session_id,")
     loading_clear = block.find("if (_isCurrentLoad()) _loadingSessionId = null;\n\n  // Re-acknowledge")
-    second_ack = block.find("_acknowledgeSessionVisit(", loading_clear)
+    final_ack = block.find("_acknowledgeSessionVisit(", loading_clear)
+    pre_success_region = block[block.find("_loadingSessionId = sid;"):loading_clear]
 
-    assert first_ack != -1, "loadSession must acknowledge the visit when metadata arrives"
-    assert loading_clear != -1, "loadSession must clear the in-flight marker before the final acknowledge"
-    assert second_ack != -1 and first_ack < loading_clear < second_ack, (
-        "loadSession must re-acknowledge after the async message-load gap so a "
-        "deferred sidebar poll cannot leave a sticky unread dot"
+    assert loading_clear != -1, "loadSession must clear its in-flight marker after successful loading"
+    assert "_acknowledgeSessionVisit(\n    S.session.session_id," not in pre_success_region, (
+        "metadata arrival is not a successful transcript load: failed or superseded "
+        "message fetches must remain unread"
+    )
+    assert final_ack > loading_clear, (
+        "loadSession must acknowledge exactly after the selected transcript finishes loading"
     )
 
 
