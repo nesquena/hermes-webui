@@ -1402,6 +1402,7 @@ async function newSession(flash, options={}){
       workspace:inheritWs,
       profile:S.activeProfile||'default',
     };
+    if(window._temporaryNewChat) reqBody.temporary=true;
     if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
     // Three-value worktree contract (#6022): explicit true/false is forwarded
     // verbatim; an ABSENT key lets the server apply the agent's config-level

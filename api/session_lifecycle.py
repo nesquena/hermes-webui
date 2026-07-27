@@ -190,8 +190,22 @@ def mark_turn_completed(session_id: str, *, agent=None) -> int:
             segments[-1]["end"] = generation
         else:
             segments.append({"start": generation, "end": generation, "agent": owner})
+        _discard_temporary_uncommitted_work(session_id, entry)
         _condition.notify_all()
         return generation
+
+
+def _discard_temporary_uncommitted_work(session_id: str, entry: dict) -> None:
+    """Temporary chats skip durable memory — do not retain phantom uncommitted work."""
+    try:
+        from api.models import get_session
+
+        session = get_session(session_id, metadata_only=True)
+        if session is None or not bool(getattr(session, "temporary", False)):
+            return
+    except Exception:
+        return
+    entry["committed_generation"] = entry["generation"]
 
 
 def has_uncommitted_work(session_id: str) -> bool:

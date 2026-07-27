@@ -1357,6 +1357,28 @@ window._readPersistedDefaultMessageMode=_readPersistedDefaultMessageMode;
 // the boot window honor the persisted preference instead of the raw default.
 window._defaultMessageMode=_readPersistedDefaultMessageMode();
 
+function _readPersistedTemporaryNewChat(){
+  try{return localStorage.getItem('hermes-temporary-new-chat')==='1';}catch(_){return false;}
+}
+function _persistTemporaryNewChat(on){
+  window._temporaryNewChat=!!on;
+  try{localStorage.setItem('hermes-temporary-new-chat',on?'1':'0');}catch(_){}
+}
+window._persistTemporaryNewChat=_persistTemporaryNewChat;
+window._temporaryNewChat=_readPersistedTemporaryNewChat();
+function toggleTemporaryNewChat(){
+  _persistTemporaryNewChat(!window._temporaryNewChat);
+  if(typeof _syncTemporaryNewChatButton==='function') _syncTemporaryNewChatButton();
+}
+window.toggleTemporaryNewChat=toggleTemporaryNewChat;
+function _syncTemporaryNewChatButton(){
+  const btn=$('btnTemporaryChat');
+  if(!btn) return;
+  btn.classList.toggle('on', window._temporaryNewChat);
+  btn.setAttribute('aria-pressed', window._temporaryNewChat?'true':'false');
+}
+window._syncTemporaryNewChatButton=_syncTemporaryNewChatButton;
+
 // ── Extension TTS-engine registry (registerHermesTtsEngine) ──────────────────
 // Defined at MODULE scope (not inside the voice-mode IIFE below) so the public
 // API exists even on browsers without SpeechRecognition / speechSynthesis — an
@@ -3780,6 +3802,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // no saved session - show empty state, wait for user to hit +
   S._bootReady=true;
   syncTopbar();
+  if(typeof _syncTemporaryNewChatButton==='function') _syncTemporaryNewChatButton();
   // Restore panel pref so the workspace panel stays visible on a fresh load if the
   // user had it open during their last session (#workspace-persist).
   const _freshPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'

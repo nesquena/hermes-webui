@@ -213,3 +213,16 @@ def test_sessions_search_excludes_temporary_by_default(monkeypatch):
     opt_ids = [s["session_id"] for s in captured["payload"].get("sessions", [])]
     assert "keep-search" in opt_ids
     assert "tmp-search" in opt_ids
+
+
+def test_mark_turn_completed_discards_temporary_uncommitted_work(monkeypatch):
+    from api.session_lifecycle import mark_turn_completed, has_uncommitted_work, _reset_for_tests
+
+    _reset_for_tests()
+    sid = "tmp-lifecycle"
+    monkeypatch.setattr(
+        "api.models.get_session",
+        lambda _sid, metadata_only=False: type("S", (), {"temporary": True})(),
+    )
+    mark_turn_completed(sid, agent=object())
+    assert has_uncommitted_work(sid) is False

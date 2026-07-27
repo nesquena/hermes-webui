@@ -2606,6 +2606,9 @@
   .composer-toolsets-wrap,
   .composer-model-wrap{position:relative;flex:0 0 auto;}
   .composer-profile-chip{display:inline-flex;align-items:center;gap:8px;max-width:180px;padding:8px 10px 8px 12px;border-radius:999px;border:1px solid transparent;background-color:transparent;font-weight:500;cursor:pointer;transition:color .15s,background-color .15s,border-color .15s;}
+  .composer-temp-chip{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;padding:6px 10px;border-radius:999px;border:1px dashed var(--border2);background:transparent;color:var(--muted);cursor:pointer;white-space:nowrap;}
+  .composer-temp-chip:hover{color:var(--text);border-color:var(--accent);}
+  .composer-temp-chip.on{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,var(--border2));background:color-mix(in srgb,var(--accent) 12%,transparent);}
   .composer-profile-chip:hover{background-color:var(--hover-bg);}
   .composer-profile-chip.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
   .composer-profile-chip.switching{opacity:.65;cursor:wait;pointer-events:none;}
