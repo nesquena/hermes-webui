@@ -412,13 +412,16 @@ def test_wallpaper_chat_scope_does_not_override_titlebar() -> None:
     assert ".app-titlebar" not in css[chat_start:app_start]
 
 
-def test_wallpaper_geist_chat_scope_forces_empty_state_transparent() -> None:
+def test_wallpaper_geist_scopes_force_empty_state_transparent() -> None:
     css = (STATIC / "style.css").read_text(encoding="utf-8")
-    selector = (
-        ':root[data-skin="geist-contrast"][data-wallpaper="active"]'
-        '[data-wallpaper-scope="chat"] .empty-state'
-    )
-    assert selector + "{background:transparent!important;}" in css
+    geist = ':root[data-skin="geist-contrast"][data-wallpaper="active"]'
+    for scope in ("chat", "app"):
+        selector = geist + f'[data-wallpaper-scope="{scope}"] .empty-state'
+        selector_start = css.index(selector)
+        declaration_start = css.index("{", selector_start)
+        assert css[declaration_start:css.index("}", declaration_start) + 1] == (
+            "{background:transparent!important;}"
+        )
 
 
 def test_wallpaper_forced_skins_explicitly_override_shell_backgrounds() -> None:
@@ -433,7 +436,7 @@ def test_wallpaper_forced_skins_explicitly_override_shell_backgrounds() -> None:
     transparency_selector = (
         selector
         + " :is(.app-titlebar,.rail,.sidebar,.rightpanel,.main,.topbar,"
-        ".composer-wrap,.empty-state)"
+        ".composer-wrap)"
     )
     assert transparency_selector + "{background:transparent!important;}" in css
     assert selector + " .sidebar .panel-view" in css

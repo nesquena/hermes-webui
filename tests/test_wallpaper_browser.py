@@ -96,9 +96,6 @@ def test_wallpaper_upload_scope_refresh_and_clear(base_url, tmp_path: Path) -> N
                 page.wait_for_function(
                     "() => getComputedStyle(document.querySelector('#emptyState')).backgroundColor === 'rgba(0, 0, 0, 0)' && getComputedStyle(document.querySelector('.app-titlebar')).backgroundColor !== 'rgba(0, 0, 0, 0)'"
                 )
-                assert page.locator("#emptyState").evaluate(
-                    "el => getComputedStyle(el).backgroundColor"
-                ) == "rgba(0, 0, 0, 0)"
                 assert page.locator(".app-titlebar").evaluate(
                     "el => getComputedStyle(el).backgroundColor"
                 ) != "rgba(0, 0, 0, 0)"
@@ -168,9 +165,6 @@ def test_wallpaper_upload_scope_refresh_and_clear(base_url, tmp_path: Path) -> N
                     page.wait_for_function(
                         "() => getComputedStyle(document.querySelector('#emptyState.empty-state')).backgroundColor === 'rgba(0, 0, 0, 0)'"
                     )
-                    assert page.locator("#emptyState.empty-state").evaluate(
-                        "el => getComputedStyle(el).backgroundColor"
-                    ) == "rgba(0, 0, 0, 0)"
                 page.locator("html").evaluate("el => { delete el.dataset.skin; }")
 
                 hit_id = page.locator("#emptyState").evaluate(
