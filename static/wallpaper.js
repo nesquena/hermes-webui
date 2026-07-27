@@ -139,15 +139,15 @@ async function _requestForTest(kind,file,opacity,scope){
   if(kind==='patch')return global.api('/api/wallpaper',{method:'PATCH',body:JSON.stringify({opacity,scope}),retries:0});
   return global.api('/api/wallpaper',{method:'DELETE',retries:0});
 }
-function enqueueMutation(kind,file,opacity,scope,owner){
+function enqueueMutation(kind,file,opacity,scope,owner,revision,url){
   mutationStarted++;
   const run=async()=>{
     requestRunning=true;if(appearanceActive&&owner===paneGeneration){setStatusKey('settings_wallpaper_saving');syncControls()}
     try{
       const raw=await _requestForTest(kind,file,opacity,scope);
       await applyAuthoritativeInfo(raw,null);
-      if(kind==='post')_releaseWallpaperDraftUrl();
-      draftFile=null;draftOpacity=saved.opacity;draftScope=saved.scope;
+      if(revision===draftRevision){if(kind==='post')_releaseWallpaperDraftUrl(url);draftFile=null;draftOpacity=saved.opacity;draftScope=saved.scope}
+      else if(appearanceActive&&owner===paneGeneration)renderDraft();
       if(appearanceActive&&owner===paneGeneration)setStatusKey(kind==='delete'?'settings_wallpaper_cleared':'settings_wallpaper_saved');
     }catch(error){
       if(!error||!Number.isFinite(error.status)||error.status>=500){try{await reconcileWallpaperInfo()}catch(_){}}
@@ -156,14 +156,14 @@ function enqueueMutation(kind,file,opacity,scope,owner){
   };
   mutationTail=mutationTail.then(run,run);return mutationTail;
 }
-function saveDraft(){if(requestRunning||!dirty())return;draftOpacity=Number(el('wallpaperOpacity').value)/100;draftScope=currentScope();enqueueMutation(draftFile?'post':'patch',draftFile,draftOpacity,draftScope,paneGeneration)}
+function saveDraft(){if(requestRunning||!dirty())return;draftOpacity=Number(el('wallpaperOpacity').value)/100;draftScope=currentScope();enqueueMutation(draftFile?'post':'patch',draftFile,draftOpacity,draftScope,paneGeneration,draftRevision,draftUrl)}
 async function clearDraft(){
   if(requestRunning)return;
   if(!saved.has_wallpaper){discardDraft();setStatusKey('settings_wallpaper_cleared');return}
   const owner=paneGeneration,target=saved.image_version,revision=draftRevision;
   const confirmed=await global.showConfirmDialog({title:text('settings_wallpaper_confirm_clear','Clear the saved wallpaper?'),message:'',confirmLabel:text('settings_wallpaper_clear','Clear'),danger:true,focusCancel:true});
   if(!confirmed||requestRunning||!appearanceActive||owner!==paneGeneration||target!==saved.image_version||revision!==draftRevision)return;
-  enqueueMutation('delete',null,0.8,'chat',owner);
+  enqueueMutation('delete',null,0.8,'chat',owner,revision,null);
 }
 function bindControls(){
   if(bound)return;bound=true;

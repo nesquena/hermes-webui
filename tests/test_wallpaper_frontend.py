@@ -198,6 +198,61 @@ const bad=[{{...good,opacity:true}},{{...good,opacity:2}},{{...good,scope:'deskt
     assert result["calls"][1] == ["/api/wallpaper", "DELETE", 0, None, None]
 
 
+def test_wallpaper_save_completion_preserves_newer_draft_and_url() -> None:
+    source = (STATIC / "wallpaper.js").read_text(encoding="utf-8")
+    script = f"""
+const vm=require('vm');
+const handlers={{}};
+function element(id){{return {{id,value:'',files:[],disabled:false,hidden:true,src:'',textContent:'',style:{{}},classList:{{toggle(){{}}}},setAttribute(){{}},addEventListener(type,fn){{handlers[id+':'+type]=fn}}}}}}
+const ids=['wallpaperFileInput','wallpaperDropZone','wallpaperOpacity','wallpaperOpacityValue','wallpaperScopeApp','wallpaperScopeChat','wallpaperPreview','wallpaperFileName','wallpaperSaveBtn','wallpaperClearBtn','wallpaperSettingsField','wallpaperStatus'];
+const elements=Object.fromEntries(ids.map(id=>[id,element(id)]));
+elements.wallpaperOpacity.value='80';elements.wallpaperScopeChat.value='chat';elements.wallpaperScopeChat.checked=true;elements.wallpaperScopeApp.value='app';
+const root={{dataset:{{}},style:{{setProperty(k,v){{this[k]=v}},removeProperty(k){{delete this[k]}}}}}};
+const revoked=[];let nextBlob=0;
+class TestURL extends URL{{static createObjectURL(){{return 'blob:draft-'+(++nextBlob)}}static revokeObjectURL(url){{revoked.push(url)}}}}
+let resolvePost;
+const postResult=new Promise(resolve=>{{resolvePost=resolve}});
+const empty={{has_wallpaper:false,opacity:.8,scope:'chat',mime_type:null,image_version:null}};
+const saved={{has_wallpaper:true,opacity:.8,scope:'chat',mime_type:'image/png',image_version:'b'.repeat(64)}};
+const context={{
+  console,URL:TestURL,
+  document:{{baseURI:'https://example.test/hermes/',documentElement:root,getElementById:id=>elements[id]||null,addEventListener(){{}},querySelectorAll:()=>[elements.wallpaperScopeChat,elements.wallpaperScopeApp],querySelector:()=>[elements.wallpaperScopeChat,elements.wallpaperScopeApp].find(r=>r.checked)}},
+  location:{{href:'https://example.test/hermes/'}},localStorage:{{getItem(){{return null}},setItem(){{}},removeItem(){{}}}},
+  Image:class{{set src(v){{this._src=v;if(this.onload)this.onload()}}}},
+  api:async(path)=>path==='/api/wallpaper/info'?empty:postResult,
+  showConfirmDialog:async()=>true,setTimeout,clearTimeout,window:null
+}};
+context.window=context;vm.createContext(context);vm.runInContext({json.dumps(source)},context);
+const first={{name:'first.png',type:'image/png',size:10}};const second={{name:'second.png',type:'image/png',size:10}};
+(async()=>{{
+  context.beginWallpaperSettingsSession();await Promise.resolve();await Promise.resolve();
+  elements.wallpaperFileInput.files=[first];handlers['wallpaperFileInput:change']();
+  handlers['wallpaperSaveBtn:click']();await Promise.resolve();
+  elements.wallpaperFileInput.files=[second];handlers['wallpaperFileInput:change']();
+  elements.wallpaperScopeChat.checked=false;elements.wallpaperScopeApp.checked=true;handlers['wallpaperScopeApp:change']();
+  elements.wallpaperOpacity.value='55';handlers['wallpaperOpacity:input']();
+  resolvePost(saved);await postResult;await new Promise(resolve=>setTimeout(resolve,0));
+  const during={{image:root.style['--wallpaper-image'],opacity:root.style['--wallpaper-opacity'],scope:root.dataset.wallpaperScope,saveDisabled:elements.wallpaperSaveBtn.disabled,revoked:[...revoked]}};
+  context.endWallpaperSettingsSession();
+  console.log(JSON.stringify({{during,after:{{image:root.style['--wallpaper-image'],opacity:root.style['--wallpaper-opacity'],scope:root.dataset.wallpaperScope,revoked:[...revoked]}}}}));
+}})();
+"""
+    result = _node(script)
+    assert result["during"] == {
+        "image": 'url("blob:draft-2")',
+        "opacity": "0.55",
+        "scope": "app",
+        "saveDisabled": False,
+        "revoked": ["blob:draft-1"],
+    }
+    assert result["after"] == {
+        "image": 'url("https://example.test/hermes/api/wallpaper/image?v=' + "b" * 64 + '")',
+        "opacity": "0.8",
+        "scope": "chat",
+        "revoked": ["blob:draft-1", "blob:draft-2"],
+    }
+
+
 def test_wallpaper_layer_stacking_chat_scope_and_inactive_guards() -> None:
     css = (STATIC / "style.css").read_text(encoding="utf-8")
     assert '#wallpaperLayer{position:fixed;inset:0' in css
@@ -260,6 +315,7 @@ def test_wallpaper_forced_skins_explicitly_override_shell_backgrounds() -> None:
     ):
         assert surface in block
     assert "{background:transparent!important;}" in block
+    assert selector + " .sidebar .panel-view" in css
     assert selector + " .composer-box" in css
     assert "{background:var(--wallpaper-composer)!important;}" in block
 
