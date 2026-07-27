@@ -21415,6 +21415,7 @@ def _start_run(
     returns no adapter is surfaced as ``{"error": str(exc), "_status": 501}``
     so both call sites can map it onto their own HTTP shape.
     """
+    from api.process_event_utils import normalize_wakeup_display_meta
     from api.runtime_adapter import (
         LegacyJournalRuntimeAdapter,
         StartRunRequest,
@@ -21443,6 +21444,11 @@ def _start_run(
         def _legacy_adapter_factory():
             return LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
 
+        request_metadata = {"route": route}
+        normalized_wakeup_meta = normalize_wakeup_display_meta(wakeup_meta)
+        if normalized_wakeup_meta is not None:
+            request_metadata["wakeup_meta"] = normalized_wakeup_meta
+
         try:
             adapter = build_runtime_adapter(
                 legacy_adapter_factory=_legacy_adapter_factory,
@@ -21460,7 +21466,7 @@ def _start_run(
                     provider=model_provider,
                     model=model,
                     source=source,
-                    metadata={"route": route, "wakeup_meta": wakeup_meta},
+                    metadata=request_metadata,
                 )
             )
         except NotImplementedError as exc:
