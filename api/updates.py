@@ -28,6 +28,7 @@ from api.agent_health import get_active_profile_gateway_running_pid
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
+from api.subprocess_utils import windows_hide_flags
 
 logger = logging.getLogger(__name__)
 
@@ -203,17 +204,6 @@ def _wait_until_restart_safe(poll_seconds: float = 2.0, max_wait_seconds: float 
     return snapshot
 
 
-def _windows_hide_flags() -> int:
-    """Win32 ``creationflags`` that hide a short-lived console child's window
-    (``CREATE_NO_WINDOW``) without detaching it, so ``capture_output`` still
-    works. Returns ``0`` on non-Windows — the ``subprocess`` default, a genuine
-    no-op. See #5692.
-    """
-    if sys.platform == "win32":
-        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return 0
-
-
 def _run_git(args, cwd, timeout=10):
     """Run a git command and return (useful output, ok).
 
@@ -232,7 +222,7 @@ def _run_git(args, cwd, timeout=10):
             timeout=timeout,
             encoding='utf-8',
             errors='replace',
-            creationflags=_windows_hide_flags(),
+            creationflags=windows_hide_flags(),
         )
         # On non-UTF-8 locales (e.g. Chinese Windows GBK), a binary git
         # output that fails to decode used to leave r.stdout = None and crash

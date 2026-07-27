@@ -2627,7 +2627,7 @@ function _startWebUIVersionSkewMonitor(){
   }
   function _check(){
     if(_isBannerVisible()) return;
-    Promise.resolve().then(function(){ return api('/api/settings',{timeoutMs:30000}); }).then(function(s){ checkWebUIVersionSkew(s); }).catch(function(){});
+    Promise.resolve().then(function(){ return api('/api/settings'); }).then(function(s){ checkWebUIVersionSkew(s); }).catch(function(){});
   }
   function _startPoll(){
     if(_pollTimer||document.hidden) return;
@@ -6555,7 +6555,7 @@ function _refreshProfileSwitchBackground(gen){
   // appearance setting; without this fetch, Profile A's hidden-tabs choice
   // would remain in effect under Profile B until the user opens Settings.
   // Stage-394 follow-up to #2636 deep review.
-  Promise.resolve(api('/api/settings',{timeoutMs:60000})).then(function(s){
+  Promise.resolve(api('/api/settings')).then(function(s){
     if (gen !== _profileSwitchGeneration) return;
     var hidden = (s && Array.isArray(s.hidden_tabs)) ? s.hidden_tabs : [];
     hidden = hidden.filter(function(x){ return typeof x === 'string' && x.trim(); });
@@ -8879,7 +8879,7 @@ function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
 
 async function loadSettingsPanel(){
   try{
-    const settings=await api('/api/settings',{timeoutMs:60000});
+    const settings=await api('/api/settings');
     checkWebUIVersionSkew(settings);
     // Populate the version badges from the server — keeps them in sync with git
     // tags automatically without any manual release step.

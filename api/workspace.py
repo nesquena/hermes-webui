@@ -16,7 +16,6 @@ import secrets
 import shutil
 import stat
 import subprocess
-import sys
 import concurrent.futures
 import threading
 import time
@@ -34,6 +33,7 @@ from api.config import (
     DEFAULT_WORKSPACE as _BOOT_DEFAULT_WORKSPACE,
     MAX_FILE_BYTES, IMAGE_EXTS, MD_EXTS
 )
+from api.subprocess_utils import windows_hide_flags
 
 
 # ── Profile-aware path resolution ───────────────────────────────────────────
@@ -1678,22 +1678,13 @@ def raw_authorized_escape_target(workspace: Path, session_id: str, token: str, r
 
 # ── Git detection ──────────────────────────────────────────────────────────
 
-def _windows_hide_flags() -> int:
-    """Win32 ``creationflags`` that hide a short-lived console child's window.
-    See #5692.
-    """
-    if sys.platform == "win32":
-        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return 0
-
-
 def _run_git(args, cwd, timeout=3):
     """Run a git command and return stdout, or None on failure."""
     try:
         r = subprocess.run(
             ['git'] + args, cwd=str(cwd), capture_output=True,
             text=True, timeout=timeout,
-            creationflags=_windows_hide_flags(),
+            creationflags=windows_hide_flags(),
         )
         return r.stdout.strip() if r.returncode == 0 else None
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):

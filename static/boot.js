@@ -3222,7 +3222,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   let _bootSettings={};
   const prefillIntent=(typeof _composerPrefillIntentFromLocation==='function')?_composerPrefillIntentFromLocation():null;
   try{
-    const s=await api('/api/settings',{timeoutMs:60000});
+    const s=await api('/api/settings');
     _bootSettings=s;
     if(typeof checkWebUIVersionSkew==='function'){try{checkWebUIVersionSkew(s);}catch(_){}}
     window._sendKey=s.send_key||'enter';

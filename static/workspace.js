@@ -790,7 +790,7 @@ async function _refreshGitBadge(){
   if(!badge||!S.session)return;
   const sessionId=S.session.session_id;
   try{
-    const data=await api(`/api/git-info?session_id=${encodeURIComponent(sessionId)}`,{timeoutMs:60000});
+    const data=await api(`/api/git-info?session_id=${encodeURIComponent(sessionId)}`);
     if(!S.session||S.session.session_id!==sessionId)return;
     if(data.git&&data.git.is_git){
       const g=data.git;
