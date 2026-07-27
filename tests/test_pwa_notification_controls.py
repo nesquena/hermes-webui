@@ -93,7 +93,7 @@ def test_desktop_background_notification_signal_stays_out_of_stream_visibility()
         "function closeLiveStream(sessionId, streamId, source){",
     )
     deferred_recovery = _source_between(
-        "function _reattachOrRestoreAfterDeferredStreamError(source){",
+        "function _reattachOrRestoreAfterDeferredStreamError(source,transportGeneration){",
         "  // Bug A fix (#631):",
     )
 
