@@ -202,8 +202,13 @@ def test_attach_live_stream_registers_one_source_per_session_stream():
     error_body = _event_body("error")
 
     assert "const LIVE_STREAMS={};" in MESSAGES_JS
-    assert "LIVE_STREAMS[activeSid]={streamId,source,ownerToken:_liveOwnerToken};" in wire_body
+    assert "function _currentLiveEventSourceOwnsStream(source)" in attach_body
+    helper_body = _function_body("_currentLiveEventSourceOwnsStream")
+    assert "live.source===source" in helper_body
+    assert "_ownsActiveStreamOrBackground()" in helper_body
+    assert "LIVE_STREAMS[activeSid]={...existingLive,streamId,source};" in wire_body
     assert "existingLive.source.close();" in wire_body
+    assert "(live.source&&live.source!==source)" in wire_body
     assert "if(source&&live.source!==source) return;" in close_body
     assert "existingLive&&existingLive.streamId===streamId" in attach_body
     assert "_closeSource(source);" in error_body

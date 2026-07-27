@@ -1126,6 +1126,7 @@ def test_reconnect_preflight_rejection_does_not_recreate_same_id_replaced_owner(
 def test_done_fade_completion_does_not_mutate_after_same_id_owner_token_replacement():
     current_owner = _extract("_currentLiveOwnerEntry")
     current_owner_active = _extract("_currentLiveOwnerActive")
+    current_event_owner = _extract("_currentLiveEventSourceOwnsStream")
     owner = _extract("_ownsActiveStreamOrBackground")
     bail = _extract("_bailOutOfTerminalEventsFromStaleStream")
     done_body = _extract_event_body("done")
@@ -1150,15 +1151,16 @@ def test_done_fade_completion_does_not_mutate_after_same_id_owner_token_replacem
           messages: [{ role: 'assistant', content: 'replacement answer' }],
           toolCalls: [],
         };
+        const liveSource = { readyState: 1, close() {} };
         globalThis.LIVE_STREAMS = {
-          'sid-1': { streamId: 'stream-1', source: { readyState: 1, close() {} }, ownerToken: 1 }
+          'sid-1': { streamId: 'stream-1', source: liveSource, ownerToken: 1 }
         };
         globalThis.INFLIGHT = {};
         globalThis.assistantText = 'replacement answer';
         globalThis.reasoningText = '';
         globalThis.liveReasoningText = '';
         globalThis.assistantBody = { textContent: 'replacement answer' };
-        globalThis.source = {};
+        globalThis.source = liveSource;
         globalThis._clearStreamEndRecovery = () => {};
         globalThis._scheduleAnchorRegistryCleanup = () => {};
         globalThis._closeSource = () => { closeCalls += 1; };
@@ -1221,6 +1223,9 @@ def test_done_fade_completion_does_not_mutate_after_same_id_owner_token_replacem
         + current_owner_active
         + """
         """
+        + current_event_owner
+        + """
+        """
         + owner
         + """
         """
@@ -1264,6 +1269,7 @@ def test_done_fade_completion_does_not_mutate_after_same_id_owner_token_replacem
 def test_terminal_callbacks_do_not_mutate_after_same_id_owner_token_replacement(event_name: str):
     current_owner = _extract("_currentLiveOwnerEntry")
     current_owner_active = _extract("_currentLiveOwnerActive")
+    current_event_owner = _extract("_currentLiveEventSourceOwnsStream")
     owner = _extract("_ownsActiveStreamOrBackground")
     bail = _extract("_bailOutOfTerminalEventsFromStaleStream")
     event_body = _extract_event_body(event_name)
@@ -1305,6 +1311,9 @@ def test_terminal_callbacks_do_not_mutate_after_same_id_owner_token_replacement(
         + """
         """
         + current_owner_active
+        + """
+        """
+        + current_event_owner
         + """
         """
         + owner
@@ -1440,6 +1449,7 @@ def test_queued_live_events_do_not_mutate_after_same_id_owner_token_replacement(
 ):
     current_owner = _extract("_currentLiveOwnerEntry")
     current_owner_active = _extract("_currentLiveOwnerActive")
+    current_event_owner = _extract("_currentLiveEventSourceOwnsStream")
     owner = _extract("_ownsActiveStreamOrBackground")
     bail = _extract("_bailOutOfTerminalEventsFromStaleStream")
     event_body = _extract_event_body(event_name)
@@ -1473,6 +1483,9 @@ def test_queued_live_events_do_not_mutate_after_same_id_owner_token_replacement(
         + """
         """
         + current_owner_active
+        + """
+        """
+        + current_event_owner
         + """
         """
         + owner
@@ -1775,6 +1788,7 @@ def test_same_stream_replacement_transfers_anchor_cleanup_lease():
 def test_cancel_continuation_does_not_mutate_after_same_id_owner_token_replacement(reject: bool):
     current_owner = _extract("_currentLiveOwnerEntry")
     current_owner_active = _extract("_currentLiveOwnerActive")
+    current_event_owner = _extract("_currentLiveEventSourceOwnsStream")
     owner = _extract("_ownsActiveStreamOrBackground")
     bail = _extract("_bailOutOfTerminalEventsFromStaleStream")
     close_source = _extract("_closeSource")
@@ -1846,6 +1860,9 @@ def test_cancel_continuation_does_not_mutate_after_same_id_owner_token_replaceme
         + current_owner_active
         + """
         """
+        + current_event_owner
+        + """
+        """
         + owner
         + """
         """
@@ -1908,6 +1925,7 @@ def test_cancel_continuation_does_not_mutate_after_same_id_owner_token_replaceme
 def test_warning_clear_timer_does_not_clear_replacement_owner_status():
     current_owner = _extract("_currentLiveOwnerEntry")
     current_owner_active = _extract("_currentLiveOwnerActive")
+    current_event_owner = _extract("_currentLiveEventSourceOwnsStream")
     owner = _extract("_ownsActiveStreamOrBackground")
     bail = _extract("_bailOutOfTerminalEventsFromStaleStream")
     warning_body = _extract_event_body("warning")
@@ -1927,10 +1945,11 @@ def test_warning_clear_timer_does_not_clear_replacement_owner_status():
           activeStreamId: 'stream-1',
           messages: [],
         };
+        const liveSource = { readyState: 1, close() {} };
         globalThis.LIVE_STREAMS = {
-          'sid-1': { streamId: 'stream-1', source: { readyState: 1, close() {} }, ownerToken: 1 }
+          'sid-1': { streamId: 'stream-1', source: liveSource, ownerToken: 1 }
         };
-        globalThis.source = { readyState: 1, close() {} };
+        globalThis.source = liveSource;
         globalThis.setComposerStatus = (value) => { statusCalls.push(value); };
         globalThis.showToast = () => {};
         globalThis.t = (key) => key;
@@ -1944,6 +1963,9 @@ def test_warning_clear_timer_does_not_clear_replacement_owner_status():
         + """
         """
         + current_owner_active
+        + """
+        """
+        + current_event_owner
         + """
         """
         + owner
