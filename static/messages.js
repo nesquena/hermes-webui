@@ -2166,6 +2166,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _currentLiveOwnerActive(){
     return !_closureRetired && !!_currentLiveOwnerEntry();
   }
+  function _currentLiveEventSourceOwnsStream(source){
+    const live=_currentLiveOwnerEntry();
+    return !!(live&&live.source===source&&_ownsActiveStreamOrBackground());
+  }
   function _ownsActiveStreamOrBackground(){
     return !_isActiveSession() || S.activeStreamId===streamId;
   }
@@ -2173,7 +2177,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return !_currentLiveOwnerActive() || !_isSessionCurrentPane(activeSid) || !_ownsActiveStreamOrBackground();
   }
   function _bailOutOfTerminalEventsFromStaleStream(source){
-    if(_currentLiveOwnerActive() && _ownsActiveStreamOrBackground()) return false;
+    if(_currentLiveEventSourceOwnsStream(source)) return false;
     // This stale stream no longer owns the session — schedule cleanup of ITS own
     // anchor registry (identity-guarded, so it can't clobber the newer stream's
     // registry for the same session) before closing. (Codex leak catch.)
@@ -2759,7 +2763,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _scheduleAnchorRegistryCleanup(delayMs=600000){
     if(!_anchorRegistryMap||!_anchorRegistry) return;
     const cleanupOwnerToken=_liveOwnerToken;
-    if(typeof _anchorRegistry==='object') _anchorRegistry._cleanupOwnerToken=cleanupOwnerToken;
     setTimeout(()=>{
       if(
         _anchorRegistryMap.get(streamId)===_anchorRegistry
@@ -5314,6 +5317,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _resetStreamFadeState();
   }
   function _rememberRunJournalCursor(e){
+    const source=(e&&((typeof e.currentTarget!=='undefined'&&e.currentTarget)||e.target))||null;
+    if(!_currentLiveEventSourceOwnsStream(source)) return;
     const raw=String(e&&e.lastEventId||'').trim();
     if(!raw) return;
     const tail=raw.includes(':')?raw.slice(raw.lastIndexOf(':')+1):raw;
@@ -5691,15 +5696,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _wireSSE(source){
-    if(!_currentLiveOwnerActive()){
+    const live=_currentLiveOwnerEntry();
+    if(!live||!_ownsActiveStreamOrBackground()||(live.source&&live.source!==source)){
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
       return;
     }
-    const existingLive=LIVE_STREAMS[activeSid];
+    const existingLive=live;
     if(existingLive&&existingLive.source&&existingLive.source!==source){
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
     }
-    LIVE_STREAMS[activeSid]={streamId,source,ownerToken:_liveOwnerToken};
+    LIVE_STREAMS[activeSid]={...existingLive,streamId,source};
 
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
@@ -6457,6 +6463,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('pending_steer_leftover',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       // The agent finished its turn with steer text still stashed (no
       // tool-result boundary fired). Match the CLI's leftover-delivery
       // behaviour: queue the leftover text as a next-turn user message
@@ -6482,6 +6489,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('compressing',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       // Context auto-compression is starting. Surface the same calm running
       // compression card as manual /compress while the summarizer LLM call runs.
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -6512,6 +6520,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('compressed',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       // Context was auto-compressed during this turn. Keep the live timeline
       // honest by transitioning the running divider into a completed divider;
       // final settlement removes live-only compression rows from the Worklog.
@@ -6547,6 +6556,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('metering',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
