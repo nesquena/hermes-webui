@@ -14,7 +14,9 @@ def test_assistant_footer_gets_completed_turn_question_jump_button():
     assert "const questionRawIdxByAssistantRawIdx=new Map()" in UI_JS
     assert "questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx)" in UI_JS
     assert "row.id=_userMessageDomId(rawIdx)" in UI_JS
-    assert "const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant')" in UI_JS
+    assert "const isTurnFinalAssistant=!isUser&&(\n" in UI_JS
+    assert "!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant'||" in UI_JS
+    assert "_hasHiddenProcessWakeupBoundaryBefore(nextRendered.rawIdx)" in UI_JS
     # #3114 superseded the turn-final-only gate: the jump-to-question button now
     # renders on every assistant message that has a resolvable question target,
     # not just the turn-final one (multi-step turns otherwise lost the affordance
