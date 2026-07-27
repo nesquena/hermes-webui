@@ -72,6 +72,26 @@ def _extract_reconnect_preflight_body() -> str:
     raise AssertionError("unclosed reconnect preflight IIFE")
 
 
+def _extract_attach_preflight_body() -> str:
+    anchor = "// Reattach path can carry stale stream ids after server restart; preflight"
+    start = MESSAGES_JS.find(anchor)
+    assert start >= 0, "missing attach reconnect preflight anchor"
+    marker = "(async()=>{"
+    start = MESSAGES_JS.rfind(marker, 0, start)
+    assert start >= 0, "missing attach reconnect preflight IIFE"
+    brace = MESSAGES_JS.find("{", start)
+    depth = 0
+    for i in range(brace, len(MESSAGES_JS)):
+        ch = MESSAGES_JS[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return MESSAGES_JS[brace + 1 : i]
+    raise AssertionError("unclosed attach reconnect preflight IIFE")
+
+
 def _extract_restore_timeout_body() -> str:
     anchor = "const _restoreTimer=setTimeout(()=>{"
     start = MESSAGES_JS.find(anchor)
@@ -322,21 +342,25 @@ def _run_restore_stale_guard_case():
     return json.loads(proc.stdout)
 
 
-def _run_restore_same_id_owner_replacement_case(*, reject: bool):
+def _run_restore_same_generation_replacement_case(*, reject: bool):
     current_owner = _extract("_currentLiveOwnerEntry")
     current_owner_active = _extract("_currentLiveOwnerActive")
+    current_transport_generation = _extract("_captureCurrentLiveTransportGeneration")
     owner = _extract("_ownsActiveStreamOrBackground")
     recovery = _extract("_currentPaneRecoveryOwnerLost")
+    clear_recovery = _extract("_clearStreamEndRecovery")
+    close_source = _extract("_closeSource")
     restore = _extract("_restoreSettledSession")
     script = textwrap.dedent(
         """
-        let closeCalls = 0;
         let renderCalls = 0;
         let sessionListCalls = 0;
         let idleCalls = 0;
         let clearLiveToolCalls = 0;
         let removeThinkingCalls = 0;
         let hydrateCalls = 0;
+        let oldSourceCloseCalls = 0;
+        let replacementSourceCloseCalls = 0;
         let resolveSession;
         let rejectSession;
         let activeSid = 'sid-1';
@@ -344,9 +368,19 @@ def _run_restore_same_id_owner_replacement_case(*, reject: bool):
         let _liveOwnerToken = 1;
         let _closureRetired = false;
         let _streamFinalized = false;
+        let _persistTimer = null;
         let _pendingStreamEndRecovery = true;
         let _streamEndRecoveryAttempts = 4;
         let _streamEndRecoveryTimer = {};
+        let _streamEndRecoveryLease = null;
+        const oldSource = {
+          readyState: 1,
+          close() { oldSourceCloseCalls += 1; this.readyState = 2; },
+        };
+        const replacementSource = {
+          readyState: 1,
+          close() { replacementSourceCloseCalls += 1; this.readyState = 2; },
+        };
         globalThis.S = {
           session: { session_id: 'sid-1' },
           activeStreamId: 'stream-1',
@@ -356,7 +390,7 @@ def _run_restore_same_id_owner_replacement_case(*, reject: bool):
         globalThis.INFLIGHT = {};
         globalThis.assistantText = 'replacement pane answer';
         globalThis.LIVE_STREAMS = {
-          'sid-1': { streamId: 'stream-1', source: { readyState: 1, close() {} }, ownerToken: 1, transportGeneration: 1 }
+          'sid-1': { streamId: 'stream-1', source: oldSource, ownerToken: 1, transportGeneration: 1 }
         };
         globalThis._loadingSessionId = null;
         globalThis._isActiveSession = () => true;
@@ -365,13 +399,6 @@ def _run_restore_same_id_owner_replacement_case(*, reject: bool):
           resolveSession = resolve;
           rejectSession = reject;
         });
-        globalThis._closeSource = () => { closeCalls += 1; };
-        globalThis._clearStreamEndRecovery = () => {
-          _pendingStreamEndRecovery = false;
-          _streamEndRecoveryAttempts = 0;
-          _streamEndRecoveryTimer = null;
-        };
-        globalThis._persistTimer = null;
         globalThis._cancelThrottledSnapshotTimer = () => {};
         globalThis._clearAnchorProseIncrementalNode = () => {};
         globalThis._cancelAnimationFramePendingStreamRender = () => {};
@@ -411,22 +438,43 @@ def _run_restore_same_id_owner_replacement_case(*, reject: bool):
         + current_owner_active
         + """
         """
+        + current_transport_generation
+        + """
+        """
         + owner
         + """
         """
         + recovery
         + """
         """
+        + clear_recovery
+        + """
+        """
+        + close_source
+        + """
+        """
         + restore
         + """
         (async () => {
-          const pending = _restoreSettledSession({}, { status: true, preserveVisibleOnShorterTerminalSnapshot: true });
+          const pending = _restoreSettledSession(oldSource, {
+            status: true,
+            preserveVisibleOnShorterTerminalSnapshot: true,
+            transportGeneration: 1,
+          });
+              _streamEndRecoveryLease = {
+                generation: 2,
+                source: replacementSource,
+                timer: {},
+                attempts: 4,
+              };
+              _pendingStreamEndRecovery = true;
+              _streamEndRecoveryAttempts = 4;
+              _streamEndRecoveryTimer = {};
           LIVE_STREAMS['sid-1'] = {
             streamId: 'stream-1',
-            source: { readyState: 1, close() {} },
-            ownerToken: 2,
-            transportGeneration: 1,
-            transportGeneration: 1,
+            source: replacementSource,
+            ownerToken: 1,
+            transportGeneration: 2,
           };
           if ("""
         + ("true" if reject else "false")
@@ -445,16 +493,20 @@ def _run_restore_same_id_owner_replacement_case(*, reject: bool):
           const result = await pending;
           console.log(JSON.stringify({
             result,
-            closeCalls,
             renderCalls,
             sessionListCalls,
             idleCalls,
             clearLiveToolCalls,
             removeThinkingCalls,
             hydrateCalls,
-            pending: _pendingStreamEndRecovery,
+            pending: !!_streamEndRecoveryLease,
+            attempts: _streamEndRecoveryLease ? _streamEndRecoveryLease.attempts : 0,
             activeStreamId: S.activeStreamId,
             ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
+            transportGeneration: LIVE_STREAMS['sid-1'].transportGeneration,
+            currentSourceIsReplacement: LIVE_STREAMS['sid-1'].source === replacementSource,
+            oldSourceCloseCalls,
+            replacementSourceCloseCalls,
             messages: S.messages,
           }));
         })().catch((error) => {
@@ -952,36 +1004,44 @@ def test_restore_settled_session_does_not_mutate_after_pane_ownership_switch_dur
 
 
 def test_restore_settled_session_does_not_mutate_after_same_stream_token_replacement_during_await():
-    result = _run_restore_same_id_owner_replacement_case(reject=False)
+    result = _run_restore_same_generation_replacement_case(reject=False)
 
     assert result["result"] == "stale"
-    assert result["closeCalls"] == 1
     assert result["renderCalls"] == 0
     assert result["sessionListCalls"] == 0
     assert result["idleCalls"] == 0
     assert result["clearLiveToolCalls"] == 0
     assert result["removeThinkingCalls"] == 0
     assert result["hydrateCalls"] == 0
-    assert result["pending"] is False
+    assert result["pending"] is True
+    assert result["attempts"] == 4
     assert result["activeStreamId"] == "stream-1"
-    assert result["ownerToken"] == 2
+    assert result["ownerToken"] == 1
+    assert result["transportGeneration"] == 2
+    assert result["currentSourceIsReplacement"] is True
+    assert result["oldSourceCloseCalls"] == 0
+    assert result["replacementSourceCloseCalls"] == 0
     assert result["messages"] == [{"role": "assistant", "content": "replacement pane answer"}]
 
 
 def test_restore_settled_session_rejection_does_not_mutate_after_same_stream_token_replacement():
-    result = _run_restore_same_id_owner_replacement_case(reject=True)
+    result = _run_restore_same_generation_replacement_case(reject=True)
 
     assert result["result"] == "stale"
-    assert result["closeCalls"] == 1
     assert result["renderCalls"] == 0
     assert result["sessionListCalls"] == 0
     assert result["idleCalls"] == 0
     assert result["clearLiveToolCalls"] == 0
     assert result["removeThinkingCalls"] == 0
     assert result["hydrateCalls"] == 0
-    assert result["pending"] is False
+    assert result["pending"] is True
+    assert result["attempts"] == 4
     assert result["activeStreamId"] == "stream-1"
-    assert result["ownerToken"] == 2
+    assert result["ownerToken"] == 1
+    assert result["transportGeneration"] == 2
+    assert result["currentSourceIsReplacement"] is True
+    assert result["oldSourceCloseCalls"] == 0
+    assert result["replacementSourceCloseCalls"] == 0
     assert result["messages"] == [{"role": "assistant", "content": "replacement pane answer"}]
 
 
@@ -2326,6 +2386,172 @@ def test_current_owner_reconnect_path_keeps_owner_alive_until_rewire():
     assert result["currentSourceIsOld"] is False
     assert result["hasLiveSource"] is True
     assert result["closureRetired"] is False
+
+
+def test_initial_preflight_and_reconnect_error_publish_one_replacement_under_same_owner():
+    attach_preflight = _extract_attach_preflight_body()
+    current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
+    current_event_owner = _extract("_currentLiveEventSourceOwnsStream")
+    current_transport_generation = _extract("_captureCurrentLiveTransportGeneration")
+    next_transport_generation = _extract("_nextLiveTransportGeneration")
+    owner = _extract("_ownsActiveStreamOrBackground")
+    recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
+    clear_recovery = _extract("_clearStreamEndRecovery")
+    close_source = _extract("_closeSource")
+    bail = _extract("_bailOutOfTerminalEventsFromStaleStream")
+    wire = _extract("_wireSSE")
+    script = textwrap.dedent(
+        """
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let reconnecting = true;
+        let _liveOwnerToken = 1;
+        let _liveTransportGenerationSeq = 1;
+        let _closureRetired = false;
+        let _terminalStateReached = false;
+        let _streamFinalized = false;
+        let _pendingStreamEndRecovery = false;
+        let _reconnectAttempted = false;
+        let _persistTimer = null;
+        let _snapshotLiveTurnTimer = null;
+        let _streamEndRecoveryTimer = null;
+        let _deferredStreamRecoveryResume = null;
+        let _deferredStreamRecoveryBound = false;
+        let cursorCalls = 0;
+        let reconnectStatuses = [];
+        const timers = [];
+        const createdSources = [];
+        class FakeEventSource {
+          constructor(url) {
+            this.url = url;
+            this.readyState = 1;
+            this.closed = false;
+            this.listeners = {};
+            createdSources.push(this);
+          }
+          addEventListener(name, cb) {
+            (this.listeners[name] ||= []).push(cb);
+          }
+          dispatch(name, event) {
+            for (const cb of this.listeners[name] || []) cb(event);
+          }
+          close() {
+            this.closed = true;
+            this.readyState = 2;
+          }
+        }
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'stream-1',
+          messages: [],
+        };
+        globalThis.INFLIGHT = {};
+        globalThis.LIVE_STREAMS = {
+          'sid-1': { streamId: 'stream-1', source: null, ownerToken: 1, transportGeneration: 1 }
+        };
+        globalThis._isActiveSession = () => true;
+        globalThis._isSessionCurrentPane = () => true;
+        globalThis._deferStreamErrorIfOffline = () => false;
+        globalThis._deferStreamErrorIfPageHidden = () => false;
+        globalThis.recordClientSSEError = () => {};
+        globalThis.setComposerStatus = () => {};
+        globalThis.snapshotLiveTurnHtmlForSession = () => {};
+        globalThis._clearLiveRunStatusTimer = () => {};
+        globalThis.hideLiveRunStatus = () => {};
+        globalThis.closeLiveStream = () => { throw new Error('owner retired during reconnect'); };
+        globalThis._runJournalReplayParams = () => '';
+        globalThis.document = { baseURI: 'http://localhost:8787/' };
+        globalThis.location = { href: 'http://localhost:8787/' };
+        globalThis.EventSource = FakeEventSource;
+        globalThis.setTimeout = (cb) => { timers.push(cb); return timers.length; };
+        globalThis.clearTimeout = () => {};
+        globalThis._restoreSettledSession = async () => false;
+        globalThis._rememberRunJournalCursor = () => { cursorCalls += 1; };
+        globalThis.api = () => new Promise((resolve) => { reconnectStatuses.push(resolve); });
+        """
+        + current_owner
+        + """
+        """
+        + current_owner_active
+        + """
+        """
+        + current_event_owner
+        + """
+        """
+        + current_transport_generation
+        + """
+        """
+        + next_transport_generation
+        + """
+        """
+        + owner
+        + """
+        """
+        + recovery_owner
+        + """
+        """
+        + clear_recovery
+        + """
+        """
+        + close_source
+        + """
+        """
+        + bail
+        + """
+        """
+        + wire
+        + """
+        const runAttachPreflight = async () => {
+        """
+        + attach_preflight
+        + """
+        };
+        await Promise.resolve();
+        const initialAttach = runAttachPreflight();
+        reconnectStatuses.shift()({ active: true, replay_available: false });
+        await initialAttach;
+        const firstSource = createdSources[0];
+        const firstGeneration = LIVE_STREAMS['sid-1'].transportGeneration;
+        const errorListenerCount = firstSource.listeners.error.length;
+        firstSource.dispatch('error', { data: '{}' });
+        const gapGeneration = LIVE_STREAMS['sid-1'].transportGeneration;
+        const gapHasNoSource = LIVE_STREAMS['sid-1'].source === null;
+        timers.shift()();
+        reconnectStatuses.shift()({ active: true, replay_available: false });
+        await Promise.resolve();
+        await Promise.resolve();
+        const replacementSource = createdSources[1];
+        console.log(JSON.stringify({
+          createdSourceCount: createdSources.length,
+          cursorCalls,
+          errorListenerCount,
+          ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
+          firstGeneration,
+          gapGeneration,
+          finalGeneration: LIVE_STREAMS['sid-1'].transportGeneration,
+          gapHasNoSource,
+          firstSourceClosed: firstSource.closed,
+          replacementSourceClosed: replacementSource.closed,
+          currentSourceIsReplacement: LIVE_STREAMS['sid-1'].source === replacementSource,
+        }));
+        """
+    )
+    proc = _run_node_script(script)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["createdSourceCount"] == 2
+    assert result["cursorCalls"] == 2
+    assert result["errorListenerCount"] == 2
+    assert result["ownerToken"] == 1
+    assert result["firstGeneration"] == 2
+    assert result["gapGeneration"] == 3
+    assert result["finalGeneration"] == 4
+    assert result["gapHasNoSource"] is True
+    assert result["firstSourceClosed"] is True
+    assert result["replacementSourceClosed"] is False
+    assert result["currentSourceIsReplacement"] is True
 
 
 def test_reconnect_probe_does_not_replace_same_id_new_owner_after_status_await():
