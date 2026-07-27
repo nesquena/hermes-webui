@@ -1260,7 +1260,7 @@ def test_done_fade_completion_does_not_mutate_after_same_id_owner_token_replacem
     assert result["renderCalls"] == 0
     assert result["idleCalls"] == 0
     assert result["sessionListCalls"] == 0
-    assert result["closeCalls"] == 1
+    assert result["closeCalls"] == 0
     assert result["ownerToken"] == 2
     assert result["activeStreamId"] == "stream-1"
 
@@ -1346,7 +1346,7 @@ def test_terminal_callbacks_do_not_mutate_after_same_id_owner_token_replacement(
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
 
-    assert result["closeCalls"] == 1
+    assert result["closeCalls"] == 0
     assert result["renderCalls"] == 0
     assert result["restoreCalls"] == 0
     assert result["handleErrorCalls"] == 0
@@ -1515,12 +1515,89 @@ def test_queued_live_events_do_not_mutate_after_same_id_owner_token_replacement(
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
 
-    assert result["closeCalls"] == 1
+    assert result["closeCalls"] == 0
     assert result["assistantText"] == "replacement answer"
     assert result["reasoningText"] == "replacement reasoning"
     assert result["liveReasoningText"] == "replacement reasoning"
     assert result["ownerToken"] == 2
     assert result["activeStreamId"] == "stream-1"
+
+
+def test_old_source_callback_does_not_retire_current_same_token_owner():
+    current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
+    current_event_owner = _extract("_currentLiveEventSourceOwnsStream")
+    owner = _extract("_ownsActiveStreamOrBackground")
+    bail = _extract("_bailOutOfTerminalEventsFromStaleStream")
+    token_body = _extract_event_body("token")
+    script = textwrap.dedent(
+        """
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
+        let _terminalStateReached = false;
+        let _streamFinalized = false;
+        let closeCalls = 0;
+        const oldSource = { readyState: 2, close() {} };
+        const newSource = { readyState: 1, close() {} };
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'stream-1',
+          messages: [],
+        };
+        globalThis.LIVE_STREAMS = {
+          'sid-1': { streamId: 'stream-1', source: newSource, ownerToken: 1 }
+        };
+        globalThis.assistantText = 'replacement answer';
+        globalThis.syncInflightAssistantMessage = () => {};
+        globalThis._completeAutomaticCompressionOnLiveProgress = () => {};
+        globalThis.appendThinking = () => {};
+        globalThis._liveThinkingPlacement = () => null;
+        globalThis._freshSegment = false;
+        globalThis._isActiveSession = () => true;
+        globalThis._isSessionCurrentPane = () => true;
+        globalThis._closeSource = () => { closeCalls += 1; };
+        """
+        + current_owner
+        + """
+        """
+        + current_owner_active
+        + """
+        """
+        + current_event_owner
+        + """
+        """
+        + owner
+        + """
+        """
+        + bail
+        + """
+        const handler = (e) => {
+          const source = e.currentTarget;
+        """
+        + token_body
+        + """
+        };
+        handler({ currentTarget: oldSource, target: oldSource, data: JSON.stringify({ text: 'stale token' }) });
+        console.log(JSON.stringify({
+          closeCalls,
+          closureRetired: _closureRetired,
+          assistantText,
+          currentSourceIsNew: LIVE_STREAMS['sid-1'].source === newSource,
+          ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
+        }));
+        """
+    )
+    proc = _run_node_script(script)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["closeCalls"] == 0
+    assert result["closureRetired"] is False
+    assert result["assistantText"] == "replacement answer"
+    assert result["currentSourceIsNew"] is True
+    assert result["ownerToken"] == 1
 
 
 def test_current_owner_reconnect_path_keeps_owner_alive_until_rewire():
@@ -2002,6 +2079,6 @@ def test_warning_clear_timer_does_not_clear_replacement_owner_status():
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
 
-    assert result["closeCalls"] == 1
+    assert result["closeCalls"] == 0
     assert result["statusCalls"] == ["Stale fallback warning"]
     assert result["ownerToken"] == 2

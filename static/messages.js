@@ -2178,11 +2178,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _bailOutOfTerminalEventsFromStaleStream(source){
     if(_currentLiveEventSourceOwnsStream(source)) return false;
-    // This stale stream no longer owns the session — schedule cleanup of ITS own
-    // anchor registry (identity-guarded, so it can't clobber the newer stream's
-    // registry for the same session) before closing. (Codex leak catch.)
-    _scheduleAnchorRegistryCleanup(120000);
-    _closeSource(source);
+    // Stale callbacks must be a pure no-op. The live owner transition now
+    // carries cleanup and teardown explicitly; a buffered old-source event may
+    // arrive after a replacement source is wired and must not retire that
+    // shared closure or reclaim its cleanup lease. (#6504 same-token transport)
     return true;
   }
   function _clearActivePaneInflightIfOwner(){
