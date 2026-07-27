@@ -1816,9 +1816,25 @@ async function loadSession(sid){
       }
       try{
         if(typeof showToast==='function') showToast(`Switching to ${profileMismatch.profile} profile for this session…`,2200);
+        const _expectedProfileSwitchGeneration = (typeof _profileSwitchGeneration === 'number')
+          ? (_profileSwitchGeneration + 1)
+          : null;
+        const _previousActiveProfileBeforeSwitch = (S && S.activeProfile) || 'default';
         const switched = await _switchProfileForSessionLoad(profileMismatch.profile);
         if (switched !== true) {
           if (!_isCurrentLoad()) {
+            _rearmActiveSessionStream();
+            return;
+          }
+          const _activeProfileAfterSwitch = (S && S.activeProfile) || 'default';
+          const _profileSwitchSuperseded = _expectedProfileSwitchGeneration !== null
+            && typeof _profileSwitchGeneration === 'number'
+            && _profileSwitchGeneration !== _expectedProfileSwitchGeneration;
+          if (_activeProfileAfterSwitch === profileMismatch.profile) {
+            if (_isCurrentLoad()) _loadingSessionId = null;
+            return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
+          }
+          if (_profileSwitchSuperseded || _activeProfileAfterSwitch !== _previousActiveProfileBeforeSwitch) {
             _rearmActiveSessionStream();
             return;
           }

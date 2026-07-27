@@ -2556,6 +2556,251 @@ eval(extractFunc('loadSession'));
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_stale_failed_profile_switch_does_not_restore_over_newer_profile_owner():
+    sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(sessions_js) + """
+const apiCalls = [];
+const switchCalls = [];
+let rearmCalls = 0;
+let renderMessagesCalls = 0;
+let renderTrayCalls = 0;
+let syncTopbarCalls = 0;
+let clearPendingSelectionsCalls = 0;
+let restoredSelections = null;
+const msgInner = { innerHTML: '' };
+const deferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+};
+const settle = async (cycles = 4) => {
+  for (let i = 0; i < cycles; i += 1) {
+    await Promise.resolve();
+  }
+};
+const cSelections = [{ id: 'ctx-c', name: 'Context C', text: 'new profile selection' }];
+const switchDeferreds = {
+  b: deferred(),
+  c: deferred(),
+};
+const document = {
+  getElementById() { return null; },
+};
+const window = {
+  _clearPendingSelections() { clearPendingSelectionsCalls += 1; },
+  _snapshotPendingSelections() {
+    return [{ id: 'ctx-1', name: 'Context 1', text: 'selected block' }];
+  },
+  _restorePendingSelections(selections) {
+    restoredSelections = selections;
+  },
+};
+const localStorage = { removeItem() {}, getItem() { return null; } };
+const history = { replaceState() {} };
+const S = {
+  activeProfile: 'a',
+  activeProfileIsDefault: false,
+  session: { session_id: 'current', message_count: 0, updated_at: 0, last_message_at: 0 },
+  messages: [{ role: 'assistant', content: 'current transcript' }],
+  toolCalls: [{ id: 'old-tool' }],
+  pendingFiles: [{ name: 'report.txt' }],
+  busy: false,
+  activeStreamId: null,
+};
+let _profileSwitchOpeningExistingSession = false;
+let _profileSwitchGeneration = 0;
+let _loadingSessionId = null;
+let _loadSessionGeneration = 0;
+let _loadingOlder = false;
+let _pendingCarryForwardSnapshot = null;
+let _messagesTruncated = false;
+let _oldestIdx = 0;
+let _yoloEnabled = false;
+const INFLIGHT = {};
+function $(id) { return id === 'msgInner' ? msgInner : null; }
+function _resolveSessionIdFromSidebarLineage(sid) { return sid; }
+function _hermesNotifySessionOpen() { return null; }
+function _rearmActiveSessionStream() { rearmCalls += 1; }
+function _selectLiveRecoveryInflight() { return null; }
+function stopApprovalPolling() {}
+function hideApprovalCard() {}
+function stopSessionStream() {}
+function _updateYoloPill() {}
+function stopClarifyPolling() {}
+function hideClarifyCard() {}
+async function _saveComposerDraftNow() {}
+function _clearQueueCardDisplay() {}
+function _sessionVisitHasUnreadState() { return false; }
+function _acknowledgeSessionVisit() {}
+function _clearSameSessionForceReloadHint() {}
+function _clearStuckSessionOnBoot() {}
+function _appRootPath() { return '/'; }
+function renderMessages() {
+  renderMessagesCalls += 1;
+  msgInner.innerHTML = S.messages.map(m => m.content || '').join('\\n');
+}
+function renderTray() { renderTrayCalls += 1; }
+function syncTopbar() { syncTopbarCalls += 1; }
+function startSessionStream() {}
+function showToast() {}
+async function switchToProfile(name) {
+  const myGen = ++_profileSwitchGeneration;
+  switchCalls.push({
+    name,
+    switchGeneration: myGen,
+    activeProfile: S.activeProfile,
+    loadingSessionId: _loadingSessionId,
+    loadGeneration: _loadSessionGeneration,
+  });
+  await switchDeferreds[name].promise;
+  if (myGen !== _profileSwitchGeneration) return false;
+  S.activeProfile = name;
+  if (name === 'c') {
+    S.session = {
+      session_id: 'c-session',
+      message_count: 0,
+      updated_at: 3,
+      last_message_at: 3,
+      pending_attachments: [],
+      active_stream_id: null,
+    };
+    S.messages = [{ role: 'assistant', content: 'c transcript' }];
+    S.toolCalls = [{ id: 'c-tool' }];
+    S.pendingFiles = [{ name: 'c.txt' }];
+    window._restorePendingSelections(cSelections);
+    renderMessages();
+    renderTray();
+    syncTopbar();
+  }
+  return true;
+}
+async function api(url) {
+  apiCalls.push({
+    url,
+    profile: S.activeProfile,
+    loadingSessionId: _loadingSessionId,
+    loadGeneration: _loadSessionGeneration,
+    switchGeneration: _profileSwitchGeneration,
+  });
+  const err = new Error('profile mismatch');
+  err.status = 409;
+  err.body = JSON.stringify({
+    code: 'session_profile_mismatch',
+    profile: 'b',
+    session_id: 'foreign',
+  });
+  throw err;
+}
+function _uploadPendingFilesSyncProgressForSession() {}
+function _clearDeferredActiveSessionExternalRefresh() {}
+function _clearEmptyComposerModelOverride() {}
+function _hydrateTodosFromSession() {}
+function _applyPendingSessionModelForSession() {}
+function _resolveSessionModelForDisplaySoon() {}
+function _setActiveSessionUrl() {}
+function _mergePendingSessionMessage() {}
+function setBusy() {}
+function setStatus() {}
+function setComposerStatus() {}
+function updateSendBtn() {}
+function updateQueueBadge() {}
+function loadDir() { return Promise.resolve(); }
+function _deferWorkspaceRefreshForSession() {}
+function startApprovalPolling() {}
+function startClarifyPolling() {}
+function _fetchYoloState() {}
+function refreshSessionList() { return Promise.resolve(); }
+function _announceNewSessionWorkspace() {}
+function _isMessagingSession() { return false; }
+function _isSessionActivelyViewedForList() { return true; }
+function _hideHandoffHint() {}
+function renderSessionArtifacts() {}
+const populateModelDropdown = null;
+eval(extractFunc('_sessionProfileMismatchFromError'));
+eval(extractFunc('_switchProfileForSessionLoad'));
+eval(extractFunc('loadSession'));
+(async () => {
+  renderMessages();
+  const oldLoad = loadSession('foreign');
+  await settle();
+  const newerSwitch = switchToProfile('c');
+  await settle();
+  switchDeferreds.c.resolve();
+  await newerSwitch;
+  await settle();
+  switchDeferreds.b.resolve();
+  await oldLoad;
+  await settle();
+  console.log(JSON.stringify({
+    apiCalls,
+    switchCalls,
+    rearmCalls,
+    renderMessagesCalls,
+    renderTrayCalls,
+    syncTopbarCalls,
+    clearPendingSelectionsCalls,
+    restoredSelections,
+    activeProfile: S.activeProfile,
+    loadingSessionId: _loadingSessionId,
+    loadGeneration: _loadSessionGeneration,
+    switchGeneration: _profileSwitchGeneration,
+    sessionId: S.session && S.session.session_id,
+    messages: S.messages,
+    toolCalls: S.toolCalls,
+    pendingFiles: S.pendingFiles,
+    msgInner: msgInner.innerHTML,
+  }));
+})().catch(err => { console.error(err); process.exit(1); });
+"""
+    result = json.loads(_run_node(source))
+    assert result["apiCalls"] == [
+        {
+            "url": "/api/session?session_id=foreign&messages=0&resolve_model=0",
+            "profile": "a",
+            "loadingSessionId": "foreign",
+            "loadGeneration": 1,
+            "switchGeneration": 0,
+        }
+    ]
+    assert result["switchCalls"] == [
+        {
+            "name": "b",
+            "switchGeneration": 1,
+            "activeProfile": "a",
+            "loadingSessionId": "foreign",
+            "loadGeneration": 1,
+        },
+        {
+            "name": "c",
+            "switchGeneration": 2,
+            "activeProfile": "a",
+            "loadingSessionId": "foreign",
+            "loadGeneration": 1,
+        },
+    ]
+    assert result["rearmCalls"] == 2
+    assert result["renderMessagesCalls"] == 2
+    assert result["renderTrayCalls"] == 1
+    assert result["syncTopbarCalls"] == 1
+    assert result["clearPendingSelectionsCalls"] == 1
+    assert result["restoredSelections"] == [
+        {"id": "ctx-c", "name": "Context C", "text": "new profile selection"}
+    ]
+    assert result["activeProfile"] == "c"
+    assert result["loadGeneration"] == 1
+    assert result["switchGeneration"] == 2
+    assert result["sessionId"] == "c-session"
+    assert result["messages"] == [{"role": "assistant", "content": "c transcript"}]
+    assert result["toolCalls"] == [{"id": "c-tool"}]
+    assert result["pendingFiles"] == [{"name": "c.txt"}]
+    assert result["msgInner"] == "c transcript"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_profile_switch_panel_load_routes_tasks_reload_by_active_subtab():
     """Tasks panel reload should delegate to the active subtab consumer."""
     js = PANELS_JS_PATH.read_text(encoding="utf-8")
