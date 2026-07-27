@@ -342,15 +342,19 @@ def _run_restore_stale_guard_case():
     return json.loads(proc.stdout)
 
 
-def _run_restore_same_generation_replacement_case(*, reject: bool):
+def _run_restore_stale_generation_replacement_case(*, reject: bool):
     current_owner = _extract("_currentLiveOwnerEntry")
     current_owner_active = _extract("_currentLiveOwnerActive")
     current_transport_generation = _extract("_captureCurrentLiveTransportGeneration")
+    next_transport_generation = _extract("_nextLiveTransportGeneration")
     owner = _extract("_ownsActiveStreamOrBackground")
     recovery = _extract("_currentPaneRecoveryOwnerLost")
     clear_recovery = _extract("_clearStreamEndRecovery")
+    schedule_recovery = _extract("_scheduleStreamEndRecovery")
+    run_recovery = _extract("_runStreamEndRecovery")
     close_source = _extract("_closeSource")
     restore = _extract("_restoreSettledSession")
+    wire = _extract("_wireSSE")
     script = textwrap.dedent(
         """
         let renderCalls = 0;
@@ -361,24 +365,33 @@ def _run_restore_same_generation_replacement_case(*, reject: bool):
         let hydrateCalls = 0;
         let oldSourceCloseCalls = 0;
         let replacementSourceCloseCalls = 0;
+        let apiCalls = 0;
         let resolveSession;
         let rejectSession;
+        const timers = [];
+        let nextTimerId = 1;
         let activeSid = 'sid-1';
         let streamId = 'stream-1';
         let _liveOwnerToken = 1;
+        let _liveTransportGenerationSeq = 1;
         let _closureRetired = false;
+        let _terminalStateReached = false;
         let _streamFinalized = false;
         let _persistTimer = null;
         let _pendingStreamEndRecovery = true;
         let _streamEndRecoveryAttempts = 4;
-        let _streamEndRecoveryTimer = {};
         let _streamEndRecoveryLease = null;
+        let _lastRestoreResult = null;
         const oldSource = {
           readyState: 1,
+          listeners: {},
+          addEventListener(name, cb) { (this.listeners[name] ||= []).push(cb); },
           close() { oldSourceCloseCalls += 1; this.readyState = 2; },
         };
         const replacementSource = {
           readyState: 1,
+          listeners: {},
+          addEventListener(name, cb) { (this.listeners[name] ||= []).push(cb); },
           close() { replacementSourceCloseCalls += 1; this.readyState = 2; },
         };
         globalThis.S = {
@@ -389,16 +402,29 @@ def _run_restore_same_generation_replacement_case(*, reject: bool):
         };
         globalThis.INFLIGHT = {};
         globalThis.assistantText = 'replacement pane answer';
+        globalThis.liveReasoningText = '';
+        globalThis.reasoningText = '';
+        globalThis._pendingRafHandle = null;
         globalThis.LIVE_STREAMS = {
-          'sid-1': { streamId: 'stream-1', source: oldSource, ownerToken: 1, transportGeneration: 1 }
+          'sid-1': { streamId: 'stream-1', source: null, ownerToken: 1, transportGeneration: 1 }
         };
         globalThis._loadingSessionId = null;
         globalThis._isActiveSession = () => true;
         globalThis._isSessionCurrentPane = () => true;
         globalThis.api = () => new Promise((resolve, reject) => {
+          apiCalls += 1;
           resolveSession = resolve;
           rejectSession = reject;
         });
+        globalThis.setTimeout = (cb, delay) => {
+          const id = nextTimerId++;
+          timers.push({ id, cb, delay, cleared: false });
+          return id;
+        };
+        globalThis.clearTimeout = (id) => {
+          const timer = timers.find((entry) => entry.id === id);
+          if (timer) timer.cleared = true;
+        };
         globalThis._cancelThrottledSnapshotTimer = () => {};
         globalThis._clearAnchorProseIncrementalNode = () => {};
         globalThis._cancelAnimationFramePendingStreamRender = () => {};
@@ -424,6 +450,9 @@ def _run_restore_same_generation_replacement_case(*, reject: bool):
         globalThis.showToast = () => {};
         globalThis._mergeSettledToolCallsWithLiveMetadata = (toolCalls) => toolCalls;
         globalThis._markSessionViewed = () => {};
+        globalThis.snapshotLiveTurnHtmlForSession = () => {};
+        globalThis._clearLiveRunStatusTimer = () => {};
+        globalThis.hideLiveRunStatus = () => {};
         globalThis._messageRenderableMessageCount = () => 1;
         globalThis._currentMessageRenderWindowSize = () => 50;
         globalThis._messageRenderWindowSize = 50;
@@ -431,6 +460,11 @@ def _run_restore_same_generation_replacement_case(*, reject: bool):
         globalThis.renderMessages = () => { renderCalls += 1; };
         globalThis.renderSessionList = () => { sessionListCalls += 1; };
         globalThis._setActivePaneIdleIfOwner = () => { idleCalls += 1; };
+        globalThis._ownsActiveStreamOrBackground = () => true;
+        globalThis._reconcileStreamEndRecoveryExhaustion = async () => { throw new Error('unexpected recovery exhaustion'); };
+        globalThis._finalizeStreamEndFallback = () => { throw new Error('unexpected fallback finalize'); };
+        globalThis._bailOutOfTerminalEventsFromStaleStream = () => false;
+        globalThis._rememberRunJournalCursor = () => {};
         """
         + current_owner
         + """
@@ -439,6 +473,9 @@ def _run_restore_same_generation_replacement_case(*, reject: bool):
         + """
         """
         + current_transport_generation
+        + """
+        """
+        + next_transport_generation
         + """
         """
         + owner
@@ -450,32 +487,40 @@ def _run_restore_same_generation_replacement_case(*, reject: bool):
         + clear_recovery
         + """
         """
+        + schedule_recovery
+        + """
+        """
         + close_source
         + """
         """
         + restore
         + """
+        const _realRestoreSettledSession = _restoreSettledSession;
+        _restoreSettledSession = async (...args) => {
+          const result = await _realRestoreSettledSession(...args);
+          _lastRestoreResult = result;
+          return result;
+        };
+        """
+        + run_recovery
+        + """
+        """
+        + wire
+        + """
         (async () => {
-          const pending = _restoreSettledSession(oldSource, {
-            status: true,
-            preserveVisibleOnShorterTerminalSnapshot: true,
-            transportGeneration: 1,
-          });
-              _streamEndRecoveryLease = {
-                generation: 2,
-                source: replacementSource,
-                timer: {},
-                attempts: 4,
-              };
-              _pendingStreamEndRecovery = true;
-              _streamEndRecoveryAttempts = 4;
-              _streamEndRecoveryTimer = {};
-          LIVE_STREAMS['sid-1'] = {
-            streamId: 'stream-1',
-            source: replacementSource,
-            ownerToken: 1,
-            transportGeneration: 2,
-          };
+          _wireSSE(oldSource, 1);
+          const oldTransportGeneration = LIVE_STREAMS['sid-1'].transportGeneration;
+          _scheduleStreamEndRecovery(oldSource, 180, oldTransportGeneration, 4);
+          const staleTimer = timers.shift();
+          staleTimer.cb();
+          await Promise.resolve();
+          _closeSource(oldSource, { retainOwner: true, transportGeneration: oldTransportGeneration });
+          const gapGeneration = LIVE_STREAMS['sid-1'].transportGeneration;
+          _wireSSE(replacementSource, gapGeneration);
+          const replacementTransportGeneration = LIVE_STREAMS['sid-1'].transportGeneration;
+          _scheduleStreamEndRecovery(replacementSource, 180, replacementTransportGeneration, 13);
+          const replacementTimer = timers.shift();
+          const leaseBeforeSettle = _streamEndRecoveryLease;
           if ("""
         + ("true" if reject else "false")
         + """) {
@@ -490,24 +535,240 @@ def _run_restore_same_generation_replacement_case(*, reject: bool):
               }
             });
           }
-          const result = await pending;
+          await Promise.resolve();
+          await Promise.resolve();
+          await Promise.resolve();
+          await Promise.resolve();
+          await Promise.resolve();
           console.log(JSON.stringify({
-            result,
+            result: _lastRestoreResult,
             renderCalls,
             sessionListCalls,
             idleCalls,
             clearLiveToolCalls,
             removeThinkingCalls,
             hydrateCalls,
+            apiCalls,
             pending: !!_streamEndRecoveryLease,
             attempts: _streamEndRecoveryLease ? _streamEndRecoveryLease.attempts : 0,
+            recoveryGeneration: _streamEndRecoveryLease ? _streamEndRecoveryLease.generation : null,
+            recoveryTimerId: _streamEndRecoveryLease ? _streamEndRecoveryLease.timer : null,
+            replacementTimerId: replacementTimer.id,
+            activeStreamId: S.activeStreamId,
+            ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
+            transportGeneration: LIVE_STREAMS['sid-1'].transportGeneration,
+            gapGeneration,
+            currentSourceIsReplacement: LIVE_STREAMS['sid-1'].source === replacementSource,
+            oldSourceCloseCalls,
+            replacementSourceCloseCalls,
+            streamFinalized: _streamFinalized,
+            terminalStateReached: _terminalStateReached,
+            leaseStable: _streamEndRecoveryLease === leaseBeforeSettle,
+            session: S.session,
+            toolCalls: S.toolCalls,
+            messages: S.messages,
+          }));
+        })().catch((error) => {
+          console.error(error && error.stack ? error.stack : String(error));
+          process.exit(1);
+        });
+        """
+    )
+    proc = _run_node_script(script)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def _run_stale_recovery_timer_after_generation_replacement_case():
+    current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
+    current_transport_generation = _extract("_captureCurrentLiveTransportGeneration")
+    next_transport_generation = _extract("_nextLiveTransportGeneration")
+    owner = _extract("_ownsActiveStreamOrBackground")
+    recovery = _extract("_currentPaneRecoveryOwnerLost")
+    clear_recovery = _extract("_clearStreamEndRecovery")
+    schedule_recovery = _extract("_scheduleStreamEndRecovery")
+    run_recovery = _extract("_runStreamEndRecovery")
+    close_source = _extract("_closeSource")
+    wire = _extract("_wireSSE")
+    script = textwrap.dedent(
+        """
+        let renderCalls = 0;
+        let sessionListCalls = 0;
+        let idleCalls = 0;
+        let clearLiveToolCalls = 0;
+        let removeThinkingCalls = 0;
+        let hydrateCalls = 0;
+        let apiCalls = 0;
+        let oldSourceCloseCalls = 0;
+        let replacementSourceCloseCalls = 0;
+        const timers = [];
+        let nextTimerId = 1;
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let _liveOwnerToken = 1;
+        let _liveTransportGenerationSeq = 1;
+        let _closureRetired = false;
+        let _terminalStateReached = false;
+        let _streamFinalized = false;
+        let _persistTimer = null;
+        let _pendingStreamEndRecovery = true;
+        let _streamEndRecoveryAttempts = 4;
+        let _streamEndRecoveryLease = null;
+        const oldSource = {
+          readyState: 1,
+          listeners: {},
+          addEventListener(name, cb) { (this.listeners[name] ||= []).push(cb); },
+          close() { oldSourceCloseCalls += 1; this.readyState = 2; },
+        };
+        const replacementSource = {
+          readyState: 1,
+          listeners: {},
+          addEventListener(name, cb) { (this.listeners[name] ||= []).push(cb); },
+          close() { replacementSourceCloseCalls += 1; this.readyState = 2; },
+        };
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'stream-1',
+          messages: [{ role: 'assistant', content: 'replacement pane answer' }],
+          toolCalls: [{ id: 'tool-1' }],
+        };
+        globalThis.INFLIGHT = {};
+        globalThis.assistantText = 'replacement pane answer';
+        globalThis.liveReasoningText = '';
+        globalThis.reasoningText = '';
+        globalThis._pendingRafHandle = null;
+        globalThis.LIVE_STREAMS = {
+          'sid-1': { streamId: 'stream-1', source: null, ownerToken: 1, transportGeneration: 1 }
+        };
+        globalThis._loadingSessionId = null;
+        globalThis._isActiveSession = () => true;
+        globalThis._isSessionCurrentPane = () => true;
+        globalThis.api = () => {
+          apiCalls += 1;
+          throw new Error('stale timer should not reach api');
+        };
+        globalThis.setTimeout = (cb, delay) => {
+          const id = nextTimerId++;
+          timers.push({ id, cb, delay, cleared: false });
+          return id;
+        };
+        globalThis.clearTimeout = (id) => {
+          const timer = timers.find((entry) => entry.id === id);
+          if (timer) timer.cleared = true;
+        };
+        globalThis._cancelThrottledSnapshotTimer = () => {};
+        globalThis._clearAnchorProseIncrementalNode = () => {};
+        globalThis._cancelAnimationFramePendingStreamRender = () => {};
+        globalThis._streamFadeCleanupReduceMotionListener = () => {};
+        globalThis._smdEndParser = () => {};
+        globalThis.finalizeThinkingCard = () => {};
+        globalThis._clearOwnerInflightState = () => {};
+        globalThis._flushReasoningToAnchor = () => {};
+        globalThis._scheduleAnchorRegistryCleanup = () => {};
+        globalThis._clearApprovalForOwner = () => {};
+        globalThis._clearClarifyForOwner = () => {};
+        globalThis._isSessionActivelyViewed = () => true;
+        globalThis._markSessionCompletionUnread = () => {};
+        globalThis.clearLiveToolCards = () => { clearLiveToolCalls += 1; };
+        globalThis.removeThinking = () => { removeThinkingCalls += 1; };
+        globalThis._filterRecoveryControlMessages = (messages) => messages;
+        globalThis._carryForwardEphemeralTurnFields = (_current, next) => next;
+        globalThis._attachProjectedAnchorSceneToLastAssistant = () => {};
+        globalThis._hydrateTodosFromSession = () => { hydrateCalls += 1; };
+        globalThis.localStorage = { setItem: () => {} };
+        globalThis._setActiveSessionUrl = () => {};
+        globalThis._replaceMarkerOnlyAssistantWithStreamError = () => false;
+        globalThis.showToast = () => {};
+        globalThis._mergeSettledToolCallsWithLiveMetadata = (toolCalls) => toolCalls;
+        globalThis._markSessionViewed = () => {};
+        globalThis.snapshotLiveTurnHtmlForSession = () => {};
+        globalThis._clearLiveRunStatusTimer = () => {};
+        globalThis.hideLiveRunStatus = () => {};
+        globalThis._messageRenderableMessageCount = () => 1;
+        globalThis._currentMessageRenderWindowSize = () => 50;
+        globalThis._messageRenderWindowSize = 50;
+        globalThis.syncTopbar = () => {};
+        globalThis.renderMessages = () => { renderCalls += 1; };
+        globalThis.renderSessionList = () => { sessionListCalls += 1; };
+        globalThis._setActivePaneIdleIfOwner = () => { idleCalls += 1; };
+        globalThis._ownsActiveStreamOrBackground = () => true;
+        globalThis._reconcileStreamEndRecoveryExhaustion = async () => { throw new Error('unexpected recovery exhaustion'); };
+        globalThis._finalizeStreamEndFallback = () => { throw new Error('unexpected fallback finalize'); };
+        globalThis._bailOutOfTerminalEventsFromStaleStream = () => false;
+        globalThis._rememberRunJournalCursor = () => {};
+        """
+        + current_owner
+        + """
+        """
+        + current_owner_active
+        + """
+        """
+        + current_transport_generation
+        + """
+        """
+        + next_transport_generation
+        + """
+        """
+        + owner
+        + """
+        """
+        + recovery
+        + """
+        """
+        + clear_recovery
+        + """
+        """
+        + schedule_recovery
+        + """
+        """
+        + run_recovery
+        + """
+        """
+        + close_source
+        + """
+        """
+        + wire
+        + """
+        (async () => {
+          _wireSSE(oldSource, 1);
+          const oldTransportGeneration = LIVE_STREAMS['sid-1'].transportGeneration;
+          _scheduleStreamEndRecovery(oldSource, 180, oldTransportGeneration, 4);
+          const staleTimer = timers.shift();
+          _closeSource(oldSource, { retainOwner: true, transportGeneration: oldTransportGeneration });
+          const gapGeneration = LIVE_STREAMS['sid-1'].transportGeneration;
+          _wireSSE(replacementSource, gapGeneration);
+          const replacementTransportGeneration = LIVE_STREAMS['sid-1'].transportGeneration;
+          _scheduleStreamEndRecovery(replacementSource, 180, replacementTransportGeneration, 13);
+          const replacementTimer = timers.shift();
+          const leaseBeforeTimer = _streamEndRecoveryLease;
+          staleTimer.cb();
+          await Promise.resolve();
+          await Promise.resolve();
+          console.log(JSON.stringify({
+            renderCalls,
+            sessionListCalls,
+            idleCalls,
+            clearLiveToolCalls,
+            removeThinkingCalls,
+            hydrateCalls,
+            apiCalls,
+            pending: !!_streamEndRecoveryLease,
+            attempts: _streamEndRecoveryLease ? _streamEndRecoveryLease.attempts : 0,
+            recoveryGeneration: _streamEndRecoveryLease ? _streamEndRecoveryLease.generation : null,
+            recoveryTimerId: _streamEndRecoveryLease ? _streamEndRecoveryLease.timer : null,
+            replacementTimerId: replacementTimer.id,
             activeStreamId: S.activeStreamId,
             ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
             transportGeneration: LIVE_STREAMS['sid-1'].transportGeneration,
             currentSourceIsReplacement: LIVE_STREAMS['sid-1'].source === replacementSource,
             oldSourceCloseCalls,
             replacementSourceCloseCalls,
-            messages: S.messages,
+            streamFinalized: _streamFinalized,
+            terminalStateReached: _terminalStateReached,
+            leaseStable: _streamEndRecoveryLease === leaseBeforeTimer,
+            session: S.session,
+            toolCalls: S.toolCalls,
           }));
         })().catch((error) => {
           console.error(error && error.stack ? error.stack : String(error));
@@ -1004,7 +1265,7 @@ def test_restore_settled_session_does_not_mutate_after_pane_ownership_switch_dur
 
 
 def test_restore_settled_session_does_not_mutate_after_same_stream_token_replacement_during_await():
-    result = _run_restore_same_generation_replacement_case(reject=False)
+    result = _run_restore_stale_generation_replacement_case(reject=False)
 
     assert result["result"] == "stale"
     assert result["renderCalls"] == 0
@@ -1013,19 +1274,28 @@ def test_restore_settled_session_does_not_mutate_after_same_stream_token_replace
     assert result["clearLiveToolCalls"] == 0
     assert result["removeThinkingCalls"] == 0
     assert result["hydrateCalls"] == 0
+    assert result["apiCalls"] == 1
     assert result["pending"] is True
-    assert result["attempts"] == 4
+    assert result["attempts"] == 13
+    assert result["recoveryGeneration"] == 4
+    assert result["recoveryTimerId"] == result["replacementTimerId"]
     assert result["activeStreamId"] == "stream-1"
     assert result["ownerToken"] == 1
-    assert result["transportGeneration"] == 2
+    assert result["transportGeneration"] == 4
+    assert result["gapGeneration"] == 3
     assert result["currentSourceIsReplacement"] is True
-    assert result["oldSourceCloseCalls"] == 0
+    assert result["oldSourceCloseCalls"] == 1
     assert result["replacementSourceCloseCalls"] == 0
+    assert result["streamFinalized"] is False
+    assert result["terminalStateReached"] is False
+    assert result["leaseStable"] is True
+    assert result["session"] == {"session_id": "sid-1"}
+    assert result["toolCalls"] == [{"id": "tool-1"}]
     assert result["messages"] == [{"role": "assistant", "content": "replacement pane answer"}]
 
 
 def test_restore_settled_session_rejection_does_not_mutate_after_same_stream_token_replacement():
-    result = _run_restore_same_generation_replacement_case(reject=True)
+    result = _run_restore_stale_generation_replacement_case(reject=True)
 
     assert result["result"] == "stale"
     assert result["renderCalls"] == 0
@@ -1034,15 +1304,51 @@ def test_restore_settled_session_rejection_does_not_mutate_after_same_stream_tok
     assert result["clearLiveToolCalls"] == 0
     assert result["removeThinkingCalls"] == 0
     assert result["hydrateCalls"] == 0
+    assert result["apiCalls"] == 1
     assert result["pending"] is True
-    assert result["attempts"] == 4
+    assert result["attempts"] == 13
+    assert result["recoveryGeneration"] == 4
+    assert result["recoveryTimerId"] == result["replacementTimerId"]
     assert result["activeStreamId"] == "stream-1"
     assert result["ownerToken"] == 1
-    assert result["transportGeneration"] == 2
+    assert result["transportGeneration"] == 4
+    assert result["gapGeneration"] == 3
     assert result["currentSourceIsReplacement"] is True
-    assert result["oldSourceCloseCalls"] == 0
+    assert result["oldSourceCloseCalls"] == 1
     assert result["replacementSourceCloseCalls"] == 0
+    assert result["streamFinalized"] is False
+    assert result["terminalStateReached"] is False
+    assert result["leaseStable"] is True
+    assert result["session"] == {"session_id": "sid-1"}
+    assert result["toolCalls"] == [{"id": "tool-1"}]
     assert result["messages"] == [{"role": "assistant", "content": "replacement pane answer"}]
+
+
+def test_stale_generation_recovery_timer_does_not_mutate_after_replacement_lease_exists():
+    result = _run_stale_recovery_timer_after_generation_replacement_case()
+
+    assert result["renderCalls"] == 0
+    assert result["sessionListCalls"] == 0
+    assert result["idleCalls"] == 0
+    assert result["clearLiveToolCalls"] == 0
+    assert result["removeThinkingCalls"] == 0
+    assert result["hydrateCalls"] == 0
+    assert result["apiCalls"] == 0
+    assert result["pending"] is True
+    assert result["attempts"] == 13
+    assert result["recoveryGeneration"] == 4
+    assert result["recoveryTimerId"] == result["replacementTimerId"]
+    assert result["activeStreamId"] == "stream-1"
+    assert result["ownerToken"] == 1
+    assert result["transportGeneration"] == 4
+    assert result["currentSourceIsReplacement"] is True
+    assert result["oldSourceCloseCalls"] == 1
+    assert result["replacementSourceCloseCalls"] == 0
+    assert result["streamFinalized"] is False
+    assert result["terminalStateReached"] is False
+    assert result["leaseStable"] is True
+    assert result["session"] == {"session_id": "sid-1"}
+    assert result["toolCalls"] == [{"id": "tool-1"}]
 
 
 def test_replacement_owner_blocks_queued_persist_snapshot_render_recovery_and_resume_callbacks():
