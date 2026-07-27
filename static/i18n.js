@@ -651,6 +651,15 @@ const LOCALES = {
     settings_wallpaper_unavailable: 'Wallpaper storage is unavailable.',
     settings_wallpaper_reconciliation: 'Could not refresh the saved wallpaper.',
     settings_wallpaper_failed: 'Could not save the wallpaper.',
+    settings_wallpaper_invalid_response: 'The wallpaper response was invalid.',
+    settings_wallpaper_image_unavailable: 'The saved wallpaper image is unavailable.',
+    settings_wallpaper_invalid_upload: 'The wallpaper upload was invalid.',
+    settings_wallpaper_invalid_metadata: 'The wallpaper settings were invalid.',
+    settings_wallpaper_not_found: 'The saved wallpaper was not found.',
+    settings_wallpaper_too_large: 'The image must be 10 MB or smaller.',
+    settings_wallpaper_storage_failed: 'Wallpaper storage failed. Please try again.',
+    settings_wallpaper_timeout: 'The wallpaper request timed out. Please try again.',
+    settings_wallpaper_network_failed: 'Could not reach wallpaper storage. Check your connection.',
     settings_section_preferences_title: 'Preferences',
     settings_section_preferences_meta: 'Defaults and UI behavior for Hermes Web UI.',
     settings_section_system_title: 'System',
@@ -26164,6 +26173,12 @@ function applyLocaleToDOM() {
     const val = t(key);
     if (val && val !== key) el.setAttribute('aria-label', val);
   });
+  document.querySelectorAll('[data-i18n-alt]').forEach(el => {
+    const key = el.getAttribute('data-i18n-alt');
+    const val = t(key);
+    if (val && val !== key) el.setAttribute('alt', val);
+  });
+  document.dispatchEvent(new CustomEvent('hermes:locale-changed'));
   if (typeof syncWorkspacePanelUI === 'function') syncWorkspacePanelUI();
   if (typeof syncAppTitlebar === 'function') syncAppTitlebar();
 }

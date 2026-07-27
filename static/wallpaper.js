@@ -20,6 +20,8 @@ let draftUrl=null;
 let draftOpacity=0.8;
 let draftScope='chat';
 let requestRunning=false;
+let statusKey=null;
+let statusIsError=false;
 let bound=false;
 
 function el(id){return document.getElementById(id)}
@@ -62,6 +64,22 @@ async function applyAuthoritativeInfo(raw,guards){
   saved=info;hasAuthoritativeState=true;cache(info);render(info);syncControls();return true;
 }
 function setStatus(message,isError){const status=el('wallpaperStatus');if(status){status.textContent=message||'';status.classList.toggle('is-error',!!isError)}}
+function setStatusKey(key,isError){statusKey=key||null;statusIsError=!!isError;setStatus(key?text(key,key):'',statusIsError)}
+function refreshLocalizedWallpaperText(){if(statusKey)setStatus(text(statusKey,statusKey),statusIsError);syncControls()}
+function wallpaperErrorKey(error){
+  const message=String(error&&error.message||'');
+  if(message==='Invalid wallpaper response')return 'settings_wallpaper_invalid_response';
+  if(message==='Wallpaper image unavailable')return 'settings_wallpaper_image_unavailable';
+  if(message==='Invalid wallpaper upload')return 'settings_wallpaper_invalid_upload';
+  if(message==='Invalid wallpaper metadata')return 'settings_wallpaper_invalid_metadata';
+  if(message==='Wallpaper not found'||error&&error.status===404)return 'settings_wallpaper_not_found';
+  if(message==='Wallpaper exceeds encoded size limit'||error&&error.status===413)return 'settings_wallpaper_too_large';
+  if(message==='Wallpaper storage operation failed')return 'settings_wallpaper_unavailable';
+  if(message==='Request timed out. Please try again.')return 'settings_wallpaper_timeout';
+  if(message==='Failed to fetch'||error instanceof TypeError)return 'settings_wallpaper_network_failed';
+  if(error&&Number.isFinite(error.status)&&error.status>=500)return 'settings_wallpaper_storage_failed';
+  return 'settings_wallpaper_failed';
+}
 async function reconcileWallpaperInfo(){
   const guards={reconcile:++reconcileGeneration,mutation:mutationStarted};
   try{
@@ -69,7 +87,7 @@ async function reconcileWallpaperInfo(){
     await applyAuthoritativeInfo(raw,guards);
   }catch(error){
     if(!hasAuthoritativeState){saved={...DEFAULT_INFO};try{localStorage.removeItem(CACHE_KEY)}catch(_){}clearRender()}
-    setStatus(text('settings_wallpaper_reconciliation','Could not refresh the saved wallpaper.'),true);
+    setStatusKey('settings_wallpaper_reconciliation',true);
     throw error;
   }
   return saved;
@@ -99,9 +117,9 @@ function syncControls(){
 }
 function installDraftFile(file){
   const extension=(file.name||'').toLowerCase().split('.').pop();
-  if(!ALLOWED_MIME.has(file.type)&&!['jpg','jpeg','png','webp'].includes(extension)){setStatus(text('settings_wallpaper_invalid_type','Choose a JPEG, PNG, or WebP image.'),true);return false}
-  if(!file.size||file.size>MAX_BYTES){setStatus(text('settings_wallpaper_invalid_size','The image must be 10 MB or smaller.'),true);return false}
-  _releaseWallpaperDraftUrl();draftFile=file;draftUrl=URL.createObjectURL(file);draftRevision++;setStatus('');syncControls();return true;
+  if(!ALLOWED_MIME.has(file.type)&&!['jpg','jpeg','png','webp'].includes(extension)){setStatusKey('settings_wallpaper_invalid_type',true);return false}
+  if(!file.size||file.size>MAX_BYTES){setStatusKey('settings_wallpaper_invalid_size',true);return false}
+  _releaseWallpaperDraftUrl();draftFile=file;draftUrl=URL.createObjectURL(file);draftRevision++;setStatusKey(null);syncControls();return true;
 }
 function discardDraft(){_releaseWallpaperDraftUrl();draftFile=null;draftOpacity=saved.opacity;draftScope=saved.scope;draftRevision++;syncControls()}
 function beginWallpaperSettingsSession(){
@@ -119,16 +137,16 @@ async function _requestForTest(kind,file,opacity,scope){
 function enqueueMutation(kind,file,opacity,scope,owner){
   mutationStarted++;
   const run=async()=>{
-    requestRunning=true;if(appearanceActive&&owner===paneGeneration){setStatus(text('settings_wallpaper_saving','Saving…'));syncControls()}
+    requestRunning=true;if(appearanceActive&&owner===paneGeneration){setStatusKey('settings_wallpaper_saving');syncControls()}
     try{
       const raw=await _requestForTest(kind,file,opacity,scope);
       await applyAuthoritativeInfo(raw,null);
       if(kind==='post')_releaseWallpaperDraftUrl();
       draftFile=null;draftOpacity=saved.opacity;draftScope=saved.scope;
-      if(appearanceActive&&owner===paneGeneration)setStatus(kind==='delete'?text('settings_wallpaper_cleared','Wallpaper cleared.'):text('settings_wallpaper_saved','Wallpaper saved.'));
+      if(appearanceActive&&owner===paneGeneration)setStatusKey(kind==='delete'?'settings_wallpaper_cleared':'settings_wallpaper_saved');
     }catch(error){
       if(!error||!Number.isFinite(error.status)||error.status>=500){try{await reconcileWallpaperInfo()}catch(_){}}
-      if(appearanceActive&&owner===paneGeneration)setStatus((error&&error.message)||text('settings_wallpaper_failed','Could not save the wallpaper.'),true);
+      if(appearanceActive&&owner===paneGeneration)setStatusKey(wallpaperErrorKey(error),true);
     }finally{requestRunning=false;if(appearanceActive&&owner===paneGeneration)syncControls()}
   };
   mutationTail=mutationTail.then(run,run);return mutationTail;
@@ -136,7 +154,7 @@ function enqueueMutation(kind,file,opacity,scope,owner){
 function saveDraft(){if(requestRunning||!dirty())return;draftOpacity=Number(el('wallpaperOpacity').value)/100;draftScope=currentScope();enqueueMutation(draftFile?'post':'patch',draftFile,draftOpacity,draftScope,paneGeneration)}
 async function clearDraft(){
   if(requestRunning)return;
-  if(!saved.has_wallpaper){discardDraft();setStatus(text('settings_wallpaper_cleared','Wallpaper cleared.'));return}
+  if(!saved.has_wallpaper){discardDraft();setStatusKey('settings_wallpaper_cleared');return}
   const owner=paneGeneration,target=saved.image_version,revision=draftRevision;
   const confirmed=await global.showConfirmDialog({title:text('settings_wallpaper_confirm_clear','Clear the saved wallpaper?'),message:'',confirmLabel:text('settings_wallpaper_clear','Clear'),danger:true,focusCancel:true});
   if(!confirmed||requestRunning||!appearanceActive||owner!==paneGeneration||target!==saved.image_version||revision!==draftRevision)return;
@@ -156,7 +174,7 @@ function speculativeBoot(){
 }
 function init(){bindControls();reconcileWallpaperInfo().catch(()=>{})}
 speculativeBoot();
-if(document.addEventListener)document.addEventListener('DOMContentLoaded',init,{once:true});
+if(document.addEventListener){document.addEventListener('DOMContentLoaded',init,{once:true});document.addEventListener('hermes:locale-changed',refreshLocalizedWallpaperText)}
 const apiSurface={normalizeInfo,imageUrl,reconcileWallpaperInfo,applyAuthoritativeInfo,_requestForTest,_setSavedForTest(value){saved=normalizeInfo(value)},_releaseWallpaperDraftUrl};
 global.HermesWallpaper=apiSurface;global.beginWallpaperSettingsSession=beginWallpaperSettingsSession;global.endWallpaperSettingsSession=endWallpaperSettingsSession;
 })(window);

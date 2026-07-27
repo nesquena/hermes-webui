@@ -30,6 +30,15 @@ WALLPAPER_I18N_KEYS = (
     "settings_wallpaper_unavailable",
     "settings_wallpaper_reconciliation",
     "settings_wallpaper_failed",
+    "settings_wallpaper_invalid_response",
+    "settings_wallpaper_image_unavailable",
+    "settings_wallpaper_invalid_upload",
+    "settings_wallpaper_invalid_metadata",
+    "settings_wallpaper_not_found",
+    "settings_wallpaper_too_large",
+    "settings_wallpaper_storage_failed",
+    "settings_wallpaper_timeout",
+    "settings_wallpaper_network_failed",
 )
 
 
@@ -59,6 +68,7 @@ def test_wallpaper_dom_controls_and_boot_bridge_exist() -> None:
     assert 'accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"' in html
     assert 'aria-describedby="wallpaperDescription wallpaperStatus"' in html
     assert 'role="status" aria-live="polite" aria-atomic="true"' in html
+    assert 'data-i18n-alt="settings_wallpaper_preview_alt"' in html
     assert '<script src="static/wallpaper.js?v=__WEBUI_VERSION__" defer></script>' in html
     assert "hermes-wallpaper-meta" in html
     bridge = html[html.index("hermes-wallpaper-meta") - 400:html.index("hermes-wallpaper-meta") + 900]
@@ -93,6 +103,7 @@ def test_wallpaper_i18n_keys_are_english_fallback_owned() -> None:
         for index, match in enumerate(locale_starts)
     }
 
+    assert len(blocks) == 15
     for key in WALLPAPER_I18N_KEYS:
         assert f"{key}:" in blocks["en"]
     assert any(
@@ -102,6 +113,38 @@ def test_wallpaper_i18n_keys_are_english_fallback_owned() -> None:
         for key in WALLPAPER_I18N_KEYS
     )
     assert "_locale[key] ?? LOCALES.en[key]" in i18n
+
+
+def test_wallpaper_locale_switch_updates_alt_and_owned_dynamic_text() -> None:
+    i18n = (STATIC / "i18n.js").read_text(encoding="utf-8")
+    wallpaper = (STATIC / "wallpaper.js").read_text(encoding="utf-8")
+
+    assert "document.querySelectorAll('[data-i18n-alt]')" in i18n
+    assert "el.setAttribute('alt', val)" in i18n
+    assert "document.dispatchEvent(new CustomEvent('hermes:locale-changed'" in i18n
+    assert "document.addEventListener('hermes:locale-changed'" in wallpaper
+    assert "statusKey" in wallpaper
+    assert "setStatusKey" in wallpaper
+    assert "refreshLocalizedWallpaperText" in wallpaper
+
+
+def test_wallpaper_errors_are_localized_instead_of_rendering_raw_messages() -> None:
+    source = (STATIC / "wallpaper.js").read_text(encoding="utf-8")
+
+    assert "function wallpaperErrorKey" in source
+    assert "error&&error.message)||text(" not in source
+    for key in (
+        "settings_wallpaper_invalid_response",
+        "settings_wallpaper_image_unavailable",
+        "settings_wallpaper_invalid_upload",
+        "settings_wallpaper_invalid_metadata",
+        "settings_wallpaper_not_found",
+        "settings_wallpaper_too_large",
+        "settings_wallpaper_storage_failed",
+        "settings_wallpaper_timeout",
+        "settings_wallpaper_network_failed",
+    ):
+        assert key in source
 
 
 def test_wallpaper_clear_uses_shared_app_confirmation_dialog() -> None:
