@@ -16312,9 +16312,9 @@ function renderMessages(options){
     _wireMessageWindowLoadEarlierButton();
   }
   let lastUserRawIdx=-1;
-  for(let i=visWithIdx.length-1;i>=0;i--){
-    if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'){
-      lastUserRawIdx=visWithIdx[i].rawIdx;
+  for(let rawIdx=S.messages.length-1;rawIdx>=0;rawIdx--){
+    if(S.messages[rawIdx]&&S.messages[rawIdx].role==='user'){
+      lastUserRawIdx=rawIdx;
       break;
     }
   }

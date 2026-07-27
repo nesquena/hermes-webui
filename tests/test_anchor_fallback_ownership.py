@@ -408,8 +408,8 @@ def test_transparent_raw_content_fallback_exits_for_anchor_owned_messages():
     }
 
 
-def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds():
-    """Drive the real renderMessages() gate, not only source-order assertions."""
+def test_render_messages_preserves_action_and_activity_ownership_boundaries():
+    """Drive the real renderMessages() gates, not only source-order assertions."""
 
     render_source = _function_source(_ui_js(), "renderMessages")
     transparent_source = _function_source(_ui_js(), "_transparentStreamOrderedParts")
@@ -543,7 +543,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           msgInner: new FakeElement('div'),
           emptyState: new FakeElement('div'),
         }};
-        global.window = {{}};
+        global.window = {{ _showBackgroundWakeups: true }};
         global.document = {{
           createElement: (tag) => new FakeElement(tag),
           getElementById: (id) => elements[id] || null,
@@ -583,7 +583,11 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _captureMessageScrollSnapshot() {{ return null; }}
         function _resetMessageRenderWindow(sid) {{ _messageRenderWindowSid = sid; }}
         function _latestPreservedCompressionTaskListMessages() {{ return []; }}
-        function _getVisibleMessagesWithIdx() {{ return S.messages.map((m, rawIdx) => (m && m.role !== 'tool') ? {{ m, rawIdx }} : null).filter(Boolean); }}
+        function _getVisibleMessagesWithIdx() {{
+          return S.messages.map((m, rawIdx) => (
+            m && m.role !== 'tool' && !(m._source === 'process_wakeup' && window._showBackgroundWakeups === false)
+          ) ? {{ m, rawIdx }} : null).filter(Boolean);
+        }}
         function _messageVirtualKeepTailCount() {{ return 100; }}
         function _currentMessageVirtualWindow(vis) {{ return {{ virtualized: false, start: 0, end: vis.length, topPad: 0, bottomPad: 0, total: vis.length, tailStart: vis.length }}; }}
         function _messageVirtualWindowKeyFor() {{ return 'all'; }}
@@ -690,7 +694,15 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           if (blocks) blocks.insertBefore(group, segment);
           return true;
         }}
-        function _hasHiddenProcessWakeupBoundaryBefore() {{ return false; }}
+        function _hasHiddenProcessWakeupBoundaryBefore(rawIdx) {{
+          if (window._showBackgroundWakeups !== false) return false;
+          for (let idx = Number(rawIdx) - 1; idx >= 0; idx--) {{
+            const previous = (S.messages || [])[idx];
+            if (previous && previous._source === 'process_wakeup') return true;
+            if (previous && previous.role !== 'tool') return false;
+          }}
+          return false;
+        }}
 
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
@@ -830,12 +842,52 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           sToolCalls: S.toolCalls.length,
         }};
 
+        elements.msgInner = new FakeElement('div');
+        window._showBackgroundWakeups = false;
+        S = {{
+          session: {{ session_id: 'hidden-wakeup' }},
+          messages: [
+            {{ role: 'user', content: 'original human question' }},
+            {{ role: 'assistant', content: 'first assistant answer' }},
+            {{ role: 'user', content: 'background completed', _source: 'process_wakeup' }},
+            {{ role: 'assistant', content: 'assistant answer after wakeup' }},
+          ],
+          toolCalls: [],
+          busy: false,
+        }};
+        renderMessages();
+        const hiddenWakeupUserRow = elements.msgInner.querySelector('[data-role="user"]');
+        const hiddenWakeupSummary = {{
+          wakeupRows: elements.msgInner.querySelectorAll('[data-role="process_wakeup"]').length,
+          assistantTurns: elements.msgInner.querySelectorAll('.assistant-turn').length,
+          oldHumanHasEdit: !!(hiddenWakeupUserRow && hiddenWakeupUserRow.innerHTML.includes('onclick="editMessage(this)"')),
+        }};
+
+        elements.msgInner = new FakeElement('div');
+        window._showBackgroundWakeups = false;
+        S = {{
+          session: {{ session_id: 'normal-edit-owner' }},
+          messages: [
+            {{ role: 'user', content: 'latest human question' }},
+            {{ role: 'assistant', content: 'assistant answer' }},
+          ],
+          toolCalls: [],
+          busy: false,
+        }};
+        renderMessages();
+        const latestHumanRow = elements.msgInner.querySelector('[data-role="user"]');
+        const normalEditSummary = {{
+          latestHumanHasEdit: !!(latestHumanRow && latestHumanRow.innerHTML.includes('onclick="editMessage(this)"')),
+        }};
+
         console.log(JSON.stringify({{
           selectorSanity,
           anchorSummary,
           historicalSummary,
           rawHistoricalSummary,
           duplicateReferenceSummary,
+          hiddenWakeupSummary,
+          normalEditSummary,
         }}));
         """
     )
@@ -882,6 +934,13 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
     assert {card["tid"] for card in duplicate_cards} == {"toolu_hist_dup"}
     assert "toolu_anchor_dup" not in {card["tid"] for card in duplicate_cards}
     assert duplicate_cards[0]["snippet"] == "historical persisted result"
+
+    assert result["hiddenWakeupSummary"] == {
+        "wakeupRows": 0,
+        "assistantTurns": 2,
+        "oldHumanHasEdit": False,
+    }
+    assert result["normalEditSummary"] == {"latestHumanHasEdit": True}
 
 
 def test_settled_legacy_tool_rebuild_excludes_anchor_owned_turns():
