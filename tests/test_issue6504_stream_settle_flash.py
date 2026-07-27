@@ -875,6 +875,7 @@ def test_restore_settled_session_rejection_does_not_mutate_after_same_stream_tok
 def test_replacement_owner_blocks_queued_persist_snapshot_render_recovery_and_resume_callbacks():
     current_owner = _extract("_currentLiveOwnerEntry")
     current_owner_active = _extract("_currentLiveOwnerActive")
+    close_source = _extract("_closeSource")
     persist = _extract("persistInflightState")
     snapshot = _extract("snapshotLiveTurn")
     throttled_snapshot = _extract("_throttledSnapshotLiveTurn")
@@ -968,6 +969,7 @@ def test_replacement_owner_blocks_queued_persist_snapshot_render_recovery_and_re
         };
         """ + current_owner + """
         """ + current_owner_active + """
+        """ + close_source + """
         """ + persist + """
         """ + snapshot + """
         """ + throttled_snapshot + """
@@ -1011,6 +1013,118 @@ def test_replacement_owner_blocks_queued_persist_snapshot_render_recovery_and_re
     assert result["activeStreamId"] == "replacement-stream"
     assert result["ownerToken"] == 2
     assert result["deferredBound"] is False
+
+
+def test_hidden_page_deferred_resume_clears_failed_source_before_reconnect():
+    current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
+    owner = _extract("_ownsActiveStreamOrBackground")
+    close_source = _extract("_closeSource")
+    defer_hidden = _extract("_deferStreamErrorIfPageHidden")
+    wire = _extract("_wireSSE")
+    script = textwrap.dedent(
+        """
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
+        let _streamFinalized = false;
+        let _terminalStateReached = false;
+        let _deferredStreamRecoveryBound = false;
+        let _deferredStreamRecoveryResume = null;
+        let currentCloseCalls = 0;
+        let replacementCloseCalls = 0;
+        let reattachCalls = 0;
+        const listeners = [];
+        const currentSource = {
+          readyState: 2,
+          close() { currentCloseCalls += 1; },
+          addEventListener() {},
+        };
+        const replacementSource = {
+          readyState: 1,
+          close() { replacementCloseCalls += 1; },
+          addEventListener() {},
+        };
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'stream-1',
+          messages: [],
+        };
+        globalThis.LIVE_STREAMS = {
+          'sid-1': { streamId: 'stream-1', source: currentSource, ownerToken: 1 }
+        };
+        globalThis.snapshotLiveTurnHtmlForSession = () => {};
+        globalThis._clearLiveRunStatusTimer = () => {};
+        globalThis.hideLiveRunStatus = () => {};
+        globalThis._rememberRunJournalCursor = () => {};
+        globalThis._pageHiddenForStreamError = () => document.visibilityState === 'hidden';
+        globalThis._reattachOrRestoreAfterDeferredStreamError = () => {
+          reattachCalls += 1;
+          _wireSSE(replacementSource);
+        };
+        globalThis.setComposerStatus = () => {};
+        globalThis._isActiveSession = () => true;
+        globalThis._isSessionCurrentPane = () => true;
+        globalThis.window = {
+          addEventListener: (_name, cb) => { listeners.push(cb); },
+          removeEventListener: (_name, cb) => {
+            const idx = listeners.indexOf(cb);
+            if (idx !== -1) listeners.splice(idx, 1);
+          },
+        };
+        globalThis.document = {
+          visibilityState: 'hidden',
+          addEventListener: (_name, cb) => { listeners.push(cb); },
+          removeEventListener: (_name, cb) => {
+            const idx = listeners.indexOf(cb);
+            if (idx !== -1) listeners.splice(idx, 1);
+          },
+        };
+        """
+        + current_owner
+        + """
+        """
+        + current_owner_active
+        + """
+        """
+        + owner
+        + """
+        """
+        + close_source
+        + """
+        """
+        + wire
+        + """
+        """
+        + defer_hidden
+        + """
+        const deferred = _deferStreamErrorIfPageHidden(currentSource);
+        const sourceClearedBeforeResume = LIVE_STREAMS['sid-1'].source === null;
+        document.visibilityState = 'visible';
+        for (const cb of [...new Set(listeners)]) cb();
+        console.log(JSON.stringify({
+          deferred,
+          sourceClearedBeforeResume,
+          reattachCalls,
+          currentSourceIsReplacement: LIVE_STREAMS['sid-1'].source === replacementSource,
+          replacementCloseCalls,
+          currentCloseCalls,
+          ownerToken: LIVE_STREAMS['sid-1'].ownerToken,
+        }));
+        """
+    )
+    proc = _run_node_script(script)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["deferred"] is True
+    assert result["sourceClearedBeforeResume"] is True
+    assert result["reattachCalls"] == 1
+    assert result["currentSourceIsReplacement"] is True
+    assert result["replacementCloseCalls"] == 0
+    assert result["currentCloseCalls"] == 0
+    assert result["ownerToken"] == 1
 
 
 def test_reconnect_preflight_rejection_does_not_recreate_same_id_replaced_owner():

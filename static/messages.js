@@ -2684,6 +2684,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!_pageHiddenForStreamError()) return false;
     setComposerStatus('Connection paused. Reconnecting when this tab returns…');
     if(S.session&&S.session.session_id===activeSid&&streamId) S.activeStreamId=streamId;
+    _closeSource(source,{retainOwner:true});
     if(!_deferredStreamRecoveryBound){
       _deferredStreamRecoveryBound=true;
       const resume=()=>{
