@@ -64,40 +64,88 @@ def test_wallpaper_upload_scope_refresh_and_clear(base_url, tmp_path: Path) -> N
 
                 page.set_input_files("#wallpaperFileInput", str(image))
                 page.locator("#wallpaperPreview:not([hidden])").wait_for()
+                assert page.locator("#wallpaperLayer").count() == 1
+                page.locator(
+                    'html[data-wallpaper="active"][data-wallpaper-scope="chat"]'
+                ).wait_for()
                 assert page.locator("#wallpaperSaveBtn").is_enabled()
-                assert page.locator("html").get_attribute("data-wallpaper") is None
 
+                # Unsaved valid draft previews, then disappears when Appearance is left.
+                page.locator('[data-panel="chat"]').first.click()
+                page.locator("html:not([data-wallpaper])").wait_for()
+                page.locator('[data-panel="settings"]').first.click()
+                page.locator('[data-settings-section="appearance"]').first.click()
+                assert page.locator("#wallpaperSaveBtn").is_disabled()
+
+                # Save authoritative Chat/80 baseline.
+                page.set_input_files("#wallpaperFileInput", str(image))
                 page.locator("#wallpaperSaveBtn").click()
-                page.locator('html[data-wallpaper="active"][data-wallpaper-scope="chat"]').wait_for()
+                page.locator(
+                    'html[data-wallpaper="active"][data-wallpaper-scope="chat"]'
+                ).wait_for()
+                page.locator('#wallpaperStatus:text-is("Wallpaper saved.")').wait_for()
                 assert page.locator("#wallpaperStatus").inner_text() == "Wallpaper saved."
-                assert page.locator("#wallpaperLayer").evaluate(
-                    "el => getComputedStyle(el).pointerEvents"
-                ) == "none"
+                assert page.locator(".app-titlebar").evaluate(
+                    "el => getComputedStyle(el).backgroundColor"
+                ) != "rgba(0, 0, 0, 0)"
 
+                # Scope and opacity preview before Save on the sole layer.
+                page.locator("#wallpaperScopeApp").check()
+                page.locator('html[data-wallpaper-scope="app"]').wait_for()
+                page.wait_for_function(
+                    "() => getComputedStyle(document.querySelector('.app-titlebar')).backgroundColor === 'rgba(0, 0, 0, 0)'"
+                )
+                assert page.locator(".app-titlebar").evaluate(
+                    "el => getComputedStyle(el).backgroundColor"
+                ) == "rgba(0, 0, 0, 0)"
+                page.locator("#wallpaperOpacity").fill("55")
+                assert page.locator("#wallpaperLayer").evaluate(
+                    "el => getComputedStyle(el).opacity"
+                ) == "0.55"
+
+                # Exit without Save restores authoritative Chat/80.
+                page.locator('[data-panel="chat"]').first.click()
+                page.locator('html[data-wallpaper-scope="chat"]').wait_for()
+                assert page.locator("#wallpaperLayer").evaluate(
+                    "el => getComputedStyle(el).opacity"
+                ) == "0.8"
+                page.wait_for_function(
+                    "() => getComputedStyle(document.querySelector('.app-titlebar')).backgroundColor !== 'rgba(0, 0, 0, 0)'"
+                )
+                assert page.locator(".app-titlebar").evaluate(
+                    "el => getComputedStyle(el).backgroundColor"
+                ) != "rgba(0, 0, 0, 0)"
+
+                # Re-enter, preview again, and Save app/55.
+                page.locator('[data-panel="settings"]').first.click()
+                page.locator('[data-settings-section="appearance"]').first.click()
+                assert page.locator("#wallpaperScopeChat").is_checked()
+                assert page.locator("#wallpaperOpacity").input_value() == "80"
                 page.locator("#wallpaperScopeApp").check()
                 page.locator("#wallpaperOpacity").fill("55")
                 page.locator("#wallpaperSaveBtn").click()
                 page.locator('html[data-wallpaper-scope="app"]').wait_for()
-                assert page.locator("html").evaluate(
-                    "el => getComputedStyle(el).getPropertyValue('--wallpaper-opacity').trim()"
+                assert page.locator("#wallpaperLayer").evaluate(
+                    "el => getComputedStyle(el).opacity"
                 ) == "0.55"
-
-                page.locator('[data-panel="chat"]').first.click()
-                transparent_surfaces = page.locator(
-                    "#mainChat, #mainChat .messages-shell, #mainChat .messages, #mainChat .empty-state"
-                )
-                assert transparent_surfaces.count() == 4
-                for index in range(transparent_surfaces.count()):
-                    assert transparent_surfaces.nth(index).evaluate(
-                        "el => getComputedStyle(el).backgroundColor"
-                    ) == "rgba(0, 0, 0, 0)"
-                main_color = page.locator("main.main").evaluate(
-                    "el => getComputedStyle(el).backgroundColor"
-                )
-                assert main_color != "rgba(0, 0, 0, 0)"
                 assert page.locator("#wallpaperLayer").evaluate(
                     "el => getComputedStyle(el).pointerEvents"
                 ) == "none"
+
+                for skin in (
+                    "graphite", "github", "codex", "terracotta", "geist-contrast"
+                ):
+                    page.locator("html").evaluate(
+                        "(el, value) => { el.dataset.skin = value; }", skin
+                    )
+                    page.wait_for_function(
+                        "() => getComputedStyle(document.querySelector('.app-titlebar')).backgroundColor === 'rgba(0, 0, 0, 0)'"
+                    )
+                    assert page.locator(".app-titlebar").evaluate(
+                        "el => getComputedStyle(el).backgroundColor"
+                    ) == "rgba(0, 0, 0, 0)"
+                page.locator("html").evaluate("el => { delete el.dataset.skin; }")
+
                 hit_id = page.locator("#emptyState").evaluate(
                     "el => { const r=el.getBoundingClientRect(); const hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2); return hit && hit.id; }"
                 )

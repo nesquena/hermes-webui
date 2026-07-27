@@ -215,19 +215,79 @@ def test_wallpaper_layer_stacking_chat_scope_and_inactive_guards() -> None:
     assert '.app-titlebar{display:flex;align-items:center;justify-content:center;height:38px;' in css
 
 
-def test_wallpaper_app_scope_covers_shell_without_parent_opacity() -> None:
+def test_wallpaper_app_scope_exposes_single_layer_through_shell() -> None:
     css = (STATIC / "style.css").read_text(encoding="utf-8")
     selector = ':root[data-wallpaper="active"][data-wallpaper-scope="app"]'
+    wallpaper_block = css[css.index("/* Active wallpaper rendering"):]
+    assert "--wallpaper-chrome:" not in wallpaper_block
+    assert "--wallpaper-main:" not in wallpaper_block
     for surface in (
-        '.app-titlebar', '.rail', '.sidebar', '.sidebar .panel-view', '.main',
-        '.main-view', '.topbar', '#mainChat', '.messages-shell', '.messages',
-        '.empty-state', '.composer-wrap', '.composer-box', '.rightpanel',
-        '.rightpanel .panel-header', '.workspace-panel-tabs',
+        ".app-titlebar", ".rail", ".sidebar", ".rightpanel", ".main",
+        ".topbar", ".composer-wrap", ".sidebar .panel-view",
+        ".rightpanel .panel-header", ".workspace-panel-tabs", ".main-view",
+        "#mainChat", ".messages-shell", ".messages", ".empty-state",
     ):
-        assert selector + ' ' + surface in css
-    wallpaper_block = css[css.index('/* Active wallpaper rendering'):]
-    assert 'opacity:' not in wallpaper_block.replace('opacity:var(--wallpaper-opacity)', '')
-    assert 'overflow-x:' not in wallpaper_block
+        assert selector + " " + surface in css
+    assert "opacity:" not in wallpaper_block.replace(
+        "opacity:var(--wallpaper-opacity)", ""
+    )
+    assert "overflow-x:" not in wallpaper_block
+
+
+def test_wallpaper_chat_scope_does_not_override_titlebar() -> None:
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+    chat_start = css.index(
+        ':root[data-wallpaper="active"][data-wallpaper-scope="chat"]'
+    )
+    app_start = css.index(
+        ':root[data-wallpaper="active"][data-wallpaper-scope="app"]'
+    )
+    assert ".app-titlebar" not in css[chat_start:app_start]
+
+
+def test_wallpaper_forced_skins_explicitly_override_shell_backgrounds() -> None:
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+    selector = (
+        ':root:is([data-skin="graphite"],[data-skin="github"],'
+        '[data-skin="codex"],[data-skin="terracotta"],'
+        '[data-skin="geist-contrast"])[data-wallpaper="active"]'
+        '[data-wallpaper-scope="app"]'
+    )
+    block = css[css.index(selector):]
+    for surface in (
+        ".app-titlebar", ".rail", ".sidebar", ".rightpanel", ".main",
+        ".topbar", ".composer-wrap",
+    ):
+        assert surface in block
+    assert "{background:transparent!important;}" in block
+    assert selector + " .composer-box" in css
+    assert "{background:var(--wallpaper-composer)!important;}" in block
+
+
+def test_wallpaper_controller_previews_draft_and_restores_saved_on_exit() -> None:
+    controller = (STATIC / "wallpaper.js").read_text(encoding="utf-8")
+    assert "function renderSource(source,opacity,scope)" in controller
+    assert "function renderDraft()" in controller
+    assert "draftUrl||(saved.has_wallpaper?imageUrl(saved.image_version):'')" in controller
+    assert "renderSource(source,draftOpacity,draftScope)" in controller
+    assert "renderDraft();syncControls()" in controller
+    assert (
+        "function discardDraft(){_releaseWallpaperDraftUrl();draftFile=null;"
+        "draftOpacity=saved.opacity;draftScope=saved.scope;draftRevision++;"
+        "render(saved);syncControls()}"
+    ) in controller
+    reconcile = controller[
+        controller.index("function beginWallpaperSettingsSession"):
+        controller.index("function endWallpaperSettingsSession")
+    ]
+    assert "renderDraft()" in reconcile
+    end = controller[
+        controller.index("function endWallpaperSettingsSession"):
+        controller.index("async function _requestForTest")
+    ]
+    assert "render(saved)" in end
+    assert end.index("render(saved)") < end.index("_releaseWallpaperDraftUrl()")
+    assert "enqueueMutation(" not in end
 
 
 def test_wallpaper_skin_inventory_has_active_override_coverage() -> None:
@@ -240,9 +300,13 @@ def test_wallpaper_skin_inventory_has_active_override_coverage() -> None:
     ]
     for name in names:
         assert name in boot.lower()
-    forced = ['graphite','github','codex','terracotta','geist-contrast']
-    for name in forced:
-        assert f'[data-skin="{name}"][data-wallpaper="active"][data-wallpaper-scope="app"]' in css
+    selector = (
+        ':root:is([data-skin="graphite"],[data-skin="github"],'
+        '[data-skin="codex"],[data-skin="terracotta"],'
+        '[data-skin="geist-contrast"])[data-wallpaper="active"]'
+        '[data-wallpaper-scope="app"]'
+    )
+    assert selector in css
 
 
 def test_wallpaper_controller_uses_explicit_lifecycle_not_appearance_autosave() -> None:

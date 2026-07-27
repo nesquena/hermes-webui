@@ -46,12 +46,17 @@ function clearRender(){
   delete root.dataset.wallpaper;delete root.dataset.wallpaperScope;
   root.style.removeProperty('--wallpaper-image');root.style.removeProperty('--wallpaper-opacity');
 }
-function render(info){
-  if(!info.has_wallpaper){clearRender();return}
+function renderSource(source,opacity,scope){
+  if(!source){clearRender();return}
   const root=document.documentElement;
-  root.dataset.wallpaper='active';root.dataset.wallpaperScope=info.scope;
-  root.style.setProperty('--wallpaper-image','url('+JSON.stringify(imageUrl(info.image_version))+')');
-  root.style.setProperty('--wallpaper-opacity',String(info.opacity));
+  root.dataset.wallpaper='active';root.dataset.wallpaperScope=scope;
+  root.style.setProperty('--wallpaper-image','url('+JSON.stringify(source)+')');
+  root.style.setProperty('--wallpaper-opacity',String(opacity));
+}
+function render(info){renderSource(info.has_wallpaper?imageUrl(info.image_version):'',info.opacity,info.scope)}
+function renderDraft(){
+  const source=draftUrl||(saved.has_wallpaper?imageUrl(saved.image_version):'');
+  renderSource(source,draftOpacity,draftScope);
 }
 function probe(info){
   if(!info.has_wallpaper)return Promise.resolve();
@@ -119,16 +124,16 @@ function installDraftFile(file){
   const extension=(file.name||'').toLowerCase().split('.').pop();
   if(!ALLOWED_MIME.has(file.type)&&!['jpg','jpeg','png','webp'].includes(extension)){setStatusKey('settings_wallpaper_invalid_type',true);return false}
   if(!file.size||file.size>MAX_BYTES){setStatusKey('settings_wallpaper_invalid_size',true);return false}
-  _releaseWallpaperDraftUrl();draftFile=file;draftUrl=URL.createObjectURL(file);draftRevision++;setStatusKey(null);syncControls();return true;
+  _releaseWallpaperDraftUrl();draftFile=file;draftUrl=URL.createObjectURL(file);draftRevision++;setStatusKey(null);renderDraft();syncControls();return true;
 }
-function discardDraft(){_releaseWallpaperDraftUrl();draftFile=null;draftOpacity=saved.opacity;draftScope=saved.scope;draftRevision++;syncControls()}
+function discardDraft(){_releaseWallpaperDraftUrl();draftFile=null;draftOpacity=saved.opacity;draftScope=saved.scope;draftRevision++;render(saved);syncControls()}
 function beginWallpaperSettingsSession(){
   if(appearanceActive)return;
   appearanceActive=true;paneGeneration++;draftRevision=0;draftFile=null;draftOpacity=saved.opacity;draftScope=saved.scope;bindControls();syncControls();
   const generation=paneGeneration,revision=draftRevision;
-  reconcileWallpaperInfo().then(()=>{if(appearanceActive&&generation===paneGeneration&&revision===draftRevision){draftOpacity=saved.opacity;draftScope=saved.scope;syncControls()}}).catch(()=>{});
+  reconcileWallpaperInfo().then(()=>{if(!appearanceActive||generation!==paneGeneration)return;if(revision===draftRevision){draftOpacity=saved.opacity;draftScope=saved.scope;syncControls()}else renderDraft()}).catch(()=>{if(appearanceActive&&generation===paneGeneration&&revision!==draftRevision)renderDraft()});
 }
-function endWallpaperSettingsSession(){if(!appearanceActive)return;appearanceActive=false;paneGeneration++;_releaseWallpaperDraftUrl();draftFile=null;draftRevision=0}
+function endWallpaperSettingsSession(){if(!appearanceActive)return;appearanceActive=false;paneGeneration++;render(saved);_releaseWallpaperDraftUrl();draftFile=null;draftRevision=0}
 async function _requestForTest(kind,file,opacity,scope){
   if(kind==='post')return global.api('/api/wallpaper?opacity='+encodeURIComponent(opacity)+'&scope='+encodeURIComponent(scope),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file,retries:0});
   if(kind==='patch')return global.api('/api/wallpaper',{method:'PATCH',body:JSON.stringify({opacity,scope}),retries:0});
@@ -165,8 +170,8 @@ function bindControls(){
   const input=el('wallpaperFileInput'),drop=el('wallpaperDropZone'),opacity=el('wallpaperOpacity');
   if(input)input.addEventListener('change',()=>{if(input.files&&input.files[0])installDraftFile(input.files[0]);input.value=''});
   if(drop){drop.addEventListener('click',()=>input&&input.click());drop.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();if(input)input.click()}});drop.addEventListener('dragover',event=>event.preventDefault());drop.addEventListener('drop',event=>{event.preventDefault();if(event.dataTransfer&&event.dataTransfer.files[0])installDraftFile(event.dataTransfer.files[0])})}
-  if(opacity)opacity.addEventListener('input',()=>{draftOpacity=Number(opacity.value)/100;draftRevision++;syncControls()});
-  document.querySelectorAll('input[name="wallpaperScope"]').forEach(radio=>radio.addEventListener('change',()=>{draftScope=currentScope();draftRevision++;syncControls()}));
+  if(opacity)opacity.addEventListener('input',()=>{draftOpacity=Number(opacity.value)/100;draftRevision++;renderDraft();syncControls()});
+  document.querySelectorAll('input[name="wallpaperScope"]').forEach(radio=>radio.addEventListener('change',()=>{draftScope=currentScope();draftRevision++;renderDraft();syncControls()}));
   const save=el('wallpaperSaveBtn'),clear=el('wallpaperClearBtn');if(save)save.addEventListener('click',saveDraft);if(clear)clear.addEventListener('click',clearDraft);
 }
 function speculativeBoot(){

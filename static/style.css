@@ -7282,32 +7282,25 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 :root[data-wallpaper="active"][data-wallpaper-scope="chat"] .composer-wrap::before{background:linear-gradient(to bottom,transparent,color-mix(in srgb,var(--bg) 82%,transparent));}
 :root[data-wallpaper="active"][data-wallpaper-scope="chat"] .composer-box{background:color-mix(in srgb,var(--input-bg) 90%,transparent);}
 
-:root[data-wallpaper="active"][data-wallpaper-scope="app"]{--wallpaper-chrome:color-mix(in srgb,var(--sidebar) 82%,transparent);--wallpaper-main:color-mix(in srgb,var(--bg) 82%,transparent);--wallpaper-composer:color-mix(in srgb,var(--input-bg) 90%,transparent);}
+:root[data-wallpaper="active"][data-wallpaper-scope="app"]{--wallpaper-composer:color-mix(in srgb,var(--input-bg) 90%,transparent);}
 :root[data-wallpaper="active"][data-wallpaper-scope="app"] .app-titlebar,
 :root[data-wallpaper="active"][data-wallpaper-scope="app"] .rail,
 :root[data-wallpaper="active"][data-wallpaper-scope="app"] .sidebar,
-:root[data-wallpaper="active"][data-wallpaper-scope="app"] .rightpanel{background:var(--wallpaper-chrome);}
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .rightpanel,
 :root[data-wallpaper="active"][data-wallpaper-scope="app"] .sidebar .panel-view,
 :root[data-wallpaper="active"][data-wallpaper-scope="app"] .rightpanel .panel-header,
-:root[data-wallpaper="active"][data-wallpaper-scope="app"] .workspace-panel-tabs{background:transparent;}
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .workspace-panel-tabs,
 :root[data-wallpaper="active"][data-wallpaper-scope="app"] .main,
 :root[data-wallpaper="active"][data-wallpaper-scope="app"] .topbar,
-:root[data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap{background:var(--wallpaper-main);}
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap,
 :root[data-wallpaper="active"][data-wallpaper-scope="app"] .main-view,
 :root[data-wallpaper="active"][data-wallpaper-scope="app"] #mainChat,
 :root[data-wallpaper="active"][data-wallpaper-scope="app"] .messages-shell,
 :root[data-wallpaper="active"][data-wallpaper-scope="app"] .messages,
 :root[data-wallpaper="active"][data-wallpaper-scope="app"] .empty-state{background:transparent;}
-:root[data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap::before{background:linear-gradient(to bottom,transparent,var(--wallpaper-main));}
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap::before{background:linear-gradient(to bottom,transparent,transparent);}
 :root[data-wallpaper="active"][data-wallpaper-scope="app"] .composer-box{background:var(--wallpaper-composer);}
 
-:root[data-skin="graphite"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap,
-:root[data-skin="github"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap,
-:root[data-skin="codex"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap,
-:root[data-skin="terracotta"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap,
-:root[data-skin="geist-contrast"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap{background:var(--wallpaper-main)!important;}
-:root[data-skin="graphite"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-box,
-:root[data-skin="github"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-box,
-:root[data-skin="codex"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-box,
-:root[data-skin="terracotta"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-box,
-:root[data-skin="geist-contrast"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-box{background:var(--wallpaper-composer)!important;}
+:root:is([data-skin="graphite"],[data-skin="github"],[data-skin="codex"],[data-skin="terracotta"],[data-skin="geist-contrast"])[data-wallpaper="active"][data-wallpaper-scope="app"] :is(.app-titlebar,.rail,.sidebar,.rightpanel,.main,.topbar,.composer-wrap){background:transparent!important;}
+:root:is([data-skin="graphite"],[data-skin="github"],[data-skin="codex"],[data-skin="terracotta"],[data-skin="geist-contrast"])[data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap::before{background:linear-gradient(to bottom,transparent,transparent)!important;}
+:root:is([data-skin="graphite"],[data-skin="github"],[data-skin="codex"],[data-skin="terracotta"],[data-skin="geist-contrast"])[data-wallpaper="active"][data-wallpaper-scope="app"] .composer-box{background:var(--wallpaper-composer)!important;}
