@@ -1869,7 +1869,7 @@ def test_chat_cancel_waits_for_worker_published_run_id_before_settlement(
     monkeypatch.setattr("api.gateway_chat.stop_gateway_run", lambda run_id: called.__setitem__("stop", run_id) or stop_result)
     monkeypatch.setattr(routes, "j", fake_j)
     parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
-    request_thread = threading.Thread(target=routes.handle_get, args=(object(), parsed), daemon=True)
+    request_thread = threading.Thread(target=routes._handle_chat_cancel, args=(object(), stream_id), daemon=True)
     worker_thread = threading.Thread(
         target=gateway_chat._run_gateway_chat_streaming,
         kwargs={
@@ -2150,7 +2150,7 @@ def test_chat_cancel_surfaces_redirected_gateway_stop(monkeypatch):
     monkeypatch.setattr(routes, "j", fake_j)
     parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
     try:
-        routes.handle_get(object(), parsed)
+        routes._handle_chat_cancel(object(), stream_id)
         assert captured["status"] == 502
         assert captured["payload"] == {
             "ok": False,
@@ -2194,7 +2194,7 @@ def test_chat_cancel_retires_same_run_gateway_mirrors_after_stop(monkeypatch):
     monkeypatch.setattr(routes, "j", fake_j)
     parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
     try:
-        routes.handle_get(object(), parsed)
+        routes._handle_chat_cancel(object(), stream_id)
         assert captured["status"] == 200
         assert captured["payload"] == {"ok": True, "cancelled": True, "stream_id": stream_id}
         assert sid not in approvals._pending
@@ -2232,7 +2232,7 @@ def test_chat_cancel_surfaces_gateway_stop_failure(monkeypatch):
     monkeypatch.setattr(routes, "j", fake_j)
     parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
     try:
-        routes.handle_get(object(), parsed)
+        routes._handle_chat_cancel(object(), stream_id)
         assert captured["status"] == 502
         assert captured["payload"] == {
             "ok": False,
@@ -2268,7 +2268,7 @@ def test_chat_cancel_without_gateway_readiness_uses_local_cancel(monkeypatch):
     monkeypatch.setattr(routes, "j", fake_j)
     parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
 
-    routes.handle_get(object(), parsed)
+    routes._handle_chat_cancel(object(), stream_id)
 
     assert captured["status"] == 200
     assert captured["payload"] == {
@@ -2305,7 +2305,7 @@ def test_chat_cancel_times_out_while_gateway_run_id_is_pending(monkeypatch):
     parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
     try:
         mark_starting(stream_id)
-        routes.handle_get(object(), parsed)
+        routes._handle_chat_cancel(object(), stream_id)
         assert captured["status"] == 502
         assert captured["payload"] == {
             "ok": False,
@@ -2343,7 +2343,7 @@ def test_chat_cancel_uses_local_cancel_after_gateway_runs_api_falls_back(monkeyp
 
     monkeypatch.setattr(routes, "j", fake_j)
     parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
-    request_thread = threading.Thread(target=routes.handle_get, args=(object(), parsed))
+    request_thread = threading.Thread(target=routes._handle_chat_cancel, args=(object(), stream_id))
     try:
         mark_starting(stream_id)
         request_thread.start()
@@ -2392,7 +2392,7 @@ def test_chat_cancel_ignores_legacy_run_id_after_gateway_runs_api_falls_back(mon
 
     monkeypatch.setattr(routes, "j", fake_j)
     parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
-    request_thread = threading.Thread(target=routes.handle_get, args=(object(), parsed))
+    request_thread = threading.Thread(target=routes._handle_chat_cancel, args=(object(), stream_id))
     try:
         mark_starting(stream_id)
         request_thread.start()

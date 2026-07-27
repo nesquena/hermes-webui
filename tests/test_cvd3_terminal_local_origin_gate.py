@@ -73,13 +73,13 @@ def test_terminal_gate_allows_loopback_client_when_auth_disabled(monkeypatch):
     assert routes._embedded_terminal_gate_allows(handler) is True
 
 
-def test_terminal_gate_allows_private_client_when_auth_disabled(monkeypatch):
-    """Docker bridge / LAN (no forwarded header present) is treated as local."""
+def test_terminal_gate_blocks_private_client_when_auth_disabled(monkeypatch):
+    """LAN / Docker bridge is NOT enough for passwordless PTY (RCE surface)."""
     from api import routes
 
     _no_auth(monkeypatch)
     handler = _Handler(client_ip="172.17.0.1", headers={})
-    assert routes._embedded_terminal_gate_allows(handler) is True
+    assert routes._embedded_terminal_gate_allows(handler) is False
 
 
 def test_terminal_gate_ignores_spoofed_forwarded_header_from_public_socket(monkeypatch):

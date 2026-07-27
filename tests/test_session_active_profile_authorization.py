@@ -382,10 +382,7 @@ def test_chat_cancel_blocks_foreign_owned_stream_before_cancel_call(monkeypatch)
 
     cap = _capture(monkeypatch)
     try:
-        routes.handle_get(
-            handler,
-            urlparse("/api/chat/cancel?stream_id=stream-foreign"),
-        )
+        routes._handle_chat_cancel(handler, "stream-foreign")
     finally:
         with config.ACTIVE_RUNS_LOCK:
             config.ACTIVE_RUNS.clear()
@@ -418,7 +415,7 @@ def test_chat_cancel_same_profile_stream_still_passes_through(monkeypatch):
         }
 
     try:
-        routes.handle_get(handler, urlparse("/api/chat/cancel?stream_id=stream-visible"))
+        routes._handle_chat_cancel(handler, "stream-visible")
     finally:
         with routes.ACTIVE_RUNS_LOCK:
             routes.ACTIVE_RUNS.clear()

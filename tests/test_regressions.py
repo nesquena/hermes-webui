@@ -179,7 +179,7 @@ def test_aiagent_imported_in_streaming(cleanup_test_sessions):
 
 def test_cancel_nonexistent_stream_returns_not_cancelled(cleanup_test_sessions):
     """R5a: Cancel endpoint works and returns cancelled:false for unknown stream."""
-    data, status = get("/api/chat/cancel?stream_id=nonexistent_test_xyz")
+    data, status = post("/api/chat/cancel", {"stream_id": "nonexistent_test_xyz"})
     assert status == 200
     assert data["ok"] is True
     assert data["cancelled"] is False

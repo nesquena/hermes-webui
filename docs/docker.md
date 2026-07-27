@@ -293,6 +293,8 @@ services:
     environment:
       - HERMES_WEBUI_HOST=0.0.0.0
       - HERMES_WEBUI_PORT=8787
+      # Required for non-loopback binds (container publishes via 0.0.0.0)
+      - HERMES_WEBUI_PASSWORD=change-me
       - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}

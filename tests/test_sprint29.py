@@ -698,13 +698,15 @@ class TestPasswordHashing:
 
 class TestStartupWarning:
     def test_warning_code_present_in_server(self):
-        """server.py must contain non-loopback warning code."""
+        """server.py must fail closed on non-loopback bind without auth."""
         src = pathlib.Path(__file__).parent.parent / "server.py"
         text = src.read_text()
-        assert "0.0.0.0" in text or "non-loopback" in text.lower() or "WARNING" in text, \
-            "server.py must contain non-loopback warning logic"
+        assert "require_secure_bind" in text, \
+            "server.py must refuse insecure non-loopback binds"
+        assert "allow_insecure_bind" in text or "HERMES_WEBUI_ALLOW_INSECURE_BIND" in text, \
+            "server.py must document the insecure-bind escape hatch"
         assert "is_auth_enabled" in text, \
-            "server.py must check is_auth_enabled() before warning"
+            "server.py must check is_auth_enabled() before binding"
 
 
 # ── 11. SSRF DNS Check ─────────────────────────────────────────────────────

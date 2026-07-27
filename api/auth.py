@@ -545,6 +545,58 @@ def is_auth_enabled() -> bool:
     )
 
 
+_LOOPBACK_BIND_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _env_truthy(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def is_loopback_bind_host(host: str) -> bool:
+    """True when ``host`` is a loopback-only bind address (not 0.0.0.0 / ::)."""
+    h = (host or "").strip().lower()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    return h in _LOOPBACK_BIND_HOSTS
+
+
+def allow_insecure_bind() -> bool:
+    """Operator escape hatch for non-loopback bind without WebUI auth."""
+    return _env_truthy("HERMES_WEBUI_ALLOW_INSECURE_BIND")
+
+
+def require_secure_bind(
+    host: str,
+    *,
+    auth_enabled: bool | None = None,
+    allow_insecure: bool | None = None,
+) -> None:
+    """Refuse non-loopback binds when auth is off unless explicitly opted in.
+
+    Raises ``SystemExit`` with a clear message. Callers that want a soft warn
+    for the escape-hatch path should check ``allow_insecure_bind()`` themselves
+    after this returns (this function allows the hatch through silently).
+    """
+    if is_loopback_bind_host(host):
+        return
+    if auth_enabled is None:
+        auth_enabled = is_auth_enabled()
+    if auth_enabled:
+        return
+    if allow_insecure is None:
+        allow_insecure = allow_insecure_bind()
+    if allow_insecure:
+        return
+    raise SystemExit(
+        f"Refusing to bind to {host} with authentication disabled.\n"
+        "  Non-loopback binds expose the agent, filesystem APIs, and embedded\n"
+        "  terminal to anyone who can reach this host.\n"
+        "  Fix: set HERMES_WEBUI_PASSWORD (or configure OIDC/passkeys), or bind\n"
+        "  to 127.0.0.1 and use an SSH tunnel / reverse proxy.\n"
+        "  Escape hatch (insecure): HERMES_WEBUI_ALLOW_INSECURE_BIND=1"
+    )
+
+
 def verify_password(plain: str) -> bool:
     """Verify a plaintext password against the stored hash.
 
