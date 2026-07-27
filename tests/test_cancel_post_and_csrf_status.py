@@ -98,3 +98,58 @@ def test_auth_status_empty_csrf_when_logged_out(monkeypatch):
     assert payload.get("csrf_token") == ""
     assert payload.get("authenticated") is False
     assert payload.get("method") == "password"
+
+
+def test_post_cancel_requires_csrf_when_auth_enabled(monkeypatch):
+    """Browser POST /api/chat/cancel without CSRF must 403 and never cancel."""
+    import hmac
+    import time
+
+    import api.auth as auth
+    from api import routes
+
+    raw = "e" * 64
+    sig = hmac.new(auth._signing_key(), raw.encode(), "sha256").hexdigest()
+    cookie = f"{raw}.{sig}"
+    auth._sessions[raw] = time.time() + 60
+    token = auth.csrf_token_for_session(cookie)
+
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    cancelled = {"n": 0}
+    monkeypatch.setattr(
+        routes, "cancel_stream", lambda _sid: cancelled.__setitem__("n", cancelled["n"] + 1) or True
+    )
+    monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_a, **_k: True)
+
+    responses = []
+
+    def _j(_h, obj, status=200, **_k):
+        responses.append((status, obj))
+        return True
+
+    monkeypatch.setattr(routes, "j", _j)
+
+    try:
+        body = b'{"stream_id":"stream-x"}'
+        base = {
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body)),
+            "Origin": "http://127.0.0.1:8787",
+            "Host": "127.0.0.1:8787",
+            "Cookie": f"{auth.COOKIE_NAME}={cookie}",
+        }
+
+        missing = _Handler(headers=base, body=body)
+        routes.handle_post(missing, urlparse("/api/chat/cancel"))
+        assert responses[-1][0] == 403
+        assert cancelled["n"] == 0
+
+        ok_body = b'{"stream_id":"stream-x"}'
+        ok_headers = {**base, auth.CSRF_HEADER_NAME: token, "Content-Length": str(len(ok_body))}
+        ok = _Handler(headers=ok_headers, body=ok_body)
+        routes.handle_post(ok, urlparse("/api/chat/cancel"))
+        assert cancelled["n"] == 1
+        assert responses[-1][0] == 200
+        assert responses[-1][1].get("cancelled") is True
+    finally:
+        auth._sessions.pop(raw, None)
