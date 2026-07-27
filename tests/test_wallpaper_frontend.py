@@ -1,5 +1,6 @@
 """Executable and static contracts for the custom wallpaper frontend."""
 
+from collections import Counter
 import json
 from pathlib import Path
 import re
@@ -103,9 +104,17 @@ def test_wallpaper_i18n_keys_exist_in_every_locale() -> None:
         "en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt",
         "ko", "fr", "cs", "tr", "pl", "vi",
     }
+    expected_keys = list(WALLPAPER_I18N_KEYS)
     for locale, block in blocks.items():
-        for key in WALLPAPER_I18N_KEYS:
-            assert f"{key}:" in block, f"{locale} is missing {key}"
+        actual_keys = re.findall(
+            r"^    (settings_wallpaper_[A-Za-z0-9_]+):", block, re.MULTILINE
+        )
+        assert Counter(actual_keys) == Counter(expected_keys), (
+            f"{locale} wallpaper key ownership differs: {actual_keys}"
+        )
+        assert actual_keys == expected_keys, (
+            f"{locale} wallpaper key order differs: {actual_keys}"
+        )
     assert "_locale[key] ?? LOCALES.en[key]" in i18n
 
 
@@ -122,6 +131,23 @@ def test_wallpaper_simplified_chinese_uses_approved_wording() -> None:
         "settings_wallpaper_network_failed: '无法连接到壁纸存储。请检查网络连接。'",
     ):
         assert expected in zh
+
+
+def test_wallpaper_browser_waits_for_language_autosave_response() -> None:
+    browser_test = (ROOT / "tests" / "test_wallpaper_browser.py").read_text(
+        encoding="utf-8"
+    )
+    test_start = browser_test.index(
+        "def test_wallpaper_settings_retranslate_owned_status_and_preserve_filename("
+    )
+    test_source = browser_test[test_start:]
+
+    assert "with page.expect_response(" in test_source
+    assert 'response.request.method == "POST"' in test_source
+    assert 'response.url == f"{base_url}/api/settings"' in test_source
+    assert "response.ok" in test_source
+    assert "settings_response.finished()" in test_source
+    assert "assert settings_response.status == 200" in test_source
 
 
 def test_wallpaper_locale_switch_updates_alt_and_owned_dynamic_text() -> None:

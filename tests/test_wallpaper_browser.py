@@ -208,9 +208,41 @@ def test_wallpaper_settings_retranslate_owned_status_and_preserve_filename(
 
                 # Keep Appearance active: select_option dispatches the real
                 # Preferences language input/change path and locale event.
-                page.locator("#settingsLanguage").select_option("zh", force=True)
+                with page.expect_response(
+                    lambda response: (
+                        response.request.method == "POST"
+                        and response.url == f"{base_url}/api/settings"
+                        and response.ok
+                    )
+                ) as response_info:
+                    page.locator("#settingsLanguage").select_option("zh", force=True)
+                settings_response = response_info.value
+                settings_response.finished()
+                assert settings_response.status == 200
 
-                assert page.locator("#wallpaperSettingsField > label").inner_text() == "壁纸"
+                wallpaper = page.locator("#wallpaperSettingsField")
+                assert wallpaper.locator(":scope > label").inner_text() == "壁纸"
+                assert page.locator("#wallpaperDescription").inner_text() == (
+                    "选择一张不超过 10 MB 的 JPEG、PNG 或 WebP 图片。更改仅在保存后生效。"
+                )
+                assert wallpaper.locator(
+                    '[data-i18n="settings_wallpaper_choose"]'
+                ).inner_text() == "选择图片或拖放到此处"
+                assert wallpaper.locator(
+                    '[data-i18n="settings_wallpaper_drop"]'
+                ).inner_text() == "JPEG、PNG 或 WebP · 最大 10 MB"
+                assert wallpaper.locator(
+                    'label[for="wallpaperOpacity"]'
+                ).inner_text() == "图片不透明度"
+                assert wallpaper.locator("#wallpaperScope legend").inner_text() == (
+                    "壁纸显示范围"
+                )
+                assert wallpaper.locator(
+                    '[data-i18n="settings_wallpaper_scope_chat"]'
+                ).inner_text() == "仅聊天"
+                assert wallpaper.locator(
+                    '[data-i18n="settings_wallpaper_scope_app"]'
+                ).inner_text() == "整个应用"
                 assert page.locator("#wallpaperSaveBtn").inner_text() == "保存壁纸"
                 assert page.locator("#wallpaperClearBtn").inner_text() == "清除"
                 assert page.locator("#wallpaperPreview").get_attribute("alt") == "壁纸预览"
