@@ -3135,8 +3135,10 @@ async function _ensureMessagesLoaded(sid, opts) {
     if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
   }
   if (!_ownsLoad()) return;
-  // Guard: api() may have redirected (401) and returned undefined.
-  if (!data || !data.session) return;
+  // api() may redirect on 401 and return undefined. That is not a loaded
+  // transcript: reject it so loadSession's existing failure path clears the
+  // loading marker without acknowledging unread state.
+  if (!data || !data.session) throw new Error('Conversation messages response was unavailable');
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;

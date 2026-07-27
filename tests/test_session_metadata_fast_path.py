@@ -35,6 +35,19 @@ def test_full_message_load_updates_viewed_count_after_metadata_fast_path():
     assert "_setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));" in src
 
 
+def test_message_loader_rejects_non_session_response():
+    src = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    start = src.index("async function _ensureMessagesLoaded")
+    end = src.index("function _messageComparableText", start)
+    block = src[start:end]
+
+    assert "if (!data || !data.session) throw" in block, (
+        "undefined or malformed message responses are failed loads, not successful "
+        "transcripts that may be acknowledged as read"
+    )
+    assert "if (!data || !data.session) return;" not in block
+
+
 def test_lazy_message_load_skips_model_resolution():
     src = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
