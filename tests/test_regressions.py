@@ -195,10 +195,20 @@ def test_server_py_sse_loop_breaks_on_cancel(cleanup_test_sessions):
     src = (REPO_ROOT / "server.py").read_text()
     routes_src = (REPO_ROOT / "api" / "routes.py").read_text() if (REPO_ROOT / "api" / "routes.py").exists() else ""
     combined = src + routes_src
-    m = re.search(r"if event in \([^)]+\):\s*break", combined)
-    assert m, "SSE break condition not found in server.py or api/routes.py"
-    assert "cancel" in m.group(), \
-        f"'cancel' missing from SSE break condition: {m.group()}"
+    # #6527: the break condition may be an inline tuple ("stream_end", ...) OR
+    # the named SSE_RELAY_CLOSE_EVENTS frozenset. Accept either shape and pin
+    # the BEHAVIOR (cancel closes the relay) against the resolved close set,
+    # not the source syntax.
+    m = re.search(
+        r"if event in (?:SSE_RELAY_CLOSE_EVENTS|\([^)]*cancel[^)]*\)):\s*break",
+        combined,
+    )
+    assert m, "SSE break/close condition not found in server.py or api/routes.py"
+    from api.run_journal import SSE_RELAY_CLOSE_EVENTS
+    assert "cancel" in SSE_RELAY_CLOSE_EVENTS, \
+        f"'cancel' missing from SSE relay close set: {SSE_RELAY_CLOSE_EVENTS}"
+    assert "apperror" in SSE_RELAY_CLOSE_EVENTS, \
+        f"'apperror' missing from SSE relay close set: {SSE_RELAY_CLOSE_EVENTS}"
 
 
 # ── R6: Test cron isolation (Sprint 10) ──────────────────────────────────────
