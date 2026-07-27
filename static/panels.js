@@ -6676,6 +6676,7 @@ const PROFILE_DROPDOWN_CACHE_KEY = 'hermes-webui-profile-dropdown-cache-v1';
 const PROFILE_DROPDOWN_CACHE_TTL_MS = 5 * 60 * 1000;
 let _profileSwitchGeneration = 0;
 let _profileSwitchTransaction = null;
+let _profileLastCommittedSwitchResult = null;
 let _profileDropdownTrigger = null;  // tracks which element triggered the dropdown
 let _profileDropdownOpenGeneration = 0;
 
@@ -7202,13 +7203,35 @@ async function switchToProfile(name) {
     target: name,
     outcome: null,
     terminalResult: null,
+    retainedResult: null,
+    refreshError: null,
+    ownerCommitted: false,
+    committedProfile: null,
     settled: new Promise(resolve => { _resolveSwitchTransaction = resolve; }),
   };
   _profileSwitchTransaction = _switchTransaction;
-  const _settleSwitchTransaction = (outcome, terminalResult = null) => {
+  const _setCommittedSwitchOwner = (profile, refreshError = null) => {
+    const committedProfile = String(profile || _switchTransaction.target || '').trim() || _switchTransaction.target;
+    _switchTransaction.ownerCommitted = true;
+    _switchTransaction.committedProfile = committedProfile;
+    if (refreshError) _switchTransaction.refreshError = refreshError;
+    _switchTransaction.retainedResult = {
+      generation: _switchGen,
+      from: _previousProfile,
+      target: committedProfile,
+      outcome: 'committed',
+      terminalResult: null,
+      retainedResult: null,
+      refreshError: refreshError || null,
+    };
+    _profileLastCommittedSwitchResult = _switchTransaction.retainedResult;
+    return _switchTransaction.retainedResult;
+  };
+  const _settleSwitchTransaction = (outcome, terminalResult = null, extras = null) => {
     if (_switchTransaction.outcome) return _returnSwitchResult(_switchTransaction);
     _switchTransaction.outcome = outcome;
     _switchTransaction.terminalResult = terminalResult;
+    if (extras && typeof extras === 'object') Object.assign(_switchTransaction, extras);
     _resolveSwitchTransaction(_switchTransaction);
     return _returnSwitchResult(_switchTransaction);
   };
@@ -7286,6 +7309,7 @@ async function switchToProfile(name) {
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
     S.activeProfile = data.active || name;
+    _setCommittedSwitchOwner(S.activeProfile || name);
     if (typeof _resetTasksForProfileTransition === 'function') _resetTasksForProfileTransition();
     S.activeProfileIsDefault = !!data.is_default;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
@@ -7405,18 +7429,18 @@ async function switchToProfile(name) {
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult(); // if (_switchGen !== _profileSwitchGeneration) return false;
+      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       showToast(t('profile_switched', name));
     } else if (sessionInProgress) {
       // Keep the active conversation on a fresh session under the new profile.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
-      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult(); // if (_switchGen !== _profileSwitchGeneration) return false;
+      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
       syncTopbar();
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult(); // if (_switchGen !== _profileSwitchGeneration) return false;
+      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       // Safety net: if the new session has no workspace, newSession() won't have
       // painted the file tree — clear the up-front skeleton so it can't strand
@@ -7439,7 +7463,7 @@ async function switchToProfile(name) {
       // #4671: lift the embargo immediately before the switch-owned render (see above).
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult(); // if (_switchGen !== _profileSwitchGeneration) return false;
+      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       syncTopbar();
       // Refresh workspace file tree so the right panel shows the new
@@ -7456,11 +7480,36 @@ async function switchToProfile(name) {
     }
 
     await _profileSwitchPanelLoad();
-    if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult(); // if (_switchGen !== _profileSwitchGeneration) return false;
+    if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
     _refreshProfileSwitchBackground(_switchGen);
     return _settleSwitchTransaction('committed');
 
   } catch (e) {
+    const _refreshError = { message: e && e.message ? e.message : String(e || 'profile switch refresh failed') };
+    if (_switchGen === _profileSwitchGeneration && _switchTransaction.ownerCommitted) {
+      _setCommittedSwitchOwner(S.activeProfile || _switchTransaction.target, _refreshError);
+      try {
+        if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
+        if (typeof renderSessionList === 'function') await renderSessionList();
+      } catch (_) {}
+      try {
+        if (S.session && S.session.workspace && typeof loadDir === 'function') {
+          const dirLoad = loadDir('.');
+          if (_workspaceVisibleAtStart) await dirLoad;
+        } else if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') {
+          clearWorkspaceTreeSkeleton();
+        }
+      } catch (_) {
+        if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
+      }
+      try {
+        if (_currentPanel === 'tasks' && typeof _ensureTasksSubtabLoaded === 'function') {
+          await _ensureTasksSubtabLoaded(_tasksSubtab);
+        }
+      } catch (_) {}
+      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
+      return _settleSwitchTransaction('committed', null, { refreshError: _refreshError });
+    }
     // Revert the optimistic name update on error
     if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
     if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;
@@ -7488,6 +7537,11 @@ async function switchToProfile(name) {
       if (_currentPanel === 'tasks') await _ensureTasksSubtabLoaded(_tasksSubtab);
     }
     if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
+    if (_profileLastCommittedSwitchResult
+      && _profileLastCommittedSwitchResult.target
+      && _profileLastCommittedSwitchResult.target === ((S && S.activeProfile) || _previousProfile || 'default')) {
+      return _settleSwitchTransaction('failed', null, { retainedResult: _profileLastCommittedSwitchResult });
+    }
     return _settleSwitchTransaction('failed');
   } finally {
     // Always remove loading indicator regardless of success or failure

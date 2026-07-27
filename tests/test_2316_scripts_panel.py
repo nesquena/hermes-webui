@@ -1214,6 +1214,7 @@ def test_failed_profile_switch_reloads_visible_scripts_owner():
     js = PANELS_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
 let _profileSwitchGeneration = 0;
+let _profileLastCommittedSwitchResult = null;
 let _scriptsData = [{ name: 'old.py' }];
 let _scriptsRequestId = 0;
 let _scriptsRawRequestId = 0;
@@ -1326,6 +1327,7 @@ def test_switch_to_profile_clears_scripts_cache_before_panel_reload():
     js = PANELS_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
 let _profileSwitchGeneration = 0;
+let _profileLastCommittedSwitchResult = null;
 let _scriptsData = ['stale'];
 let _skillsData = ['old'];
 let _workspaceList = ['old'];
@@ -1425,6 +1427,7 @@ const settle = async (cycles = 4) => {
 };
 let _profileSwitchGeneration = 0;
 let _profileSwitchTransaction = null;
+let _profileLastCommittedSwitchResult = null;
 let _profilesCache = null;
 let _profileDropdownFetchPromise = null;
 let _profileDropdownCacheLoadedFromStorage = false;
@@ -1540,6 +1543,694 @@ eval(extractFunc('switchToProfile'));
         "switchGeneration": 2,
         "panelLoads": ["b", "c"],
     }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_loadsession_retries_after_post_commit_profile_switch_refresh_failure():
+    panels_js = PANELS_JS_PATH.read_text(encoding="utf-8")
+    sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(panels_js + "\n" + sessions_js) + """
+const apiCalls = [];
+const panelLoads = [];
+const toasts = [];
+let renderMessagesCalls = 0;
+let _profileSwitchGeneration = 0;
+let _profileSwitchTransaction = null;
+let _profileLastCommittedSwitchResult = null;
+let _profileSwitchOpeningExistingSession = false;
+let _profilesCache = null;
+let _profileDropdownFetchPromise = null;
+let _profileDropdownCacheLoadedFromStorage = false;
+let _skillsData = ['old'];
+let _workspaceList = ['old'];
+let _showAllProfiles = true;
+let _scriptsRequestId = 0;
+let _scriptsRawRequestId = 0;
+let _cronsRequestId = 0;
+let _cronList = ['stale-job'];
+let _showAllCronProfiles = true;
+let _cronOtherProfileCount = 3;
+let _cronPreFormDetail = { id: 'stale-job' };
+let _editingCronId = 'stale-job';
+let _cronIsDuplicate = true;
+let _currentPanel = 'chat';
+let _tasksSubtab = 'scripts';
+let _workspacePanelMode = 'closed';
+let _sessionListSkeletonActive = false;
+let _loadingSessionId = null;
+let _loadSessionGeneration = 0;
+let _loadingOlder = false;
+let _pendingCarryForwardSnapshot = null;
+let _messagesTruncated = false;
+let _oldestIdx = 0;
+let _yoloEnabled = false;
+const INFLIGHT = {};
+const document = { getElementById() { return null; } };
+const msgInner = { innerHTML: '' };
+const localStorage = {
+  removeItem() {},
+  getItem() { return null; },
+  setItem() {},
+};
+const history = { replaceState() {} };
+const window = {
+  _clearPendingSelections() {},
+  _snapshotPendingSelections() { return null; },
+  _restorePendingSelections() {},
+};
+const S = {
+  activeProfile: 'a',
+  activeProfileIsDefault: false,
+  session: { session_id: 'current', message_count: 0, updated_at: 0, last_message_at: 0, pending_attachments: [] },
+  messages: [{ role: 'assistant', content: 'current transcript' }],
+  toolCalls: [{ id: 'old-tool' }],
+  pendingFiles: [{ name: 'report.txt' }],
+  busy: false,
+  activeStreamId: null,
+};
+const cronList = { children: [{}], replaceChildren(){ this.children = []; } };
+const cronRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
+const scriptsList = { children: [{}], replaceChildren(){ this.children = []; } };
+const scriptsRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
+function $(id){
+  return {
+    msgInner,
+    cronList,
+    cronRefreshBtn,
+    scriptsList,
+    scriptsRefreshBtn,
+  }[id] || null;
+}
+function _resolveSessionIdFromSidebarLineage(sid) { return sid; }
+function _hermesNotifySessionOpen() { return null; }
+function _clearCronDetail() {}
+function _invalidateScriptsRequests() {
+  _scriptsRequestId += 1;
+  _scriptsRawRequestId += 1;
+  _scriptsData = null;
+}
+function _invalidateSessionListRenders() {}
+function _setProfileSwitchListEmbargo() {}
+function showSessionListSkeleton() {}
+function bumpWorkspaceTreeGen() {}
+function clearWorkspaceTreeSkeleton() {}
+function _refreshProfileSwitchBackground() {}
+function animateNextSessionListRefresh() {}
+function startGatewaySSE() {}
+function applyBotName() {}
+function _clearPersistedModelState() {}
+function refreshProfileTransitionReasoningChip() {}
+function syncTopbar() {}
+function loadDir() { return Promise.resolve(); }
+function showToast(message) { toasts.push(message); }
+function t(key, name) { return name ? key + ':' + name : key; }
+async function renderSessionList() {}
+async function _profileSwitchPanelLoad() {
+  panelLoads.push(S.activeProfile);
+  throw new Error('panel refresh failed');
+}
+async function api(url, opts) {
+  apiCalls.push({ url, profile: S.activeProfile });
+  if (url === '/api/profile/switch') {
+    return { active: 'b', is_default: false };
+  }
+  if (url === '/api/session?session_id=foreign&messages=0&resolve_model=0') {
+    if (S.activeProfile === 'a') {
+      const err = new Error('profile mismatch');
+      err.status = 409;
+      err.body = JSON.stringify({
+        code: 'session_profile_mismatch',
+        profile: 'b',
+        session_id: 'foreign',
+      });
+      throw err;
+    }
+    return {
+      session: {
+        session_id: 'foreign',
+        message_count: 1,
+        updated_at: 2,
+        last_message_at: 2,
+        pending_attachments: [],
+        active_stream_id: null,
+        profile: 'b',
+      },
+    };
+  }
+  throw new Error('unexpected api ' + url);
+}
+function _rearmActiveSessionStream() {}
+function _selectLiveRecoveryInflight() { return null; }
+function stopApprovalPolling() {}
+function hideApprovalCard() {}
+function stopSessionStream() {}
+function _updateYoloPill() {}
+function stopClarifyPolling() {}
+function hideClarifyCard() {}
+async function _saveComposerDraftNow() {}
+function _clearQueueCardDisplay() {}
+function _sessionVisitHasUnreadState() { return false; }
+function _acknowledgeSessionVisit() {}
+function _clearSameSessionForceReloadHint() {}
+function _clearStuckSessionOnBoot() {}
+function _appRootPath() { return '/'; }
+function renderMessages() {
+  renderMessagesCalls += 1;
+  msgInner.innerHTML = S.messages.map(m => m.content || '').join('\\n');
+}
+function renderTray() {}
+function startSessionStream() {}
+function _uploadPendingFilesSyncProgressForSession() {}
+function _clearDeferredActiveSessionExternalRefresh() {}
+function _clearEmptyComposerModelOverride() {}
+function _hydrateTodosFromSession() {}
+function _applyPendingSessionModelForSession() {}
+function _resolveSessionModelForDisplaySoon() {}
+function _setActiveSessionUrl() {}
+function setBusy() {}
+function setStatus() {}
+function setComposerStatus() {}
+function updateSendBtn() {}
+function updateQueueBadge() {}
+function _deferWorkspaceRefreshForSession() {}
+function startApprovalPolling() {}
+function startClarifyPolling() {}
+function _fetchYoloState() {}
+function refreshSessionList() { return Promise.resolve(); }
+function _announceNewSessionWorkspace() {}
+function _isMessagingSession() { return false; }
+function _isSessionActivelyViewedForList() { return true; }
+function _hideHandoffHint() {}
+function renderSessionArtifacts() {}
+async function _ensureMessagesLoaded(sid) {
+  if (sid === 'foreign') {
+    S.messages = [{ role: 'assistant', content: 'foreign transcript' }];
+    S.toolCalls = [{ id: 'foreign-tool' }];
+  }
+}
+const populateModelDropdown = null;
+eval(extractFunc('_resetTasksForProfileTransition'));
+eval(extractFunc('switchToProfile'));
+eval(extractFunc('_sessionProfileMismatchFromError'));
+eval(extractFunc('_switchProfileForSessionLoad'));
+eval(extractFunc('loadSession'));
+(async () => {
+  renderMessages();
+  await loadSession('foreign');
+  console.log(JSON.stringify({
+    apiCalls,
+    panelLoads,
+    activeProfile: S.activeProfile,
+    sessionId: S.session && S.session.session_id,
+    messages: S.messages,
+    toolCalls: S.toolCalls,
+    loadingSessionId: _loadingSessionId,
+    renderMessagesCalls,
+    msgInner: msgInner.innerHTML,
+    toasts,
+  }));
+})().catch(err => { console.error(err); process.exit(1); });
+"""
+    result = json.loads(_run_node(source))
+    assert result["apiCalls"] == [
+        {"url": "/api/session?session_id=foreign&messages=0&resolve_model=0", "profile": "a"},
+        {"url": "/api/profile/switch", "profile": "a"},
+        {"url": "/api/session?session_id=foreign&messages=0&resolve_model=0", "profile": "b"},
+    ]
+    assert result["panelLoads"] == ["b"]
+    assert result["activeProfile"] == "b"
+    assert result["sessionId"] == "foreign"
+    assert result["messages"] == [{"role": "assistant", "content": "foreign transcript"}]
+    assert result["toolCalls"] == [{"id": "foreign-tool"}]
+    assert result["loadingSessionId"] is None
+    assert result["msgInner"] == "foreign transcript"
+    assert not any(toast.startswith("switch_failed") for toast in result["toasts"])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_loadsession_retries_when_committed_owner_is_superseded_by_failed_precommit_switch():
+    panels_js = PANELS_JS_PATH.read_text(encoding="utf-8")
+    sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(panels_js + "\n" + sessions_js) + """
+const deferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+};
+const settle = async (cycles = 4) => {
+  for (let i = 0; i < cycles; i += 1) await Promise.resolve();
+};
+const apiCalls = [];
+const panelDeferred = deferred();
+let _profileSwitchGeneration = 0;
+let _profileSwitchTransaction = null;
+let _profileLastCommittedSwitchResult = null;
+let _profileSwitchOpeningExistingSession = false;
+let _profilesCache = null;
+let _profileDropdownFetchPromise = null;
+let _profileDropdownCacheLoadedFromStorage = false;
+let _skillsData = ['old'];
+let _workspaceList = ['old'];
+let _showAllProfiles = true;
+let _scriptsRequestId = 0;
+let _scriptsRawRequestId = 0;
+let _cronsRequestId = 0;
+let _cronList = ['stale-job'];
+let _showAllCronProfiles = true;
+let _cronOtherProfileCount = 3;
+let _cronPreFormDetail = { id: 'stale-job' };
+let _editingCronId = 'stale-job';
+let _cronIsDuplicate = true;
+let _currentPanel = 'chat';
+let _tasksSubtab = 'scripts';
+let _workspacePanelMode = 'closed';
+let _sessionListSkeletonActive = false;
+let _loadingSessionId = null;
+let _loadSessionGeneration = 0;
+let _loadingOlder = false;
+let _pendingCarryForwardSnapshot = null;
+let _messagesTruncated = false;
+let _oldestIdx = 0;
+let _yoloEnabled = false;
+const INFLIGHT = {};
+const document = { getElementById() { return null; } };
+const msgInner = { innerHTML: '' };
+const localStorage = {
+  removeItem() {},
+  getItem() { return null; },
+  setItem() {},
+};
+const history = { replaceState() {} };
+const window = {
+  _clearPendingSelections() {},
+  _snapshotPendingSelections() { return null; },
+  _restorePendingSelections() {},
+};
+const S = {
+  activeProfile: 'a',
+  activeProfileIsDefault: false,
+  session: { session_id: 'current', message_count: 0, updated_at: 0, last_message_at: 0, pending_attachments: [] },
+  messages: [{ role: 'assistant', content: 'current transcript' }],
+  toolCalls: [{ id: 'old-tool' }],
+  pendingFiles: [{ name: 'report.txt' }],
+  busy: false,
+  activeStreamId: null,
+};
+const cronList = { children: [{}], replaceChildren(){ this.children = []; } };
+const cronRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
+const scriptsList = { children: [{}], replaceChildren(){ this.children = []; } };
+const scriptsRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
+function $(id){
+  return {
+    msgInner,
+    cronList,
+    cronRefreshBtn,
+    scriptsList,
+    scriptsRefreshBtn,
+  }[id] || null;
+}
+function _resolveSessionIdFromSidebarLineage(sid) { return sid; }
+function _hermesNotifySessionOpen() { return null; }
+function _clearCronDetail() {}
+function _invalidateScriptsRequests() {
+  _scriptsRequestId += 1;
+  _scriptsRawRequestId += 1;
+  _scriptsData = null;
+}
+function _invalidateSessionListRenders() {}
+function _setProfileSwitchListEmbargo() {}
+function showSessionListSkeleton() {}
+function bumpWorkspaceTreeGen() {}
+function clearWorkspaceTreeSkeleton() {}
+function _refreshProfileSwitchBackground() {}
+function animateNextSessionListRefresh() {}
+function startGatewaySSE() {}
+function applyBotName() {}
+function _clearPersistedModelState() {}
+function refreshProfileTransitionReasoningChip() {}
+function syncTopbar() {}
+function loadDir() { return Promise.resolve(); }
+function showToast() {}
+function t(key, name) { return name ? key + ':' + name : key; }
+async function renderSessionList() {}
+async function _profileSwitchPanelLoad() {
+  await panelDeferred.promise;
+}
+async function api(url, opts) {
+  apiCalls.push({ url, profile: S.activeProfile });
+  if (url === '/api/profile/switch') {
+    const body = JSON.parse(opts.body);
+    if (body.name === 'b') return { active: 'b', is_default: false };
+    throw new Error('switch rejected');
+  }
+  if (url === '/api/session?session_id=foreign&messages=0&resolve_model=0') {
+    if (S.activeProfile === 'a') {
+      const err = new Error('profile mismatch');
+      err.status = 409;
+      err.body = JSON.stringify({
+        code: 'session_profile_mismatch',
+        profile: 'b',
+        session_id: 'foreign',
+      });
+      throw err;
+    }
+    return {
+      session: {
+        session_id: 'foreign',
+        message_count: 1,
+        updated_at: 2,
+        last_message_at: 2,
+        pending_attachments: [],
+        active_stream_id: null,
+        profile: 'b',
+      },
+    };
+  }
+  throw new Error('unexpected api ' + url);
+}
+function _rearmActiveSessionStream() {}
+function _selectLiveRecoveryInflight() { return null; }
+function stopApprovalPolling() {}
+function hideApprovalCard() {}
+function stopSessionStream() {}
+function _updateYoloPill() {}
+function stopClarifyPolling() {}
+function hideClarifyCard() {}
+async function _saveComposerDraftNow() {}
+function _clearQueueCardDisplay() {}
+function _sessionVisitHasUnreadState() { return false; }
+function _acknowledgeSessionVisit() {}
+function _clearSameSessionForceReloadHint() {}
+function _clearStuckSessionOnBoot() {}
+function _appRootPath() { return '/'; }
+function renderMessages() { msgInner.innerHTML = S.messages.map(m => m.content || '').join('\\n'); }
+function renderTray() {}
+function startSessionStream() {}
+function _uploadPendingFilesSyncProgressForSession() {}
+function _clearDeferredActiveSessionExternalRefresh() {}
+function _clearEmptyComposerModelOverride() {}
+function _hydrateTodosFromSession() {}
+function _applyPendingSessionModelForSession() {}
+function _resolveSessionModelForDisplaySoon() {}
+function _setActiveSessionUrl() {}
+function setBusy() {}
+function setStatus() {}
+function setComposerStatus() {}
+function updateSendBtn() {}
+function updateQueueBadge() {}
+function _deferWorkspaceRefreshForSession() {}
+function startApprovalPolling() {}
+function startClarifyPolling() {}
+function _fetchYoloState() {}
+function refreshSessionList() { return Promise.resolve(); }
+function _announceNewSessionWorkspace() {}
+function _isMessagingSession() { return false; }
+function _isSessionActivelyViewedForList() { return true; }
+function _hideHandoffHint() {}
+function renderSessionArtifacts() {}
+async function _ensureMessagesLoaded(sid) {
+  if (sid === 'foreign') {
+    S.messages = [{ role: 'assistant', content: 'foreign transcript' }];
+    S.toolCalls = [{ id: 'foreign-tool' }];
+  }
+}
+const populateModelDropdown = null;
+eval(extractFunc('_resetTasksForProfileTransition'));
+eval(extractFunc('switchToProfile'));
+eval(extractFunc('_sessionProfileMismatchFromError'));
+eval(extractFunc('_switchProfileForSessionLoad'));
+eval(extractFunc('loadSession'));
+(async () => {
+  const oldLoad = loadSession('foreign');
+  await settle();
+  const newerSwitch = switchToProfile('c', { returnTransaction: true });
+  await settle();
+  const newerResult = await newerSwitch;
+  panelDeferred.resolve();
+  await oldLoad;
+  await settle();
+  console.log(JSON.stringify({
+    apiCalls,
+    newerResult: {
+      outcome: newerResult.outcome,
+      retainedTarget: newerResult.retainedResult && newerResult.retainedResult.target,
+      retainedGeneration: newerResult.retainedResult && newerResult.retainedResult.generation,
+    },
+    activeProfile: S.activeProfile,
+    sessionId: S.session && S.session.session_id,
+    messages: S.messages,
+    loadingSessionId: _loadingSessionId,
+    msgInner: msgInner.innerHTML,
+  }));
+})().catch(err => { console.error(err); process.exit(1); });
+"""
+    result = json.loads(_run_node(source))
+    assert result["apiCalls"] == [
+        {"url": "/api/session?session_id=foreign&messages=0&resolve_model=0", "profile": "a"},
+        {"url": "/api/profile/switch", "profile": "a"},
+        {"url": "/api/profile/switch", "profile": "b"},
+        {"url": "/api/session?session_id=foreign&messages=0&resolve_model=0", "profile": "b"},
+    ]
+    assert result["newerResult"] == {
+        "outcome": "failed",
+        "retainedTarget": "b",
+        "retainedGeneration": 1,
+    }
+    assert result["activeProfile"] == "b"
+    assert result["sessionId"] == "foreign"
+    assert result["messages"] == [{"role": "assistant", "content": "foreign transcript"}]
+    assert result["loadingSessionId"] is None
+    assert result["msgInner"] == "foreign transcript"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_precommit_profile_switch_failure_restores_busy_session_lifecycle():
+    panels_js = PANELS_JS_PATH.read_text(encoding="utf-8")
+    sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(panels_js + "\n" + sessions_js) + """
+const apiCalls = [];
+const startApprovalCalls = [];
+const startClarifyCalls = [];
+const yoloCalls = [];
+const sessionStreamCalls = [];
+const attachCalls = [];
+let _profileSwitchGeneration = 0;
+let _profileSwitchTransaction = null;
+let _profileLastCommittedSwitchResult = null;
+let _profileSwitchOpeningExistingSession = false;
+let _profilesCache = null;
+let _profileDropdownFetchPromise = null;
+let _profileDropdownCacheLoadedFromStorage = false;
+let _skillsData = ['old'];
+let _workspaceList = ['old'];
+let _showAllProfiles = true;
+let _scriptsRequestId = 0;
+let _scriptsRawRequestId = 0;
+let _cronsRequestId = 0;
+let _cronList = ['stale-job'];
+let _showAllCronProfiles = true;
+let _cronOtherProfileCount = 3;
+let _cronPreFormDetail = { id: 'stale-job' };
+let _editingCronId = 'stale-job';
+let _cronIsDuplicate = true;
+let _currentPanel = 'chat';
+let _tasksSubtab = 'scripts';
+let _workspacePanelMode = 'closed';
+let _sessionListSkeletonActive = false;
+let _loadingSessionId = null;
+let _loadSessionGeneration = 0;
+let _loadingOlder = false;
+let _pendingCarryForwardSnapshot = null;
+let _messagesTruncated = false;
+let _oldestIdx = 0;
+let _yoloEnabled = false;
+const INFLIGHT = {};
+const document = { getElementById() { return null; } };
+const msgInner = { innerHTML: '' };
+let restoredSelections = null;
+const localStorage = {
+  removeItem() {},
+  getItem() { return null; },
+  setItem() {},
+};
+const history = { replaceState() {} };
+const window = {
+  _clearPendingSelections() {},
+  _snapshotPendingSelections() { return [{ id: 'ctx-1', name: 'Context 1' }]; },
+  _restorePendingSelections(selections) { restoredSelections = selections; },
+};
+const S = {
+  activeProfile: 'a',
+  activeProfileIsDefault: false,
+  session: {
+    session_id: 'current',
+    message_count: 0,
+    updated_at: 0,
+    last_message_at: 0,
+    pending_attachments: [{ name: 'upload.bin' }],
+    active_stream_id: 'stream-1',
+  },
+  messages: [{ role: 'assistant', content: 'current transcript' }],
+  toolCalls: [{ id: 'old-tool' }],
+  pendingFiles: [{ name: 'report.txt' }],
+  busy: true,
+  activeStreamId: 'stream-1',
+};
+const cronList = { children: [{}], replaceChildren(){ this.children = []; } };
+const cronRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
+const scriptsList = { children: [{}], replaceChildren(){ this.children = []; } };
+const scriptsRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
+function $(id){
+  return {
+    msgInner,
+    cronList,
+    cronRefreshBtn,
+    scriptsList,
+    scriptsRefreshBtn,
+  }[id] || null;
+}
+function _resolveSessionIdFromSidebarLineage(sid) { return sid; }
+function _hermesNotifySessionOpen() { return null; }
+function _clearCronDetail() {}
+function _invalidateScriptsRequests() {
+  _scriptsRequestId += 1;
+  _scriptsRawRequestId += 1;
+  _scriptsData = null;
+}
+function _invalidateSessionListRenders() {}
+function _setProfileSwitchListEmbargo() {}
+function showSessionListSkeleton() {}
+function bumpWorkspaceTreeGen() {}
+function clearWorkspaceTreeSkeleton() {}
+function _refreshProfileSwitchBackground() {}
+function animateNextSessionListRefresh() {}
+function startGatewaySSE() {}
+function applyBotName() {}
+function _clearPersistedModelState() {}
+function refreshProfileTransitionReasoningChip() {}
+function syncTopbar() {}
+function loadDir() { return Promise.resolve(); }
+function showToast() {}
+function t(key, name) { return name ? key + ':' + name : key; }
+async function renderSessionList() {}
+async function _profileSwitchPanelLoad() {}
+async function api(url) {
+  apiCalls.push({ url, profile: S.activeProfile });
+  if (url === '/api/profile/switch') throw new Error('switch rejected');
+  if (url === '/api/session?session_id=foreign&messages=0&resolve_model=0') {
+    const err = new Error('profile mismatch');
+    err.status = 409;
+    err.body = JSON.stringify({
+      code: 'session_profile_mismatch',
+      profile: 'b',
+      session_id: 'foreign',
+    });
+    throw err;
+  }
+  throw new Error('unexpected api ' + url);
+}
+function _rearmActiveSessionStream() {
+  if (S.session && S.session.session_id) startSessionStream(S.session.session_id);
+}
+function _selectLiveRecoveryInflight() { return null; }
+function stopApprovalPolling() {}
+function hideApprovalCard() {}
+function stopSessionStream() {}
+function _updateYoloPill() {}
+function stopClarifyPolling() {}
+function hideClarifyCard() {}
+async function _saveComposerDraftNow() {}
+function _clearQueueCardDisplay() {}
+function _sessionVisitHasUnreadState() { return false; }
+function _acknowledgeSessionVisit() {}
+function _clearSameSessionForceReloadHint() {}
+function _clearStuckSessionOnBoot() {}
+function _appRootPath() { return '/'; }
+function renderMessages() {
+  msgInner.innerHTML = S.messages.map(m => m.content || '').join('\\n');
+}
+function renderTray() {}
+function startSessionStream(sid) {
+  if (S.activeStreamId && S.session && S.session.session_id === sid) return;
+  sessionStreamCalls.push(sid);
+}
+function attachLiveStream(sid, streamId, pending, opts) {
+  attachCalls.push({ sid, streamId, pending, reconnecting: !!(opts && opts.reconnecting) });
+}
+function _uploadPendingFilesSyncProgressForSession() {}
+function _clearDeferredActiveSessionExternalRefresh() {}
+function _clearEmptyComposerModelOverride() {}
+function _hydrateTodosFromSession() {}
+function _applyPendingSessionModelForSession() {}
+function _resolveSessionModelForDisplaySoon() {}
+function _setActiveSessionUrl() {}
+function setBusy() {}
+function setStatus() {}
+function setComposerStatus() {}
+function updateSendBtn() {}
+function updateQueueBadge() {}
+function _deferWorkspaceRefreshForSession() {}
+function startApprovalPolling(sid) { startApprovalCalls.push(sid); }
+function startClarifyPolling(sid) { startClarifyCalls.push(sid); }
+function _fetchYoloState(sid) { yoloCalls.push(sid); }
+function refreshSessionList() { return Promise.resolve(); }
+function _announceNewSessionWorkspace() {}
+function _isMessagingSession() { return false; }
+function _isSessionActivelyViewedForList() { return true; }
+function _hideHandoffHint() {}
+function renderSessionArtifacts() {}
+const populateModelDropdown = null;
+eval(extractFunc('_resetTasksForProfileTransition'));
+eval(extractFunc('switchToProfile'));
+eval(extractFunc('_sessionProfileMismatchFromError'));
+eval(extractFunc('_switchProfileForSessionLoad'));
+eval(extractFunc('loadSession'));
+(async () => {
+  renderMessages();
+  await loadSession('foreign');
+  console.log(JSON.stringify({
+    apiCalls,
+    startApprovalCalls,
+    startClarifyCalls,
+    yoloCalls,
+    sessionStreamCalls,
+    attachCalls,
+    activeProfile: S.activeProfile,
+    sessionId: S.session && S.session.session_id,
+    activeStreamId: S.activeStreamId,
+    messages: S.messages,
+    loadingSessionId: _loadingSessionId,
+    restoredSelections,
+    msgInner: msgInner.innerHTML,
+  }));
+})().catch(err => { console.error(err); process.exit(1); });
+"""
+    result = json.loads(_run_node(source))
+    assert result["apiCalls"] == [
+        {"url": "/api/session?session_id=foreign&messages=0&resolve_model=0", "profile": "a"},
+        {"url": "/api/profile/switch", "profile": "a"},
+    ]
+    assert result["startApprovalCalls"] == ["current"]
+    assert result["startClarifyCalls"] == ["current"]
+    assert result["yoloCalls"] == ["current"]
+    assert result["sessionStreamCalls"] == []
+    assert result["attachCalls"] == [{
+        "sid": "current",
+        "streamId": "stream-1",
+        "pending": [{"name": "upload.bin"}],
+        "reconnecting": True,
+    }]
+    assert result["activeProfile"] == "a"
+    assert result["sessionId"] == "current"
+    assert result["activeStreamId"] == "stream-1"
+    assert result["messages"] == [{"role": "assistant", "content": "current transcript"}]
+    assert result["loadingSessionId"] is None
+    assert result["restoredSelections"] == [{"id": "ctx-1", "name": "Context 1"}]
+    assert result["msgInner"] == "current transcript"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -3037,8 +3728,10 @@ async function _switchProfileForSessionLoad(profile) {
   S.pendingFiles = [{ name: 'other.txt' }];
   renderMessages();
   return {
+    generation: 1,
     outcome: 'superseded',
     terminalResult: Promise.resolve({
+      generation: 2,
       outcome: 'committed',
       target: profile,
       from: 'a',

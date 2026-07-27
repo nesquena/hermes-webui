@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -40,6 +41,7 @@ TEST_BITE = os.environ.get("LIFECYCLE_TEST_BITE", "").strip()
 GATEWAY_ACTIVITY_TIMEOUT = 60.0
 ANCHOR_SCENE_PERSIST_TIMEOUT = 60.0
 ANCHOR_SCENE_PROJECTION_TIMEOUT = 10_000
+_TERMINAL_ROW_TIME_SUFFIX_RE = re.compile(r"(?:\n|\s)\d{1,2}:\d{2}\s?(?:AM|PM)$")
 
 
 def _latest_anchor_scene_from_disk(state_root: Path, session_id: str) -> dict | None:
@@ -567,6 +569,19 @@ def _terminal_rows(snapshot: dict) -> list[dict]:
     return [row for row in snapshot["rows"] if row["role"] == "terminal"]
 
 
+def _normalize_terminal_row(row: dict) -> dict:
+    text = str((row or {}).get("text") or "").strip()
+    text = _TERMINAL_ROW_TIME_SUFFIX_RE.sub("", text).strip()
+    return {
+        "role": (row or {}).get("role"),
+        "source": (row or {}).get("source"),
+        "status": (row or {}).get("status"),
+        "tool": (row or {}).get("tool"),
+        "text": text,
+        "classes": (row or {}).get("classes"),
+    }
+
+
 def _process_rows(snapshot: dict) -> list[dict]:
     return [
         row for row in snapshot["rows"]
@@ -1023,9 +1038,9 @@ def main() -> int:
                 "settled_terminal": settled_terminal,
                 "reloaded_terminal": reloaded_terminal,
             }
-            assert settled_terminal[0]["text"] == reloaded_terminal[0]["text"], {
-                "settled_terminal": settled_terminal[0],
-                "reloaded_terminal": reloaded_terminal[0],
+            assert _normalize_terminal_row(settled_terminal[0]) == _normalize_terminal_row(reloaded_terminal[0]), {
+                "settled_terminal": _normalize_terminal_row(settled_terminal[0]),
+                "reloaded_terminal": _normalize_terminal_row(reloaded_terminal[0]),
             }
         print("OK  hard reload: transcript-backed Anchor scene preserves settled parity")
 

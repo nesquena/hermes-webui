@@ -1814,6 +1814,9 @@ async function loadSession(sid){
           while (current && current.outcome === 'superseded' && current.terminalResult) {
             current = await current.terminalResult;
           }
+          while (current && current.outcome === 'failed' && current.retainedResult) {
+            current = current.retainedResult;
+          }
           return _normalizeProfileSwitchResult(current);
         };
         let switched = _normalizeProfileSwitchResult(await _switchProfileForSessionLoad(profileMismatch.profile));
@@ -1826,6 +1829,11 @@ async function loadSession(sid){
           if (!_isCurrentLoad()) {
             _rearmActiveSessionStream();
             return;
+          }
+          if ((terminal.outcome === 'already_active' || terminal.outcome === 'committed')
+            && terminal.generation === switched.generation) {
+            _retireCurrentLoad();
+            return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
           }
           _retireCurrentLoad();
           if (terminal.outcome === 'failed') {
@@ -2008,6 +2016,18 @@ async function loadSession(sid){
     try{
       if(typeof window!=='undefined' && typeof window._restorePendingSelections==='function'){
         window._restorePendingSelections(_previousConversationOnSwitchFailure.pendingSelections || []);
+      }
+    }catch(_){}
+    try{
+      const restoredSid = S.session && S.session.session_id;
+      if (restoredSid && typeof startApprovalPolling === 'function') startApprovalPolling(restoredSid);
+      if (restoredSid && (S.busy || S.activeStreamId)) {
+        if (typeof startClarifyPolling === 'function') startClarifyPolling(restoredSid);
+        if (typeof _fetchYoloState === 'function') _fetchYoloState(restoredSid);
+        if (S.activeStreamId) {
+          if (typeof attachLiveStream === 'function') attachLiveStream(restoredSid, S.activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
+          else if (typeof watchInflightSession === 'function') watchInflightSession(restoredSid, S.activeStreamId);
+        }
       }
     }catch(_){}
     try{if(typeof renderTray==='function') renderTray();}catch(_){}
