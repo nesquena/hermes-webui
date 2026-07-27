@@ -171,3 +171,58 @@ def test_wallpaper_upload_scope_refresh_and_clear(base_url, tmp_path: Path) -> N
                 browser.close()
     finally:
         _settings(base_url, {"onboarding_completed": previous_onboarding})
+
+
+def test_wallpaper_settings_retranslate_owned_status_and_preserve_filename(
+    base_url, tmp_path: Path
+) -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+    valid_image = tmp_path / "用户壁纸.png"
+    valid_image.write_bytes(_png())
+    invalid_file = tmp_path / "invalid-wallpaper.txt"
+    invalid_file.write_text("not an image", encoding="utf-8")
+    previous = _settings(base_url)
+    previous_language = previous.get("language", "en")
+    previous_onboarding = previous["onboarding_completed"]
+    try:
+        _settings(base_url, {"onboarding_completed": True, "language": "en"})
+        with playwright.sync_playwright() as manager:
+            browser = manager.chromium.launch(headless=True)
+            context = browser.new_context(viewport={"width": 1280, "height": 900})
+            try:
+                page = context.new_page()
+                page.goto(base_url, wait_until="domcontentloaded")
+                page.locator('[data-panel="settings"]').first.click()
+                page.locator('[data-settings-section="appearance"]').first.click()
+                page.locator("#wallpaperSettingsField").wait_for()
+
+                page.set_input_files("#wallpaperFileInput", str(valid_image))
+                assert page.locator("#wallpaperFileName").inner_text() == "用户壁纸.png"
+                page.set_input_files("#wallpaperFileInput", str(invalid_file))
+                assert page.locator("#wallpaperStatus").inner_text() == (
+                    "Choose a JPEG, PNG, or WebP image."
+                )
+                assert "is-error" in (
+                    page.locator("#wallpaperStatus").get_attribute("class") or ""
+                )
+
+                # Keep Appearance active: select_option dispatches the real
+                # Preferences language input/change path and locale event.
+                page.locator("#settingsLanguage").select_option("zh", force=True)
+
+                assert page.locator("#wallpaperSettingsField > label").inner_text() == "壁纸"
+                assert page.locator("#wallpaperSaveBtn").inner_text() == "保存壁纸"
+                assert page.locator("#wallpaperClearBtn").inner_text() == "清除"
+                assert page.locator("#wallpaperPreview").get_attribute("alt") == "壁纸预览"
+                assert page.locator("#wallpaperStatus").inner_text() == (
+                    "请选择 JPEG、PNG 或 WebP 图片。"
+                )
+                assert page.locator("#wallpaperFileName").inner_text() == "用户壁纸.png"
+            finally:
+                context.close()
+                browser.close()
+    finally:
+        _settings(base_url, {
+            "onboarding_completed": previous_onboarding,
+            "language": previous_language,
+        })

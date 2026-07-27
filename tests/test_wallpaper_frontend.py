@@ -86,33 +86,42 @@ def test_wallpaper_i18n_and_service_worker_contracts() -> None:
     assert "url.pathname.includes('/api/')" in sw
 
 
-def test_wallpaper_i18n_keys_are_english_fallback_owned() -> None:
+def test_wallpaper_i18n_keys_exist_in_every_locale() -> None:
     i18n = (STATIC / "i18n.js").read_text(encoding="utf-8")
-    locale_starts = list(
-        re.finditer(
-            r"^  ('[^']+'|[A-Za-z][A-Za-z0-9-]*): \{$", i18n, re.MULTILINE
-        )
-    )
+    locale_starts = list(re.finditer(
+        r"^  ('[^']+'|[A-Za-z][A-Za-z0-9-]*): \{$", i18n, re.MULTILINE
+    ))
     end = i18n.index("\n};", locale_starts[-1].start())
     blocks = {
         match.group(1).strip("'"): i18n[
-            match.start() : locale_starts[index + 1].start()
-            if index + 1 < len(locale_starts)
-            else end
+            match.start(): locale_starts[index + 1].start()
+            if index + 1 < len(locale_starts) else end
         ]
         for index, match in enumerate(locale_starts)
     }
-
-    assert len(blocks) == 15
-    for key in WALLPAPER_I18N_KEYS:
-        assert f"{key}:" in blocks["en"]
-    assert any(
-        f"{key}:" not in block
-        for locale, block in blocks.items()
-        if locale != "en"
-        for key in WALLPAPER_I18N_KEYS
-    )
+    assert set(blocks) == {
+        "en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt",
+        "ko", "fr", "cs", "tr", "pl", "vi",
+    }
+    for locale, block in blocks.items():
+        for key in WALLPAPER_I18N_KEYS:
+            assert f"{key}:" in block, f"{locale} is missing {key}"
     assert "_locale[key] ?? LOCALES.en[key]" in i18n
+
+
+def test_wallpaper_simplified_chinese_uses_approved_wording() -> None:
+    i18n = (STATIC / "i18n.js").read_text(encoding="utf-8")
+    zh = i18n[i18n.index("  zh: {"):i18n.index("  'zh-Hant': {")]
+    for expected in (
+        "settings_wallpaper_title: '壁纸'",
+        "settings_wallpaper_description: '选择一张不超过 10 MB 的 JPEG、PNG 或 WebP 图片。更改仅在保存后生效。'",
+        "settings_wallpaper_scope_chat: '仅聊天'",
+        "settings_wallpaper_scope_app: '整个应用'",
+        "settings_wallpaper_saved: '壁纸已保存。'",
+        "settings_wallpaper_invalid_type: '请选择 JPEG、PNG 或 WebP 图片。'",
+        "settings_wallpaper_network_failed: '无法连接到壁纸存储。请检查网络连接。'",
+    ):
+        assert expected in zh
 
 
 def test_wallpaper_locale_switch_updates_alt_and_owned_dynamic_text() -> None:
