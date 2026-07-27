@@ -34,6 +34,7 @@ def _fake_agent(tmp_path):
     agent_dir = tmp_path / "hermes-agent"
     cli_dir = agent_dir / "hermes_cli"
     cli_dir.mkdir(parents=True)
+    (cli_dir / "__init__.py").write_text("", encoding="utf-8")
     (cli_dir / "main.py").write_text("print('fake hermes cli')\n", encoding="utf-8")
     return agent_dir
 
@@ -84,13 +85,34 @@ def test_gateway_start_runs_profile_scoped_agent_cli_and_returns_status(monkeypa
     assert "stderr" not in data
     assert data["status"]["running"] is True
     cmd, kwargs = calls[0]
-    assert cmd[:2] == [sys.executable, str(agent_dir / "hermes_cli" / "main.py")]
-    assert cmd[2:] == ["--profile", "work", "gateway", "start"]
+    assert cmd[:3] == [sys.executable, "-m", "hermes_cli.main"]
+    assert cmd[3:] == ["--profile", "work", "gateway", "start"]
     assert kwargs["cwd"] == str(agent_dir)
     assert kwargs["env"]["PYTHONUTF8"] == "1"
     assert kwargs["env"]["BROWSER"] == "echo"
     assert kwargs["capture_output"] is True
     assert kwargs["text"] is True
+
+
+def test_gateway_lifecycle_runs_source_cli_as_importable_module(monkeypatch, tmp_path):
+    from api import config, profiles, routes
+
+    agent_dir = tmp_path / "hermes-agent"
+    cli_dir = agent_dir / "hermes_cli"
+    cli_dir.mkdir(parents=True)
+    (cli_dir / "__init__.py").write_text("SENTINEL = 'source-cli-ok'\n", encoding="utf-8")
+    (cli_dir / "main.py").write_text(
+        "from hermes_cli import SENTINEL\nprint(SENTINEL)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "_AGENT_DIR", agent_dir)
+    monkeypatch.setattr(config, "PYTHON_EXE", sys.executable)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+
+    result = routes._run_gateway_lifecycle_command("restart")
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "source-cli-ok"
 
 
 def test_gateway_action_contention_returns_409_without_spawning(monkeypatch, tmp_path):

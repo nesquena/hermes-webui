@@ -246,6 +246,8 @@ def build_report(root: Path) -> dict[str, object]:
             ("startup_install_function", r"auto_install_agent_deps"),
             ("agent_dir_env", r"HERMES_WEBUI_AGENT_DIR"),
             ("agent_source_install", r"uv pip install.*\[all\]"),
+            ("agent_dependency_export", r"uv export.*--extra all.*--no-emit-project"),
+            ("agent_dependency_install", r"uv pip install -r.*_agent_requirements"),
             ("agent_source_staging", r"_agent_src|_stage_src"),
         ),
     )
@@ -270,7 +272,7 @@ def build_report(root: Path) -> dict[str, object]:
             title="Startup dependency installation from agent checkout",
             current_dependency=(
                 "WebUI startup discovers HERMES_WEBUI_AGENT_DIR or ~/.hermes/hermes-agent "
-                "and installs the agent checkout extras."
+                "and installs the agent checkout's exported dependency set."
             ),
             replacement_surface=(
                 "Replace source-tree pip installs with a packaged hermes-agent client "
@@ -278,7 +280,14 @@ def build_report(root: Path) -> dict[str, object]:
             ),
             findings=_findings_by_kind(
                 startup_findings,
-                {"startup_install_function", "agent_dir_env", "agent_source_install", "agent_source_staging"},
+                {
+                    "startup_install_function",
+                    "agent_dir_env",
+                    "agent_source_install",
+                    "agent_dependency_export",
+                    "agent_dependency_install",
+                    "agent_source_staging",
+                },
             ),
         ),
         DependencyClass(

@@ -91,8 +91,8 @@ services:
       # Same hermes home as the agent — shares config, sessions, state
       - hermes-home:/home/hermeswebui/.hermes
       # Agent source mounted where docker_init.bash expects it.
-      # Mounted read-only — the WebUI only reads this volume to install
-      # the agent's Python dependencies at startup (`uv pip install`).
+      # Mounted read-only — the WebUI stages this source to export the
+      # agent's dependency set, then installs that export at startup.
       # Read-only enforces that defence-in-depth at the kernel layer.
       - hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent:ro
       # Workspace directory — browse and edit files from the WebUI.

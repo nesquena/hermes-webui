@@ -10,6 +10,7 @@ import sys
 import threading
 from pathlib import Path
 
+from api.agent_cli import source_agent_cli_invocation
 from api.profiles import (
     _PROFILE_ID_RE,
     _is_root_profile,
@@ -23,16 +24,19 @@ logger = logging.getLogger(__name__)
 _GATEWAY_RESTART_LOCK = threading.Lock()
 
 
-def _resolve_hermes_command() -> str:
-    """Resolve the CLI path used for active-profile gateway restarts."""
+def _resolve_hermes_invocation() -> tuple[list[str], Path | None]:
+    """Resolve the CLI invocation used for active-profile gateway restarts."""
     hermes_cmd = shutil.which("hermes")
     if hermes_cmd:
-        return hermes_cmd
+        return [hermes_cmd], None
 
     sibling = Path(sys.executable).parent / "hermes"
     if sibling.exists():
-        return str(sibling)
-    return "hermes"
+        return [str(sibling)], None
+    try:
+        return source_agent_cli_invocation()
+    except FileNotFoundError:
+        return ["hermes"], None
 
 
 def _consume_stream(stream) -> None:
@@ -98,8 +102,7 @@ def restart_active_profile_gateway(
         active_home, cli_profile = _gateway_restart_profile_context(profile)
         env = os.environ.copy()
         env["HERMES_HOME"] = str(active_home)
-        hermes_cmd = _resolve_hermes_command()
-        cmd = [hermes_cmd]
+        cmd, cli_cwd = _resolve_hermes_invocation()
         if cli_profile is not None:
             cmd.extend(["--profile", cli_profile])
         cmd.extend(["gateway", "restart"])
@@ -107,23 +110,25 @@ def restart_active_profile_gateway(
         if cli_profile is None:
             logger.info(
                 "Restarting gateway service via CLI command: %s gateway restart (HERMES_HOME=%s)",
-                hermes_cmd,
+                cmd[:-2],
                 active_home,
             )
         else:
             logger.info(
                 "Restarting gateway service via CLI command: %s --profile %s gateway restart (HERMES_HOME=%s)",
-                hermes_cmd,
+                cmd[:-4],
                 cli_profile,
                 active_home,
             )
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-        )
+        popen_kwargs = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "env": env,
+        }
+        if cli_cwd is not None:
+            popen_kwargs["cwd"] = str(cli_cwd)
+        proc = subprocess.Popen(cmd, **popen_kwargs)
 
         try:
             stdout, stderr = proc.communicate(timeout=quick_timeout_seconds)

@@ -29,6 +29,10 @@ The multi-container setup still shares the agent source tree with the WebUI:
 - `docs/docker.md` explicitly documents that this is not a filesystem trust
   boundary: the WebUI cannot write the mount, but it still installs and imports
   code from it.
+- Gateway lifecycle controls invoke `python -m hermes_cli.main` from the
+  configured checkout when no installed `hermes` launcher is available. This
+  keeps source-based controls functional when Docker installs dependencies
+  without installing the agent distribution.
 
 The durable target is that multi-container WebUI should not need a direct
 `hermes-agent-src` mount. The WebUI should communicate with hermes-agent through
@@ -105,6 +109,8 @@ The WebUI can keep code that is only presentation, validation, or routing glue:
 
 - Docker/compose source sharing is reported.
 - Startup dependency installation and `HERMES_WEBUI_AGENT_DIR` are reported.
+- The staged `uv export --extra all --no-emit-project` and subsequent
+  requirements installation are reported as the Docker startup mechanism.
 - Runtime auxiliary/model metadata imports are reported.
 - Runtime SessionDB/state imports are reported.
 - Runtime provider/gateway imports are reported.

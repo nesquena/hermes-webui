@@ -2,6 +2,7 @@
 
 import io
 import subprocess
+import sys
 import threading
 import types
 
@@ -98,6 +99,90 @@ def test_restart_active_profile_gateway_success_uses_active_profile_home(monkeyp
     assert result["message"] == "Gateway service restarted successfully"
     assert called["args"] == ["/mock/bin/hermes", "--profile", "default", "gateway", "restart"]
     assert called["env"]["HERMES_HOME"] == "/mock/hermes/home"
+    assert gateway_restart._GATEWAY_RESTART_LOCK.locked() is False
+
+
+def test_restart_active_profile_gateway_uses_source_cli_without_installed_launcher(monkeypatch, tmp_path):
+    from api import config
+
+    gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
+    agent_dir = tmp_path / "hermes-agent"
+    main_py = agent_dir / "hermes_cli" / "main.py"
+    main_py.parent.mkdir(parents=True)
+    (main_py.parent / "__init__.py").write_text("", encoding="utf-8")
+    main_py.write_text("print('fake hermes cli')\n", encoding="utf-8")
+    python_exe = tmp_path / "venv" / "bin" / "python"
+    called = {}
+
+    def fake_popen(args, stdout=None, stderr=None, text=True, env=None, cwd=None):
+        called["args"] = args
+        called["cwd"] = cwd
+        return MockPopen(args, stdout_text="ok", returncode=0, env=env)
+
+    monkeypatch.setattr(config, "_AGENT_DIR", agent_dir)
+    monkeypatch.setattr(config, "PYTHON_EXE", str(python_exe))
+    monkeypatch.setattr(gateway_restart, "get_active_hermes_home", lambda: "/mock/hermes/home")
+    monkeypatch.setattr(gateway_restart.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr(gateway_restart.sys, "executable", str(python_exe))
+    monkeypatch.setattr(gateway_restart.subprocess, "Popen", fake_popen)
+
+    result = gateway_restart.restart_active_profile_gateway()
+
+    assert result["status"] == "completed"
+    assert called["args"] == [
+        str(python_exe),
+        "-m",
+        "hermes_cli.main",
+        "--profile",
+        "default",
+        "gateway",
+        "restart",
+    ]
+    assert called["cwd"] == str(agent_dir)
+    assert gateway_restart._GATEWAY_RESTART_LOCK.locked() is False
+
+
+def test_restart_active_profile_gateway_runs_source_cli_in_clean_venv(monkeypatch, tmp_path):
+    from api import config
+
+    gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
+    agent_dir = tmp_path / "hermes-agent"
+    cli_dir = agent_dir / "hermes_cli"
+    cli_dir.mkdir(parents=True)
+    (cli_dir / "__init__.py").write_text("SENTINEL = 'source-cli-ok'\n", encoding="utf-8")
+    (cli_dir / "main.py").write_text(
+        "import importlib.metadata as metadata\n"
+        "from hermes_cli import SENTINEL\n"
+        "try:\n"
+        "    metadata.version('hermes-agent')\n"
+        "except metadata.PackageNotFoundError:\n"
+        "    print(SENTINEL)\n"
+        "else:\n"
+        "    raise RuntimeError('hermes-agent distribution must be absent')\n",
+        encoding="utf-8",
+    )
+    venv_dir = tmp_path / "venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(venv_dir)],
+        check=True,
+    )
+    python_exe = venv_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    hermes_exe = venv_dir / ("Scripts/hermes.exe" if sys.platform == "win32" else "bin/hermes")
+
+    assert python_exe.exists()
+    assert not hermes_exe.exists()
+
+    monkeypatch.setattr(config, "_AGENT_DIR", agent_dir)
+    monkeypatch.setattr(config, "PYTHON_EXE", str(python_exe))
+    monkeypatch.setattr(gateway_restart, "get_active_hermes_home", lambda: "/mock/hermes/home")
+    monkeypatch.setattr(gateway_restart.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr(gateway_restart.sys, "executable", str(python_exe))
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+
+    result = gateway_restart.restart_active_profile_gateway()
+
+    assert result["status"] == "completed"
+    assert result["detail"] == "source-cli-ok"
     assert gateway_restart._GATEWAY_RESTART_LOCK.locked() is False
 
 

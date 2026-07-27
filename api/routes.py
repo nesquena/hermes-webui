@@ -34,6 +34,7 @@ from contextlib import closing
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
+from api.agent_cli import source_agent_cli_invocation
 from api.agent_runtime import (
     AgentRuntimeChangedError,
     ensure_agent_runtime_current,
@@ -1208,18 +1209,9 @@ def _run_gateway_lifecycle_command(action: str) -> subprocess.CompletedProcess:
     if action not in {"start", "stop", "restart"}:
         raise ValueError("unsupported gateway action")
 
-    from api import config as api_config
     from api.profiles import get_active_profile_name
 
-    agent_dir = getattr(api_config, "_AGENT_DIR", None)
-    if not agent_dir:
-        raise FileNotFoundError("Hermes agent checkout not found")
-    agent_dir = Path(agent_dir).expanduser().resolve()
-    main_py = agent_dir / "hermes_cli" / "main.py"
-    if not main_py.exists():
-        raise FileNotFoundError("Hermes agent CLI entrypoint not found")
-
-    cmd = [str(getattr(api_config, "PYTHON_EXE", sys.executable)), str(main_py)]
+    cmd, agent_dir = source_agent_cli_invocation()
     profile_name = ""
     try:
         profile_name = str(get_active_profile_name() or "").strip()

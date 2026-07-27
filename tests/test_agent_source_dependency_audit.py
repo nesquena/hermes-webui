@@ -107,13 +107,27 @@ def test_audit_reports_startup_install_dependencies():
     classes = _class_by_id(_run_audit())
     anchors = _anchors(classes["startup_dependency_install"])
     texts = _texts(classes["startup_dependency_install"])
+    findings = _findings(classes["startup_dependency_install"])
 
     assert ("api/startup.py", "HERMES_WEBUI_AGENT_DIR") in anchors
     assert ("bootstrap.py", "HERMES_WEBUI_AGENT_DIR") in anchors
     assert ("start.ps1", "HERMES_WEBUI_AGENT_DIR") in anchors
     assert ("api/startup.py", "auto_install_agent_deps") in anchors
     assert ("server.py", "auto_install_agent_deps") in anchors
-    assert any("uv pip install" in text and "[all]" in text for text in texts)
+    assert any(
+        "uv export" in text
+        and "--extra all" in text
+        and "--no-emit-project" in text
+        for text in texts
+    )
+    assert any("uv pip install -r" in text for text in texts)
+    dependency_installs = [
+        finding
+        for finding in findings
+        if finding["kind"] == "agent_dependency_install"
+    ]
+    assert dependency_installs
+    assert all("_agent_requirements" in str(finding["text"]) for finding in dependency_installs)
 
 
 def test_audit_reports_runtime_agent_execution_imports():
