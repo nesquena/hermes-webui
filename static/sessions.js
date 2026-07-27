@@ -5507,15 +5507,21 @@ function _appendTouchBatch(){
     return;
   }
   // Commit: attach fragments to the live DOM. This is the point of no return.
-  // Validate every group/body before committing. Insert each group fragment
-  // BEFORE its after-spacer (not after it) — the after-spacer represents
-  // unloaded rows and must remain at the END of the group body, after the
-  // newly loaded rows. A partial 60->100 append would otherwise produce
-  // rows 0-59, spacer, rows 60-99 — with the spacer in front of the new rows.
+  // Validate EVERY group wrapper+body exists BEFORE attaching any fragment.
+  // The prior version attached group A, then aborted on a missing group B body
+  // without advancing the loaded count — retry re-appended group A's rows,
+  // duplicating them. Pre-validation makes the commit all-or-nothing.
+  // Insert each group fragment BEFORE its after-spacer (not after it) — the
+  // after-spacer represents unloaded rows and must remain at the END of the
+  // group body, after the newly loaded rows. A partial 60->100 append would
+  // otherwise produce rows 0-59, spacer, rows 60-99 — with the spacer in front
+  // of the new rows.
+  // Phase 1: validate all targets exist.
+  const commitTargets=[];
   for(const label of groupOrder){
     let wrapper=list.querySelector('.session-date-group[data-group-label="'+CSS.escape(label)+'"]');
     if(!wrapper){
-      // Group doesn't exist in DOM yet — create it before the sentinel.
+      // Group doesn't exist in DOM yet — create it (but don't attach fragment yet).
       wrapper=_createTouchGroupWrapper({label:label,isPinned:false}, state);
       const sentinel=list.querySelector('[data-touch-sentinel]');
       if(sentinel) list.insertBefore(wrapper,sentinel);
@@ -5523,16 +5529,19 @@ function _appendTouchBatch(){
     }
     const body=wrapper.querySelector('.session-date-body');
     if(!body){
-      // Missing body — abort without advancing the loaded count.
+      // Missing body — abort the entire commit without advancing the loaded count.
       return;
     }
-    // Insert the fragment BEFORE the after-spacer so newly loaded rows sit
-    // between the existing rows and the spacer (not after the spacer).
     const afterSpacer=body.querySelector('.session-virtual-spacer[data-virtual-spacer="after"]');
-    if(afterSpacer){
-      body.insertBefore(fragmentsByGroup[label], afterSpacer);
+    commitTargets.push({body:body, afterSpacer:afterSpacer, label:label});
+  }
+  // Phase 2: attach all fragments. By this point every target is guaranteed to
+  // exist, so no partial-commit-duplicate-on-retry is possible.
+  for(const target of commitTargets){
+    if(target.afterSpacer){
+      target.body.insertBefore(fragmentsByGroup[target.label], target.afterSpacer);
     }else{
-      body.appendChild(fragmentsByGroup[label]);
+      target.body.appendChild(fragmentsByGroup[target.label]);
     }
   }
   // Commit the loaded count only after all fragments are in the live DOM.
@@ -5623,7 +5632,7 @@ function _createTouchGroupWrapper(g, state){
   return wrapper;
 }
 
-function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid){
+function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid, paintedExtent){
   // Touch-mode exit: if we were previously in touch mode but no longer are,
   // invalidate all touch state (observer, RAF, pending, render state).
   if(!list||!_isTouchPrimary()){
@@ -5635,6 +5644,12 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid)
   // Unified invalidation before setting up new state. _invalidateTouchRender
   // bumps _sessionTouchGen, so the new render state's gen is already current.
   _invalidateTouchRender();
+  // Restore the canonical loaded count to the exact number of rows the initial
+  // render actually painted (virtualWindow.end). _invalidateTouchRender reset it
+  // to 0; without restoring, the first _appendTouchBatch() reads oldLoaded=0,
+  // its prefix check is vacuous, and it appends rows 0–39 behind the already-
+  // painted rows 0–59 — duplicating the first batch.
+  _sessionTouchLoadedCount=Math.min(total, Math.max(0, Number(paintedExtent)||0));
   _sessionTouchListEl=list;
   _sessionTouchTotalCount=total;
   // Save canonical render state for incremental appends.
@@ -5666,7 +5681,7 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid)
     sentinel.style.cssText='padding:12px 8px;text-align:center;color:var(--muted);font-size:12px;';
     list.appendChild(sentinel);
   }
-  const loaded=_sessionTouchLoadedCount||SESSION_TOUCH_INITIAL_BATCH;
+  const loaded=_sessionTouchLoadedCount;
   if(loaded>=total){
     sentinel.style.display='none';
   }else{
@@ -8532,9 +8547,11 @@ function renderSessionListFromCache(){
   // This must happen after the list DOM is built and scroll is restored.
   // Pass the flat rows and _renderOneSession closure so _appendTouchBatch can
   // append rows without re-deriving from mutable _allSessions.
-  if(_isTouchPrimary()){
-    _setupTouchSentinel(list, flatSessionRows.length, flatSessionRows, _renderOneSession, activeSidForSidebar);
-  }
+  // Call unconditionally — _setupTouchSentinel handles the touch→non-touch
+  // transition internally (invalidates observer/RAF/state when leaving touch mode).
+  // Gating this inside `if(_isTouchPrimary())` made the teardown unreachable,
+  // leaving a dangling observer and RAF after a touch→desktop transition.
+  _setupTouchSentinel(list, flatSessionRows.length, flatSessionRows, _renderOneSession, activeSidForSidebar, virtualWindow.end);
   const archivePagingFilterActive=_sessionArchivePagingFilterActive();
   if(_showArchived&&!archivePagingFilterActive){
     const activeArchivedTotal=_sessionSourceFilter==='cli'?_archivedCliCount:_archivedWebuiCount;

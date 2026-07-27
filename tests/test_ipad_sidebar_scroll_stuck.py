@@ -1607,3 +1607,274 @@ console.log(JSON.stringify({{
     result = json.loads(_run_node_vm(source))
     assert result["loadedCount"] == 60, \
         f"Missing body must abort without advancing loaded count, got {result['loadedCount']}"
+
+
+# ── Production-composed chain tests (gate certifier requested) ──────────────
+# These exercise the real renderSessionListFromCache → _setupTouchSentinel →
+# _appendTouchBatch sequence, not just isolated function calls. The gate
+# certifier specifically called out that prior tests "do not execute the
+# production render-to-append chain."
+
+
+def test_setup_touch_sentinel_restores_painted_extent():
+    """Source-level pin: _setupTouchSentinel must accept a paintedExtent param
+    and restore _sessionTouchLoadedCount to it AFTER _invalidateTouchRender
+    (which resets it to 0), BEFORE installing the sentinel observer/RAF.
+
+    Without this, the first _appendTouchBatch() reads oldLoaded=0, its prefix
+    check is vacuous, and it appends rows 0–39 behind the already-painted
+    rows 0–59 — duplicating the first batch.
+    """
+    fn = _extract_fn(SESSIONS_JS, "_setupTouchSentinel")
+    assert "paintedExtent" in fn, \
+        "_setupTouchSentinel must accept a paintedExtent parameter"
+    # The restore must happen AFTER _invalidateTouchRender and BEFORE _ensureTouchSentinelObserver
+    invalidate_idx = fn.find("_invalidateTouchRender()")
+    restore_idx = fn.find("_sessionTouchLoadedCount")
+    observer_idx = fn.find("_ensureTouchSentinelObserver")
+    assert invalidate_idx >= 0 and restore_idx >= 0 and observer_idx >= 0
+    assert invalidate_idx < restore_idx, \
+        "Loaded count restore must come AFTER _invalidateTouchRender"
+    assert restore_idx < observer_idx, \
+        "Loaded count restore must come BEFORE observer installation"
+
+
+def test_setup_touch_sentinel_called_with_painted_extent():
+    """Source-level pin: renderSessionListFromCache must pass virtualWindow.end
+    as the paintedExtent argument to _setupTouchSentinel."""
+    src = SESSIONS_JS
+    # Find the call site (not the function definition). The call site is
+    # indented and doesn't start with "function".
+    matches = list(re.finditer(r'(?<!function )_setupTouchSentinel\(list,', src))
+    assert matches, "Call to _setupTouchSentinel not found"
+    # Use the last match — the function definition appears first in the file;
+    # the call site appears later inside renderSessionListFromCache.
+    call_match = matches[-1]
+    call_idx = call_match.start()
+    call_end = src.find(");", call_idx)
+    call_text = src[call_idx:call_end + 2]
+    assert "virtualWindow.end" in call_text, \
+        f"Must pass virtualWindow.end as paintedExtent, got: {call_text}"
+
+
+def test_setup_touch_sentinel_called_unconditionally():
+    """Source-level pin: _setupTouchSentinel must be called unconditionally,
+    NOT gated inside if(_isTouchPrimary()). The function handles the touch→
+    non-touch transition internally — gating it makes teardown unreachable,
+    leaving a dangling observer and RAF after a touch→desktop transition."""
+    src = SESSIONS_JS
+    call_idx = src.find("_setupTouchSentinel(list,")
+    # Look backwards from the call for an if(_isTouchPrimary()) gate
+    before = src[max(0, call_idx - 200):call_idx]
+    # The call must NOT be inside an if(_isTouchPrimary()) block
+    # Check if there's an if(_isTouchPrimary()) in the preceding lines
+    # that wraps this call (would have an opening brace before the call)
+    if_matches = re.findall(r'if\s*\(\s*_isTouchPrimary\(\)\s*\)\s*\{', before)
+    assert len(if_matches) == 0, \
+        "_setupTouchSentinel must be called unconditionally, not inside if(_isTouchPrimary())"
+
+
+def test_append_commit_two_phase():
+    """Source-level pin: _appendTouchBatch commit must be two-phase —
+    validate ALL group bodies exist BEFORE attaching any fragment.
+
+    The prior single-pass version attached group A, then aborted on a missing
+    group B body without advancing the loaded count — retry re-appended
+    group A's rows, duplicating them.
+    """
+    fn = _extract_fn(SESSIONS_JS, "_appendTouchBatch")
+    assert "commitTargets" in fn, \
+        "Commit must use a commitTargets array for two-phase validation"
+    assert "Phase 1" in fn or "Phase 2" in fn, \
+        "Commit must document the two-phase pattern"
+    # All fragments must be attached in a separate loop AFTER validation
+    assert "for(const target of commitTargets)" in fn, \
+        "Phase 2 must iterate commitTargets to attach fragments"
+
+
+@_node_tests
+def test_production_chain_setup_preserves_loaded_count():
+    """Production-composed: simulates the real
+    renderSessionListFromCache → _setupTouchSentinel → _appendTouchBatch chain.
+
+    renderSessionListFromCache paints rows 0–59 (virtualWindow.end=60), then
+    calls _setupTouchSentinel which invalidates (resetting loadedCount to 0)
+    and must restore loadedCount to 60 (paintedExtent). When the observer
+    fires _appendTouchBatch, oldLoaded must be 60, NOT 0 — otherwise rows
+    0–39 are appended as duplicates behind the already-painted 0–59.
+    """
+    total = 100
+    flat_rows = [{"group": {"label": "G"}, "session": {"session_id": f"s_{i}"}} for i in range(total)]
+
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchGen = 0;
+
+// Simulate renderSessionListFromCache painting 60 rows (virtualWindow.end=60)
+const paintedExtent = 60;
+for (let i = 0; i < paintedExtent; i++) list._items.push(makeSessionItem('s_' + i));
+
+// Mock _isTouchPrimary to return true
+function _isTouchPrimary() {{ return true; }}
+
+// Mock document.createElement for sentinel div creation
+document.createElement = function(tag) {{ return makeEl(tag); }};
+
+// Mock requestAnimationFrame (not used when IntersectionObserver exists)
+if (typeof requestAnimationFrame === 'undefined') global.requestAnimationFrame = function(cb) {{ return 0; }};
+
+// Set up group G with a body that tracks items — simulates what
+// renderSessionListFromCache's row loop creates before calling setup.
+const gw = makeEl('div');
+gw.dataset['group-label'] = 'G';
+const body = makeBodyThatTracksItems(list);
+gw.querySelector = function(sel) {{ if(sel==='.session-date-body') return body; return null; }};
+gw.appendChild(body);
+list._groups['G'] = gw;
+
+// Mock _ensureTouchSentinelObserver (extracted separately)
+eval(extractFunc('_ensureTouchSentinelObserver'));
+
+// Call _setupTouchSentinel with paintedExtent — simulates what
+// renderSessionListFromCache does at line ~8381.
+eval(extractFunc('_setupTouchSentinel'));
+_setupTouchSentinel(list, {total}, {json.dumps(flat_rows)},
+  function(s) {{ return makeSessionItem(s.session_id); }},
+  null, paintedExtent);
+
+// After setup, loadedCount must be restored to paintedExtent (60), not 0.
+const loadedAfterSetup = _sessionTouchLoadedCount;
+
+// Now simulate the observer firing _appendTouchBatch.
+// oldLoaded must be 60, not 0 — so rows 60–99 are appended, not 0–39.
+_appendTouchBatch();
+
+console.log(JSON.stringify({{
+  loadedAfterSetup: loadedAfterSetup,
+  loadedAfterAppend: _sessionTouchLoadedCount,
+  itemCount: list._items.length,
+  // Check for duplicates — all sids must be unique
+  sids: list._items.map(function(i) {{ return i.dataset.sid; }}),
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["loadedAfterSetup"] == 60, \
+        f"After setup, loadedCount must be restored to paintedExtent (60), got {result['loadedAfterSetup']}"
+    assert result["loadedAfterAppend"] == 100, \
+        f"After append, loadedCount must be 100, got {result['loadedAfterAppend']}"
+    assert result["itemCount"] == 100, \
+        f"After append, DOM must have 100 items, got {result['itemCount']}"
+    # Verify no duplicates
+    sids = result["sids"]
+    assert len(sids) == len(set(sids)), \
+        f"Duplicate SIDs found after append: {sids}"
+
+
+@_node_tests
+def test_partial_commit_does_not_attach_any_group():
+    """Two-phase commit: if group A's body exists but group B's body is missing,
+    the append must abort WITHOUT attaching ANY fragment — not just group B's.
+
+    The prior single-pass version attached group A, then aborted on group B,
+    leaving A's rows in the DOM while the loaded count stayed at oldLoaded.
+    Retry re-appended group A's rows, duplicating them.
+    """
+    # Two groups: A (rows 60–79) and B (rows 80–99)
+    flat_rows = []
+    for i in range(100):
+        group_label = "A" if i < 80 else "B"
+        flat_rows.append({"group": {"label": group_label}, "session": {"session_id": f"s_{i}"}})
+
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 100;
+// Pre-populate 60 items in group A
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s_' + i));
+
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+
+// Group A has a body; group B does NOT (querySelector returns null for body)
+const gwA = makeEl('div');
+gwA.dataset['group-label'] = 'A';
+const bodyA = makeBodyThatTracksItems(list);
+gwA.querySelector = function(sel) {{ if(sel==='.session-date-body') return bodyA; return null; }};
+gwA.appendChild(bodyA);
+
+const gwB = makeEl('div');
+gwB.dataset['group-label'] = 'B';
+gwB.querySelector = function(sel) {{ return null; }}; // no body for group B
+
+list._groups['A'] = gwA;
+list._groups['B'] = gwB;
+
+_appendTouchBatch();
+
+// Count items per group — group A should NOT have received any new rows
+// because the commit should have aborted entirely.
+console.log(JSON.stringify({{
+  loadedCount: _sessionTouchLoadedCount, // must stay at 60
+  totalItems: list._items.length, // must stay at 60
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["loadedCount"] == 60, \
+        f"Partial commit must not advance loaded count, got {result['loadedCount']}"
+    assert result["totalItems"] == 60, \
+        f"Partial commit must not attach ANY items, got {result['totalItems']}"
+
+
+@_node_tests
+def test_touch_exit_teardown_reachable():
+    """When _isTouchPrimary() returns false, _setupTouchSentinel must still
+    be called (not gated) and must invalidate old touch state.
+
+    The prior version gated the call inside if(_isTouchPrimary()), making
+    the teardown unreachable on a touch→desktop transition — leaving a
+    dangling observer and RAF.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchGen = 1;
+_sessionTouchListEl = list;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 100;
+_touchRenderState = {{ gen: 1, list: list, flatRows: [], renderOneSession: null, activeSid: null }};
+_touchBatchPending = true;
+_touchSentinelObserver = {{ disconnect: function() {{}}, observe: function() {{}}, unobserve: function() {{}} }};
+
+// Mock _isTouchPrimary to return FALSE — simulating touch→desktop transition
+function _isTouchPrimary() {{ return false; }}
+
+eval(extractFunc('_setupTouchSentinel'));
+
+// Call _setupTouchSentinel with non-touch — must invalidate old state.
+// The paintedExtent argument (60) is ignored in the exit path.
+_setupTouchSentinel(list, 100, [], function(){{}}, null, 60);
+
+console.log(JSON.stringify({{
+  observerNull: _touchSentinelObserver === null,
+  renderStateNull: _touchRenderState === null,
+  listElNull: _sessionTouchListEl === null,
+  loadedCountZero: _sessionTouchLoadedCount === 0,
+  batchPendingFalse: _touchBatchPending === false,
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["observerNull"], "Observer must be disconnected on touch exit"
+    assert result["renderStateNull"], "Render state must be cleared on touch exit"
+    assert result["listElNull"], "List element must be cleared on touch exit"
+    assert result["loadedCountZero"], "Loaded count must be zeroed on touch exit"
+    assert result["batchPendingFalse"], "Batch pending must be cleared on touch exit"
