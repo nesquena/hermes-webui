@@ -426,12 +426,15 @@ else
     fi
     # The agent source can be mounted read-only (see docker-compose.two-container.yml
     # / docker-compose.three-container.yml — the WebUI only reads this volume to
-    # install the agent's Python dependencies and never writes to it). setuptools'
-    # `egg_info` build step, however, touches `hermes_agent.egg-info/` inside the
-    # source tree even under PEP 517 build isolation, which `EROFS`-fails on a
-    # `:ro` mount and (under `set -e`) kills startup of every multi-container
-    # deploy. Stage the source into a writable tmpfs copy so the build can write
-    # its metadata side-by-side without touching the underlying mount.
+    # install the agent's Python dependencies and never writes to it). Export the
+    # curated [all] dependency set without emitting/building the agent project:
+    # current hermes-agent releases intentionally reject wheel and sdist builds,
+    # while WebUI imports the agent directly from the mounted source checkout.
+    #
+    # Stage the source into a writable tmpfs copy before export. The normal locked
+    # path is read-only, but the compatibility fallback may refresh uv.lock when an
+    # older or locally modified checkout has a stale lock; it must never write to
+    # the underlying mount.
     #
     # The copy excludes any pre-baked `*.egg-info` / `build` / `dist` artifacts
     # to avoid the timestamp-update path setuptools takes when one is present,
@@ -440,11 +443,9 @@ else
     # change across volume re-init); cost is one rsync of ~10MB of Python source.
     #
     # NB: `rsync -a` / `cp -a` preserve the source tree's mode bits, so a `:ro`
-    # source mounted mode 555 leaves the staged copy also mode 555. setuptools
-    # then can't create `hermes_agent.egg-info/` next to the package — it dies
-    # with "Permission denied" even though `_stage_src` itself was created
-    # writable by hermeswebui. Re-add owner-write on the staged tree after the
-    # copy so the build dir is genuinely writable, not just owned by us.
+    # source mounted mode 555 leaves the staged copy also mode 555. Re-add
+    # owner-write after the copy so uv can refresh a stale lock in the fallback
+    # path without widening permissions on the mounted source.
     _stage_src="/tmp/hermes-agent-build"
     rm -rf "$_stage_src"
     mkdir -p "$_stage_src"
@@ -466,7 +467,15 @@ else
     fi
     chmod -R u+w "$_stage_src" \
       || error_exit "Failed to make staged hermes-agent source writable (rsync/cp preserved :ro mount perms)"
-    uv pip install "$_stage_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org \
+    _agent_requirements="$_stage_src/.webui-requirements.txt"
+    if ! uv export --project "$_stage_src" --extra all --no-dev --no-emit-project --locked \
+      --output-file "$_agent_requirements"; then
+      echo "!! WARNING: hermes-agent uv.lock is missing or stale; resolving dependencies from pyproject.toml"
+      uv export --project "$_stage_src" --extra all --no-dev --no-emit-project \
+        --output-file "$_agent_requirements" \
+        || error_exit "Failed to export hermes-agent's requirements"
+    fi
+    uv pip install -r "$_agent_requirements" --trusted-host pypi.org --trusted-host files.pythonhosted.org \
       || error_exit "Failed to install hermes-agent's requirements"
     rm -rf "$_stage_src"
   else

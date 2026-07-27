@@ -158,54 +158,41 @@ def test_docker_md_documents_isolation_model():
 # ── 5: docker_init.bash stages agent source to a writable build dir ─────────
 #
 # The :ro mount fixed in PR #2470 broke a second, less obvious surface:
-# `uv pip install "$_agent_src[all]"` invokes setuptools' egg_info build step,
-# which touches `hermes_agent.egg-info/` *inside the source tree* even under
-# PEP 517 build isolation. On a `:ro` mount this returns `EROFS` and (under
-# `set -e`) kills container startup. The fix: copy the source tree into a
-# writable tmpfs build dir, run the install against THAT, then clean up.
+# Dependency resolution can need to update uv.lock for an older or locally
+# modified checkout. On a `:ro` mount that returns `EROFS` and (under `set -e`)
+# kills container startup. The fix: copy the source tree into a writable tmpfs
+# build dir, export its dependency set there, then clean up.
 #
 # This was caught the first time the Docker smoke gate ran on its own PR — a
 # real regression that 5800+ source-level pytests had no way to surface
 # because none of them invoked `docker_init.bash` against a real :ro mount.
 
 
-def test_docker_init_stages_agent_source_for_writable_install():
-    """docker_init.bash must NOT pass the raw _agent_src path to `uv pip
-    install` — that hits the :ro mount and fails. It must stage the source
-    into a writable build dir first (the staged path is used in the install
-    invocation)."""
+def test_docker_init_exports_agent_dependencies_without_building_agent_wheel():
+    """Docker must install deps without building the mounted agent project.
+
+    Current hermes-agent releases intentionally reject wheel/sdist builds, so
+    ``uv pip install <agent>[all]`` is no longer a valid dependency-install
+    mechanism.  Export the curated, locked ``all`` dependency set while
+    omitting the project itself, then install that exported requirements file.
+    """
     src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
 
-    # The fix uses a /tmp staging path that's clearly distinct from the
-    # mounted source path. Pin the staging marker.
     assert "_stage_src=" in src, (
-        "docker_init.bash must declare a _stage_src writable build dir "
-        "before invoking `uv pip install` against the (potentially :ro) "
-        "hermes-agent source."
+        "docker_init.bash must stage the potentially read-only agent source "
+        "before asking uv to inspect its project metadata."
     )
 
-    # The install line must reference the staged path, NOT the raw _agent_src
-    # path. The pre-fix code was:
-    #   uv pip install "$_agent_src[all]" ...
-    # The fixed code is:
-    #   uv pip install "$_stage_src[all]" ...
-    install_lines = [
-        line for line in src.splitlines()
-        if "uv pip install" in line and "[all]" in line
-    ]
-    assert install_lines, "expected an `uv pip install ...[all]` line in docker_init.bash"
-    for line in install_lines:
-        assert '"$_agent_src[all]"' not in line, (
-            "docker_init.bash invokes `uv pip install $_agent_src[all]` "
-            "directly — this fails with EROFS when the hermes-agent volume "
-            "is mounted :ro (the production multi-container default). "
-            "Use the writable $_stage_src path instead. "
-            f"Offending line: {line!r}"
-        )
-        assert "_stage_src" in line, (
-            "the `uv pip install ...[all]` line must use the staged writable "
-            f"path. Offending line: {line!r}"
-        )
+    stage_idx = src.index("_stage_src=")
+    stage_block_end = src.index("\n  else\n", stage_idx)
+    install_block = src[stage_idx:stage_block_end]
+
+    assert 'uv export --project "$_stage_src"' in install_block
+    assert "--extra all" in install_block
+    assert "--locked" in install_block
+    assert "--no-emit-project" in install_block
+    assert 'uv pip install -r "$_agent_requirements"' in install_block
+    assert 'uv pip install "$_stage_src[all]"' not in install_block
 
 
 def test_docker_init_excludes_egg_info_during_staging():
@@ -265,16 +252,14 @@ def test_docker_init_excludes_egg_info_during_staging():
 
 
 def test_docker_init_makes_staged_dir_writable_after_ro_mount_copy():
-    """Regression test for the docker-init "could not create hermes_agent.egg-info:
-    Permission denied" failure on :ro multi-container mounts.
+    """The staged checkout must be writable for dependency-export fallback.
 
     `rsync -a` / `cp -a` preserve the source tree's mode bits, so a hermes-agent
     source mounted mode 555 leaves the staged copy also mode 555 even though the
-    staging dir itself was created writable by hermeswebui. setuptools then can't
-    create `<pkg>.egg-info/` next to the package and dies with "Permission denied"
-    during `uv pip install`. The fix is a `chmod -R u+w` on the staged tree AFTER
-    both copy paths and BEFORE the install. This test pins that ordering and the
-    `u+w` form (so the staged tree isn't accidentally made world-writable).
+    staging dir itself was created writable by hermeswebui. The unlocked export
+    fallback then cannot refresh uv.lock. Keep `chmod -R u+w` after both copy
+    paths and before dependency export/install without making the tree
+    world-writable.
     """
     src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
 
@@ -289,9 +274,8 @@ def test_docker_init_makes_staged_dir_writable_after_ro_mount_copy():
     assert re.search(r"chmod\s+-R\s+u\+w\s+\"?\\?\$?_stage_src\"?", stage_block), (
         "docker_init.bash staging block must `chmod -R u+w \"$_stage_src\"` "
         "after the rsync/cp copy. Without it, a :ro hermes-agent mount leaves "
-        "the staged tree mode 555 and `uv pip install` fails with "
-        "'could not create hermes_agent.egg-info: Permission denied' under "
-        "PEP 517 build isolation."
+        "the staged tree mode 555 and the unlocked dependency export fallback "
+        "cannot refresh uv.lock."
     )
 
     # The chmod must live in the SHARED tail (after `fi`), not inside either
@@ -304,7 +288,8 @@ def test_docker_init_makes_staged_dir_writable_after_ro_mount_copy():
 
     # Both copy branches (rsync and cp -a) close with `fi`; the chmod must
     # come AFTER the closing `fi` so it covers whichever path was taken.
-    fi_idx = stage_block.rindex("\n    fi\n")
+    copy_if_idx = stage_block.index("if command -v rsync")
+    fi_idx = stage_block.index("\n    fi\n", copy_if_idx)
     chmod_idx = stage_block.index("chmod -R u+w")
     assert chmod_idx > fi_idx, (
         "chmod must live AFTER the rsync/cp if/else closes — putting it "
