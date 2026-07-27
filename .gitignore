@@ -27,6 +27,7 @@ copilot-instructions.md
 # Generated screenshots and transient artifacts
 screenshot-*.png
 full-UI.png
+test.png
 
 # OS files
 .DS_Store
