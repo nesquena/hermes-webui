@@ -421,12 +421,12 @@ def test_wallpaper_forced_skins_explicitly_override_shell_backgrounds() -> None:
         '[data-wallpaper-scope="app"]'
     )
     block = css[css.index(selector):]
-    for surface in (
-        ".app-titlebar", ".rail", ".sidebar", ".rightpanel", ".main",
-        ".topbar", ".composer-wrap",
-    ):
-        assert surface in block
-    assert "{background:transparent!important;}" in block
+    transparency_selector = (
+        selector
+        + " :is(.app-titlebar,.rail,.sidebar,.rightpanel,.main,.topbar,"
+        ".composer-wrap,.empty-state)"
+    )
+    assert transparency_selector + "{background:transparent!important;}" in css
     assert selector + " .sidebar .panel-view" in css
     assert selector + " .composer-box" in css
     assert "{background:var(--wallpaper-composer)!important;}" in block
