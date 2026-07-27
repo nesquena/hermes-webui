@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from unittest.mock import patch
 
 import api.agent_sessions as agent_sessions
+import api.models as models
 import api.routes as routes
 
 
@@ -59,6 +60,64 @@ def _insert_message(conn, sid, *, timestamp=None, role="user"):
     conn.commit()
 
 
+def _ensure_production_state_db(path):
+    """Create the current Agent lineage shape (not the synthetic fork schema)."""
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            title TEXT,
+            model TEXT,
+            model_config TEXT,
+            started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            parent_session_id TEXT,
+            ended_at REAL,
+            end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT,
+            timestamp REAL
+        );
+        """
+    )
+    return conn
+
+
+def _insert_production_row(
+    conn,
+    sid,
+    *,
+    parent=None,
+    started_at,
+    ended_at=None,
+    end_reason=None,
+    model_config=None,
+    source="webui",
+):
+    if isinstance(model_config, dict):
+        model_config = json.dumps(model_config)
+    conn.execute(
+        """
+        INSERT INTO sessions
+        (id, source, title, model, model_config, started_at, message_count,
+         parent_session_id, ended_at, end_reason)
+        VALUES (?, ?, ?, 'openai/gpt-5', ?, ?, 1, ?, ?, ?)
+        """,
+        (sid, source, sid, model_config, started_at, parent, ended_at, end_reason),
+    )
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'user', ?, ?)",
+        (sid, f"message:{sid}", started_at),
+    )
+    conn.commit()
+
+
 def test_lineage_report_returns_bounded_read_only_tip_and_hidden_segments(tmp_path):
     conn = _ensure_state_db(tmp_path / "state.db")
     t0 = time.time() - 100
@@ -87,6 +146,385 @@ def test_lineage_report_returns_bounded_read_only_tip_and_hidden_segments(tmp_pa
         assert "delete_candidates" not in report
     finally:
         conn.close()
+
+
+def test_compression_persist_race_still_collapses_to_one_lineage(tmp_path):
+    """A child may be inserted just before its compression parent is closed."""
+    conn = _ensure_state_db(tmp_path / "state.db")
+    t0 = time.time() - 100
+    try:
+        _insert_state_row(
+            conn,
+            "compression_race_root",
+            started_at=t0,
+            ended_at=t0 + 5.020,
+            end_reason="compression",
+        )
+        _insert_state_row(
+            conn,
+            "compression_race_tip",
+            parent="compression_race_root",
+            started_at=t0 + 5.000,
+        )
+        _insert_message(conn, "compression_race_tip", timestamp=t0 + 6)
+
+        report = agent_sessions.read_session_lineage_report(
+            tmp_path / "state.db", "compression_race_tip"
+        )
+        rows = agent_sessions.read_importable_agent_session_rows(
+            tmp_path / "state.db", exclude_sources=()
+        )
+
+        assert report["lineage_key"] == "compression_race_root"
+        assert report["tip_session_id"] == "compression_race_tip"
+        assert [segment["session_id"] for segment in report["segments"]] == [
+            "compression_race_tip",
+            "compression_race_root",
+        ]
+        assert [row["id"] for row in rows] == ["compression_race_tip"]
+        assert rows[0]["_lineage_root_id"] == "compression_race_root"
+        assert rows[0]["_compression_segment_count"] == 2
+    finally:
+        conn.close()
+
+
+def test_production_identity_metadata_keeps_branches_out_of_raced_compression_lineage(
+    tmp_path, monkeypatch
+):
+    """Production branch/delegate identity wins before bounded overlap stitching."""
+    db_path = tmp_path / "state.db"
+    conn = _ensure_production_state_db(db_path)
+    root_id = "67731d41a751"
+    middle_id = "20260809_092619_1df4e5"
+    middle2_id = "20260809_153027_ecd2d0"
+    tip_id = "20260811_163454_515676"
+    branch_id = "production_branch"
+    delegate_id = "production_delegate"
+    malformed_id = "malformed_identity"
+    ambiguous_id = "ambiguous_identity"
+    foreign_identity_id = "foreign_identity"
+    older_id = "materially_older_child"
+    inherited_identity = {"_branched_from": "pre_compression_origin"}
+    try:
+        _insert_production_row(
+            conn,
+            root_id,
+            started_at=1000.0,
+            ended_at=1100.041825,
+            end_reason="compression",
+            model_config=inherited_identity,
+        )
+        _insert_production_row(
+            conn,
+            middle_id,
+            parent=root_id,
+            started_at=1100.0,
+            ended_at=1200.031181,
+            end_reason="compression",
+            model_config=inherited_identity,
+        )
+        _insert_production_row(
+            conn,
+            middle2_id,
+            parent=middle_id,
+            started_at=1200.0,
+            ended_at=1300.042504,
+            end_reason="compression",
+            model_config=inherited_identity,
+        )
+        _insert_production_row(
+            conn,
+            tip_id,
+            parent=middle2_id,
+            started_at=1300.0,
+            model_config=inherited_identity,
+        )
+        _insert_production_row(
+            conn,
+            branch_id,
+            parent=middle2_id,
+            started_at=1300.02,
+            model_config={"_branched_from": middle2_id},
+        )
+        _insert_production_row(
+            conn,
+            delegate_id,
+            parent=middle2_id,
+            started_at=1300.02,
+            model_config={"_delegate_from": middle2_id},
+        )
+        _insert_production_row(
+            conn,
+            malformed_id,
+            parent=middle2_id,
+            started_at=1300.02,
+            model_config='{"_branched_from":',
+        )
+        _insert_production_row(
+            conn,
+            ambiguous_id,
+            parent=middle2_id,
+            started_at=1300.02,
+            model_config={
+                "_branched_from": middle2_id,
+                "_delegate_from": middle2_id,
+            },
+        )
+        _insert_production_row(
+            conn,
+            foreign_identity_id,
+            parent=middle2_id,
+            started_at=1300.02,
+            model_config={"_branched_from": "unrelated_lineage"},
+        )
+        _insert_production_row(
+            conn,
+            older_id,
+            parent=middle2_id,
+            started_at=1290.0,
+        )
+
+        rows = agent_sessions.read_importable_agent_session_rows(
+            db_path, limit=None, exclude_sources=()
+        )
+        rows_by_id = {row["id"]: row for row in rows}
+        assert set(rows_by_id) == {
+            tip_id,
+            branch_id,
+            delegate_id,
+            malformed_id,
+            ambiguous_id,
+            foreign_identity_id,
+            older_id,
+        }
+        assert rows_by_id[tip_id]["_lineage_root_id"] == root_id
+        assert rows_by_id[tip_id]["_lineage_tip_id"] == tip_id
+        assert rows_by_id[tip_id]["_compression_segment_count"] == 4
+        for independent_id in (
+            branch_id,
+            delegate_id,
+            malformed_id,
+            ambiguous_id,
+            foreign_identity_id,
+            older_id,
+        ):
+            assert rows_by_id[independent_id]["relationship_type"] == "child_session"
+            assert "_lineage_root_id" not in rows_by_id[independent_id]
+            assert "model_config" not in rows_by_id[independent_id]
+            assert "_lineage_model_config" not in rows_by_id[independent_id]
+
+        tip_report = agent_sessions.read_session_lineage_report(db_path, tip_id)
+        assert tip_report["lineage_key"] == root_id
+        assert tip_report["tip_session_id"] == tip_id
+        assert tip_report["total_segments"] == 4
+        assert [segment["session_id"] for segment in tip_report["segments"]] == [
+            tip_id,
+            middle2_id,
+            middle_id,
+            root_id,
+        ]
+        for independent_id in (
+            branch_id,
+            delegate_id,
+            malformed_id,
+            ambiguous_id,
+            foreign_identity_id,
+        ):
+            report = agent_sessions.read_session_lineage_report(db_path, independent_id)
+            assert report["lineage_key"] == independent_id
+            assert report["total_segments"] == 1
+
+        metadata = agent_sessions.read_session_lineage_metadata(
+            db_path,
+            {
+                root_id,
+                middle_id,
+                middle2_id,
+                tip_id,
+                branch_id,
+                delegate_id,
+                malformed_id,
+                ambiguous_id,
+                foreign_identity_id,
+                older_id,
+            },
+        )
+        assert metadata[tip_id]["_lineage_root_id"] == root_id
+        assert metadata[tip_id]["_lineage_tip_id"] == tip_id
+        for stale_id in (root_id, middle_id, middle2_id):
+            assert metadata[stale_id]["_lineage_tip_id"] == tip_id
+        for independent_id in (
+            branch_id,
+            delegate_id,
+            malformed_id,
+            ambiguous_id,
+            foreign_identity_id,
+            older_id,
+        ):
+            assert metadata[independent_id]["relationship_type"] == "child_session"
+            assert "_lineage_root_id" not in metadata[independent_id]
+
+        monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+        assert [
+            message["content"]
+            for message in models.get_state_db_session_messages(
+                tip_id, stitch_continuations=True
+            )
+        ] == [
+            f"message:{root_id}",
+            f"message:{middle_id}",
+            f"message:{middle2_id}",
+            f"message:{tip_id}",
+        ]
+        for independent_id in (
+            branch_id,
+            delegate_id,
+            malformed_id,
+            ambiguous_id,
+            foreign_identity_id,
+            older_id,
+        ):
+            assert [
+                message["content"]
+                for message in models.get_state_db_session_messages(
+                    independent_id, stitch_continuations=True
+                )
+            ] == [f"message:{independent_id}"]
+    finally:
+        conn.close()
+
+
+def test_jouvence_compression_collapse_preserves_three_real_delegate_children(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "state.db"
+    conn = _ensure_production_state_db(db_path)
+    root_id = "20260802_122018_e27695"
+    tip_id = "20260809_100052_0e8b4c"
+    delegate_ids = [f"jouvence_delegate_{index}" for index in range(3)]
+    try:
+        _insert_production_row(
+            conn,
+            root_id,
+            started_at=1000.0,
+            ended_at=2000.081553,
+            end_reason="compression",
+        )
+        _insert_production_row(conn, tip_id, parent=root_id, started_at=2000.0)
+        for index, delegate_id in enumerate(delegate_ids):
+            _insert_production_row(
+                conn,
+                delegate_id,
+                parent=root_id,
+                started_at=1500.0 + index,
+                source="subagent",
+                model_config={"_delegate_from": root_id},
+            )
+
+        rows = agent_sessions.read_importable_agent_session_rows(
+            db_path, limit=None, exclude_sources=()
+        )
+        assert [row["id"] for row in rows if row.get("relationship_type") != "child_session"] == [
+            tip_id
+        ]
+        tip_row = next(row for row in rows if row["id"] == tip_id)
+        assert tip_row["_lineage_root_id"] == root_id
+        assert tip_row["_lineage_tip_id"] == tip_id
+        assert tip_row["_compression_segment_count"] == 2
+        child_rows = [row for row in rows if row.get("relationship_type") == "child_session"]
+        assert {row["id"] for row in child_rows} == set(delegate_ids)
+        assert all(row["parent_session_id"] == root_id for row in child_rows)
+
+        report = agent_sessions.read_session_lineage_report(db_path, tip_id)
+        assert report["lineage_key"] == root_id
+        assert report["tip_session_id"] == tip_id
+        assert report["total_segments"] == 2
+        assert {child["session_id"] for child in report["children"]} == set(delegate_ids)
+
+        metadata = agent_sessions.read_session_lineage_metadata(
+            db_path, {root_id, tip_id, *delegate_ids}
+        )
+        assert metadata[root_id]["_lineage_tip_id"] == tip_id
+        assert metadata[tip_id]["_lineage_tip_id"] == tip_id
+        assert all(
+            metadata[delegate_id]["relationship_type"] == "child_session"
+            for delegate_id in delegate_ids
+        )
+
+        monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+        assert [
+            message["content"]
+            for message in models.get_state_db_session_messages(
+                tip_id, stitch_continuations=True
+            )
+        ] == [f"message:{root_id}", f"message:{tip_id}"]
+    finally:
+        conn.close()
+
+
+def test_cli_close_overlap_remains_a_child_session(tmp_path):
+    """Only automatic compression may overlap the parent's close timestamp."""
+    conn = _ensure_state_db(tmp_path / "state.db")
+    t0 = time.time() - 100
+    try:
+        _insert_state_row(
+            conn,
+            "cli_overlap_parent",
+            started_at=t0,
+            ended_at=t0 + 5.020,
+            end_reason="cli_close",
+        )
+        _insert_state_row(
+            conn,
+            "cli_overlap_child",
+            parent="cli_overlap_parent",
+            started_at=t0 + 5.000,
+        )
+
+        child_report = agent_sessions.read_session_lineage_report(
+            tmp_path / "state.db", "cli_overlap_child"
+        )
+        parent_report = agent_sessions.read_session_lineage_report(
+            tmp_path / "state.db", "cli_overlap_parent"
+        )
+
+        assert child_report["lineage_key"] == "cli_overlap_child"
+        assert [segment["session_id"] for segment in child_report["segments"]] == [
+            "cli_overlap_child"
+        ]
+        assert [child["session_id"] for child in parent_report["children"]] == [
+            "cli_overlap_child"
+        ]
+    finally:
+        conn.close()
+
+
+def test_compression_overlap_allowance_is_bounded_at_one_second():
+    parent = {
+        "id": "bounded_parent",
+        "source": "webui",
+        "ended_at": 200.0,
+        "end_reason": "compression",
+    }
+
+    assert agent_sessions._is_continuation_session(
+        parent,
+        {
+            "id": "at_boundary",
+            "source": "webui",
+            "parent_session_id": "bounded_parent",
+            "started_at": 199.0,
+        },
+    )
+    assert not agent_sessions._is_continuation_session(
+        parent,
+        {
+            "id": "past_boundary",
+            "source": "webui",
+            "parent_session_id": "bounded_parent",
+            "started_at": 198.999,
+        },
+    )
 
 
 def test_lineage_report_keeps_cross_surface_parent_out_of_hidden_segments(tmp_path):
