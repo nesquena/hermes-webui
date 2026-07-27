@@ -19,9 +19,9 @@ snapshot + repaint) and wires it into loadSession at three points:
 
 Two invariants flagged in review are protected here and MUST NOT regress:
 
-  (a) hidden/background completions must still be marked unread — the visit-ack
-      does NOT loosen the focus gate on the completion paths, so a completion in
-      a non-visible/non-focused tab is still flagged (concern a).
+  (a) later hidden/background completions must still be marked unread — the
+      final successful-load ack does NOT loosen the focus gate on completion
+      paths, so a completion after the visit remains flagged (concern a).
   (b) cleaning up a visited child's unread state must not strip a lineage
       PARENT's own unread dot — the visit repaints via
       renderSessionListFromCache(), which recomputes each row's aggregated
@@ -79,19 +79,25 @@ def test_load_session_acknowledges_visit_before_and_after_message_load():
     )
 
 
-def test_post_load_reack_is_guarded_by_active_view():
-    # #5917 gate finding: the post-load re-ack must be gated on
-    # _isSessionActivelyViewedForList(sid). A completion that lands while
-    # _ensureMessagesLoaded() is in flight AND the tab then goes hidden is
-    # correctly marked unread — an UNCONDITIONAL post-load ack would wrongly
-    # clear that hidden-tab-completion marker.
+def test_successful_post_load_reack_is_not_blocked_by_focus_loss():
+    """Once the selected transcript has loaded successfully, it is read.
+
+    Losing focus while the awaited messages request is in flight must not strand
+    the selected conversation in unread forever. Failure and stale-navigation
+    exits occur before this block, so only the successfully loaded current
+    session reaches the final acknowledgement.
+    """
     block = _load_session_block()
     loading_clear = block.find("if (_isCurrentLoad()) _loadingSessionId = null;\n\n  // Re-acknowledge")
-    guard = block.find("_isSessionActivelyViewedForList(sid)", loading_clear)
     second_ack = block.find("_acknowledgeSessionVisit(", loading_clear)
-    assert guard != -1 and guard < second_ack, (
-        "the post-load re-acknowledge must be guarded by "
-        "_isSessionActivelyViewedForList(sid) so a hidden-tab completion stays unread"
+    ack_guard = block.rfind("if (", loading_clear, second_ack)
+    guarded_region = block[ack_guard:second_ack]
+
+    assert loading_clear != -1 and second_ack > loading_clear
+    assert "S.session && S.session.session_id === sid" in guarded_region
+    assert "_isSessionActivelyViewedForList" not in guarded_region, (
+        "a successful current-session load must clear unread even if the window "
+        "lost focus while the transcript was loading"
     )
 
 
@@ -412,18 +418,17 @@ function _hasMarker() {{
 """
 
 
-def test_hidden_tab_completion_during_message_load_survives():
-    """#5917 gate finding (SILENT): a completion that lands while the tab is
-    hidden DURING the awaited message fetch inside _ensureMessagesLoaded() must
-    NOT be silently marked read. The guarded viewed-count clear must skip when
-    the session is no longer actively viewed."""
+def test_hidden_tab_completion_survives_message_helper_until_final_load_ack():
+    """The lower-level message helper must not itself decide that a hidden
+    session is read. ``loadSession`` owns that decision after the selected
+    transcript settles successfully; standalone/background helper calls retain
+    the focus gate."""
     out = _run_node(_hidden_completion_script(hidden=True))
     assert out["apiIssued"] is True, "precondition: the delayed messages fetch was issued"
     assert out["markerBefore"] is True, "precondition: the mid-fetch completion marked the session unread"
     assert out["markerAfter"] is True, (
-        "a hidden-tab completion landing during the awaited message fetch must "
-        "SURVIVE — _ensureMessagesLoaded() must not clear the unread marker via "
-        "an unconditional _setSessionViewedCount when the tab is not actively viewing"
+        "the message helper must preserve the hidden-tab marker until the outer "
+        "successful load performs its final selected-session acknowledgement"
     )
     assert out["viewed"] is None, (
         "the viewed count must NOT be synced for a hidden/background session, "

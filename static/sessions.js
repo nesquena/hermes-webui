@@ -2361,15 +2361,12 @@ async function loadSession(sid){
   // flight and re-mark the open session unread; re-syncing here clears that
   // sticky dot once the transcript is settled (#4946).
   //
-  // Gate the final ack on _isSessionActivelyViewedForList(sid): a completion
-  // that lands while _ensureMessagesLoaded() is in flight AND the tab then goes
-  // hidden is correctly marked unread — an UNCONDITIONAL ack here would wrongly
-  // clear that hidden-tab-completion marker. Only clear when the session is
-  // still actively viewed. (#5917 gate finding)
-  if (
-    S.session && S.session.session_id === sid &&
-    (typeof _isSessionActivelyViewedForList !== 'function' || _isSessionActivelyViewedForList(sid))
-  ) {
+  // A successfully loaded selected transcript is read, even if the window lost
+  // focus while _ensureMessagesLoaded() was in flight. Failure and stale-load
+  // exits occur above, so reaching this point proves that `sid` finished loading
+  // and is still the selected session. Completions that arrive later while the
+  // window is hidden still use the normal focus-gated background marker paths.
+  if (S.session && S.session.session_id === sid) {
     _acknowledgeSessionVisit(
       sid,
       Number(S.session.message_count || 0),
