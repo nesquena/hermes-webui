@@ -5,6 +5,8 @@ import subprocess
 import sys
 from urllib.parse import urlparse
 
+import pytest
+
 
 class _FakeHandler:
     def __init__(self):
@@ -205,6 +207,51 @@ def test_gateway_restart_uses_restart_subcommand(monkeypatch, tmp_path):
     assert data["ok"] is True
     assert data["action"] == "restart"
     assert calls[0][-2:] == ["gateway", "restart"]
+
+
+@pytest.mark.parametrize("env_name", ("HERMES_API_URL", "HERMES_WEBUI_GATEWAY_BASE_URL"))
+@pytest.mark.parametrize("action", ("start", "stop", "restart"))
+def test_remote_gateway_lifecycle_fails_closed_without_local_subprocess(
+    monkeypatch,
+    env_name,
+    action,
+):
+    from api import routes
+
+    monkeypatch.setenv(env_name, "http://hermes-agent:8642")
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("remote gateway control must not launch a local subprocess")
+
+    monkeypatch.setattr(routes.subprocess, "run", fail_run)
+
+    handler, data = _call_post(monkeypatch, f"/api/gateway/{action}")
+
+    assert handler.status == 501
+    assert data == {
+        "ok": False,
+        "error": (
+            "Gateway lifecycle control is unavailable for remote gateway deployments. "
+            "Restart the hermes-agent service through its container supervisor."
+        ),
+        "error_code": "remote_gateway_control_unsupported",
+        "action": action,
+    }
+
+
+def test_remote_gateway_lifecycle_precedes_local_action_contention(monkeypatch):
+    from api import routes
+
+    monkeypatch.setenv("HERMES_API_URL", "http://hermes-agent:8642")
+    acquired = routes._GATEWAY_ACTION_LOCK.acquire(blocking=False)
+    assert acquired, "lock should be free at test start"
+    try:
+        handler, data = _call_post(monkeypatch, "/api/gateway/restart")
+    finally:
+        routes._GATEWAY_ACTION_LOCK.release()
+
+    assert handler.status == 501
+    assert data["error_code"] == "remote_gateway_control_unsupported"
 
 
 def test_gateway_lifecycle_timeout_returns_gateway_timeout(monkeypatch, tmp_path):

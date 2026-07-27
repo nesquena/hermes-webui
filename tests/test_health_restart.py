@@ -186,6 +186,47 @@ def test_restart_active_profile_gateway_runs_source_cli_in_clean_venv(monkeypatc
     assert gateway_restart._GATEWAY_RESTART_LOCK.locked() is False
 
 
+def test_restart_active_profile_gateway_fails_closed_for_remote_gateway(monkeypatch):
+    gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
+    monkeypatch.setenv("HERMES_API_URL", "http://hermes-agent:8642")
+
+    def fail_popen(*args, **kwargs):
+        raise AssertionError("remote gateway restart must not launch a local subprocess")
+
+    monkeypatch.setattr(gateway_restart.subprocess, "Popen", fail_popen)
+
+    result = gateway_restart.restart_active_profile_gateway(profile="work")
+
+    assert result == {
+        "status": "unsupported",
+        "message": (
+            "Gateway lifecycle control is unavailable for remote gateway deployments. "
+            "Restart the hermes-agent service through its container supervisor."
+        ),
+        "error_code": "remote_gateway_control_unsupported",
+    }
+    assert gateway_restart._GATEWAY_RESTART_LOCK.locked() is False
+
+
+def test_remote_gateway_restart_precedes_local_lock_and_profile_resolution(monkeypatch):
+    gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://hermes-agent:8642")
+    monkeypatch.setattr(
+        gateway_restart,
+        "get_hermes_home_for_profile",
+        lambda profile: (_ for _ in ()).throw(RuntimeError("profile unavailable")),
+    )
+
+    assert gateway_restart._GATEWAY_RESTART_LOCK.acquire(blocking=False) is True
+    try:
+        result = gateway_restart.restart_active_profile_gateway(profile="work")
+    finally:
+        gateway_restart._GATEWAY_RESTART_LOCK.release()
+
+    assert result["status"] == "unsupported"
+    assert result["error_code"] == "remote_gateway_control_unsupported"
+
+
 def test_restart_active_profile_gateway_pins_explicit_default_profile(monkeypatch):
     gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
     called = {}
@@ -393,3 +434,51 @@ def test_handle_health_restart_concurrency(monkeypatch):
             429,
         )
     ]
+
+
+def test_handle_health_restart_remote_gateway_unsupported(monkeypatch):
+    _, responses = _call_health_restart(
+        monkeypatch,
+        {
+            "status": "unsupported",
+            "message": (
+                "Gateway lifecycle control is unavailable for remote gateway deployments. "
+                "Restart the hermes-agent service through its container supervisor."
+            ),
+            "error_code": "remote_gateway_control_unsupported",
+        },
+    )
+
+    assert responses == [
+        (
+            {
+                "ok": False,
+                "error": (
+                    "Gateway lifecycle control is unavailable for remote gateway deployments. "
+                    "Restart the hermes-agent service through its container supervisor."
+                ),
+                "error_code": "remote_gateway_control_unsupported",
+            },
+            501,
+        )
+    ]
+
+
+def test_handle_health_restart_remote_gateway_precedes_local_contention(monkeypatch):
+    gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
+    monkeypatch.setenv("HERMES_API_URL", "http://hermes-agent:8642")
+    responses = []
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, **kw: responses.append((payload, kw.get("status", 200))) or True,
+    )
+
+    assert gateway_restart._GATEWAY_RESTART_LOCK.acquire(blocking=False) is True
+    try:
+        routes._handle_health_restart(types.SimpleNamespace())
+    finally:
+        gateway_restart._GATEWAY_RESTART_LOCK.release()
+
+    assert responses[0][1] == 501
+    assert responses[0][0]["error_code"] == "remote_gateway_control_unsupported"

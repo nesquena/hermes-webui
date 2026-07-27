@@ -30,9 +30,15 @@ The multi-container setup still shares the agent source tree with the WebUI:
   boundary: the WebUI cannot write the mount, but it still installs and imports
   code from it.
 - Gateway lifecycle controls invoke `python -m hermes_cli.main` from the
-  configured checkout when no installed `hermes` launcher is available. This
-  keeps source-based controls functional when Docker installs dependencies
-  without installing the agent distribution.
+  configured checkout when no installed `hermes` launcher is available and
+  WebUI owns the local gateway lifecycle. This keeps source-based controls
+  functional when Docker installs dependencies without installing the agent
+  distribution. When `HERMES_API_URL` or
+  `HERMES_WEBUI_GATEWAY_BASE_URL` selects a separately owned gateway, WebUI
+  must not launch a local CLI subprocess. The Agent API currently exposes no
+  authenticated lifecycle endpoint, so remote controls fail closed with
+  `remote_gateway_control_unsupported`; operators restart the Agent through
+  its container or service supervisor.
 
 The durable target is that multi-container WebUI should not need a direct
 `hermes-agent-src` mount. The WebUI should communicate with hermes-agent through
@@ -78,6 +84,9 @@ perform provider/runtime decisions, or expose privileged data:
   compatibility path can be removed.
 - Runtime provider resolution and gateway normalization now using
   `hermes_cli.runtime_provider` and `agent.anthropic_adapter`.
+- Authenticated, profile-scoped gateway lifecycle control owned by the Agent
+  runtime. The endpoint must advertise support through capabilities and define
+  bounded start/stop/restart outcomes before WebUI enables remote controls.
 - Auxiliary task execution and configuration now using `agent.auxiliary_client`.
 - Credential/auth/account usage access now using `agent.credential_pool`,
   `hermes_cli.auth`, and `agent.account_usage`.

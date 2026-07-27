@@ -226,6 +226,21 @@ server, the agent also requires a real `API_SERVER_KEY` (at least 8 characters),
 and the WebUI still needs `HERMES_API_URL` or `HERMES_WEBUI_GATEWAY_BASE_URL` to
 reach that service from its container.
 
+Gateway lifecycle ownership also follows that URL. In the two- and
+three-container layouts, the gateway process belongs to the `hermes-agent`
+service, not the WebUI container. The Agent API does not currently expose an
+authenticated start/stop/restart endpoint, so WebUI returns
+`remote_gateway_control_unsupported` instead of launching a second gateway in
+its own container namespace. Restart the owning service from the host when
+needed:
+
+```bash
+docker compose -f docker-compose.two-container.yml restart hermes-agent
+```
+
+Local/single-process installations continue to use the System Settings and
+`/api/health/restart` controls normally.
+
 **Verify**: Once the gateway is up, the System Settings pill should turn green and the Tasks banner disappear. From the host:
 
 ```bash

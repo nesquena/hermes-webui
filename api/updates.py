@@ -25,6 +25,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from api.agent_health import get_active_profile_gateway_running_pid
+from api.gateway_authority import REMOTE_GATEWAY_CONTROL_ERROR_CODE
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
@@ -1888,6 +1889,17 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
 
 
 def _agent_gateway_restart_failure_message(target: str, restart_result: dict) -> str:
+    if (
+        restart_result.get("status") == "unsupported"
+        or restart_result.get("error_code") == REMOTE_GATEWAY_CONTROL_ERROR_CODE
+    ):
+        detail = str(restart_result.get("message") or "").strip()
+        if detail:
+            return f'{target} updated, but gateway restart did not complete: {detail}'
+        return (
+            f'{target} updated, but remote gateway lifecycle control is unsupported. '
+            'Restart the owning gateway service through its supervisor.'
+        )
     if restart_result.get("message"):
         return (
             f'{target} updated, but gateway restart did not complete: '

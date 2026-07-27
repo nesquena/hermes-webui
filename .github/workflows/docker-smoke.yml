@@ -32,6 +32,9 @@ on:
       - 'Dockerfile'
       - 'docker_init.bash'
       - 'docker-compose*.yml'
+      - 'api/gateway_authority.py'
+      - 'api/gateway_restart.py'
+      - 'api/routes.py'
       - '.dockerignore'
       - '.env.docker.example'
       - '.github/workflows/docker-smoke.yml'
@@ -41,6 +44,9 @@ on:
       - 'Dockerfile'
       - 'docker_init.bash'
       - 'docker-compose*.yml'
+      - 'api/gateway_authority.py'
+      - 'api/gateway_restart.py'
+      - 'api/routes.py'
       - '.dockerignore'
       - '.env.docker.example'
       - '.github/workflows/docker-smoke.yml'
@@ -212,6 +218,66 @@ jobs:
           done
           echo "✅ /health = 200 after $attempts attempts"
           echo "::endgroup::"
+
+          # ----- Multi-container gateway-control ownership -----
+          # HERMES_API_URL points WebUI at the separately owned hermes-agent
+          # process. The Agent API does not currently expose lifecycle control,
+          # so WebUI must return an explicit unsupported response rather than
+          # launching `hermes gateway restart` in its own container namespace.
+          if [ "${{ matrix.variant }}" != "single" ]; then
+            echo "::group::Remote gateway restart authority"
+
+            count_gateway_processes() {
+              local service="$1"
+              docker compose -p "$PROJECT" -f "$COMPOSE_FILE" exec -T "$service" python3 -c '
+          from pathlib import Path
+
+          count = 0
+          for proc in Path("/proc").iterdir():
+              if not proc.name.isdigit():
+                  continue
+              try:
+                  args = (proc / "cmdline").read_bytes().split(b"\0")
+              except (FileNotFoundError, PermissionError, ProcessLookupError):
+                  continue
+              if b"gateway" in args and b"run" in args:
+                  count += 1
+          print(count)
+          '
+            }
+
+            agent_before="$(count_gateway_processes "hermes-agent")"
+            webui_before="$(count_gateway_processes "hermes-webui")"
+            if [ "$agent_before" != "1" ] || [ "$webui_before" != "0" ]; then
+              echo "❌ Unexpected gateway ownership before restart: agent=$agent_before webui=$webui_before"
+              exit 1
+            fi
+
+            restart_body="$HERMES_WORKSPACE/restart-response.json"
+            for restart_endpoint in /api/health/restart /api/gateway/restart; do
+              restart_status="$(curl --silent --show-error --max-time 10 \
+                --output "$restart_body" --write-out '%{http_code}' \
+                --request POST "http://127.0.0.1:8787$restart_endpoint")"
+              if [ "$restart_status" != "501" ] || \
+                 ! grep -q 'remote_gateway_control_unsupported' "$restart_body"; then
+                echo "❌ $restart_endpoint did not fail closed (HTTP $restart_status)"
+                cat "$restart_body"
+                rm -f "$restart_body"
+                exit 1
+              fi
+            done
+            rm -f "$restart_body"
+
+            agent_after="$(count_gateway_processes "hermes-agent")"
+            webui_after="$(count_gateway_processes "hermes-webui")"
+            if [ "$agent_after" != "1" ] || [ "$webui_after" != "0" ]; then
+              echo "❌ Gateway ownership changed after rejected restart: agent=$agent_after webui=$webui_after"
+              exit 1
+            fi
+
+            echo "✅ Remote restart failed closed; gateway remains agent-owned"
+            echo "::endgroup::"
+          fi
 
           # ----- Startup log scan: must not contain any known-bad signatures -----
           # These are the exact patterns that would have flagged #2470 in real time.

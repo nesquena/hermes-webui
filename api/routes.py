@@ -35,6 +35,11 @@ from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 from api.agent_cli import source_agent_cli_invocation
+from api.gateway_authority import (
+    REMOTE_GATEWAY_CONTROL_ERROR_CODE,
+    RemoteGatewayControlUnsupported,
+    require_local_gateway_control,
+)
 from api.agent_runtime import (
     AgentRuntimeChangedError,
     ensure_agent_runtime_current,
@@ -1209,6 +1214,8 @@ def _run_gateway_lifecycle_command(action: str) -> subprocess.CompletedProcess:
     if action not in {"start", "stop", "restart"}:
         raise ValueError("unsupported gateway action")
 
+    require_local_gateway_control()
+
     from api.profiles import get_active_profile_name
 
     cmd, agent_dir = source_agent_cli_invocation()
@@ -1236,11 +1243,25 @@ def _run_gateway_lifecycle_command(action: str) -> subprocess.CompletedProcess:
 
 def _handle_gateway_lifecycle(handler, action: str, body: dict):
     del body  # Reserved for future per-gateway naming without changing the route contract.
-    # Reject overlapping lifecycle actions instead of spawning concurrent
-    # `hermes gateway` subprocesses (a non-blocking acquire — the action holds
-    # the lock for at most _GATEWAY_LIFECYCLE_TIMEOUT_SECONDS).
     if action not in {"start", "stop", "restart"}:
         return bad(handler, "unsupported gateway action", 400)
+    try:
+        require_local_gateway_control()
+    except RemoteGatewayControlUnsupported as exc:
+        return j(
+            handler,
+            {
+                "ok": False,
+                "error": str(exc),
+                "error_code": REMOTE_GATEWAY_CONTROL_ERROR_CODE,
+                "action": action,
+            },
+            status=501,
+        )
+
+    # Reject overlapping local lifecycle actions instead of spawning concurrent
+    # `hermes gateway` subprocesses (a non-blocking acquire — the action holds
+    # the lock for at most _GATEWAY_LIFECYCLE_TIMEOUT_SECONDS).
     if not _GATEWAY_ACTION_LOCK.acquire(blocking=False):
         return j(
             handler,
@@ -1255,6 +1276,17 @@ def _handle_gateway_lifecycle(handler, action: str, body: dict):
         result = _run_gateway_lifecycle_command(action)
     except ValueError as exc:
         return bad(handler, str(exc), 400)
+    except RemoteGatewayControlUnsupported as exc:
+        return j(
+            handler,
+            {
+                "ok": False,
+                "error": str(exc),
+                "error_code": REMOTE_GATEWAY_CONTROL_ERROR_CODE,
+                "action": action,
+            },
+            status=501,
+        )
     except FileNotFoundError as exc:
         return j(handler, {"ok": False, "error": _sanitize_error(exc), "action": action}, status=500)
     except subprocess.TimeoutExpired as exc:
@@ -11871,6 +11903,20 @@ def _handle_health_restart(handler) -> bool:
             handler,
             {"ok": False, "error": outcome.get("message", "Restart already in progress. Please wait a moment and try again.")},
             status=429,
+        )
+
+    if outcome.get("status") == "unsupported":
+        return j(
+            handler,
+            {
+                "ok": False,
+                "error": outcome.get("message", "Remote gateway lifecycle control is unsupported"),
+                "error_code": outcome.get(
+                    "error_code",
+                    REMOTE_GATEWAY_CONTROL_ERROR_CODE,
+                ),
+            },
+            status=501,
         )
 
     return j(

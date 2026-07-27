@@ -884,6 +884,50 @@ class TestAgentUpdateRequiresGatewayRestart:
         assert sleeps == [upd._AGENT_GATEWAY_RESTART_RETRY_DELAY_S]
         assert gateway_pid_calls == ['default']
 
+    def test_agent_gateway_restart_remote_unsupported_does_not_retry(self, monkeypatch):
+        import api.updates as upd
+
+        restart_calls = []
+        sleeps = []
+        unsupported = {
+            'status': 'unsupported',
+            'message': 'Restart the hermes-agent service through its container supervisor.',
+            'error_code': 'remote_gateway_control_unsupported',
+        }
+
+        def fake_restart(*, profile=None):
+            restart_calls.append(profile)
+            return unsupported
+
+        monkeypatch.setattr(upd, 'restart_active_profile_gateway', fake_restart)
+        monkeypatch.setattr(upd.time, 'sleep', sleeps.append)
+        monkeypatch.setattr(upd, 'get_active_profile_gateway_running_pid', lambda *, profile=None: 101)
+
+        ok, result = upd._ensure_gateway_restart_for_agent_update()
+
+        assert ok is False
+        assert result == unsupported
+        assert restart_calls == ['default']
+        assert sleeps == []
+
+    def test_agent_update_remote_restart_failure_does_not_recommend_local_cli(self):
+        import api.updates as upd
+
+        message = upd._agent_gateway_restart_failure_message(
+            'Hermes Agent',
+            {
+                'status': 'unsupported',
+                'message': 'Restart the hermes-agent service through its container supervisor.',
+                'error_code': 'remote_gateway_control_unsupported',
+            },
+        )
+
+        assert message == (
+            'Hermes Agent updated, but gateway restart did not complete: '
+            'Restart the hermes-agent service through its container supervisor.'
+        )
+        assert 'hermes gateway restart' not in message
+
     def test_agent_gateway_restart_accepts_verified_process_replacement_after_retry_failure(self, monkeypatch):
         import api.updates as upd
 

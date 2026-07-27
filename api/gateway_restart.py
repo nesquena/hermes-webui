@@ -11,6 +11,11 @@ import threading
 from pathlib import Path
 
 from api.agent_cli import source_agent_cli_invocation
+from api.gateway_authority import (
+    REMOTE_GATEWAY_CONTROL_ERROR_CODE,
+    RemoteGatewayControlUnsupported,
+    require_local_gateway_control,
+)
 from api.profiles import (
     _PROFILE_ID_RE,
     _is_root_profile,
@@ -91,7 +96,18 @@ def restart_active_profile_gateway(
     - in_progress: command did not finish within ``quick_timeout_seconds``.
     - failed: command finished quickly with non-zero exit status.
     - busy: restart already in progress from another caller.
+    - unsupported: the configured gateway is owned by a remote runtime.
     """
+    try:
+        require_local_gateway_control()
+    except RemoteGatewayControlUnsupported as exc:
+        logger.info("Declining local gateway restart for remote gateway authority")
+        return {
+            "status": "unsupported",
+            "message": str(exc),
+            "error_code": REMOTE_GATEWAY_CONTROL_ERROR_CODE,
+        }
+
     if not _GATEWAY_RESTART_LOCK.acquire(blocking=False):
         return {
             "status": "busy",
@@ -100,6 +116,7 @@ def restart_active_profile_gateway(
 
     try:
         active_home, cli_profile = _gateway_restart_profile_context(profile)
+        require_local_gateway_control()
         env = os.environ.copy()
         env["HERMES_HOME"] = str(active_home)
         cmd, cli_cwd = _resolve_hermes_invocation()
@@ -191,6 +208,14 @@ def restart_active_profile_gateway(
                 "status": "in_progress",
                 "message": "Gateway service restart initiated (in progress)",
             }
+    except RemoteGatewayControlUnsupported as exc:
+        _release_lock()
+        logger.info("Declining local gateway restart for remote gateway deployment")
+        return {
+            "status": "unsupported",
+            "message": str(exc),
+            "error_code": REMOTE_GATEWAY_CONTROL_ERROR_CODE,
+        }
     except Exception as exc:
         _release_lock()
         logger.exception("Failed to run gateway restart command")

@@ -125,6 +125,9 @@ services:
       # Let the WebUI health/status checks reach the gateway container over
       # the compose network. Cron listing is local, but scheduled ticking and
       # the Tasks/System gateway pill need a reachable gateway URL (#4483).
+      # Lifecycle control stays with this compose service: until the Agent API
+      # exposes authenticated lifecycle endpoints, WebUI restart requests fail
+      # closed instead of spawning a second gateway in the WebUI container.
       - HERMES_API_URL=http://hermes-agent:8642
       # Match your host user's UID/GID for correct file permissions.
       # Run `id -u` and `id -g` to find your values.

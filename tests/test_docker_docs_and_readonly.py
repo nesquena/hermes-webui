@@ -297,3 +297,22 @@ def test_docker_init_makes_staged_dir_writable_after_ro_mount_copy():
         ":ro mount perm leak returns."
     )
 
+
+def test_docker_smoke_exercises_remote_gateway_restart_authority():
+    """Multi-container smoke must prove WebUI does not spawn a local gateway.
+
+    The agent API currently exposes no lifecycle endpoint, so remote restart
+    requests must fail closed while the existing agent-container gateway stays
+    alive and the WebUI container remains gateway-free.
+    """
+    workflow = (REPO / ".github" / "workflows" / "docker-smoke.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "/api/health/restart" in workflow
+    assert "/api/gateway/restart" in workflow
+    assert "remote_gateway_control_unsupported" in workflow
+    assert "count_gateway_processes" in workflow
+    assert 'count_gateway_processes "hermes-agent"' in workflow
+    assert 'count_gateway_processes "hermes-webui"' in workflow
+
