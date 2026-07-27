@@ -464,7 +464,33 @@ function makeEl(tag) {
         if (idx >= 0) this._parent.children.splice(idx, 1);
       }
     },
-    querySelector(sel) { return null; },
+    querySelector(sel) {
+      // Support simple class selectors for newly created elements (e.g.
+      // wrappers returned by _createTouchGroupWrapper). The mock doesn't
+      // implement a full selector engine, but it can match single-class
+      // and data-attribute selectors against children.
+      if (typeof sel !== 'string') return null;
+      // .session-date-body
+      var m = sel.match(/^\\.([\\w-]+)$/);
+      if (m) {
+        for (var i = 0; i < this.children.length; i++) {
+          var c = this.children[i];
+          if (c.className && c.className.indexOf(m[1]) >= 0) return c;
+        }
+        return null;
+      }
+      // .session-virtual-spacer[data-virtual-spacer="after"]
+      m = sel.match(/^\.([\w-]+)\[([\w-]+)="([\w-]+)"\]$/);
+      if (m) {
+        for (var i = 0; i < this.children.length; i++) {
+          var c = this.children[i];
+          if (c.className && c.className.indexOf(m[1]) >= 0 &&
+              c.dataset && c.dataset[m[2].replace(/-/g,'')] === m[3]) return c;
+        }
+        return null;
+      }
+      return null;
+    },
     querySelectorAll(sel) { return []; },
     setAttribute(k, v) { this.dataset[k.replace('data-','').replace(/-/g,'')] = v; },
     getAttribute(k) { return this.dataset[k.replace('data-','').replace(/-/g,'')] || null; },
@@ -569,6 +595,11 @@ if (!document.createDocumentFragment) {
     // target, not the fragment itself. Override appendChild on the body
     // to detect fragments and unpack them.
     return frag;
+  };
+}
+if (!document.createElement) {
+  document.createElement = function(tag) {
+    return makeEl(tag || 'div');
   };
 }
 
@@ -1832,6 +1863,188 @@ console.log(JSON.stringify({{
         f"Partial commit must not advance loaded count, got {result['loadedCount']}"
     assert result["totalItems"] == 60, \
         f"Partial commit must not attach ANY items, got {result['totalItems']}"
+
+
+@_node_tests
+def test_missing_wrapper_then_malformed_wrapper_no_live_mutation():
+    """Phase 1 must be side-effect-free: group A has no wrapper (so Phase 1
+    creates one detached), group B has an existing wrapper with no body.
+    Phase 1 must abort at B WITHOUT attaching A's detached wrapper to the
+    live DOM. Live group child-node count and loaded count must stay
+    unchanged. Then repair B, retry, and assert each canonical SID appears
+    exactly once.
+
+    This is the exact schedule the gate certifier requested: the prior
+    test_partial_commit_does_not_attach_any_group pre-installed both
+    wrappers, so Phase 1 never took the live insertBefore/appendChild
+    branch. This test does NOT pre-install group A's wrapper — forcing
+    Phase 1 to create it — and verifies it stays detached.
+    """
+    # 100 rows: rows 0-79 in group A, rows 80-99 in group B
+    flat_rows = []
+    for i in range(100):
+        group_label = "A" if i < 80 else "B"
+        flat_rows.append({"group": {"label": group_label}, "session": {"session_id": f"s_{i}"}})
+
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 100;
+// Pre-populate 60 items (rows 0-59, all in group A)
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s_' + i));
+
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+
+// Group A: NO wrapper in list._groups — Phase 1 must create it detached.
+// Group B: existing wrapper but querySelector returns null for body (malformed).
+const gwB = makeEl('div');
+gwB.dataset['group-label'] = 'B';
+gwB.querySelector = function(sel) {{ return null; }}; // no body — malformed
+list._groups['B'] = gwB;
+// gwB is NOT in list.children — it exists in _groups only, simulating a
+// stale/partially-constructed DOM state.
+
+// Count live DOM children BEFORE append
+const childrenBefore = list.children.length;
+
+_appendTouchBatch();
+
+// After abort: loaded count must be unchanged, no new wrapper in live DOM
+const loadedAfterAbort = _sessionTouchLoadedCount;
+const childrenAfterAbort = list.children.length;
+const itemsAfterAbort = list._items.length;
+// Group A wrapper must NOT have been attached to the live list.
+// _createTouchGroupWrapper uses setAttribute('data-group-label', ...) which
+// the mock stores as dataset.grouplabel (dashes stripped). Check both forms.
+function hasGroupInDom(label) {{
+  return list.children.some(c => {{
+    if (!c.dataset) return false;
+    return c.dataset['group-label'] === label ||
+           c.dataset['grouplabel'] === label ||
+           c.getAttribute('data-group-label') === label;
+  }});
+}}
+const groupAInDom = hasGroupInDom('A');
+
+console.log(JSON.stringify({{
+  loadedAfterAbort,
+  childrenBefore,
+  childrenAfterAbort,
+  itemsAfterAbort,
+  groupAInDom,
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["loadedAfterAbort"] == 60, \
+        f"Phase 1 abort must not advance loaded count, got {result['loadedAfterAbort']}"
+    assert result["childrenAfterAbort"] == result["childrenBefore"], \
+        f"Phase 1 abort must not mutate live DOM children: before={result['childrenBefore']}, after={result['childrenAfterAbort']}"
+    assert result["itemsAfterAbort"] == 60, \
+        f"Phase 1 abort must not add any session items, got {result['itemsAfterAbort']}"
+    assert not result["groupAInDom"], \
+        "Group A's newly created wrapper must stay DETACHED — must not appear in live DOM children"
+
+    # Phase 2: repair group B (give it a proper body), retry, verify success
+    source2 = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 100;
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s_' + i));
+
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+
+// Group A: NO wrapper (Phase 1 will create it)
+// Group B: existing wrapper WITH a proper body now (repaired)
+const gwB = makeEl('div');
+gwB.dataset['group-label'] = 'B';
+const bodyB = makeBodyThatTracksItems(list);
+gwB.querySelector = function(sel) {{ if(sel==='.session-date-body') return bodyB; return null; }};
+gwB.appendChild(bodyB);
+list._groups['B'] = gwB;
+list.children.push(gwB); // existing wrapper is already in the live DOM
+
+// Override _createTouchGroupWrapper so newly created group A's body tracks
+// session items in list._items (the production version uses real DOM which
+// tracks naturally; the mock needs explicit wiring).
+const _origCreateTouchGroupWrapper = _createTouchGroupWrapper;
+_createTouchGroupWrapper = function(g, st) {{
+  const wrapper = _origCreateTouchGroupWrapper(g, st);
+  // Replace the default body with a tracking body
+  const trackingBody = makeBodyThatTracksItems(list);
+  trackingBody.className = 'session-date-body';
+  // Remove old body, add tracking body
+  wrapper.children = wrapper.children.filter(c => c.className !== 'session-date-body');
+  wrapper.appendChild(trackingBody);
+  // Override querySelector to find the tracking body
+  wrapper.querySelector = function(sel) {{
+    if (sel === '.session-date-body') return trackingBody;
+    return null;
+  }};
+  return wrapper;
+}};
+
+_appendTouchBatch();
+
+// After success: loaded count should be 100, all SIDs present exactly once
+const sids = list._items.map(i => i.dataset.sid);
+const uniqueSids = [...new Set(sids)];
+const expectedSids = Array.from({{length: 100}}, (_, i) => 's_' + i);
+const allPresent = expectedSids.every(s => sids.includes(s));
+const noDuplicates = sids.length === uniqueSids.length;
+
+// Verify group A's newly created wrapper was attached to the live DOM.
+// _createTouchGroupWrapper uses setAttribute('data-group-label', ...) which
+// the mock stores as dataset.grouplabel (dashes stripped). Check both forms.
+function hasGroupInDom(label) {{
+  return list.children.some(c => {{
+    if (!c.dataset) return false;
+    return c.dataset['group-label'] === label ||
+           c.dataset['grouplabel'] === label ||
+           c.getAttribute('data-group-label') === label;
+  }});
+}}
+const groupAInDom = hasGroupInDom('A');
+const groupBInDom = hasGroupInDom('B');
+
+console.log(JSON.stringify({{
+  loadedCount: _sessionTouchLoadedCount,
+  totalItems: list._items.length,
+  allPresent,
+  noDuplicates,
+  duplicateCount: sids.length - uniqueSids.length,
+  groupAInDom,
+  groupBInDom,
+}}));
+"""
+    result2 = json.loads(_run_node_vm(source2))
+    assert result2["loadedCount"] == 100, \
+        f"After repair+retry, loaded count should reach 100, got {result2['loadedCount']}"
+    assert result2["totalItems"] == 100, \
+        f"After repair+retry, DOM should have 100 items, got {result2['totalItems']}"
+    assert result2["allPresent"], \
+        "After repair+retry, every canonical SID s_0..s_99 must be present"
+    assert result2["noDuplicates"], \
+        f"After repair+retry, no duplicate SIDs, duplicateCount={result2['duplicateCount']}"
+    assert result2["groupAInDom"], \
+        "After success, group A wrapper must be in live DOM"
+    assert result2["groupBInDom"], \
+        "After success, group B wrapper must be in live DOM"
 
 
 @_node_tests
