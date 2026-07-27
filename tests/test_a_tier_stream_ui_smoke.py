@@ -1,20 +1,20 @@
 """Playwright smoke: tool card mid-stream, title update, approval card.
 
 Boots an isolated WebUI server (agent-free), opens Chromium, and drives the
-vanilla surface through deterministic inject APIs + DOM mutation hooks the
-frontend already uses for live turns. Skips when Playwright is not installed.
+vanilla surface through production render helpers plus loopback inject_test.
+Skips when Playwright is not installed.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -23,6 +23,14 @@ import pytest
 
 pytest.importorskip("playwright")
 from playwright.sync_api import sync_playwright  # noqa: E402
+
+_CRED_ENV_PREFIXES = (
+    "OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+    "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    "AWS_PROFILE", "GH_TOKEN", "GITHUB_TOKEN",
+)
 
 
 def _free_port() -> int:
@@ -55,15 +63,22 @@ def _http_json(method: str, url: str, body: dict | None = None) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _scrub_smoke_server_env(env: dict[str, str]) -> dict[str, str]:
+    cleaned = env.copy()
+    for key in list(cleaned):
+        if key.endswith("_API_KEY") or key in _CRED_ENV_PREFIXES:
+            cleaned.pop(key, None)
+    for model_env in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
+        cleaned.pop(model_env, None)
+    return cleaned
+
+
 @pytest.fixture(scope="module")
 def smoke_server():
     repo_root = Path(__file__).resolve().parents[1]
     port = _free_port()
     state_dir = tempfile.mkdtemp(prefix="hermes-a-tier-smoke-")
-    env = os.environ.copy()
-    for k in list(env):
-        if k.endswith("_API_KEY"):
-            env.pop(k, None)
+    env = _scrub_smoke_server_env(os.environ)
     env.update(
         {
             "HERMES_WEBUI_PORT": str(port),
@@ -71,9 +86,12 @@ def smoke_server():
             "HERMES_WEBUI_STATE_DIR": state_dir,
             "HERMES_HOME": state_dir,
             "HERMES_BASE_HOME": state_dir,
+            "HERMES_CONFIG_PATH": str(Path(state_dir) / "config.yaml"),
             "HERMES_WEBUI_SKIP_ONBOARDING": "1",
             "HERMES_WEBUI_AGENT_DIR": str(Path(state_dir) / "no-agent"),
             "HERMES_WEBUI_ALLOW_INJECT_TEST": "1",
+            "HERMES_WEBUI_TEST_NETWORK_BLOCK": "1",
+            "AWS_EC2_METADATA_DISABLED": "true",
         }
     )
     log_path = Path(state_dir) / "server.log"
@@ -99,6 +117,7 @@ def smoke_server():
         except subprocess.TimeoutExpired:
             proc.kill()
         log.close()
+        shutil.rmtree(state_dir, ignore_errors=True)
 
 
 def test_tool_title_and_approval_surface(smoke_server):
@@ -110,36 +129,33 @@ def test_tool_title_and_approval_surface(smoke_server):
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         page = browser.new_page(base_url=base)
-        page.goto("/", wait_until="domcontentloaded")
+        page.goto(f"/session/{sid}", wait_until="domcontentloaded")
         page.wait_for_selector("#msg, .composer, body", timeout=15_000)
 
-        # Mid-stream tool card: use the live message list surface the UI already
-        # owns. Creating a tool-card-row proves the CSS/DOM contract is intact.
         page.evaluate(
             """([sessionId]) => {
-              const host = document.querySelector('#messages') || document.querySelector('.messages') || document.body;
-              const row = document.createElement('div');
-              row.className = 'tool-card-row tool-card-running';
-              row.setAttribute('data-live-tid', 'smoke-tool-1');
-              row.innerHTML = '<div class="tool-card"><span class="tool-card-name">read_file</span></div>';
-              host.appendChild(row);
-              const titleEl = document.querySelector('#sessionTitle, .session-title, [data-session-title]');
-              if (titleEl) titleEl.textContent = 'A-Tier Smoke Title';
-              else {
-                const t = document.createElement('div');
-                t.id = 'sessionTitle';
-                t.className = 'session-title';
-                t.textContent = 'A-Tier Smoke Title';
-                document.body.appendChild(t);
+              if (window.S) {
+                window.S.session = window.S.session || {};
+                window.S.session.session_id = sessionId;
+                window.S.session.title = 'A-Tier Smoke Title';
               }
-              window.__smokeSessionId = sessionId;
+              if (typeof syncTopbar === 'function') syncTopbar();
+              const host = document.querySelector('#messages') || document.body;
+              if (typeof buildToolCard === 'function') {
+                const row = buildToolCard({
+                  name: 'read_file',
+                  done: false,
+                  args: { path: 'smoke.txt' },
+                });
+                row.setAttribute('data-live-tid', 'smoke-tool-1');
+                host.appendChild(row);
+              }
             }""",
             [sid],
         )
-        assert page.locator(".tool-card-row .tool-card-name").first.inner_text() == "read_file"
-        assert "A-Tier Smoke Title" in page.locator("#sessionTitle, .session-title").first.inner_text()
+        assert page.locator(".tool-card-row[data-tool-name='read_file']").count() >= 1
+        assert "smoke.txt" in page.locator(".tool-card-row .tool-card-name").first.inner_text()
 
-        # Approval card via loopback inject_test (real backend path).
         cmd = "echo smoke-approval"
         inject_url = (
             f"{base}/api/approval/inject_test?session_id={urllib.parse.quote(sid)}"
@@ -148,24 +164,16 @@ def test_tool_title_and_approval_surface(smoke_server):
         inject = _http_json("GET", inject_url)
         assert inject.get("ok") is True
 
-        # Nudge the UI to refresh pending approval if the page is already open.
         page.evaluate(
             """async (sessionId) => {
-              try {
-                const res = await fetch('/api/approval/pending?session_id=' + encodeURIComponent(sessionId));
-                const data = await res.json();
-                const card = document.getElementById('approvalCard');
-                if (card && data && data.pending) {
-                  card.hidden = false;
-                  card.classList.add('visible');
-                  card.removeAttribute('aria-hidden');
-                  card.removeAttribute('inert');
-                  const cmdEl = document.getElementById('approvalCommand') || card.querySelector('.approval-command, code, pre');
-                  if (cmdEl) cmdEl.textContent = data.pending.command || 'echo smoke-approval';
-                }
-              } catch (e) {}
+              const res = await fetch('/api/approval/pending?session_id=' + encodeURIComponent(sessionId));
+              const data = await res.json();
+              if (data && data.pending && typeof showApprovalForSession === 'function') {
+                showApprovalForSession(sessionId, data.pending, data.pending_count || 1);
+              }
             }""",
             sid,
         )
-        page.wait_for_selector("#approvalCard:not([hidden]), #approvalCard.visible, .approval-card.visible", timeout=10_000)
+        page.wait_for_selector("#approvalCard.visible", timeout=10_000)
+        assert "smoke-approval" in page.locator("#approvalCmd").inner_text()
         browser.close()
