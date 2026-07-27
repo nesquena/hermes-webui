@@ -17017,7 +17017,10 @@ function renderMessages(options){
     }
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1&&rawIdx>lastUserRawIdx;
     const nextRendered=renderVisWithIdx[vi+1];
-    const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant');
+    const isTurnFinalAssistant=!isUser&&(
+      !nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant'||
+      _hasHiddenProcessWakeupBoundaryBefore(nextRendered.rawIdx)
+    );
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
       // Static regression tests intentionally look for msg-media-img/msg-file-badge near this branch.
