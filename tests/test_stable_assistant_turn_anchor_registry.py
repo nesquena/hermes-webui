@@ -1486,7 +1486,7 @@ def test_slice6_live_shadow_feed_wires_anchor_scene_for_visible_order_handoff():
     assert "_applyToAnchor('error'" not in error_body
     assert "_flushReasoningToAnchor();" in error_body
     assert "_scheduleAnchorRegistryCleanup(120000);" in error_body
-    assert "_handleStreamError(source)" in error_body
+    assert "_handleStreamError(source,retainedTransportGeneration)" in error_body
     assert "projectAssistantTurnAnchorActivityScene" in src
 
     tool_body = _event_listener_body(src, "tool")

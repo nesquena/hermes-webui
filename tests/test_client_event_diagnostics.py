@@ -145,7 +145,7 @@ def test_sessions_js_reports_gateway_sse_errors_with_browser_context():
 
 def test_messages_js_reports_chat_sse_errors_with_stream_identity():
     error_block_start = MESSAGES_JS.index("source.addEventListener('error',async e=>")
-    error_block = MESSAGES_JS[error_block_start:error_block_start + 900]
+    error_block = MESSAGES_JS[error_block_start:error_block_start + 5000]
     assert "recordClientSSEError('chat-response'" in error_block
     assert "session_id:activeSid" in error_block
     assert "stream_id:streamId" in error_block
@@ -153,6 +153,6 @@ def test_messages_js_reports_chat_sse_errors_with_stream_identity():
 
 def test_messages_js_keeps_finalized_stream_guard_before_diagnostic_report():
     error_block_start = MESSAGES_JS.index("source.addEventListener('error',async e=>")
-    error_block = MESSAGES_JS[error_block_start:error_block_start + 900]
+    error_block = MESSAGES_JS[error_block_start:error_block_start + 5000]
     assert "_streamFinalized" in error_block
     assert error_block.index("_streamFinalized") < error_block.index("recordClientSSEError")

@@ -314,7 +314,7 @@ def test_error_reconnect_path_can_restore_from_journal():
 
     assert "st.active" in block
     assert "st.replay_available" in block
-    assert "Restoring stream" in block
+    assert "setComposerStatus('Restoring stream…')" in MESSAGES_SRC
     assert "_runJournalReplayParams()" in block
 
 
@@ -325,9 +325,34 @@ def test_frontend_replay_cursor_uses_eventsource_last_event_id():
     assert "e.lastEventId" in block
     assert "lastIndexOf(':')" in block
     assert "_lastRunJournalSeq=seq" in block
-    assert "source.addEventListener(_runJournalEventName,_rememberRunJournalCursor)" in MESSAGES_SRC
+    assert "source.addEventListener(_runJournalEventName,e=>_rememberRunJournalCursor(e,transportGeneration))" in MESSAGES_SRC
     assert "after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}" in MESSAGES_SRC
     assert "after_seq=0" not in MESSAGES_SRC
+
+
+def test_round9_transport_and_cursor_contract_is_generation_admitted():
+    assert "function _wireSSE(candidate,expectedGeneration)" in MESSAGES_SRC
+    assert "live.transportGeneration!==expectedGeneration" in MESSAGES_SRC
+    assert "_pendingTransportGenerationLease" not in MESSAGES_SRC
+    assert "_liveTransportGenerationLease" not in MESSAGES_SRC
+    for event_name in (
+        "state_saved", "title", "title_status", "context_status", "goal",
+        "goal_continue", "stream_end", "pending_steer_leftover", "warning", "error",
+    ):
+        assert f"'{event_name}'" in MESSAGES_SRC
+    assert "_rememberRunJournalCursor(e,transportGeneration)" in MESSAGES_SRC
+
+
+def test_error_handler_remembers_run_journal_cursor_before_advancing_generation():
+    error_pos = MESSAGES_SRC.index("source.addEventListener('error',async e=>")
+    error_block = MESSAGES_SRC[error_pos : MESSAGES_SRC.index("source.addEventListener('cancel'", error_pos)]
+
+    cursor_idx = error_block.find("_rememberRunJournalCursor(e,transportGeneration);")
+    close_idx = error_block.find("_closeSource(source,{retainOwner:true,transportGeneration});")
+
+    assert cursor_idx != -1, "error handler must capture the replay cursor from the admitted error frame"
+    assert close_idx != -1, "error handler must still retain the live owner before reconnect probes"
+    assert cursor_idx < close_idx, "cursor capture must happen before the retained close advances generation"
 
 
 def test_replayed_long_task_events_enter_the_same_live_timeline_handlers():
@@ -338,7 +363,7 @@ def test_replayed_long_task_events_enter_the_same_live_timeline_handlers():
     live long task can render as Thinking -> progress text -> tool cards, while
     the same journaled event sequence replays as a flattened or reordered scene.
     """
-    wire_pos = MESSAGES_SRC.index("function _wireSSE(source)")
+    wire_pos = MESSAGES_SRC.index("function _wireSSE(candidate,expectedGeneration)")
     wire_block = MESSAGES_SRC[wire_pos : MESSAGES_SRC.index("async function _restoreSettledSession", wire_pos)]
     replay_events = [
         "reasoning",
@@ -349,6 +374,16 @@ def test_replayed_long_task_events_enter_the_same_live_timeline_handlers():
         "compressed",
         "metering",
         "done",
+        "state_saved",
+        "title",
+        "title_status",
+        "context_status",
+        "goal",
+        "goal_continue",
+        "stream_end",
+        "pending_steer_leftover",
+        "warning",
+        "error",
         "apperror",
     ]
 

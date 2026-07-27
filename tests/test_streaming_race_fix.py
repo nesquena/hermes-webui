@@ -106,6 +106,16 @@ class TestStreamFinalized:
         )
         assert 'cancelAnimationFrame' in fn
 
+    def test_done_fade_uses_accepted_completion_lease_after_transport_error(self):
+        src = read('static/messages.js')
+        done = re.search(r"source\.addEventListener\('done'.*?\n    \}\);", src, re.DOTALL)
+        error = re.search(r"source\.addEventListener\('error'.*?\n    \}\);", src, re.DOTALL)
+        assert done and error
+        assert '_acceptedCompletionLease=' in done.group(0)
+        assert 'completionLease.settled=true' in done.group(0)
+        assert 'completionLease.closePending=true' in error.group(0)
+        assert '_closeSource(source,{retainOwner:true,transportGeneration})' in error.group(0)
+
     def test_cancel_sets_stream_finalized(self):
         src = read('static/messages.js')
         m = re.search(r"source\.addEventListener\('cancel'.*?\}\);", src, re.DOTALL)
@@ -149,7 +159,7 @@ class TestReconnectAccumulatorPreservation:
         this guard — they prevent reasoning from accumulating across
         multi-turn agent sessions."""
         src = read('static/messages.js')
-        m = re.search(r'function _wireSSE\(source\)\{.*?\n  \}', src, re.DOTALL)
+        m = re.search(r'function _wireSSE\(candidate,expectedGeneration\)\{.*?\n  \}', src, re.DOTALL)
         assert m, "_wireSSE not found"
         fn = m.group(0)
         # Check only the preamble before the first addEventListener — this is
@@ -207,7 +217,7 @@ class TestReconnectAccumulatorPreservation:
         It calls renderMessages() which settles the DOM. Any pending rAF must be
         cancelled before that renderMessages call — same as done/apperror/cancel."""
         src = read('static/messages.js')
-        m = re.search(r'function _handleStreamError\(source\)\{.*?\n  \}', src, re.DOTALL)
+        m = re.search(r'function _handleStreamError\(source,activeTransportGeneration\)\{.*?\n  \}', src, re.DOTALL)
         assert m, "_handleStreamError(source) not found"
         fn = m.group(0)
         assert '_streamFinalized=true' in fn or '_streamFinalized = true' in fn, (
@@ -221,7 +231,7 @@ class TestReconnectAccumulatorPreservation:
         """Deferred hidden-tab recovery must not reattach an old stream after
         the user has switched to a different session in the same tab."""
         src = read('static/messages.js')
-        m = re.search(r'function _reattachOrRestoreAfterDeferredStreamError\(source\)\{.*?\n  \}', src, re.DOTALL)
+        m = re.search(r'function _reattachOrRestoreAfterDeferredStreamError\(source,transportGeneration\)\{.*?\n  \}', src, re.DOTALL)
         assert m, "_reattachOrRestoreAfterDeferredStreamError(source) not found"
         fn = m.group(0)
         assert 'S.session&&S.session.session_id' in fn

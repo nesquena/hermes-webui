@@ -1121,7 +1121,7 @@ def test_messages_js_stream_perf_cleanup_lifecycle(cleanup_test_sessions):
     cancel_body = _terminal_body("source.addEventListener('cancel'", "_streamFadeCleanupReduceMotionListener();")
     assert "_cancelThrottledSnapshotTimer();" in cancel_body and "_clearAnchorProseIncrementalNode();" in cancel_body, \
         "cancel terminal handler must tear down the snapshot timer + anchor prose cache"
-    stream_error_body = _terminal_body("function _handleStreamError(source)", "_streamFadeCleanupReduceMotionListener();")
+    stream_error_body = _terminal_body("function _handleStreamError(source,activeTransportGeneration)", "_streamFadeCleanupReduceMotionListener();")
     assert "_cancelThrottledSnapshotTimer();" in stream_error_body and "_clearAnchorProseIncrementalNode();" in stream_error_body, \
         "_handleStreamError must tear down the snapshot timer + anchor prose cache"
     restore_body = _terminal_body("async function _restoreSettledSession(source", "_cancelAnimationFramePendingStreamRender();")

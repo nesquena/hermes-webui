@@ -259,7 +259,7 @@ def test_inactive_interim_assistant_still_records_activity_boundary():
     Otherwise later tool calls keep an activityBurstId with no text anchor and
     Activity groups pile up at the tail after switching back.
     """
-    wire_fn = MESSAGES_JS.split("function _wireSSE(source)", 1)[1].split("source.addEventListener('reasoning'", 1)[0]
+    wire_fn = MESSAGES_JS.split("function _wireSSE(candidate,expectedGeneration)", 1)[1].split("source.addEventListener('reasoning'", 1)[0]
     inactive_returns = [
         idx for idx in range(len(wire_fn))
         if wire_fn.startswith("if(!S.session||S.session.session_id!==activeSid){", idx)
