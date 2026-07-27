@@ -89,6 +89,21 @@ def test_wallpaper_upload_scope_refresh_and_clear(base_url, tmp_path: Path) -> N
                     "el => getComputedStyle(el).backgroundColor"
                 ) != "rgba(0, 0, 0, 0)"
 
+                # Geist Contrast must expose an empty Chat without exposing chrome.
+                page.locator("html").evaluate(
+                    "el => { el.dataset.skin = 'geist-contrast'; }"
+                )
+                page.wait_for_function(
+                    "() => getComputedStyle(document.querySelector('#emptyState')).backgroundColor === 'rgba(0, 0, 0, 0)' && getComputedStyle(document.querySelector('.app-titlebar')).backgroundColor !== 'rgba(0, 0, 0, 0)'"
+                )
+                assert page.locator("#emptyState").evaluate(
+                    "el => getComputedStyle(el).backgroundColor"
+                ) == "rgba(0, 0, 0, 0)"
+                assert page.locator(".app-titlebar").evaluate(
+                    "el => getComputedStyle(el).backgroundColor"
+                ) != "rgba(0, 0, 0, 0)"
+                page.locator("html").evaluate("el => { delete el.dataset.skin; }")
+
                 # Scope and opacity preview before Save on the sole layer.
                 page.locator("#wallpaperScopeApp").check()
                 page.locator('html[data-wallpaper-scope="app"]').wait_for()

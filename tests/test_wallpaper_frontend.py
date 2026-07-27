@@ -412,6 +412,15 @@ def test_wallpaper_chat_scope_does_not_override_titlebar() -> None:
     assert ".app-titlebar" not in css[chat_start:app_start]
 
 
+def test_wallpaper_geist_chat_scope_forces_empty_state_transparent() -> None:
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+    selector = (
+        ':root[data-skin="geist-contrast"][data-wallpaper="active"]'
+        '[data-wallpaper-scope="chat"] .empty-state'
+    )
+    assert selector + "{background:transparent!important;}" in css
+
+
 def test_wallpaper_forced_skins_explicitly_override_shell_backgrounds() -> None:
     css = (STATIC / "style.css").read_text(encoding="utf-8")
     selector = (
