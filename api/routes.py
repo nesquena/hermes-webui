@@ -14012,6 +14012,7 @@ def handle_post(handler, parsed) -> bool:
             FeedbackValidationError,
             append_feedback,
             feedback_rate_limited,
+            feedback_record_rate_hit,
             normalize_feedback_payload,
         )
 
@@ -14020,6 +14021,7 @@ def handle_post(handler, parsed) -> bool:
             if feedback_rate_limited(record["session_id"]):
                 return bad(handler, "Too many feedback submissions", status=429)
             append_feedback(record)
+            feedback_record_rate_hit(record["session_id"])
         except FeedbackValidationError as exc:
             return bad(handler, str(exc), status=400)
         except Exception:

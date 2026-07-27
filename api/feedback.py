@@ -101,6 +101,31 @@ def _assert_session_exists(session_id: str) -> None:
         raise FeedbackValidationError("session not found") from exc
 
 
+def _assert_message_target(
+    session_id: str,
+    message_id: str | None,
+    message_index: int | None,
+) -> None:
+    from api.models import get_session
+
+    session = get_session(session_id, metadata_only=False)
+    messages = list(getattr(session, "messages", None) or [])
+    if message_index is not None:
+        if message_index >= len(messages):
+            raise FeedbackValidationError("index out of range")
+    if message_id is not None:
+        found = False
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            identity = msg.get("id") or msg.get("message_id")
+            if identity is not None and str(identity) == message_id:
+                found = True
+                break
+        if not found:
+            raise FeedbackValidationError("message_id not found in session")
+
+
 def normalize_feedback_payload(body: Any, *, validate_session: bool = True) -> dict:
     """Validate and normalize a POST /api/feedback body. Fail closed."""
     if not isinstance(body, dict):
@@ -127,6 +152,8 @@ def normalize_feedback_payload(body: Any, *, validate_session: bool = True) -> d
 
     if message_id is None and message_index is None:
         raise FeedbackValidationError("message_id or index is required")
+    if validate_session:
+        _assert_message_target(session_id, message_id, message_index)
 
     reason = _optional_str(body.get("reason"), field="reason", max_len=64)
     if reason is not None:
@@ -141,9 +168,11 @@ def normalize_feedback_payload(body: Any, *, validate_session: bool = True) -> d
 
     model = _optional_str(body.get("model"), field="model", max_len=_MAX_MODEL_LEN)
     mode = _optional_str(body.get("mode"), field="mode", max_len=_MAX_MODE_LEN)
-    profile = _optional_str(body.get("profile"), field="profile", max_len=_MAX_PROFILE_LEN)
-    if profile is None:
-        profile = _active_profile_name()
+    active_profile = _active_profile_name()
+    profile_override = _optional_str(body.get("profile"), field="profile", max_len=_MAX_PROFILE_LEN)
+    if profile_override is not None and profile_override != active_profile:
+        raise FeedbackValidationError("profile does not match active profile")
+    profile = active_profile
 
     record = {
         "ts": time.time(),
@@ -164,19 +193,40 @@ def normalize_feedback_payload(body: Any, *, validate_session: bool = True) -> d
     return record
 
 
+def _prune_rate_limit_keys(cutoff: float) -> None:
+    for key in list(_RATE_HITS):
+        timestamps = [ts for ts in _RATE_HITS.get(key, []) if ts >= cutoff]
+        if timestamps:
+            _RATE_HITS[key] = timestamps
+        else:
+            del _RATE_HITS[key]
+
+
 def feedback_rate_limited(session_id: str, *, now: float | None = None) -> bool:
     """Return True when this session has exceeded the feedback write budget."""
     now = time.time() if now is None else now
     cutoff = now - _RATE_LIMIT_WINDOW_SECONDS
     key = str(session_id or "").strip() or "_"
     with _RATE_LOCK:
+        _prune_rate_limit_keys(cutoff)
         timestamps = [ts for ts in _RATE_HITS.get(key, []) if ts >= cutoff]
         if len(timestamps) >= _RATE_LIMIT_MAX:
             _RATE_HITS[key] = timestamps
             return True
-        timestamps.append(now)
         _RATE_HITS[key] = timestamps
     return False
+
+
+def feedback_record_rate_hit(session_id: str, *, now: float | None = None) -> None:
+    """Record a successful feedback write against the session rate budget."""
+    now = time.time() if now is None else now
+    cutoff = now - _RATE_LIMIT_WINDOW_SECONDS
+    key = str(session_id or "").strip() or "_"
+    with _RATE_LOCK:
+        _prune_rate_limit_keys(cutoff)
+        timestamps = [ts for ts in _RATE_HITS.get(key, []) if ts >= cutoff]
+        timestamps.append(now)
+        _RATE_HITS[key] = timestamps
 
 
 def append_feedback(record: dict) -> Path:

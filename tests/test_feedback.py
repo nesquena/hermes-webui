@@ -123,6 +123,7 @@ def test_post_feedback_persists_and_returns_ok(tmp_path, monkeypatch):
         "_assert_session_exists",
         lambda _sid: None,
     )
+    monkeypatch.setattr(feedback, "_assert_message_target", lambda *_a, **_k: None)
     monkeypatch.setattr(feedback, "_RATE_HITS", {})
 
     cap = _post(
@@ -172,6 +173,42 @@ def test_feedback_rejects_missing_session(monkeypatch):
         assert "session not found" in str(exc)
 
 
+def test_feedback_rejects_profile_mismatch(monkeypatch):
+    monkeypatch.setattr(feedback, "_active_profile_name", lambda: "default")
+    monkeypatch.setattr(feedback, "_assert_session_exists", lambda _sid: None)
+    monkeypatch.setattr(feedback, "_assert_message_target", lambda *_a, **_k: None)
+    try:
+        feedback.normalize_feedback_payload(
+            {
+                "session_id": "s1",
+                "index": 0,
+                "rating": "up",
+                "profile": "other",
+            }
+        )
+        assert False, "expected FeedbackValidationError"
+    except feedback.FeedbackValidationError as exc:
+        assert "profile" in str(exc).lower()
+
+
+def test_feedback_rejects_invalid_message_target(monkeypatch):
+    class _Session:
+        messages = [{"role": "user", "content": "hi", "id": "msg-1"}]
+
+    monkeypatch.setattr(feedback, "_assert_session_exists", lambda _sid: None)
+    monkeypatch.setattr(
+        "api.models.get_session",
+        lambda _sid, metadata_only=False: _Session(),
+    )
+    try:
+        feedback.normalize_feedback_payload(
+            {"session_id": "s1", "message_id": "missing", "rating": "up"}
+        )
+        assert False, "expected FeedbackValidationError"
+    except feedback.FeedbackValidationError as exc:
+        assert "message_id" in str(exc).lower()
+
+
 def test_feedback_rate_limit_and_size_cap(tmp_path, monkeypatch):
     monkeypatch.setattr(feedback, "_profile_state_dir", lambda: tmp_path)
     monkeypatch.setattr(feedback, "_RATE_HITS", {})
@@ -179,7 +216,9 @@ def test_feedback_rate_limit_and_size_cap(tmp_path, monkeypatch):
     monkeypatch.setattr(feedback, "_MAX_FEEDBACK_FILE_BYTES", 80)
 
     assert feedback.feedback_rate_limited("s1") is False
+    feedback.feedback_record_rate_hit("s1")
     assert feedback.feedback_rate_limited("s1") is False
+    feedback.feedback_record_rate_hit("s1")
     assert feedback.feedback_rate_limited("s1") is True
 
     record = feedback.normalize_feedback_payload(
