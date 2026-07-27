@@ -146,13 +146,14 @@ function enqueueMutation(kind,file,opacity,scope,owner,revision,url){
     try{
       const raw=await _requestForTest(kind,file,opacity,scope);
       await applyAuthoritativeInfo(raw,null);
-      if(revision===draftRevision){if(kind==='post')_releaseWallpaperDraftUrl(url);draftFile=null;draftOpacity=saved.opacity;draftScope=saved.scope}
-      else if(appearanceActive&&owner===paneGeneration)renderDraft();
+      const ownsDraft=appearanceActive&&owner===paneGeneration&&revision===draftRevision&&(kind!=='post'||url===draftUrl);
+      if(ownsDraft){if(kind==='post')_releaseWallpaperDraftUrl(url);draftFile=null;draftOpacity=saved.opacity;draftScope=saved.scope}
+      else if(appearanceActive)renderDraft();
       if(appearanceActive&&owner===paneGeneration)setStatusKey(kind==='delete'?'settings_wallpaper_cleared':'settings_wallpaper_saved');
     }catch(error){
-      if(!error||!Number.isFinite(error.status)||error.status>=500){try{await reconcileWallpaperInfo()}catch(_){}}
+      if(!error||!Number.isFinite(error.status)||error.status>=500){try{await reconcileWallpaperInfo()}catch(_){}finally{if(appearanceActive&&(draftUrl||saved.has_wallpaper))renderDraft()}}
       if(appearanceActive&&owner===paneGeneration)setStatusKey(wallpaperErrorKey(error),true);
-    }finally{requestRunning=false;if(appearanceActive&&owner===paneGeneration)syncControls()}
+    }finally{requestRunning=false;if(appearanceActive)syncControls()}
   };
   mutationTail=mutationTail.then(run,run);return mutationTail;
 }

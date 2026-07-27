@@ -253,6 +253,83 @@ const first={{name:'first.png',type:'image/png',size:10}};const second={{name:'s
     }
 
 
+def test_wallpaper_mutation_isolates_sessions_and_restores_after_reconcile() -> None:
+    source = (STATIC / "wallpaper.js").read_text(encoding="utf-8")
+    script = f"""
+const vm=require('vm');
+const source={json.dumps(source)};
+const empty={{has_wallpaper:false,opacity:.8,scope:'chat',mime_type:null,image_version:null}};
+const saved={{has_wallpaper:true,opacity:.8,scope:'chat',mime_type:'image/png',image_version:'c'.repeat(64)}};
+function harness(mode){{
+  const handlers={{}};
+  function element(id){{return {{id,value:'',files:[],disabled:false,hidden:true,src:'',textContent:'',style:{{}},classList:{{toggle(){{}}}},setAttribute(){{}},addEventListener(type,fn){{handlers[id+':'+type]=fn}}}}}}
+  const ids=['wallpaperFileInput','wallpaperDropZone','wallpaperOpacity','wallpaperOpacityValue','wallpaperScopeApp','wallpaperScopeChat','wallpaperPreview','wallpaperFileName','wallpaperSaveBtn','wallpaperClearBtn','wallpaperSettingsField','wallpaperStatus'];
+  const elements=Object.fromEntries(ids.map(id=>[id,element(id)]));
+  elements.wallpaperOpacity.value='80';elements.wallpaperScopeChat.value='chat';elements.wallpaperScopeChat.checked=true;elements.wallpaperScopeApp.value='app';
+  const root={{dataset:{{}},style:{{setProperty(k,v){{this[k]=v}},removeProperty(k){{delete this[k]}}}}}};
+  const revoked=[];let nextBlob=0,infoCalls=0,resolveMutation,rejectMutation;
+  class TestURL extends URL{{static createObjectURL(){{return 'blob:'+mode+'-'+(++nextBlob)}}static revokeObjectURL(url){{revoked.push(url)}}}}
+  const mutation=new Promise((resolve,reject)=>{{resolveMutation=resolve;rejectMutation=reject}});
+  const context={{
+    console,URL:TestURL,
+    document:{{baseURI:'https://example.test/hermes/',documentElement:root,getElementById:id=>elements[id]||null,addEventListener(){{}},querySelectorAll:()=>[elements.wallpaperScopeChat,elements.wallpaperScopeApp],querySelector:()=>[elements.wallpaperScopeChat,elements.wallpaperScopeApp].find(r=>r.checked)}},
+    location:{{href:'https://example.test/hermes/'}},localStorage:{{getItem(){{return null}},setItem(){{}},removeItem(){{}}}},
+    Image:class{{set src(v){{this._src=v;if(this.onload)this.onload()}}}},
+    api:async(path)=>{{
+      if(path==='/api/wallpaper/info'){{
+        infoCalls++;
+        if(infoCalls===1||mode==='session'&&infoCalls===2)return empty;
+        if(mode==='reconcile-failure')throw new Error('Failed to fetch');
+        return saved;
+      }}
+      return mutation;
+    }},
+    showConfirmDialog:async()=>true,setTimeout,clearTimeout,window:null
+  }};
+  context.window=context;vm.createContext(context);vm.runInContext(source,context);
+  const install=name=>{{elements.wallpaperFileInput.files=[{{name,type:'image/png',size:10}}];handlers['wallpaperFileInput:change']()}};
+  const edit=()=>{{elements.wallpaperScopeChat.checked=false;elements.wallpaperScopeApp.checked=true;handlers['wallpaperScopeApp:change']();elements.wallpaperOpacity.value='55';handlers['wallpaperOpacity:input']()}};
+  const snapshot=()=>({{image:root.style['--wallpaper-image'],opacity:root.style['--wallpaper-opacity'],scope:root.dataset.wallpaperScope,saveDisabled:elements.wallpaperSaveBtn.disabled,revoked:[...revoked]}});
+  return {{context,handlers,elements,install,edit,snapshot,resolveMutation,rejectMutation}};
+}}
+async function settle(){{await new Promise(resolve=>setTimeout(resolve,0))}}
+async function runSession(){{
+  const h=harness('session');h.context.beginWallpaperSettingsSession();await settle();
+  h.install('old.png');h.handlers['wallpaperSaveBtn:click']();await Promise.resolve();
+  h.context.endWallpaperSettingsSession();h.context.beginWallpaperSettingsSession();await settle();
+  h.install('new.png');h.edit();h.resolveMutation(saved);await settle();
+  const during=h.snapshot();h.context.endWallpaperSettingsSession();return {{during,after:h.snapshot()}};
+}}
+async function runFailure(mode){{
+  const h=harness(mode);h.context.beginWallpaperSettingsSession();await settle();
+  h.install('old.png');h.handlers['wallpaperSaveBtn:click']();await Promise.resolve();h.install('new.png');h.edit();
+  const error=new Error('server');error.status=500;h.rejectMutation(error);await settle();await settle();
+  return h.snapshot();
+}}
+(async()=>console.log(JSON.stringify({{session:await runSession(),success:await runFailure('reconcile-success'),failure:await runFailure('reconcile-failure')}})))();
+"""
+    result = _node(script)
+    for snapshot, prefix in (
+        (result["session"]["during"], "session"),
+        (result["success"], "reconcile-success"),
+        (result["failure"], "reconcile-failure"),
+    ):
+        assert snapshot == {
+            "image": f'url("blob:{prefix}-2")',
+            "opacity": "0.55",
+            "scope": "app",
+            "saveDisabled": False,
+            "revoked": [f"blob:{prefix}-1"],
+        }
+    assert result["session"]["after"] == {
+        "image": 'url("https://example.test/hermes/api/wallpaper/image?v=' + "c" * 64 + '")',
+        "opacity": "0.8",
+        "scope": "chat",
+        "saveDisabled": False,
+        "revoked": ["blob:session-1", "blob:session-2"],
+    }
+
+
 def test_wallpaper_layer_stacking_chat_scope_and_inactive_guards() -> None:
     css = (STATIC / "style.css").read_text(encoding="utf-8")
     assert '#wallpaperLayer{position:fixed;inset:0' in css
