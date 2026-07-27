@@ -1770,21 +1770,7 @@ async function loadSession(sid){
     // instead of collapsing a long session back to the default tail window.
     if (sameSessionForceReload) _captureSameSessionForceReloadHint(sid);
     else _clearSameSessionForceReloadHint();
-    // #5177: keep-stale-until-loaded path — defer the destructive
-    // S.messages/toolCalls clear so the user does NOT see a transcript-wide
-    // blank gap during the metadata + messages round-trip. Only the
-    // visibility / focus recovery callers in refreshActiveSessionIfExternallyUpdated
-    // request this. The new transcript will be SWAPPED into S.messages by the
-    // forced _ensureMessagesLoaded(...{force:true}) call below, producing a
-    // single render frame with old DOM directly replaced by new DOM rather
-    // than the old → empty → new sequence the default branch produces.
-    //
-    // The session-switch branch (currentSid !== sid) MUST continue to clear
-    // synchronously — leaving a prior session's transcript on screen during a
-    // navigation is the original bug this clear was written for. We gate
-    // strictly on sameSessionForceReload (computed above as part of
-    // _keepStaleUntilLoaded) so cross-session switches keep their existing
-    // behaviour.
+    // Keep stale transcript visible only during same-session force reloads.
     if (!_keepStaleUntilLoaded) {
       S.messages = [];
       S.toolCalls = [];
@@ -1920,9 +1906,8 @@ async function loadSession(sid){
     }
     _clearSameSessionForceReloadHint(sid);
     const _selfHealedCurrent = (e.status===404) && (currentSid===sid);
+    if (e.status===404 && _isCurrentLoad()) _loadingSessionId = null;
     _retireCurrentLoad();
-    // Restart the on-screen session unless this 404 just self-healed it away,
-    // or a newer load already owns the restart.
     if (currentSid && !_selfHealedCurrent && _loadingSessionId === null
         && typeof startSessionStream === 'function') {
       startSessionStream(currentSid);
@@ -2384,7 +2369,7 @@ async function loadSession(sid){
   }
 
   // Clear the in-flight session marker now that this load has completed (#1060).
-  _retireCurrentLoad();
+  if (_isCurrentLoad()) _loadingSessionId = null;
 
   // Re-acknowledge the visit after the async message-load gap. A deferred
   // sidebar /api/sessions poll can land while _ensureMessagesLoaded is in

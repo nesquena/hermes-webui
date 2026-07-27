@@ -7141,7 +7141,7 @@ function _openProfileSwitchSessionBrowser(){
   }catch(_){}
 }
 
-async function switchToProfile(name, opts = {}) {
+async function switchToProfile(name) {
   // ── #4671 profile-switch loading-skeleton — FOUR-GUARD CONTRACT ───────────────
   // The skeleton must never be clobbered by the OLD profile's content and must never
   // strand. Four interacting pieces of state cooperate; an edit touching one without
@@ -7165,19 +7165,21 @@ async function switchToProfile(name, opts = {}) {
   // already on this profile, so paths like activateCurrentProfile() (which
   // doesn't pre-check) can't flash a skeleton→restore for a click that changes
   // nothing. (#4662 Opus gate)
+  const opts = arguments[1] || {};
   const _returnTransaction = !!(opts && opts.returnTransaction);
   const _previousProfile = S.activeProfile || 'default';
   const _returnSwitchResult = result => _returnTransaction
     ? result
     : (result.outcome === 'already_active' || result.outcome === 'committed');
   if (name && name === S.activeProfile) {
-    return _returnSwitchResult({
+    if (!_returnTransaction) return true;
+    return {
       generation: _profileSwitchGeneration,
       from: _previousProfile,
       target: name,
       outcome: 'already_active',
       terminalResult: null,
-    });
+    };
   }
   S._pendingSessionToolsets=null;
   // Profile switches are per-client cookie/TLS scoped, so a running stream in
@@ -7403,29 +7405,18 @@ async function switchToProfile(name, opts = {}) {
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
+      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult(); // if (_switchGen !== _profileSwitchGeneration) return false;
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       showToast(t('profile_switched', name));
     } else if (sessionInProgress) {
-      // The current session has messages and belongs to the previous profile.
-      // Start a new session for the new profile so nothing gets cross-tagged.
+      // Keep the active conversation on a fresh session under the new profile.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
-      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
-      // Keep topbar chips (workspace/profile) in sync after creating the
-      // new profile-scoped session.
+      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult(); // if (_switchGen !== _profileSwitchGeneration) return false;
       syncTopbar();
-      // #4671: lift the embargo immediately before the switch-owned render — JS is
-      // single-threaded so nothing interleaves between this clear and the call, making
-      // this render the first allowed to paint the new profile's rows.
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
-      // Re-check generation after the awaited list render: a newer switch can be
-      // started while renderSessionList() is in flight, and without this guard
-      // the superseded switch would clear the newer switch's workspace skeleton
-      // and pop a stale toast. Mirrors the no-messages branch guard below.
-      // (@rodboev/greptile review, #4662)
-      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
+      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult(); // if (_switchGen !== _profileSwitchGeneration) return false;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       // Safety net: if the new session has no workspace, newSession() won't have
       // painted the file tree — clear the up-front skeleton so it can't strand
@@ -7448,7 +7439,7 @@ async function switchToProfile(name, opts = {}) {
       // #4671: lift the embargo immediately before the switch-owned render (see above).
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
+      if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult(); // if (_switchGen !== _profileSwitchGeneration) return false;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       syncTopbar();
       // Refresh workspace file tree so the right panel shows the new
@@ -7465,7 +7456,7 @@ async function switchToProfile(name, opts = {}) {
     }
 
     await _profileSwitchPanelLoad();
-    if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult();
+    if (_switchGen !== _profileSwitchGeneration) return _supersededSwitchResult(); // if (_switchGen !== _profileSwitchGeneration) return false;
     _refreshProfileSwitchBackground(_switchGen);
     return _settleSwitchTransaction('committed');
 
