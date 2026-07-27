@@ -13,7 +13,9 @@ import threading
 import time
 import uuid
 from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, overload
 
 try:  # pragma: no cover - platform-specific imports.
     import fcntl as _fcntl
@@ -7888,6 +7890,43 @@ def _json_loads_if_string(value):
         return value
 
 
+@dataclass(frozen=True)
+class StateDBSessionMessagesSnapshot:
+    """Internal message projection paired with its durable SQLite revision."""
+
+    messages: list
+    revision: dict | None
+
+
+def _state_db_session_messages_result(messages, revision, *, with_revision):
+    if with_revision:
+        return StateDBSessionMessagesSnapshot(messages=list(messages or []), revision=revision)
+    return list(messages or [])
+
+
+def _state_db_active_rows_digest(rows) -> str:
+    """Match the Agent fence for model-facing fields mutable in place."""
+    digest = hashlib.sha256()
+    stamped = False
+    for row in rows:
+        keys = row.keys()
+        api_content = row['api_content'] if 'api_content' in keys else None
+        if api_content is None:
+            continue
+        stamped = True
+        digest.update(
+            json.dumps(
+                [row['id'], api_content],
+                ensure_ascii=False,
+                separators=(',', ':'),
+                default=str,
+            ).encode('utf-8', errors='surrogatepass')
+        )
+        digest.update(b'\n')
+    return digest.hexdigest() if stamped else ''
+
+
+@overload
 def get_state_db_session_messages(
     sid,
     *,
@@ -7896,7 +7935,33 @@ def get_state_db_session_messages(
     since_timestamp=None,
     include_inactive: bool = False,
     limit=None,
-) -> list:
+    with_revision: Literal[False] = False,
+) -> list: ...
+
+
+@overload
+def get_state_db_session_messages(
+    sid,
+    *,
+    stitch_continuations: bool = False,
+    profile=None,
+    since_timestamp=None,
+    include_inactive: bool = False,
+    limit=None,
+    with_revision: Literal[True],
+) -> StateDBSessionMessagesSnapshot: ...
+
+
+def get_state_db_session_messages(
+    sid,
+    *,
+    stitch_continuations: bool = False,
+    profile=None,
+    since_timestamp=None,
+    include_inactive: bool = False,
+    limit=None,
+    with_revision: bool = False,
+):
     """Read messages for a Hermes session from state.db.
 
     When *profile* is supplied, reads from that profile's state.db; otherwise
@@ -7926,20 +7991,23 @@ def get_state_db_session_messages(
     ``active=0`` archive rows back in resurrects pre-compaction history and can
     make every later turn re-trigger compression. Pass ``include_inactive=True``
     only for explicit recovery/audit views.
+
+    ``with_revision=True`` returns a :class:`StateDBSessionMessagesSnapshot`.
+    Its revision is derived from the exact rows fetched by the same SQLite
+    query and is available only for an unbounded, active, current-segment read.
+    Existing callers keep the historical list return by default.
     """
     try:
         import sqlite3
     except ImportError:
-        return []
+        return _state_db_session_messages_result([], None, with_revision=with_revision)
 
     if isinstance(profile, str) and profile:
         db_path = _get_profile_home(profile) / 'state.db'
-        if not db_path.exists():
-            db_path = _active_state_db_path()
     else:
         db_path = _active_state_db_path()
     if not db_path.exists():
-        return []
+        return _state_db_session_messages_result([], None, with_revision=with_revision)
 
     try:
         with closing(open_state_db_readonly(db_path)) as conn:
@@ -7949,7 +8017,7 @@ def get_state_db_session_messages(
             available = {str(row['name']) for row in cur.fetchall()}
             required = {'role', 'content', 'timestamp'}
             if not required.issubset(available):
-                return []
+                return _state_db_session_messages_result([], None, with_revision=with_revision)
             optional = [
                 'tool_call_id',
                 'tool_calls',
@@ -7961,7 +8029,18 @@ def get_state_db_session_messages(
                 'codex_message_items',
             ]
             id_col = ['id'] if 'id' in available else []
-            selected = id_col + ['role', 'content', 'timestamp'] + [c for c in optional if c in available]
+            revision_cols = []
+            if with_revision:
+                if 'active' in available:
+                    revision_cols.append('active')
+                if 'api_content' in available:
+                    revision_cols.append('api_content')
+            selected = (
+                id_col
+                + ['role', 'content', 'timestamp']
+                + revision_cols
+                + [c for c in optional if c in available]
+            )
 
             session_chain = [str(sid)]
             if stitch_continuations:
@@ -8020,6 +8099,7 @@ def get_state_db_session_messages(
             active_clause = ""
             if 'active' in available and not include_inactive:
                 active_clause = " AND (active IS NULL OR active != 0)"
+            durable_order_column = 'id' if 'id' in available else 'timestamp'
             # Defensive row cap (backstop only — see docstring). Applied as a
             # SQL LIMIT bound parameter (?) so the tail (newest) rows are
             # retained and a pathological state.db can't materialize unbounded
@@ -8031,10 +8111,9 @@ def get_state_db_session_messages(
                 except (TypeError, ValueError):
                     limit_int = None
                 if limit_int is not None:
-                    # The query orders ASC (oldest first); to keep the NEWEST
-                    # rows under the cap, take a descending-ordered subquery and
-                    # re-sort ascending — a plain LIMIT would keep the oldest.
-                    limit_clause = " ORDER BY timestamp DESC, id DESC LIMIT ?"
+                    # Keep the newest durable rows under the cap, then restore
+                    # canonical append order for the caller.
+                    limit_clause = f" ORDER BY {durable_order_column} DESC LIMIT ?"
                     params.append(limit_int)
             if limit_clause:
                 cur.execute(f"""
@@ -8045,7 +8124,7 @@ def get_state_db_session_messages(
                         {since_clause}
                         {active_clause}
                         {limit_clause}
-                    ) ORDER BY timestamp ASC, id ASC
+                    ) ORDER BY {durable_order_column} ASC
                 """, params)
             else:
                 cur.execute(f"""
@@ -8054,10 +8133,34 @@ def get_state_db_session_messages(
                     WHERE session_id IN ({placeholders})
                     {since_clause}
                     {active_clause}
-                    ORDER BY timestamp ASC, id ASC
+                    ORDER BY {durable_order_column} ASC
                 """, params)
+            rows = cur.fetchall()
+            revision = None
+            if (
+                with_revision
+                and 'id' in available
+                and 'active' in available
+                and len(session_chain) == 1
+                and str(session_chain[0]) == str(sid)
+                and since_timestamp is None
+                and not include_inactive
+                and limit is None
+                and all(row['active'] == 1 for row in rows)
+            ):
+                revision = {
+                    'session_id': str(sid),
+                    'active_message_count': len(rows),
+                    'max_active_message_id': max(
+                        (int(row['id']) for row in rows),
+                        default=0,
+                    ),
+                }
+                if 'api_content' in available:
+                    revision['active_rows_digest'] = _state_db_active_rows_digest(rows)
+
             msgs = []
-            for row in cur.fetchall():
+            for row in rows:
                 msg = {
                     'role': row['role'],
                     'content': row['content'],
@@ -8076,8 +8179,8 @@ def get_state_db_session_messages(
                     msg['name'] = msg['tool_name']
                 msgs.append(msg)
     except Exception:
-        return []
-    return msgs
+        return _state_db_session_messages_result([], None, with_revision=with_revision)
+    return _state_db_session_messages_result(msgs, revision, with_revision=with_revision)
 
 
 def get_state_db_session_message_prefix_summary(
@@ -9222,12 +9325,40 @@ def merge_session_messages_append_only(
     return merged_messages
 
 
+@overload
 def reconciled_state_db_messages_for_session(
-    session, *, prefer_context: bool = False, state_messages: list | None = None
-) -> list:
+    session,
+    *,
+    prefer_context: bool = False,
+    state_messages: list | StateDBSessionMessagesSnapshot | None = None,
+    with_revision: Literal[False] = False,
+) -> list: ...
+
+
+@overload
+def reconciled_state_db_messages_for_session(
+    session,
+    *,
+    prefer_context: bool = False,
+    state_messages: list | StateDBSessionMessagesSnapshot | None = None,
+    with_revision: Literal[True],
+) -> StateDBSessionMessagesSnapshot: ...
+
+
+def reconciled_state_db_messages_for_session(
+    session,
+    *,
+    prefer_context: bool = False,
+    state_messages: list | StateDBSessionMessagesSnapshot | None = None,
+    with_revision: bool = False,
+):
     """Return append-only messages reconciled with state.db for a WebUI session."""
     if session is None:
-        return []
+        return _state_db_session_messages_result([], None, with_revision=with_revision)
+    state_revision = None
+    if isinstance(state_messages, StateDBSessionMessagesSnapshot):
+        state_revision = state_messages.revision
+        state_messages = state_messages.messages
     local_messages = []
     using_context_messages = False
     if prefer_context:
@@ -9238,7 +9369,21 @@ def reconciled_state_db_messages_for_session(
     if not local_messages:
         local_messages = getattr(session, 'messages', None) or []
     if state_messages is None:
-        state_messages = get_state_db_session_messages(getattr(session, 'session_id', None))
+        session_id = getattr(session, 'session_id', None)
+        if with_revision:
+            state_result = get_state_db_session_messages(
+                session_id,
+                with_revision=True,
+            )
+        else:
+            # Preserve the historical one-argument call contract for ordinary
+            # reconciliation and for integrations that replace this reader.
+            state_result = get_state_db_session_messages(session_id)
+        if isinstance(state_result, StateDBSessionMessagesSnapshot):
+            state_revision = state_result.revision
+            state_messages = state_result.messages
+        else:
+            state_messages = state_result
     if prefer_context and local_messages:
         if using_context_messages:
             sidecar_messages = getattr(session, 'messages', None) or []
@@ -9265,21 +9410,34 @@ def reconciled_state_db_messages_for_session(
                             "Compressed context for session %s has no compression anchor; using context_messages only",
                             getattr(session, "session_id", None),
                         )
-                        return list(local_messages)
+                        return _state_db_session_messages_result(
+                            local_messages,
+                            state_revision,
+                            with_revision=with_revision,
+                        )
                     anchor_index = _state_db_anchor_index(state_messages, anchor_key)
                     if anchor_index is None:
                         logger.debug(
                             "Compressed context for session %s has an unverifiable compression anchor; using context_messages only",
                             getattr(session, "session_id", None),
                         )
-                        return list(local_messages)
+                        return _state_db_session_messages_result(
+                            local_messages,
+                            state_revision,
+                            with_revision=with_revision,
+                        )
                     state_messages = list(state_messages or [])[anchor_index + 1 :]
         state_messages = state_db_delta_after_context(local_messages, state_messages)
-    return merge_session_messages_append_only(
+    reconciled_messages = merge_session_messages_append_only(
         local_messages,
         state_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
+    )
+    return _state_db_session_messages_result(
+        reconciled_messages,
+        state_revision,
+        with_revision=with_revision,
     )
 
 
