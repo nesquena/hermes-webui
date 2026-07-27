@@ -1131,37 +1131,180 @@ def test_cron_batch_exact_remainder_growth_does_not_exceed_hard_cap(monkeypatch,
     pinned 1-byte file grows during its descriptor read, the total physical
     read must NEVER exceed 4*cap. The reader caps the physical read at the
     remaining budget (not budget+1), so a same-inode growth cannot return more
-    than the caller's allowance."""
+    than the caller's allowance.
+    
+    Schedule:
+      - run-2.md: newest, size 2*cap (large file → contributes 2*cap bytes)
+      - run-1.md: second newest, size 2*cap - 1 (large file → contributes 2*cap - 1 bytes)
+      - run-0.md: oldest, pinned 1-byte file that grows to 2 bytes between fstat and read
+    
+    The two newer files consume exactly 4*cap - 1 bytes, leaving exactly 1 byte
+    of remaining allowance for the oldest file. The oldest file's fstat sees
+    size=1 (admitted), but the same inode grows to 2 bytes before the read.
+    
+    Before the fix, the helper would call read(budget + 1) = read(2) even when
+    budget was small, and the grown file would return 2 bytes, pushing total
+    physical reads to 4*cap + 1 and violating the hard cap. The fixed helper
+    caps the read at budget (=1), so read(1) -> 1, keeping total at exactly
+    4*cap (the hard cap is never exceeded)."""
     out_dir = tmp_path / "cron-out" / "job1"
     out_dir.mkdir(parents=True)
     cap = _FILE_READ_MAX_BYTES
-    # Two newer files that together consume 4*cap - 1 bytes.
-    # Each reads at most 2*cap (head+tail). Two files = up to 4*cap. We want
-    # exactly 4*cap - 1, so make them sum to that.
-    # File A: 2*cap bytes on disk -> reads 2*cap. File B: (2*cap - 1) on disk.
-    new_a = out_dir / "run-1.md"
-    new_a.write_text("## Response\n" + ("A" * (cap * 2 - 50)), encoding="utf-8")
-    new_b = out_dir / "run-0.md"
-    new_b.write_text("## Response\n" + ("B" * (cap * 2 - 51)), encoding="utf-8")
-    os.utime(new_a, (200, 200))
-    os.utime(new_b, (100, 100))
-    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
 
-    # Instrument: wrap the reader so that for new_b (the second file), if the
-    # remaining budget is small, the file 'grows' during read. Track the
-    # independent physical bytes via the handler's spent counter.
+    # Schedule: the two newest files consume exactly 4*cap - 1 descriptor bytes
+    # so the remaining allowance for the oldest file is exactly 1 byte.
+    #
+    # For a large file (size S where cap < S <= 2*cap) the disjoint head+tail
+    # path reads the whole file (head=[0,cap), tail=[cap,S)), so bytes_read = S.
+    # So two newest files of on-disk sizes 2*cap and 2*cap-1 together consume
+    # exactly 4*cap - 1 bytes.
+    prefix = "## Response\n"
+    prefix_bytes = len(prefix.encode("utf-8"))  # UTF-8 byte length
+
+    # run-2: newest, size 2*cap bytes -> contributes 2*cap.
+    run_2 = out_dir / "run-2.md"
+    filler_2_bytes = cap * 2 - prefix_bytes
+    content_2_bytes = prefix.encode("utf-8") + (b"A" * filler_2_bytes)
+    run_2.write_bytes(content_2_bytes)
+
+    # run-1: second newest, size 2*cap - 1 bytes -> contributes 2*cap - 1.
+    run_1 = out_dir / "run-1.md"
+    filler_1_bytes = cap * 2 - 1 - prefix_bytes
+    content_1_bytes = prefix.encode("utf-8") + (b"B" * filler_1_bytes)
+    run_1.write_bytes(content_1_bytes)
+
+    # Verify exact sizes (bytes_read arithmetic depends on them).
+    assert os.path.getsize(run_2) == cap * 2, f"run_2 size mismatch: {os.path.getsize(run_2)}"
+    assert os.path.getsize(run_1) == cap * 2 - 1, f"run_1 size mismatch: {os.path.getsize(run_1)}"
+
+    # Oldest file: pinned 1-byte inode that grows to 2 bytes between fstat and
+    # read. fstat pins size=1 (admitted under budget=1); the growth happens
+    # inside read(), so an uncapped read(budget+1)=read(2) would return 2 bytes
+    # and breach the hard cap. The fixed helper caps the read at budget=1.
+    old_0 = out_dir / "run-0.md"
+    old_0.write_text("x", encoding="utf-8")  # exactly 1 byte
+    assert os.path.getsize(old_0) == 1, f"old_0 size must be 1: {os.path.getsize(old_0)}"
+
+    # Set mtimes for newest-first ordering (descending mtime).
+    os.utime(run_2, (300, 300))  # newest
+    os.utime(run_1, (200, 200))
+    os.utime(old_0, (100, 100))  # oldest
+    
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+    
+    # Track per-descriptor read() calls on the grown file
+    grown_path = old_0
+    requested_amounts_for_grown = []
+    returned_lengths_for_grown = []
+    real_open = open
+    
+    class GrowingFile:
+        """File wrapper that grows old_0.md from 1 to 2 bytes on first read().
+        
+        The growth happens AFTER os.fstat() but BEFORE fh.read(), simulating
+        same-inode growth. fileno() returns the real fd so fstat sees size=1,
+        but read() grows the file to 2 bytes before reading."""
+        def __init__(self, name, *a, **k):
+            self._real = real_open(name, *a, **k)
+            self._grown = False
+        def fileno(self):
+            return self._real.fileno()
+        def read(self, n=-1):
+            if not self._grown and n and n > 0:
+                # Grow the file from 1 to 2 bytes BEFORE this read, so an
+                # uncapped read(budget+1)=read(2) would return 2 bytes and
+                # breach the hard cap. The fixed helper caps the read at
+                # budget=1, so this returns at most 1 byte.
+                with real_open(self._real.name, "ab") as wf:
+                    wf.write(b"G")
+                self._grown = True
+            data = self._real.read(n)
+            # Record the requested and returned lengths independently of the
+            # helper's reported bytes_read (observe raw read(n) calls).
+            requested_amounts_for_grown.append(n)
+            returned_lengths_for_grown.append(len(data))
+            return data
+        def seek(self, *a, **k): return self._real.seek(*a, **k)
+        def close(self): return self._real.close()
+
+    import builtins
+    def growing_open(name, *a, **k):
+        if str(name) == str(grown_path):
+            return GrowingFile(name, *a, **k)
+        return real_open(name, *a, **k)
+    monkeypatch.setattr(builtins, "open", growing_open)
+
+    # Instrument the helper-level reader to record bytes_read per call, so the
+    # total physical bytes can be summed independently of the grown-file wrapper.
+    original_reader = routes._read_cron_output_bounded
+    call_log = []
+
+    def instrumented_reader(path, *a, **kw):
+        result = original_reader(path, *a, **kw)
+        text, trunc, ok, bytes_read, declined = result
+        call_log.append((path.name, ok, declined, bytes_read))
+        return result
+
+    monkeypatch.setattr(routes, "_read_cron_output_bounded", instrumented_reader)
+
+    # Drive the batch endpoint.
     handler = _JSONHandler()
     routes._handle_cron_output(
         handler, SimpleNamespace(query="job_id=job1&limit=10")
     )
     body = _payload(handler)
-    # The batch succeeded for both files (both fit). The key assertion is that
-    # the total is bounded — verified by the handler's internal spent tracking.
-    # We assert the outputs are present and no truncation occurred (both fit).
-    contents = [e.get("content", "") for e in body.get("outputs", [])]
-    assert len(contents) == 2, (
-        f"both files must be read (they fit within 4*cap); got {len(contents)}"
+
+    # Required assertion 1: the grown file's only read requested exactly 1 byte
+    # (budget-capped, NOT budget+1=2) and returned exactly 1 byte even though
+    # the inode had grown to 2.
+    assert requested_amounts_for_grown == [1], (
+        f"the grown file must be read with exactly 1 byte request (budget capped); "
+        f"got {requested_amounts_for_grown}"
     )
+    assert returned_lengths_for_grown == [1], (
+        f"the grown file's read must return exactly 1 byte even though it grew to 2; "
+        f"got {returned_lengths_for_grown}"
+    )
+
+    # Required assertion 2: total physical bytes never exceed the hard batch
+    # cap (4*cap). Independent of the helper's reported bytes_read.
+    total_physical_bytes = sum(entry[3] for entry in call_log)
+    assert total_physical_bytes <= cap * 4, (
+        f"total physical bytes must stay within 4*cap ({cap * 4}); "
+        f"got {total_physical_bytes}"
+    )
+    # Should be exactly 4*cap - 1 + 1 = 4*cap
+    expected_total = (cap * 2) + (cap * 2 - 1) + 1
+    assert total_physical_bytes == expected_total, (
+        f"total should be exactly {expected_total} (4*cap); got {total_physical_bytes}"
+    )
+    
+    # Required assertion 3: the grown row is returned but flagged truncated
+    # (conservatively, since the read filled the budget with no growth-probe
+    # room — the helper cannot prove EOF when the read is capped at budget).
+    outputs = body.get("outputs", [])
+    grown_entry = next((e for e in outputs if e.get("filename") == "run-0.md"), None)
+    assert grown_entry is not None, "run-0.md should be in outputs"
+    assert grown_entry.get("truncated") is True, (
+        f"the grown file must be conservatively truncated; got {grown_entry.get('truncated')}"
+    )
+
+    # Required assertion 4: no reader runs after the grown file. The grown file
+    # is the oldest (last in descending-mtime order), so it must be the final
+    # entry in the call log — the batch did not continue past exhaustion.
+    assert call_log[-1][0] == "run-0.md", (
+        f"the grown file should be the last read (oldest, exhausts budget); "
+        f"call order: {[c[0] for c in call_log]}"
+    )
+
+    # Helper-level state consistency for the grown file: the read succeeded,
+    # was not a budget decline, and charged exactly 1 byte.
+    grown_call = next((c for c in call_log if c[0] == "run-0.md"), None)
+    assert grown_call is not None
+    _name, ok, declined, bytes_read = grown_call
+    assert ok is True, "the grown file read should succeed (ok=True)"
+    assert declined is False, "the grown file should not be declined"
+    assert bytes_read == 1, f"helper should report bytes_read=1 for the grown file; got {bytes_read}"
 
 
 def test_read_cron_output_bounded_budget_limited_read_never_exceeds_budget(
@@ -1199,12 +1342,25 @@ def test_read_cron_output_bounded_budget_limited_read_never_exceeds_budget(
 
     text, trunc, ok, bytes_read, declined = _read_cron_output_bounded(f, budget=1)
     # The read request must have been capped at budget (1), not budget+1 (2).
-    assert all(n <= 1 for n in requested_amounts), (
-        f"physical read must never request more than budget=1; requested "
+    # Strengthened: exactly ONE read request, of exactly 1 byte.
+    assert requested_amounts == [1], (
+        f"physical read must be exactly one request of 1 byte; got "
         f"{requested_amounts}"
     )
-    assert bytes_read <= 1, (
-        f"bytes_read must never exceed budget=1; got {bytes_read}"
+    # Strengthened: exact bytes_read value (not just <=)
+    assert bytes_read == 1, (
+        f"bytes_read must be exactly 1 (not just <=1); got {bytes_read}"
+    )
+    # Strengthened: exact text content
+    assert text == "x", (
+        f"text must be exactly the 1 byte that was read; got {text!r}"
+    )
+    # Strengthened: ok and declined states
+    assert ok is True, (
+        f"the read should succeed (ok=True); got ok={ok}"
+    )
+    assert declined is False, (
+        f"the file should not be declined; got declined={declined}"
     )
     # Conservatively truncated (no room for growth probe, read filled budget).
     assert trunc is True, (
