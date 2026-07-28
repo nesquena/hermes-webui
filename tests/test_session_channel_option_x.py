@@ -935,11 +935,11 @@ def test_load_session_rearms_stream_on_every_early_return():
         "helper must (re)arm startSessionStream for the currently-shown S.session"
     )
 
-    # Isolate the loadSession body. Widened window: the #4946 visit-ack helpers
-    # added inside loadSession pushed the fetch-error catch's stream restart past
-    # the old 14000-char cutoff.
+    # Isolate the full loadSession body. The function keeps growing as adjacent
+    # ownership seams tighten, so fixed character windows turn into false reds.
     fn_ix = js.index("async function loadSession(")
-    body = js[fn_ix:fn_ix + 16000]
+    next_fn_ix = js.index("async function _ensureSidebarSessionProfile(", fn_ix)
+    body = js[fn_ix:next_fn_ix]
 
     # The unconditional teardown must still be there (this is what creates the
     # dead-stream window the re-arm closes).
