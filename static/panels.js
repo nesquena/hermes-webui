@@ -11347,8 +11347,20 @@ function _buildProviderCard(p){
   if(p.configurable && p.id==='bedrock'){
     const hint=document.createElement('div');
     hint.className='provider-card-hint';
-    hint.textContent='Use a Bedrock API key and/or an IAM access key pair. Instance-role (IMDS) auth is separate and off by default on locked hosts.';
+    hint.textContent='Credential priority: (1) Bedrock API key, then (2) IAM access key + secret. If both are saved, the API key is used. Instance-role (IMDS) is last in the chain and off by default on locked hosts.';
     body.appendChild(hint);
+    const activeHint=document.createElement('div');
+    activeHint.className='provider-card-hint';
+    if(p.bedrock_has_bearer && p.bedrock_has_iam){
+      activeHint.textContent='In use now: Bedrock API key (saved IAM keys are ignored while an API key is present).';
+    }else if(p.bedrock_has_bearer){
+      activeHint.textContent='In use now: Bedrock API key.';
+    }else if(p.bedrock_has_iam){
+      activeHint.textContent='In use now: IAM access key pair.';
+    }else{
+      activeHint.textContent='No API key or IAM keys saved yet.';
+    }
+    body.appendChild(activeHint);
 
     const addSecretField=(labelText, placeholder, keyName)=>{
       const field=document.createElement('div');
@@ -11382,17 +11394,17 @@ function _buildProviderCard(p){
     };
 
     const bearerInput=addSecretField(
-      'Bedrock API key',
+      '1. Bedrock API key (highest priority)',
       p.bedrock_has_bearer?'•••••••• (replace to update)':'AWS_BEARER_TOKEN_BEDROCK',
       'api_key'
     );
     const accessInput=addSecretField(
-      'AWS access key ID',
+      '2. AWS access key ID',
       p.bedrock_has_iam?'•••••••• (replace to update)':'AWS_ACCESS_KEY_ID',
       'aws_access_key_id'
     );
     const secretInput=addSecretField(
-      'AWS secret access key',
+      '2. AWS secret access key',
       p.bedrock_has_iam?'•••••••• (replace to update)':'AWS_SECRET_ACCESS_KEY',
       'aws_secret_access_key'
     );
