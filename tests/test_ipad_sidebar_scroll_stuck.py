@@ -1705,6 +1705,34 @@ def test_setup_touch_sentinel_called_unconditionally():
         "_setupTouchSentinel must be called unconditionally, not inside if(_isTouchPrimary())"
 
 
+def test_skeleton_teardown_unconditional():
+    """Source-level pin: showSessionListSkeleton must call _invalidateTouchRender
+    UNCONDITIONALLY — not gated on _isTouchPrimary(). The old touch owner may
+    have already lost capability (_isTouchPrimary() now false) but its observer,
+    RAF, render state, pending work, and generation are still live. Gating on
+    the current capability check leaves them dangling after the skeleton
+    replaces the DOM."""
+    fn = _extract_fn(SESSIONS_JS, "showSessionListSkeleton")
+    # The function must call _invalidateTouchRender without gating on _isTouchPrimary
+    assert "_invalidateTouchRender" in fn, \
+        "showSessionListSkeleton must call _invalidateTouchRender"
+    # The call must NOT be inside an if(_isTouchPrimary()) gate
+    invalidate_idx = fn.find("_invalidateTouchRender")
+    before = fn[max(0, invalidate_idx - 200):invalidate_idx]
+    if_matches = re.findall(r'if\s*\(\s*_isTouchPrimary\(\)\s*\)\s*\{', before)
+    assert len(if_matches) == 0, \
+        "showSessionListSkeleton must call _invalidateTouchRender unconditionally, not inside if(_isTouchPrimary())"
+
+
+def test_prefix_authority_exact_match():
+    """Source-level pin: _appendTouchBatch prefix validation must use exact
+    equality (!==) not less-than (<). An extra stale live row (61 items,
+    oldLoaded=60) must invalidate/rebuild, not silently duplicate."""
+    fn = _extract_fn(SESSIONS_JS, "_appendTouchBatch")
+    assert "existingItems.length!==oldLoaded" in fn, \
+        "Prefix validation must use exact equality (!==), not < — an extra stale row must invalidate"
+
+
 def test_append_commit_two_phase():
     """Source-level pin: _appendTouchBatch commit must be two-phase —
     validate ALL group bodies exist BEFORE attaching any fragment.
@@ -1866,25 +1894,25 @@ console.log(JSON.stringify({{
 
 
 @_node_tests
-def test_missing_wrapper_then_malformed_wrapper_no_live_mutation():
-    """Phase 1 must be side-effect-free: group A has no wrapper (so Phase 1
-    creates one detached), group B has an existing wrapper with no body.
-    Phase 1 must abort at B WITHOUT attaching A's detached wrapper to the
-    live DOM. Live group child-node count and loaded count must stay
-    unchanged. Then repair B, retry, and assert each canonical SID appears
-    exactly once.
+def test_missing_wrapper_then_live_malformed_wrapper_repair_retry():
+    """Single-VM test: group A has no wrapper (Phase 1 creates it detached),
+    group B has a LIVE wrapper in list.children with no body (malformed).
+    Phase 1 must abort at B WITHOUT attaching A's detached wrapper or mutating
+    B. Then repair B IN PLACE (same VM, same list), retry, and assert:
+    - Top-level order is A, B (canonical, not B, A)
+    - Every SID s_0..s_99 appears exactly once
+    - B's wrapper node identity is preserved (same object reference)
+    - Loaded count reaches 100
 
-    This is the exact schedule the gate certifier requested: the prior
-    test_partial_commit_does_not_attach_any_group pre-installed both
-    wrappers, so Phase 1 never took the live insertBefore/appendChild
-    branch. This test does NOT pre-install group A's wrapper — forcing
-    Phase 1 to create it — and verifies it stays detached.
+    This replaces the prior two-VM test whose malformed B existed only in the
+    mock _groups registry, not in list.children, and whose "retry" started a
+    fresh VM with a newly valid B — never repairing the same live B.
     """
-    # 100 rows: rows 0-79 in group A, rows 80-99 in group B
+    # 100 rows: rows 0-79 in group A (isPinned=true), rows 80-99 in group B
     flat_rows = []
     for i in range(100):
         group_label = "A" if i < 80 else "B"
-        flat_rows.append({"group": {"label": group_label}, "session": {"session_id": f"s_{i}"}})
+        flat_rows.append({"group": {"label": group_label, "isPinned": i < 80}, "session": {"session_id": f"s_{i}"}})
 
     source = f"""
 const SESSIONS_JS = {SESSIONS_JS!r};
@@ -1903,95 +1931,25 @@ _touchRenderState = {{
   activeSid: null,
 }};
 
-// Group A: NO wrapper in list._groups — Phase 1 must create it detached.
-// Group B: existing wrapper but querySelector returns null for body (malformed).
+// Group A: NO wrapper anywhere — Phase 1 must create it detached.
+// Group B: LIVE malformed wrapper — in list.children AND _groups, but
+// querySelector returns null for .session-date-body (no body = malformed).
 const gwB = makeEl('div');
 gwB.dataset['group-label'] = 'B';
 gwB.querySelector = function(sel) {{ return null; }}; // no body — malformed
 list._groups['B'] = gwB;
-// gwB is NOT in list.children — it exists in _groups only, simulating a
-// stale/partially-constructed DOM state.
-
-// Count live DOM children BEFORE append
-const childrenBefore = list.children.length;
-
-_appendTouchBatch();
-
-// After abort: loaded count must be unchanged, no new wrapper in live DOM
-const loadedAfterAbort = _sessionTouchLoadedCount;
-const childrenAfterAbort = list.children.length;
-const itemsAfterAbort = list._items.length;
-// Group A wrapper must NOT have been attached to the live list.
-// _createTouchGroupWrapper uses setAttribute('data-group-label', ...) which
-// the mock stores as dataset.grouplabel (dashes stripped). Check both forms.
-function hasGroupInDom(label) {{
-  return list.children.some(c => {{
-    if (!c.dataset) return false;
-    return c.dataset['group-label'] === label ||
-           c.dataset['grouplabel'] === label ||
-           c.getAttribute('data-group-label') === label;
-  }});
-}}
-const groupAInDom = hasGroupInDom('A');
-
-console.log(JSON.stringify({{
-  loadedAfterAbort,
-  childrenBefore,
-  childrenAfterAbort,
-  itemsAfterAbort,
-  groupAInDom,
-}}));
-"""
-    result = json.loads(_run_node_vm(source))
-    assert result["loadedAfterAbort"] == 60, \
-        f"Phase 1 abort must not advance loaded count, got {result['loadedAfterAbort']}"
-    assert result["childrenAfterAbort"] == result["childrenBefore"], \
-        f"Phase 1 abort must not mutate live DOM children: before={result['childrenBefore']}, after={result['childrenAfterAbort']}"
-    assert result["itemsAfterAbort"] == 60, \
-        f"Phase 1 abort must not add any session items, got {result['itemsAfterAbort']}"
-    assert not result["groupAInDom"], \
-        "Group A's newly created wrapper must stay DETACHED — must not appear in live DOM children"
-
-    # Phase 2: repair group B (give it a proper body), retry, verify success
-    source2 = f"""
-const SESSIONS_JS = {SESSIONS_JS!r};
-""" + _node_test_preamble() + f"""
-const list = makeList();
-_sessionTouchListEl = list;
-_sessionTouchGen = 1;
-_sessionTouchLoadedCount = 60;
-_sessionTouchTotalCount = 100;
-for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s_' + i));
-
-_touchRenderState = {{
-  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
-  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
-  activeSid: null,
-}};
-
-// Group A: NO wrapper (Phase 1 will create it)
-// Group B: existing wrapper WITH a proper body now (repaired)
-const gwB = makeEl('div');
-gwB.dataset['group-label'] = 'B';
-const bodyB = makeBodyThatTracksItems(list);
-gwB.querySelector = function(sel) {{ if(sel==='.session-date-body') return bodyB; return null; }};
-gwB.appendChild(bodyB);
-list._groups['B'] = gwB;
-list.children.push(gwB); // existing wrapper is already in the live DOM
+list.children.push(gwB); // B is LIVE in list.children
 
 // Override _createTouchGroupWrapper so newly created group A's body tracks
 // session items in list._items (the production version uses real DOM which
 // tracks naturally; the mock needs explicit wiring).
-const _origCreateTouchGroupWrapper = _createTouchGroupWrapper;
+const _origCreate = _createTouchGroupWrapper;
 _createTouchGroupWrapper = function(g, st) {{
-  const wrapper = _origCreateTouchGroupWrapper(g, st);
-  // Replace the default body with a tracking body
+  const wrapper = _origCreate(g, st);
   const trackingBody = makeBodyThatTracksItems(list);
   trackingBody.className = 'session-date-body';
-  // Remove old body, add tracking body
   wrapper.children = wrapper.children.filter(c => c.className !== 'session-date-body');
   wrapper.appendChild(trackingBody);
-  // Override querySelector to find the tracking body
   wrapper.querySelector = function(sel) {{
     if (sel === '.session-date-body') return trackingBody;
     return null;
@@ -1999,18 +1957,32 @@ _createTouchGroupWrapper = function(g, st) {{
   return wrapper;
 }};
 
+// ── Snapshot top-level node identities and order BEFORE append ──
+const childrenBefore = list.children.slice();
+const idsBefore = childrenBefore.map(c => c._domId || (c._domId = 'node_' + Math.random()));
+// Tag them so we can verify identity preservation
+childrenBefore.forEach((c, i) => {{ if(!c._testTag) c._testTag = 'before_' + i; }});
+
+const loadedBefore = _sessionTouchLoadedCount;
+const itemsBefore = list._items.length;
+
+// ── First append: must abort at B (no body) ──
 _appendTouchBatch();
 
-// After success: loaded count should be 100, all SIDs present exactly once
-const sids = list._items.map(i => i.dataset.sid);
-const uniqueSids = [...new Set(sids)];
-const expectedSids = Array.from({{length: 100}}, (_, i) => 's_' + i);
-const allPresent = expectedSids.every(s => sids.includes(s));
-const noDuplicates = sids.length === uniqueSids.length;
+const loadedAfterAbort = _sessionTouchLoadedCount;
+const itemsAfterAbort = list._items.length;
+const childrenAfterAbort = list.children.slice();
 
-// Verify group A's newly created wrapper was attached to the live DOM.
-// _createTouchGroupWrapper uses setAttribute('data-group-label', ...) which
-// the mock stores as dataset.grouplabel (dashes stripped). Check both forms.
+// Verify zero mutation: same node identities, same order, same count
+const idsAfterAbort = childrenAfterAbort.map(c => c._domId);
+const sameOrder = idsBefore.length === idsAfterAbort.length &&
+  idsBefore.every((id, i) => id === idsAfterAbort[i]);
+const sameCount = childrenBefore.length === childrenAfterAbort.length;
+
+// B's wrapper must still be the same object reference
+const bWrapperSame = childrenAfterAbort.includes(gwB);
+
+// Group A must NOT be in the live DOM
 function hasGroupInDom(label) {{
   return list.children.some(c => {{
     if (!c.dataset) return false;
@@ -2019,32 +1991,157 @@ function hasGroupInDom(label) {{
            c.getAttribute('data-group-label') === label;
   }});
 }}
-const groupAInDom = hasGroupInDom('A');
-const groupBInDom = hasGroupInDom('B');
+const groupAInDomAfterAbort = hasGroupInDom('A');
+
+// ── Repair B IN PLACE: give it a proper body ──
+const bodyB = makeBodyThatTracksItems(list);
+bodyB.className = 'session-date-body';
+gwB.querySelector = function(sel) {{ if(sel==='.session-date-body') return bodyB; return null; }};
+gwB.appendChild(bodyB);
+// Also override querySelectorAll on gwB so _updateTouchGroupSpacers works
+gwB.querySelectorAll = function(sel) {{ return []; }};
+
+// ── Retry: _appendTouchBatch in the SAME VM ──
+_appendTouchBatch();
+
+const loadedAfterRetry = _sessionTouchLoadedCount;
+const itemsAfterRetry = list._items.length;
+
+// Verify canonical order: A before B in top-level children
+const childrenAfterRetry = list.children.slice();
+const labelsAfterRetry = childrenAfterRetry.map(c => {{
+  if (!c.dataset) return null;
+  return c.dataset['group-label'] || c.dataset['grouplabel'] || c.getAttribute('data-group-label');
+}});
+const groupAIdx = labelsAfterRetry.indexOf('A');
+const groupBIdx = labelsAfterRetry.indexOf('B');
+const aBeforeB = groupAIdx >= 0 && groupBIdx >= 0 && groupAIdx < groupBIdx;
+
+// Verify every SID appears exactly once
+const sids = list._items.map(i => i.dataset.sid);
+const uniqueSids = [...new Set(sids)];
+const expectedSids = Array.from({{length: 100}}, (_, i) => 's_' + i);
+const allPresent = expectedSids.every(s => sids.includes(s));
+const noDuplicates = sids.length === uniqueSids.length;
+
+// Verify B's wrapper identity is preserved (same object from before)
+const bWrapperPreserved = childrenAfterRetry.includes(gwB);
+
+// Verify isPinned metadata carried from flatRows to newly created A wrapper
+const wrapperA = childrenAfterRetry.find(c => {{
+  if (!c.dataset) return false;
+  return c.dataset['group-label'] === 'A' || c.dataset['grouplabel'] === 'A' ||
+         c.getAttribute('data-group-label') === 'A';
+}});
+let aHasPinnedHeader = false;
+if (wrapperA) {{
+  // _createTouchGroupWrapper sets header className to include 'pinned' when isPinned
+  const hdr = wrapperA.children.find(c => c.className && c.className.indexOf('session-date-header') >= 0);
+  aHasPinnedHeader = hdr && hdr.className.indexOf('pinned') >= 0;
+}}
 
 console.log(JSON.stringify({{
-  loadedCount: _sessionTouchLoadedCount,
-  totalItems: list._items.length,
+  loadedAfterAbort,
+  itemsAfterAbort,
+  sameOrder,
+  sameCount,
+  bWrapperSame,
+  groupAInDomAfterAbort,
+  loadedAfterRetry,
+  itemsAfterRetry,
+  aBeforeB,
+  groupAIdx,
+  groupBIdx,
   allPresent,
   noDuplicates,
   duplicateCount: sids.length - uniqueSids.length,
-  groupAInDom,
-  groupBInDom,
+  bWrapperPreserved,
+  aHasPinnedHeader,
+  labelsAfterRetry,
 }}));
 """
-    result2 = json.loads(_run_node_vm(source2))
-    assert result2["loadedCount"] == 100, \
-        f"After repair+retry, loaded count should reach 100, got {result2['loadedCount']}"
-    assert result2["totalItems"] == 100, \
-        f"After repair+retry, DOM should have 100 items, got {result2['totalItems']}"
-    assert result2["allPresent"], \
+    result = json.loads(_run_node_vm(source))
+
+    # ── Abort assertions ──
+    assert result["loadedAfterAbort"] == 60, \
+        f"Phase 1 abort must not advance loaded count, got {result['loadedAfterAbort']}"
+    assert result["itemsAfterAbort"] == 60, \
+        f"Phase 1 abort must not add session items, got {result['itemsAfterAbort']}"
+    assert result["sameCount"], \
+        f"Phase 1 abort must not change live DOM child count: before/after mismatch"
+    assert result["sameOrder"], \
+        "Phase 1 abort must not mutate top-level node order or identities"
+    assert result["bWrapperSame"], \
+        "B's wrapper must be the same object reference after abort (zero mutation)"
+    assert not result["groupAInDomAfterAbort"], \
+        "Group A's newly created wrapper must stay DETACHED — must not appear in live DOM children"
+
+    # ── Retry assertions ──
+    assert result["loadedAfterRetry"] == 100, \
+        f"After repair+retry in same VM, loaded count should reach 100, got {result['loadedAfterRetry']}"
+    assert result["itemsAfterRetry"] == 100, \
+        f"After repair+retry, DOM should have 100 items, got {result['itemsAfterRetry']}"
+    assert result["aBeforeB"], \
+        f"Canonical order must be A before B, got A@{result['groupAIdx']} B@{result['groupBIdx']} — labels: {result['labelsAfterRetry']}"
+    assert result["allPresent"], \
         "After repair+retry, every canonical SID s_0..s_99 must be present"
-    assert result2["noDuplicates"], \
-        f"After repair+retry, no duplicate SIDs, duplicateCount={result2['duplicateCount']}"
-    assert result2["groupAInDom"], \
-        "After success, group A wrapper must be in live DOM"
-    assert result2["groupBInDom"], \
-        "After success, group B wrapper must be in live DOM"
+    assert result["noDuplicates"], \
+        f"After repair+retry, no duplicate SIDs, duplicateCount={result['duplicateCount']}"
+    assert result["bWrapperPreserved"], \
+        "B's wrapper node identity must be preserved through repair+retry"
+    assert result["aHasPinnedHeader"], \
+        "Group A's newly created wrapper must carry isPinned metadata from flatRows (pinned header class)"
+
+
+@_node_tests
+def test_extra_stale_live_row_rejects_and_rebuilds():
+    """When the DOM has MORE rows than oldLoaded (e.g. 61 live rows,
+    oldLoaded=60), prefix validation must reject and trigger a full re-render
+    — not silently duplicate by validating only the first 60 and appending
+    starting at canonical row 60. The prior version used < instead of !==,
+    so an extra stale row was accepted and the DOM settled at 101 items /
+    100 unique SIDs instead of invalidating."""
+    flat_rows = []
+    for i in range(100):
+        flat_rows.append({"group": {"label": "Today", "isPinned": False}, "session": {"session_id": f"s_{i}"}})
+
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 100;
+// Pre-populate 61 items — ONE MORE than oldLoaded (60). The extra stale row
+// must trigger invalidation, not be silently accepted.
+for (let i = 0; i < 61; i++) list._items.push(makeSessionItem('s_' + i));
+
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+
+const loadedBefore = _sessionTouchLoadedCount;
+const itemsBefore = list._items.length;
+const renderCallsBefore = _renderCalls;
+
+_appendTouchBatch();
+
+console.log(JSON.stringify({{
+  loadedAfter: _sessionTouchLoadedCount,
+  itemsAfter: list._items.length,
+  renderCallsDelta: _renderCalls - renderCallsBefore,
+  loadedBefore,
+  itemsBefore,
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["renderCallsDelta"] >= 1, \
+        f"Extra stale row (61 items, oldLoaded=60) must trigger full re-render (renderSessionListFromCache), got renderCallsDelta={result['renderCallsDelta']}"
+    assert result["loadedAfter"] == 0, \
+        f"After invalidation, loaded count must be reset to 0, got {result['loadedAfter']}"
 
 
 @_node_tests
@@ -2091,3 +2188,65 @@ console.log(JSON.stringify({
     assert result["listElNull"], "List element must be cleared on touch exit"
     assert result["loadedCountZero"], "Loaded count must be zeroed on touch exit"
     assert result["batchPendingFalse"], "Batch pending must be cleared on touch exit"
+
+
+@_node_tests
+def test_skeleton_teardown_with_old_touch_owner_capability_false():
+    """showSessionListSkeleton must tear down prior touch owner/observer/RAF/
+    pending/list state BEFORE skeleton replacement, regardless of the current
+    _isTouchPrimary() result. The old owner may have already lost capability
+    (capability flips false before skeleton replacement) — gating on the
+    current _isTouchPrimary() leaves the old render state, pending work, list
+    owner, and generation surviving after the DOM is replaced.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+_sessionTouchGen = 1;
+_sessionTouchListEl = list;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 100;
+_touchRenderState = { gen: 1, list: list, flatRows: [], renderOneSession: null, activeSid: null };
+_touchBatchPending = true;
+_touchScrollFallbackRaf = 42; // non-zero = RAF was scheduled
+_touchSentinelObserver = { disconnect: function() {}, observe: function() {}, unobserve: function() {} };
+
+// Mock _isTouchPrimary to return FALSE — capability flipped to non-touch
+// BEFORE the skeleton replacement. The old touch owner is still live.
+function _isTouchPrimary() { return false; }
+
+// Mock $ to return our list element
+function $(id) { return id === 'sessionList' ? list : null; }
+
+// Mock skeleton groups constant referenced by showSessionListSkeleton
+const _SESSION_SKELETON_GROUPS = [{rows: [{title: 70}]}];
+
+// Extract and eval showSessionListSkeleton
+eval(extractFunc('showSessionListSkeleton'));
+
+// Call showSessionListSkeleton — must tear down old touch state UNCONDITIONALLY
+showSessionListSkeleton('test-profile');
+
+console.log(JSON.stringify({
+  observerNull: _touchSentinelObserver === null,
+  renderStateNull: _touchRenderState === null,
+  listElNull: _sessionTouchListEl === null,
+  loadedCountZero: _sessionTouchLoadedCount === 0,
+  batchPendingFalse: _touchBatchPending === false,
+  rafZero: _touchScrollFallbackRaf === 0,
+}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["observerNull"], \
+        "Observer must be disconnected even when _isTouchPrimary() is false — old owner still live"
+    assert result["renderStateNull"], \
+        "Render state must be cleared even when _isTouchPrimary() is false"
+    assert result["listElNull"], \
+        "List element must be cleared even when _isTouchPrimary() is false"
+    assert result["loadedCountZero"], \
+        "Loaded count must be zeroed even when _isTouchPrimary() is false"
+    assert result["batchPendingFalse"], \
+        "Batch pending must be cleared even when _isTouchPrimary() is false"
+    assert result["rafZero"], \
+        "Fallback RAF must be cancelled even when _isTouchPrimary() is false"
