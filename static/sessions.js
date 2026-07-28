@@ -1815,24 +1815,26 @@ async function loadSession(sid){
         };
         const _classifyProfileSwitchSettlement = terminal => {
           if (!terminal) return 'stand_down';
-          const requestedProfile = (typeof profileMismatch.profile === 'string' && profileMismatch.profile.trim())
-            ? profileMismatch.profile.trim()
-            : 'default';
-          const normalize = value => (typeof value === 'string' && value.trim()) ? value.trim() : '';
-          const terminalTarget = normalize(terminal.target);
-          const activeProfile = normalize((S && S.activeProfile) || 'default') || 'default';
+          const normalizeTarget = value => (typeof value === 'string' && value.trim()) ? value.trim() : 'default';
+          const normalizeOwner = value => (typeof value === 'string' && value.trim()) ? value.trim() : '';
+          const requestedProfile = normalizeTarget(profileMismatch.profile);
+          const terminalTarget = normalizeTarget(terminal.target);
+          const activeProfile = normalizeTarget((S && S.activeProfile) || 'default');
           const activeSessionId = S.session && S.session.session_id ? String(S.session.session_id) : '';
           if (activeSessionId && activeSessionId !== currentSid) return 'stand_down';
+          const terminalOwner = normalizeOwner(terminal.committedProfile || terminal.target);
           const requestedOwnerCommitted = (terminal.outcome === 'already_active' || terminal.outcome === 'committed')
             && terminalTarget === requestedProfile
-            && _profileMatchesActiveProfile(terminalTarget, activeProfile);
+            && terminalOwner
+            && _profileMatchesActiveProfile(terminalOwner, activeProfile);
           if (requestedOwnerCommitted) return 'retry_requested_owner';
           if (terminal.outcome === 'failed' && terminal.retainedResult) {
             const retained = terminal.retainedResult;
-            const retainedOwner = normalize(retained.committedProfile || retained.target);
-            if (retainedOwner && _profileMatchesActiveProfile(retainedOwner, activeProfile)) {
-              return 'restore_retained_owner';
-            }
+            const retainedTarget = normalizeTarget(retained.target);
+            const retainedOwner = normalizeOwner(retained.committedProfile || retained.target);
+            if (!retainedOwner || !_profileMatchesActiveProfile(retainedOwner, activeProfile)) return 'stand_down';
+            if (retainedTarget === requestedProfile) return 'retry_requested_owner';
+            return 'restore_retained_owner';
           }
           return 'stand_down';
         };
@@ -1853,7 +1855,7 @@ async function loadSession(sid){
             return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
           }
           _retireCurrentLoad();
-          if (settlement === 'restore_retained_owner' || terminal.outcome === 'failed') {
+          if (settlement === 'restore_retained_owner' || (terminal.outcome === 'failed' && !terminal.retainedResult)) {
             if (!_restorePreviousConversationAfterFailedSwitch()) {
               const _msgInner = $('msgInner');
               if (_msgInner) {
