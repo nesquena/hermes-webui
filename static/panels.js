@@ -11347,13 +11347,11 @@ function _buildProviderCard(p){
   if(p.configurable && p.id==='bedrock'){
     const hint=document.createElement('div');
     hint.className='provider-card-hint';
-    hint.textContent='Credential priority: (1) Bedrock API key, then (2) IAM access key + secret. If both are saved, the API key is used. Instance-role (IMDS) is last in the chain and off by default on locked hosts.';
+    hint.textContent='Save either a Bedrock API key or an IAM access key pair — saving one replaces the other. Instance-role (IMDS) is last and off by default on locked hosts.';
     body.appendChild(hint);
     const activeHint=document.createElement('div');
     activeHint.className='provider-card-hint';
-    if(p.bedrock_has_bearer && p.bedrock_has_iam){
-      activeHint.textContent='In use now: Bedrock API key (saved IAM keys are ignored while an API key is present).';
-    }else if(p.bedrock_has_bearer){
+    if(p.bedrock_has_bearer){
       activeHint.textContent='In use now: Bedrock API key.';
     }else if(p.bedrock_has_iam){
       activeHint.textContent='In use now: IAM access key pair.';
@@ -11394,17 +11392,17 @@ function _buildProviderCard(p){
     };
 
     const bearerInput=addSecretField(
-      '1. Bedrock API key (highest priority)',
+      'Bedrock API key',
       p.bedrock_has_bearer?'•••••••• (replace to update)':'AWS_BEARER_TOKEN_BEDROCK',
       'api_key'
     );
     const accessInput=addSecretField(
-      '2. AWS access key ID',
+      'AWS access key ID',
       p.bedrock_has_iam?'•••••••• (replace to update)':'AWS_ACCESS_KEY_ID',
       'aws_access_key_id'
     );
     const secretInput=addSecretField(
-      '2. AWS secret access key',
+      'AWS secret access key',
       p.bedrock_has_iam?'•••••••• (replace to update)':'AWS_SECRET_ACCESS_KEY',
       'aws_secret_access_key'
     );
@@ -11588,8 +11586,13 @@ async function _saveBedrockProviderCredentials(providerId){
   els.saveBtn.textContent=t('providers_saving');
   try{
     const body={provider:providerId};
-    if(bearer) body.api_key=bearer;
-    if(access&&secret){
+    if(bearer){
+      body.api_key=bearer;
+      // Clear IAM so deleted access keys cannot keep signing requests.
+      body.aws_access_key_id='';
+      body.aws_secret_access_key='';
+    }else if(access&&secret){
+      body.api_key='';
       body.aws_access_key_id=access;
       body.aws_secret_access_key=secret;
     }

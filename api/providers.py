@@ -2946,9 +2946,11 @@ def set_provider_key(
     If ``api_key`` is None or empty, the key is removed.
 
     For ``bedrock``, also accepts optional IAM access-key fields
-    (``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY``). Passing only those
-    fields updates the IAM pair without clearing the Bedrock API key.
-    Passing ``api_key=None`` via remove clears bearer **and** IAM keys.
+    (``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY``). Saving a Bedrock
+    API key clears any stored IAM pair (and vice versa) so stale access keys
+    cannot keep winning boto3 SigV4 after a switch. Passing both in one
+    request keeps both. Passing ``api_key=None`` via remove clears bearer
+    **and** IAM keys.
 
     Returns a status dict with the operation result.
     """
@@ -2992,7 +2994,8 @@ def set_provider_key(
                 return {"ok": False, "error": err}
 
     # Validate API key format (basic sanity check). For bedrock IAM-only saves,
-    # api_key may be omitted (None) without clearing the bearer token.
+    # api_key may be omitted (None) without an explicit clear; exclusive
+    # replace still clears bearer when a new IAM pair is written.
     clear_bearer = False
     if api_key is not None:
         api_key = str(api_key).strip() or None
@@ -3013,15 +3016,28 @@ def set_provider_key(
             updates["AWS_ACCESS_KEY_ID"] = None
             updates["AWS_SECRET_ACCESS_KEY"] = None
         else:
+            saving_bearer = bool(api_key) and not clear_bearer
+            saving_iam = bool(iam_provided and access and secret)
+
             if api_key is not None:
                 updates[env_var] = None if clear_bearer else api_key
+            elif saving_iam:
+                # IAM-only replace: drop leftover bearer so boto3 cannot keep
+                # treating a half-switched env as dual-auth.
+                updates[env_var] = None
+
             if iam_provided:
-                if access and secret:
+                if saving_iam:
                     updates["AWS_ACCESS_KEY_ID"] = access
                     updates["AWS_SECRET_ACCESS_KEY"] = secret
                 else:
                     updates["AWS_ACCESS_KEY_ID"] = None
                     updates["AWS_SECRET_ACCESS_KEY"] = None
+            elif saving_bearer:
+                # Bearer-only replace: always clear IAM so deleted access keys
+                # cannot keep signing Bedrock requests.
+                updates["AWS_ACCESS_KEY_ID"] = None
+                updates["AWS_SECRET_ACCESS_KEY"] = None
         if not updates:
             return {"ok": False, "error": "No Bedrock credentials provided to update."}
     else:
@@ -3034,6 +3050,14 @@ def set_provider_key(
     except Exception as exc:
         logger.exception("Failed to write env file for provider %s", provider_id)
         return {"ok": False, "error": f"Failed to save API key: {exc}"}
+
+    if provider_id == "bedrock":
+        try:
+            from agent.bedrock_adapter import reset_client_cache
+
+            reset_client_cache()
+        except Exception:
+            logger.debug("bedrock reset_client_cache unavailable", exc_info=True)
 
     # Invalidate the model cache so the dropdown refreshes on next request.
     # Using invalidate_models_cache() instead of reload_config() to avoid
