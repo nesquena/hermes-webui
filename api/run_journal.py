@@ -36,7 +36,15 @@ _SEQ_CACHE_LOCK = threading.Lock()
 _SUMMARY_CACHE_MAX_ENTRIES = 128
 _SUMMARY_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int, int], dict]] = OrderedDict()
 _SUMMARY_CACHE_LOCK = threading.Lock()
-_TERMINAL_SSE_EVENTS = {"done", "cancel", "apperror", "error", "stream_end"}
+# Events that mark a run terminal in the journal / summary sense.
+TERMINAL_SSE_EVENTS = frozenset({"done", "cancel", "apperror", "error", "stream_end"})
+# Events that should close an SSE relay drain loop. `done` is intentionally
+# excluded: background title generation and `stream_end` are emitted after
+# `done`, and breaking early would drop them. `apperror` is included because
+# it terminates with no trailing `stream_end`.
+SSE_RELAY_CLOSE_EVENTS = frozenset({"stream_end", "cancel", "apperror", "error"})
+# Back-compat alias used by older call sites / tests.
+_TERMINAL_SSE_EVENTS = TERMINAL_SSE_EVENTS
 _FSYNC_MODE_ENV = "HERMES_WEBUI_RUN_JOURNAL_FSYNC"
 _FSYNC_MODE_EAGER = "eager"
 _FSYNC_MODE_TERMINAL_ONLY = "terminal-only"
