@@ -4371,7 +4371,11 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     return None, llm_status or 'empty_title', raw_preview
 
 
-def _preserve_pre_compression_snapshot(s, old_sid: str, continuation_sid: str | None = None) -> None:
+def _preserve_pre_compression_snapshot(
+    s,
+    old_sid: str,
+    continuation_sid: str | None = None,
+) -> bool:
     """Persist old_sid as a read-only pre-compression snapshot.
 
     Context compression rotates the active WebUI session id from old_sid to the
@@ -4380,19 +4384,17 @@ def _preserve_pre_compression_snapshot(s, old_sid: str, continuation_sid: str | 
     """
     old_path = SESSION_DIR / f'{old_sid}.json'
     if not old_path.exists():
-        return
+        return False
     try:
         existing_text = old_path.read_text(encoding='utf-8')
         try:
             existing = json.loads(existing_text)
             existing_msgs = len(existing.get('messages') or [])
-            existing_snapshot = bool(existing.get('pre_compression_snapshot'))
         except (json.JSONDecodeError, ValueError):
             # Treat corrupt/malformed old JSON as missing history and rewrite it
             # from the in-memory pre-compression messages below. That is safer
             # than leaving an unreadable recovery snapshot behind.
             existing_msgs = -1
-            existing_snapshot = False
         if len(s.messages) > existing_msgs:
             # In-memory messages are newer than the file; save the full old
             # snapshot from the current session object while preserving its
@@ -4448,7 +4450,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str, continuation_sid: str | 
                 s.pending_attachments = saved_pending_attachments
                 s.pending_started_at = saved_pending_started_at
                 s.pending_user_source = saved_pending_user_source
-            return
+            return True
         # Existing file is already at least as complete as memory; stamp only
         # the snapshot marker so index/sidebar projection can hide it without
         # rewriting a shorter messages array over a fuller transcript.
@@ -4479,40 +4481,102 @@ def _preserve_pre_compression_snapshot(s, old_sid: str, continuation_sid: str | 
                 "Marked pre-compression session %s as sidebar-hidden snapshot",
                 old_sid,
             )
+            return True
+        return False
     except OSError:
         logger.debug("Could not read old session file before preservation")
     except Exception:
         logger.debug("Failed to preserve pre-compression session file", exc_info=True)
+    return False
 
 
-def _migrate_compression_session_ownership(s, old_sid: str, new_sid: str, agent_lock) -> None:
-    """Move live session and lock ownership to a compression continuation."""
-    s.session_id = new_sid
-    _preserve_pre_compression_snapshot(s, old_sid, new_sid)
-    s.pre_compression_snapshot = False
-    s.pre_compression_continuation_session_id = None
-    s.parent_session_id = old_sid
+def _migrate_compression_session_ownership(
+    s,
+    old_sid: str,
+    new_sid: str,
+    agent_lock,
+) -> bool:
+    """Atomically publish a durable compression continuation."""
+    if not _preserve_pre_compression_snapshot(s, old_sid, new_sid):
+        return False
 
+    missing = object()
+    previous_state = (
+        s.session_id,
+        bool(getattr(s, 'pre_compression_snapshot', False)),
+        getattr(s, 'pre_compression_continuation_session_id', None),
+        getattr(s, 'parent_session_id', None),
+    )
     with LOCK:
-        cached_old_session = SESSIONS.pop(old_sid, None)
-        if cached_old_session is not None and cached_old_session is not s:
-            cached_old_sid = str(getattr(cached_old_session, 'session_id', '') or '')
-            if cached_old_sid == str(old_sid):
-                SESSIONS[old_sid] = cached_old_session
-            else:
+        if SESSIONS.get(old_sid) is not s or str(getattr(s, 'session_id', '') or '') != old_sid:
+            logger.warning(
+                "compression cache migration blocked by stale owner: old_sid=%s new_sid=%s",
+                old_sid,
+                new_sid,
+            )
+            return False
+        existing_new_session = SESSIONS.get(new_sid, missing)
+        if existing_new_session is not missing and existing_new_session is not s:
+            logger.warning(
+                "compression cache migration blocked by existing continuation owner: old_sid=%s new_sid=%s",
+                old_sid,
+                new_sid,
+            )
+            return False
+
+        with SESSION_AGENT_LOCKS_LOCK:
+            old_lock = SESSION_AGENT_LOCKS.get(old_sid, missing)
+            new_lock = SESSION_AGENT_LOCKS.get(new_sid, missing)
+            if old_lock is not missing and old_lock is not agent_lock:
                 logger.warning(
-                    "compression cache migration skipped stale object: old_sid=%s new_sid=%s cached_session_id=%s",
+                    "compression lock migration blocked by stale owner: old_sid=%s new_sid=%s",
                     old_sid,
                     new_sid,
-                    cached_old_sid or None,
                 )
-        SESSIONS[new_sid] = s
-        SESSIONS.move_to_end(new_sid)
-        _evict_sessions_over_cap()
+                return False
+            if new_lock is not missing and new_lock is not agent_lock:
+                logger.warning(
+                    "compression lock migration blocked by existing continuation lock: old_sid=%s new_sid=%s",
+                    old_sid,
+                    new_sid,
+                )
+                return False
 
-    with SESSION_AGENT_LOCKS_LOCK:
-        SESSION_AGENT_LOCKS[new_sid] = agent_lock
-        SESSION_AGENT_LOCKS.pop(old_sid, None)
+            SESSION_AGENT_LOCKS[new_sid] = agent_lock
+            try:
+                s.session_id = new_sid
+                s.pre_compression_snapshot = False
+                s.pre_compression_continuation_session_id = None
+                s.parent_session_id = old_sid
+                SESSIONS[new_sid] = s
+                SESSIONS.move_to_end(new_sid)
+                _evict_sessions_over_cap()
+            except Exception:
+                if SESSIONS.get(new_sid) is s:
+                    SESSIONS.pop(new_sid, None)
+                if existing_new_session is not missing:
+                    SESSIONS[new_sid] = existing_new_session
+                if SESSIONS.get(old_sid) is None:
+                    SESSIONS[old_sid] = s
+                s.session_id, s.pre_compression_snapshot, s.pre_compression_continuation_session_id, s.parent_session_id = previous_state
+                if SESSION_AGENT_LOCKS.get(new_sid) is agent_lock:
+                    if new_lock is missing:
+                        SESSION_AGENT_LOCKS.pop(new_sid, None)
+                    else:
+                        SESSION_AGENT_LOCKS[new_sid] = new_lock
+                logger.debug(
+                    "Compression ownership migration aborted: old_sid=%s new_sid=%s",
+                    old_sid,
+                    new_sid,
+                    exc_info=True,
+                )
+                return False
+
+            if SESSIONS.get(old_sid) is s:
+                SESSIONS.pop(old_sid, None)
+            if SESSION_AGENT_LOCKS.get(old_sid) is agent_lock:
+                SESSION_AGENT_LOCKS.pop(old_sid, None)
+    return True
 
 
 def _maybe_schedule_title_refresh(session, put_event, agent):
@@ -9820,7 +9884,7 @@ def _run_agent_streaming(
                     new_sid = _agent_sid
                     _compression_origin_session_id = old_sid
                     _compression_continuation_session_id = new_sid
-                    s.session_id = new_sid
+                    _pre_migration_profile = s.profile
                     # Carry profile identity across the compression boundary.
                     # Without this, s.profile stays None on the continuation
                     # session. On the next request, _run_agent_streaming calls
@@ -9837,7 +9901,11 @@ def _run_agent_streaming(
                             "Stamped profile=%r on continuation session %s after compression",
                             _resolved_profile_name, new_sid,
                         )
-                    _migrate_compression_session_ownership(s, old_sid, new_sid, _agent_lock)
+                    if not _migrate_compression_session_ownership(s, old_sid, new_sid, _agent_lock):
+                        s.profile = _pre_migration_profile
+                        raise RuntimeError(
+                            f"Failed to migrate compressed-session ownership: {old_sid}->{new_sid}",
+                        )
                     # Migrate cached agent to the new session ID so the turn
                     # count survives context compression.
                     from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK

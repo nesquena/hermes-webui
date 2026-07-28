@@ -219,7 +219,9 @@ function _saveComposerDraft(sid, text, files) {
     _composerDraftKnownPayloadSessions.add(sid);
   }
   _draftSaveTimer = setTimeout(() => {
-    _postComposerDraftPayload(sid, normalizedDraft).catch(() => {});
+    _postComposerDraftPayload(sid, normalizedDraft).catch((error) => {
+      _handleComposerDraftPostFailure(error, sid, normalizedText, normalizedFiles);
+    });
   }, _DRAFT_SAVE_DELAY_MS);
 }
 
@@ -253,6 +255,23 @@ function _composerDraftResponseSessionId(response, fallbackSid) {
   return sid;
 }
 
+function _handleComposerDraftPostFailure(error, sid, text, files) {
+  const normalizedText = String(text || '');
+  const normalizedFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  if (S.session && S.session.session_id === sid) {
+    S.session.composer_draft = { text: normalizedText, files: normalizedFiles };
+  }
+  if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
+    _composerDraftKnownPayloadSessions.add(sid);
+  }
+  if (typeof console !== 'undefined' && console.warn) {
+    console.warn(
+      '[composer draft] failed to persist draft',
+      { session_id: sid, error: String(error && error.message ? error.message : error || '') },
+    );
+  }
+}
+
 function _postComposerDraftPayload(sid, draft) {
   const requestSid = _safeDraftSessionId(sid);
   if (!requestSid) return Promise.resolve();
@@ -267,11 +286,16 @@ function _postComposerDraftPayload(sid, draft) {
       files: bodyPayload.files,
     }),
   });
+  const remember = (responseSid) => {
+    if (responseSid !== requestSid) {
+      _composerDraftKnownPayloadSessions.delete(requestSid);
+    }
+    _rememberComposerDraftPayloadState(responseSid, normalizedText, normalizedFiles);
+  };
 
   return post(requestSid).then((response) => {
-    sid = _composerDraftResponseSessionId(response, requestSid);
-    if (sid !== requestSid) _composerDraftKnownPayloadSessions.delete(requestSid);
-    _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
+    const responseSid = _composerDraftResponseSessionId(response, requestSid);
+    remember(responseSid);
     return response;
   }).catch((error) => {
     const movedSid = _parseSessionMovedDraftError(error);
@@ -283,9 +307,8 @@ function _postComposerDraftPayload(sid, draft) {
       throw error;
     }
     return post(movedSid).then((response) => {
-      sid = _composerDraftResponseSessionId(response, movedSid);
-      _composerDraftKnownPayloadSessions.delete(requestSid);
-      _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
+      const responseSid = _composerDraftResponseSessionId(response, movedSid);
+      remember(responseSid);
       return response;
     });
   });
@@ -333,7 +356,7 @@ function _saveComposerDraftNow(sid, text, files) {
       && !_composerDraftKnownPayloadSessions.has(sid)) {
     return Promise.resolve();
   }
-  return _postComposerDraftPayload(sid, normalizedDraft).catch(() => {});
+  return _postComposerDraftPayload(sid, normalizedDraft);
 }
 
 // Restore composer draft from server onto #msg textarea.

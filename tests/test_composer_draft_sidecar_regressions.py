@@ -5,6 +5,8 @@ import sqlite3
 import threading
 from types import SimpleNamespace
 
+from api import streaming
+
 import pytest
 
 
@@ -118,16 +120,14 @@ def _build_pre_compression_migration_state(tmp_path, monkeypatch):
     old_session.save(touch_updated_at=False, skip_index=True)
 
     continuation = models.Session(
-        session_id=continuation_sid,
+        session_id=old_sid,
         title="Compression snapshot",
-        parent_session_id=old_sid,
         messages=[
             {"role": "user", "content": "question"},
             {"role": "assistant", "content": "compressed reply"},
         ],
         updated_at=1234.0,
     )
-    continuation.save(touch_updated_at=False, skip_index=True)
     fork = models.Session(
         session_id=fork_sid,
         title="Ordinary fork sibling",
@@ -142,12 +142,12 @@ def _build_pre_compression_migration_state(tmp_path, monkeypatch):
     with routes.LOCK:
         models.SESSIONS.clear()
         models.SESSIONS[old_sid] = continuation
-    streaming._migrate_compression_session_ownership(
+    assert streaming._migrate_compression_session_ownership(
         continuation,
         old_sid,
         continuation_sid,
         old_lock,
-    )
+    ) is True
     continuation.save(touch_updated_at=False, skip_index=True)
 
     return models, routes, session_dir, old_sid, continuation_sid, fork_sid
@@ -625,6 +625,112 @@ def test_draft_post_for_stale_pre_compression_snapshot_cycles_rejected(tmp_path,
         with routes.SESSION_AGENT_LOCKS_LOCK:
             routes.SESSION_AGENT_LOCKS.pop(old_sid, None)
             routes.SESSION_AGENT_LOCKS.pop(continuation_sid, None)
+
+
+def test_draft_pre_compression_snapshot_marker_write_failure(tmp_path, monkeypatch):
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+
+    old_sid = "sid-rotation-marker-fail-old"
+    new_sid = "sid-rotation-marker-fail-new"
+    (session_dir / f"{old_sid}.json").write_text(
+        json.dumps({"session_id": old_sid, "messages": [{"role": "user", "content": "old"}]},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    class _WriteFailSession:
+        def __init__(self):
+            self.session_id = new_sid
+            self.parent_session_id = ""
+            self.pre_compression_snapshot = False
+            self.pinned = False
+            self.messages = [
+                {"role": "user", "content": "old"},
+                {"role": "assistant", "content": "new"},
+            ]
+            self.active_stream_id = "stream"
+            self.pending_user_message = "inflight"
+            self.pending_attachments = [{"name": "file.txt"}]
+            self.pending_started_at = 123.0
+            self.pending_user_source = "webui"
+
+        def save(self, *args, **kwargs):
+            raise OSError("write failed")
+
+    result = streaming._preserve_pre_compression_snapshot(_WriteFailSession(), old_sid)
+    assert result is False
+
+
+def test_draft_compression_migration_rejects_different_old_sid_cache_object(tmp_path, monkeypatch):
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(streaming, "_preserve_pre_compression_snapshot", lambda *args, **kwargs: True)
+
+    old_sid = "sid-rotation-old-mismatch"
+    new_sid = "sid-rotation-new-mismatch"
+    cache_owner = models.Session(session_id=old_sid, title="old owner")
+    migrating = models.Session(session_id=old_sid, title="migrating")
+
+    lock = routes._get_session_agent_lock(old_sid)
+    with routes.LOCK:
+        routes.SESSIONS.clear()
+        routes.SESSIONS[old_sid] = cache_owner
+
+    try:
+        result = streaming._migrate_compression_session_ownership(migrating, old_sid, new_sid, lock)
+        assert result is False
+        with routes.LOCK:
+            assert routes.SESSIONS.get(old_sid) is cache_owner
+            assert routes.SESSIONS.get(new_sid) is None
+    finally:
+        with routes.LOCK:
+            routes.SESSIONS.clear()
+        with routes.SESSION_AGENT_LOCKS_LOCK:
+            routes.SESSION_AGENT_LOCKS.pop(old_sid, None)
+            routes.SESSION_AGENT_LOCKS.pop(new_sid, None)
+
+
+def test_draft_compression_migration_rollback_when_evictor_interleaves_after_lock_alias(tmp_path, monkeypatch):
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(streaming, "_preserve_pre_compression_snapshot", lambda *args, **kwargs: True)
+
+    old_sid = "sid-rotation-old-evict"
+    new_sid = "sid-rotation-new-evict"
+    migrating = models.Session(session_id=old_sid, title="migrating")
+
+    observed = {}
+
+    def _evict_sessions_over_cap(_cap=None):
+        observed["locked"] = routes.SESSION_AGENT_LOCKS.get(new_sid)
+        routes.SESSIONS.pop(old_sid, None)
+        raise RuntimeError("evictor interleave")
+
+    lock = routes._get_session_agent_lock(old_sid)
+    with routes.LOCK:
+        routes.SESSIONS.clear()
+        routes.SESSIONS[old_sid] = migrating
+
+    old_evict = streaming._evict_sessions_over_cap
+    try:
+        monkeypatch.setattr(streaming, "_evict_sessions_over_cap", _evict_sessions_over_cap)
+        result = streaming._migrate_compression_session_ownership(migrating, old_sid, new_sid, lock)
+        assert result is False
+        assert observed["locked"] is lock
+        with routes.LOCK:
+            assert routes.SESSIONS.get(old_sid) is migrating
+            assert routes.SESSIONS.get(new_sid) is None
+        with routes.SESSION_AGENT_LOCKS_LOCK:
+            assert new_sid not in routes.SESSION_AGENT_LOCKS
+    finally:
+        streaming._evict_sessions_over_cap = old_evict
+        with routes.LOCK:
+            routes.SESSIONS.clear()
+            routes.SESSIONS.pop(old_sid, None)
+        with routes.SESSION_AGENT_LOCKS_LOCK:
+            routes.SESSION_AGENT_LOCKS.pop(new_sid, None)
+            routes.SESSION_AGENT_LOCKS.pop(old_sid, None)
 
 
 def test_draft_post_for_stale_pre_compression_snapshot_hops_exhausted_rejected(tmp_path, monkeypatch):

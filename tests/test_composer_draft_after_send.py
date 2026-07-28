@@ -45,6 +45,16 @@ def _run_draft_save_helper(caller: str, api_responses: list[dict]) -> dict:
         const state = {
           calls: [],
           rememberCalls: [],
+          warns: [],
+          expectedPayload,
+        };
+
+        const originalWarn = console.warn;
+        console.warn = (...args) => {
+          state.warns.push(args.map((value) => String(value)).join(' '));
+          if (typeof originalWarn === 'function') {
+            originalWarn.apply(console, args);
+          }
         };
 
         async function api(path, opts) {
@@ -53,6 +63,18 @@ def _run_draft_save_helper(caller: str, api_responses: list[dict]) -> dict:
           const next = responses[callIndex++];
           if (!next) {
             throw new Error('unexpected /api/session/draft call');
+          }
+          if (next.throw) {
+            const err = new Error(next.error || 'draft draft save failed');
+            if (next.status) {
+              err.status = Number(next.status);
+            }
+            if (typeof next.body === 'string') {
+              err.body = next.body;
+            } else if (next.body) {
+              err.body = JSON.stringify(next.body);
+            }
+            throw err;
           }
           if (Number(next.status) === 409) {
             const err = new Error(next.error || 'Session moved');
@@ -93,15 +115,24 @@ def _run_draft_save_helper(caller: str, api_responses: list[dict]) -> dict:
             calls: state.calls,
             rememberCalls: state.rememberCalls,
             knownPayloadSids: Array.from(_composerDraftKnownPayloadSessions).sort(),
+            localDraft: S.session.composer_draft || null,
             expectedPayload,
+            warns: state.warns,
+            ok: true,
           }));
         })().catch(error => {
           const serialized = {
+            ok: false,
             error: String(error && error.message ? error.message : error || ''),
             status: error && Number(error.status),
+            calls: state.calls,
+            rememberCalls: state.rememberCalls,
+            knownPayloadSids: Array.from(_composerDraftKnownPayloadSessions).sort(),
+            localDraft: S.session.composer_draft || null,
+            expectedPayload,
+            warns: state.warns,
           };
           console.log(JSON.stringify(serialized));
-          process.exit(1);
         });
         """
     ) % {
@@ -146,6 +177,7 @@ def test_draft_save_paths_use_authoritative_session_id_after_rotation(caller, sc
         ]
 
     out = _run_draft_save_helper(caller, responses)
+    assert out["ok"] is True
 
     expected_sid = "sid_authoritative"
     old_sid = "sid_old"
@@ -171,6 +203,94 @@ def test_draft_save_paths_use_authoritative_session_id_after_rotation(caller, sc
         assert last_call["session_id"] == expected_sid
     else:
         assert first_call["session_id"] == old_sid
+
+
+@pytest.mark.parametrize("caller", ["debounced", "immediate"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "second-redirect",
+        "replay-failure",
+        "invalid-sid",
+    ],
+)
+def test_draft_save_paths_reject_replayed_authority_or_bad_response(caller, scenario):
+    if scenario == "second-redirect":
+        responses = [
+            {
+                "status": 409,
+                "error": "Session moved",
+                "body": {
+                    "error": "Session moved",
+                    "code": "session_moved",
+                    "session_id": "sid_authoritative",
+                },
+            },
+            {
+                "status": 409,
+                "error": "Session moved",
+                "body": {
+                    "error": "Session moved",
+                    "code": "session_moved",
+                    "session_id": "sid_authoritative",
+                },
+            },
+        ]
+    elif scenario == "replay-failure":
+        responses = [
+            {
+                "status": 409,
+                "error": "Session moved",
+                "body": {
+                    "error": "Session moved",
+                    "code": "session_moved",
+                    "session_id": "sid_authoritative",
+                },
+            },
+            {
+                "throw": True,
+                "status": 503,
+                "error": "server down",
+            },
+        ]
+    else:
+        responses = [
+            {
+                "status": 200,
+                "response": {
+                    "ok": True,
+                    "session_id": "sid_!@#",
+                },
+            },
+        ]
+
+    out = _run_draft_save_helper(caller, responses)
+    sid_old = "sid_old"
+    assert out["calls"]
+    assert out["rememberCalls"] == []
+    for call in out["calls"]:
+        assert call["text"] == out["expectedPayload"]["text"]
+        assert call["files"] == out["expectedPayload"]["files"]
+    if caller == "immediate":
+        assert out["knownPayloadSids"] == []
+    else:
+        assert out["knownPayloadSids"] == [sid_old]
+    if scenario == "second-redirect":
+        assert len(out["calls"]) == 2
+    elif scenario == "replay-failure":
+        assert len(out["calls"]) == 2
+    else:
+        assert len(out["calls"]) == 1
+
+    if caller == "immediate":
+        assert out["ok"] is False
+        assert out["error"]
+        assert out["status"] in (None, 409, 500, 503)
+        assert not out["warns"]
+    else:
+        assert out["ok"] is True
+        assert out["warns"]
+        assert out["localDraft"] == out["expectedPayload"]
 
 
 def test_clear_composer_draft_suppresses_same_session_stale_restore():
