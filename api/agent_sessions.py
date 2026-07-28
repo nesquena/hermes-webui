@@ -51,6 +51,7 @@ MESSAGING_SOURCES = {
 
 CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
 CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
+COMPRESSION_ROTATION_OVERLAP_TOLERANCE_SECONDS = 1.0
 
 SOURCE_LABELS = {
     'acp': 'ACP',
@@ -331,7 +332,14 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         # continuations when no boundary timestamp is available.
         return True
     try:
-        return float(child.get('started_at') or 0) >= float(ended_at)
+        child_started_at = float(child.get('started_at') or 0)
+        parent_ended_at = float(ended_at)
+        tolerance = (
+            COMPRESSION_ROTATION_OVERLAP_TOLERANCE_SECONDS
+            if parent.get('end_reason') == 'compression'
+            else 0.0
+        )
+        return child_started_at + tolerance >= parent_ended_at
     except (TypeError, ValueError):
         return False
 
