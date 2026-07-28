@@ -4624,6 +4624,10 @@ def _evict_sessions_over_cap(cap: int | None = None) -> int:
     CALLER CONTRACT: the global ``LOCK`` MUST already be held (every call site
     mutates ``SESSIONS`` under ``LOCK``). This function never acquires ``LOCK``
     or any stream lock itself, so it cannot introduce a lock-ordering deadlock.
+    Under that same held ``LOCK`` it publishes the cap it enforced into
+    ``api.config._LAST_APPLIED_SESSIONS_CACHE_MAX`` for nonblocking diagnostics
+    (#6351); any future edit that can change ``cap`` after that point must move
+    the publish down with it.
 
     Returns the number of sessions evicted. If every over-cap candidate is
     active/unsaved, the cache may temporarily exceed ``cap`` — that is the
@@ -4636,6 +4640,11 @@ def _evict_sessions_over_cap(cap: int | None = None) -> int:
             cap = SESSIONS_MAX
     if not isinstance(cap, int) or cap < 1:
         cap = SESSIONS_MAX if isinstance(SESSIONS_MAX, int) and SESSIONS_MAX >= 1 else 1
+    # Diagnostics owns the field; this function owns the decision. Publishing the
+    # normalized cap here, rather than from the resolver, is what makes the health
+    # payload report a cap eviction actually applied — including the getter-failure
+    # fallback and explicit/normalized calls, which never reach the resolver (#6351).
+    _cfg._LAST_APPLIED_SESSIONS_CACHE_MAX = cap
     evicted = 0
     # Iterate over a snapshot of ids in LRU order (oldest first). We stop as
     # soon as we are at/below the cap. Skipping a non-evictable oldest entry and
