@@ -201,8 +201,8 @@ def test_static_sessions_js_switches_profile_before_opening_all_profiles_row():
     ensure_body = src[ensure_idx:open_idx]
     open_body = src[open_idx:src.index("function _isReadOnlySession", open_idx)]
 
-    assert "await switchToProfile(targetProfile);" in ensure_body
-    assert "_profileSwitchOpeningExistingSession=true;" in ensure_body
+    assert "await switchToProfile(targetProfile, {openingExistingSessionId: String(session.session_id)});" in ensure_body
+    assert "_profileSwitchOpeningExistingSession" not in ensure_body
     assert open_body.index("await _ensureSidebarSessionProfile(session);") < open_body.index("await loadSession(session.session_id,")
     assert "await _openSidebarSession(s);" in src
     assert "await _openSidebarSession(seg, {skipLineageResolve:true});" in src

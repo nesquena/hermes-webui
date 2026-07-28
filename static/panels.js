@@ -7168,6 +7168,9 @@ async function switchToProfile(name) {
   // nothing. (#4662 Opus gate)
   const opts = arguments[1] || {};
   const _returnTransaction = !!(opts && opts.returnTransaction);
+  const _openingExistingSessionId = opts && opts.openingExistingSessionId
+    ? String(opts.openingExistingSessionId)
+    : null;
   const _previousProfile = S.activeProfile || 'default';
   const _returnSwitchResult = result => _returnTransaction
     ? result
@@ -7179,6 +7182,7 @@ async function switchToProfile(name) {
       from: _previousProfile,
       target: name,
       outcome: 'already_active',
+      committedProfile: S.activeProfile || name,
       terminalResult: null,
     };
   }
@@ -7218,7 +7222,8 @@ async function switchToProfile(name) {
     _switchTransaction.retainedResult = {
       generation: _switchGen,
       from: _previousProfile,
-      target: committedProfile,
+      target: _switchTransaction.target,
+      committedProfile,
       outcome: 'committed',
       terminalResult: null,
       retainedResult: null,
@@ -7241,7 +7246,7 @@ async function switchToProfile(name) {
       ? _profileSwitchTransaction.settled
       : Promise.resolve(null)
   );
-  const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
+  const _openingExistingSidebarSession = !!_openingExistingSessionId;
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
   // Optimistic name update — shows the target name right away
@@ -7268,11 +7273,17 @@ async function switchToProfile(name) {
   // otherwise-empty session whose recorded profile does not match the target
   // profile as replace-only: uploads send S.session.session_id and the backend
   // correctly rejects old-profile sessions under the new profile cookie.
+  const _currentSessionId = S.session && S.session.session_id ? String(S.session.session_id) : '';
+  const _pendingDifferentSessionLoad = !!(
+    typeof _loadingSessionId !== 'undefined'
+    && _loadingSessionId
+    && String(_loadingSessionId) !== _currentSessionId
+  );
   let sessionInProgress = !!(S.session && (
     (S.messages && S.messages.length > 0) ||
     S.session.active_stream_id ||
     S.session.pending_user_message
-  ));
+  )) || _pendingDifferentSessionLoad;
   if (_openingExistingSidebarSession && S.session) {
     // A cross-profile sidebar click is about to load a concrete existing session.
     // Do not create or retag a blank intermediary session in the destination profile.

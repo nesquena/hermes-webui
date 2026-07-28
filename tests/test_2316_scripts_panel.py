@@ -1557,7 +1557,6 @@ let renderMessagesCalls = 0;
 let _profileSwitchGeneration = 0;
 let _profileSwitchTransaction = null;
 let _profileLastCommittedSwitchResult = null;
-let _profileSwitchOpeningExistingSession = false;
 let _profilesCache = null;
 let _profileDropdownFetchPromise = null;
 let _profileDropdownCacheLoadedFromStorage = false;
@@ -1786,11 +1785,22 @@ const settle = async (cycles = 4) => {
   for (let i = 0; i < cycles; i += 1) await Promise.resolve();
 };
 const apiCalls = [];
+const startApprovalCalls = [];
+const startClarifyCalls = [];
+const yoloCalls = [];
+const sessionStreamCalls = [];
+const attachCalls = [];
 const panelDeferred = deferred();
+const bSwitchDeferred = deferred();
 let _profileSwitchGeneration = 0;
 let _profileSwitchTransaction = null;
-let _profileLastCommittedSwitchResult = null;
-let _profileSwitchOpeningExistingSession = false;
+let _profileLastCommittedSwitchResult = {
+  generation: 0,
+  from: 'a',
+  target: 'a',
+  committedProfile: 'a',
+  outcome: 'committed',
+};
 let _profilesCache = null;
 let _profileDropdownFetchPromise = null;
 let _profileDropdownCacheLoadedFromStorage = false;
@@ -1828,18 +1838,25 @@ const localStorage = {
 const history = { replaceState() {} };
 const window = {
   _clearPendingSelections() {},
-  _snapshotPendingSelections() { return null; },
-  _restorePendingSelections() {},
+  _snapshotPendingSelections() { return [{ id: 'ctx-1', name: 'Context 1' }]; },
+  _restorePendingSelections(selections) { restoredSelections = selections; },
 };
 const S = {
   activeProfile: 'a',
   activeProfileIsDefault: false,
-  session: { session_id: 'current', message_count: 0, updated_at: 0, last_message_at: 0, pending_attachments: [] },
+  session: {
+    session_id: 'current',
+    message_count: 0,
+    updated_at: 0,
+    last_message_at: 0,
+    pending_attachments: [{ name: 'upload.bin' }],
+    active_stream_id: 'stream-1',
+  },
   messages: [{ role: 'assistant', content: 'current transcript' }],
   toolCalls: [{ id: 'old-tool' }],
   pendingFiles: [{ name: 'report.txt' }],
-  busy: false,
-  activeStreamId: null,
+  busy: true,
+  activeStreamId: 'stream-1',
 };
 const cronList = { children: [{}], replaceChildren(){ this.children = []; } };
 const cronRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
@@ -1885,7 +1902,7 @@ async function api(url, opts) {
   apiCalls.push({ url, profile: S.activeProfile });
   if (url === '/api/profile/switch') {
     const body = JSON.parse(opts.body);
-    if (body.name === 'b') return { active: 'b', is_default: false };
+    if (body.name === 'b') return bSwitchDeferred.promise;
     throw new Error('switch rejected');
   }
   if (url === '/api/session?session_id=foreign&messages=0&resolve_model=0') {
@@ -1913,7 +1930,9 @@ async function api(url, opts) {
   }
   throw new Error('unexpected api ' + url);
 }
-function _rearmActiveSessionStream() {}
+function _rearmActiveSessionStream() {
+  if (S.session && S.session.session_id) startSessionStream(S.session.session_id);
+}
 function _selectLiveRecoveryInflight() { return null; }
 function stopApprovalPolling() {}
 function hideApprovalCard() {}
@@ -1930,7 +1949,13 @@ function _clearStuckSessionOnBoot() {}
 function _appRootPath() { return '/'; }
 function renderMessages() { msgInner.innerHTML = S.messages.map(m => m.content || '').join('\\n'); }
 function renderTray() {}
-function startSessionStream() {}
+function startSessionStream(sid) {
+  if (S.activeStreamId && S.session && S.session.session_id === sid) return;
+  sessionStreamCalls.push(sid);
+}
+function attachLiveStream(sid, streamId, pending, opts) {
+  attachCalls.push({ sid, streamId, pending, reconnecting: !!(opts && opts.reconnecting) });
+}
 function _uploadPendingFilesSyncProgressForSession() {}
 function _clearDeferredActiveSessionExternalRefresh() {}
 function _clearEmptyComposerModelOverride() {}
@@ -1944,9 +1969,9 @@ function setComposerStatus() {}
 function updateSendBtn() {}
 function updateQueueBadge() {}
 function _deferWorkspaceRefreshForSession() {}
-function startApprovalPolling() {}
-function startClarifyPolling() {}
-function _fetchYoloState() {}
+function startApprovalPolling(sid) { startApprovalCalls.push(sid); }
+function startClarifyPolling(sid) { startClarifyCalls.push(sid); }
+function _fetchYoloState(sid) { yoloCalls.push(sid); }
 function refreshSessionList() { return Promise.resolve(); }
 function _announceNewSessionWorkspace() {}
 function _isMessagingSession() { return false; }
@@ -1972,11 +1997,16 @@ eval(extractFunc('loadSession'));
   const newerSwitch = switchToProfile('c', { returnTransaction: true });
   await settle();
   const newerResult = await newerSwitch;
-  panelDeferred.resolve();
+  bSwitchDeferred.resolve({ active: 'b', is_default: false });
   await oldLoad;
   await settle();
   console.log(JSON.stringify({
     apiCalls,
+    startApprovalCalls,
+    startClarifyCalls,
+    yoloCalls,
+    sessionStreamCalls,
+    attachCalls,
     newerResult: {
       outcome: newerResult.outcome,
       retainedTarget: newerResult.retainedResult && newerResult.retainedResult.target,
@@ -1984,8 +2014,12 @@ eval(extractFunc('loadSession'));
     },
     activeProfile: S.activeProfile,
     sessionId: S.session && S.session.session_id,
+    activeStreamId: S.activeStreamId,
     messages: S.messages,
+    toolCalls: S.toolCalls,
+    pendingFiles: S.pendingFiles,
     loadingSessionId: _loadingSessionId,
+    restoredSelections,
     msgInner: msgInner.innerHTML,
   }));
 })().catch(err => { console.error(err); process.exit(1); });
@@ -1994,19 +2028,32 @@ eval(extractFunc('loadSession'));
     assert result["apiCalls"] == [
         {"url": "/api/session?session_id=foreign&messages=0&resolve_model=0", "profile": "a"},
         {"url": "/api/profile/switch", "profile": "a"},
-        {"url": "/api/profile/switch", "profile": "b"},
-        {"url": "/api/session?session_id=foreign&messages=0&resolve_model=0", "profile": "b"},
+        {"url": "/api/profile/switch", "profile": "a"},
     ]
     assert result["newerResult"] == {
         "outcome": "failed",
-        "retainedTarget": "b",
-        "retainedGeneration": 1,
+        "retainedTarget": "a",
+        "retainedGeneration": 0,
     }
-    assert result["activeProfile"] == "b"
-    assert result["sessionId"] == "foreign"
-    assert result["messages"] == [{"role": "assistant", "content": "foreign transcript"}]
+    assert result["startApprovalCalls"] == ["current"]
+    assert result["startClarifyCalls"] == ["current"]
+    assert result["yoloCalls"] == ["current"]
+    assert result["sessionStreamCalls"] == []
+    assert result["attachCalls"] == [{
+        "sid": "current",
+        "streamId": "stream-1",
+        "pending": [{"name": "upload.bin"}],
+        "reconnecting": True,
+    }]
+    assert result["activeProfile"] == "a"
+    assert result["sessionId"] == "current"
+    assert result["activeStreamId"] == "stream-1"
+    assert result["messages"] == [{"role": "assistant", "content": "current transcript"}]
+    assert result["toolCalls"] == [{"id": "old-tool"}]
+    assert result["pendingFiles"] == [{"name": "report.txt"}]
     assert result["loadingSessionId"] is None
-    assert result["msgInner"] == "foreign transcript"
+    assert result["restoredSelections"] == [{"id": "ctx-1", "name": "Context 1"}]
+    assert result["msgInner"] == "current transcript"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -2023,7 +2070,6 @@ const attachCalls = [];
 let _profileSwitchGeneration = 0;
 let _profileSwitchTransaction = null;
 let _profileLastCommittedSwitchResult = null;
-let _profileSwitchOpeningExistingSession = false;
 let _profilesCache = null;
 let _profileDropdownFetchPromise = null;
 let _profileDropdownCacheLoadedFromStorage = false;
@@ -2241,23 +2287,21 @@ def test_session_load_profile_switch_delegates_to_canonical_transaction():
     """Session-load profile changes must use the canonical switch transaction."""
     js = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
-let _profileSwitchOpeningExistingSession = false;
 const S = { activeProfile: 'a' };
 const calls = [];
 async function switchToProfile(name, opts){
-  calls.push({ name, opening: _profileSwitchOpeningExistingSession, opts });
+  calls.push({ name, opts });
   S.activeProfile = name;
   return true;
 }
 eval(extractFunc('_switchProfileForSessionLoad'));
 (async () => {
-  await _switchProfileForSessionLoad('b');
-  console.log(JSON.stringify({ calls, guard: _profileSwitchOpeningExistingSession, profile: S.activeProfile }));
+  await _switchProfileForSessionLoad('b', 'foreign');
+  console.log(JSON.stringify({ calls, profile: S.activeProfile }));
 })().catch(err => { console.error(err); process.exit(1); });
 """
     assert json.loads(_run_node(source)) == {
-        "calls": [{"name": "b", "opening": True, "opts": {"returnTransaction": True}}],
-        "guard": False,
+        "calls": [{"name": "b", "opts": {"returnTransaction": True, "openingExistingSessionId": "foreign"}}],
         "profile": "b",
     }
 
@@ -2266,7 +2310,6 @@ eval(extractFunc('_switchProfileForSessionLoad'));
 def test_session_load_profile_switch_treats_already_active_profile_as_success():
     js = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
-    let _profileSwitchOpeningExistingSession = false;
     const S = { activeProfile: 'b' };
     const calls = [];
     async function switchToProfile(name, opts){
@@ -2282,7 +2325,7 @@ def test_session_load_profile_switch_treats_already_active_profile_as_success():
 eval(extractFunc('_switchProfileForSessionLoad'));
 (async () => {
   const result = await _switchProfileForSessionLoad('b');
-  console.log(JSON.stringify({ result, calls, guard: _profileSwitchOpeningExistingSession }));
+  console.log(JSON.stringify({ result, calls }));
 })().catch(err => { console.error(err); process.exit(1); });
 """
     assert json.loads(_run_node(source)) == {
@@ -2294,7 +2337,6 @@ eval(extractFunc('_switchProfileForSessionLoad'));
             "terminalResult": None,
         },
         "calls": [{"name": "b", "opts": {"returnTransaction": True}}],
-        "guard": False,
     }
 
 
@@ -3050,8 +3092,9 @@ def test_session_load_profile_switch_retires_first_profile_owner_after_return():
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_loadsession_profile_switch_failure_does_not_force_retry_under_stale_profile():
+    panels_js = PANELS_JS_PATH.read_text(encoding="utf-8")
     sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
-    source = _extract_func_script(sessions_js) + """
+    source = _extract_func_script(panels_js + "\n" + sessions_js) + """
 const apiCalls = [];
 const switchCalls = [];
 const toasts = [];
@@ -3402,9 +3445,10 @@ eval(extractFunc('loadSession'));
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_stale_failed_profile_switch_does_not_restore_over_newer_profile_owner():
+def test_real_concurrent_c_switch_preserves_newer_profile_owner():
+    panels_js = PANELS_JS_PATH.read_text(encoding="utf-8")
     sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
-    source = _extract_func_script(sessions_js) + """
+    source = _extract_func_script(panels_js + "\n" + sessions_js) + """
 const apiCalls = [];
 const switchCalls = [];
 let rearmCalls = 0;
@@ -3457,8 +3501,9 @@ const S = {
   busy: false,
   activeStreamId: null,
 };
-let _profileSwitchOpeningExistingSession = false;
 let _profileSwitchGeneration = 0;
+let _profileSwitchTransaction = null;
+let _profileLastCommittedSwitchResult = null;
 let _loadingSessionId = null;
 let _loadSessionGeneration = 0;
 let _loadingOlder = false;
@@ -3466,8 +3511,31 @@ let _pendingCarryForwardSnapshot = null;
 let _messagesTruncated = false;
 let _oldestIdx = 0;
 let _yoloEnabled = false;
+let _showAllCronProfiles = true;
+let _cronOtherProfileCount = 3;
+let _cronPreFormDetail = { id: 'stale-job' };
+let _editingCronId = 'stale-job';
+let _cronIsDuplicate = true;
+let _cronList = ['stale-job'];
+let _cronListAllProfiles = false;
+let _cronsRequestId = 0;
+let _scriptsData = ['stale-script'];
+let _scriptsRequestId = 0;
+let _scriptsRawRequestId = 0;
 const INFLIGHT = {};
-function $(id) { return id === 'msgInner' ? msgInner : null; }
+const cronList = { children: [{}], replaceChildren(){ this.children = []; } };
+const cronRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
+const scriptsList = { children: [{}], replaceChildren(){ this.children = []; } };
+const scriptsRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
+function $(id) {
+  return {
+    msgInner,
+    cronList,
+    cronRefreshBtn,
+    scriptsList,
+    scriptsRefreshBtn,
+  }[id] || null;
+}
 function _resolveSessionIdFromSidebarLineage(sid) { return sid; }
 function _hermesNotifySessionOpen() { return null; }
 function _rearmActiveSessionStream() { rearmCalls += 1; }
@@ -3485,6 +3553,12 @@ function _acknowledgeSessionVisit() {}
 function _clearSameSessionForceReloadHint() {}
 function _clearStuckSessionOnBoot() {}
 function _appRootPath() { return '/'; }
+function _clearCronDetail() {}
+function _invalidateScriptsRequests() {
+  _scriptsRequestId += 1;
+  _scriptsRawRequestId += 1;
+  _scriptsData = null;
+}
 function renderMessages() {
   renderMessagesCalls += 1;
   msgInner.innerHTML = S.messages.map(m => m.content || '').join('\\n');
@@ -3493,63 +3567,29 @@ function renderTray() { renderTrayCalls += 1; }
 function syncTopbar() { syncTopbarCalls += 1; }
 function startSessionStream() {}
 function showToast() {}
-async function switchToProfile(name, opts) {
-  const myGen = ++_profileSwitchGeneration;
-  switchCalls.push({
-    name,
-    switchGeneration: myGen,
-    activeProfile: S.activeProfile,
-    loadingSessionId: _loadingSessionId,
-    loadGeneration: _loadSessionGeneration,
-  });
-  await switchDeferreds[name].promise;
-  if (myGen !== _profileSwitchGeneration) {
-    const terminalResult = Promise.resolve({
-      generation: _profileSwitchGeneration,
-      from: 'a',
-      target: S.activeProfile,
-      outcome: 'committed',
-      terminalResult: null,
-    });
-    return opts && opts.returnTransaction
-      ? {
-          generation: myGen,
-          from: 'a',
-          target: name,
-          outcome: 'superseded',
-          terminalResult,
-        }
-      : false;
-  }
-  S.activeProfile = name;
-  if (name === 'c') {
-    S.session = {
-      session_id: 'c-session',
-      message_count: 0,
-      updated_at: 3,
-      last_message_at: 3,
-      pending_attachments: [],
-      active_stream_id: null,
-    };
-    S.messages = [{ role: 'assistant', content: 'c transcript' }];
-    S.toolCalls = [{ id: 'c-tool' }];
-    S.pendingFiles = [{ name: 'c.txt' }];
-    window._restorePendingSelections(cSelections);
-    renderMessages();
-    renderTray();
-    syncTopbar();
-  }
-  return opts && opts.returnTransaction
-    ? {
-        generation: myGen,
-        from: 'a',
-        target: name,
-        outcome: 'committed',
-        terminalResult: null,
-      }
-    : true;
+function t(key) { return key; }
+function renderSessionList() { return Promise.resolve(); }
+function _invalidateSessionListRenders() {}
+function _setProfileSwitchListEmbargo() {}
+function showSessionListSkeleton() {}
+function bumpWorkspaceTreeGen() {}
+function clearWorkspaceTreeSkeleton() {}
+function _refreshProfileSwitchBackground() {}
+function animateNextSessionListRefresh() {}
+function startGatewaySSE() {}
+function applyBotName() {}
+function _clearPersistedModelState() {}
+function refreshProfileTransitionReasoningChip() {}
+function _profileSwitchPanelLoad() { return Promise.resolve(); }
+async function newSession() {
+  S.session = { session_id: 'c-session', message_count: 0, updated_at: 3, last_message_at: 3, profile: 'c' };
+  S.messages = [{ role: 'assistant', content: 'c transcript' }];
+  S.toolCalls = [{ id: 'c-tool' }];
+  S.pendingFiles = [{ name: 'c.txt' }];
+  window._restorePendingSelections(cSelections);
+  renderMessages();
 }
-async function api(url) {
+async function api(url, opts) {
   apiCalls.push({
     url,
     profile: S.activeProfile,
@@ -3557,6 +3597,18 @@ async function api(url) {
     loadGeneration: _loadSessionGeneration,
     switchGeneration: _profileSwitchGeneration,
   });
+  if (url === '/api/profile/switch') {
+    const name = JSON.parse(opts.body).name;
+    switchCalls.push({
+      name,
+      switchGeneration: _profileSwitchGeneration,
+      activeProfile: S.activeProfile,
+      loadingSessionId: _loadingSessionId,
+      loadGeneration: _loadSessionGeneration,
+    });
+    if (name === 'b') return switchDeferreds.b.promise;
+    return { active: 'c', is_default: false };
+  }
   const err = new Error('profile mismatch');
   err.status = 409;
   err.body = JSON.stringify({
@@ -3592,6 +3644,8 @@ function _isSessionActivelyViewedForList() { return true; }
     function renderSessionArtifacts() {}
     const populateModelDropdown = null;
     eval(extractFunc('_profileMatchesActiveProfile'));
+    eval(extractFunc('_resetTasksForProfileTransition'));
+    eval(extractFunc('switchToProfile'));
     eval(extractFunc('_sessionProfileMismatchFromError'));
     eval(extractFunc('_switchProfileForSessionLoad'));
     eval(extractFunc('loadSession'));
@@ -3601,7 +3655,6 @@ function _isSessionActivelyViewedForList() { return true; }
   await settle();
   const newerSwitch = switchToProfile('c');
   await settle();
-  switchDeferreds.c.resolve();
   await newerSwitch;
   await settle();
   switchDeferreds.b.resolve();
@@ -3629,43 +3682,25 @@ function _isSessionActivelyViewedForList() { return true; }
 })().catch(err => { console.error(err); process.exit(1); });
 """
     result = json.loads(_run_node(source))
-    assert result["apiCalls"] == [
-        {
-            "url": "/api/session?session_id=foreign&messages=0&resolve_model=0",
-            "profile": "a",
-            "loadingSessionId": "foreign",
-            "loadGeneration": 1,
-            "switchGeneration": 0,
-        }
+    assert [call["url"] for call in result["apiCalls"]] == [
+        "/api/session?session_id=foreign&messages=0&resolve_model=0",
+        "/api/profile/switch",
+        "/api/profile/switch",
     ]
+    assert [call["profile"] for call in result["apiCalls"]] == ["a", "a", "a"]
     assert result["switchCalls"] == [
-        {
-            "name": "b",
-            "switchGeneration": 1,
-            "activeProfile": "a",
-            "loadingSessionId": "foreign",
-            "loadGeneration": 1,
-        },
-        {
-            "name": "c",
-            "switchGeneration": 2,
-            "activeProfile": "a",
-            "loadingSessionId": "foreign",
-            "loadGeneration": 1,
-        },
-    ]
-    assert result["rearmCalls"] == 2
-    assert result["renderMessagesCalls"] == 2
-    assert result["renderTrayCalls"] == 1
-    assert result["syncTopbarCalls"] == 1
-    assert result["clearPendingSelectionsCalls"] == 1
-    assert result["restoredSelections"] == [
-        {"id": "ctx-c", "name": "Context C", "text": "new profile selection"}
+        {"name": "b", "switchGeneration": 1, "activeProfile": "a", "loadingSessionId": "foreign", "loadGeneration": 1},
+        {"name": "c", "switchGeneration": 2, "activeProfile": "a", "loadingSessionId": "foreign", "loadGeneration": 1},
     ]
     assert result["activeProfile"] == "c"
     assert result["loadingSessionId"] is None
     assert result["loadGeneration"] == 1
     assert result["switchGeneration"] == 2
+    assert result["renderMessagesCalls"] == 2
+    assert result["clearPendingSelectionsCalls"] == 1
+    assert result["restoredSelections"] == [
+        {"id": "ctx-c", "name": "Context C", "text": "new profile selection"}
+    ]
     assert result["sessionId"] == "c-session"
     assert result["messages"] == [{"role": "assistant", "content": "c transcript"}]
     assert result["toolCalls"] == [{"id": "c-tool"}]
@@ -3674,7 +3709,7 @@ function _isSessionActivelyViewedForList() { return true; }
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_loadsession_retries_after_newer_same_target_switch_without_replacement_session():
+def test_loadsession_stands_down_when_newer_default_owner_commits_against_requested_b():
     panels_js = PANELS_JS_PATH.read_text(encoding="utf-8")
     sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(panels_js + "\n" + sessions_js) + """
@@ -3696,6 +3731,7 @@ const firstSwitch = deferred();
 const newerSwitch = deferred();
 let profileSwitchCalls = 0;
 let foreignLoads = 0;
+const newSessionCalls = [];
 const msgInner = { innerHTML: '' };
 const cronList = { children: [{}], replaceChildren(){ this.children = []; } };
 const cronRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
@@ -3709,11 +3745,11 @@ const S = {
     message_count: 0,
     updated_at: 1,
     last_message_at: 1,
-    profile: 'a',
+    profile: 'default',
   },
-  messages: [{ role: 'assistant', content: 'current transcript' }],
-  toolCalls: [{ id: 'current-tool' }],
-  pendingFiles: [{ name: 'current.txt' }],
+  messages: [],
+  toolCalls: [],
+  pendingFiles: [],
   busy: false,
   activeStreamId: null,
   _pendingSessionToolsets: null,
@@ -3728,7 +3764,6 @@ let _yoloEnabled = false;
 let _profileSwitchGeneration = 0;
 let _profileSwitchTransaction = null;
 let _profileLastCommittedSwitchResult = null;
-let _profileSwitchOpeningExistingSession = false;
 let _workspacePanelMode = 'closed';
 let _currentPanel = 'chat';
 let _tasksSubtab = 'jobs';
@@ -3738,8 +3773,11 @@ let _cronOtherProfileCount = 0;
 let _cronPreFormDetail = null;
 let _editingCronId = null;
 let _cronIsDuplicate = false;
+let _cronList = [];
+let _cronListAllProfiles = false;
 let _skillsData = null;
 let _workspaceList = null;
+let _cronsRequestId = 0;
 let _scriptsRequestId = 0;
 let _scriptsRawRequestId = 0;
 let _scriptsData = null;
@@ -3844,6 +3882,11 @@ function syncTopbar() {}
 function showToast() {}
 function t(key) { return key; }
 function _clearCronDetail() {}
+function _invalidateScriptsRequests() {
+  _scriptsRequestId += 1;
+  _scriptsRawRequestId += 1;
+  _scriptsData = null;
+}
 function _refreshProfileSwitchBackground() {}
 function animateNextSessionListRefresh() {}
 function startGatewaySSE() {}
@@ -3868,6 +3911,20 @@ function _isSessionActivelyViewedForList() { return true; }
 function _hideHandoffHint() {}
 function renderSessionArtifacts() {}
 async function _ensureTasksSubtabLoaded() {}
+async function newSession(flash, options) {
+  newSessionCalls.push({ flash, options });
+  S.session = {
+    session_id: 'default-session',
+    message_count: 0,
+    updated_at: 3,
+    last_message_at: 3,
+    profile: 'default',
+  };
+  S.messages = [];
+  S.toolCalls = [];
+  S.pendingFiles = [];
+  renderMessages();
+}
 async function _ensureMessagesLoaded() {
   S.messages = [{ role: 'assistant', content: S.session.session_id + ' transcript' }];
 }
@@ -3883,9 +3940,9 @@ eval(extractFunc('loadSession'));
   renderMessages();
   const firstLoad = loadSession('foreign');
   await settle();
-  const newer = switchToProfile('b', { returnTransaction: true });
+  const newer = switchToProfile('default', { returnTransaction: true });
   await settle();
-  newerSwitch.resolve({ active: 'b', is_default: false });
+  newerSwitch.resolve({ active: 'default', is_default: true });
   const newerResult = await newer;
   await settle();
   firstSwitch.resolve({ active: 'b', is_default: false });
@@ -3893,6 +3950,7 @@ eval(extractFunc('loadSession'));
   await settle();
   console.log(JSON.stringify({
     apiCalls,
+    newSessionCalls,
     newerResult: {
       generation: newerResult.generation,
       outcome: newerResult.outcome,
@@ -3917,8 +3975,12 @@ eval(extractFunc('loadSession'));
     assert result["newerResult"] == {
         "generation": 2,
         "outcome": "committed",
-        "target": "b",
+        "target": "default",
     }
+    assert result["newSessionCalls"] == [{
+        "flash": False,
+        "options": {"awaitWorkspaceLoad": False, "worktree": False},
+    }]
     assert result["apiCalls"] == [
         {
             "url": "/api/session?session_id=foreign&messages=0&resolve_model=0",
@@ -3942,28 +4004,20 @@ eval(extractFunc('loadSession'));
             "loadingSessionId": "foreign",
             "loadGeneration": 1,
             "switchGeneration": 2,
-            "body": {"name": "b"},
-        },
-        {
-            "url": "/api/session?session_id=foreign&messages=0&resolve_model=0",
-            "profile": "b",
-            "loadingSessionId": "foreign",
-            "loadGeneration": 2,
-            "switchGeneration": 2,
-            "body": None,
+            "body": {"name": "default"},
         },
     ]
     assert result["final"] == {
-        "activeProfile": "b",
+        "activeProfile": "default",
         "loadingSessionId": None,
-        "loadGeneration": 2,
+        "loadGeneration": 1,
         "switchGeneration": 2,
-        "sessionId": "foreign",
-        "sessionProfile": "b",
-        "messages": [{"role": "assistant", "content": "foreign transcript"}],
+        "sessionId": "default-session",
+        "sessionProfile": "default",
+        "messages": [],
         "toolCalls": [],
-        "pendingFiles": [{"name": "current.txt"}],
-        "msgInner": "foreign transcript",
+        "pendingFiles": [],
+        "msgInner": "",
     }
 
 

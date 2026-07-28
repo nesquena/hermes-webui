@@ -1626,15 +1626,12 @@ function _sessionProfileMismatchFromError(e){
   return null;
 }
 
-async function _switchProfileForSessionLoad(profile){
+async function _switchProfileForSessionLoad(profile, sessionId){
   const name=String(profile||'').trim();
   if(!name) throw new Error('missing profile');
-  _profileSwitchOpeningExistingSession=true;
-  try{
-    return await switchToProfile(name, {returnTransaction:true});
-  } finally {
-    _profileSwitchOpeningExistingSession=false;
-  }
+  const options={returnTransaction:true};
+  if(sessionId) options.openingExistingSessionId=String(sessionId);
+  return await switchToProfile(name, options);
 }
 
 async function loadSession(sid){
@@ -1814,25 +1811,32 @@ async function loadSession(sid){
           while (current && current.outcome === 'superseded' && current.terminalResult) {
             current = await current.terminalResult;
           }
-          while (current && current.outcome === 'failed' && current.retainedResult) {
-            current = current.retainedResult;
-          }
           return _normalizeProfileSwitchResult(current);
         };
-        const _terminalCommittedRequestedProfileWithoutReplacementSession = terminal => {
-          if (!terminal || (terminal.outcome !== 'already_active' && terminal.outcome !== 'committed')) return false;
+        const _classifyProfileSwitchSettlement = terminal => {
+          if (!terminal) return 'stand_down';
           const requestedProfile = (typeof profileMismatch.profile === 'string' && profileMismatch.profile.trim())
             ? profileMismatch.profile.trim()
             : 'default';
-          const terminalTarget = (typeof terminal.target === 'string' && terminal.target.trim())
-            ? terminal.target.trim()
-            : requestedProfile;
-          if (!_profileMatchesActiveProfile(terminalTarget, requestedProfile)) return false;
-          if (!_profileMatchesActiveProfile(terminalTarget, (S && S.activeProfile) || 'default')) return false;
+          const normalize = value => (typeof value === 'string' && value.trim()) ? value.trim() : '';
+          const terminalTarget = normalize(terminal.target);
+          const activeProfile = normalize((S && S.activeProfile) || 'default') || 'default';
           const activeSessionId = S.session && S.session.session_id ? String(S.session.session_id) : '';
-          return !activeSessionId || activeSessionId === currentSid;
+          if (activeSessionId && activeSessionId !== currentSid) return 'stand_down';
+          const requestedOwnerCommitted = (terminal.outcome === 'already_active' || terminal.outcome === 'committed')
+            && terminalTarget === requestedProfile
+            && _profileMatchesActiveProfile(terminalTarget, activeProfile);
+          if (requestedOwnerCommitted) return 'retry_requested_owner';
+          if (terminal.outcome === 'failed' && terminal.retainedResult) {
+            const retained = terminal.retainedResult;
+            const retainedOwner = normalize(retained.committedProfile || retained.target);
+            if (retainedOwner && _profileMatchesActiveProfile(retainedOwner, activeProfile)) {
+              return 'restore_retained_owner';
+            }
+          }
+          return 'stand_down';
         };
-        let switched = _normalizeProfileSwitchResult(await _switchProfileForSessionLoad(profileMismatch.profile));
+        let switched = _normalizeProfileSwitchResult(await _switchProfileForSessionLoad(profileMismatch.profile, sid));
         if (!_isCurrentLoad()) {
           _rearmActiveSessionStream();
           return;
@@ -1843,12 +1847,13 @@ async function loadSession(sid){
             _rearmActiveSessionStream();
             return;
           }
-          if (_terminalCommittedRequestedProfileWithoutReplacementSession(terminal)) {
+          const settlement = _classifyProfileSwitchSettlement(terminal);
+          if (settlement === 'retry_requested_owner') {
             _retireCurrentLoad();
             return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
           }
           _retireCurrentLoad();
-          if (terminal.outcome === 'failed') {
+          if (settlement === 'restore_retained_owner' || terminal.outcome === 'failed') {
             if (!_restorePreviousConversationAfterFailedSwitch()) {
               const _msgInner = $('msgInner');
               if (_msgInner) {
@@ -2509,12 +2514,7 @@ async function _ensureSidebarSessionProfile(session){
   const activeProfile=S.activeProfile||'default';
   if(_profileMatchesActiveProfile(targetProfile,activeProfile)) return false;
   if(typeof switchToProfile!=='function') return false;
-  _profileSwitchOpeningExistingSession=true;
-  try{
-    await switchToProfile(targetProfile);
-  }finally{
-    _profileSwitchOpeningExistingSession=false;
-  }
+  await switchToProfile(targetProfile, {openingExistingSessionId: String(session.session_id)});
   return _profileMatchesActiveProfile(targetProfile,S.activeProfile||'default');
 }
 
@@ -3929,7 +3929,6 @@ const NO_PROJECT_FILTER = '__none__';
 let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FILTER = unassigned only)
 const SHOW_ALL_PROFILES_STORAGE_KEY = 'hermes-show-all-profiles';
 let _showAllProfiles = false;  // false = filter to active profile only
-let _profileSwitchOpeningExistingSession = false;  // true while cross-profile sidebar click switches profile before loadSession()
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
 let _archivedWebuiCount = 0;      // archived WebUI sessions not fetched until requested
 let _archivedCliCount = 0;        // archived non-WebUI sessions not fetched until requested

@@ -148,7 +148,9 @@ def test_cross_profile_session_deep_links_switch_profile_instead_of_self_healing
     assert '"code": "session_profile_mismatch"' in routes
     assert 'if method == "GET" and path == "/api/session":' in routes
     assert "function _sessionProfileMismatchFromError" in sessions
-    assert "_switchProfileForSessionLoad(profileMismatch.profile)" in sessions
+    assert "async function _switchProfileForSessionLoad(profile, sessionId)" in sessions
+    assert "_switchProfileForSessionLoad(profileMismatch.profile, sid)" in sessions
+    assert "options.openingExistingSessionId=String(sessionId);" in sessions
     assert "skipProfileResolve:true" in sessions
 
 
