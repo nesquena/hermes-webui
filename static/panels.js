@@ -2772,7 +2772,7 @@ function _kanbanStartEventStream(){
   let url = '/api/kanban/events/stream' + _kanbanBoardQuery({since: since});
   let es;
   try {
-    es = new EventSource(url);
+    es = new EventSource(typeof _tabContextUrl === 'function' ? _tabContextUrl(url) : url);
   } catch(e) {
     _kanbanEventSourceFailures += 1;
     if (_kanbanEventSourceFailures < 3 && !_kanbanPollTimer) {
@@ -6801,8 +6801,19 @@ function renderProfileDropdown(data) {
     : (data.active || 'default');
   const profiles = allProfiles.filter(p => p && (p.visible !== false || p.name === active));
   for (const p of profiles) {
-    const opt = document.createElement('div');
+    const profileHref = _profileTabUrl(p.name);
+    const opt = document.createElement('a');
+    opt.href = profileHref;
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
+    // Open in new tab: let native browser behavior handle ctrl/cmd/middle-click
+    // Plain click: prevent default and switch in-place
+    opt.addEventListener('click', function(e) {
+      if (e.button !== 0 || e.ctrlKey || e.shiftKey || e.metaKey || e.altKey) return; // let native new-tab flow
+      e.preventDefault();
+      closeProfileDropdown();
+      if (p.name === active) return;
+      switchToProfile(p.name);
+    });
     const meta = [];
     if (typeof p.model === 'string' && p.model) meta.push(p.model.split('/').pop());
     if (p.total_skills && p.total_skills > 0) meta.push(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`));
@@ -6810,12 +6821,7 @@ function renderProfileDropdown(data) {
     const checkmark = p.name === active ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="3" style="vertical-align:-1px"><polyline points="20 6 9 17 4 12"/></svg>' : '';
     const defaultBadge = p.is_default ? ` <span style="opacity:.5;font-weight:400">${esc(t('profile_default_label'))}</span>` : '';
     opt.innerHTML = `<div class="profile-opt-name">${gwDot}${esc(p.name)}${defaultBadge}${checkmark}</div>` +
-      (meta.length ? `<div class="profile-opt-meta">${esc(meta.join(' \u00b7 '))}</div>` : '');
-    opt.onclick = async () => {
-      closeProfileDropdown();
-      if (p.name === active) return;
-      await switchToProfile(p.name);
-    };
+      (meta.length ? `<div class="profile-opt-meta">${esc(meta.join(' · '))}</div>` : '');
     dd.appendChild(opt);
   }
   // Divider + Manage link (hidden in single profile mode)

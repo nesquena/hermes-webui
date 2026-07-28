@@ -2,6 +2,13 @@ async function api(path,opts={}){
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
   const url=new URL(rel,document.baseURI||location.href);
+  // Append per-tab profile context if present (#6559)
+  (function _appendTabContext(u){
+    try{
+      const ctx=typeof sessionStorage!=='undefined'?sessionStorage.getItem('hermes-tab-profile-ctx'):null;
+      if(ctx) u.searchParams.set('tab_context',ctx);
+    }catch(e){}
+  })(url);
   const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
   const timeoutToast=opts.timeoutToast!==false;
   const redirect401=opts.redirect401!==false;
