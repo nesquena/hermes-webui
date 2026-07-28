@@ -1819,6 +1819,19 @@ async function loadSession(sid){
           }
           return _normalizeProfileSwitchResult(current);
         };
+        const _terminalCommittedRequestedProfileWithoutReplacementSession = terminal => {
+          if (!terminal || (terminal.outcome !== 'already_active' && terminal.outcome !== 'committed')) return false;
+          const requestedProfile = (typeof profileMismatch.profile === 'string' && profileMismatch.profile.trim())
+            ? profileMismatch.profile.trim()
+            : 'default';
+          const terminalTarget = (typeof terminal.target === 'string' && terminal.target.trim())
+            ? terminal.target.trim()
+            : requestedProfile;
+          if (!_profileMatchesActiveProfile(terminalTarget, requestedProfile)) return false;
+          if (!_profileMatchesActiveProfile(terminalTarget, (S && S.activeProfile) || 'default')) return false;
+          const activeSessionId = S.session && S.session.session_id ? String(S.session.session_id) : '';
+          return !activeSessionId || activeSessionId === currentSid;
+        };
         let switched = _normalizeProfileSwitchResult(await _switchProfileForSessionLoad(profileMismatch.profile));
         if (!_isCurrentLoad()) {
           _rearmActiveSessionStream();
@@ -1830,8 +1843,7 @@ async function loadSession(sid){
             _rearmActiveSessionStream();
             return;
           }
-          if ((terminal.outcome === 'already_active' || terminal.outcome === 'committed')
-            && terminal.generation === switched.generation) {
+          if (_terminalCommittedRequestedProfileWithoutReplacementSession(terminal)) {
             _retireCurrentLoad();
             return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
           }
