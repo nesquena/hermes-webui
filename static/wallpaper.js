@@ -11,10 +11,12 @@ let saved={...DEFAULT_INFO};
 let hasAuthoritativeState=false;
 let reconcileGeneration=0;
 let mutationStarted=0;
+let authoritativeGeneration=0;
 let mutationTail=Promise.resolve();
 let appearanceActive=false;
 let paneGeneration=0;
 let draftRevision=0;
+let draftEdited=false;
 let draftFile=null;
 let draftUrl=null;
 let draftOpacity=0.8;
@@ -65,8 +67,8 @@ function probe(info){
 async function applyAuthoritativeInfo(raw,guards){
   const info=normalizeInfo(raw);
   await probe(info);
-  if(guards&&(guards.reconcile!==reconcileGeneration||guards.mutation!==mutationStarted))return false;
-  saved=info;hasAuthoritativeState=true;cache(info);render(info);syncControls();return true;
+  if(guards&&(guards.reconcile!==reconcileGeneration||guards.mutation!==mutationStarted||guards.authoritative!==authoritativeGeneration))return false;
+  saved=info;hasAuthoritativeState=true;authoritativeGeneration++;cache(info);render(info);syncControls();return true;
 }
 function setStatus(message,isError){const status=el('wallpaperStatus');if(status){status.textContent=message||'';status.classList.toggle('is-error',!!isError)}}
 function setStatusKey(key,isError){statusKey=key||null;statusIsError=!!isError;setStatus(key?text(key,key):'',statusIsError)}
@@ -85,14 +87,18 @@ function wallpaperErrorKey(error){
   if(error&&Number.isFinite(error.status)&&error.status>=500)return 'settings_wallpaper_storage_failed';
   return 'settings_wallpaper_failed';
 }
+function ownsReconcile(guards){return guards.reconcile===reconcileGeneration&&guards.mutation===mutationStarted&&guards.authoritative===authoritativeGeneration}
 async function reconcileWallpaperInfo(){
-  const guards={reconcile:++reconcileGeneration,mutation:mutationStarted};
+  const guards={reconcile:++reconcileGeneration,mutation:mutationStarted,authoritative:authoritativeGeneration};
   try{
     const raw=await global.api('/api/wallpaper/info',{retries:0});
-    await applyAuthoritativeInfo(raw,guards);
+    const applied=await applyAuthoritativeInfo(raw,guards);
+    if(applied&&statusKey==='settings_wallpaper_reconciliation')setStatusKey(null);
   }catch(error){
-    if(!hasAuthoritativeState){saved={...DEFAULT_INFO};try{localStorage.removeItem(CACHE_KEY)}catch(_){}clearRender()}
-    setStatusKey('settings_wallpaper_reconciliation',true);
+    if(ownsReconcile(guards)){
+      if(!hasAuthoritativeState){saved={...DEFAULT_INFO};try{localStorage.removeItem(CACHE_KEY)}catch(_){}clearRender();if(appearanceActive&&draftEdited)renderDraft()}
+      setStatusKey('settings_wallpaper_reconciliation',true);
+    }
     throw error;
   }
   return saved;
@@ -124,16 +130,16 @@ function installDraftFile(file){
   const extension=(file.name||'').toLowerCase().split('.').pop();
   if(!ALLOWED_MIME.has(file.type)&&!['jpg','jpeg','png','webp'].includes(extension)){setStatusKey('settings_wallpaper_invalid_type',true);return false}
   if(!file.size||file.size>MAX_BYTES){setStatusKey('settings_wallpaper_invalid_size',true);return false}
-  _releaseWallpaperDraftUrl();draftFile=file;draftUrl=URL.createObjectURL(file);draftRevision++;setStatusKey(null);renderDraft();syncControls();return true;
+  _releaseWallpaperDraftUrl();draftFile=file;draftUrl=URL.createObjectURL(file);draftRevision++;draftEdited=true;setStatusKey(null);renderDraft();syncControls();return true;
 }
-function discardDraft(){_releaseWallpaperDraftUrl();draftFile=null;draftOpacity=saved.opacity;draftScope=saved.scope;draftRevision++;render(saved);syncControls()}
+function discardDraft(){_releaseWallpaperDraftUrl();draftFile=null;draftOpacity=saved.opacity;draftScope=saved.scope;draftRevision++;draftEdited=false;render(saved);syncControls()}
 function beginWallpaperSettingsSession(){
   if(appearanceActive)return;
-  appearanceActive=true;paneGeneration++;draftRevision=0;draftFile=null;draftOpacity=saved.opacity;draftScope=saved.scope;bindControls();syncControls();
+  appearanceActive=true;paneGeneration++;draftRevision=0;draftEdited=false;draftFile=null;draftOpacity=saved.opacity;draftScope=saved.scope;bindControls();syncControls();
   const generation=paneGeneration,revision=draftRevision;
   reconcileWallpaperInfo().then(()=>{if(!appearanceActive||generation!==paneGeneration)return;if(revision===draftRevision){draftOpacity=saved.opacity;draftScope=saved.scope;syncControls()}else renderDraft()}).catch(()=>{if(appearanceActive&&generation===paneGeneration&&revision!==draftRevision)renderDraft()});
 }
-function endWallpaperSettingsSession(){if(!appearanceActive)return;appearanceActive=false;paneGeneration++;render(saved);_releaseWallpaperDraftUrl();draftFile=null;draftRevision=0}
+function endWallpaperSettingsSession(){if(!appearanceActive)return;appearanceActive=false;paneGeneration++;render(saved);_releaseWallpaperDraftUrl();draftFile=null;draftRevision=0;draftEdited=false}
 async function _requestForTest(kind,file,opacity,scope){
   if(kind==='post')return global.api('/api/wallpaper?opacity='+encodeURIComponent(opacity)+'&scope='+encodeURIComponent(scope),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file,retries:0});
   if(kind==='patch')return global.api('/api/wallpaper',{method:'PATCH',body:JSON.stringify({opacity,scope}),retries:0});
@@ -147,9 +153,10 @@ function enqueueMutation(kind,file,opacity,scope,owner,revision,url){
       const raw=await _requestForTest(kind,file,opacity,scope);
       await applyAuthoritativeInfo(raw,null);
       const ownsDraft=appearanceActive&&owner===paneGeneration&&revision===draftRevision&&(kind!=='post'||url===draftUrl);
-      if(ownsDraft){if(kind==='post')_releaseWallpaperDraftUrl(url);draftFile=null;draftOpacity=saved.opacity;draftScope=saved.scope}
-      else if(appearanceActive)renderDraft();
-      if(appearanceActive&&owner===paneGeneration)setStatusKey(kind==='delete'?'settings_wallpaper_cleared':'settings_wallpaper_saved');
+      if(ownsDraft){if(kind==='post')_releaseWallpaperDraftUrl(url);draftFile=null;draftOpacity=saved.opacity;draftScope=saved.scope;draftEdited=false}
+      else if(appearanceActive&&draftEdited)renderDraft();
+      else if(appearanceActive){draftOpacity=saved.opacity;draftScope=saved.scope;render(saved)}
+      if(ownsDraft)setStatusKey(kind==='delete'?'settings_wallpaper_cleared':'settings_wallpaper_saved');
     }catch(error){
       if(!error||!Number.isFinite(error.status)||error.status>=500){try{await reconcileWallpaperInfo()}catch(_){}finally{if(appearanceActive&&(draftUrl||saved.has_wallpaper))renderDraft()}}
       if(appearanceActive&&owner===paneGeneration)setStatusKey(wallpaperErrorKey(error),true);
@@ -171,8 +178,8 @@ function bindControls(){
   const input=el('wallpaperFileInput'),drop=el('wallpaperDropZone'),opacity=el('wallpaperOpacity');
   if(input)input.addEventListener('change',()=>{if(input.files&&input.files[0])installDraftFile(input.files[0]);input.value=''});
   if(drop){drop.addEventListener('click',()=>input&&input.click());drop.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();if(input)input.click()}});drop.addEventListener('dragover',event=>event.preventDefault());drop.addEventListener('drop',event=>{event.preventDefault();if(event.dataTransfer&&event.dataTransfer.files[0])installDraftFile(event.dataTransfer.files[0])})}
-  if(opacity)opacity.addEventListener('input',()=>{draftOpacity=Number(opacity.value)/100;draftRevision++;renderDraft();syncControls()});
-  document.querySelectorAll('input[name="wallpaperScope"]').forEach(radio=>radio.addEventListener('change',()=>{draftScope=currentScope();draftRevision++;renderDraft();syncControls()}));
+  if(opacity)opacity.addEventListener('input',()=>{draftOpacity=Number(opacity.value)/100;draftRevision++;draftEdited=true;renderDraft();syncControls()});
+  document.querySelectorAll('input[name="wallpaperScope"]').forEach(radio=>radio.addEventListener('change',()=>{draftScope=currentScope();draftRevision++;draftEdited=true;renderDraft();syncControls()}));
   const save=el('wallpaperSaveBtn'),clear=el('wallpaperClearBtn');if(save)save.addEventListener('click',saveDraft);if(clear)clear.addEventListener('click',clearDraft);
 }
 function speculativeBoot(){

@@ -25094,7 +25094,7 @@ const LOCALES = {
     settings_wallpaper_drop: 'JPEG, PNG hoặc WebP · tối đa 10 MB',
     settings_wallpaper_preview_alt: 'Bản xem trước hình nền',
     settings_wallpaper_saved_file: 'Hình nền đã lưu',
-    settings_wallpaper_opacity: 'Độ trong suốt của ảnh',
+    settings_wallpaper_opacity: 'Độ mờ của ảnh',
     settings_wallpaper_scope: 'Hiển thị hình nền trong',
     settings_wallpaper_scope_chat: 'Chỉ cuộc trò chuyện',
     settings_wallpaper_scope_app: 'Toàn bộ ứng dụng',

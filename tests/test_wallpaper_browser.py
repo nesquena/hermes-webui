@@ -94,7 +94,7 @@ def test_wallpaper_upload_scope_refresh_and_clear(base_url, tmp_path: Path) -> N
                     "el => { el.dataset.skin = 'geist-contrast'; }"
                 )
                 page.wait_for_function(
-                    "() => getComputedStyle(document.querySelector('#emptyState')).backgroundColor === 'rgba(0, 0, 0, 0)' && getComputedStyle(document.querySelector('.app-titlebar')).backgroundColor !== 'rgba(0, 0, 0, 0)'"
+                    "() => getComputedStyle(document.querySelector('main.main')).backgroundColor === 'rgba(0, 0, 0, 0)' && getComputedStyle(document.querySelector('#emptyState')).backgroundColor === 'rgba(0, 0, 0, 0)' && getComputedStyle(document.querySelector('.app-titlebar')).backgroundColor !== 'rgba(0, 0, 0, 0)'"
                 )
                 assert page.locator(".app-titlebar").evaluate(
                     "el => getComputedStyle(el).backgroundColor"
