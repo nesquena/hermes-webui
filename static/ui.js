@@ -1513,6 +1513,70 @@ function _getCachedRender(text, isUser){
   _renderCache.set(key, rendered);
   return rendered;
 }
+
+// Keep prose and machine-oriented output readable when a single message mixes
+// Persian/Arabic/Hebrew with English. Direction is DOM metadata only: the raw
+// message source remains unchanged for send, persistence, copy, and export.
+function _applyAutomaticMessageDirections(root){
+  const scope=root||((typeof document!=='undefined')?document:null);
+  if(!scope||typeof scope.querySelectorAll!=='function') return;
+  const prose=scope.matches&&scope.matches('.msg-body')?[scope]:scope.querySelectorAll('.msg-body');
+  for(const body of prose){
+    if(!body||typeof body.setAttribute!=='function') continue;
+    body.setAttribute('dir','auto');
+    if(body.classList) body.classList.add('message-prose-auto');
+  }
+  const blockSelector='p,li,blockquote,h1,h2,h3,h4,h5,h6';
+  const blocks=scope.matches&&scope.matches(blockSelector)?[scope]:scope.querySelectorAll(blockSelector);
+  for(const block of blocks){
+    if(block&&typeof block.setAttribute==='function') block.setAttribute('dir','auto');
+  }
+  const inlineSelector='a,strong,em';
+  const inlines=scope.matches&&scope.matches(inlineSelector)?[scope]:scope.querySelectorAll(inlineSelector);
+  for(const inline of inlines){
+    if(inline&&typeof inline.setAttribute==='function') inline.setAttribute('dir','auto');
+  }
+  const machineSelector=[
+    'pre','code','kbd','samp','tt','.hljs','.code-block',
+    '.katex','.katex-block','.katex-display','.katex-html','.katex-inline',
+    '.diff-block','.csv-table-wrap','.csv-table','.skill-file-path',
+    '.tool-call-group-body','.process-wakeup-body',
+  ].join(',');
+  const machines=scope.matches&&scope.matches(machineSelector)?[scope]:scope.querySelectorAll(machineSelector);
+  for(const node of machines){
+    if(!node||typeof node.setAttribute!=='function') continue;
+    node.setAttribute('dir','ltr');
+    if(node.classList) node.classList.add('message-machine-ltr');
+  }
+}
+function _observeAutomaticMessageDirections(body){
+  _applyAutomaticMessageDirections(body);
+  if(!body||body._automaticDirectionObserver||typeof MutationObserver==='undefined') return;
+  const observer=new MutationObserver(records=>{
+    const added=new Set();
+    for(const record of records){
+      for(const node of record.addedNodes){
+        if(node&&node.nodeType===1) added.add(node);
+      }
+    }
+    for(const node of added){
+      let parent=node.parentElement;
+      let nested=false;
+      while(parent){
+        if(added.has(parent)){nested=true;break;}
+        parent=parent.parentElement;
+      }
+      if(!nested) _applyAutomaticMessageDirections(node);
+    }
+  });
+  observer.observe(body,{childList:true,subtree:true});
+  body._automaticDirectionObserver=observer;
+}
+function _disconnectAutomaticMessageDirections(body){
+  const observer=body&&body._automaticDirectionObserver;
+  if(observer&&typeof observer.disconnect==='function') observer.disconnect();
+  if(body) body._automaticDirectionObserver=null;
+}
 function _currentMessageRenderWindowSize(){
   return Math.max(
     MESSAGE_RENDER_WINDOW_DEFAULT,
@@ -15734,6 +15798,7 @@ function renderMessages(options){
     const cached=_sessionHtmlCache.get(sid);
     if(cached&&cached.msgCount===msgCount&&cached.renderWindowKey===renderWindowKey&&cached.signature===renderSignature){
       inner.innerHTML=cached.html;
+      _applyAutomaticMessageDirections(inner);
       _messageVirtualWindowKey=renderWindowKey;
       _sessionHtmlCacheSid=sid;
       _rehydrateTransparentStreamDom(inner);
@@ -18474,6 +18539,7 @@ function _postProcessWithAnchorSuppression(container){
     ? _suppressBrowserOverflowAnchor(scroller) : null;
   try{
     postProcessRenderedMessages(container);
+    _applyAutomaticMessageDirections(container);
   }finally{
     // Hold suppression across ONE more frame so late media/layout reflow
     // (image decode, katex/mermaid measure) cannot re-anchor either, then let

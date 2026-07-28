@@ -1,3 +1,4 @@
+  @font-face{font-family:"Vazirmatn";src:url("fonts/Vazirmatn.woff2") format("woff2");font-style:normal;font-weight:100 900;font-display:swap;unicode-range:U+0600-06FF,U+0750-077F,U+0870-089F,U+08A0-08FF,U+200C-200D,U+FB50-FDFF,U+FE70-FEFF;}
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   /* ── Light mode (default) — warm gold-tinted palette from Hermes brand ── */
   :root {
@@ -15,6 +16,7 @@
     --message-body-font-size:14px;--message-body-line-height:1.75;--message-code-font-size:12.5px;--message-pre-code-font-size:13px;--message-table-font-size:12px;
     --file-tree-toggle-width:10px;
     --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+    --font-persian:"Vazirmatn",var(--font-ui);--font-mono:ui-monospace,"SFMono-Regular","SF Mono",Menlo,Monaco,Consolas,"Liberation Mono",monospace;
     --surface-subtle:rgba(0,0,0,.025);--surface-subtle-hover:rgba(0,0,0,.045);
     --border-subtle:rgba(0,0,0,.08);--border-muted:rgba(0,0,0,.12);
     font-family:var(--font-ui);font-size:14px;line-height:1.6;
@@ -5935,6 +5937,22 @@ main.main > #mainPlugin{display:none;}
      regression the scroll-anchor work fought hard to close. */
 }
 .msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); }
+.msg-body.message-prose-auto { text-align: start; unicode-bidi: plaintext; font-family:var(--font-persian)!important; line-height:1.8!important; }
+/* Block prose follows dir=auto: Persian start=right, English start=left. Logical
+   list/quote edges keep markers/borders on the start side under both dirs. */
+.msg-body.message-prose-auto :is(h1,h2,h3,h4,h5,h6,ul,ol,li,blockquote) { text-align:start; unicode-bidi:plaintext; }
+.msg-body.message-prose-auto blockquote:has(> :first-child:dir(rtl)) { direction: rtl; }
+.msg-body.message-prose-auto :is(ul,ol) { margin:6px 0 10px; margin-inline-start:20px; padding-inline-start:1.25em; }
+.msg-body.message-prose-auto blockquote { border-left:0; border-inline-start:3px solid var(--blue); padding-left:0; padding-inline-start:14px; }
+.msg-body.message-prose-auto a { direction:ltr; unicode-bidi:isolate; }
+.msg-body.message-prose-auto strong,
+.msg-body.message-prose-auto em { unicode-bidi:isolate; }
+.msg-body.message-prose-auto .message-machine-ltr,
+.message-machine-ltr { direction: ltr; text-align: left; unicode-bidi: isolate; }
+.msg-body.message-prose-auto :is(pre,code,kbd,samp,tt,.hljs,.code-block,.katex,.katex-block,.katex-display,.katex-html,.katex-inline,.diff-block,.csv-table-wrap,.csv-table,.skill-file-path,.tool-call-group-body,.process-wakeup-body) { direction:ltr; text-align:left; unicode-bidi:isolate; }
+.msg-body :not(pre) > code { display: inline-block; max-width: 100%; vertical-align: text-bottom; overflow-wrap: break-word; word-break: break-word; }
+.msg-body.message-prose-auto code,
+.msg-body.message-prose-auto pre { font-family:var(--font-mono); line-height:1.6; }
 .msg-body code,
 .msg-body pre,
 .msg-body table { font-family: 'SF Mono', ui-monospace, monospace; }
@@ -7132,6 +7150,8 @@ main.main.showing-logs > #mainLogs{display:flex;}
   text-align:right;
   unicode-bidi:plaintext;
 }
+:root.chat-content-rtl textarea#msg,
+.chat-content-rtl .msg-edit-area { font-family:var(--font-persian)!important; line-height:1.8!important; }
 /* Force code/pre/tt back to LTR — Arabic users still write English code. */
 .chat-content-rtl .msg-body pre,
 .chat-content-rtl .msg-body code,

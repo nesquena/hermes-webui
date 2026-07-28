@@ -2446,6 +2446,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!inflight) return;
     if(!Array.isArray(inflight.activityBurstAnchors)) inflight.activityBurstAnchors=[];
     if(!assistantRow||!assistantRow.isConnected){
+      _disconnectAutomaticMessageDirections(assistantBody);
       assistantRow=null;
       assistantBody=null;
     }
@@ -2470,7 +2471,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function ensureAssistantRow(force=false){
     if(!_isActiveSession()) return;
-    if(assistantRow&&!assistantRow.isConnected){assistantRow=null;assistantBody=null;}
+    if(assistantRow&&!assistantRow.isConnected){_disconnectAutomaticMessageDirections(assistantBody);assistantRow=null;assistantBody=null;}
     if(!force&&!assistantRow){
       const parsed=_parseStreamState();
       if(!String((parsed&&parsed.displayText)||'').trim()) return;
@@ -2491,6 +2492,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(existing){
           assistantRow=existing;
           assistantBody=existing.querySelector('.msg-body');
+          _observeAutomaticMessageDirections(assistantBody);
           const existingSeq=Number(existing.getAttribute('data-live-segment-seq')||'');
           if(Number.isFinite(existingSeq)&&existingSeq>0){
             _assistantSegmentSeq=existingSeq;
@@ -2515,6 +2517,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     assistantRow.setAttribute('data-activity-burst-id',String(_currentActivityBurstId));
     assistantRow.setAttribute('data-live-segment-seq',String(_assistantSegmentSeq));
     assistantBody=document.createElement('div');assistantBody.className='msg-body';
+    _observeAutomaticMessageDirections(assistantBody);
     assistantRow.appendChild(assistantBody);
     blocks.appendChild(assistantRow);
     if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
@@ -4966,6 +4969,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(typeof _syncLiveWorklogReasonsForAnchor==='function') _syncLiveWorklogReasonsForAnchor(assistantRow, displayText);
   }
   function _resetAssistantSegment(){
+    _disconnectAutomaticMessageDirections(assistantBody);
     assistantRow=null;
     assistantBody=null;
     segmentStart=assistantText.length;
