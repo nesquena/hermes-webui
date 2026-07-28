@@ -500,6 +500,99 @@ def test_compression_chain_collapses_to_latest_tip_in_sidebar():
         post('/api/settings', {'show_cli_sessions': False})
 
 
+def test_compression_lineage_tolerates_subsecond_rotation_overlap_without_hiding_real_child():
+    """Clock-order jitter at rotation stays one conversation; real children stay distinct."""
+    from api.agent_sessions import _project_agent_session_rows
+
+    rows = [
+        {
+            'id': 'overlap_root_001',
+            'title': 'Rétablissement MES',
+            'source': 'webui',
+            'started_at': 100.0,
+            'parent_session_id': None,
+            'ended_at': 200.0,
+            'end_reason': 'compression',
+            'actual_message_count': 3,
+            'actual_user_message_count': 1,
+            'message_count': 3,
+            'last_activity': 199.0,
+        },
+        {
+            'id': 'overlap_tip_001',
+            'title': 'Rétablissement MES',
+            'source': 'webui',
+            'started_at': 199.7,
+            'parent_session_id': 'overlap_root_001',
+            'ended_at': None,
+            'end_reason': None,
+            'actual_message_count': 2,
+            'actual_user_message_count': 1,
+            'message_count': 2,
+            'last_activity': 201.0,
+        },
+        {
+            'id': 'real_child_001',
+            'title': 'Independent child work',
+            'source': 'webui',
+            'started_at': 195.0,
+            'parent_session_id': 'overlap_root_001',
+            'ended_at': None,
+            'end_reason': None,
+            'actual_message_count': 2,
+            'actual_user_message_count': 1,
+            'message_count': 2,
+            'last_activity': 202.0,
+        },
+    ]
+
+    projected = _project_agent_session_rows(rows)
+    projected_by_id = {row['id']: row for row in projected}
+
+    assert set(projected_by_id) == {'overlap_tip_001', 'real_child_001'}
+    assert projected_by_id['overlap_tip_001']['_lineage_root_id'] == 'overlap_root_001'
+    assert projected_by_id['overlap_tip_001']['_compression_segment_count'] == 2
+    assert projected_by_id['real_child_001']['relationship_type'] == 'child_session'
+
+
+def test_compression_overlap_tolerance_is_bounded_and_keeps_exclusions():
+    """The rotation allowance must not weaken explicit lineage boundaries."""
+    from api.agent_sessions import _is_continuation_session
+
+    parent = {
+        'id': 'bounded_parent',
+        'source': 'webui',
+        'ended_at': 200.0,
+        'end_reason': 'compression',
+    }
+
+    assert _is_continuation_session(
+        parent,
+        {'id': 'at_boundary', 'source': 'webui', 'started_at': 199.0},
+    )
+    assert not _is_continuation_session(
+        parent,
+        {'id': 'past_boundary', 'source': 'webui', 'started_at': 198.999},
+    )
+    assert not _is_continuation_session(
+        parent,
+        {'id': 'different_source', 'source': 'cli', 'started_at': 199.7},
+    )
+    assert not _is_continuation_session(
+        parent,
+        {
+            'id': 'explicit_fork',
+            'source': 'webui',
+            'session_source': 'fork',
+            'started_at': 199.7,
+        },
+    )
+    assert not _is_continuation_session(
+        {**parent, 'end_reason': 'cli_close'},
+        {'id': 'cli_overlap', 'source': 'webui', 'started_at': 199.7},
+    )
+
+
 def test_compression_lineage_prefers_freshest_descendant_over_newer_direct_sibling():
     """A later-started stale sibling must not hide a deeper active branch."""
     conn = _ensure_state_db()
