@@ -2347,6 +2347,456 @@ eval(extractFunc('loadSession'));
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_loadsession_stands_down_when_third_retained_owner_wins_before_opening_session_installs():
+    panels_js = PANELS_JS_PATH.read_text(encoding="utf-8")
+    sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(panels_js + "\n" + sessions_js) + """
+const deferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+};
+const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+const settle = async (cycles = 4) => {
+  for (let i = 0; i < cycles; i += 1) await tick();
+};
+const apiCalls = [];
+const startApprovalCalls = [];
+const startClarifyCalls = [];
+const yoloCalls = [];
+const attachCalls = [];
+const restoredSelectionCalls = [];
+const panelDeferred = deferred();
+const bSwitchDeferred = deferred();
+let _profileSwitchGeneration = 0;
+let _profileSwitchTransaction = null;
+let _profileLastCommittedSwitchResult = {
+  generation: 0,
+  from: 'a',
+  target: 'a',
+  committedProfile: 'a',
+  outcome: 'committed',
+};
+let _profilesCache = null;
+let _profileDropdownFetchPromise = null;
+let _profileDropdownCacheLoadedFromStorage = false;
+let _skillsData = ['old'];
+let _workspaceList = ['old'];
+let _showAllProfiles = true;
+let _scriptsRequestId = 0;
+let _scriptsRawRequestId = 0;
+let _cronsRequestId = 0;
+let _cronList = ['stale-job'];
+let _showAllCronProfiles = true;
+let _cronOtherProfileCount = 0;
+let _cronPreFormDetail = null;
+let _editingCronId = null;
+let _cronIsDuplicate = false;
+let _currentPanel = 'chat';
+let _tasksSubtab = 'jobs';
+let _workspacePanelMode = 'closed';
+let _sessionListSkeletonActive = false;
+let _loadingSessionId = null;
+let _loadSessionGeneration = 0;
+let _loadingOlder = false;
+let _pendingCarryForwardSnapshot = null;
+let _messagesTruncated = false;
+let _oldestIdx = 0;
+let _yoloEnabled = false;
+const INFLIGHT = {};
+const document = { getElementById() { return null; } };
+const msgInner = { innerHTML: '' };
+const localStorage = {
+  removeItem() {},
+  getItem() { return null; },
+  setItem() {},
+};
+const history = { replaceState() {} };
+const window = {
+  _clearPendingSelections() {},
+  _snapshotPendingSelections() { return [{ id: 'ctx-a', name: 'Context A' }]; },
+  _restorePendingSelections(selections) {
+    restoredSelectionCalls.push(selections);
+  },
+};
+const S = {
+  activeProfile: 'a',
+  activeProfileIsDefault: false,
+  session: {
+    session_id: 'current',
+    message_count: 0,
+    updated_at: 1,
+    last_message_at: 1,
+    pending_attachments: [{ name: 'a-upload.bin' }],
+    active_stream_id: 'a-stream',
+    profile: 'a',
+  },
+  messages: [{ role: 'assistant', content: 'a transcript' }],
+  toolCalls: [{ id: 'a-tool' }],
+  pendingFiles: [{ name: 'a-upload.bin' }],
+  busy: true,
+  activeStreamId: 'a-stream',
+};
+const cronList = { children: [{}], replaceChildren(){ this.children = []; } };
+const cronRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
+const scriptsList = { children: [{}], replaceChildren(){ this.children = []; } };
+const scriptsRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
+function $(id){
+  return {
+    msgInner,
+    cronList,
+    cronRefreshBtn,
+    scriptsList,
+    scriptsRefreshBtn,
+  }[id] || null;
+}
+async function api(url, opts) {
+  const body = opts && typeof opts.body === 'string' ? JSON.parse(opts.body) : null;
+  apiCalls.push({
+    url,
+    profile: S.activeProfile,
+    body,
+    loadingSessionId: _loadingSessionId,
+    loadGeneration: _loadSessionGeneration,
+    switchGeneration: _profileSwitchGeneration,
+  });
+  if (url === '/api/profile/switch') {
+    if (body.name === 'b') return bSwitchDeferred.promise;
+    if (body.name === 'c') return { active: 'c', is_default: false };
+    if (body.name === 'd') throw new Error('switch rejected');
+    throw new Error('unexpected switch ' + body.name);
+  }
+  if (url === '/api/session?session_id=foreign&messages=0&resolve_model=0') {
+    if (S.activeProfile === 'a') {
+      const err = new Error('profile mismatch');
+      err.status = 409;
+      err.body = JSON.stringify({
+        code: 'session_profile_mismatch',
+        profile: 'b',
+        session_id: 'foreign',
+      });
+      throw err;
+    }
+    return {
+      session: {
+        session_id: 'foreign',
+        message_count: 1,
+        updated_at: 2,
+        last_message_at: 2,
+        pending_attachments: [{ name: 'b-upload.bin' }],
+        active_stream_id: 'b-stream',
+        profile: 'b',
+      },
+    };
+  }
+  if (url === '/api/session?session_id=c-session&messages=0&resolve_model=0') {
+    return {
+      session: {
+        session_id: 'c-session',
+        message_count: 1,
+        updated_at: 3,
+        last_message_at: 3,
+        pending_attachments: [{ name: 'c-upload.bin' }],
+        active_stream_id: 'c-stream',
+        profile: 'c',
+      },
+    };
+  }
+  throw new Error('unexpected api ' + url);
+}
+function _resolveSessionIdFromSidebarLineage(sid) { return sid; }
+function _hermesNotifySessionOpen() { return null; }
+function _clearCronDetail() {}
+function _invalidateScriptsRequests() {
+  _scriptsRequestId += 1;
+  _scriptsRawRequestId += 1;
+  _scriptsData = null;
+}
+function _invalidateSessionListRenders() {}
+function _setProfileSwitchListEmbargo() {}
+function showSessionListSkeleton() {}
+function bumpWorkspaceTreeGen() {}
+function clearWorkspaceTreeSkeleton() {}
+function _refreshProfileSwitchBackground() {}
+function animateNextSessionListRefresh() {}
+function startGatewaySSE() {}
+function applyBotName() {}
+function _clearPersistedModelState() {}
+function refreshProfileTransitionReasoningChip() {}
+function syncTopbar() {}
+function loadDir() { return Promise.resolve(); }
+function showToast() {}
+function t(key, name) { return name ? key + ':' + name : key; }
+async function renderSessionList() {}
+async function _profileSwitchPanelLoad() {
+  await panelDeferred.promise;
+}
+function _rearmActiveSessionStream() {}
+function _selectLiveRecoveryInflight() { return null; }
+function stopApprovalPolling() {}
+function hideApprovalCard() {}
+function stopSessionStream() {}
+function _updateYoloPill() {}
+function stopClarifyPolling() {}
+function hideClarifyCard() {}
+async function _saveComposerDraftNow() {}
+function _clearQueueCardDisplay() {}
+function _sessionVisitHasUnreadState() { return false; }
+function _acknowledgeSessionVisit() {}
+function _clearSameSessionForceReloadHint() {}
+function _clearStuckSessionOnBoot() {}
+function _appRootPath() { return '/'; }
+function renderMessages() {
+  msgInner.innerHTML = S.messages.map(m => m.content || '').join('\\n');
+}
+function renderTray() {}
+function startSessionStream() {}
+function attachLiveStream(sid, streamId, pending, opts) {
+  attachCalls.push({ sid, streamId, pending, reconnecting: !!(opts && opts.reconnecting) });
+}
+function _uploadPendingFilesSyncProgressForSession() {}
+function _clearDeferredActiveSessionExternalRefresh() {}
+function _clearEmptyComposerModelOverride() {}
+function _hydrateTodosFromSession() {}
+function _applyPendingSessionModelForSession() {}
+function _resolveSessionModelForDisplaySoon() {}
+function _setActiveSessionUrl() {}
+function _mergePendingSessionMessage() {}
+function setBusy() {}
+function setStatus() {}
+function setComposerStatus() {}
+function updateSendBtn() {}
+function updateQueueBadge() {}
+function _deferWorkspaceRefreshForSession() {}
+function startApprovalPolling(sid) { startApprovalCalls.push(sid); }
+function startClarifyPolling(sid) { startClarifyCalls.push(sid); }
+function _fetchYoloState(sid) { yoloCalls.push(sid); }
+function refreshSessionList() { return Promise.resolve(); }
+function _announceNewSessionWorkspace() {}
+function _isMessagingSession() { return false; }
+function _isSessionActivelyViewedForList() { return true; }
+function _hideHandoffHint() {}
+function renderSessionArtifacts() {}
+function _isExternalSession() { return false; }
+function closeMobileSidebar() {}
+function renderSessionListFromCache() {}
+function _serverLiveSnapshotInflight() { return null; }
+function _renderRuntimeJournalAnchorActivityScene() { return false; }
+function ensureLiveWorklogShell() {}
+function appendThinking() {}
+async function _ensureMessagesLoaded(sid) {
+  if (sid === 'foreign') {
+    S.messages = [{ role: 'assistant', content: 'foreign transcript' }];
+    S.toolCalls = [{ id: 'foreign-tool' }];
+    return;
+  }
+  if (sid === 'c-session') {
+    S.messages = [{ role: 'assistant', content: 'c transcript' }];
+    S.toolCalls = [{ id: 'c-tool' }];
+  }
+}
+const populateModelDropdown = null;
+const Prism = null;
+eval(extractFunc('_profileMatchesActiveProfile'));
+eval(extractFunc('_resetTasksForProfileTransition'));
+eval(extractFunc('switchToProfile'));
+eval(extractFunc('_sessionProfileMismatchFromError'));
+eval(extractFunc('_switchProfileForSessionLoad'));
+eval(extractFunc('loadSession'));
+eval(extractFunc('_sidebarSessionProfileName'));
+eval(extractFunc('_ensureSidebarSessionProfile'));
+eval(extractFunc('_openSidebarSession'));
+(async () => {
+  renderMessages();
+  const oldLoad = loadSession('foreign');
+  await settle();
+  const openC = _openSidebarSession({ session_id: 'c-session', profile: 'c' });
+  await settle();
+  const failedD = switchToProfile('d', { returnTransaction: true });
+  await settle();
+  const dResult = await failedD;
+  await settle();
+  bSwitchDeferred.resolve({ active: 'b', is_default: false });
+  await oldLoad;
+  await settle();
+  const afterOldLoad = JSON.parse(JSON.stringify({
+    apiCalls,
+    activeProfile: S.activeProfile,
+    sessionId: S.session && S.session.session_id,
+    sessionProfile: S.session && S.session.profile,
+    messages: S.messages,
+    toolCalls: S.toolCalls,
+    pendingFiles: S.pendingFiles,
+    activeStreamId: S.activeStreamId,
+    loadingSessionId: _loadingSessionId,
+    loadGeneration: _loadSessionGeneration,
+    switchGeneration: _profileSwitchGeneration,
+    restoredSelectionCalls,
+    startApprovalCalls,
+    startClarifyCalls,
+    yoloCalls,
+    attachCalls,
+    msgInner: msgInner.innerHTML,
+  }));
+  panelDeferred.resolve();
+  await openC;
+  await settle();
+  console.log(JSON.stringify({
+    dResult: {
+      outcome: dResult.outcome,
+      retainedTarget: dResult.retainedResult && dResult.retainedResult.target,
+      retainedCommittedProfile: dResult.retainedResult && dResult.retainedResult.committedProfile,
+    },
+    afterOldLoad,
+    final: {
+      apiCalls,
+      activeProfile: S.activeProfile,
+      sessionId: S.session && S.session.session_id,
+      sessionProfile: S.session && S.session.profile,
+      sessionPendingAttachments: S.session && S.session.pending_attachments,
+      messages: S.messages,
+      toolCalls: S.toolCalls,
+      activeStreamId: S.activeStreamId,
+      loadingSessionId: _loadingSessionId,
+      loadGeneration: _loadSessionGeneration,
+      switchGeneration: _profileSwitchGeneration,
+      restoredSelectionCalls,
+      startApprovalCalls,
+      startClarifyCalls,
+      yoloCalls,
+      attachCalls,
+      msgInner: msgInner.innerHTML,
+    },
+  }));
+})().catch(err => { console.error(err); process.exit(1); });
+"""
+    result = json.loads(_run_node(source))
+    assert result["dResult"] == {
+        "outcome": "failed",
+        "retainedTarget": "c",
+        "retainedCommittedProfile": "c",
+    }
+    after_old_load = result["afterOldLoad"]
+    assert after_old_load["apiCalls"] == [
+        {
+            "url": "/api/session?session_id=foreign&messages=0&resolve_model=0",
+            "profile": "a",
+            "body": None,
+            "loadingSessionId": "foreign",
+            "loadGeneration": 1,
+            "switchGeneration": 0,
+        },
+        {
+            "url": "/api/profile/switch",
+            "profile": "a",
+            "body": {"name": "b"},
+            "loadingSessionId": "foreign",
+            "loadGeneration": 1,
+            "switchGeneration": 1,
+        },
+        {
+            "url": "/api/profile/switch",
+            "profile": "a",
+            "body": {"name": "c"},
+            "loadingSessionId": "foreign",
+            "loadGeneration": 1,
+            "switchGeneration": 2,
+        },
+        {
+            "url": "/api/profile/switch",
+            "profile": "c",
+            "body": {"name": "d"},
+            "loadingSessionId": "foreign",
+            "loadGeneration": 1,
+            "switchGeneration": 3,
+        },
+    ]
+    assert after_old_load["activeProfile"] == "c"
+    assert after_old_load["sessionId"] == "current"
+    assert after_old_load["sessionProfile"] == "a"
+    assert after_old_load["messages"] == []
+    assert after_old_load["toolCalls"] == []
+    assert after_old_load["loadingSessionId"] is None
+    assert after_old_load["loadGeneration"] == 1
+    assert after_old_load["switchGeneration"] == 3
+    assert after_old_load["restoredSelectionCalls"] == []
+    assert after_old_load["startApprovalCalls"] == []
+    assert after_old_load["startClarifyCalls"] == []
+    assert after_old_load["yoloCalls"] == []
+    assert after_old_load["attachCalls"] == []
+    assert "Loading conversation..." in after_old_load["msgInner"]
+
+    final = result["final"]
+    assert final["apiCalls"] == [
+        {
+            "url": "/api/session?session_id=foreign&messages=0&resolve_model=0",
+            "profile": "a",
+            "body": None,
+            "loadingSessionId": "foreign",
+            "loadGeneration": 1,
+            "switchGeneration": 0,
+        },
+        {
+            "url": "/api/profile/switch",
+            "profile": "a",
+            "body": {"name": "b"},
+            "loadingSessionId": "foreign",
+            "loadGeneration": 1,
+            "switchGeneration": 1,
+        },
+        {
+            "url": "/api/profile/switch",
+            "profile": "a",
+            "body": {"name": "c"},
+            "loadingSessionId": "foreign",
+            "loadGeneration": 1,
+            "switchGeneration": 2,
+        },
+        {
+            "url": "/api/profile/switch",
+            "profile": "c",
+            "body": {"name": "d"},
+            "loadingSessionId": "foreign",
+            "loadGeneration": 1,
+            "switchGeneration": 3,
+        },
+        {
+            "url": "/api/session?session_id=c-session&messages=0&resolve_model=0",
+            "profile": "c",
+            "body": None,
+            "loadingSessionId": "c-session",
+            "loadGeneration": 2,
+            "switchGeneration": 3,
+        },
+    ]
+    assert final["activeProfile"] == "c"
+    assert final["sessionId"] == "c-session"
+    assert final["sessionProfile"] == "c"
+    assert final["sessionPendingAttachments"] == [{"name": "c-upload.bin"}]
+    assert final["messages"] == [{"role": "assistant", "content": "c transcript"}]
+    assert final["toolCalls"] == [{"id": "c-tool"}]
+    assert final["activeStreamId"] == "c-stream"
+    assert final["loadingSessionId"] is None
+    assert final["loadGeneration"] == 2
+    assert final["switchGeneration"] == 3
+    assert final["restoredSelectionCalls"] == []
+    assert final["startApprovalCalls"] == ["c-session"]
+    assert final["startClarifyCalls"] == ["c-session"]
+    assert final["yoloCalls"] == ["c-session"]
+    assert final["attachCalls"] == [{
+        "sid": "c-session",
+        "streamId": "c-stream",
+        "pending": [{"name": "c-upload.bin"}],
+        "reconnecting": True,
+    }]
+    assert final["msgInner"] == "c transcript"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_precommit_profile_switch_failure_restores_busy_session_lifecycle():
     panels_js = PANELS_JS_PATH.read_text(encoding="utf-8")
     sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
@@ -4419,6 +4869,118 @@ eval(extractFunc('loadSession'));
     assert result["pendingFiles"] == [{"name": "current.txt"}]
     assert result["restoredSelections"] == [{"id": "ctx-1", "name": "Context 1", "text": "selected block"}]
     assert result["msgInner"] == "current transcript"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_failed_profile_switch_stands_down_without_exact_pane_owner():
+    sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(sessions_js) + """
+const apiCalls = [];
+let rearmCalls = 0;
+let restoredSelections = null;
+const msgInner = { innerHTML: '' };
+const window = {
+  _clearPendingSelections() {},
+  _snapshotPendingSelections() {
+    return [{ id: 'ctx-1', name: 'Context 1', text: 'selected block' }];
+  },
+  _restorePendingSelections(selections) {
+    restoredSelections = selections;
+  },
+};
+const localStorage = { removeItem() {}, getItem() { return null; } };
+const history = { replaceState() {} };
+const S = {
+  activeProfile: 'a',
+  session: { session_id: 'current', message_count: 0, profile: 'a' },
+  messages: [{ role: 'assistant', content: 'current transcript' }],
+  toolCalls: [{ id: 'current-tool' }],
+  pendingFiles: [{ name: 'current.txt' }],
+  busy: false,
+  activeStreamId: null,
+};
+let _loadingSessionId = null;
+let _loadSessionGeneration = 0;
+let _loadingOlder = false;
+let _pendingCarryForwardSnapshot = null;
+let _messagesTruncated = false;
+let _oldestIdx = 0;
+let _yoloEnabled = false;
+const INFLIGHT = {};
+function $(id) { return id === 'msgInner' ? msgInner : null; }
+function _resolveSessionIdFromSidebarLineage(sid) { return sid; }
+function _hermesNotifySessionOpen() { return null; }
+function _rearmActiveSessionStream() { rearmCalls += 1; }
+function stopApprovalPolling() {}
+function hideApprovalCard() {}
+function stopSessionStream() {}
+function _updateYoloPill() {}
+function stopClarifyPolling() {}
+function hideClarifyCard() {}
+async function _saveComposerDraftNow() {}
+function _clearQueueCardDisplay() {}
+function _sessionVisitHasUnreadState() { return false; }
+function _acknowledgeSessionVisit() {}
+function _clearSameSessionForceReloadHint() {}
+function _clearStuckSessionOnBoot() {}
+function _appRootPath() { return '/'; }
+function renderMessages() { msgInner.innerHTML = S.messages.map(m => m.content || '').join('\\n'); }
+function renderTray() {}
+function syncTopbar() {}
+function startSessionStream() {}
+function showToast() {}
+async function _switchProfileForSessionLoad() {
+  S.activeProfile = 'replacement';
+  S.session = { session_id: 'replacement', message_count: 1, profile: 'replacement' };
+  S.messages = [{ role: 'assistant', content: 'replacement transcript' }];
+  S.toolCalls = [{ id: 'replacement-tool' }];
+  S.pendingFiles = [{ name: 'replacement.txt' }];
+  renderMessages();
+  return { outcome: 'failed' };
+}
+async function api(url) {
+  apiCalls.push(url);
+  const err = new Error('profile mismatch');
+  err.status = 409;
+  err.body = JSON.stringify({
+    code: 'session_profile_mismatch',
+    profile: 'other',
+    session_id: 'foreign',
+  });
+  throw err;
+}
+eval(extractFunc('_sessionProfileMismatchFromError'));
+eval(extractFunc('loadSession'));
+(async () => {
+  renderMessages();
+  await loadSession('foreign');
+  console.log(JSON.stringify({
+    apiCalls,
+    rearmCalls,
+    activeProfile: S.activeProfile,
+    loadingSessionId: _loadingSessionId,
+    sessionId: S.session && S.session.session_id,
+    sessionProfile: S.session && S.session.profile,
+    messages: S.messages,
+    toolCalls: S.toolCalls,
+    pendingFiles: S.pendingFiles,
+    restoredSelections,
+    msgInner: msgInner.innerHTML,
+  }));
+})().catch(err => { console.error(err); process.exit(1); });
+"""
+    result = json.loads(_run_node(source))
+    assert result["apiCalls"] == ["/api/session?session_id=foreign&messages=0&resolve_model=0"]
+    assert result["rearmCalls"] == 2
+    assert result["activeProfile"] == "replacement"
+    assert result["loadingSessionId"] is None
+    assert result["sessionId"] == "replacement"
+    assert result["sessionProfile"] == "replacement"
+    assert result["messages"] == [{"role": "assistant", "content": "replacement transcript"}]
+    assert result["toolCalls"] == [{"id": "replacement-tool"}]
+    assert result["pendingFiles"] == [{"name": "replacement.txt"}]
+    assert result["restoredSelections"] is None
+    assert result["msgInner"] == "replacement transcript"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

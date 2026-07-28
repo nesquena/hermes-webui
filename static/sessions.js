@@ -1653,7 +1653,11 @@ async function loadSession(sid){
     }
   }
   const forceReload = !!opts.force;
+  const _normalizeProfileSwitchTarget = value => (typeof value === 'string' && value.trim()) ? value.trim() : 'default';
   const currentSid = S.session ? S.session.session_id : null;
+  const _previousProfileOwnerOnSwitchFailure = (currentSid && currentSid !== sid)
+    ? _normalizeProfileSwitchTarget((S && S.activeProfile) || (S.session && S.session.profile) || 'default')
+    : null;
   const sameSessionForceReload = forceReload && currentSid===sid;
   const _previousConversationOnSwitchFailure = (currentSid && currentSid !== sid)
     ? {
@@ -1815,13 +1819,16 @@ async function loadSession(sid){
         };
         const _classifyProfileSwitchSettlement = terminal => {
           if (!terminal) return 'stand_down';
-          const normalizeTarget = value => (typeof value === 'string' && value.trim()) ? value.trim() : 'default';
           const normalizeOwner = value => (typeof value === 'string' && value.trim()) ? value.trim() : '';
-          const requestedProfile = normalizeTarget(profileMismatch.profile);
-          const terminalTarget = normalizeTarget(terminal.target);
-          const activeProfile = normalizeTarget((S && S.activeProfile) || 'default');
-          const activeSessionId = S.session && S.session.session_id ? String(S.session.session_id) : '';
-          if (activeSessionId && activeSessionId !== currentSid) return 'stand_down';
+          const requestedProfile = _normalizeProfileSwitchTarget(profileMismatch.profile);
+          const terminalTarget = _normalizeProfileSwitchTarget(terminal.target);
+          const activeProfile = _normalizeProfileSwitchTarget((S && S.activeProfile) || 'default');
+          const priorProfileOwner = _previousProfileOwnerOnSwitchFailure;
+          const ownsCapturedPane = () => {
+            const activeSessionId = S.session && S.session.session_id ? String(S.session.session_id) : '';
+            return !!currentSid && !!activeSessionId && activeSessionId === currentSid;
+          };
+          if (!ownsCapturedPane()) return 'stand_down';
           const terminalOwner = normalizeOwner(terminal.committedProfile || terminal.target);
           const requestedOwnerCommitted = (terminal.outcome === 'already_active' || terminal.outcome === 'committed')
             && terminalTarget === requestedProfile
@@ -1830,11 +1837,12 @@ async function loadSession(sid){
           if (requestedOwnerCommitted) return 'retry_requested_owner';
           if (terminal.outcome === 'failed' && terminal.retainedResult) {
             const retained = terminal.retainedResult;
-            const retainedTarget = normalizeTarget(retained.target);
+            const retainedTarget = _normalizeProfileSwitchTarget(retained.target);
             const retainedOwner = normalizeOwner(retained.committedProfile || retained.target);
             if (!retainedOwner || !_profileMatchesActiveProfile(retainedOwner, activeProfile)) return 'stand_down';
             if (retainedTarget === requestedProfile) return 'retry_requested_owner';
-            return 'restore_retained_owner';
+            if (priorProfileOwner && retainedTarget === priorProfileOwner) return 'restore_prior_owner';
+            return 'stand_down';
           }
           return 'stand_down';
         };
@@ -1854,8 +1862,9 @@ async function loadSession(sid){
             _retireCurrentLoad();
             return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
           }
+          const canRestoreWithoutRetainedOwner = terminal.outcome === 'failed' && !terminal.retainedResult && !!currentSid && !!(S.session && S.session.session_id) && String(S.session.session_id) === currentSid;
           _retireCurrentLoad();
-          if (settlement === 'restore_retained_owner' || (terminal.outcome === 'failed' && !terminal.retainedResult)) {
+          if (settlement === 'restore_prior_owner' || canRestoreWithoutRetainedOwner) {
             if (!_restorePreviousConversationAfterFailedSwitch()) {
               const _msgInner = $('msgInner');
               if (_msgInner) {
@@ -1870,8 +1879,9 @@ async function loadSession(sid){
           _retireCurrentLoad();
           return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
         }
+        const canRestoreFailedSwitch = switched.outcome === 'failed' && !!currentSid && !!(S.session && S.session.session_id) && String(S.session.session_id) === currentSid;
         _retireCurrentLoad();
-        if (switched.outcome === 'failed') {
+        if (canRestoreFailedSwitch) {
           if (!_restorePreviousConversationAfterFailedSwitch()) {
             const _msgInner = $('msgInner');
             if (_msgInner) {
