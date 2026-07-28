@@ -1,26 +1,71 @@
-"""Fail-closed guard for in-process Hermes Agent source revisions.
+"""Auto-restart guard for in-process Hermes Agent source revisions.
 
 Hermes WebUI currently imports ``run_agent.AIAgent`` into its long-lived server
 process. If the Agent checkout changes while that process is alive, Python may
-combine already-cached modules with newly-read source. Refuse to reuse that
-mixed runtime and require a clean WebUI restart instead.
+combine already-cached modules with newly-read source.
+
+Instead of blocking user actions (old behaviour), the guard now schedules
+an automatic process restart so the user never sees a blocking error.
+A cron watchdog (webui-agent-watchdog) catches any remaining edge cases.
 """
 
 from __future__ import annotations
 
+import logging
+import os
+import signal
 from pathlib import Path
 import sys
 import subprocess
 import threading
+
+logger = logging.getLogger(__name__)
 
 # Retain the discovered path as a diagnostic/test-visible compatibility value;
 # runtime identity is deliberately captured from the loaded module below.
 from api.config import _AGENT_DIR  # noqa: F401
 
 _RESTART_MESSAGE = (
-    "Hermes Agent was updated while Hermes WebUI was running. "
-    "Restart Hermes WebUI before retrying this action."
+    "Hermes Agent was updated. "
+    "The WebUI is restarting automatically to pick up the changes. "
+    "Please wait a few seconds and reload the page."
 )
+
+# Guard flag: only schedule one restart per process lifetime
+_SCHEDULED_RESTART = False
+_SCHEDULE_LOCK = threading.Lock()
+
+
+def _schedule_self_restart() -> None:
+    """Spawn a background thread that kills this process after 3 seconds.
+
+    The delay lets the current HTTP response (with the friendly message) be
+    sent to the user before the process dies. systemd's ``Restart=on-failure``
+    or the SIGKILL exit code triggers an automatic restart.
+    """
+    global _SCHEDULED_RESTART
+
+    with _SCHEDULE_LOCK:
+        if _SCHEDULED_RESTART:
+            return
+        _SCHEDULED_RESTART = True
+
+    def _do_restart() -> None:
+        import time as _time
+
+        _time.sleep(3)
+        pid = os.getpid()
+        logger.info(
+            "Agent revision changed — restarting WebUI (PID %s) in 3s",
+            pid,
+        )
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    t = threading.Thread(target=_do_restart, daemon=True)
+    t.start()
 
 
 def _read_agent_revision(
@@ -129,13 +174,21 @@ def _capture_loaded_agent_revision() -> None:
 
 
 def ensure_agent_runtime_current() -> None:
-    """Reject a known Git checkout change instead of mixing Python modules."""
+    """Detect a Git checkout change and auto-restart instead of blocking."""
     if _AGENT_REVISION is None:
         return
-    if (
-        _read_agent_revision(_AGENT_SOURCE_DIR, module_path=_AGENT_MODULE_PATH)
-        != _AGENT_REVISION
-    ):
+
+    old_rev = _AGENT_REVISION
+    current_rev = _read_agent_revision(
+        _AGENT_SOURCE_DIR, module_path=_AGENT_MODULE_PATH
+    )
+    if current_rev != old_rev and current_rev is not None:
+        logger.warning(
+            "Agent revision changed: %s → %s. Scheduling WebUI restart.",
+            old_rev[:12],
+            current_rev[:12],
+        )
+        _schedule_self_restart()
         raise AgentRuntimeChangedError(_RESTART_MESSAGE)
 
 
