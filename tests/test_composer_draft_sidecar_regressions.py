@@ -665,11 +665,15 @@ def test_draft_pre_compression_snapshot_marker_write_failure(tmp_path, monkeypat
 def test_draft_compression_migration_rejects_different_old_sid_cache_object(tmp_path, monkeypatch):
     models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
     monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
-    monkeypatch.setattr(streaming, "_preserve_pre_compression_snapshot", lambda *args, **kwargs: True)
 
     old_sid = "sid-rotation-old-mismatch"
     new_sid = "sid-rotation-new-mismatch"
     cache_owner = models.Session(session_id=old_sid, title="old owner")
+    cache_owner.save(touch_updated_at=False)
+    old_path = session_dir / f"{old_sid}.json"
+    index_path = session_dir / "_index.json"
+    old_preimage = old_path.read_bytes()
+    index_preimage = index_path.read_bytes()
     migrating = models.Session(session_id=old_sid, title="migrating")
 
     lock = routes._get_session_agent_lock(old_sid)
@@ -682,6 +686,50 @@ def test_draft_compression_migration_rejects_different_old_sid_cache_object(tmp_
         assert result is False
         with routes.LOCK:
             assert routes.SESSIONS.get(old_sid) is cache_owner
+        assert routes.SESSIONS.get(new_sid) is None
+        assert old_path.read_bytes() == old_preimage
+        assert index_path.read_bytes() == index_preimage
+        assert models.Session.load(old_sid).pre_compression_continuation_session_id is None
+    finally:
+        with routes.LOCK:
+            routes.SESSIONS.clear()
+        with routes.SESSION_AGENT_LOCKS_LOCK:
+            routes.SESSION_AGENT_LOCKS.pop(old_sid, None)
+            routes.SESSION_AGENT_LOCKS.pop(new_sid, None)
+def test_draft_compression_migration_rollback_restores_durable_marker_after_new_lock_conflict(tmp_path, monkeypatch):
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+
+    old_sid = "sid-rotation-old-lock-conflict"
+    new_sid = "sid-rotation-new-lock-conflict"
+    index_file = session_dir / "_index.json"
+    existing = models.Session(session_id=old_sid, title="old lock", messages=[{"role": "user", "content": "lock conflict"}])
+    existing.save(touch_updated_at=False)
+    sidecar_before = (session_dir / f"{old_sid}.json").read_bytes()
+    index_before = index_file.read_bytes()
+    third_party_lock = routes._get_session_agent_lock(f"third-party-{new_sid}")
+
+    migrating = models.Session(session_id=old_sid, title="migrating", messages=[{"role": "assistant", "content": "new content"}])
+    lock = routes._get_session_agent_lock(old_sid)
+    with routes.LOCK:
+        routes.SESSIONS.clear()
+        routes.SESSIONS[old_sid] = migrating
+    with routes.SESSION_AGENT_LOCKS_LOCK:
+        routes.SESSION_AGENT_LOCKS[new_sid] = third_party_lock
+
+    try:
+        result = streaming._migrate_compression_session_ownership(migrating, old_sid, new_sid, lock)
+        assert result is False
+        assert (session_dir / f"{old_sid}.json").read_bytes() == sidecar_before
+        assert index_file.read_bytes() == index_before
+        persisted = models.Session.load(old_sid)
+        assert persisted is not None
+        assert persisted.pre_compression_snapshot is False
+        assert persisted.pre_compression_continuation_session_id is None
+        with routes.SESSION_AGENT_LOCKS_LOCK:
+            assert routes.SESSION_AGENT_LOCKS.get(new_sid) is third_party_lock
+        with routes.LOCK:
+            assert routes.SESSIONS.get(old_sid) is migrating
             assert routes.SESSIONS.get(new_sid) is None
     finally:
         with routes.LOCK:
@@ -694,11 +742,19 @@ def test_draft_compression_migration_rejects_different_old_sid_cache_object(tmp_
 def test_draft_compression_migration_rollback_when_evictor_interleaves_after_lock_alias(tmp_path, monkeypatch):
     models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
     monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
-    monkeypatch.setattr(streaming, "_preserve_pre_compression_snapshot", lambda *args, **kwargs: True)
 
     old_sid = "sid-rotation-old-evict"
     new_sid = "sid-rotation-new-evict"
     migrating = models.Session(session_id=old_sid, title="migrating")
+    index_file = session_dir / "_index.json"
+    old_session = models.Session(
+        session_id=old_sid,
+        title="old evict marker",
+        messages=[{"role": "user", "content": "persisted for rollback"}],
+    )
+    old_session.save(touch_updated_at=False)
+    sidecar_before = (session_dir / f"{old_sid}.json").read_bytes()
+    index_before = index_file.read_bytes()
 
     observed = {}
 
@@ -717,6 +773,12 @@ def test_draft_compression_migration_rollback_when_evictor_interleaves_after_loc
         monkeypatch.setattr(streaming, "_evict_sessions_over_cap", _evict_sessions_over_cap)
         result = streaming._migrate_compression_session_ownership(migrating, old_sid, new_sid, lock)
         assert result is False
+        assert (session_dir / f"{old_sid}.json").read_bytes() == sidecar_before
+        assert index_file.read_bytes() == index_before
+        persisted = models.Session.load(old_sid)
+        assert persisted is not None
+        assert persisted.pre_compression_snapshot is False
+        assert persisted.pre_compression_continuation_session_id is None
         assert observed["locked"] is lock
         with routes.LOCK:
             assert routes.SESSIONS.get(old_sid) is migrating

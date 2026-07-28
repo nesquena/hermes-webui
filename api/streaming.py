@@ -4497,8 +4497,8 @@ def _migrate_compression_session_ownership(
     agent_lock,
 ) -> bool:
     """Atomically publish a durable compression continuation."""
-    if not _preserve_pre_compression_snapshot(s, old_sid, new_sid):
-        return False
+    from api import models as _models
+    from api.paths import _atomic_write_text
 
     missing = object()
     previous_state = (
@@ -4507,6 +4507,15 @@ def _migrate_compression_session_ownership(
         getattr(s, 'pre_compression_continuation_session_id', None),
         getattr(s, 'parent_session_id', None),
     )
+    old_path = SESSION_DIR / f'{old_sid}.json'
+    index_path = _models.SESSION_INDEX_FILE
+    try:
+        old_preimage = old_path.read_text(encoding='utf-8')
+        index_preimage = index_path.read_text(encoding='utf-8') if index_path.exists() else None
+    except OSError:
+        logger.debug("Could not capture compression marker preimage", exc_info=True)
+        return False
+
     with LOCK:
         if SESSIONS.get(old_sid) is not s or str(getattr(s, 'session_id', '') or '') != old_sid:
             logger.warning(
@@ -4523,7 +4532,6 @@ def _migrate_compression_session_ownership(
                 new_sid,
             )
             return False
-
         with SESSION_AGENT_LOCKS_LOCK:
             old_lock = SESSION_AGENT_LOCKS.get(old_sid, missing)
             new_lock = SESSION_AGENT_LOCKS.get(new_sid, missing)
@@ -4541,9 +4549,29 @@ def _migrate_compression_session_ownership(
                     new_sid,
                 )
                 return False
-
             SESSION_AGENT_LOCKS[new_sid] = agent_lock
-            try:
+
+    if not _preserve_pre_compression_snapshot(s, old_sid, new_sid):
+        with SESSION_AGENT_LOCKS_LOCK:
+            if new_lock is missing and SESSION_AGENT_LOCKS.get(new_sid) is agent_lock:
+                SESSION_AGENT_LOCKS.pop(new_sid, None)
+        return False
+
+    try:
+        with LOCK:
+            if SESSIONS.get(old_sid) is not s or str(getattr(s, 'session_id', '') or '') != old_sid:
+                raise RuntimeError("stale owner while publishing")
+            if existing_new_session is missing:
+                if SESSIONS.get(new_sid) is not None and SESSIONS.get(new_sid) is not s:
+                    raise RuntimeError("continuation owner changed during publish")
+            elif SESSIONS.get(new_sid) is not existing_new_session:
+                raise RuntimeError("continuation owner changed during publish")
+            with SESSION_AGENT_LOCKS_LOCK:
+                if SESSION_AGENT_LOCKS.get(old_sid, missing) not in (missing, agent_lock):
+                    raise RuntimeError("stale old-lock while publishing")
+                if SESSION_AGENT_LOCKS.get(new_sid) is not agent_lock:
+                    raise RuntimeError("continuation lock changed during publish")
+
                 s.session_id = new_sid
                 s.pre_compression_snapshot = False
                 s.pre_compression_continuation_session_id = None
@@ -4551,31 +4579,39 @@ def _migrate_compression_session_ownership(
                 SESSIONS[new_sid] = s
                 SESSIONS.move_to_end(new_sid)
                 _evict_sessions_over_cap()
-            except Exception:
-                if SESSIONS.get(new_sid) is s:
-                    SESSIONS.pop(new_sid, None)
-                if existing_new_session is not missing:
-                    SESSIONS[new_sid] = existing_new_session
-                if SESSIONS.get(old_sid) is None:
-                    SESSIONS[old_sid] = s
-                s.session_id, s.pre_compression_snapshot, s.pre_compression_continuation_session_id, s.parent_session_id = previous_state
+
+                if SESSIONS.get(old_sid) is s:
+                    SESSIONS.pop(old_sid, None)
+                if SESSION_AGENT_LOCKS.get(old_sid) is agent_lock:
+                    SESSION_AGENT_LOCKS.pop(old_sid, None)
+    except Exception:
+        with LOCK:
+            with _models._INDEX_WRITE_LOCK:
+                _atomic_write_text(old_path, old_preimage, encoding='utf-8')
+                if index_preimage is None:
+                    index_path.unlink(missing_ok=True)
+                else:
+                    _atomic_write_text(index_path, index_preimage, encoding='utf-8')
+            if SESSIONS.get(new_sid) is s:
+                SESSIONS.pop(new_sid, None)
+            if existing_new_session is not missing:
+                SESSIONS[new_sid] = existing_new_session
+            if SESSIONS.get(old_sid) is None:
+                SESSIONS[old_sid] = s
+            s.session_id, s.pre_compression_snapshot, s.pre_compression_continuation_session_id, s.parent_session_id = previous_state
+            with SESSION_AGENT_LOCKS_LOCK:
                 if SESSION_AGENT_LOCKS.get(new_sid) is agent_lock:
                     if new_lock is missing:
                         SESSION_AGENT_LOCKS.pop(new_sid, None)
                     else:
                         SESSION_AGENT_LOCKS[new_sid] = new_lock
-                logger.debug(
-                    "Compression ownership migration aborted: old_sid=%s new_sid=%s",
-                    old_sid,
-                    new_sid,
-                    exc_info=True,
-                )
-                return False
-
-            if SESSIONS.get(old_sid) is s:
-                SESSIONS.pop(old_sid, None)
-            if SESSION_AGENT_LOCKS.get(old_sid) is agent_lock:
-                SESSION_AGENT_LOCKS.pop(old_sid, None)
+        logger.debug(
+            "Compression ownership migration aborted: old_sid=%s new_sid=%s",
+            old_sid,
+            new_sid,
+            exc_info=True,
+        )
+        return False
     return True
 
 
