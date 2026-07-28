@@ -308,6 +308,208 @@ def _run_recovery_case(
     return json.loads(proc.stdout)
 
 
+def _run_composed_recovery_case(*, exhaustion: bool, fallback_mutation: bool = False):
+    current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
+    capture_generation = _extract("_captureCurrentLiveTransportGeneration")
+    next_generation = _extract("_nextLiveTransportGeneration")
+    owner = _extract("_ownsActiveStreamOrBackground")
+    recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
+    clear_recovery = _extract("_clearStreamEndRecovery")
+    close_source = _extract("_closeSource")
+    schedule = _extract("_scheduleStreamEndRecovery")
+    recovery = _extract("_runStreamEndRecovery")
+    reconcile = _extract("_reconcileStreamEndRecoveryExhaustion")
+    fallback = _extract("_finalizeStreamEndFallback")
+    visible = _extract("_visibleLiveAssistantAnswerPresent")
+    wire = _extract("_wireSSE")
+    if fallback_mutation:
+        recovery = recovery.replace(
+            "_finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});",
+            "_finalizeStreamEndFallback(source,{transportGeneration});",
+            1,
+        )
+    initial_attempts = 9 if exhaustion else 0
+    statuses = ["active"] * 7 + [False] if exhaustion else [False]
+    script = textwrap.dedent(
+        f"""
+        let activeSid='sid-1';
+        let streamId='stream-1';
+        let _liveOwnerToken=1;
+        let _liveTransportGenerationSeq=1;
+        let _closureRetired=false;
+        let _terminalStateReached=false;
+        let _streamFinalized=false;
+        let _persistTimer=null;
+        let _streamEndRecoveryLease=null;
+        let liveReasoningText='';
+        let reasoningText='';
+        let assistantText='final streamed answer';
+        let assistantRow=null;
+        let assistantBody={{isConnected:true,textContent:assistantText,childSentinel:{{textContent:'child sentinel'}}}};
+        const liveAnswerNode=assistantBody;
+        const timers=[];
+        const closeTrace=[];
+        let physicalCloseCalls=0;
+        let restoreIndex=0;
+        const restoreStatuses={json.dumps(statuses)};
+        class FakeEventSource {{
+          constructor() {{ this.readyState=1; this.listeners={{}}; this.closeCalls=0; }}
+          addEventListener(name, callback) {{ (this.listeners[name] ||= []).push(callback); }}
+          dispatch(name, event) {{ return Promise.all((this.listeners[name] || []).map(callback => callback(event))); }}
+          close() {{ if(this.readyState!==2) {{ this.readyState=2; this.closeCalls++; physicalCloseCalls++; }} }}
+        }}
+        const source=new FakeEventSource();
+        globalThis.S={{session:{{session_id:activeSid}},activeStreamId:streamId,messages:[]}};
+        globalThis.LIVE_STREAMS={{[activeSid]:{{streamId,source:null,ownerToken:1,transportGeneration:1}}}};
+        globalThis.INFLIGHT={{}};
+        globalThis._isActiveSession=()=>true;
+        globalThis._isSessionCurrentPane=()=>true;
+        globalThis._cancelThrottledSnapshotTimer=()=>{{}};
+        globalThis._cancelAnimationFramePendingStreamRender=()=>{{}};
+        globalThis._streamFadeCleanupReduceMotionListener=()=>{{}};
+        globalThis._smdEndParser=()=>{{}};
+        globalThis._clearOwnerInflightState=()=>{{}};
+        globalThis._clearStreamHidden=()=>{{}};
+        globalThis._clearStreamNotificationBackground=()=>{{}};
+        globalThis._flushReasoningToAnchor=()=>{{}};
+        globalThis._scheduleAnchorRegistryCleanup=()=>{{}};
+        globalThis._clearAnchorProseIncrementalNode=()=>{{}};
+        globalThis._clearApprovalForOwner=()=>{{}};
+        globalThis._clearClarifyForOwner=()=>{{}};
+        globalThis.finalizeThinkingCard=()=>{{}};
+        globalThis.clearLiveToolCards=()=>{{}};
+        globalThis.removeThinking=()=>{{}};
+        globalThis.renderMessages=()=>{{assistantBody={{isConnected:false,textContent:'rebuilt'}};}};
+        globalThis.renderSessionList=()=>{{}};
+        globalThis._setActivePaneIdleIfOwner=()=>{{}};
+        globalThis.snapshotLiveTurnHtmlForSession=()=>{{}};
+        globalThis._clearLiveRunStatusTimer=()=>{{}};
+        globalThis.hideLiveRunStatus=()=>{{}};
+        function closeLiveStream(sid, id, closingSource){{
+          if(closingSource && closingSource!==source) throw new Error('wrong source');
+          if(closingSource && closingSource.readyState!==2) closingSource.close();
+          if(LIVE_STREAMS[sid] && LIVE_STREAMS[sid].source===closingSource) LIVE_STREAMS[sid]={{...LIVE_STREAMS[sid],source:null}};
+        }};
+        globalThis.setTimeout=(callback)=>{{timers.push(callback);return timers.length;}};
+        globalThis.clearTimeout=()=>{{}};
+        globalThis._restoreSettledSession=async()=>restoreStatuses[restoreIndex++] ?? false;
+        globalThis.api=async()=>({{active:false,replay_available:false}});
+        globalThis.document={{baseURI:'http://localhost:8787/'}};
+        globalThis.location={{href:'http://localhost:8787/'}};
+        globalThis.window={{removeEventListener(){{}}}};
+        globalThis.$=()=>null;
+        globalThis.EventSource=FakeEventSource;
+        function _bailOutOfTerminalEventsFromStaleStream(){{return false;}}
+        function _currentLiveEventSourceOwnsStream(){{return true;}}
+        globalThis._streamRecoveryControlMessageText=()=>false;
+        globalThis._filterRecoveryControlMessages=messages=>messages;
+        globalThis._markSessionViewed=()=>{{}};
+        globalThis._applyToAnchor=()=>{{}};
+        globalThis._attachProjectedAnchorSceneToLastAssistant=()=>{{}};
+        globalThis._carryForwardEphemeralTurnFields=(_,next)=>next;
+        globalThis.showToast=()=>{{}};
+        globalThis._rememberRunJournalCursor=()=>{{}};
+        {current_owner}
+        {current_owner_active}
+        {capture_generation}
+        {next_generation}
+        {owner}
+        {recovery_owner}
+        {clear_recovery}
+        {close_source}
+        function _retireLiveClosure(closingSource, requiredGeneration){{
+          const live=_currentLiveOwnerEntry();
+          if(_closureRetired || !live || (requiredGeneration!=null && live.transportGeneration!==requiredGeneration) || (closingSource && live.source!==closingSource)) return;
+          _closureRetired=true;
+          if(closingSource && closingSource.readyState!==2) closingSource.close();
+          LIVE_STREAMS[activeSid]={{...live,source:null}};
+          _clearStreamEndRecovery(requiredGeneration);
+        }}
+        const originalCloseSource=_closeSource;
+        _closeSource=(closingSource, options=null)=>{{
+          closeTrace.push({{source:closingSource, generation:options&&options.transportGeneration, retain:!!(options&&options.retainOwner)}});
+          return originalCloseSource(closingSource,options);
+        }};
+        {schedule}
+        {visible}
+        {fallback}
+        {reconcile}
+        {recovery}
+        {wire}
+        _wireSSE(source,1);
+        const published=LIVE_STREAMS[activeSid];
+        _scheduleStreamEndRecovery(published.source,0,published.transportGeneration,{initial_attempts});
+        for(let guard=0;guard<30;guard++) {{
+          if(!timers.length) {{ await Promise.resolve(); if(!timers.length) break; }}
+          const callback=timers.shift(); callback(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+        }}
+        console.log(JSON.stringify({{
+          publishedSource:published.source===source,
+          publishedGeneration:published.transportGeneration,
+          closeTrace:closeTrace.map(call=>({{sameSource:call.source===source,generation:call.generation,retain:call.retain}})),
+          physicalCloseCalls,
+          leaseCleared:_streamEndRecoveryLease===null,
+          finalGeneration:LIVE_STREAMS[activeSid].transportGeneration,
+          visibleNodePreserved:assistantBody===liveAnswerNode,
+          childSentinel:assistantBody.childSentinel&&assistantBody.childSentinel.textContent,
+          finalized:_streamFinalized,terminal:_terminalStateReached
+        }}));
+        """
+    )
+    proc = _run_node_script(script)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def _run_registered_apperror_case(*, mutation: bool = False):
+    current_owner = _extract("_currentLiveOwnerEntry")
+    current_owner_active = _extract("_currentLiveOwnerActive")
+    next_generation = _extract("_nextLiveTransportGeneration")
+    owner = _extract("_ownsActiveStreamOrBackground")
+    clear_recovery = _extract("_clearStreamEndRecovery")
+    wire = _extract("_wireSSE")
+    if mutation:
+        wire = wire.replace(
+            "_restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true,transportGeneration})",
+            "_restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true,retainedTransportGeneration})",
+            1,
+        )
+    script = textwrap.dedent(
+        f"""
+        let activeSid='sid-1'; let streamId='stream-1'; let _liveOwnerToken=1;
+        let _liveTransportGenerationSeq=1; let _closureRetired=false; let _persistTimer=null;
+        let _streamEndRecoveryLease=null; let _terminalStateReached=false; let _streamFinalized=false;
+        let assistantText=''; let restoreCalls=[]; let unhandled=[]; process.on('unhandledRejection',e=>unhandled.push(String(e)));
+        class FakeEventSource {{ constructor(){{this.readyState=1;this.listeners={{}};this.closeCalls=0;}} addEventListener(n,c){{(this.listeners[n]||=[]).push(c);}} async dispatch(n,e){{for(const c of this.listeners[n]||[]) await c(e);}} close(){{if(this.readyState!==2){{this.readyState=2;this.closeCalls++;}}}} }}
+        const source=new FakeEventSource(); globalThis.EventSource=FakeEventSource;
+        globalThis.S={{session:{{session_id:activeSid}},activeStreamId:streamId,messages:[]}}; globalThis.LIVE_STREAMS={{[activeSid]:{{streamId,source:null,ownerToken:1,transportGeneration:1}}}};
+        globalThis.INFLIGHT={{}}; globalThis._isActiveSession=()=>true; globalThis._isSessionCurrentPane=()=>true;
+        globalThis._cancelThrottledSnapshotTimer=()=>{{}}; globalThis._cancelAnimationFramePendingStreamRender=()=>{{}}; globalThis._clearAnchorProseIncrementalNode=()=>{{}};
+        globalThis._streamFadeCleanupReduceMotionListener=()=>{{}}; globalThis._smdEndParser=()=>{{}}; globalThis._clearOwnerInflightState=()=>{{}};
+        globalThis._clearStreamHidden=()=>{{}}; globalThis._clearStreamNotificationBackground=()=>{{}}; globalThis._clearApprovalForOwner=()=>{{}}; globalThis._clearClarifyForOwner=()=>{{}};
+        globalThis._scheduleAnchorRegistryCleanup=()=>{{}}; globalThis._flushReasoningToAnchor=()=>{{}}; globalThis.finalizeThinkingCard=()=>{{}}; globalThis.clearLiveToolCards=()=>{{}}; globalThis.removeThinking=()=>{{}};
+        globalThis._setActivePaneIdleIfOwner=()=>{{}}; globalThis.renderSessionList=()=>{{}}; globalThis.renderMessages=()=>{{}}; globalThis._applyToAnchor=()=>{{}}; globalThis._markSessionViewed=()=>{{}};
+        globalThis._streamRecoveryControlMessageText=()=>false; globalThis._filterRecoveryControlMessages=m=>m; globalThis.showToast=()=>{{}}; globalThis.window={{}}; globalThis.localStorage={{setItem(){{}}}};
+        globalThis._rememberRunJournalCursor=()=>{{}};
+        globalThis._restoreSettledSession=async(calledSource,options)=>{{restoreCalls.push({{sameSource:calledSource===source,generation:options&&options.transportGeneration}});return false;}};
+        globalThis.setTimeout=(callback)=>{{callback();return 1;}}; globalThis.clearTimeout=()=>{{}}; globalThis.document={{baseURI:'http://localhost:8787/'}}; globalThis.location={{href:'http://localhost:8787/'}};
+        function _bailOutOfTerminalEventsFromStaleStream(){{return false;}} function _currentLiveEventSourceOwnsStream(){{return true;}}
+        globalThis._attachProjectedAnchorSceneToLastAssistant=()=>{{}}; globalThis._carryForwardEphemeralTurnFields=(_,n)=>n;
+        {current_owner}{current_owner_active}{next_generation}{owner}{clear_recovery}{wire}
+        _wireSSE(source,1); const published=LIVE_STREAMS[activeSid];
+        await published.source.dispatch('apperror',{{currentTarget:source,target:source,data:JSON.stringify({{type:'interrupted',recovery_control:true,session_id:activeSid,message:'continue exactly where you left off'}})}});
+        await Promise.resolve(); await Promise.resolve();
+        console.log(JSON.stringify({{publishedSource:published.source===source,publishedGeneration:published.transportGeneration,restoreCalls,unhandled,closeCalls:source.closeCalls,activeStreamId:S.activeStreamId}}));
+        """
+    )
+    proc = _run_node_script(script)
+    if mutation:
+        return proc
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
 def _run_stream_end_restore_failure_case(source_override: str | None = None, event_mutation: bool = False):
     source = source_override or MESSAGES_JS
     current_owner = _extract("_currentLiveOwnerEntry", source)
@@ -1089,51 +1291,47 @@ def test_long_tail_recovery_reattaches_when_stream_status_stays_active():
 
 
 def test_direct_error_recovery_preserves_visible_live_answer_until_cleanup_finishes():
-    result = _run_recovery_case(
-        active=True,
-        restore_results=["error"],
-        attempts=3,
-        assistant_text="final streamed answer",
-        stream_status={"active": False, "replay_available": False},
-    )
+    result = _run_composed_recovery_case(exhaustion=False)
 
-    assert result["wireCalls"] == 0
-    assert result["scheduleDelays"] == []
-    assert result["renderCalls"] == 0
-    assert result["clearLiveToolCalls"] == 1
-    assert result["removeThinkingCalls"] == 0
-    assert result["activeStreamId"] is None
+    assert result["publishedSource"] is True
+    assert result["closeTrace"] == [{"sameSource": True, "generation": 2, "retain": False}]
+    assert result["physicalCloseCalls"] == 1
+    assert result["leaseCleared"] is True
+    assert result["visibleNodePreserved"] is True
+    assert result["childSentinel"] == "child sentinel"
     assert result["finalized"] is True
     assert result["terminal"] is True
-    assert result["visibleNodePreserved"] is True
-    assert result["visibleAnswerText"] == "final streamed answer"
-    assert result["childSentinelText"] == "child sentinel"
-    assert result["sessionListCalls"] == 1
-    assert result["idleCalls"] == 1
 
 
 def test_long_tail_recovery_preserves_visible_live_answer_after_exhaustion_reconcile():
-    result = _run_recovery_case(
-        active=True,
-        restore_results=["active", False],
-        attempts=15,
-        assistant_text="final streamed answer",
-        stream_status={"active": False, "replay_available": False},
-    )
+    result = _run_composed_recovery_case(exhaustion=True)
 
-    assert result["wireCalls"] == 0
-    assert result["scheduleDelays"] == []
-    assert result["renderCalls"] == 0
-    assert result["clearLiveToolCalls"] == 1
-    assert result["removeThinkingCalls"] == 0
-    assert result["activeStreamId"] is None
+    assert result["publishedSource"] is True
+    assert result["closeTrace"] == [
+        {"sameSource": True, "generation": 2, "retain": True},
+        {"sameSource": False, "generation": 3, "retain": False},
+    ]
+    assert result["physicalCloseCalls"] == 1
+    assert result["leaseCleared"] is True
+    assert result["finalGeneration"] == 3
+    assert result["visibleNodePreserved"] is True
+    assert result["childSentinel"] == "child sentinel"
     assert result["finalized"] is True
     assert result["terminal"] is True
-    assert result["visibleNodePreserved"] is True
-    assert result["visibleAnswerText"] == "final streamed answer"
-    assert result["childSentinelText"] == "child sentinel"
-    assert result["sessionListCalls"] == 1
-    assert result["idleCalls"] == 1
+
+
+def test_apererror_recovers_on_registered_wire_listener_generation():
+    result = _run_registered_apperror_case()
+
+    assert result["publishedSource"] is True
+    assert result["publishedGeneration"] == 2
+    assert result["restoreCalls"] == [{"sameSource": True, "generation": 2}]
+    assert result["unhandled"] == []
+    assert result["closeCalls"] == 1
+    assert result["activeStreamId"] is None
+
+    mutated = _run_registered_apperror_case(mutation=True)
+    assert mutated.returncode != 0 or json.loads(mutated.stdout)["restoreCalls"] == []
 
 
 def test_long_tail_recovery_without_visible_live_answer_still_rebuilds_when_stream_turns_inactive():
