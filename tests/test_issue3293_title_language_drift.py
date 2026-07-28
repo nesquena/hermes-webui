@@ -139,3 +139,80 @@ def test_legacy_german_start_german_title_allowed():
     assert _title_language_mismatch(
         "Warum werden alte Bilder angezeigt?", "Alte Bilder Anzeige"
     ) is False
+
+
+# ── configured title language (auxiliary.title_generation.language) ─────────
+#
+# The cross-script guard above only rejects drift it can *see*. A Latin-script
+# start whose title comes back in another Latin-script language is allowed on
+# purpose (see test_english_start_spanish_title_allowed), so English → Spanish,
+# Portuguese, Italian and friends still persist. #3293 listed "Chinese or
+# Spanish"; in practice the Latin-script half is the common case and the script
+# check cannot reach it.
+# Hermes Agent already exposes `auxiliary.title_generation.language`, which its
+# own generator applies as a hard pin. These cover the WebUI honouring it, so a
+# user who has pinned a language gets it on every title path rather than only on
+# native surfaces.
+
+
+def test_configured_language_pins_every_title_prompt(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "English"})
+
+    _, prompts = streaming._title_prompts("¿Cómo arreglo este error?", "Así se arregla.")
+
+    assert prompts, "expected at least one title prompt"
+    for prompt in prompts:
+        assert "Write the title in English." in prompt
+
+
+def test_configured_language_is_not_hardcoded_to_english(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "Deutsch"})
+
+    _, prompts = streaming._title_prompts("How do I fix this bug", "Like this")
+
+    for prompt in prompts:
+        assert "Write the title in Deutsch." in prompt
+
+
+def test_unset_language_keeps_match_user_default(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {})
+
+    _, prompts = streaming._title_prompts("How do I fix this bug", "Like this")
+
+    assert prompts
+    for prompt in prompts:
+        assert "Match the language of the user question." in prompt
+        assert "Write the title in" not in prompt
+
+
+def test_blank_language_is_treated_as_unset(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "   "})
+
+    _, prompts = streaming._title_prompts("How do I fix this bug", "Like this")
+
+    for prompt in prompts:
+        assert "Match the language of the user question." in prompt
+        assert "Write the title in" not in prompt
+
+
+def test_unreadable_config_falls_back_to_default(monkeypatch):
+    """A config read that raises must not break title generation."""
+    from api import streaming
+
+    def _boom():
+        raise RuntimeError("config unavailable")
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", _boom)
+
+    _, prompts = streaming._title_prompts("How do I fix this bug", "Like this")
+
+    for prompt in prompts:
+        assert "Match the language of the user question." in prompt
