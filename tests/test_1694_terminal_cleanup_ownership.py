@@ -104,11 +104,12 @@ def test_stream_end_without_done_restores_settled_session_before_closing():
     if restore_idx == -1:
         restore_idx = body.find("_restoreSettledSession(source)")
     close_idx = body.find("_closeSource(source", restore_idx)
+    fallback_idx = body.find("_finalizeStreamEndFallback(source,{transportGeneration", restore_idx)
     if close_idx == -1:
-        close_idx = body.find("_finalizeStreamEndFallback(source,{transportGeneration})", restore_idx)
+        close_idx = fallback_idx
     finalized_idx = body.find("_streamFinalized=true", restore_idx)
     if finalized_idx == -1:
-        finalized_idx = body.find("_finalizeStreamEndFallback(source,{transportGeneration})", restore_idx)
+        finalized_idx = fallback_idx
     assert restore_idx != -1, "stream_end handler must restore settled session when done is absent"
     assert close_idx != -1, "stream_end handler must still close the owning EventSource"
     assert restore_idx < close_idx, "restore must be attempted before closing the stream"
