@@ -11344,7 +11344,102 @@ function _buildProviderCard(p){
     return card;
   }
 
-  if(p.configurable){
+  if(p.configurable && p.id==='bedrock'){
+    const hint=document.createElement('div');
+    hint.className='provider-card-hint';
+    hint.textContent='Use a Bedrock API key and/or an IAM access key pair. Instance-role (IMDS) auth is separate and off by default on locked hosts.';
+    body.appendChild(hint);
+
+    const addSecretField=(labelText, placeholder, keyName)=>{
+      const field=document.createElement('div');
+      field.className='provider-card-field';
+      const label=document.createElement('label');
+      label.className='provider-card-label';
+      label.textContent=labelText;
+      field.appendChild(label);
+      const row=document.createElement('div');
+      row.className='provider-card-row';
+      const el=document.createElement('input');
+      el.type='password';
+      el.className='provider-card-input';
+      el.placeholder=placeholder;
+      el.autocomplete='off';
+      el.dataset.bedrockField=keyName;
+      const toggleBtn=document.createElement('button');
+      toggleBtn.type='button';
+      toggleBtn.className='provider-card-btn provider-card-btn-ghost';
+      toggleBtn.textContent='Show';
+      toggleBtn.onclick=()=>{
+        const revealed=el.type==='text';
+        el.type=revealed?'password':'text';
+        toggleBtn.textContent=revealed?'Show':'Hide';
+      };
+      row.appendChild(el);
+      row.appendChild(toggleBtn);
+      field.appendChild(row);
+      body.appendChild(field);
+      return el;
+    };
+
+    const bearerInput=addSecretField(
+      'Bedrock API key',
+      p.bedrock_has_bearer?'•••••••• (replace to update)':'AWS_BEARER_TOKEN_BEDROCK',
+      'api_key'
+    );
+    const accessInput=addSecretField(
+      'AWS access key ID',
+      p.bedrock_has_iam?'•••••••• (replace to update)':'AWS_ACCESS_KEY_ID',
+      'aws_access_key_id'
+    );
+    const secretInput=addSecretField(
+      'AWS secret access key',
+      p.bedrock_has_iam?'•••••••• (replace to update)':'AWS_SECRET_ACCESS_KEY',
+      'aws_secret_access_key'
+    );
+
+    const saveRow=document.createElement('div');
+    saveRow.className='provider-card-row';
+    saveRow.style.marginTop='6px';
+    saveBtn=document.createElement('button');
+    saveBtn.type='button';
+    saveBtn.className='provider-card-btn provider-card-btn-primary';
+    saveBtn.textContent=t('providers_save');
+    saveBtn.disabled=true;
+    saveBtn.onclick=()=>_saveBedrockProviderCredentials(p.id);
+    saveRow.appendChild(saveBtn);
+    if(p.has_key){
+      const removeBtn=document.createElement('button');
+      removeBtn.type='button';
+      removeBtn.className='provider-card-btn provider-card-btn-danger';
+      removeBtn.textContent=t('providers_remove');
+      removeBtn.onclick=()=>_removeProviderKey(p.id);
+      saveRow.appendChild(removeBtn);
+    }
+    body.appendChild(saveRow);
+
+    const syncSave=()=>{
+      const hasBearer=!!bearerInput.value.trim();
+      const hasAccess=!!accessInput.value.trim();
+      const hasSecret=!!secretInput.value.trim();
+      const iamPair=hasAccess&&hasSecret;
+      const iamPartial=(hasAccess||hasSecret)&&!iamPair;
+      saveBtn.disabled=iamPartial||(!hasBearer&&!iamPair);
+    };
+    bearerInput.addEventListener('input',syncSave);
+    accessInput.addEventListener('input',syncSave);
+    secretInput.addEventListener('input',syncSave);
+
+    _providerCardEls.set(p.id,{
+      card,
+      bearerInput,
+      accessInput,
+      secretInput,
+      saveBtn,
+      hasKey:p.has_key,
+      isBedrock:true,
+    });
+    focusInput=bearerInput;
+  }else if(p.configurable){
     const field=document.createElement('div');
     field.className='provider-card-field';
     const label=document.createElement('label');
@@ -11463,9 +11558,52 @@ function _buildProviderCard(p){
   return card;
 }
 
+async function _saveBedrockProviderCredentials(providerId){
+  const els=_providerCardEls.get(providerId);
+  if(!els||!els.isBedrock) return;
+  const bearer=(els.bearerInput&&els.bearerInput.value||'').trim();
+  const access=(els.accessInput&&els.accessInput.value||'').trim();
+  const secret=(els.secretInput&&els.secretInput.value||'').trim();
+  if((access&&!secret)||(!access&&secret)){
+    showToast('AWS access key ID and secret access key must be provided together.');
+    return;
+  }
+  if(!bearer&&!access){
+    showToast(t('providers_enter_key')||'Enter a Bedrock API key or IAM access key pair.');
+    return;
+  }
+  els.saveBtn.disabled=true;
+  els.saveBtn.textContent=t('providers_saving');
+  try{
+    const body={provider:providerId};
+    if(bearer) body.api_key=bearer;
+    if(access&&secret){
+      body.aws_access_key_id=access;
+      body.aws_secret_access_key=secret;
+    }
+    const res=await api('/api/providers',{method:'POST',body:JSON.stringify(body)});
+    if(res&&res.ok===false){
+      showToast(res.error||t('providers_save_failed')||'Failed to save');
+      return;
+    }
+    showToast(t('providers_saved')||'Saved');
+    await loadProvidersPanel();
+  }catch(e){
+    showToast(e.message||String(e));
+  }finally{
+    if(els.saveBtn){
+      els.saveBtn.disabled=false;
+      els.saveBtn.textContent=t('providers_save');
+    }
+  }
+}
+
 async function _saveProviderKey(providerId){
   const els=_providerCardEls.get(providerId);
   if(!els) return;
+  if(els.isBedrock){
+    return _saveBedrockProviderCredentials(providerId);
+  }
   const key=els.input.value.trim();
   if(!key){
     showToast(t('providers_enter_key'));
