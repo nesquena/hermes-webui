@@ -2526,6 +2526,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _clearApprovalForOwner();
     _clearClarifyForOwner('terminal');
     const preserveVisibleAnswer=!!(options&&options.preserveVisibleAnswer)&&_visibleLiveAssistantAnswerPresent();
+    _closeSource(source,{transportGeneration});
     if(_isActiveSession()){
       S.activeStreamId=null;
       clearLiveToolCards();if(!assistantText)removeThinking();
@@ -2533,7 +2534,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     renderSessionList();
     _setActivePaneIdleIfOwner();
-    _closeSource(source,{transportGeneration});
     return true;
   }
   async function _reconcileStreamEndRecoveryExhaustion(source,transportGeneration){
