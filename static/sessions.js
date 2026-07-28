@@ -5178,7 +5178,12 @@ function showSessionListSkeleton(targetProfile){
   // Invalidate touch render state when the skeleton replaces the list —
   // the observer, RAF, render state, loaded count, and generation must all
   // be torn down so stale callbacks can't mutate the skeleton DOM.
-  if(typeof _invalidateTouchRender==='function' && _isTouchPrimary && _isTouchPrimary()){
+  // Tear down any prior touch owner unconditionally — the old owner may have
+  // already lost capability (_isTouchPrimary() now false) but its observer,
+  // RAF, render state, pending work, and generation are still live. Gating on
+  // the current capability check leaves them dangling after the skeleton
+  // replaces the DOM, letting stale callbacks mutate the skeleton.
+  if(typeof _invalidateTouchRender==='function'){
     _invalidateTouchRender();
   }
   // Tear down any active virtual-scroll state up front so a pending scroll-driven
@@ -5455,8 +5460,10 @@ function _appendTouchBatch(){
   // partially re-rendered), bail out and trigger a full re-render instead of
   // splicing a new-cache suffix onto an old-cache prefix.
   const existingItems=list.querySelectorAll('.session-item[data-sid]');
-  if(existingItems.length<oldLoaded){
-    // DOM has fewer rows than we thought — something wiped it. Full re-render.
+  if(existingItems.length!==oldLoaded){
+    // DOM row count must match the loaded count exactly — fewer means
+    // something wiped rows, more means a stale live row snuck in. Either
+    // way, the prefix is unauthoritative: full re-render.
     _invalidateTouchRender();
     _sessionTouchLoadedCount=0;
     renderSessionListFromCache();
@@ -5529,8 +5536,12 @@ function _appendTouchBatch(){
     let isNew=false;
     if(!wrapper){
       // Group doesn't exist in DOM yet — create it but keep DETACHED.
-      // It will only be attached in Phase 2 after every target validates.
-      wrapper=_createTouchGroupWrapper({label:label,isPinned:false}, state);
+      // Carry the real group metadata (isPinned etc.) from the canonical
+      // flatRows, not a hard-coded isPinned:false — the prior version
+      // discarded the row group's pinned metadata.
+      const rowForMeta=state.flatRows.find(r=>r&&r.group&&r.group.label===label);
+      const groupMeta=rowForMeta?rowForMeta.group:{label:label};
+      wrapper=_createTouchGroupWrapper(groupMeta, state);
       isNew=true;
       newWrappers.push(wrapper);
     }
@@ -5544,12 +5555,30 @@ function _appendTouchBatch(){
     const afterSpacer=body.querySelector('.session-virtual-spacer[data-virtual-spacer="after"]');
     commitTargets.push({wrapper:wrapper, body:body, afterSpacer:afterSpacer, label:label, isNew:isNew});
   }
-  // Phase 2: attach newly created wrappers to the live DOM. By this point every
-  // target (existing and new) has been validated — body exists for all groups.
-  for(const wrapper of newWrappers){
-    const sentinel=list.querySelector('[data-touch-sentinel]');
-    if(sentinel) list.insertBefore(wrapper,sentinel);
-    else list.appendChild(wrapper);
+  // Phase 2: attach newly created wrappers to the live DOM in canonical order.
+  // Each new wrapper is inserted BEFORE the next existing canonical wrapper
+  // that follows it in groupOrder — not just before the sentinel/end. Without
+  // this, a missing earlier group A is committed after an existing later
+  // group B, producing live order B, A instead of the canonical A, B.
+  for(let gi=0; gi<commitTargets.length; gi++){
+    const target=commitTargets[gi];
+    if(!target.isNew) continue;
+    // Find the next existing (non-new) wrapper in canonical order.
+    let insertBeforeEl=null;
+    for(let gj=gi+1; gj<commitTargets.length; gj++){
+      if(!commitTargets[gj].isNew){
+        insertBeforeEl=commitTargets[gj].wrapper;
+        break;
+      }
+    }
+    if(!insertBeforeEl){
+      // No existing wrapper follows — insert before the sentinel, or at end.
+      const sentinel=list.querySelector('[data-touch-sentinel]');
+      if(sentinel) list.insertBefore(target.wrapper, sentinel);
+      else list.appendChild(target.wrapper);
+    }else{
+      list.insertBefore(target.wrapper, insertBeforeEl);
+    }
   }
   // Phase 3: attach all fragments. Every target is guaranteed to exist, so no
   // partial-commit-duplicate-on-retry is possible.
