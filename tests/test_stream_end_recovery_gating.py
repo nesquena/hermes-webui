@@ -70,7 +70,7 @@ def test_stream_end_fallback_does_not_finalize_when_session_is_still_active():
     assert "const status=await _restoreSettledSession(source,{status:true,transportGeneration});" in body
     assert "if(status==='active'&&S.activeStreamId===streamId)" in body
     assert "_scheduleStreamEndRecovery(source,200,transportGeneration);" in body
-    assert "_finalizeStreamEndFallback(source,{transportGeneration});" in body
+    assert "_finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});" in body
 
 
 def test_stream_end_recovery_helper_retries_while_session_is_still_active():
@@ -83,7 +83,8 @@ def test_stream_end_recovery_helper_retries_while_session_is_still_active():
     assert "_scheduleStreamEndRecovery(" in fn
     assert "nextRecoveryTransportGeneration" in fn
     assert "await _reconcileStreamEndRecoveryExhaustion(nextRecoverySource,nextRecoveryTransportGeneration);" in fn
-    assert "_finalizeStreamEndFallback(source,{transportGeneration});" in fn
+    assert "_finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});" in fn
+    assert "_streamEndRecoveryAttempts" not in fn
 
 
 def test_stream_end_fallback_helper_clears_owner_state_before_closing():
@@ -113,7 +114,7 @@ def test_stream_end_recovery_exhaustion_reconciles_stream_status_before_terminal
     assert "if(await _restoreSettledSession(source,{preserveVisibleOnShorterTerminalSnapshot:true,transportGeneration})) return true;" in fn
     assert "_closeSource(source,{retainOwner:true,transportGeneration});" in fn
     assert "_closeSource(source,{retainOwner:true});" not in fn
-    assert "_finalizeStreamEndFallback(source,{transportGeneration});" in fn
+    assert "_finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});" in fn
 
 
 def test_stream_end_live_scene_detection_includes_empty_text_activity():

@@ -2571,12 +2571,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearStreamEndRecovery(transportGeneration);
       return true;
     }
-    _finalizeStreamEndFallback(source,{transportGeneration});
+    _finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});
     return true;
   }
   async function _runStreamEndRecovery(source,transportGeneration){
-    const recovery=(typeof _streamEndRecoveryLease!=='undefined'&&_streamEndRecoveryLease)
-      || {generation:transportGeneration,attempts:typeof _streamEndRecoveryAttempts==='number'?_streamEndRecoveryAttempts:0};
+    const recovery=_streamEndRecoveryLease;
     if(_streamFinalized || _terminalStateReached ||
       (recovery.generation!=null&&recovery.generation!==transportGeneration) || !_currentLiveOwnerActive(transportGeneration)){
       _clearStreamEndRecovery(transportGeneration);
@@ -2594,9 +2593,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     if(status==='active'){
       recovery.attempts+=1;
-      if(typeof _streamEndRecoveryLease==='undefined'||!_streamEndRecoveryLease){
-        _streamEndRecoveryAttempts=recovery.attempts;
-      }
       let nextRecoverySource=source;
       let nextRecoveryTransportGeneration=transportGeneration;
       if(recovery.attempts===10){
@@ -2620,7 +2616,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       await _reconcileStreamEndRecoveryExhaustion(nextRecoverySource,nextRecoveryTransportGeneration);
       return;
     }
-    _finalizeStreamEndFallback(source,{transportGeneration});
+    _finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});
   }
   function _stripLiveVisibleAssistantEchoFromThinking(text, snippets){
     let out=String(text||'');
@@ -6376,7 +6372,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _scheduleStreamEndRecovery(source,200,transportGeneration);
         return;
       }
-      _finalizeStreamEndFallback(source,{transportGeneration});
+      _finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});
     });
 
     source.addEventListener('pending_steer_leftover',e=>{
@@ -6577,7 +6573,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(isRecoveryControlMessage){
           (async()=>{
-            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true,transportGeneration:retainedTransportGeneration})) return;
+            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true,transportGeneration})) return;
             if(S.session&&S.session.session_id===activeSid){
               S.messages=_filterRecoveryControlMessages(S.messages||[]);
               _markSessionViewed(activeSid, S.messages.length);
