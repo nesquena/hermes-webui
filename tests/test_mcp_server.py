@@ -272,6 +272,43 @@ async def _call(mod, tool_name, **kwargs):
     return json.loads(result[0].text)
 
 
+async def _call_protocol_v1(mod, tool_name, arguments=None):
+    result = await mod._call_tool_v1(tool_name, arguments)
+    return json.loads(result.content[0].text), _call_tool_is_error(result)
+
+
+async def _call_protocol_v2(mod, tool_name, arguments=None):
+    from mcp.types import CallToolRequestParams
+
+    result = await mod._call_tool_v2(
+        None,
+        CallToolRequestParams(name=tool_name, arguments=arguments),
+    )
+    return json.loads(result.content[0].text), _call_tool_is_error(result)
+
+
+async def _call_protocol(mod, surface, tool_name, arguments=None):
+    if surface == "v1":
+        return await _call_protocol_v1(mod, tool_name, arguments)
+    return await _call_protocol_v2(mod, tool_name, arguments)
+
+
+def _tool_schema(mod, tool):
+    return getattr(tool, mod._TOOL_SCHEMA_FIELD)
+
+
+def _call_tool_is_error(result):
+    if hasattr(result, "isError"):
+        return result.isError
+    if hasattr(result, "is_error"):
+        return result.is_error
+    if hasattr(result, "model_dump"):
+        payload = result.model_dump(by_alias=True)
+    else:
+        payload = result.dict(by_alias=True)
+    return payload.get("isError", payload.get("is_error", False))
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  Project CRUD
 # ═══════════════════════════════════════════════════════════════════════════
@@ -572,6 +609,10 @@ class TestSessionMutations:
         result = await _call(self.mod, "move_session",
                              session_id="", project_id="x")
         assert "error" in result
+
+    async def test_move_missing_project_id(self):
+        result = await _call(self.mod, "move_session", session_id="s1")
+        assert result["error"] == "project_id is required"
 
     async def test_move_project_not_found(self):
         result = await _call(self.mod, "move_session",
@@ -923,3 +964,69 @@ class TestApiWireFormat:
         assert mod.WEBUI_HOST == "127.0.0.1"
         assert mod.WEBUI_PORT == "8787"
         assert mod.WEBUI_URL == "http://127.0.0.1:8787"
+
+
+class TestProtocolValidation:
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        self.state_dir = _fresh_state_dir()
+        self.mod, self.profiles = _reimport_mcp()
+        self.api_calls = []
+
+        def _fake_api_post(path, body):
+            self.api_calls.append({"path": path, "body": body})
+            return {
+                "ok": True,
+                "session": {
+                    "session_id": body.get("session_id"),
+                    "project_id": body.get("project_id"),
+                    "title": "Moved",
+                },
+            }
+
+        self.mod._api_post = _fake_api_post
+        yield
+        _cleanup_state_dir(self.state_dir)
+
+    @pytest.mark.parametrize("surface", ["v1", "v2"])
+    @pytest.mark.parametrize("arguments, needle", [
+        ({"session_id": "s1"}, "project_id"),
+        ({"session_id": "s1", "project_id": 7}, "not of type"),
+    ])
+    async def test_move_session_protocol_rejects_invalid_input_without_api_post(self, surface, arguments, needle):
+        result, is_error = await _call_protocol(self.mod, surface, "move_session", arguments)
+        assert is_error is True
+        assert "Input validation error" in result["error"]
+        assert needle in result["error"]
+        assert self.api_calls == []
+
+    @pytest.mark.parametrize("surface", ["v1", "v2"])
+    async def test_move_session_protocol_allows_explicit_null_unassign(self, surface):
+        result, is_error = await _call_protocol(
+            self.mod,
+            surface,
+            "move_session",
+            {"session_id": "s1", "project_id": None},
+        )
+        assert is_error is False
+        assert result["ok"] is True
+        assert self.api_calls == [{
+            "path": "/api/session/move",
+            "body": {"session_id": "s1", "project_id": None},
+        }]
+
+    @pytest.mark.parametrize("surface", ["v1", "v2"])
+    async def test_unknown_tool_returns_protocol_error(self, surface):
+        result, is_error = await _call_protocol(self.mod, surface, "missing_tool", {})
+        assert is_error is True
+        assert result == {"error": "Unknown tool: missing_tool"}
+        assert self.api_calls == []
+
+    async def test_listed_move_session_schema_requires_project_id_and_allows_null(self):
+        tools_v1 = await self.mod._list_tools_v1()
+        tools_v2 = (await self.mod._list_tools_v2(None, None)).tools
+        for tools in (tools_v1, tools_v2):
+            move_tool = next(tool for tool in tools if tool.name == "move_session")
+            schema = _tool_schema(self.mod, move_tool)
+            assert schema["required"] == ["session_id", "project_id"]
+            assert schema["properties"]["project_id"]["type"] == ["string", "null"]

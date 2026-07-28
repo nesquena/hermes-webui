@@ -34,6 +34,7 @@ import time
 import uuid
 from pathlib import Path
 
+import jsonschema
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
@@ -415,6 +416,9 @@ async def handle_rename_session(arguments: dict) -> list[TextContent]:
 
 async def handle_move_session(arguments: dict) -> list[TextContent]:
     """Assign a session to a project via the authenticated webui API (cache-safe)."""
+    if "project_id" not in arguments:
+        return [TextContent(type="text", text=json.dumps(
+            {"error": "project_id is required"}, ensure_ascii=False))]
     session_id = arguments.get("session_id")
     project_id = arguments.get("project_id")  # None/null = unassign
     if not session_id:
@@ -546,6 +550,7 @@ TOOLS = [
         },
     ),
 ]
+TOOL_BY_NAME = {tool.name: tool for tool in TOOLS}
 
 HANDLERS = {
     "list_projects": handle_list_projects,
@@ -558,12 +563,56 @@ HANDLERS = {
 }
 
 
+def _tool_input_schema(tool: Tool) -> dict:
+    return getattr(tool, _TOOL_SCHEMA_FIELD)
+
+
+def _error_content(message: str) -> list[TextContent]:
+    return [TextContent(type="text", text=json.dumps(
+        {"error": message}, ensure_ascii=False))]
+
+
+def _call_tool_result(content: list[TextContent], is_error: bool) -> CallToolResult:
+    return CallToolResult(content=content, isError=is_error)
+
+
+def _validate_tool_arguments(name: str, arguments: dict | None) -> list[TextContent] | None:
+    tool = TOOL_BY_NAME.get(name)
+    if not tool:
+        return None
+    try:
+        jsonschema.validate(instance=arguments or {}, schema=_tool_input_schema(tool))
+    except jsonschema.ValidationError as exc:
+        return _error_content(f"Input validation error: {exc.message}")
+    return None
+
+
 async def _dispatch_tool(name: str, arguments: dict | None) -> tuple[list[TextContent], bool]:
     handler = HANDLERS.get(name)
     if not handler:
-        return [TextContent(type="text", text=json.dumps(
-            {"error": f"Unknown tool: {name}"}, ensure_ascii=False))], True
+        return _error_content(f"Unknown tool: {name}"), True
+    validation_error = _validate_tool_arguments(name, arguments)
+    if validation_error:
+        return validation_error, True
     return await handler(arguments or {}), False
+
+
+async def _list_tools_v1() -> list[Tool]:
+    return TOOLS
+
+
+async def _call_tool_v1(name: str, arguments: dict | None) -> CallToolResult:
+    content, is_error = await _dispatch_tool(name, arguments)
+    return _call_tool_result(content, is_error)
+
+
+async def _list_tools_v2(_ctx, _params) -> ListToolsResult:
+    return ListToolsResult(tools=TOOLS)
+
+
+async def _call_tool_v2(_ctx, params) -> CallToolResult:
+    content, is_error = await _dispatch_tool(params.name, params.arguments)
+    return _call_tool_result(content, is_error)
 
 
 if _HAS_DECORATOR_HANDLERS:
@@ -571,19 +620,17 @@ if _HAS_DECORATOR_HANDLERS:
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
-        return TOOLS
+        return await _list_tools_v1()
 
     @server.call_tool()
-    async def call_tool(name: str, arguments: dict | None) -> list[TextContent]:
-        content, _is_error = await _dispatch_tool(name, arguments)
-        return content
+    async def call_tool(name: str, arguments: dict | None) -> CallToolResult:
+        return await _call_tool_v1(name, arguments)
 else:
     async def list_tools(_ctx, _params) -> ListToolsResult:
-        return ListToolsResult(tools=TOOLS)
+        return await _list_tools_v2(_ctx, _params)
 
     async def call_tool(_ctx, params) -> CallToolResult:
-        content, is_error = await _dispatch_tool(params.name, params.arguments)
-        return CallToolResult(content=content, is_error=is_error)
+        return await _call_tool_v2(_ctx, params)
 
     server = Server(
         "hermes-webui",

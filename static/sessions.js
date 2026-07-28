@@ -1610,9 +1610,11 @@ function _clearStuckSessionOnBoot(sid, currentSid){
 // double-arms the success path, which arms the *newly assigned* S.session
 // only after this point.
 function _rearmActiveSessionStream(){
-  if(typeof startSessionStream!=='function') return;
-  const activeSid = S.session ? S.session.session_id : null;
-  if(activeSid) startSessionStream(activeSid);
+  const s=S&&S.session, id=s&&s.session_id;
+  if(typeof startSessionStream!=='function' || !id) return;
+  if(typeof _profileMatchesActiveProfile==='function'
+    && !_profileMatchesActiveProfile(typeof _sidebarSessionProfileName==='function' ? _sidebarSessionProfileName(s) : '', (S&&S.activeProfile)||'default')) return;
+  startSessionStream(id);
 }
 
 function _sessionProfileMismatchFromError(e){
@@ -1654,6 +1656,7 @@ async function loadSession(sid){
   }
   const forceReload = !!opts.force;
   const _normalizeProfileSwitchTarget = value => (typeof value === 'string' && value.trim()) ? value.trim() : 'default';
+  const _normalizeCapturedPaneId = value => value ? String(value) : '';
   const currentSid = S.session ? S.session.session_id : null;
   const _previousProfileOwnerOnSwitchFailure = (currentSid && currentSid !== sid)
     ? _normalizeProfileSwitchTarget((S && S.activeProfile) || (S.session && S.session.profile) || 'default')
@@ -1824,10 +1827,7 @@ async function loadSession(sid){
           const terminalTarget = _normalizeProfileSwitchTarget(terminal.target);
           const activeProfile = _normalizeProfileSwitchTarget((S && S.activeProfile) || 'default');
           const priorProfileOwner = _previousProfileOwnerOnSwitchFailure;
-          const ownsCapturedPane = () => {
-            const activeSessionId = S.session && S.session.session_id ? String(S.session.session_id) : '';
-            return !!currentSid && !!activeSessionId && activeSessionId === currentSid;
-          };
+          const ownsCapturedPane = () => _normalizeCapturedPaneId(S.session && S.session.session_id) === _normalizeCapturedPaneId(currentSid);
           if (!ownsCapturedPane()) return 'stand_down';
           const terminalOwner = normalizeOwner(terminal.committedProfile || terminal.target);
           const requestedOwnerCommitted = (terminal.outcome === 'already_active' || terminal.outcome === 'committed')
@@ -1862,7 +1862,9 @@ async function loadSession(sid){
             _retireCurrentLoad();
             return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
           }
-          const canRestoreWithoutRetainedOwner = terminal.outcome === 'failed' && !terminal.retainedResult && !!currentSid && !!(S.session && S.session.session_id) && String(S.session.session_id) === currentSid;
+          const canRestoreWithoutRetainedOwner = terminal.outcome === 'failed'
+            && !terminal.retainedResult
+            && _normalizeCapturedPaneId(S.session && S.session.session_id) === _normalizeCapturedPaneId(currentSid);
           _retireCurrentLoad();
           if (settlement === 'restore_prior_owner' || canRestoreWithoutRetainedOwner) {
             if (!_restorePreviousConversationAfterFailedSwitch()) {
@@ -1879,7 +1881,8 @@ async function loadSession(sid){
           _retireCurrentLoad();
           return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
         }
-        const canRestoreFailedSwitch = switched.outcome === 'failed' && !!currentSid && !!(S.session && S.session.session_id) && String(S.session.session_id) === currentSid;
+        const canRestoreFailedSwitch = switched.outcome === 'failed'
+          && _normalizeCapturedPaneId(S.session && S.session.session_id) === _normalizeCapturedPaneId(currentSid);
         _retireCurrentLoad();
         if (canRestoreFailedSwitch) {
           if (!_restorePreviousConversationAfterFailedSwitch()) {
