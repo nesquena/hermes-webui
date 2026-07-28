@@ -43,8 +43,97 @@ from api.agent_sessions import (
     read_session_lineage_metadata,
 )
 from api.process_event_utils import stamp_message_source
+from api.incremental_session_store import IncrementalSessionStore
 
 logger = logging.getLogger(__name__)
+_LEGACY_SESSION_MIRROR_MAX_BYTES = 256 * 1024
+_SESSION_LIST_LIMIT = 1_000
+
+
+def _incremental_session_store() -> IncrementalSessionStore:
+    return IncrementalSessionStore(SESSION_DIR)
+
+
+def _read_session_index_rows(
+    *,
+    limit: int = _SESSION_LIST_LIMIT,
+    session_dir: Path | None = None,
+    session_index_file: Path | None = None,
+) -> list[dict]:
+    """Read current compact rows from keyed store, importing legacy index once."""
+    resolved_dir = session_dir or SESSION_DIR
+    resolved_index = session_index_file or SESSION_INDEX_FILE
+    store = IncrementalSessionStore(resolved_dir)
+    store.import_legacy_index_if_changed(resolved_index)
+    rows = store.list_index(limit=limit)
+    if rows or store.path.exists():
+        return rows
+    try:
+        legacy = json.loads(resolved_index.read_bytes())
+    except Exception:
+        return []
+    return [row for row in legacy if isinstance(row, dict)][:limit]
+
+
+def _read_session_index_row(
+    session_id: str,
+    *,
+    session_dir: Path | None = None,
+    session_index_file: Path | None = None,
+) -> dict | None:
+    resolved_dir = session_dir or SESSION_DIR
+    resolved_index = session_index_file or SESSION_INDEX_FILE
+    store = IncrementalSessionStore(resolved_dir)
+    store.import_legacy_index_if_changed(resolved_index)
+    row = store.get_index(str(session_id or ""))
+    if row is not None:
+        return row
+    return next(
+        (
+            item
+            for item in _read_session_index_rows(
+                session_dir=resolved_dir,
+                session_index_file=resolved_index,
+            )
+            if item.get("session_id") == session_id
+        ),
+        None,
+    )
+
+
+def delete_incremental_session(session_id: str) -> None:
+    """Delete keyed session state when a lifecycle path removes its sidecar."""
+    _incremental_session_store().delete(str(session_id or ""))
+
+
+def _bounded_value_size(value, remaining: int) -> int:
+    """Estimate nested payload size, stopping once *remaining* is exceeded."""
+    if remaining < 0:
+        return remaining
+    if value is None:
+        return remaining - 4
+    if isinstance(value, str):
+        return remaining - len(value.encode("utf-8"))
+    if isinstance(value, (bytes, bytearray)):
+        return remaining - len(value)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            remaining = _bounded_value_size(key, remaining)
+            remaining = _bounded_value_size(item, remaining)
+            if remaining < 0:
+                break
+        return remaining
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            remaining = _bounded_value_size(item, remaining)
+            if remaining < 0:
+                break
+        return remaining
+    return remaining - 16
+
+
+def _legacy_session_mirror_is_bounded(payload: dict) -> bool:
+    return _bounded_value_size(payload, _LEGACY_SESSION_MIRROR_MAX_BYTES) >= 0
 CLI_VISIBLE_SESSION_LIMIT = 20
 # How many messageful cron sessions to surface in the project-chip layer.
 # Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
@@ -366,6 +455,18 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
     """
     session_dir = session_dir or SESSION_DIR
     session_index_file = session_index_file or SESSION_INDEX_FILE
+    incremental_store = IncrementalSessionStore(session_dir)
+    if updates is not None:
+        incremental_store.import_legacy_index_if_changed(session_index_file)
+        incremental_store.update_index([session.compact() for session in updates])
+        try:
+            if (
+                session_index_file.exists()
+                and session_index_file.stat().st_size > _LEGACY_SESSION_MIRROR_MAX_BYTES
+            ):
+                return
+        except OSError:
+            return
     _tmp = session_index_file.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
 
     with _INDEX_WRITE_LOCK:
@@ -403,6 +504,7 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                 ]
             entries.extend(in_memory_entries)
             entries.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
+            incremental_store.update_index(entries)
             _payload = json.dumps(entries, ensure_ascii=False, indent=2)
 
             try:
@@ -483,7 +585,22 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
 def prune_session_from_index(session_id: str) -> None:
     """Remove one session row from the persisted sidebar index if present."""
     sid = str(session_id or "")
-    if not sid or not SESSION_INDEX_FILE.exists():
+    if not sid:
+        return
+    incremental_store = _incremental_session_store()
+    incremental_store.import_legacy_index_if_changed(SESSION_INDEX_FILE)
+    with LOCK:
+        in_memory = sid in SESSIONS
+    if not in_memory and not (SESSION_DIR / f"{sid}.json").exists():
+        incremental_store.delete(sid)
+    else:
+        incremental_store.delete_index(sid)
+    if not SESSION_INDEX_FILE.exists():
+        return
+    try:
+        if SESSION_INDEX_FILE.stat().st_size > _LEGACY_SESSION_MIRROR_MAX_BYTES:
+            return
+    except OSError:
         return
     _tmp = SESSION_INDEX_FILE.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
 
@@ -1136,10 +1253,7 @@ def _index_message_count_map(entries=None) -> dict[str, int]:
     the index they just parsed.
     """
     if entries is None:
-        try:
-            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
-        except Exception:
-            return {}
+        entries = _read_session_index_rows()
     if not isinstance(entries, list):
         return {}
     counts: dict[str, int] = {}
@@ -1343,7 +1457,12 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+    def save(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        metadata_only: bool = False,
+    ) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1418,7 +1537,40 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
-        payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
+        payload_data = {**meta, **extra}
+        incremental_store = _incremental_session_store()
+        store_contains_session = incremental_store.contains(self.session_id)
+        incoming_msg_count = len(self.messages or [])
+        if (
+            store_contains_session
+            and incremental_store.persisted_message_count(self.session_id) > 0
+            and incoming_msg_count == 0
+            and (self.active_stream_id or self.pending_user_message)
+        ):
+            logger.warning(
+                "refusing to overwrite session %s messages with empty active/pending snapshot",
+                self.session_id,
+            )
+            return
+        if metadata_only and store_contains_session:
+            incremental_store.save_metadata(
+                payload_data,
+                compact=None if skip_index else self.compact(message_facts=False),
+            )
+            return
+        # Materialize one compatibility snapshot for brand-new sessions. Once
+        # imported, only bounded snapshots keep mirroring; large transcripts
+        # move to keyed SQLite updates and leave the readable JSON snapshot
+        # untouched.
+        mirror_legacy_json = (
+            not store_contains_session
+            or _legacy_session_mirror_is_bounded(payload_data)
+        )
+        payload = (
+            json.dumps(payload_data, ensure_ascii=False, indent=2)
+            if mirror_legacy_json
+            else None
+        )
 
         # ── #1558 backup safeguard ──────────────────────────────────────
         # Before overwriting the session file, copy the previous version to
@@ -1433,7 +1585,7 @@ class Session:
         # via /api/session/recover, sessions whose JSON has fewer messages than
         # their .bak get restored automatically.
         try:
-            if self.path.exists():
+            if mirror_legacy_json and self.path.exists():
                 existing_text = self.path.read_text(encoding='utf-8')
                 try:
                     existing = json.loads(existing_text)
@@ -1483,19 +1635,38 @@ class Session:
         except OSError:
             pass
 
-        tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
-        try:
-            with open(tmp, 'w', encoding='utf-8') as f:
-                f.write(payload)
-                f.flush()
-                os.fsync(f.fileno())
-            _safe_replace(tmp, self.path)
-        except Exception:
+        if mirror_legacy_json:
+            tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
             try:
-                tmp.unlink(missing_ok=True)
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    f.write(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                _safe_replace(tmp, self.path)
             except Exception:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+
+        source_mtime_ns = None
+        source_size = None
+        if mirror_legacy_json:
+            try:
+                source_stat = self.path.stat()
+                source_mtime_ns = source_stat.st_mtime_ns
+                source_size = source_stat.st_size
+            except OSError:
                 pass
-            raise
+        self._incremental_component_snapshot = incremental_store.save_payload(
+            payload_data,
+            compact=None if skip_index else self.compact(),
+            source_mtime_ns=source_mtime_ns,
+            source_size=source_size,
+            source_payload=payload_data if mirror_legacy_json else None,
+            component_snapshot=getattr(self, '_incremental_component_snapshot', None),
+        )
         if not skip_index:
             _write_session_index(updates=[self])
 
@@ -1531,6 +1702,36 @@ class Session:
         if not is_safe_session_id(sid):
             return None
         p = SESSION_DIR / f'{sid}.json'
+        incremental_store = _incremental_session_store()
+        try:
+            store_contains_session = incremental_store.contains(sid)
+        except Exception:
+            store_contains_session = False
+            logger.warning(
+                "Incremental session store unreadable; falling back to legacy sidecar for %s",
+                sid,
+                exc_info=True,
+            )
+        try:
+            if store_contains_session and not incremental_store.legacy_source_is_newer(sid, p):
+                stored = incremental_store.load_payload(sid)
+                if stored is not None:
+                    data, component_snapshot = stored
+                    data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(
+                        data.get('messages')
+                    )
+                    session = cls(**data)
+                    session._incremental_component_snapshot = component_snapshot
+                    if _collapsed_partials:
+                        session.save(touch_updated_at=False, skip_index=True)
+                    return session
+        except Exception:
+            store_contains_session = False
+            logger.warning(
+                "Incremental session read failed; falling back to legacy sidecar for %s",
+                sid,
+                exc_info=True,
+            )
         if not p.exists():
             return None
         # #5854: snapshot the stat signature BEFORE reading so a legacy-facts
@@ -1540,6 +1741,31 @@ class Session:
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
+        try:
+            if store_contains_session:
+                conflicts = incremental_store.reconcile_legacy_payload(data, p)
+                if conflicts:
+                    logger.warning(
+                        "Preserved newer incremental fields for session %s during "
+                        "legacy sidecar reconciliation: %s",
+                        sid,
+                        ", ".join(sorted(conflicts)),
+                    )
+                reconciled = incremental_store.load_payload(sid)
+                if reconciled is not None:
+                    data, component_snapshot = reconciled
+                    data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(
+                        data.get('messages')
+                    )
+                    session = cls(**data)
+                    session._incremental_component_snapshot = component_snapshot
+            else:
+                incremental_store.import_legacy_payload(data, p)
+            stored = incremental_store.load_payload(sid)
+            if stored is not None:
+                session._incremental_component_snapshot = stored[1]
+        except Exception:
+            logger.debug("Failed to import legacy session %s into incremental store", sid, exc_info=True)
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
@@ -1585,6 +1811,30 @@ class Session:
         if not is_safe_session_id(sid):
             return None
         p = SESSION_DIR / f'{sid}.json'
+        incremental_store = _incremental_session_store()
+        try:
+            store_contains_session = incremental_store.contains(sid)
+        except Exception:
+            store_contains_session = False
+        try:
+            if store_contains_session and not incremental_store.legacy_source_is_newer(sid, p):
+                stored_metadata = incremental_store.load_metadata(sid)
+                if stored_metadata is not None:
+                    stored_metadata['messages'] = []
+                    stored_metadata['tool_calls'] = []
+                    session = cls(**stored_metadata)
+                    session._metadata_message_count = _parse_nonnegative_int(
+                        stored_metadata.get('message_count')
+                    )
+                    session._loaded_metadata_only = True
+                    return session
+        except Exception:
+            store_contains_session = False
+            logger.warning(
+                "Incremental metadata read failed; falling back to legacy sidecar for %s",
+                sid,
+                exc_info=True,
+            )
         if not p.exists():
             return None
         try:
@@ -1696,7 +1946,7 @@ class Session:
                     n += 1
         return n
 
-    def compact(self, include_runtime=False, active_stream_ids=None) -> dict:
+    def compact(self, include_runtime=False, active_stream_ids=None, *, message_facts=True) -> dict:
         active_stream_ids = active_stream_ids if active_stream_ids is not None else set()
         has_pending_user_message = bool(self.pending_user_message)
         message_count = (
@@ -1706,10 +1956,14 @@ class Session:
         )
         if has_pending_user_message:
             message_count = max(message_count, 1)
-        last_message_at = _last_message_timestamp(self.messages) or self.updated_at
+        last_message_at = (
+            _last_message_timestamp(self.messages) or self.updated_at
+            if message_facts
+            else None
+        )
         if has_pending_user_message and self.pending_started_at:
             last_message_at = self.pending_started_at
-        return {
+        compact = {
             'session_id': self.session_id,
             'title': self.title,
             'workspace': self.workspace,
@@ -1718,7 +1972,6 @@ class Session:
             'message_count': message_count,
             'created_at': self.created_at,
             'updated_at': self.updated_at,
-            'last_message_at': last_message_at,
             'pinned': self.pinned,
             'archived': self.archived,
             'project_id': self.project_id,
@@ -1761,7 +2014,6 @@ class Session:
                 'worktree_repo_root': self.worktree_repo_root,
                 'worktree_created_at': self.worktree_created_at,
             } if self.worktree_path else {}),
-            'user_message_count': Session._compute_user_message_count(self.messages),
             'active_stream_id': self.active_stream_id,
             'pending_user_message': self.pending_user_message,
             'has_pending_user_message': has_pending_user_message,
@@ -1780,6 +2032,13 @@ class Session:
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,
         }
+        if last_message_at is not None:
+            compact['last_message_at'] = last_message_at
+        if message_facts:
+            compact['user_message_count'] = Session._compute_user_message_count(
+                self.messages
+            )
+        return compact
 
 
 PROCESS_WAKEUP_PROVIDER_UNAVAILABLE_TYPES = frozenset({
@@ -3374,10 +3633,9 @@ def _has_compression_continuation(session) -> bool:
         pass
 
     try:
-        if SESSION_INDEX_FILE.exists():
-            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
-            if isinstance(entries, list) and any(_row_is_continuation(e) for e in entries):
-                return True
+        entries = _read_session_index_rows()
+        if any(_row_is_continuation(e) for e in entries):
+            return True
     except Exception:
         logger.debug("Failed to inspect session index for compression continuation", exc_info=True)
 
@@ -5755,19 +6013,41 @@ def _diag_stage(diag, name: str) -> None:
 def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
     _diag_stage(diag, "all_sessions.active_streams")
     active_stream_ids = _active_stream_ids()
+    incremental_store = _incremental_session_store()
     # Phase C: try index first for O(1) read; fall back to full scan
     _diag_stage(diag, "all_sessions.index_exists")
-    if not SESSION_INDEX_FILE.exists():
+    if not SESSION_INDEX_FILE.exists() and not incremental_store.path.exists():
         _diag_stage(diag, "all_sessions.start_index_rebuild")
         _start_session_index_rebuild_thread()
-    if SESSION_INDEX_FILE.exists():
+    if SESSION_INDEX_FILE.exists() or incremental_store.path.exists():
         try:
             _diag_stage(diag, "all_sessions.read_index")
-            index = json.loads(SESSION_INDEX_FILE.read_bytes())
+            incremental_store.import_legacy_index_if_changed(SESSION_INDEX_FILE)
+            index = incremental_store.list_index(limit=_SESSION_LIST_LIMIT)
             _diag_stage(diag, "all_sessions.prune_index")
             with LOCK:
                 in_memory_ids = set(SESSIONS.keys())
-            persisted_ids = _persisted_session_ids_snapshot()
+            using_incremental_index = incremental_store.path.exists()
+            if using_incremental_index:
+                # Keyed rows are authoritative. Do not enumerate every retained
+                # session after a bounded query or recover omitted rows back into
+                # this response — that defeats pagination and recreates O(total).
+                candidate_ids = [
+                    str(row.get('session_id') or '')
+                    for row in index
+                    if row.get('session_id')
+                ]
+                persisted_ids = (
+                    incremental_store.existing_session_ids(candidate_ids)
+                    | frozenset(
+                        sid
+                        for sid in candidate_ids
+                        if os.path.exists(os.path.join(SESSION_DIR, f"{sid}.json"))
+                    )
+                    | frozenset(in_memory_ids)
+                )
+            else:
+                persisted_ids = _persisted_session_ids_snapshot()
             if not index and _session_dir_has_persisted_session_files():
                 raise ValueError("empty session index while session files exist")
             index = [
@@ -5816,7 +6096,7 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
                         active_stream_ids=active_stream_ids,
                     )
             missing_persisted_ids = []
-            if persisted_ids is not None:
+            if persisted_ids is not None and not using_incremental_index:
                 indexed_ids = {str(sid) for sid in index_map.keys() if sid}
                 missing_persisted_ids = sorted(
                     str(sid) for sid in persisted_ids
@@ -5903,6 +6183,8 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
             for s in result:
                 if not s.get('profile'):
                     s['profile'] = 'default'
+            if using_incremental_index:
+                result = result[:_SESSION_LIST_LIMIT]
             return result
         except Exception:
             logger.debug("Failed to load session index, falling back to full scan")
@@ -6005,9 +6287,9 @@ def _backfill_project_profiles_if_needed(projects: list) -> bool:
 
     # Build session_id -> profile map for the untagged project_ids.
     session_profile_by_project: dict[str, str] = {}
-    if SESSION_INDEX_FILE.exists():
+    if SESSION_INDEX_FILE.exists() or _incremental_session_store().path.exists():
         try:
-            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
+            entries = _read_session_index_rows()
             untagged_ids = {p['project_id'] for p in untagged if p.get('project_id')}
             for e in entries:
                 pid = e.get('project_id')

@@ -43,11 +43,13 @@ def test_all_sessions_reads_unicode_index_via_bytes(tmp_path, monkeypatch):
         {"session_id": "unic-1", "title": "Café ☕", "last_message_at": 10.0},
     ]
     idx.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+    (session_dir / "unic-1.json").write_text(
+        json.dumps(entries[0], ensure_ascii=False),
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", idx)
-    # Treat the indexed id as persisted so the prune step keeps it.
-    monkeypatch.setattr(models, "_persisted_session_ids_snapshot", lambda: frozenset({"unic-1"}))
     monkeypatch.setattr(models, "_active_stream_ids", lambda: set())
 
     result = models.all_sessions(include_lineage_metadata=False)
