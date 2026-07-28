@@ -15,40 +15,40 @@ NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 
-def _extract(name: str) -> str:
+def _extract(name: str, source: str = MESSAGES_JS) -> str:
     marker = f"async function {name}("
-    start = MESSAGES_JS.find(marker)
+    start = source.find(marker)
     if start < 0:
         marker = f"function {name}("
-        start = MESSAGES_JS.find(marker)
+        start = source.find(marker)
     assert start >= 0, f"missing function: {name}"
-    brace = MESSAGES_JS.find("{", start)
+    brace = source.find("{", start)
     depth = 0
-    for i in range(brace, len(MESSAGES_JS)):
-        ch = MESSAGES_JS[i]
+    for i in range(brace, len(source)):
+        ch = source[i]
         if ch == "{":
             depth += 1
         elif ch == "}":
             depth -= 1
             if depth == 0:
-                return MESSAGES_JS[start : i + 1]
+                return source[start : i + 1]
     raise AssertionError(f"unclosed function: {name}")
 
 
-def _extract_event_body(event_name: str) -> str:
+def _extract_event_body(event_name: str, source: str = MESSAGES_JS) -> str:
     marker = f"source.addEventListener('{event_name}'"
-    start = MESSAGES_JS.find(marker)
+    start = source.find(marker)
     assert start >= 0, f"missing event listener: {event_name}"
-    brace = MESSAGES_JS.find("{", start)
+    brace = source.find("{", start)
     depth = 0
-    for i in range(brace, len(MESSAGES_JS)):
-        ch = MESSAGES_JS[i]
+    for i in range(brace, len(source)):
+        ch = source[i]
         if ch == "{":
             depth += 1
         elif ch == "}":
             depth -= 1
             if depth == 0:
-                return "let transportGeneration=1;\n" + MESSAGES_JS[brace + 1 : i]
+                return "let transportGeneration=1;\n" + source[brace + 1 : i]
     raise AssertionError(f"unclosed event listener: {event_name}")
 
 
@@ -151,15 +151,31 @@ def _run_recovery_case(
     current_active_stream: str = "stream-1",
     stream_id: str = "stream-1",
     current_pane: bool | None = None,
+    source_override: str | None = None,
+    fallback_mutation: bool = False,
+    reconcile_mutation: bool = False,
 ):
-    current_owner = _extract("_currentLiveOwnerEntry")
-    current_owner_active = _extract("_currentLiveOwnerActive")
-    owner = _extract("_ownsActiveStreamOrBackground")
-    recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
-    fallback = _extract("_finalizeStreamEndFallback")
-    visible = _extract("_visibleLiveAssistantAnswerPresent")
-    reconcile = _extract("_reconcileStreamEndRecoveryExhaustion")
-    recovery = _extract("_runStreamEndRecovery")
+    source = source_override or MESSAGES_JS
+    current_owner = _extract("_currentLiveOwnerEntry", source)
+    current_owner_active = _extract("_currentLiveOwnerActive", source)
+    owner = _extract("_ownsActiveStreamOrBackground", source)
+    recovery_owner = _extract("_currentPaneRecoveryOwnerLost", source)
+    fallback = _extract("_finalizeStreamEndFallback", source)
+    visible = _extract("_visibleLiveAssistantAnswerPresent", source)
+    reconcile = _extract("_reconcileStreamEndRecoveryExhaustion", source)
+    if reconcile_mutation:
+        reconcile = reconcile.replace(
+            "_finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});",
+            "_finalizeStreamEndFallback(source,{transportGeneration});",
+            1,
+        )
+    recovery = _extract("_runStreamEndRecovery", source)
+    if fallback_mutation:
+        recovery = recovery.replace(
+            "_finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});",
+            "_finalizeStreamEndFallback(source,{transportGeneration});",
+            1,
+        )
     restore_results = list(restore_results)
     stream_status = stream_status or {}
     script = textwrap.dedent(
@@ -195,7 +211,12 @@ def _run_recovery_case(
         }};
         globalThis.assistantText = {assistant_text!r};
         globalThis.INFLIGHT = {{}};
-        globalThis.assistantBody = {{ isConnected: {str(bool(assistant_text)).lower()}, textContent: {assistant_text!r} }};
+        const liveAnswerNode = {{
+          isConnected: {str(bool(assistant_text)).lower()},
+          textContent: {assistant_text!r},
+          childSentinel: {{ textContent: 'child sentinel' }},
+        }};
+        globalThis.assistantBody = liveAnswerNode;
         globalThis.$ = () => null;
         globalThis._isActiveSession = () => active;
         globalThis._isSessionCurrentPane = () => {str((active if current_pane is None else current_pane)).lower()};
@@ -235,7 +256,10 @@ def _run_recovery_case(
         globalThis._clearClarifyForOwner = () => {{}};
         globalThis.clearLiveToolCards = () => {{ clearLiveToolCalls++; }};
         globalThis.removeThinking = () => {{ removeThinkingCalls++; }};
-        globalThis.renderMessages = () => {{ renderCalls++; }};
+        globalThis.renderMessages = () => {{
+          renderCalls++;
+          globalThis.assistantBody = {{ isConnected: false, textContent: 'rebuilt transcript' }};
+        }};
         globalThis.renderSessionList = () => {{ sessionListCalls++; }};
         globalThis._setActivePaneIdleIfOwner = () => {{ idleCalls++; }};
         globalThis._closeSource = () => {{ closeCalls++; }};
@@ -268,12 +292,97 @@ def _run_recovery_case(
             attempts: _streamEndRecoveryLease ? _streamEndRecoveryLease.attempts : 0,
             pending: !!_streamEndRecoveryLease,
             finalized: _streamFinalized,
-            terminal: _terminalStateReached
+            terminal: _terminalStateReached,
+            visibleNodePreserved: assistantBody === liveAnswerNode,
+            visibleAnswerText: assistantBody.textContent,
+            childSentinelText: assistantBody.childSentinel && assistantBody.childSentinel.textContent
           }}));
         }})().catch((error) => {{
           console.error(error && error.stack ? error.stack : String(error));
           process.exit(1);
         }});
+        """
+    )
+    proc = _run_node_script(script)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def _run_stream_end_restore_failure_case(source_override: str | None = None, event_mutation: bool = False):
+    source = source_override or MESSAGES_JS
+    current_owner = _extract("_currentLiveOwnerEntry", source)
+    current_owner_active = _extract("_currentLiveOwnerActive", source)
+    fallback = _extract("_finalizeStreamEndFallback", source)
+    visible = _extract("_visibleLiveAssistantAnswerPresent", source)
+    event_body = _extract_event_body("stream_end", source)
+    if event_mutation:
+        event_body = event_body.replace(
+            "_finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});",
+            "_finalizeStreamEndFallback(source,{transportGeneration});",
+            1,
+        )
+    script = textwrap.dedent(
+        f"""
+        let renderCalls = 0;
+        let closeCalls = 0;
+        let idleCalls = 0;
+        let sessionListCalls = 0;
+        let _liveOwnerToken = 1;
+        let _closureRetired = false;
+        let _streamFinalized = false;
+        let _terminalStateReached = false;
+        let _streamEndRecoveryLease = {{ generation: 1, source: null, timer: null, attempts: 0 }};
+        let _persistTimer = null;
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let assistantText = 'final streamed answer';
+        const liveAnswerNode = {{ isConnected: true, textContent: assistantText,
+          childSentinel: {{ textContent: 'child sentinel' }} }};
+        const source = {{ readyState: 1, close() {{ closeCalls += 1; this.readyState = 2; }} }};
+        globalThis.S = {{ session: {{ session_id: activeSid }}, activeStreamId: streamId, messages: [] }};
+        globalThis.LIVE_STREAMS = {{ 'sid-1': {{ streamId, source, ownerToken: 1, transportGeneration: 1 }} }};
+        globalThis.assistantBody = liveAnswerNode;
+        globalThis._isActiveSession = () => true;
+        globalThis._isSessionCurrentPane = () => true;
+        globalThis._currentLiveEventSourceOwnsStream = () => true;
+        globalThis._ownsActiveStreamOrBackground = () => true;
+        globalThis._liveStreamEndScenePresent = () => false;
+        globalThis._clearStreamEndRecovery = () => {{ _streamEndRecoveryLease = null; }};
+        globalThis._restoreSettledSession = async () => 'error';
+        globalThis._cancelThrottledSnapshotTimer = () => {{}};
+        globalThis._cancelAnimationFramePendingStreamRender = () => {{}};
+        globalThis._streamFadeCleanupReduceMotionListener = () => {{}};
+        globalThis._smdEndParser = () => {{}};
+        globalThis._clearOwnerInflightState = () => {{}};
+        globalThis._clearStreamHidden = () => {{}};
+        globalThis._clearStreamNotificationBackground = () => {{}};
+        globalThis._flushReasoningToAnchor = () => {{}};
+        globalThis._scheduleAnchorRegistryCleanup = () => {{}};
+        globalThis._clearAnchorProseIncrementalNode = () => {{}};
+        globalThis._clearApprovalForOwner = () => {{}};
+        globalThis._clearClarifyForOwner = () => {{}};
+        globalThis.clearLiveToolCards = () => {{}};
+        globalThis.removeThinking = () => {{}};
+        globalThis.renderMessages = () => {{ renderCalls += 1; globalThis.assistantBody = {{ isConnected: false, textContent: 'rebuilt' }}; }};
+        globalThis.renderSessionList = () => {{ sessionListCalls += 1; }};
+        globalThis._setActivePaneIdleIfOwner = () => {{ idleCalls += 1; }};
+        globalThis._closeSource = () => {{ closeCalls += 1; }};
+        {current_owner}
+        {current_owner_active}
+        {visible}
+        {fallback}
+        const handler = async (event) => {{
+          {event_body}
+        }};
+        await handler({{ currentTarget: source, target: source, data: JSON.stringify({{ session_id: activeSid }}) }});
+        console.log(JSON.stringify({{
+          renderCalls, closeCalls, idleCalls, sessionListCalls,
+          activeStreamId: S.activeStreamId, finalized: _streamFinalized,
+          terminal: _terminalStateReached, recoveryPending: !!_streamEndRecoveryLease,
+          visibleNodePreserved: assistantBody === liveAnswerNode,
+          visibleAnswerText: assistantBody.textContent,
+          childSentinelText: assistantBody.childSentinel && assistantBody.childSentinel.textContent,
+        }}));
         """
     )
     proc = _run_node_script(script)
@@ -979,7 +1088,7 @@ def test_long_tail_recovery_reattaches_when_stream_status_stays_active():
     assert result["pending"] is False
 
 
-def test_direct_error_recovery_rebuilds_even_with_visible_live_answer():
+def test_direct_error_recovery_preserves_visible_live_answer_until_cleanup_finishes():
     result = _run_recovery_case(
         active=True,
         restore_results=["error"],
@@ -990,14 +1099,20 @@ def test_direct_error_recovery_rebuilds_even_with_visible_live_answer():
 
     assert result["wireCalls"] == 0
     assert result["scheduleDelays"] == []
-    assert result["renderCalls"] == 1
+    assert result["renderCalls"] == 0
     assert result["clearLiveToolCalls"] == 1
     assert result["removeThinkingCalls"] == 0
     assert result["activeStreamId"] is None
     assert result["finalized"] is True
+    assert result["terminal"] is True
+    assert result["visibleNodePreserved"] is True
+    assert result["visibleAnswerText"] == "final streamed answer"
+    assert result["childSentinelText"] == "child sentinel"
+    assert result["sessionListCalls"] == 1
+    assert result["idleCalls"] == 1
 
 
-def test_long_tail_recovery_rebuilds_when_stream_turns_inactive_after_exhaustion():
+def test_long_tail_recovery_preserves_visible_live_answer_after_exhaustion_reconcile():
     result = _run_recovery_case(
         active=True,
         restore_results=["active", False],
@@ -1008,11 +1123,17 @@ def test_long_tail_recovery_rebuilds_when_stream_turns_inactive_after_exhaustion
 
     assert result["wireCalls"] == 0
     assert result["scheduleDelays"] == []
-    assert result["renderCalls"] == 1
+    assert result["renderCalls"] == 0
     assert result["clearLiveToolCalls"] == 1
     assert result["removeThinkingCalls"] == 0
     assert result["activeStreamId"] is None
     assert result["finalized"] is True
+    assert result["terminal"] is True
+    assert result["visibleNodePreserved"] is True
+    assert result["visibleAnswerText"] == "final streamed answer"
+    assert result["childSentinelText"] == "child sentinel"
+    assert result["sessionListCalls"] == 1
+    assert result["idleCalls"] == 1
 
 
 def test_long_tail_recovery_without_visible_live_answer_still_rebuilds_when_stream_turns_inactive():
@@ -1031,6 +1152,43 @@ def test_long_tail_recovery_without_visible_live_answer_still_rebuilds_when_stre
     assert result["removeThinkingCalls"] == 1
     assert result["activeStreamId"] is None
     assert result["finalized"] is True
+
+
+def test_stream_end_restore_failure_preserves_visible_answer_and_finishes_terminal_cleanup():
+    result = _run_stream_end_restore_failure_case()
+
+    assert result["renderCalls"] == 0
+    assert result["visibleNodePreserved"] is True
+    assert result["visibleAnswerText"] == "final streamed answer"
+    assert result["childSentinelText"] == "child sentinel"
+    assert result["finalized"] is True
+    assert result["terminal"] is True
+    assert result["recoveryPending"] is False
+    assert result["activeStreamId"] is None
+    assert result["idleCalls"] == 1
+    assert result["sessionListCalls"] == 1
+    assert result["closeCalls"] == 1
+
+
+def test_each_visible_answer_fallback_caller_is_mutation_sensitive():
+    cases = [
+        ("direct", ["error"], 3),
+        ("exhaustion", ["active", False], 15),
+    ]
+    for label, restore_results, attempts in cases:
+        result = _run_recovery_case(
+            active=True,
+            restore_results=restore_results,
+            attempts=attempts,
+            assistant_text="final streamed answer",
+            stream_status={"active": False, "replay_available": False},
+            fallback_mutation=label == "direct",
+            reconcile_mutation=label == "exhaustion",
+        )
+        assert result["renderCalls"] == 1, label
+
+    result = _run_stream_end_restore_failure_case(event_mutation=True)
+    assert result["renderCalls"] == 1
 
 
 def test_long_tail_recovery_does_not_reattach_stale_stream_over_replacement_owner():
