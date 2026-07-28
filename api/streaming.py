@@ -3544,6 +3544,22 @@ def _dominant_script(text: str) -> str:
 
 
 def _title_prompt_language_rule(user_text: str) -> str:
+    """Return the language instruction used by every title prompt.
+
+    Honours ``auxiliary.title_generation.language`` when the user has pinned a
+    title language -- Hermes Agent's own generator applies the same pin via
+    ``_TITLE_PROMPT_PINNED_LANGUAGE``, so without this the setting only takes
+    effect on native surfaces and WebUI titles drift independently.
+
+    Falls back to the previous "match the conversation start" instruction when
+    no language is configured, so unpinned installs are unaffected.
+    """
+    try:
+        language = str((_get_aux_title_config() or {}).get("language", "") or "").strip()
+    except Exception:
+        language = ""
+    if language:
+        return f"Write the title in {language}.\n"
     return "Match the language of the user question.\n"
 
 
