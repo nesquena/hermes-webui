@@ -317,6 +317,8 @@ def _run_composed_recovery_case(*, exhaustion: bool, fallback_mutation: bool = F
     recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
     clear_recovery = _extract("_clearStreamEndRecovery")
     close_source = _extract("_closeSource")
+    close_live_stream = _extract("closeLiveStream")
+    retire = _extract("_retireLiveClosure")
     schedule = _extract("_scheduleStreamEndRecovery")
     recovery = _extract("_runStreamEndRecovery")
     reconcile = _extract("_reconcileStreamEndRecoveryExhaustion")
@@ -325,6 +327,11 @@ def _run_composed_recovery_case(*, exhaustion: bool, fallback_mutation: bool = F
     wire = _extract("_wireSSE")
     if fallback_mutation:
         recovery = recovery.replace(
+            "_finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});",
+            "_finalizeStreamEndFallback(source,{transportGeneration});",
+            1,
+        )
+        reconcile = reconcile.replace(
             "_finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});",
             "_finalizeStreamEndFallback(source,{transportGeneration});",
             1,
@@ -342,6 +349,8 @@ def _run_composed_recovery_case(*, exhaustion: bool, fallback_mutation: bool = F
         let _streamFinalized=false;
         let _persistTimer=null;
         let _streamEndRecoveryLease=null;
+        let _deferredStreamRecoveryResume=null;
+        let _deferredStreamRecoveryBound=false;
         let liveReasoningText='';
         let reasoningText='';
         let assistantText='final streamed answer';
@@ -351,6 +360,11 @@ def _run_composed_recovery_case(*, exhaustion: bool, fallback_mutation: bool = F
         const timers=[];
         const closeTrace=[];
         let physicalCloseCalls=0;
+        let clearLiveToolCalls=0;
+        let idleCalls=0;
+        let sessionListCalls=0;
+        let retainedGeneration=null;
+        let productionCloseCalls=0;
         let restoreIndex=0;
         const restoreStatuses={json.dumps(statuses)};
         class FakeEventSource {{
@@ -378,19 +392,16 @@ def _run_composed_recovery_case(*, exhaustion: bool, fallback_mutation: bool = F
         globalThis._clearApprovalForOwner=()=>{{}};
         globalThis._clearClarifyForOwner=()=>{{}};
         globalThis.finalizeThinkingCard=()=>{{}};
-        globalThis.clearLiveToolCards=()=>{{}};
+        globalThis.clearLiveToolCards=()=>{{clearLiveToolCalls+=1;}};
         globalThis.removeThinking=()=>{{}};
         globalThis.renderMessages=()=>{{assistantBody={{isConnected:false,textContent:'rebuilt'}};}};
-        globalThis.renderSessionList=()=>{{}};
-        globalThis._setActivePaneIdleIfOwner=()=>{{}};
+        globalThis.renderSessionList=()=>{{sessionListCalls+=1;}};
+        globalThis._setActivePaneIdleIfOwner=()=>{{idleCalls+=1;}};
         globalThis.snapshotLiveTurnHtmlForSession=()=>{{}};
         globalThis._clearLiveRunStatusTimer=()=>{{}};
         globalThis.hideLiveRunStatus=()=>{{}};
-        function closeLiveStream(sid, id, closingSource){{
-          if(closingSource && closingSource!==source) throw new Error('wrong source');
-          if(closingSource && closingSource.readyState!==2) closingSource.close();
-          if(LIVE_STREAMS[sid] && LIVE_STREAMS[sid].source===closingSource) LIVE_STREAMS[sid]={{...LIVE_STREAMS[sid],source:null}};
-        }};
+        globalThis._resumeSessionStreamAfterLiveChat=()=>{{}};
+        globalThis.INFLIGHT={{}};
         globalThis.setTimeout=(callback)=>{{timers.push(callback);return timers.length;}};
         globalThis.clearTimeout=()=>{{}};
         globalThis._restoreSettledSession=async()=>restoreStatuses[restoreIndex++] ?? false;
@@ -418,18 +429,16 @@ def _run_composed_recovery_case(*, exhaustion: bool, fallback_mutation: bool = F
         {recovery_owner}
         {clear_recovery}
         {close_source}
-        function _retireLiveClosure(closingSource, requiredGeneration){{
-          const live=_currentLiveOwnerEntry();
-          if(_closureRetired || !live || (requiredGeneration!=null && live.transportGeneration!==requiredGeneration) || (closingSource && live.source!==closingSource)) return;
-          _closureRetired=true;
-          if(closingSource && closingSource.readyState!==2) closingSource.close();
-          LIVE_STREAMS[activeSid]={{...live,source:null}};
-          _clearStreamEndRecovery(requiredGeneration);
-        }}
+        {close_live_stream}
+        {retire}
+        const productionCloseLiveStream=closeLiveStream;
+        closeLiveStream=(sid,id,closingSource)=>{{productionCloseCalls+=1;return productionCloseLiveStream(sid,id,closingSource);}};
         const originalCloseSource=_closeSource;
         _closeSource=(closingSource, options=null)=>{{
           closeTrace.push({{source:closingSource, generation:options&&options.transportGeneration, retain:!!(options&&options.retainOwner)}});
-          return originalCloseSource(closingSource,options);
+          const result=originalCloseSource(closingSource,options);
+          if(options&&options.retainOwner) retainedGeneration=LIVE_STREAMS[activeSid]&&LIVE_STREAMS[activeSid].transportGeneration;
+          return result;
         }};
         {schedule}
         {visible}
@@ -450,7 +459,15 @@ def _run_composed_recovery_case(*, exhaustion: bool, fallback_mutation: bool = F
           closeTrace:closeTrace.map(call=>({{sameSource:call.source===source,generation:call.generation,retain:call.retain}})),
           physicalCloseCalls,
           leaseCleared:_streamEndRecoveryLease===null,
-          finalGeneration:LIVE_STREAMS[activeSid].transportGeneration,
+          finalGeneration:retainedGeneration || (LIVE_STREAMS[activeSid]&&LIVE_STREAMS[activeSid].transportGeneration),
+          registryDeleted:!LIVE_STREAMS[activeSid],
+          productionCloseCalls,
+          sourceReadyState:source.readyState,
+          closureRetired:_closureRetired,
+          activeStreamId:S.activeStreamId,
+          clearLiveToolCalls,
+          idleCalls,
+          sessionListCalls,
           visibleNodePreserved:assistantBody===liveAnswerNode,
           childSentinel:assistantBody.childSentinel&&assistantBody.childSentinel.textContent,
           finalized:_streamFinalized,terminal:_terminalStateReached
@@ -1297,10 +1314,21 @@ def test_direct_error_recovery_preserves_visible_live_answer_until_cleanup_finis
     assert result["closeTrace"] == [{"sameSource": True, "generation": 2, "retain": False}]
     assert result["physicalCloseCalls"] == 1
     assert result["leaseCleared"] is True
+    assert result["clearLiveToolCalls"] == 1
+    assert result["idleCalls"] == 1
+    assert result["sessionListCalls"] == 1
+    assert result["registryDeleted"] is True
+    assert result["productionCloseCalls"] == 1
+    assert result["sourceReadyState"] == 2
+    assert result["closureRetired"] is True
+    assert result["activeStreamId"] is None
     assert result["visibleNodePreserved"] is True
     assert result["childSentinel"] == "child sentinel"
     assert result["finalized"] is True
     assert result["terminal"] is True
+
+    mutated = _run_composed_recovery_case(exhaustion=False, fallback_mutation=True)
+    assert mutated["visibleNodePreserved"] is False
 
 
 def test_long_tail_recovery_preserves_visible_live_answer_after_exhaustion_reconcile():
@@ -1314,10 +1342,21 @@ def test_long_tail_recovery_preserves_visible_live_answer_after_exhaustion_recon
     assert result["physicalCloseCalls"] == 1
     assert result["leaseCleared"] is True
     assert result["finalGeneration"] == 3
+    assert result["clearLiveToolCalls"] == 1
+    assert result["idleCalls"] == 1
+    assert result["sessionListCalls"] == 1
+    assert result["registryDeleted"] is True
+    assert result["productionCloseCalls"] == 1
+    assert result["sourceReadyState"] == 2
+    assert result["closureRetired"] is True
+    assert result["activeStreamId"] is None
     assert result["visibleNodePreserved"] is True
     assert result["childSentinel"] == "child sentinel"
     assert result["finalized"] is True
     assert result["terminal"] is True
+
+    mutated = _run_composed_recovery_case(exhaustion=True, fallback_mutation=True)
+    assert mutated["visibleNodePreserved"] is False
 
 
 def test_apererror_recovers_on_registered_wire_listener_generation():
