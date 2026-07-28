@@ -1349,6 +1349,7 @@ class Session:
                  compression_anchor_message_key=None,
                  compression_anchor_summary=None,
                  pre_compression_snapshot: bool=False,
+                 pre_compression_continuation_session_id: str=None,
                  context_engine=None,
                  compression_anchor_engine=None,
                  compression_anchor_mode=None,
@@ -1418,6 +1419,11 @@ class Session:
         self.compression_anchor_message_key = compression_anchor_message_key
         self.compression_anchor_summary = compression_anchor_summary
         self.pre_compression_snapshot = bool(pre_compression_snapshot)
+        self.pre_compression_continuation_session_id = (
+            str(pre_compression_continuation_session_id).strip()
+            if pre_compression_continuation_session_id
+            else None
+        )
         self.context_engine = context_engine
         self.compression_anchor_engine = compression_anchor_engine
         self.compression_anchor_mode = compression_anchor_mode
@@ -1521,6 +1527,7 @@ class Session:
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
+            'pre_compression_continuation_session_id',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
             'compression_anchor_details', 'context_engine_state',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',

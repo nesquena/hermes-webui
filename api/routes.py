@@ -9614,6 +9614,46 @@ def _pre_compression_continuation_session_id(session) -> str | None:
     rows.extend(_child_rows_from_sidecars(memory_seen_ids))
     return _resolve_from_rows(rows)
 
+
+def _draft_pre_compression_continuation_session_authority(
+    session,
+    *,
+    request_profile,
+    seen_authority_sids: set[str],
+) -> tuple[str | None, str]:
+    """Validate one authoritative compression transition from a snapshot.
+
+    Returns:
+        (next_session, next_sid) when a validated transition exists.
+        (None, best_known_sid) when authority cannot be confirmed.
+    """
+    snapshot_sid = _safe_first(getattr(session, "session_id", None))
+    if not snapshot_sid or not is_safe_session_id(snapshot_sid):
+        return None, snapshot_sid
+
+    continuation_sid = _safe_first(
+        getattr(session, "pre_compression_continuation_session_id", None)
+    )
+    if not continuation_sid or not is_safe_session_id(continuation_sid):
+        return None, snapshot_sid
+    if continuation_sid in seen_authority_sids:
+        return None, continuation_sid
+
+    try:
+        continuation_session = get_session(continuation_sid)
+    except KeyError:
+        return None, continuation_sid
+
+    if not _profiles_match(
+        getattr(continuation_session, "profile", None), request_profile
+    ):
+        return None, continuation_sid
+
+    if _safe_first(getattr(continuation_session, "parent_session_id", None)) != snapshot_sid:
+        return None, continuation_sid
+
+    return continuation_session, continuation_sid
+
 from api.workspace import (
     load_workspaces,
     save_workspaces,
@@ -14776,7 +14816,12 @@ def handle_post(handler, parsed) -> bool:
                     if not resolved_sid or not is_safe_session_id(resolved_sid):
                         return j(
                             handler,
-                            {"ok": False, "error": "Session moved", "session_id": request_sid},
+                            {
+                                "ok": False,
+                                "error": "Session moved",
+                                "session_id": request_sid,
+                                "code": "session_moved",
+                            },
                             status=409,
                         )
                     if resolved_sid != authoritative_sid:
@@ -14789,6 +14834,7 @@ def handle_post(handler, parsed) -> bool:
                                             "ok": False,
                                             "error": "Session moved",
                                             "session_id": resolved_sid,
+                                            "code": "session_moved",
                                         },
                                         status=409,
                                     )
@@ -14812,13 +14858,23 @@ def handle_post(handler, parsed) -> bool:
                 if not resolved_sid or not is_safe_session_id(resolved_sid):
                     return j(
                         handler,
-                        {"ok": False, "error": "Session moved", "session_id": authoritative_sid},
+                        {
+                            "ok": False,
+                            "error": "Session moved",
+                            "session_id": authoritative_sid,
+                            "code": "session_moved",
+                        },
                         status=409,
                     )
                 if not _profiles_match(getattr(request_session, "profile", None), request_profile):
                     return j(
                         handler,
-                        {"ok": False, "error": "Session moved", "session_id": authoritative_sid},
+                        {
+                            "ok": False,
+                            "error": "Session moved",
+                            "session_id": authoritative_sid,
+                            "code": "session_moved",
+                        },
                         status=409,
                     )
 
@@ -14826,7 +14882,12 @@ def handle_post(handler, parsed) -> bool:
                     if resolved_sid in _seen_authority_sids:
                         return j(
                             handler,
-                            {"ok": False, "error": "Session moved", "session_id": resolved_sid},
+                            {
+                                "ok": False,
+                                "error": "Session moved",
+                                "session_id": resolved_sid,
+                                "code": "session_moved",
+                            },
                             status=409,
                         )
                     _seen_authority_sids.add(resolved_sid)
@@ -14835,21 +14896,25 @@ def handle_post(handler, parsed) -> bool:
 
                 continuation_sid = None
                 if getattr(request_session, "pre_compression_snapshot", False):
-                    continuation_sid = _pre_compression_continuation_session_id(request_session)
-
-                if continuation_sid:
-                    if not is_safe_session_id(continuation_sid):
+                    continuation_session, continuation_sid = (
+                        _draft_pre_compression_continuation_session_authority(
+                            request_session,
+                            request_profile=request_profile,
+                            seen_authority_sids=_seen_authority_sids,
+                        )
+                    )
+                    if not continuation_session:
                         return j(
                             handler,
-                            {"ok": False, "error": "Session moved", "session_id": authoritative_sid},
+                            {
+                                "ok": False,
+                                "error": "Session moved",
+                                "session_id": continuation_sid or authoritative_sid,
+                                "code": "session_moved",
+                            },
                             status=409,
                         )
-                    if continuation_sid in _seen_authority_sids:
-                        return j(
-                            handler,
-                            {"ok": False, "error": "Session moved", "session_id": continuation_sid},
-                            status=409,
-                        )
+                    request_session = continuation_session
                     _seen_authority_sids.add(continuation_sid)
                     authoritative_sid = continuation_sid
                     continue
@@ -14918,7 +14983,12 @@ def handle_post(handler, parsed) -> bool:
         if not resolved_once:
             return j(
                 handler,
-                {"ok": False, "error": "Session moved", "session_id": request_sid},
+                {
+                    "ok": False,
+                    "error": "Session moved",
+                    "session_id": authoritative_sid,
+                    "code": "session_moved",
+                },
                 status=409,
             )
         _draft_mark("released_lock")

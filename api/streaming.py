@@ -4371,7 +4371,7 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     return None, llm_status or 'empty_title', raw_preview
 
 
-def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
+def _preserve_pre_compression_snapshot(s, old_sid: str, continuation_sid: str | None = None) -> None:
     """Persist old_sid as a read-only pre-compression snapshot.
 
     Context compression rotates the active WebUI session id from old_sid to the
@@ -4399,9 +4399,19 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             # pre-existing parent_session_id lineage.
             saved_sid = s.session_id
             saved_snapshot = bool(getattr(s, 'pre_compression_snapshot', False))
+            saved_continuation_sid = (
+                str(getattr(s, 'pre_compression_continuation_session_id', None) or '')
+                if getattr(s, 'pre_compression_continuation_session_id', None)
+                else None
+            )
             saved_pinned = bool(getattr(s, 'pinned', False))
             s.session_id = old_sid
             s.pre_compression_snapshot = True
+            s.pre_compression_continuation_session_id = (
+                str(continuation_sid).strip()
+                if continuation_sid
+                else None
+            )
             s.pinned = False
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
             # archived snapshot so the sidebar does not reopen the parent as
@@ -4431,6 +4441,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             finally:
                 s.session_id = saved_sid
                 s.pre_compression_snapshot = saved_snapshot
+                s.pre_compression_continuation_session_id = saved_continuation_sid
                 s.pinned = saved_pinned
                 s.active_stream_id = saved_active_stream_id
                 s.pending_user_message = saved_pending_user_message
@@ -4445,6 +4456,11 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
         snapshot = Session.load(old_sid)
         if snapshot:
             snapshot.pre_compression_snapshot = True
+            snapshot.pre_compression_continuation_session_id = (
+                str(continuation_sid).strip()
+                if continuation_sid
+                else None
+            )
             snapshot.pinned = False
             # Stage-359 Opus SHOULD-FIX: clear runtime fields on the loaded
             # snapshot too. If the disk snapshot was last persisted while the
@@ -4467,6 +4483,36 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
         logger.debug("Could not read old session file before preservation")
     except Exception:
         logger.debug("Failed to preserve pre-compression session file", exc_info=True)
+
+
+def _migrate_compression_session_ownership(s, old_sid: str, new_sid: str, agent_lock) -> None:
+    """Move live session and lock ownership to a compression continuation."""
+    s.session_id = new_sid
+    _preserve_pre_compression_snapshot(s, old_sid, new_sid)
+    s.pre_compression_snapshot = False
+    s.pre_compression_continuation_session_id = None
+    s.parent_session_id = old_sid
+
+    with LOCK:
+        cached_old_session = SESSIONS.pop(old_sid, None)
+        if cached_old_session is not None and cached_old_session is not s:
+            cached_old_sid = str(getattr(cached_old_session, 'session_id', '') or '')
+            if cached_old_sid == str(old_sid):
+                SESSIONS[old_sid] = cached_old_session
+            else:
+                logger.warning(
+                    "compression cache migration skipped stale object: old_sid=%s new_sid=%s cached_session_id=%s",
+                    old_sid,
+                    new_sid,
+                    cached_old_sid or None,
+                )
+        SESSIONS[new_sid] = s
+        SESSIONS.move_to_end(new_sid)
+        _evict_sessions_over_cap()
+
+    with SESSION_AGENT_LOCKS_LOCK:
+        SESSION_AGENT_LOCKS[new_sid] = agent_lock
+        SESSION_AGENT_LOCKS.pop(old_sid, None)
 
 
 def _maybe_schedule_title_refresh(session, put_event, agent):
@@ -9791,59 +9837,7 @@ def _run_agent_streaming(
                             "Stamped profile=%r on continuation session %s after compression",
                             _resolved_profile_name, new_sid,
                         )
-                    # Preserve the original session file so the full pre-compression
-                    # history survives even when summarisation fails. The previous
-                    # implementation renamed old_sid.json → new_sid.json, which
-                    # destroyed the only persistent copy of the uncompressed history
-                    # before the new (possibly summary-only) session had been saved.
-                    # If the LLM summariser also failed, the user was left with zero
-                    # recoverable messages. (#2223)
-                    # ---
-                    # Archive the old session: write its current state to disk so
-                    # the full conversation history survives even when context
-                    # compression removes messages from the model's context. Skip
-                    # the write when the file already contains up-to-date data
-                    # (i.e. it was just saved by a checkpoint).
-                    _preserve_pre_compression_snapshot(s, old_sid)
-                    # The continuation is the live/tip session, not another archived
-                    # snapshot. If the in-memory object was itself loaded from a
-                    # pre-compression snapshot (possible on repeated compression chains
-                    # or stale-cache repair paths), _preserve_pre_compression_snapshot()
-                    # intentionally restores that old flag; clear it before saving the
-                    # new continuation so sidebar/discoverability code does not hide the
-                    # session that owns the completed turn.
-                    s.pre_compression_snapshot = False
-                    # Always link the continuation session to its immediate predecessor
-                    # (the preserved snapshot). This OVERRIDES any prior
-                    # parent_session_id because the new continuation IS the next link
-                    # in the chain: traversal walks new → old → old.parent → ... root.
-                    # Stage-353 Opus SHOULD-FIX: previous `if not s.parent_session_id`
-                    # guard skipped this stamp on fork-of-fork compressions, so a
-                    # subsequent traversal from the new continuation would jump
-                    # over the just-preserved snapshot back to the original fork
-                    # parent, losing access to the recoverable history in old_sid.json.
-                    s.parent_session_id = old_sid
-                    with LOCK:
-                        cached_old_session = SESSIONS.pop(old_sid, None)
-                        if cached_old_session is not None and cached_old_session is not s:
-                            cached_old_sid = str(getattr(cached_old_session, 'session_id', '') or '')
-                            if cached_old_sid == str(old_sid):
-                                SESSIONS[old_sid] = cached_old_session
-                            else:
-                                logger.warning(
-                                    "compression cache migration skipped stale object: old_sid=%s new_sid=%s cached_session_id=%s",
-                                    old_sid,
-                                    new_sid,
-                                    cached_old_sid or None,
-                                )
-                        SESSIONS[new_sid] = s
-                        SESSIONS.move_to_end(new_sid)
-                        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-                    # Migrate the per-session lock by aliasing new_sid to the
-                    # held _agent_lock reference directly. Keep old_sid aliased
-                    # too until the weak registry can reclaim both safely after
-                    # all old-ID holders and waiters release the lock.
-                    _alias_session_agent_lock(old_sid, new_sid, _agent_lock)
+                    _migrate_compression_session_ownership(s, old_sid, new_sid, _agent_lock)
                     # Migrate cached agent to the new session ID so the turn
                     # count survives context compression.
                     from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK

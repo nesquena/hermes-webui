@@ -109,6 +109,7 @@ def _build_pre_compression_migration_state(tmp_path, monkeypatch):
 
     old_sid = "sid-rotation-old"
     continuation_sid = "sid-rotation-new"
+    fork_sid = "sid-rotation-fork"
     old_session = models.Session(
         session_id=old_sid,
         title="Compression snapshot",
@@ -124,21 +125,32 @@ def _build_pre_compression_migration_state(tmp_path, monkeypatch):
             {"role": "user", "content": "question"},
             {"role": "assistant", "content": "compressed reply"},
         ],
+        updated_at=1234.0,
     )
     continuation.save(touch_updated_at=False, skip_index=True)
-    streaming._preserve_pre_compression_snapshot(continuation, old_sid)
-    continuation.save(touch_updated_at=False, skip_index=True)
-
-    with routes.LOCK:
-        models.SESSIONS.clear()
-        models.SESSIONS[continuation_sid] = continuation
+    fork = models.Session(
+        session_id=fork_sid,
+        title="Ordinary fork sibling",
+        parent_session_id=old_sid,
+        session_source="fork",
+        messages=[{"role": "user", "content": "forked question"}],
+        updated_at=1250.0,
+    )
+    fork.save(touch_updated_at=False, skip_index=True)
 
     old_lock = routes._get_session_agent_lock(old_sid)
-    with routes.SESSION_AGENT_LOCKS_LOCK:
-        routes.SESSION_AGENT_LOCKS[continuation_sid] = old_lock
-        routes.SESSION_AGENT_LOCKS.pop(old_sid, None)
+    with routes.LOCK:
+        models.SESSIONS.clear()
+        models.SESSIONS[old_sid] = continuation
+    streaming._migrate_compression_session_ownership(
+        continuation,
+        old_sid,
+        continuation_sid,
+        old_lock,
+    )
+    continuation.save(touch_updated_at=False, skip_index=True)
 
-    return models, routes, session_dir, old_sid, continuation_sid
+    return models, routes, session_dir, old_sid, continuation_sid, fork_sid
 
 
 def test_dedicated_draft_overlays_full_and_metadata_loads(tmp_path, monkeypatch):
@@ -427,7 +439,7 @@ def test_draft_post_for_stale_request_sid_does_not_write_under_old_sid(tmp_path,
 
 
 def test_draft_post_for_stale_pre_compression_snapshot_writes_to_continuation(tmp_path, monkeypatch):
-    models, routes, session_dir, old_sid, continuation_sid = _build_pre_compression_migration_state(
+    models, routes, session_dir, old_sid, continuation_sid, fork_sid = _build_pre_compression_migration_state(
         tmp_path, monkeypatch
     )
 
@@ -436,19 +448,28 @@ def test_draft_post_for_stale_pre_compression_snapshot_writes_to_continuation(tm
             monkeypatch,
             routes,
             "/api/session/draft",
-            {"session_id": old_sid, "text": "recover from archived snapshot", "files": []},
+            {
+                "session_id": old_sid,
+                "text": "recover from archived snapshot",
+                "files": [{"name": "proof.txt"}],
+            },
         )
 
         assert status == 200
         assert payload["session_id"] == continuation_sid
-        assert payload["draft"] == {"text": "recover from archived snapshot", "files": []}
+        assert payload["draft"] == {"text": "recover from archived snapshot", "files": [{"name": "proof.txt"}]}
 
         assert not (session_dir / ".drafts" / f"{old_sid}.json").exists()
         assert (session_dir / ".drafts" / f"{continuation_sid}.json").exists()
+        assert not (session_dir / ".drafts" / f"{fork_sid}.json").exists()
+        assert (session_dir / f"{old_sid}.json").exists()
+        assert json.loads((session_dir / f"{old_sid}.json").read_text(encoding="utf-8")).get(
+            "pre_compression_continuation_session_id"
+        ) == continuation_sid
 
         models.SESSIONS.clear()
         loaded = models.Session.load(continuation_sid)
-        assert loaded.composer_draft == {"text": "recover from archived snapshot", "files": []}
+        assert loaded.composer_draft == {"text": "recover from archived snapshot", "files": [{"name": "proof.txt"}]}
         assert (session_dir / f"{old_sid}.json").exists()
     finally:
         with routes.SESSION_AGENT_LOCKS_LOCK:
@@ -459,7 +480,7 @@ def test_draft_post_for_stale_pre_compression_snapshot_writes_to_continuation(tm
 def test_draft_post_for_stale_pre_compression_snapshot_profile_mismatch_rejected(
     tmp_path, monkeypatch
 ):
-    models, routes, session_dir, old_sid, continuation_sid = _build_pre_compression_migration_state(
+    models, routes, session_dir, old_sid, continuation_sid, fork_sid = _build_pre_compression_migration_state(
         tmp_path,
         monkeypatch,
     )
@@ -487,6 +508,7 @@ def test_draft_post_for_stale_pre_compression_snapshot_profile_mismatch_rejected
         assert status == 409
         assert payload["ok"] is False
         assert payload["error"] == "Session moved"
+        assert payload["code"] == "session_moved"
         assert payload["session_id"] == continuation_sid
         assert not (session_dir / ".drafts" / f"{old_sid}.json").exists()
         assert not (session_dir / ".drafts" / f"{continuation_sid}.json").exists()
@@ -497,7 +519,7 @@ def test_draft_post_for_stale_pre_compression_snapshot_profile_mismatch_rejected
 
 
 def test_draft_post_waits_for_rotation_while_lock_waits_for_authority(tmp_path, monkeypatch):
-    models, routes, session_dir, old_sid, continuation_sid = _build_pre_compression_migration_state(
+    models, routes, session_dir, old_sid, continuation_sid, fork_sid = _build_pre_compression_migration_state(
         tmp_path,
         monkeypatch,
     )
@@ -571,6 +593,84 @@ def test_draft_post_waits_for_rotation_while_lock_waits_for_authority(tmp_path, 
     loaded = models.Session.load(continuation_sid)
     assert loaded.composer_draft == {"text": "rotating while waiting", "files": []}
     assert not (session_dir / ".drafts" / f"{old_sid}.json").exists()
+
+
+def test_draft_post_for_stale_pre_compression_snapshot_cycles_rejected(tmp_path, monkeypatch):
+    models, routes, session_dir, old_sid, continuation_sid, fork_sid = _build_pre_compression_migration_state(
+        tmp_path,
+        monkeypatch,
+    )
+
+    continuation = models.Session.load(continuation_sid)
+    continuation.pre_compression_snapshot = True
+    continuation.pre_compression_continuation_session_id = old_sid
+    continuation.save(touch_updated_at=False, skip_index=True)
+    models.SESSIONS.clear()
+
+    try:
+        status, payload = _post_json(
+            monkeypatch,
+            routes,
+            "/api/session/draft",
+            {"session_id": old_sid, "text": "cycle rejected", "files": []},
+        )
+
+        assert status == 409
+        assert payload["ok"] is False
+        assert payload["error"] == "Session moved"
+        assert payload["code"] == "session_moved"
+        assert payload["session_id"] == old_sid
+        assert not (session_dir / ".drafts" / f"{old_sid}.json").exists()
+    finally:
+        with routes.SESSION_AGENT_LOCKS_LOCK:
+            routes.SESSION_AGENT_LOCKS.pop(old_sid, None)
+            routes.SESSION_AGENT_LOCKS.pop(continuation_sid, None)
+
+
+def test_draft_post_for_stale_pre_compression_snapshot_hops_exhausted_rejected(tmp_path, monkeypatch):
+    models, routes, session_dir, old_sid, continuation_sid, fork_sid = _build_pre_compression_migration_state(
+        tmp_path,
+        monkeypatch,
+    )
+
+    continuation = models.Session.load(continuation_sid)
+    continuation.pre_compression_snapshot = True
+
+    chain_tail = continuation
+    chain_sid = None
+    for idx in range(3):
+        chain_sid = f"sid-rotation-hop-{idx}"
+        chain = models.Session(
+            session_id=chain_sid,
+            title="Compression hop",
+            parent_session_id=chain_tail.session_id,
+            pre_compression_snapshot=True,
+            messages=[{"role": "assistant", "content": "hop"}],
+        )
+        chain.save(touch_updated_at=False, skip_index=True)
+        chain_tail.pre_compression_continuation_session_id = chain_sid
+        chain_tail.save(touch_updated_at=False, skip_index=True)
+        chain_tail = chain
+    models.SESSIONS.clear()
+
+    try:
+        status, payload = _post_json(
+            monkeypatch,
+            routes,
+            "/api/session/draft",
+            {"session_id": old_sid, "text": "exhausted", "files": []},
+        )
+
+        assert status == 409
+        assert payload["ok"] is False
+        assert payload["error"] == "Session moved"
+        assert payload["code"] == "session_moved"
+        assert payload["session_id"] == chain_sid
+        assert not (session_dir / ".drafts" / f"{old_sid}.json").exists()
+    finally:
+        with routes.SESSION_AGENT_LOCKS_LOCK:
+            routes.SESSION_AGENT_LOCKS.pop(old_sid, None)
+            routes.SESSION_AGENT_LOCKS.pop(continuation_sid, None)
 
 
 @pytest.mark.parametrize(("cached", "messageful"), [(False, False), (True, True)])
