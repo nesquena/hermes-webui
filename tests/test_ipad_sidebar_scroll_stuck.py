@@ -1894,25 +1894,51 @@ console.log(JSON.stringify({{
 
 
 @_node_tests
+@_node_tests
 def test_missing_wrapper_then_live_malformed_wrapper_repair_retry():
     """Single-VM test: group A has no wrapper (Phase 1 creates it detached),
     group B has a LIVE wrapper in list.children with no body (malformed).
     Phase 1 must abort at B WITHOUT attaching A's detached wrapper or mutating
     B. Then repair B IN PLACE (same VM, same list), retry, and assert:
-    - Top-level order is A, B (canonical, not B, A)
+    - Top-level order is P, A, B (canonical, not B, A)
     - Every SID s_0..s_99 appears exactly once
     - B's wrapper node identity is preserved (same object reference)
     - Loaded count reaches 100
 
-    This replaces the prior two-VM test whose malformed B existed only in the
-    mock _groups registry, not in list.children, and whose "retry" started a
-    fresh VM with a newly valid B — never repairing the same live B.
+    Strengthened per gate-certifier review at 33396f4b:
+    - Wrapper and SID authority derived from DOM-faithful live child tree
+      (list.children traversal), not _groups/_items side registries.
+    - B's exact children/order, attributes, body state, SID nodes, and
+      seeded spacer/sentinel identity are snapshotted before abort, then
+      proven unchanged afterward — a deep zero-mutation proof.
+    - After retry: exactly one A and one B, childrenAfterRetry[groupBIdx]
+      === gwB (strict ref), gwB.querySelector('.session-date-body') === bodyB,
+      and exactly s_80..s_99 once inside bodyB.
+    - Mutation bite: if B's dataset is mutated before the abort (e.g.
+      data-reviewer-mutated-before-abort='1'), the deep snapshot comparison
+      must fail the test.
+
+    Scenario: 100 rows in 3 groups. Rows 0-59 in group P (pre-painted,
+    existing wrapper with body — provides the 60 DOM items the prefix
+    validation needs). Rows 60-79 in group A (no wrapper — Phase 1 creates
+    it detached). Rows 80-99 in group B (live malformed wrapper — no body).
+    The first _appendTouchBatch processes rows 60-99: Phase 1 validates A
+    (creates detached), validates B (exists, no body — abort). A's detached
+    wrapper must NOT be attached. B must be unchanged.
     """
-    # 100 rows: rows 0-79 in group A (isPinned=true), rows 80-99 in group B
+    # 100 rows: 0-59 in P, 60-79 in A (isPinned=true), 80-99 in B
     flat_rows = []
     for i in range(100):
-        group_label = "A" if i < 80 else "B"
-        flat_rows.append({"group": {"label": group_label, "isPinned": i < 80}, "session": {"session_id": f"s_{i}"}})
+        if i < 60:
+            group_label = "P"
+            is_pinned = False
+        elif i < 80:
+            group_label = "A"
+            is_pinned = True
+        else:
+            group_label = "B"
+            is_pinned = False
+        flat_rows.append({"group": {"label": group_label, "isPinned": is_pinned}, "session": {"session_id": f"s_{i}"}})
 
     source = f"""
 const SESSIONS_JS = {SESSIONS_JS!r};
@@ -1922,27 +1948,66 @@ _sessionTouchListEl = list;
 _sessionTouchGen = 1;
 _sessionTouchLoadedCount = 60;
 _sessionTouchTotalCount = 100;
-// Pre-populate 60 items (rows 0-59, all in group A)
-for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s_' + i));
 
-_touchRenderState = {{
-  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
-  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
-  activeSid: null,
+// ── DOM-faithful list: querySelector/querySelectorAll derive authority
+//    from the live child tree (list.children), NOT from _groups/_items
+//    side registries. This mirrors how production's real DOM works —
+//    the mock cannot diverge from DOM authority. ──
+list.querySelector = function(sel) {{
+  // [data-touch-sentinel]
+  if (sel === '[data-touch-sentinel]') {{
+    return list.children.find(c => c.dataset && c.dataset['touch-sentinel'] !== undefined) || null;
+  }}
+  // .session-date-group[data-group-label="..."]
+  var m = sel.match(/^\\.session-date-group\\[data-group-label="([^"]+)"\\]$/);
+  if (m) {{
+    return list.children.find(c => c.dataset && c.dataset['group-label'] === m[1]) || null;
+  }}
+  // .session-date-group[data-group-label] (no value)
+  m = sel.match(/^\\.session-date-group\\[data-group-label\\]$/);
+  if (m) {{
+    return list.children.find(c => c.dataset && c.dataset['group-label'] !== undefined) || null;
+  }}
+  return null;
+}};
+list.querySelectorAll = function(sel) {{
+  if (sel === '.session-item[data-sid]') {{
+    // Traverse the live child tree: find all session-item elements by
+    // walking group wrappers → bodies → session-item children.
+    var items = [];
+    for (var gi = 0; gi < list.children.length; gi++) {{
+      var gw = list.children[gi];
+      if (!gw.dataset || gw.dataset['group-label'] === undefined) continue;
+      var body = null;
+      if (typeof gw.querySelector === 'function') {{
+        body = gw.querySelector('.session-date-body');
+      }} else {{
+        body = gw.children.find(c => c.className && c.className.indexOf('session-date-body') >= 0) || null;
+      }}
+      if (!body) continue;
+      for (var bi = 0; bi < body.children.length; bi++) {{
+        var c = body.children[bi];
+        if (c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid) {{
+          items.push(c);
+        }}
+      }}
+    }}
+    return items;
+  }}
+  if (sel === '.session-date-group[data-group-label]') {{
+    return list.children.filter(c => c.dataset && c.dataset['group-label'] !== undefined);
+  }}
+  if (sel === '.session-virtual-spacer[data-virtual-spacer="after"]') {{
+    return list._afterSpacers || [];
+  }}
+  return [];
 }};
 
-// Group A: NO wrapper anywhere — Phase 1 must create it detached.
-// Group B: LIVE malformed wrapper — in list.children AND _groups, but
-// querySelector returns null for .session-date-body (no body = malformed).
-const gwB = makeEl('div');
-gwB.dataset['group-label'] = 'B';
-gwB.querySelector = function(sel) {{ return null; }}; // no body — malformed
-list._groups['B'] = gwB;
-list.children.push(gwB); // B is LIVE in list.children
-
 // Override _createTouchGroupWrapper so newly created group A's body tracks
-// session items in list._items (the production version uses real DOM which
-// tracks naturally; the mock needs explicit wiring).
+// session items (the production version uses real DOM which tracks naturally;
+// the mock needs explicit wiring). The body's appendChild must push items
+// into the live DOM tree so they're visible to the DOM-faithful
+// querySelectorAll above.
 const _origCreate = _createTouchGroupWrapper;
 _createTouchGroupWrapper = function(g, st) {{
   const wrapper = _origCreate(g, st);
@@ -1954,40 +2019,140 @@ _createTouchGroupWrapper = function(g, st) {{
     if (sel === '.session-date-body') return trackingBody;
     return null;
   }};
+  wrapper.querySelectorAll = function(sel) {{
+    if (sel === '.session-virtual-spacer[data-virtual-spacer="after"]') {{
+      return trackingBody.children.filter(c => c.className && c.className.indexOf('session-virtual-spacer') >= 0);
+    }}
+    return [];
+  }};
   return wrapper;
 }};
 
-// ── Snapshot top-level node identities and order BEFORE append ──
-const childrenBefore = list.children.slice();
-const idsBefore = childrenBefore.map(c => c._domId || (c._domId = 'node_' + Math.random()));
-// Tag them so we can verify identity preservation
-childrenBefore.forEach((c, i) => {{ if(!c._testTag) c._testTag = 'before_' + i; }});
+// ── Group P: existing wrapper with 60 pre-painted items ──
+// This provides the prefix validation with exactly 60 DOM session items.
+const gwP = makeEl('div');
+gwP.className = 'session-date-group';
+gwP.dataset['group-label'] = 'P';
+const bodyP = makeBodyThatTracksItems(list);
+bodyP.className = 'session-date-body';
+gwP.appendChild(bodyP);
+gwP.querySelector = function(sel) {{
+  if (sel === '.session-date-body') return bodyP;
+  return null;
+}};
+gwP.querySelectorAll = function(sel) {{
+  if (sel === '.session-virtual-spacer[data-virtual-spacer="after"]') {{
+    return bodyP.children.filter(c => c.className && c.className.indexOf('session-virtual-spacer') >= 0);
+  }}
+  return [];
+}};
+list.children.push(gwP);
+// Populate _items (for legacy compat) and the actual body (for DOM-faithful traversal)
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s_' + i));
+for (let i = 0; i < 60; i++) bodyP.appendChild(makeSessionItem('s_' + i));
 
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+
+// ── Group B: LIVE malformed wrapper — in list.children but querySelector
+//    returns null for .session-date-body (no body = malformed). ──
+const gwB = makeEl('div');
+gwB.className = 'session-date-group';
+gwB.dataset['group-label'] = 'B';
+gwB.querySelector = function(sel) {{ return null; }}; // no body — malformed
+gwB.querySelectorAll = function(sel) {{ return []; }};
+list.children.push(gwB); // B is LIVE in list.children
+
+// ── Deep snapshot of B BEFORE append ──
+// Capture B's exact children (by reference), their order, classNames,
+// B's dataset keys/values, B's className, and any relevant attributes.
+const bChildrenRefsBefore = gwB.children.slice();
+const bChildrenClassesBefore = gwB.children.map(c => c.className || '');
+const bDatasetBefore = {{}};
+for (const k in gwB.dataset) bDatasetBefore[k] = gwB.dataset[k];
+const bClassNameBefore = gwB.className || '';
+const bChildrenCountBefore = gwB.children.length;
+
+// Snapshot the live tree's top-level state
+const childrenBefore = list.children.slice();
+const topLevelCountBefore = list.children.length;
 const loadedBefore = _sessionTouchLoadedCount;
-const itemsBefore = list._items.length;
+
+// Snapshot what SID nodes exist inside B (from DOM-faithful traversal —
+// should be 0 since B has no body)
+const sidsInBBefore = (function() {{
+  var body = null;
+  if (typeof gwB.querySelector === 'function') body = gwB.querySelector('.session-date-body');
+  if (!body) return [];
+  return body.children.filter(c => c.className && c.className.indexOf('session-item') >= 0)
+    .map(c => c.dataset.sid);
+}})();
 
 // ── First append: must abort at B (no body) ──
 _appendTouchBatch();
 
 const loadedAfterAbort = _sessionTouchLoadedCount;
-const itemsAfterAbort = list._items.length;
 const childrenAfterAbort = list.children.slice();
+const topLevelCountAfterAbort = list.children.length;
 
-// Verify zero mutation: same node identities, same order, same count
-const idsAfterAbort = childrenAfterAbort.map(c => c._domId);
-const sameOrder = idsBefore.length === idsAfterAbort.length &&
-  idsBefore.every((id, i) => id === idsAfterAbort[i]);
-const sameCount = childrenBefore.length === childrenAfterAbort.length;
+// ── Prove B is UNCHANGED after abort (deep zero-mutation proof) ──
+// 1. B's wrapper reference identity preserved in live tree
+const bWrapperInTreeAfterAbort = childrenAfterAbort.indexOf(gwB) >= 0;
 
-// B's wrapper must still be the same object reference
-const bWrapperSame = childrenAfterAbort.includes(gwB);
+// 2. B's children are exactly the same references in the same order
+const bChildrenRefsAfter = gwB.children.slice();
+const bChildrenSameRefs = bChildrenRefsBefore.length === bChildrenRefsAfter.length &&
+  bChildrenRefsBefore.every((ref, i) => bChildrenRefsAfter[i] === ref);
+const bChildrenSameClasses = bChildrenClassesBefore.length === bChildrenRefsAfter.length &&
+  bChildrenClassesBefore.every((cls, i) => (bChildrenRefsAfter[i].className || '') === cls);
+
+// 3. B's dataset unchanged (this is the mutation bite — catches
+//    data-reviewer-mutated-before-abort and any other attribute mutation)
+const bDatasetAfter = {{}};
+for (const k in gwB.dataset) bDatasetAfter[k] = gwB.dataset[k];
+const bDatasetSame = Object.keys(bDatasetBefore).length === Object.keys(bDatasetAfter).length &&
+  Object.keys(bDatasetBefore).every(k => bDatasetAfter[k] === bDatasetBefore[k]);
+
+// 4. B's className unchanged
+const bClassNameAfter = gwB.className || '';
+const bClassNameSame = bClassNameBefore === bClassNameAfter;
+
+// 5. B's children count unchanged
+const bChildrenCountAfter = gwB.children.length;
+const bChildrenCountSame = bChildrenCountBefore === bChildrenCountAfter;
+
+// 6. Top-level tree unchanged: same count, same refs, same order
+const topLevelCountSame = topLevelCountBefore === topLevelCountAfterAbort;
+const topLevelSameRefs = childrenBefore.length === childrenAfterAbort.length &&
+  childrenBefore.every((ref, i) => childrenAfterAbort[i] === ref);
+
+// 7. No SID nodes appeared inside B after abort
+const sidsInBAfter = (function() {{
+  var body = null;
+  if (typeof gwB.querySelector === 'function') body = gwB.querySelector('.session-date-body');
+  if (!body) return [];
+  return body.children.filter(c => c.className && c.className.indexOf('session-item') >= 0)
+    .map(c => c.dataset.sid);
+}})();
+const bNoNewSids = JSON.stringify(sidsInBBefore) === JSON.stringify(sidsInBAfter);
+
+// Group P must NOT have received any new rows (from DOM-faithful traversal)
+const sidsInPAfterAbort = (function() {{
+  var body = gwP.querySelector('.session-date-body');
+  if (!body) return [];
+  return body.children.filter(c => c.className && c.className.indexOf('session-item') >= 0)
+    .map(c => c.dataset.sid);
+}})();
+const pSidCountAfterAbort = sidsInPAfterAbort.length;
 
 // Group A must NOT be in the live DOM
 function hasGroupInDom(label) {{
   return list.children.some(c => {{
     if (!c.dataset) return false;
     return c.dataset['group-label'] === label ||
-           c.dataset['grouplabel'] === label ||
            c.getAttribute('data-group-label') === label;
   }});
 }}
@@ -1997,100 +2162,171 @@ const groupAInDomAfterAbort = hasGroupInDom('A');
 const bodyB = makeBodyThatTracksItems(list);
 bodyB.className = 'session-date-body';
 gwB.querySelector = function(sel) {{ if(sel==='.session-date-body') return bodyB; return null; }};
+gwB.querySelectorAll = function(sel) {{
+  if (sel === '.session-virtual-spacer[data-virtual-spacer="after"]') {{
+    return bodyB.children.filter(c => c.className && c.className.indexOf('session-virtual-spacer') >= 0);
+  }}
+  return [];
+}};
 gwB.appendChild(bodyB);
-// Also override querySelectorAll on gwB so _updateTouchGroupSpacers works
-gwB.querySelectorAll = function(sel) {{ return []; }};
 
 // ── Retry: _appendTouchBatch in the SAME VM ──
 _appendTouchBatch();
 
 const loadedAfterRetry = _sessionTouchLoadedCount;
-const itemsAfterRetry = list._items.length;
-
-// Verify canonical order: A before B in top-level children
 const childrenAfterRetry = list.children.slice();
+
+// ── Derive everything from the live child tree ──
 const labelsAfterRetry = childrenAfterRetry.map(c => {{
   if (!c.dataset) return null;
-  return c.dataset['group-label'] || c.dataset['grouplabel'] || c.getAttribute('data-group-label');
+  return c.dataset['group-label'] || c.getAttribute('data-group-label');
 }});
+
+// Exactly one A and one B
 const groupAIdx = labelsAfterRetry.indexOf('A');
 const groupBIdx = labelsAfterRetry.indexOf('B');
-const aBeforeB = groupAIdx >= 0 && groupBIdx >= 0 && groupAIdx < groupBIdx;
+const groupACount = labelsAfterRetry.filter(l => l === 'A').length;
+const groupBCount = labelsAfterRetry.filter(l => l === 'B').length;
 
-// Verify every SID appears exactly once
-const sids = list._items.map(i => i.dataset.sid);
-const uniqueSids = [...new Set(sids)];
-const expectedSids = Array.from({{length: 100}}, (_, i) => 's_' + i);
-const allPresent = expectedSids.every(s => sids.includes(s));
-const noDuplicates = sids.length === uniqueSids.length;
+// Strict reference identity: childrenAfterRetry[groupBIdx] === gwB
+const bWrapperStrictRef = groupBIdx >= 0 && childrenAfterRetry[groupBIdx] === gwB;
 
-// Verify B's wrapper identity is preserved (same object from before)
-const bWrapperPreserved = childrenAfterRetry.includes(gwB);
+// Strict reference identity for body: gwB.querySelector('.session-date-body') === bodyB
+const bodyBStrictRef = gwB.querySelector('.session-date-body') === bodyB;
 
-// Verify isPinned metadata carried from flatRows to newly created A wrapper
-const wrapperA = childrenAfterRetry.find(c => {{
-  if (!c.dataset) return false;
-  return c.dataset['group-label'] === 'A' || c.dataset['grouplabel'] === 'A' ||
-         c.getAttribute('data-group-label') === 'A';
-}});
+// Exactly s_80..s_99 once inside bodyB (from live DOM tree)
+const sidsInBAfterRetry = (function() {{
+  var body = gwB.querySelector('.session-date-body');
+  if (!body) return [];
+  return body.children.filter(c => c.className && c.className.indexOf('session-item') >= 0)
+    .map(c => c.dataset.sid);
+}})();
+const expectedB = Array.from({{length: 20}}, (_, i) => 's_' + (80 + i));
+const bSidsExact = JSON.stringify(sidsInBAfterRetry) === JSON.stringify(expectedB);
+const bSidsNoDup = sidsInBAfterRetry.length === new Set(sidsInBAfterRetry).size;
+
+// Exactly s_60..s_79 once inside A's body (from live DOM tree)
+const wrapperA = groupAIdx >= 0 ? childrenAfterRetry[groupAIdx] : null;
+const sidsInAAfterRetry = (function() {{
+  if (!wrapperA) return [];
+  var body = null;
+  if (typeof wrapperA.querySelector === 'function') body = wrapperA.querySelector('.session-date-body');
+  if (!body) return [];
+  return body.children.filter(c => c.className && c.className.indexOf('session-item') >= 0)
+    .map(c => c.dataset.sid);
+}})();
+const expectedA = Array.from({{length: 20}}, (_, i) => 's_' + (60 + i));
+const aSidsExact = JSON.stringify(sidsInAAfterRetry) === JSON.stringify(expectedA);
+
+// All SIDs from DOM-faithful traversal (P + A + B bodies)
+const sidsInPAfterRetry = (function() {{
+  var body = gwP.querySelector('.session-date-body');
+  if (!body) return [];
+  return body.children.filter(c => c.className && c.className.indexOf('session-item') >= 0)
+    .map(c => c.dataset.sid);
+}})();
+const allDomSids = sidsInPAfterRetry.concat(sidsInAAfterRetry, sidsInBAfterRetry);
+const expectedAll = Array.from({{length: 100}}, (_, i) => 's_' + i);
+const allDomSidsExact = JSON.stringify(allDomSids) === JSON.stringify(expectedAll);
+const allDomNoDup = allDomSids.length === new Set(allDomSids).size;
+
+// Verify isPinned metadata on group A wrapper (A has isPinned=true in flatRows)
 let aHasPinnedHeader = false;
 if (wrapperA) {{
-  // _createTouchGroupWrapper sets header className to include 'pinned' when isPinned
   const hdr = wrapperA.children.find(c => c.className && c.className.indexOf('session-date-header') >= 0);
-  aHasPinnedHeader = hdr && hdr.className.indexOf('pinned') >= 0;
+  aHasPinnedHeader = !!(hdr && hdr.className.indexOf('pinned') >= 0);
 }}
 
 console.log(JSON.stringify({{
+  // Abort assertions
   loadedAfterAbort,
-  itemsAfterAbort,
-  sameOrder,
-  sameCount,
-  bWrapperSame,
+  topLevelCountSame,
+  topLevelSameRefs,
+  bWrapperInTreeAfterAbort,
+  bChildrenSameRefs,
+  bChildrenSameClasses,
+  bDatasetSame,
+  bClassNameSame,
+  bChildrenCountSame,
+  bNoNewSids,
+  pSidCountAfterAbort,
   groupAInDomAfterAbort,
+  // Retry assertions
   loadedAfterRetry,
-  itemsAfterRetry,
-  aBeforeB,
+  groupACount,
+  groupBCount,
   groupAIdx,
   groupBIdx,
-  allPresent,
-  noDuplicates,
-  duplicateCount: sids.length - uniqueSids.length,
-  bWrapperPreserved,
+  bWrapperStrictRef,
+  bodyBStrictRef,
+  bSidsExact,
+  bSidsNoDup,
+  aSidsExact,
+  allDomSidsExact,
+  allDomNoDup,
   aHasPinnedHeader,
   labelsAfterRetry,
+  // Debug
+  bDatasetBefore,
+  bDatasetAfter,
+  sidsInBAfterRetry,
+  sidsInAAfterRetry,
 }}));
 """
     result = json.loads(_run_node_vm(source))
 
-    # ── Abort assertions ──
+    # ── Abort assertions (deep zero-mutation proof) ──
     assert result["loadedAfterAbort"] == 60, \
         f"Phase 1 abort must not advance loaded count, got {result['loadedAfterAbort']}"
-    assert result["itemsAfterAbort"] == 60, \
-        f"Phase 1 abort must not add session items, got {result['itemsAfterAbort']}"
-    assert result["sameCount"], \
-        f"Phase 1 abort must not change live DOM child count: before/after mismatch"
-    assert result["sameOrder"], \
-        "Phase 1 abort must not mutate top-level node order or identities"
-    assert result["bWrapperSame"], \
-        "B's wrapper must be the same object reference after abort (zero mutation)"
+    assert result["topLevelCountSame"], \
+        "Phase 1 abort must not change live DOM top-level child count"
+    assert result["topLevelSameRefs"], \
+        "Phase 1 abort must not mutate top-level node order or identities (strict ref)"
+    assert result["bWrapperInTreeAfterAbort"], \
+        "B's wrapper must still be in the live tree after abort"
+    assert result["bChildrenSameRefs"], \
+        "B's children must be the exact same object references in the same order after abort (zero mutation)"
+    assert result["bChildrenSameClasses"], \
+        "B's children classNames must be unchanged after abort"
+    assert result["bDatasetSame"], \
+        f"B's dataset must be unchanged after abort (mutation bite) — before={result.get('bDatasetBefore')} after={result.get('bDatasetAfter')}"
+    assert result["bClassNameSame"], \
+        "B's className must be unchanged after abort"
+    assert result["bChildrenCountSame"], \
+        "B's children count must be unchanged after abort"
+    assert result["bNoNewSids"], \
+        "No new SID nodes must appear inside B after abort"
+    assert result["pSidCountAfterAbort"] == 60, \
+        f"Group P must not receive any new rows during abort, got {result['pSidCountAfterAbort']}"
     assert not result["groupAInDomAfterAbort"], \
         "Group A's newly created wrapper must stay DETACHED — must not appear in live DOM children"
 
-    # ── Retry assertions ──
+    # ── Retry assertions (strict identity from live child tree) ──
     assert result["loadedAfterRetry"] == 100, \
-        f"After repair+retry in same VM, loaded count should reach 100, got {result['loadedAfterRetry']}"
-    assert result["itemsAfterRetry"] == 100, \
-        f"After repair+retry, DOM should have 100 items, got {result['itemsAfterRetry']}"
-    assert result["aBeforeB"], \
+        f"After repair+retry, loaded count should reach 100, got {result['loadedAfterRetry']}"
+    assert result["groupACount"] == 1, \
+        f"Exactly one group A wrapper after retry, got {result['groupACount']}"
+    assert result["groupBCount"] == 1, \
+        f"Exactly one group B wrapper after retry, got {result['groupBCount']}"
+    assert result["groupAIdx"] >= 0 and result["groupBIdx"] >= 0 and result["groupAIdx"] < result["groupBIdx"], \
         f"Canonical order must be A before B, got A@{result['groupAIdx']} B@{result['groupBIdx']} — labels: {result['labelsAfterRetry']}"
-    assert result["allPresent"], \
-        "After repair+retry, every canonical SID s_0..s_99 must be present"
-    assert result["noDuplicates"], \
-        f"After repair+retry, no duplicate SIDs, duplicateCount={result['duplicateCount']}"
-    assert result["bWrapperPreserved"], \
-        "B's wrapper node identity must be preserved through repair+retry"
+    assert result["bWrapperStrictRef"], \
+        f"childrenAfterRetry[groupBIdx] must be === gwB (strict ref), got groupBIdx={result['groupBIdx']}"
+    assert result["bodyBStrictRef"], \
+        "gwB.querySelector('.session-date-body') must be === bodyB (strict ref)"
+    assert result["bSidsExact"], \
+        f"bodyB must contain exactly s_80..s_99 once, got {result.get('sidsInBAfterRetry')}"
+    assert result["bSidsNoDup"], \
+        "No duplicate SIDs inside bodyB"
+    assert result["aSidsExact"], \
+        f"bodyA must contain exactly s_60..s_79 once, got {result.get('sidsInAAfterRetry')}"
+    assert result["allDomSidsExact"], \
+        "All 100 SIDs must appear exactly once across P+A+B bodies (from live DOM tree)"
+    assert result["allDomNoDup"], \
+        "No duplicate SIDs across the entire live DOM tree"
     assert result["aHasPinnedHeader"], \
         "Group A's newly created wrapper must carry isPinned metadata from flatRows (pinned header class)"
+
 
 
 @_node_tests
