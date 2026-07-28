@@ -37,6 +37,11 @@ from pathlib import Path
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
+try:
+    from mcp.types import CallToolResult, ListToolsResult
+except ImportError:
+    CallToolResult = None
+    ListToolsResult = None
 
 # ── Ensure the repo root is on sys.path so api.* imports work ─────────────
 _REPO_ROOT = Path(__file__).parent.resolve()
@@ -72,9 +77,6 @@ WEBUI_PORT = os.environ.get("HERMES_WEBUI_PORT", "8787")
 WEBUI_URL = f"http://{WEBUI_HOST}:{WEBUI_PORT}"
 _auth_cookie: str | None = None
 _auth_expires: float = 0  # unix timestamp after which we re-auth
-
-server = Server("hermes-webui")
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Helpers — filesystem (project CRUD via canonical api.models)
@@ -451,16 +453,29 @@ async def handle_move_session(arguments: dict) -> list[TextContent]:
 #  MCP Server wiring
 # ═══════════════════════════════════════════════════════════════════════════
 
+_TOOL_FIELDS = getattr(Tool, "model_fields", None) or getattr(Tool, "__fields__", {})
+_TOOL_SCHEMA_FIELD = "input_schema" if "input_schema" in _TOOL_FIELDS else "inputSchema"
+_HAS_DECORATOR_HANDLERS = hasattr(Server, "list_tools") and hasattr(Server, "call_tool")
+
+
+def _make_tool(*, name: str, description: str, input_schema: dict) -> Tool:
+    return Tool(
+        name=name,
+        description=description,
+        **{_TOOL_SCHEMA_FIELD: input_schema},
+    )
+
+
 TOOLS = [
-    Tool(
+    _make_tool(
         name="list_projects",
         description="List all session projects with their IDs, names, colors, and session counts (scoped to active profile).",
-        inputSchema={"type": "object", "properties": {}, "required": []},
+        input_schema={"type": "object", "properties": {}, "required": []},
     ),
-    Tool(
+    _make_tool(
         name="create_project",
         description="Create a new project for organizing sessions (profile-scoped).",
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Project name (max 128 chars)"},
@@ -469,10 +484,10 @@ TOOLS = [
             "required": ["name"],
         },
     ),
-    Tool(
+    _make_tool(
         name="rename_project",
         description="Rename a project and optionally change its color (profile-checked).",
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "project_id": {"type": "string", "description": "12-char project ID"},
@@ -482,10 +497,10 @@ TOOLS = [
             "required": ["project_id", "name"],
         },
     ),
-    Tool(
+    _make_tool(
         name="delete_project",
         description="Delete a project and unassign all its sessions (profile-checked).",
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "project_id": {"type": "string", "description": "12-char project ID to delete"},
@@ -493,10 +508,10 @@ TOOLS = [
             "required": ["project_id"],
         },
     ),
-    Tool(
+    _make_tool(
         name="rename_session",
         description="Rename a session (updates sidebar via authenticated API, cache-safe).",
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "session_id": {"type": "string", "description": "Session ID"},
@@ -505,10 +520,10 @@ TOOLS = [
             "required": ["session_id", "title"],
         },
     ),
-    Tool(
+    _make_tool(
         name="move_session",
         description="Assign a session to a project. Pass project_id=null to unassign. Uses authenticated API for cache safety (profile-checked).",
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "session_id": {"type": "string", "description": "Session ID"},
@@ -517,10 +532,10 @@ TOOLS = [
             "required": ["session_id", "project_id"],
         },
     ),
-    Tool(
+    _make_tool(
         name="list_sessions",
         description="List sessions, optionally filtered by project or unassigned status (profile-scoped).",
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "project_id": {"type": "string", "description": "Filter sessions by project ID"},
@@ -543,18 +558,38 @@ HANDLERS = {
 }
 
 
-@server.list_tools()
-async def list_tools() -> list[Tool]:
-    return TOOLS
-
-
-@server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+async def _dispatch_tool(name: str, arguments: dict | None) -> tuple[list[TextContent], bool]:
     handler = HANDLERS.get(name)
     if not handler:
         return [TextContent(type="text", text=json.dumps(
-            {"error": f"Unknown tool: {name}"}, ensure_ascii=False))]
-    return await handler(arguments)
+            {"error": f"Unknown tool: {name}"}, ensure_ascii=False))], True
+    return await handler(arguments or {}), False
+
+
+if _HAS_DECORATOR_HANDLERS:
+    server = Server("hermes-webui")
+
+    @server.list_tools()
+    async def list_tools() -> list[Tool]:
+        return TOOLS
+
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict | None) -> list[TextContent]:
+        content, _is_error = await _dispatch_tool(name, arguments)
+        return content
+else:
+    async def list_tools(_ctx, _params) -> ListToolsResult:
+        return ListToolsResult(tools=TOOLS)
+
+    async def call_tool(_ctx, params) -> CallToolResult:
+        content, is_error = await _dispatch_tool(params.name, params.arguments)
+        return CallToolResult(content=content, is_error=is_error)
+
+    server = Server(
+        "hermes-webui",
+        on_list_tools=list_tools,
+        on_call_tool=call_tool,
+    )
 
 
 async def main():
