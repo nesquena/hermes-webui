@@ -514,3 +514,99 @@ def test_datestamped_claude3_not_reasoning_capable_heuristic():
             f"{model} must remain reasoning-capable"
         )
 
+
+def test_bare_grok45_is_reasoning_capable_and_capped_at_high():
+    # Bare Grok-4.5 ids used to hide the composer chip entirely because the
+    # family heuristic only matched names containing "reasoning"/"thinking".
+    # Native ladder for Grok-4.5 is low/medium/high (no minimal/xhigh/max).
+    # Reasoning is mandatory: none coerces to default, minimal escalates to low.
+    for model in (
+        "grok-4.5",                 # bare id
+        "x-ai/grok-4.5",            # vendor-prefixed
+        "@custom:proxy:grok-4.5",   # generic custom-provider form (not a local slug)
+    ):
+        assert cfg._candidate_supports_reasoning(model) is True, model
+        efforts = cfg.resolve_model_reasoning_efforts(model, provider_id="custom:proxy")
+        assert efforts == ["low", "medium", "high"], model
+        assert "none" not in efforts, model
+        assert "minimal" not in efforts, model
+        assert "xhigh" not in efforts, model
+        assert "max" not in efforts, model
+        assert cfg.coerce_reasoning_effort_for_model(
+            "xhigh", model, provider_id="custom:proxy"
+        ) == "high", model
+        assert cfg.coerce_reasoning_effort_for_model(
+            "max", model, provider_id="custom:proxy"
+        ) == "high", model
+        assert cfg.coerce_reasoning_effort_for_model(
+            "none", model, provider_id="custom:proxy"
+        ) == "", model
+        assert cfg.coerce_reasoning_effort_for_model(
+            "minimal", model, provider_id="custom:proxy"
+        ) == "low", model
+
+
+def test_non_45_grok_family_caps_at_xhigh_not_max():
+    # Family match must not open the full minimal..max ladder for non-4.5 Grok
+    # ids. xAI text models top out at xhigh; stored max must degrade to xhigh.
+    for model in (
+        "grok-3",
+        "grok-4.20-multi-agent-0309",
+        "x-ai/grok-4.6",
+    ):
+        assert cfg._candidate_supports_reasoning(model) is True, model
+        efforts = cfg.resolve_model_reasoning_efforts(model, provider_id="custom:proxy")
+        assert "minimal" not in efforts, model
+        assert "max" not in efforts, model
+        assert "xhigh" in efforts, model
+        assert "high" in efforts, model
+        assert cfg.coerce_reasoning_effort_for_model(
+            "max", model, provider_id="custom:proxy"
+        ) == "xhigh", model
+
+
+def test_grok_reasoning_named_ids_still_reasoning_capable():
+    # Names with an explicit reasoning token already matched the generic branch;
+    # keep that path green after adding the bare-family rule.
+    assert cfg._candidate_supports_reasoning("grok-4.20-reasoning") is True
+    efforts = cfg.resolve_model_reasoning_efforts(
+        "grok-4.20-reasoning", provider_id="custom:proxy"
+    )
+    assert "max" not in efforts
+    assert "xhigh" in efforts
+
+
+def test_grok_prefix_without_family_token_is_not_reasoning_capable():
+    # Guard against a broad startswith("grok") match (Greptile P2 on #6438):
+    # "grokfast-150x" normalizes to token "grokfast", not "grok".
+    for model in ("grokfast-150x", "my-provider/grokfast-150x", "notgrok-4.5"):
+        assert cfg._candidate_supports_reasoning(model) is False, model
+
+
+def test_grok_45_regex_does_not_false_match_suffix_aliases():
+    # Official product id is only dotted grok-4.5. Hyphen/underscore spellings,
+    # -latest, letter/turbo suffixes must NOT get the 4.5 hard contract.
+    for model in (
+        "grok-4-5",
+        "grok-4_5",
+        "grok-4.5-latest",
+        "grok-4.5x",
+        "grok-4-5-turbo",
+        "x-ai/grok-4.5-preview",
+    ):
+        assert cfg._is_grok_45_model_id(model) is False, model
+        # Still Grok-family, so family ceiling applies (xhigh ok, max dropped).
+        assert cfg._is_grok_model_id(model) is True, model
+        efforts = cfg.resolve_model_reasoning_efforts(model, provider_id="custom:proxy")
+        assert "xhigh" in efforts, model
+        assert "max" not in efforts, model
+        assert cfg.coerce_reasoning_effort_for_model(
+            "none", model, provider_id="custom:proxy"
+        ) == "none", model
+
+
+def test_grok_45_positive_spellings_only_dotted():
+    # Only the official dotted product id (with optional path/custom prefix).
+    for model in ("grok-4.5", "x-ai/grok-4.5", "@custom:proxy:grok-4.5"):
+        assert cfg._is_grok_45_model_id(model) is True, model
+

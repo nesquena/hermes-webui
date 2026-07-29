@@ -4956,6 +4956,9 @@ let _currentReasoningEffortsSupported=null;
 // is empty (GLM-4.5–5.1 on native zai). Undefined = unknown, treated as true
 // so the chip stays visible by default (prior behavior).
 let _currentReasoningToggleSupported=undefined;
+// Whether the model may disable reasoning entirely (None option). Undefined =
+// unknown, treated as true so prior Default+None behavior is preserved.
+let _currentAllowsReasoningOff=undefined;
 let _profileTransitionReasoningContext=null;
 
 function _normalizeReasoningEffort(eff){
@@ -5005,17 +5008,26 @@ function _applyReasoningOptions(supportedEfforts){
   const dd=$('composerReasoningDropdown');
   if(!dd) return;
   const supported=new Set(Array.isArray(supportedEfforts)?supportedEfforts:[]);
+  // allows_reasoning_off: false for mandatory-reasoning models (Grok-4.5) so the
+  // composer does not offer "None". Default true preserves prior two-state
+  // Default+None behavior for every other model.
+  const allowsOff=(typeof _currentAllowsReasoningOff==='undefined')
+    ?true
+    :_currentAllowsReasoningOff;
   dd.querySelectorAll('.reasoning-option').forEach(function(opt){
     const effort=opt.dataset.effort;
-    // 'none' (turn thinking off) and '' (Default = clear override, provider
-    // default = thinking on) are meta-options outside the effort ladder. They
-    // are always shown so a thinking-toggle-only model (GLM-4.5–5.1 on native
-    // zai, where the ladder is empty) still has an operable two-state control:
-    // Default (on) + None (off). Without the Default option the toggle is
-    // one-way off-only — the user can disable thinking but cannot re-enable it.
-    // (#6219 round-3)
-    if(effort==='none'||effort===''){
+    // '' (Default = clear override, provider default = thinking on) stays
+    // available so users can return to the configured/provider default. 'none'
+    // (turn thinking off) is a meta-option that is normally always shown so a
+    // thinking-toggle-only model (GLM-4.5–5.1 on native zai, where the ladder is
+    // empty) still has an operable two-state control: Default (on) + None (off).
+    // Hide 'none' when the active model cannot disable reasoning. (#6438)
+    if(effort===''){
       opt.style.display='';
+      return;
+    }
+    if(effort==='none'){
+      opt.style.display=allowsOff?'':'none';
       return;
     }
     if(!supported.size){
@@ -5041,6 +5053,11 @@ function _applyReasoningChip(eff){
   // Default true preserves prior behavior when the field is absent.
   if(meta&&typeof meta.supports_thinking_toggle==='boolean'){
     _currentReasoningToggleSupported=meta.supports_thinking_toggle;
+  }
+  // allows_reasoning_off: false hides the "None" option for mandatory-reasoning
+  // models (Grok-4.5). Default true preserves prior Default+None behavior.
+  if(meta&&typeof meta.allows_reasoning_off==='boolean'){
+    _currentAllowsReasoningOff=meta.allows_reasoning_off;
   }
   const wrap=$('composerReasoningWrap');
   const label=$('composerReasoningLabel');
@@ -5121,6 +5138,7 @@ function refreshProfileTransitionReasoningChip(model, provider){
   _currentReasoningEffort=null;
   _currentReasoningEffortsSupported=null;
   _currentReasoningToggleSupported=undefined;
+  _currentAllowsReasoningOff=undefined;
   _lastReasoningFetchKey=null;
   ++_reasoningFetchSeq;
   _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
