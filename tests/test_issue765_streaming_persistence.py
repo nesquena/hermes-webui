@@ -280,28 +280,36 @@ class TestIssue765FollowupHardening:
     def test_same_session_concurrent_saves_use_distinct_temp_files(self, monkeypatch):
         """Two concurrent saves of the same session must not collide on one tmp path.
 
-        The key regression guard here is that each save call should reach os.replace()
-        with a distinct source tmp path. With the old shared `<sid>.tmp` scheme, both
-        threads would target the same path and the second replace would deterministically
-        fail once the first consume/remove happened.
+        The key regression guard here is that each save call should publish the
+        authoritative sidecar with a distinct source tmp path. Derived tail-cache
+        publications have their own atomicity tests and must not change this count.
+        With the old shared `<sid>.tmp` scheme, both threads would target the same
+        path and the second replace would deterministically fail once the first
+        consume/remove happened.
         """
         s = _make_session("same_sid")
         s.save(skip_index=True)  # seed the file on disk
 
         original_replace = models.os.replace
-        barrier = threading.Barrier(2)
+        start_barrier = threading.Barrier(2)
         replace_sources = []
         errors = []
 
-        def _replace_with_barrier(src, dst):
-            replace_sources.append(str(src))
-            barrier.wait(timeout=5)
-            return original_replace(src, dst)
+        def _record_replace(src, dst, *args, **kwargs):
+            destination_is_sidecar = Path(dst) == s.path
+            if kwargs.get("dst_dir_fd") is not None:
+                destination_is_sidecar = Path(dst).name == s.path.name
+            if destination_is_sidecar:
+                replace_sources.append(str(src))
+            return original_replace(src, dst, *args, **kwargs)
 
-        monkeypatch.setattr(models.os, "replace", _replace_with_barrier)
+        monkeypatch.setattr(models.os, "replace", _record_replace)
 
         def _save_worker():
             try:
+                # Both callers enter save concurrently, but same-ID publication is
+                # intentionally serialized by the storage-owned transaction lock.
+                start_barrier.wait(timeout=5)
                 s.save(skip_index=True)
             except Exception as e:
                 errors.append(e)

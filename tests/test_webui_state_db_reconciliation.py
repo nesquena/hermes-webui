@@ -838,6 +838,123 @@ def test_limited_state_db_prefix_missing_sidecar_timestamp_preserves_full_fallba
     assert returned_sidecar == sidecar_messages
 
 
+def test_limited_state_db_prefix_helper_fails_open_on_db_path_error(monkeypatch, tmp_path):
+    """D1R2 review blocker regression: a state.db path-resolution/stat failure
+    inside the preflight helpers must surface as the (None, sidecar_messages)
+    full-read fallback, not as an exception escaping the route helper."""
+    import api.models as models
+    import api.routes as routes
+
+    sid = "webui_reconcile_prefix_path_error"
+    sidecar_messages = _large_timestamped_sidecar_messages()
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+
+    def broken_db_path():
+        raise OSError("readonly preflight failed")
+
+    monkeypatch.setattr(models, "_active_state_db_path", broken_db_path)
+
+    floor, returned_sidecar = routes._state_db_since_timestamp_for_limited_display(
+        session,
+        30,
+    )
+
+    assert floor is None
+    assert returned_sidecar == sidecar_messages
+
+
+def _make_state_db_with_active(path: Path, sid: str, rows):
+    """State DB variant with a compaction ``active`` column (0 = compacted)."""
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, started_at REAL, message_count INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, timestamp REAL, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, active INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, title, model, started_at, message_count) VALUES (?, ?, ?, ?, ?, ?)",
+        (sid, "webui", "Reconcile", "test-model", 1000.0, len(rows)),
+    )
+    for row in rows:
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp, tool_call_id, tool_calls, tool_name, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                sid,
+                row["role"],
+                row["content"],
+                row.get("timestamp", 1000.0),
+                row.get("tool_call_id"),
+                row.get("tool_calls"),
+                row.get("tool_name"),
+                row.get("active", 1),
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_limited_state_db_prefix_compacted_rows_use_active_predicate_end_to_end(
+    monkeypatch,
+    tmp_path,
+):
+    """D1R2 review nonblocking regression: on a compacted DB the definitive key
+    helper must exclude active=0 rows exactly like the prefix summary, so an
+    exact active-row prefix takes the bounded path instead of falling back."""
+    import api.routes as routes
+
+    sid = "webui_reconcile_prefix_compacted_active"
+    sidecar_messages = _large_timestamped_sidecar_messages()
+    state_messages = [dict(message) for message in sidecar_messages]
+    # A compacted row inside the prefix window: invisible to the merge and to
+    # the summary count, so it must be invisible to the key sequence too.
+    state_messages.insert(
+        100,
+        {
+            "role": "assistant",
+            "content": "compacted away",
+            "timestamp": 100.5,
+            "active": 0,
+        },
+    )
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    _make_state_db_with_active(tmp_path / "state.db", sid, state_messages)
+    summary_calls = []
+    key_calls = []
+    real_summary_reader = routes.get_state_db_session_message_prefix_summary
+    real_key_reader = routes.get_state_db_session_message_keys_before_timestamp
+
+    def prefix_summary(*args, **kwargs):
+        summary_calls.append((args, kwargs))
+        return real_summary_reader(*args, **kwargs)
+
+    def counted_key_reader(*args, **kwargs):
+        key_calls.append((args, kwargs))
+        return real_key_reader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_message_prefix_summary",
+        prefix_summary,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_message_keys_before_timestamp",
+        counted_key_reader,
+    )
+
+    floor, returned_sidecar = routes._state_db_since_timestamp_for_limited_display(
+        session,
+        30,
+    )
+
+    assert floor == 200.0
+    assert returned_sidecar == sidecar_messages
+    assert len(summary_calls) == 1
+    assert len(key_calls) == 1
+
+
 def test_msg_limit_session_load_bails_when_older_state_db_row_changes_offsets(monkeypatch, tmp_path):
     import api.routes as routes
 

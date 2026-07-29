@@ -134,6 +134,120 @@ def test_full_index_rebuild_includes_hyphenated_sessions():
     assert sid in ids
 
 
+def test_save_invalidates_persisted_id_snapshot_when_directory_mtime_stalls(monkeypatch):
+    """A same-tick create must not stay hidden behind the directory snapshot cache."""
+    first = _make_session("snapshot_first", "First")
+    first.save()
+    assert models._persisted_session_ids_snapshot() == frozenset({first.session_id})
+
+    session_dir = models.SESSION_DIR
+    frozen_dir_stat = session_dir.stat()
+    original_stat = Path.stat
+
+    def stat_with_stalled_directory_mtime(path, *args, **kwargs):
+        if path == session_dir:
+            return frozen_dir_stat
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_with_stalled_directory_mtime)
+
+    second = _make_session("snapshot_second", "Second")
+    second.save()
+
+    assert models._persisted_session_ids_snapshot() == frozenset(
+        {first.session_id, second.session_id}
+    )
+
+
+def test_concurrent_snapshot_rebuild_cannot_restore_invalidated_ids(monkeypatch):
+    """A rebuild that began before save invalidation must not publish stale IDs after it."""
+    first = _make_session("snapshot_first", "First")
+    first.save(skip_index=True)
+    assert models._persisted_session_ids_snapshot() == frozenset({first.session_id})
+
+    session_dir = models.SESSION_DIR
+    frozen_dir_stat = session_dir.stat()
+    original_stat = Path.stat
+    original_glob = Path.glob
+    original_safe_replace = models._safe_replace
+    original_invalidate = models._invalidate_persisted_session_ids_snapshot
+
+    enumeration_finished = threading.Event()
+    release_reader = threading.Event()
+    second_published = threading.Event()
+    invalidation_started = threading.Event()
+    invalidation_finished = threading.Event()
+    reader_snapshots = []
+    errors = []
+
+    def stat_with_stalled_directory_mtime(path, *args, **kwargs):
+        if path == session_dir:
+            return frozen_dir_stat
+        return original_stat(path, *args, **kwargs)
+
+    def glob_with_stalled_reader(path, pattern):
+        paths = list(original_glob(path, pattern))
+        if path == session_dir and threading.current_thread().name == "persisted-id-reader":
+            enumeration_finished.set()
+            if not release_reader.wait(timeout=5):
+                raise TimeoutError("snapshot reader was not released")
+        return paths
+
+    second = _make_session("snapshot_second", "Second")
+
+    def safe_replace_with_publication_signal(src, dst):
+        original_safe_replace(src, dst)
+        if dst == second.path:
+            second_published.set()
+
+    def invalidate_with_signals():
+        invalidation_started.set()
+        original_invalidate()
+        invalidation_finished.set()
+
+    monkeypatch.setattr(Path, "stat", stat_with_stalled_directory_mtime)
+    monkeypatch.setattr(Path, "glob", glob_with_stalled_reader)
+    monkeypatch.setattr(models, "_safe_replace", safe_replace_with_publication_signal)
+    monkeypatch.setattr(models, "_invalidate_persisted_session_ids_snapshot", invalidate_with_signals)
+    models._PERSISTED_SESSION_IDS_CACHE = (None, None, frozenset())
+
+    def rebuild_snapshot():
+        try:
+            reader_snapshots.append(models._persisted_session_ids_snapshot())
+        except Exception as exc:
+            errors.append(exc)
+
+    def save_second_session():
+        try:
+            second.save(skip_index=True)
+        except Exception as exc:
+            errors.append(exc)
+
+    reader = threading.Thread(target=rebuild_snapshot, name="persisted-id-reader")
+    saver = threading.Thread(target=save_second_session, name="persisted-id-saver")
+    reader.start()
+    assert enumeration_finished.wait(timeout=5), "snapshot reader did not enumerate the old set"
+
+    saver.start()
+    assert second_published.wait(timeout=5), "second sidecar was not published"
+    assert invalidation_started.wait(timeout=5), "save did not attempt cache invalidation"
+    # Without serialization invalidation completes while the stale reader is paused.
+    # With the cache lock it remains blocked until that reader publishes and exits.
+    invalidation_finished.wait(timeout=1)
+    release_reader.set()
+
+    reader.join(timeout=5)
+    saver.join(timeout=5)
+
+    assert not reader.is_alive(), "snapshot reader deadlocked"
+    assert not saver.is_alive(), "session saver deadlocked"
+    assert not errors, f"concurrent snapshot/save errors: {errors}"
+    assert reader_snapshots == [frozenset({first.session_id})]
+    assert models._persisted_session_ids_snapshot() == frozenset(
+        {first.session_id, second.session_id}
+    )
+
+
 def test_prune_session_from_index_removes_requested_row_only():
     index_file = models.SESSION_INDEX_FILE
     s_a = _make_session("sess_a", "A", updated_at=100)
