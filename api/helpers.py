@@ -1208,3 +1208,45 @@ def clear_profile_cookie(handler) -> None:
     cookie[cookie_name]['samesite'] = 'Lax'
     cookie[cookie_name]['max-age'] = '0'
     handler.send_header('Set-Cookie', cookie[cookie_name].OutputString())
+
+# ── MEDIA: token path matching (shared) ──────────────────────────────────────
+# A MEDIA path may legitimately contain spaces:
+#   MEDIA:/home/u/vault/Meeting Notes/2026-07-29 - SDE Focus Group.md
+# A ``[^\s)\]]+`` class stops at the first space, which truncates the path.
+# Frontend ui.js/messages.js used to do this (the artifact card rendered the
+# wrong basename and the tail leaked into the bubble as prose); the same class
+# lives in the /api/media allow-list and the public-share inliner, where a
+# truncated capture silently fails to match the real on-disk path and the
+# artifact becomes unviewable.
+#
+# Widening cannot be unbounded: greedy space tolerance would swallow trailing
+# prose ("MEDIA:/tmp/a.png looks good") and glue an adjacent tag
+# ("MEDIA:/a.png MEDIA:/b.png") into one invalid path. The bare form is
+# therefore anchored on a file extension and tempered -- it crosses single
+# spaces only while still reaching a ``.ext``, never crosses a newline, and
+# carries a ``(?!MEDIA:)`` guard on each continuation token so the next token
+# is never absorbed. Extension-less paths still match via the no-space
+# fallback, so nothing that resolved before stops resolving.
+#
+# Keep this the single source of truth for MEDIA path shape on the Python side;
+# it mirrors ``_mediaPathSrc()`` in static/ui.js.
+_MEDIA_TOKEN_BARE = (
+    r"(?!MEDIA:)[^\s)\]]+?(?:[^\S\n](?!MEDIA:)[^\s)\]]+?)*?\.[A-Za-z0-9]+"
+)
+_MEDIA_TOKEN_BOUNDARY = r"(?=[\s)\]}\"'*_,;:]|MEDIA:|$)"
+
+
+def media_token_pattern(extra_exclude: str = "", exclude_urls: bool = False) -> str:
+    """Return the MEDIA: path-capture pattern (one capture group).
+
+    ``extra_exclude`` adds characters to the no-space fallback's excluded set
+    (the share inliner also excludes ``>``). ``exclude_urls`` skips
+    ``MEDIA:http(s)://...`` so external images pass through untouched.
+    """
+    url_guard = r"(?!https?://)" if exclude_urls else ""
+    fallback = r"[^\s)\]" + extra_exclude + r"]+"
+    bare = _MEDIA_TOKEN_BARE
+    if extra_exclude:
+        bare = bare.replace(r"[^\s)\]]", r"[^\s)\]" + extra_exclude + r"]")
+    return r"MEDIA:" + url_guard + r"((?:" + bare + r")" + _MEDIA_TOKEN_BOUNDARY + r"|" + fallback + r")"
+

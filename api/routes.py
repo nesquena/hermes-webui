@@ -2848,6 +2848,7 @@ from api.helpers import (
     redact_session_data,
     _redact_text,
     _CLIENT_DISCONNECT_ERRORS,
+    media_token_pattern,
 )
 from api.agent_health import build_agent_health_payload
 from api.gateway_chat import gateway_chat_config_status
@@ -18806,7 +18807,7 @@ def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp
     return True
 
 
-_MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
+_MEDIA_TOKEN_RE = re.compile(media_token_pattern())
 
 
 def _message_content_text(content) -> str:

@@ -24,7 +24,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from api.config import STATE_DIR
-from api.helpers import redact_session_data
+from api.helpers import redact_session_data, media_token_pattern
 # _redact_fn_cached is the ALWAYS-ON credential redactor (agent redactor with
 # force=True + local fallback regex). Unlike redact_session_data it does NOT
 # consult the user-toggleable api_redact_enabled setting — a public share is a
@@ -120,8 +120,11 @@ def _redact_share_paths(text: str, extra_paths) -> str:
 # Excludes MEDIA: followed by http/https URLs so external images pass
 # through unchanged.  file:// references are NOT matched here — they are
 # always rejected at the public-share boundary (absolute, un-scoped).
+# Shares additionally exclude '>' so an inlined <img ...> tag terminates the
+# path. Shape comes from the shared helper so a spaced path resolves here the
+# same way it does in the renderer and the /api/media allow-list.
 _SHARE_MEDIA_RE = re.compile(
-    r"MEDIA:(?!https?://)([^\s\)\]>]+)"
+    media_token_pattern(extra_exclude=">", exclude_urls=True)
 )
 
 # Max size (in bytes) for files we'll embed as base64 in a share snapshot.
