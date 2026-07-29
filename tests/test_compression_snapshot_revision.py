@@ -639,7 +639,10 @@ def test_stale_compression_snapshot_emits_actionable_error_without_replaying_tur
 
 
 @pytest.mark.parametrize("failure_mode", ["result", "exception"])
-@pytest.mark.parametrize("second_result", ["recovered", "stale_error", "stale_flag"])
+@pytest.mark.parametrize(
+    "second_result",
+    ["recovered", "stale_error", "stale_flag", "stale_without_current_assistant"],
+)
 def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
     tmp_path, monkeypatch, failure_mode, second_result
 ):
@@ -695,15 +698,27 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
             if second_result != "recovered":
                 stale_result = {
                     "completed": False,
-                    "final_response": "partial stale",
-                    "messages": history
-                    + [{"role": "assistant", "content": "partial stale"}],
+                    "final_response": (
+                        "" if second_result == "stale_without_current_assistant" else "partial stale"
+                    ),
+                    "messages": (
+                        history + [{"role": "user", "content": "new webui turn"}]
+                        if second_result == "stale_without_current_assistant"
+                        else history
+                        + [
+                            {"role": "user", "content": "new webui turn"},
+                            {"role": "assistant", "content": "partial stale"},
+                        ]
+                    ),
                     "partial": True,
                     "failed": False,
                 }
                 if second_result == "stale_error":
                     stale_result["error"] = "compression_snapshot_stale"
+                elif second_result == "stale_flag":
+                    stale_result["compression_snapshot_stale"] = True
                 else:
+                    stale_result["error"] = "compression_snapshot_stale"
                     stale_result["compression_snapshot_stale"] = True
                 return stale_result
             return {
@@ -759,11 +774,20 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
         assert "next message" in apperrors[0]["hint"].lower()
         assert not any(event == "done" for event, _payload in events)
         assert reloaded.active_stream_id is None
+        assert reloaded.pending_user_message is None
+        assert reloaded.pending_attachments == []
         partials = [
             message
             for message in reloaded.messages
-            if message.get("content") == "partial stale" and message.get("_partial") is True
+            if message.get("_partial") is True
         ]
-        assert len(partials) == 1
+        if second_result == "stale_without_current_assistant":
+            assert not partials
+            assert not any(
+                message.get("content") == "prior answer" and message.get("_partial") is True
+                for message in reloaded.messages
+            )
+        else:
+            assert [message.get("content") for message in partials] == ["partial stale"]
         assert reloaded.messages[-1]["_error"] is True
         assert "next message" in reloaded.messages[-1]["content"].lower()

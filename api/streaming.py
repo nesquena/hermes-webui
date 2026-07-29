@@ -7180,17 +7180,49 @@ def _snapshot_and_append_partial_on_error(session, stream_id) -> dict | None:
     return None
 
 
-def _append_result_partial_on_error(session, result) -> dict | None:
-    """Retain a structured Agent result's final partial assistant row once."""
+def _append_result_partial_on_error(
+    session,
+    result,
+    pre_call_context,
+    msg_text,
+) -> dict | None:
+    """Retain only a current-turn partial assistant row from an Agent result."""
     if not isinstance(result, dict) or result.get('partial') is not True:
         return None
     messages = result.get('messages')
-    if not isinstance(messages, list):
+    if not isinstance(messages, list) or not isinstance(pre_call_context, list):
         return None
+    baseline_len = len(pre_call_context)
+    if len(messages) < baseline_len:
+        return None
+    current_turn_rows = messages[baseline_len:]
+    normalized_msg_text = _normalize_user_text(msg_text)
+    baseline_has_current_user = bool(
+        pre_call_context
+        and isinstance(pre_call_context[-1], dict)
+        and pre_call_context[-1].get('role') == 'user'
+        and _normalize_user_text(_message_text(pre_call_context[-1].get('content')))
+        == normalized_msg_text
+    )
+    if not baseline_has_current_user:
+        current_user_index = next(
+            (
+                index
+                for index, row in enumerate(current_turn_rows)
+                if isinstance(row, dict)
+                and row.get('role') == 'user'
+                and _normalize_user_text(_message_text(row.get('content')))
+                == normalized_msg_text
+            ),
+            None,
+        )
+        if current_user_index is None:
+            return None
+        current_turn_rows = current_turn_rows[current_user_index + 1:]
     assistant_row = next(
         (
             row
-            for row in reversed(messages)
+            for row in reversed(current_turn_rows)
             if isinstance(row, dict)
             and row.get('role') == 'assistant'
             and row.get('content')
@@ -7766,6 +7798,8 @@ def _run_agent_streaming(
     old_session_platform = None
     old_hermes_home = None
     old_profile_env = {}
+    result = None
+    _result_partial_pre_call_context = []
 
     # MCP discovery moved to AFTER the per-profile HERMES_HOME mutation below
     # (was here at v0.51.30) — the previous placement always read the default
@@ -9719,6 +9753,7 @@ def _run_agent_streaming(
                     cfg=_cfg,
                 )
                 _run_conversation_kwargs["user_message"] = user_message
+            _result_partial_pre_call_context = list(_previous_context_messages)
             result = agent.run_conversation(**_run_conversation_kwargs)
             _active_turn_identity = _resolve_active_turn_authority(
                 _active_turn_identity,
@@ -10184,6 +10219,9 @@ def _run_agent_streaming(
                                 )
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
+                                _result_partial_pre_call_context = list(
+                                    _heal_context_messages
+                                )
                                 _heal_result = agent.run_conversation(**_heal_kwargs)
                                 _active_turn_identity = _resolve_active_turn_authority(
                                     _active_turn_identity,
@@ -10324,7 +10362,12 @@ def _run_agent_streaming(
                         s.pending_user_source = None
                         try:
                             _snapshot_and_append_partial_on_error(s, stream_id)
-                            _append_result_partial_on_error(s, result)
+                            _append_result_partial_on_error(
+                                s,
+                                result,
+                                _result_partial_pre_call_context,
+                                msg_text,
+                            )
                         except Exception:
                             logger.debug("Failed to snapshot partials on error for %s", stream_id, exc_info=True)
                         _error_content = (
@@ -11445,6 +11488,9 @@ def _run_agent_streaming(
                         )
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config
+                        _result_partial_pre_call_context = list(
+                            _heal_context_messages
+                        )
                         _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
                         _active_turn_identity = _resolve_active_turn_authority(
                             _active_turn_identity,
@@ -11592,7 +11638,12 @@ def _run_agent_streaming(
                 s.pending_user_source = None
                 try:
                     _snapshot_and_append_partial_on_error(s, stream_id)
-                    _append_result_partial_on_error(s, result)
+                    _append_result_partial_on_error(
+                        s,
+                        result,
+                        _result_partial_pre_call_context,
+                        msg_text,
+                    )
                 except Exception:
                     logger.debug("Failed to snapshot partials on error for %s", stream_id, exc_info=True)
                 _error_message = {
