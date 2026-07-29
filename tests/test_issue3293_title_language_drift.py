@@ -216,3 +216,117 @@ def test_unreadable_config_falls_back_to_default(monkeypatch):
 
     for prompt in prompts:
         assert "Match the language of the user question." in prompt
+
+
+# ── pinned language must survive output validation ──────────────────────────
+#
+# The prompt pin above is only half the contract. Both title wrappers run the
+# generated title through _title_language_mismatch(user_text, title), which
+# derives the expected script from the conversation start -- so a compliant
+# Japanese title for an English conversation would be generated as requested
+# and then discarded as llm_language_mismatch / llm_language_mismatch_aux.
+# A nonblank pin is snapshotted once per attempt and is authoritative for both
+# the prompt and validation; absent/blank/unreadable pins keep the #3293
+# rejection behavior unchanged.
+
+
+def _fake_transport(response, calls):
+    def fake(*args, **kwargs):
+        calls.append(kwargs)
+        return response, "llm_stub"
+    return fake
+
+
+def test_agent_route_accepts_pinned_cross_script_title(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "Japanese"})
+    calls = []
+    monkeypatch.setattr(streaming, "generate_title_raw_via_agent", _fake_transport("修正方法", calls))
+
+    title, status, _ = streaming._generate_llm_session_title_for_agent(
+        object(), "How do I fix this error?", "Do it like this."
+    )
+
+    assert title == "修正方法"
+    assert status == "llm_stub"
+    assert calls and calls[0].get("pinned_language") == "Japanese"
+
+
+def test_agent_route_still_rejects_cross_script_drift_without_pin(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {})
+    monkeypatch.setattr(streaming, "generate_title_raw_via_agent", _fake_transport("修正方法", []))
+
+    title, status, _ = streaming._generate_llm_session_title_for_agent(
+        object(), "How do I fix this error?", "Do it like this."
+    )
+
+    assert title is None
+    assert status == "llm_language_mismatch"
+
+
+def test_aux_route_accepts_pinned_cross_script_title(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "Japanese"})
+    calls = []
+    monkeypatch.setattr(streaming, "generate_title_raw_via_aux", _fake_transport("修正方法", calls))
+
+    title, status, _ = streaming._generate_llm_session_title_via_aux(
+        "How do I fix this error?", "Do it like this."
+    )
+
+    assert title == "修正方法"
+    assert status == "llm_stub"
+    assert calls and calls[0].get("pinned_language") == "Japanese"
+
+
+def test_aux_route_still_rejects_cross_script_drift_without_pin(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {})
+    monkeypatch.setattr(streaming, "generate_title_raw_via_aux", _fake_transport("修正方法", []))
+
+    title, status, _ = streaming._generate_llm_session_title_via_aux(
+        "How do I fix this error?", "Do it like this."
+    )
+
+    assert title is None
+    assert status == "llm_language_mismatch_aux"
+
+
+def test_blank_pin_keeps_rejection_on_both_routes(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "   "})
+    monkeypatch.setattr(streaming, "generate_title_raw_via_agent", _fake_transport("修正方法", []))
+    monkeypatch.setattr(streaming, "generate_title_raw_via_aux", _fake_transport("修正方法", []))
+
+    agent_title, agent_status, _ = streaming._generate_llm_session_title_for_agent(
+        object(), "How do I fix this error?", "Do it like this."
+    )
+    aux_title, aux_status, _ = streaming._generate_llm_session_title_via_aux(
+        "How do I fix this error?", "Do it like this."
+    )
+
+    assert agent_title is None and agent_status == "llm_language_mismatch"
+    assert aux_title is None and aux_status == "llm_language_mismatch_aux"
+
+
+def test_unreadable_config_keeps_rejection(monkeypatch):
+    from api import streaming
+
+    def _boom():
+        raise RuntimeError("config unavailable")
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", _boom)
+    monkeypatch.setattr(streaming, "generate_title_raw_via_aux", _fake_transport("修正方法", []))
+
+    title, status, _ = streaming._generate_llm_session_title_via_aux(
+        "How do I fix this error?", "Do it like this."
+    )
+
+    assert title is None
+    assert status == "llm_language_mismatch_aux"

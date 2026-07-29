@@ -3543,7 +3543,21 @@ def _dominant_script(text: str) -> str:
     return ''
 
 
-def _title_prompt_language_rule(user_text: str) -> str:
+def _configured_title_language() -> str:
+    """Return the trimmed ``auxiliary.title_generation.language`` pin, or ''.
+
+    A nonblank value is authoritative for a whole generation attempt: the same
+    snapshot must drive both the prompt instruction and output validation, so
+    a title requested in the pinned language is never rejected by a validator
+    that expected the conversation's language.
+    """
+    try:
+        return str((_get_aux_title_config() or {}).get("language", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _title_prompt_language_rule(user_text: str, pinned_language: Optional[str] = None) -> str:
     """Return the language instruction used by every title prompt.
 
     Honours ``auxiliary.title_generation.language`` when the user has pinned a
@@ -3551,13 +3565,14 @@ def _title_prompt_language_rule(user_text: str) -> str:
     ``_TITLE_PROMPT_PINNED_LANGUAGE``, so without this the setting only takes
     effect on native surfaces and WebUI titles drift independently.
 
+    ``pinned_language`` lets callers that already snapshotted the setting pass
+    it through, keeping prompt and validation consistent within one attempt;
+    ``None`` means read the config here.
+
     Falls back to the previous "match the conversation start" instruction when
     no language is configured, so unpinned installs are unaffected.
     """
-    try:
-        language = str((_get_aux_title_config() or {}).get("language", "") or "").strip()
-    except Exception:
-        language = ""
+    language = _configured_title_language() if pinned_language is None else str(pinned_language).strip()
     if language:
         return f"Write the title in {language}.\n"
     return "Match the language of the user question.\n"
@@ -3611,9 +3626,9 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
     return english_hits >= 2
 
 
-def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:
+def _title_prompts(user_text: str, assistant_text: str, pinned_language: Optional[str] = None) -> tuple[str, list[str]]:
     qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
-    language_rule = _title_prompt_language_rule(user_text)
+    language_rule = _title_prompt_language_rule(user_text, pinned_language)
     prompts = [
         (
             "Generate a short session title from this conversation start.\n"
@@ -3844,11 +3859,13 @@ def generate_title_raw_via_aux(
     provider: str = '',
     model: str = '',
     base_url: str = '',
+    *,
+    pinned_language: Optional[str] = None,
 ) -> tuple[Optional[str], str]:
     """Return (raw_text, status) via auxiliary LLM route."""
     if not user_text or not assistant_text:
         return None, 'missing_exchange'
-    qa, prompts = _title_prompts(user_text, assistant_text)
+    qa, prompts = _title_prompts(user_text, assistant_text, pinned_language)
     configured = _get_aux_title_config()
     caller_supplied_route = bool(provider or model or base_url)
     provider = provider or configured.get('provider', '') or ''
@@ -3924,14 +3941,14 @@ def generate_title_raw_via_aux(
         return None, 'llm_error_aux'
 
 
-def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str]:
+def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, pinned_language: Optional[str] = None) -> tuple[Optional[str], str]:
     """Return (raw_text, status) via active-agent route."""
     if not user_text or not assistant_text:
         return None, 'missing_exchange'
     if agent is None:
         return None, 'missing_agent'
 
-    qa, prompts = _title_prompts(user_text, assistant_text)
+    qa, prompts = _title_prompts(user_text, assistant_text, pinned_language)
     base_max_tokens = _title_completion_budget(
         getattr(agent, 'provider', ''),
         getattr(agent, 'model', ''),
@@ -4048,12 +4065,17 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
 
 def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str, str]:
     """Generate a title via active-agent route, then sanitize/validate result."""
-    raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text)
+    # One snapshot drives both the prompt and validation: when a language is
+    # pinned, the prompt asks for it, so a title whose script differs from the
+    # conversation start is compliant output, not drift -- the user_text-based
+    # mismatch check must not discard it.
+    pinned_language = _configured_title_language()
+    raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text, pinned_language=pinned_language)
     if not raw:
         return None, status, ''
     title = _sanitize_generated_title(raw)
     if title:
-        if _title_language_mismatch(user_text, title):
+        if not pinned_language and _title_language_mismatch(user_text, title):
             return None, 'llm_language_mismatch', str(raw)[:120]
         return title, status, ''
     return None, 'llm_invalid', str(raw)[:120]
@@ -4076,18 +4098,23 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
         provider = ''
         model = ''
         base_url = ''
+    # Same snapshot-once contract as _generate_llm_session_title_for_agent:
+    # a pinned language means the prompt requested it, so cross-script output
+    # is expected and must survive validation.
+    pinned_language = _configured_title_language()
     raw, status = generate_title_raw_via_aux(
         user_text,
         assistant_text,
         provider=provider,
         model=model,
         base_url=base_url,
+        pinned_language=pinned_language,
     )
     if not raw:
         return None, status, ''
     title = _sanitize_generated_title(raw)
     if title:
-        if _title_language_mismatch(user_text, title):
+        if not pinned_language and _title_language_mismatch(user_text, title):
             return None, 'llm_language_mismatch_aux', str(raw)[:120]
         return title, status, ''
     return None, 'llm_invalid_aux', str(raw)[:120]
