@@ -621,3 +621,114 @@ def test_qwen_prefixed_alias_reasoning_detection():
             f"{model} must remain reasoning-capable (DeepSeek-R1 hybrid, "
             f"Qwen 2.x must not shadow the DeepSeek detector)"
         )
+
+# ── PR #6018: max/ultra coercion leak closures ───────────────────────────────
+
+def test_custom_provider_default_denies_max_ultra_for_recognized_models():
+    # Finding 1: a recognized reasoning-capable model family behind a custom /
+    # unknown provider must NOT inherit the generic max/ultra tiers by default —
+    # the provider's native ladder is unknown, so the top tiers are denied.
+    for model in (
+        "kimi-k2.5", "moonshotai.kimi-k2.5", "deepseek-v4-flash",
+        "zai-org/GLM-5.2", "minimax-m3-pro",
+    ):
+        efforts = cfg.resolve_model_reasoning_efforts(model, provider_id="custom:unlisted")
+        assert efforts, f"{model} should still expose the standard ladder"
+        assert "xhigh" in efforts
+        assert "max" not in efforts and "ultra" not in efforts, (
+            f"{model} via unrecognized custom provider must default-deny max/ultra"
+        )
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", model, provider_id="custom:unlisted"
+        ) == "xhigh"
+        assert cfg.coerce_reasoning_effort_for_model(
+            "max", model, provider_id="custom:unlisted"
+        ) == "xhigh"
+
+
+def test_custom_provider_explicit_allowlist_authorizes_max_ultra(monkeypatch):
+    # Finding 1 (exception): an explicit provider reasoning_efforts allowlist
+    # is the operator's authorization — max/ultra survive when listed.
+    original = cfg.cfg.get("custom_providers")
+    monkeypatch.setitem(
+        cfg.cfg,
+        "custom_providers",
+        [{"name": "frontier-gw", "reasoning_efforts": ["high", "xhigh", "max", "ultra"]}],
+    )
+    try:
+        assert cfg.resolve_model_reasoning_efforts(
+            "some-model", provider_id="custom:frontier-gw"
+        ) == ["high", "xhigh", "max", "ultra"]
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", "some-model", provider_id="custom:frontier-gw"
+        ) == "ultra"
+        assert cfg.coerce_reasoning_effort_for_model(
+            "max", "some-model", provider_id="custom:frontier-gw"
+        ) == "max"
+    finally:
+        if original is None:
+            cfg.cfg.pop("custom_providers", None)
+        else:
+            monkeypatch.setitem(cfg.cfg, "custom_providers", original)
+
+
+def test_aggregator_routes_cap_older_gpt5_and_o_series():
+    # Finding 2: model-scoped ceilings follow the MODEL across aggregator lanes.
+    # Older GPT-5 + o-series via OpenRouter/Nous must never see max/ultra.
+    for prov in ("openrouter", "nous"):
+        for model in ("openai/gpt-5.5", "openai/gpt-5.1"):
+            assert cfg.coerce_reasoning_effort_for_model(
+                "ultra", model, provider_id=prov
+            ) == "xhigh", f"{model} via {prov}: ultra must downgrade to xhigh"
+            assert cfg.coerce_reasoning_effort_for_model(
+                "max", model, provider_id=prov
+            ) == "xhigh"
+            efforts = cfg.resolve_model_reasoning_efforts(model, provider_id=prov)
+            assert "max" not in efforts and "ultra" not in efforts
+        for model in ("openai/o3", "openai/o4-mini"):
+            assert cfg.coerce_reasoning_effort_for_model(
+                "ultra", model, provider_id=prov
+            ) == "high", f"{model} via {prov}: ultra must downgrade to high"
+            assert cfg.coerce_reasoning_effort_for_model(
+                "xhigh", model, provider_id=prov
+            ) == "high"
+            efforts = cfg.resolve_model_reasoning_efforts(model, provider_id=prov)
+            assert set(efforts) <= {"low", "medium", "high"}
+        # GPT-5.6 via the same aggregator keeps the generic top tiers — the
+        # ceiling is model-scoped, not aggregator-scoped.
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", "openai/gpt-5.6-sol", provider_id=prov
+        ) == "ultra"
+
+
+def test_copilot_fallback_caps_max_ultra():
+    # Finding 3: the Copilot heuristic fallback handed out the full global list
+    # for ANY gpt-5 id; only GPT-5.6 may keep max/ultra.
+    efforts = cfg._heuristic_reasoning_efforts("gpt-5.5", "copilot")
+    assert efforts, "copilot gpt-5.5 fallback must keep the standard ladder"
+    assert "xhigh" in efforts
+    assert "max" not in efforts and "ultra" not in efforts
+    assert cfg._heuristic_reasoning_efforts("o3", "github-copilot") == ["low", "medium", "high"]
+    efforts56 = cfg._heuristic_reasoning_efforts("gpt-5.6-sol", "copilot")
+    assert "max" in efforts56 and "ultra" in efforts56
+    # Coercion agrees even when the sourced list came from the fallback.
+    assert cfg.coerce_reasoning_effort_for_model(
+        "ultra", "gpt-5.5", provider_id="copilot"
+    ) == "xhigh"
+
+
+def test_metadata_unavailable_fallback_applies_gpt56_check(monkeypatch):
+    # Finding 4: when capability metadata has no answer, the fallback branches
+    # returning the expanded global effort list must still apply the GPT-5.6
+    # model check and the unknown-provider max/ultra default-deny.
+    monkeypatch.setattr(cfg, "_models_dev_reasoning_efforts", lambda *a, **k: None)
+    efforts = cfg.resolve_model_reasoning_efforts("openai/gpt-5.5", provider_id="openrouter")
+    assert "xhigh" in efforts
+    assert "max" not in efforts and "ultra" not in efforts
+    efforts56 = cfg.resolve_model_reasoning_efforts("openai/gpt-5.6-sol", provider_id="openrouter")
+    assert "max" in efforts56 and "ultra" in efforts56
+    # Same gap closed for heuristic-recognized families on unknown providers.
+    custom = cfg.resolve_model_reasoning_efforts("kimi-k2.5", provider_id="custom:unlisted")
+    assert "xhigh" in custom
+    assert "max" not in custom and "ultra" not in custom
+
