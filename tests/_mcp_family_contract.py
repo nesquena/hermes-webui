@@ -58,7 +58,17 @@ SELECTION_ENV_VARS = (
     "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
 )
 SELECTION_ADDOPTS_FLAGS = ("-k", "-m", "--deselect", "--ignore", "--collect-only", "--co")
-PYTEST_CONFIG_FILES = ("pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini")
+# Every file pytest reads config from, in its own discovery order. `pytest.toml`
+# is recognized ahead of `pytest.ini`, so omitting it leaves a supported place
+# to park an `addopts` that deselects the certification.
+PYTEST_CONFIG_FILES = (
+    "pytest.ini",
+    "pytest.toml",
+    ".pytest.ini",
+    "pyproject.toml",
+    "tox.ini",
+    "setup.cfg",
+)
 
 DOCS_ONLY_GUARD = "needs.changes.outputs.docs_only != 'true'"
 JOB_GUARD = "always()"
@@ -192,12 +202,22 @@ def assert_no_external_test_selection(workflow=None):
         path = _REPO / filename
         if not path.exists():
             continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if not stripped.startswith("addopts"):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            if not line.strip().startswith("addopts"):
                 continue
-            offenders = [flag for flag in SELECTION_ADDOPTS_FLAGS if flag in stripped]
+            # `addopts` can span lines, as an ini continuation or a TOML list,
+            # so read the declaration plus everything up to the next key or
+            # section rather than the first line alone.
+            block = [line]
+            for follow in lines[index + 1:]:
+                stripped = follow.strip()
+                if not stripped or stripped.startswith("[") or "=" in stripped.split("#")[0]:
+                    break
+                block.append(follow)
+            declaration = " ".join(part.strip() for part in block)
+            offenders = [flag for flag in SELECTION_ADDOPTS_FLAGS if flag in declaration]
             assert not offenders, (
-                f"{filename} sets {stripped!r}, carrying {offenders}, which "
+                f"{filename} sets {declaration!r}, carrying {offenders}, which "
                 f"deselects tests for every run including the certification"
             )
