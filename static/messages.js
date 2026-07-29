@@ -5965,7 +5965,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               _transient:true,
             });
           }
-          clearLiveToolCards();
+          // #6472: keep the live worklog visible until the settled render replaces
+          // it. Calling clearLiveToolCards() before renderMessages() removes the
+          // live worklog DOM before the settled anchor-scene render populates the
+          // replacement, exposing an empty intermediate frame on costly transcript
+          // rebuilds. The renderMessages() call below naturally handles DOM cleanup
+          // via innerHTML replacement, so the pre-render removal is both redundant
+          // and harmful. Error/cancel paths (_finalizeStreamEndFallback) still call
+          // their own clearLiveToolCards() for immediate cleanup as specified.
           S.busy=false;
           // No-reply guard (#373): if agent returned nothing, show inline error
           if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
