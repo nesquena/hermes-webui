@@ -470,7 +470,7 @@ def retry_last(session_id: str) -> dict[str, Any]:
                 truncated_context = _truncate_at_last_user(s.context_messages)
                 if truncated_context is not None:
                     s.context_messages = truncated_context
-        s.save()
+        s.save(prune_media=True)
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
 
@@ -512,7 +512,7 @@ def undo_last(session_id: str) -> dict[str, Any]:
                 truncated_context = _truncate_at_last_user(s.context_messages)
                 if truncated_context is not None:
                     s.context_messages = truncated_context
-        s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
+        s.save(prune_media=True)  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
     preview = (removed_text[:40] + '...') if len(removed_text) > 40 else removed_text
     return {
         'removed_count': removed_count,

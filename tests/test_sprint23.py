@@ -34,17 +34,16 @@ def _make_session_visible(sid):
     from api.models import Session
     from tests.conftest import TEST_WORKSPACE
 
-    session = Session(
-        session_id=sid,
-        title="Compact Usage",
-        workspace=str(TEST_WORKSPACE),
-        model="test",
-        created_at=1.0,
-        updated_at=1.0,
-        profile="default",
-        messages=[{"role": "user", "content": "visible row", "timestamp": 1.0}],
-        tool_calls=[],
-    )
+    session = Session.load(sid)
+    assert session is not None
+    session.title = "Compact Usage"
+    session.workspace = str(TEST_WORKSPACE)
+    session.model = "test"
+    session.created_at = 1.0
+    session.updated_at = 1.0
+    session.profile = "default"
+    session.messages = [{"role": "user", "content": "visible row", "timestamp": 1.0}]
+    session.tool_calls = []
     session.save(touch_updated_at=False)
 
 

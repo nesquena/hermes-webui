@@ -235,6 +235,43 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.
 
+#### 4.2.1 Private Session Media
+
+Large native raster data URLs remain inline in session JSON. New private-media
+externalization is disabled because POSIX/Python exposes final `unlink` and
+`rmdir` only by mutable pathname; it has no portable operation that retires the
+inode held by an opened descriptor. A final stat check cannot close the
+replacement window, so enabling creation would make ordinary delete, clear,
+prune, rollback, and recovery unsafe.
+
+`webui-media://<sha256>.<ext>` remains a read-only compatibility format for
+sidecars written by an earlier experimental build. The reader anchors the
+directory handles, rejects symlink components, and verifies extension/MIME,
+raster magic, and SHA-256 before it expands a reference to a data URL. It is
+not a persistence compatibility path: `Session.save()`, backup/recovery,
+duplicate, branch, `/btw`, and compression continuation reject a compact
+reference before a destination can commit. An operator must run an explicit
+offline migration which reads and verifies the legacy blob, writes an inline
+payload, then retires the old namespace using an identity-bound backend.
+Missing or corrupt media also fails closed and leaves the current sidecar
+untouched. Portable imports continue to reject private references.
+
+No automatic write, clone, migration, prune, or deletion operation creates a
+new private-media entry. Existing canonical directories and durable
+`.delete-<sid-hash>-...` quarantines remain SID owners, including the crash
+window before a cleanup residual is written, so a same-ID reservation cannot
+adopt or collide with detached private data. Automatic retirement of such old
+experimental data is intentionally refused rather than deleting a mutable
+path; it requires an identity-bound backend/operator migration. The generic
+`/api/media` file server hard-denies the complete `session-media` subtree.
+
+Session publication and deletion share permanent per-SID cross-process and
+in-process locks plus an incarnation token. Tokenless legacy loads hold that
+authority from no-follow regular-FD validation through lease registration, and
+a save rechecks the bound device/inode signature immediately before publishing.
+Backups, focused recovery, and compression-source restore validate the exact
+bytes they will retain or publish and reject every private reference.
+
 ### 4.3 SSE Streaming Engine
 
 This is the most architecturally interesting part. Two endpoints cooperate:

@@ -641,7 +641,7 @@ class _ImportedSessionStub:
         }
 
 
-def test_session_import_stamps_active_profile():
+def test_session_import_stamps_active_profile(monkeypatch, tmp_path):
     """JSON imports must not create root/default-owned rows from named profiles.
 
     The import route validates the workspace under the request's active profile.
@@ -650,6 +650,12 @@ def test_session_import_stamps_active_profile():
     named-profile workspace. Pin the import-time ownership stamp directly.
     """
     import api.routes as routes
+    import api.models as models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
 
     captured = {}
     body = {
@@ -678,9 +684,15 @@ def test_session_import_stamps_active_profile():
     assert sessions["imported_profile_001"].profile == "poc"
 
 
-def test_session_import_default_profile_remains_default_owned():
+def test_session_import_default_profile_remains_default_owned(monkeypatch, tmp_path):
     """Root/default imports keep the legacy default ownership semantics."""
     import api.routes as routes
+    import api.models as models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
 
     captured = {}
     body = {

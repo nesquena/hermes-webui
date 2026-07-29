@@ -109,7 +109,7 @@ def test_delete_worktree_session_reports_retained_worktree_without_cleanup(tmp_p
     assert worktree.exists(), "session delete must not remove the git worktree directory"
 
 
-def test_delete_session_records_tombstone_when_state_db_delete_fails(tmp_path, monkeypatch):
+def test_delete_session_reports_residuals_when_private_cleanup_fails(tmp_path, monkeypatch):
     session_dir = _isolate_session_store(tmp_path, monkeypatch)
     sid = "dbfaildelete1"
     session = Session(
@@ -138,11 +138,16 @@ def test_delete_session_records_tombstone_when_state_db_delete_fails(tmp_path, m
 
     assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
 
-    assert captured["status"] == 200
-    assert captured["payload"]["ok"] is True
-    assert captured["payload"]["state_db_cleanup_failed"] is True
+    assert captured["status"] == 500
+    assert captured["payload"]["error"] == "Session cleanup incomplete"
+    assert {item["artifact"] for item in captured["payload"]["residuals"]} >= {
+        "session_backup",
+        "state_db",
+    }
     assert not (session_dir / f"{sid}.json").exists()
+    assert (session_dir / f"{sid}.json.bak").exists()
     assert sid in models._load_webui_deleted_session_tombstone()
+    assert sid in models._load_session_cleanup_residuals()
 
 
 def test_delete_messaging_session_reopens_read_only_without_deleted_webui_tombstone(
