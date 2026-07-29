@@ -1900,31 +1900,37 @@ def test_missing_wrapper_then_live_malformed_wrapper_repair_retry():
     group B has a LIVE wrapper in list.children with no body (malformed).
     Phase 1 must abort at B WITHOUT attaching A's detached wrapper or mutating
     B. Then repair B IN PLACE (same VM, same list), retry, and assert:
-    - Top-level order is P, A, B (canonical, not B, A)
+    - Top-level order is P, A, B, [sentinel] (canonical, not B, A)
     - Every SID s_0..s_99 appears exactly once
     - B's wrapper node identity is preserved (same object reference)
     - Loaded count reaches 100
 
-    Strengthened per gate-certifier review at 33396f4b:
-    - Wrapper and SID authority derived from DOM-faithful live child tree
-      (list.children traversal), not _groups/_items side registries.
-    - B's exact children/order, attributes, body state, SID nodes, and
-      seeded spacer/sentinel identity are snapshotted before abort, then
-      proven unchanged afterward — a deep zero-mutation proof.
-    - After retry: exactly one A and one B, childrenAfterRetry[groupBIdx]
-      === gwB (strict ref), gwB.querySelector('.session-date-body') === bodyB,
-      and exactly s_80..s_99 once inside bodyB.
-    - Mutation bite: if B's dataset is mutated before the abort (e.g.
-      data-reviewer-mutated-before-abort='1'), the deep snapshot comparison
-      must fail the test.
+    Strengthened per gate-certifier review at e159285654:
+    - ALL post-retry session rows derived by traversing list.children (the
+      live child tree), NOT from saved gwP/wrapperA/gwB references. A detached
+      saved reference cannot false-green.
+    - Assert the exact top-level identity sequence and length, including the
+      same live gwP at its position, one canonical A, the same gwB, and any
+      retained sentinel/spacer.
+    - Assert exact body ownership from that live tree: P=s_0..s_59,
+      A=s_60..s_79, B=s_80..s_99.
+    - Seed non-empty malformed-B internals plus retained spacer/sentinel
+      objects; snapshot their identity/order/state; prove abort leaves them
+      unchanged.
+    - Mutation bite: if a canonical live wrapper is removed/replaced/duplicated
+      the test fails, rather than satisfying aggregate SID checks from a
+      detached saved reference.
 
     Scenario: 100 rows in 3 groups. Rows 0-59 in group P (pre-painted,
     existing wrapper with body — provides the 60 DOM items the prefix
     validation needs). Rows 60-79 in group A (no wrapper — Phase 1 creates
-    it detached). Rows 80-99 in group B (live malformed wrapper — no body).
+    it detached). Rows 80-99 in group B (live malformed wrapper — no body,
+    but WITH pre-existing children and a spacer to exercise internal-state
+    preservation). A sentinel element is also seeded in list.children.
     The first _appendTouchBatch processes rows 60-99: Phase 1 validates A
     (creates detached), validates B (exists, no body — abort). A's detached
-    wrapper must NOT be attached. B must be unchanged.
+    wrapper must NOT be attached. B must be unchanged — including its
+    internal children, spacer, and the sentinel.
     """
     # 100 rows: 0-59 in P, 60-79 in A (isPinned=true), 80-99 in B
     flat_rows = []
@@ -2058,13 +2064,30 @@ _touchRenderState = {{
 }};
 
 // ── Group B: LIVE malformed wrapper — in list.children but querySelector
-//    returns null for .session-date-body (no body = malformed). ──
+//    returns null for .session-date-body (no body = malformed).
+//    BUT B is NOT empty: it has pre-existing children (a header and a
+//    spacer element) to exercise internal-state preservation. ──
 const gwB = makeEl('div');
 gwB.className = 'session-date-group';
 gwB.dataset['group-label'] = 'B';
+// Seed non-empty internal state: a header child and a virtual spacer child
+const bHeader = makeEl('div');
+bHeader.className = 'session-date-header';
+gwB.appendChild(bHeader);
+const bSpacer = makeEl('div');
+bSpacer.className = 'session-virtual-spacer';
+bSpacer.dataset['virtual-spacer'] = 'after';
+gwB.appendChild(bSpacer);
 gwB.querySelector = function(sel) {{ return null; }}; // no body — malformed
 gwB.querySelectorAll = function(sel) {{ return []; }};
 list.children.push(gwB); // B is LIVE in list.children
+
+// ── Sentinel element: seeded in list.children to exercise sentinel
+//    preservation. Production uses this for the IntersectionObserver. ──
+const sentinel = makeEl('div');
+sentinel.className = 'touch-sentinel';
+sentinel.dataset['touch-sentinel'] = '1';
+list.children.push(sentinel);
 
 // ── Deep snapshot of B BEFORE append ──
 // Capture B's exact children (by reference), their order, classNames,
@@ -2076,10 +2099,13 @@ for (const k in gwB.dataset) bDatasetBefore[k] = gwB.dataset[k];
 const bClassNameBefore = gwB.className || '';
 const bChildrenCountBefore = gwB.children.length;
 
-// Snapshot the live tree's top-level state
+// Snapshot the live tree's top-level state (including sentinel)
 const childrenBefore = list.children.slice();
 const topLevelCountBefore = list.children.length;
 const loadedBefore = _sessionTouchLoadedCount;
+
+// Snapshot sentinel identity/position
+const sentinelIdxBefore = list.children.indexOf(sentinel);
 
 // Snapshot what SID nodes exist inside B (from DOM-faithful traversal —
 // should be 0 since B has no body)
@@ -2139,6 +2165,11 @@ const sidsInBAfter = (function() {{
 }})();
 const bNoNewSids = JSON.stringify(sidsInBBefore) === JSON.stringify(sidsInBAfter);
 
+// 8. Sentinel unchanged: same ref, same position
+const sentinelIdxAfterAbort = list.children.indexOf(sentinel);
+const sentinelSameRef = sentinelIdxAfterAbort >= 0;
+const sentinelSamePos = sentinelIdxBefore === sentinelIdxAfterAbort;
+
 // Group P must NOT have received any new rows (from DOM-faithful traversal)
 const sidsInPAfterAbort = (function() {{
   var body = gwP.querySelector('.session-date-body');
@@ -2176,17 +2207,49 @@ _appendTouchBatch();
 const loadedAfterRetry = _sessionTouchLoadedCount;
 const childrenAfterRetry = list.children.slice();
 
-// ── Derive everything from the live child tree ──
-const labelsAfterRetry = childrenAfterRetry.map(c => {{
-  if (!c.dataset) return null;
-  return c.dataset['group-label'] || c.getAttribute('data-group-label');
+// ── LIVE-TREE AUTHORITY: derive everything from list.children ──
+// Walk the live child tree to build the complete top-level identity
+// sequence. This is the authoritative source — NOT saved gwP/wrapperA/gwB
+// references, which could be detached and false-green.
+const liveSeq = childrenAfterRetry.map((c, i) => {{
+  if (!c.dataset) return {{ idx: i, kind: 'unknown', label: null, ref: c }};
+  var label = c.dataset['group-label'] || c.getAttribute('data-group-label');
+  var isSentinel = c.dataset['touch-sentinel'] !== undefined;
+  return {{ idx: i, kind: isSentinel ? 'sentinel' : (label ? 'group' : 'unknown'), label: label, ref: c }};
 }});
 
+const liveSeqLabels = liveSeq.map(e => e.label);
+const liveSeqLength = childrenAfterRetry.length;
+
 // Exactly one A and one B
-const groupAIdx = labelsAfterRetry.indexOf('A');
-const groupBIdx = labelsAfterRetry.indexOf('B');
-const groupACount = labelsAfterRetry.filter(l => l === 'A').length;
-const groupBCount = labelsAfterRetry.filter(l => l === 'B').length;
+const groupAIdx = liveSeqLabels.indexOf('A');
+const groupBIdx = liveSeqLabels.indexOf('B');
+const groupPIdx = liveSeqLabels.indexOf('P');
+const groupACount = liveSeqLabels.filter(l => l === 'A').length;
+const groupBCount = liveSeqLabels.filter(l => l === 'B').length;
+const groupPCount = liveSeqLabels.filter(l => l === 'P').length;
+
+// ── EXACT TOP-LEVEL IDENTITY SEQUENCE ──
+// Assert the exact sequence: [gwP, A_wrapper, gwB, sentinel]
+// This proves the same live gwP is at position 0, A is new, gwB is the
+// same object, and the sentinel is retained — from the LIVE tree.
+// Note: use getAttribute('data-group-label') as fallback because the mock's
+// setAttribute strips hyphens (grouplabel vs group-label), matching what
+// the liveSeqLabels derivation does.
+const _ref0IsGwP = childrenAfterRetry[0] === gwP;
+const _ref1NotGwB = childrenAfterRetry[1] !== gwB;
+const _ref1LabelA = !!(childrenAfterRetry[1] && (
+  childrenAfterRetry[1].dataset && childrenAfterRetry[1].dataset['group-label'] === 'A' ||
+  childrenAfterRetry[1].getAttribute && childrenAfterRetry[1].getAttribute('data-group-label') === 'A'
+));
+const _ref2IsGwB = childrenAfterRetry[2] === gwB;
+const _ref3IsSentinel = childrenAfterRetry[3] === sentinel;
+const liveSeqExactRefs = liveSeqLength === 4 &&
+  _ref0IsGwP &&
+  _ref1NotGwB &&
+  _ref1LabelA &&
+  _ref2IsGwB &&
+  _ref3IsSentinel;
 
 // Strict reference identity: childrenAfterRetry[groupBIdx] === gwB
 const bWrapperStrictRef = groupBIdx >= 0 && childrenAfterRetry[groupBIdx] === gwB;
@@ -2194,47 +2257,80 @@ const bWrapperStrictRef = groupBIdx >= 0 && childrenAfterRetry[groupBIdx] === gw
 // Strict reference identity for body: gwB.querySelector('.session-date-body') === bodyB
 const bodyBStrictRef = gwB.querySelector('.session-date-body') === bodyB;
 
-// Exactly s_80..s_99 once inside bodyB (from live DOM tree)
-const sidsInBAfterRetry = (function() {{
-  var body = gwB.querySelector('.session-date-body');
-  if (!body) return [];
-  return body.children.filter(c => c.className && c.className.indexOf('session-item') >= 0)
-    .map(c => c.dataset.sid);
-}})();
-const expectedB = Array.from({{length: 20}}, (_, i) => 's_' + (80 + i));
-const bSidsExact = JSON.stringify(sidsInBAfterRetry) === JSON.stringify(expectedB);
-const bSidsNoDup = sidsInBAfterRetry.length === new Set(sidsInBAfterRetry).size;
+// ── DERIVE ALL SIDs FROM LIVE-TREE TRAVERSAL ──
+// Walk list.children → group wrappers → bodies → session-items. Do NOT
+// read from saved gwP/wrapperA/gwB references — traverse the actual live
+// child tree so a detached reference cannot false-green.
+function sidsFromLiveTree() {{
+  var allSids = [];
+  var groupSids = {{}}; // label → [sids]
+  for (var gi = 0; gi < list.children.length; gi++) {{
+    var gw = list.children[gi];
+    if (!gw.dataset) continue;
+    // Get label from either dataset['group-label'] (direct set) or
+    // getAttribute('data-group-label') (mock setAttribute strips hyphens,
+    // storing as 'grouplabel'). Skip non-group children (e.g. sentinel).
+    var label = gw.dataset['group-label'] ||
+      (gw.getAttribute ? gw.getAttribute('data-group-label') : null);
+    if (!label) continue;
+    var body = null;
+    if (typeof gw.querySelector === 'function') body = gw.querySelector('.session-date-body');
+    if (!body) {{ groupSids[label] = []; continue; }}
+    var sids = [];
+    for (var bi = 0; bi < body.children.length; bi++) {{
+      var c = body.children[bi];
+      if (c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid) {{
+        sids.push(c.dataset.sid);
+      }}
+    }}
+    groupSids[label] = sids;
+    allSids = allSids.concat(sids);
+  }}
+  return {{ all: allSids, byGroup: groupSids }};
+}}
 
-// Exactly s_60..s_79 once inside A's body (from live DOM tree)
-const wrapperA = groupAIdx >= 0 ? childrenAfterRetry[groupAIdx] : null;
-const sidsInAAfterRetry = (function() {{
-  if (!wrapperA) return [];
-  var body = null;
-  if (typeof wrapperA.querySelector === 'function') body = wrapperA.querySelector('.session-date-body');
-  if (!body) return [];
-  return body.children.filter(c => c.className && c.className.indexOf('session-item') >= 0)
-    .map(c => c.dataset.sid);
-}})();
-const expectedA = Array.from({{length: 20}}, (_, i) => 's_' + (60 + i));
-const aSidsExact = JSON.stringify(sidsInAAfterRetry) === JSON.stringify(expectedA);
+const liveTreeResult = sidsFromLiveTree();
+const allDomSids = liveTreeResult.all;
+const sidsInPFromLive = liveTreeResult.byGroup['P'] || [];
+const sidsInAFromLive = liveTreeResult.byGroup['A'] || [];
+const sidsInBFromLive = liveTreeResult.byGroup['B'] || [];
 
-// All SIDs from DOM-faithful traversal (P + A + B bodies)
-const sidsInPAfterRetry = (function() {{
-  var body = gwP.querySelector('.session-date-body');
-  if (!body) return [];
-  return body.children.filter(c => c.className && c.className.indexOf('session-item') >= 0)
-    .map(c => c.dataset.sid);
-}})();
-const allDomSids = sidsInPAfterRetry.concat(sidsInAAfterRetry, sidsInBAfterRetry);
 const expectedAll = Array.from({{length: 100}}, (_, i) => 's_' + i);
 const allDomSidsExact = JSON.stringify(allDomSids) === JSON.stringify(expectedAll);
 const allDomNoDup = allDomSids.length === new Set(allDomSids).size;
 
+// Exact body ownership from the live tree
+const expectedP = Array.from({{length: 60}}, (_, i) => 's_' + i);
+const expectedA = Array.from({{length: 20}}, (_, i) => 's_' + (60 + i));
+const expectedB = Array.from({{length: 20}}, (_, i) => 's_' + (80 + i));
+const pSidsExact = JSON.stringify(sidsInPFromLive) === JSON.stringify(expectedP);
+const aSidsExact = JSON.stringify(sidsInAFromLive) === JSON.stringify(expectedA);
+const bSidsExact = JSON.stringify(sidsInBFromLive) === JSON.stringify(expectedB);
+
 // Verify isPinned metadata on group A wrapper (A has isPinned=true in flatRows)
+// Derive A's wrapper from the live tree, not a saved reference
+const wrapperAFromLive = groupAIdx >= 0 ? childrenAfterRetry[groupAIdx] : null;
 let aHasPinnedHeader = false;
-if (wrapperA) {{
-  const hdr = wrapperA.children.find(c => c.className && c.className.indexOf('session-date-header') >= 0);
+if (wrapperAFromLive) {{
+  const hdr = wrapperAFromLive.children.find(c => c.className && c.className.indexOf('session-date-header') >= 0);
   aHasPinnedHeader = !!(hdr && hdr.className.indexOf('pinned') >= 0);
+}}
+
+// ── MUTATION BITE: verify the live-tree traversal catches a detached gwP ──
+// Simulate a detached prefix: remove gwP from list.children AFTER retry.
+// The live-tree-derived allDomSids must NOT include P's SIDs anymore,
+// so allDomSidsExact must be false. This proves the test derives authority
+// from list.children, not from the saved gwP reference.
+const listChildrenForBite = list.children.slice();
+const gwPIdx = listChildrenForBite.indexOf(gwP);
+var biteAllDomSidsExact = true; // will be recomputed
+if (gwPIdx >= 0) {{
+  // Temporarily remove gwP from the live tree
+  list.children.splice(gwPIdx, 1);
+  const biteResult = sidsFromLiveTree();
+  biteAllDomSidsExact = JSON.stringify(biteResult.all) === JSON.stringify(expectedAll);
+  // Restore gwP
+  list.children.splice(gwPIdx, 0, gwP);
 }}
 
 console.log(JSON.stringify({{
@@ -2251,26 +2347,41 @@ console.log(JSON.stringify({{
   bNoNewSids,
   pSidCountAfterAbort,
   groupAInDomAfterAbort,
+  sentinelSameRef,
+  sentinelSamePos,
   // Retry assertions
   loadedAfterRetry,
   groupACount,
   groupBCount,
+  groupPCount,
   groupAIdx,
   groupBIdx,
+  groupPIdx,
+  liveSeqLength,
+  liveSeqExactRefs,
+  liveSeqLabels,
+  _ref0IsGwP,
+  _ref1NotGwB,
+  _ref1LabelA,
+  _ref2IsGwB,
+  _ref3IsSentinel,
   bWrapperStrictRef,
   bodyBStrictRef,
-  bSidsExact,
-  bSidsNoDup,
+  // Live-tree-derived SID assertions
+  pSidsExact,
   aSidsExact,
+  bSidsExact,
   allDomSidsExact,
   allDomNoDup,
   aHasPinnedHeader,
-  labelsAfterRetry,
+  // Mutation bite
+  biteAllDomSidsExact,
   // Debug
   bDatasetBefore,
   bDatasetAfter,
-  sidsInBAfterRetry,
-  sidsInAAfterRetry,
+  sidsInPFromLive,
+  sidsInAFromLive,
+  sidsInBFromLive,
 }}));
 """
     result = json.loads(_run_node_vm(source))
@@ -2300,6 +2411,10 @@ console.log(JSON.stringify({{
         f"Group P must not receive any new rows during abort, got {result['pSidCountAfterAbort']}"
     assert not result["groupAInDomAfterAbort"], \
         "Group A's newly created wrapper must stay DETACHED — must not appear in live DOM children"
+    assert result["sentinelSameRef"], \
+        "Sentinel must remain in the live tree after abort"
+    assert result["sentinelSamePos"], \
+        "Sentinel must remain at the same position after abort"
 
     # ── Retry assertions (strict identity from live child tree) ──
     assert result["loadedAfterRetry"] == 100, \
@@ -2308,24 +2423,46 @@ console.log(JSON.stringify({{
         f"Exactly one group A wrapper after retry, got {result['groupACount']}"
     assert result["groupBCount"] == 1, \
         f"Exactly one group B wrapper after retry, got {result['groupBCount']}"
-    assert result["groupAIdx"] >= 0 and result["groupBIdx"] >= 0 and result["groupAIdx"] < result["groupBIdx"], \
-        f"Canonical order must be A before B, got A@{result['groupAIdx']} B@{result['groupBIdx']} — labels: {result['labelsAfterRetry']}"
+    assert result["groupPCount"] == 1, \
+        f"Exactly one group P wrapper after retry, got {result['groupPCount']}"
+
+    # ── EXACT TOP-LEVEL IDENTITY SEQUENCE from live tree ──
+    assert result["liveSeqLength"] == 4, \
+        f"Live tree must have exactly 4 top-level children (P, A, B, sentinel), got {result['liveSeqLength']} — labels: {result.get('liveSeqLabels')}"
+    assert result["liveSeqExactRefs"], \
+        f"Live tree sequence must be [gwP, A_wrapper, gwB, sentinel] (strict refs from list.children), got labels: {result.get('liveSeqLabels')}"
+    assert result["groupAIdx"] == 1, \
+        f"Group A must be at index 1, got {result['groupAIdx']}"
+    assert result["groupBIdx"] == 2, \
+        f"Group B must be at index 2, got {result['groupBIdx']}"
+    assert result["groupPIdx"] == 0, \
+        f"Group P must be at index 0, got {result['groupPIdx']}"
+
     assert result["bWrapperStrictRef"], \
         f"childrenAfterRetry[groupBIdx] must be === gwB (strict ref), got groupBIdx={result['groupBIdx']}"
     assert result["bodyBStrictRef"], \
         "gwB.querySelector('.session-date-body') must be === bodyB (strict ref)"
-    assert result["bSidsExact"], \
-        f"bodyB must contain exactly s_80..s_99 once, got {result.get('sidsInBAfterRetry')}"
-    assert result["bSidsNoDup"], \
-        "No duplicate SIDs inside bodyB"
+
+    # ── EXACT BODY OWNERSHIP from live tree ──
+    assert result["pSidsExact"], \
+        f"bodyP must contain exactly s_0..s_59 from live tree, got {result.get('sidsInPFromLive')}"
     assert result["aSidsExact"], \
-        f"bodyA must contain exactly s_60..s_79 once, got {result.get('sidsInAAfterRetry')}"
+        f"bodyA must contain exactly s_60..s_79 from live tree, got {result.get('sidsInAFromLive')}"
+    assert result["bSidsExact"], \
+        f"bodyB must contain exactly s_80..s_99 from live tree, got {result.get('sidsInBFromLive')}"
+
+    # ── ALL SIDs from live-tree traversal ──
     assert result["allDomSidsExact"], \
-        "All 100 SIDs must appear exactly once across P+A+B bodies (from live DOM tree)"
+        "All 100 SIDs must appear exactly once across P+A+B bodies (from live DOM tree traversal)"
     assert result["allDomNoDup"], \
         "No duplicate SIDs across the entire live DOM tree"
     assert result["aHasPinnedHeader"], \
         "Group A's newly created wrapper must carry isPinned metadata from flatRows (pinned header class)"
+
+    # ── MUTATION BITE: removing gwP from the live tree must break allDomSidsExact ──
+    assert not result["biteAllDomSidsExact"], \
+        "Mutation bite failed: removing gwP from list.children must make allDomSidsExact false — " \
+        "the test must derive SID authority from list.children traversal, not from saved gwP references"
 
 
 
