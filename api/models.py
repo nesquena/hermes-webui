@@ -1195,11 +1195,13 @@ def _deduplicate_exact_stable_messages(messages):
     """
     if not isinstance(messages, list):
         return [], 0
-    if len(messages) < 2:
-        # Save callers require a detached payload snapshot even when there is
-        # nothing to deduplicate; returning the owner-visible list here lets a
-        # concurrent append change serialization after message_count is fixed.
-        return list(messages), 0
+    # Persist from a deep snapshot, not only a detached outer list. A retained
+    # message can contain nested dict/list values; if those remain aliased to the
+    # owner-visible transcript, a mutation after this scan can change the bytes
+    # serialized for a deletion decision that was made against older content.
+    messages_snapshot = copy.deepcopy(messages)
+    if len(messages_snapshot) < 2:
+        return messages_snapshot, 0
 
     seen_by_identity = {}
     guarded = []
@@ -1221,7 +1223,7 @@ def _deduplicate_exact_stable_messages(messages):
     def _is_missing_or_blank(value):
         return value is None or (type(value) is str and not value.strip())
 
-    for message in messages:
+    for message in messages_snapshot:
         if not isinstance(message, dict):
             guarded.append(message)
             continue
@@ -1327,7 +1329,9 @@ class Session:
         # so a stale first-party leftover (#433) is never wrongly preserved.
         # Restored from persisted metadata on load (arrives via **kwargs).
         self.model_explicit_pick_signature = kwargs.get('model_explicit_pick_signature') or None
-        self.messages = messages or []
+        # Preserve malformed persisted containers so save() can fail closed
+        # instead of silently normalizing a dict/string to an empty transcript.
+        self.messages = messages if messages is not None else []
         self.tool_calls = tool_calls or []
         self.created_at = created_at or time.time()
         self.updated_at = updated_at or time.time()
@@ -1439,6 +1443,11 @@ class Session:
                 f"would atomically overwrite on-disk messages with []. "
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
+            )
+        if not isinstance(self.messages, list):
+            raise ValueError(
+                f"Refusing to save session {self.session_id!r}: messages must be a list, "
+                f"got {type(self.messages).__name__}."
             )
         if touch_updated_at:
             self.updated_at = time.time()

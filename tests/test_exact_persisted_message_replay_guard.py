@@ -93,8 +93,9 @@ def test_exact_stable_replay_guard_rejects_scalar_subclass_identities(identity_f
 
     assert removed == 0
     assert len(guarded) == 2
-    assert guarded[0] is row
-    assert guarded[1] is duplicate
+    assert guarded == [row, duplicate]
+    assert guarded[0] is not row
+    assert guarded[1] is not duplicate
 
 
 @pytest.mark.parametrize("blank_value", ["", "   ", None])
@@ -171,8 +172,9 @@ def test_exact_stable_replay_guard_rejects_malformed_identity_values(
 
     assert removed == 0
     assert len(guarded) == 2
-    assert guarded[0] is row
-    assert guarded[1] is duplicate
+    assert guarded == [row, duplicate]
+    assert guarded[0] is not row
+    assert guarded[1] is not duplicate
 
 
 def test_exact_stable_replay_guard_keeps_scalar_identity_types_separate():
@@ -482,3 +484,253 @@ def test_save_leaves_preexisting_stale_duplicate_backup_untouched(temp_session_d
     persisted = json.loads(session.path.read_text(encoding="utf-8"))
     assert persisted["messages"] == [repeated, current]
     assert persisted["message_count"] == 2
+
+
+def _write_stale_recovery_pair(session, backup_messages):
+    """Persist a clean live sidecar, then plant an older recovery snapshot."""
+    session.save(touch_updated_at=False, skip_index=True)
+    backup_path = session.path.with_suffix(".json.bak")
+    backup_path.write_text(
+        json.dumps(
+            {
+                "session_id": session.session_id,
+                "message_count": len(backup_messages),
+                "messages": backup_messages,
+            }
+        ),
+        encoding="utf-8",
+    )
+    # A later metadata-only mutation must leave the pre-existing backup in place.
+    session.title = "metadata changed"
+    session.save(touch_updated_at=False, skip_index=True)
+    return backup_path
+
+
+def test_recovery_ignores_duplicate_only_backup_after_real_save(
+    temp_session_dir,
+):
+    from api.models import Session
+    from api.session_recovery import (
+        inspect_session_recovery_status,
+        recover_all_sessions_on_startup,
+        recover_session,
+    )
+
+    stable = {
+        "role": "assistant",
+        "content": "stable",
+        "id": "assistant-event-recovery-duplicate",
+        "timestamp": 500.25,
+    }
+    current = {
+        "role": "user",
+        "content": "current",
+        "id": "user-event-recovery-current",
+        "timestamp": 501.25,
+    }
+    manual = Session(
+        session_id="exact-replay-recovery-duplicate-manual",
+        messages=[stable, current],
+    )
+    _write_stale_recovery_pair(manual, [stable, dict(stable), current])
+
+    status = inspect_session_recovery_status(manual.path)
+    result = recover_session(manual.path)
+
+    assert status["recommend"] == "no_action"
+    assert status["live_messages"] == status["bak_messages"] == 2
+    assert result["restored"] is False
+    assert json.loads(manual.path.read_text(encoding="utf-8"))["messages"] == [
+        stable,
+        current,
+    ]
+
+    startup = Session(
+        session_id="exact-replay-recovery-duplicate-startup",
+        messages=[stable, current],
+    )
+    _write_stale_recovery_pair(startup, [stable, dict(stable), current])
+
+    startup_result = recover_all_sessions_on_startup(temp_session_dir)
+
+    assert startup_result["restored"] == 0
+    assert json.loads(startup.path.read_text(encoding="utf-8"))["messages"] == [
+        stable,
+        current,
+    ]
+
+
+def test_recovery_restores_guarded_unique_backup_after_real_save(
+    temp_session_dir,
+):
+    from api.models import Session
+    from api.session_recovery import (
+        inspect_session_recovery_status,
+        recover_all_sessions_on_startup,
+        recover_session,
+    )
+
+    stable = {
+        "role": "assistant",
+        "content": "stable",
+        "id": "assistant-event-recovery-unique",
+        "timestamp": 600.25,
+    }
+    lost = {
+        "role": "assistant",
+        "content": "genuinely lost",
+        "id": "assistant-event-recovery-lost",
+        "timestamp": 601.25,
+    }
+    current = {
+        "role": "user",
+        "content": "current",
+        "id": "user-event-recovery-current-2",
+        "timestamp": 602.25,
+    }
+    expected = [stable, lost, current]
+    manual = Session(
+        session_id="exact-replay-recovery-unique-manual",
+        messages=[stable, current],
+    )
+    _write_stale_recovery_pair(
+        manual,
+        [stable, dict(stable), lost, current],
+    )
+
+    status = inspect_session_recovery_status(manual.path)
+    result = recover_session(manual.path)
+    restored = json.loads(manual.path.read_text(encoding="utf-8"))
+
+    assert status["recommend"] == "restore"
+    assert status["live_messages"] == 2
+    assert status["bak_messages"] == 3
+    assert result["restored"] is True
+    assert restored["messages"] == expected
+    assert restored["message_count"] == len(expected)
+
+    startup = Session(
+        session_id="exact-replay-recovery-unique-startup",
+        messages=[stable, current],
+    )
+    _write_stale_recovery_pair(
+        startup,
+        [stable, dict(stable), lost, current],
+    )
+
+    startup_result = recover_all_sessions_on_startup(temp_session_dir)
+    startup_restored = json.loads(startup.path.read_text(encoding="utf-8"))
+
+    assert startup_result["restored"] == 1
+    assert startup_restored["messages"] == expected
+    assert startup_restored["message_count"] == len(expected)
+
+
+@pytest.mark.parametrize(
+    "unsupported_messages",
+    [
+        {"role": "assistant", "content": "not a transcript list"},
+        "not a transcript list",
+    ],
+)
+def test_loaded_non_list_messages_cannot_be_erased_by_metadata_save(
+    temp_session_dir,
+    unsupported_messages,
+):
+    from api.models import Session
+
+    sid = f"unsupported-messages-{type(unsupported_messages).__name__}"
+    path = temp_session_dir / f"{sid}.json"
+    original = {
+        "session_id": sid,
+        "title": "original",
+        "workspace": "",
+        "model": "test-model",
+        "message_count": 7,
+        "messages": unsupported_messages,
+    }
+    path.write_text(json.dumps(original), encoding="utf-8")
+    before = path.read_bytes()
+
+    loaded = Session.load(sid)
+    assert loaded is not None
+    assert loaded.messages == unsupported_messages
+    loaded.title = "metadata changed"
+
+    with pytest.raises(ValueError, match="messages.*list"):
+        loaded.save(touch_updated_at=False)
+
+    assert path.read_bytes() == before
+    assert not (temp_session_dir / "_index.json").exists()
+
+
+def test_session_save_uses_deep_scan_snapshot_for_nested_row_mutation(
+    temp_session_dir,
+    monkeypatch,
+):
+    from api import models
+
+    repeated = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "scan-time content"}],
+        "id": "assistant-event-nested-mutation",
+        "timestamp": 700.25,
+    }
+    session = models.Session(
+        session_id="exact-replay-nested-mutation",
+        messages=[repeated, json.loads(json.dumps(repeated))],
+    )
+    original_messages = session.messages
+    real_guard = models._deduplicate_exact_stable_messages
+    scan_finished = threading.Event()
+    resume_save = threading.Event()
+    paused_once = threading.Event()
+
+    def pause_after_real_scan(messages):
+        result = real_guard(messages)
+        if messages is original_messages and not paused_once.is_set():
+            paused_once.set()
+            scan_finished.set()
+            assert resume_save.wait(timeout=5), "test did not resume the paused save"
+        return result
+
+    monkeypatch.setattr(
+        models,
+        "_deduplicate_exact_stable_messages",
+        pause_after_real_scan,
+    )
+    errors = []
+
+    def run_save():
+        try:
+            session.save(skip_index=True)
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    save_thread = threading.Thread(target=run_save)
+    save_thread.start()
+    assert scan_finished.wait(timeout=5), "save did not reach the post-scan pause"
+    original_messages[0]["content"][0]["text"] = "mutated after scan"
+    resume_save.set()
+    save_thread.join(timeout=5)
+
+    assert not save_thread.is_alive()
+    assert errors == []
+    assert session.messages is original_messages
+    assert len(session.messages) == 2
+    assert session.messages[0] != session.messages[1]
+
+    first_persisted = json.loads(session.path.read_text(encoding="utf-8"))
+    assert first_persisted["messages"] == [
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "scan-time content"}],
+            "id": "assistant-event-nested-mutation",
+            "timestamp": 700.25,
+        }
+    ]
+
+    session.save(skip_index=True)
+    second_persisted = json.loads(session.path.read_text(encoding="utf-8"))
+    assert second_persisted["messages"] == session.messages
+    assert second_persisted["message_count"] == 2
