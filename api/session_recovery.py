@@ -65,7 +65,7 @@ def _is_valid_intentional_shrink_generation(value) -> bool:
 
 
 def _msg_count(p: Path) -> int:
-    """Return the number of messages in a session JSON file, or -1 on read/parse error.
+    """Return the effective message count, or -1 on read/parse error.
 
     Returns -1 for any non-session-shape file:
     - File can't be read (OSError)
@@ -82,7 +82,21 @@ def _msg_count(p: Path) -> int:
     if not isinstance(data, dict):
         return -1
     msgs = data.get('messages')
-    return len(msgs) if isinstance(msgs, list) else -1
+    if not isinstance(msgs, list):
+        return -1
+    # A shrink caused only by collapsing replayed empty ``incomplete`` rows is
+    # an intentional repair, not data loss.  Compare live and backup using the
+    # same narrow identity rule as Session.save() so startup recovery does not
+    # resurrect the amplification.  Unique backup messages still increase the
+    # effective count and remain recoverable.
+    try:
+        from api.models import _collapse_duplicate_incomplete_message_ids
+
+        msgs, _ = _collapse_duplicate_incomplete_message_ids(msgs)
+    except Exception:
+        logger.debug("Failed to compute effective recovery message count for %s", p, exc_info=True)
+        return -1
+    return len(msgs)
 
 
 def _rebuild_recovery_session_index(session_dir: Path) -> None:

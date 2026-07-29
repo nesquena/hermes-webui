@@ -205,6 +205,77 @@ def test_save_is_a_final_idempotent_barrier_for_incomplete_message_ids(tmp_path,
     session.save(skip_index=True)
     session.save(skip_index=True)
 
-    assert [message["id"] for message in session.messages] == [1701, 1702]
-    persisted = json.loads(session.path.read_text(encoding="utf-8"))
+    # save() never rebinds or mutates the list visible to active workers.
+    assert [message["id"] for message in session.messages] == [1701, 1702, 1701, 1702]
+    persisted = json.loads((session_dir / "save-barrier.json").read_text(encoding="utf-8"))
     assert [message["id"] for message in persisted["messages"]] == [1701, 1702]
+    assert persisted["message_count"] == 2
+
+
+def test_save_snapshot_does_not_lose_concurrent_alias_append(tmp_path, monkeypatch):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "index.json")
+
+    first = _incomplete_reasoning_only(1701, reasoning="first")
+    session = models.Session(session_id="concurrent-alias", messages=[first, dict(first)])
+    live_alias = session.messages
+    concurrent = {"role": "user", "content": "arrived during save", "id": 1702}
+    real_collapse = models._collapse_duplicate_incomplete_message_ids
+
+    def collapse_then_append(messages):
+        collapsed = real_collapse(messages)
+        live_alias.append(concurrent)
+        return collapsed
+
+    monkeypatch.setattr(models, "_collapse_duplicate_incomplete_message_ids", collapse_then_append)
+    session.save(skip_index=True)
+
+    assert session.messages is live_alias
+    assert session.messages[-1] == concurrent
+    first_payload = json.loads((session_dir / "concurrent-alias.json").read_text(encoding="utf-8"))
+    assert [message["id"] for message in first_payload["messages"]] == [1701]
+
+    monkeypatch.setattr(models, "_collapse_duplicate_incomplete_message_ids", real_collapse)
+    session.save(skip_index=True)
+    second_payload = json.loads((session_dir / "concurrent-alias.json").read_text(encoding="utf-8"))
+    assert [message["id"] for message in second_payload["messages"]] == [1701, 1702]
+
+
+def test_recovery_does_not_resurrect_duplicate_incomplete_backup(tmp_path):
+    from api.session_recovery import inspect_session_recovery_status, recover_session
+
+    session_path = tmp_path / "repaired.json"
+    backup_path = tmp_path / "repaired.json.bak"
+    first = _incomplete_reasoning_only(1701, reasoning="first")
+    second = _incomplete_reasoning_only(1702, reasoning="second")
+    session_path.write_text(json.dumps({"messages": [first, second]}), encoding="utf-8")
+    backup_path.write_text(
+        json.dumps({"messages": [first, second, dict(first), dict(second)]}),
+        encoding="utf-8",
+    )
+
+    status = inspect_session_recovery_status(session_path)
+    assert status["live_messages"] == 2
+    assert status["bak_messages"] == 2
+    assert status["recommend"] == "no_action"
+    assert recover_session(session_path)["restored"] is False
+
+
+def test_recovery_still_restores_unique_backup_excess(tmp_path):
+    from api.session_recovery import inspect_session_recovery_status
+
+    session_path = tmp_path / "repaired.json"
+    backup_path = tmp_path / "repaired.json.bak"
+    first = _incomplete_reasoning_only(1701, reasoning="first")
+    unique = {"role": "user", "content": "must survive", "id": 1702}
+    session_path.write_text(json.dumps({"messages": [first]}), encoding="utf-8")
+    backup_path.write_text(json.dumps({"messages": [first, unique]}), encoding="utf-8")
+
+    status = inspect_session_recovery_status(session_path)
+    assert status["live_messages"] == 1
+    assert status["bak_messages"] == 2
+    assert status["recommend"] == "restore"
