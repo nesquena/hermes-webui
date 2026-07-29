@@ -38,22 +38,27 @@ _REPO = pathlib.Path(__file__).parent.parent.resolve()
 WORKFLOW_PATH = _REPO / ".github" / "workflows" / "tests.yml"
 JOB_ID = "mcp-family"
 
-# Ways a pytest command can exit 0 without running the tests it names. Checked
-# as tokens so a substring inside a path or a comment cannot trip them.
-NON_EXECUTING_PYTEST_FLAGS = frozenset({
-    "--collect-only",
-    "--co",
-    "-k",
-    "-m",
-    "--deselect",
-    "--ignore",
-    "--last-failed",
-    "--lf",
-    "--failed-first",
-    "--ff",
-    "--exitfirst",
-    "-x",
-})
+# The one command the certifying step may run, compared exactly.
+#
+# Blacklisting the ways a pytest invocation can exit 0 without running what it
+# names is a losing game: `-ktest_x` attaches with no space so a token check
+# misses it, `cmd &` is an asynchronous list that bash reports as success
+# immediately, and GitHub's default Linux shell is `bash -e {0}` with no
+# pipefail, so `cmd | true` swallows the exit status. An exact match closes all
+# of them at once, and makes any genuine change to this command a deliberate
+# edit here as well.
+CERTIFYING_COMMAND = "pytest tests/test_mcp_server.py -v --timeout=60"
+
+# Selection can also arrive from outside the command. `PYTEST_ADDOPTS` set at
+# workflow, job, or step level deselects everything with the `run:` line
+# untouched, and an `addopts` in pytest config does the same from the repo.
+SELECTION_ENV_VARS = (
+    "PYTEST_ADDOPTS",
+    "PYTEST_PLUGINS",
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+)
+SELECTION_ADDOPTS_FLAGS = ("-k", "-m", "--deselect", "--ignore", "--collect-only", "--co")
+PYTEST_CONFIG_FILES = ("pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini")
 
 DOCS_ONLY_GUARD = "needs.changes.outputs.docs_only != 'true'"
 JOB_GUARD = "always()"
@@ -156,20 +161,43 @@ def assert_family_matrix_contract():
     )
 
     lines = runnable_lines(certify["run"])
-    assert len(lines) == 1, f"certifying step runs {len(lines)} commands, expected 1"
-    command = lines[0]
-    tokens = command.split()
-    assert tokens[0] == "pytest", f"certifying command starts with {tokens[0]!r}, not pytest"
-    assert "tests/test_mcp_server.py" in tokens, (
-        f"certifying command {command!r} does not name tests/test_mcp_server.py as a target"
+    assert lines == [CERTIFYING_COMMAND], (
+        f"certifying step runs {lines!r}; it may run exactly "
+        f"[{CERTIFYING_COMMAND!r}]. Any selector, chained command, pipeline, or "
+        f"background list here can exit 0 without running the registered-boundary cases"
     )
-    # `pytest ... || true` exits 0 under GitHub's `bash -e -o pipefail`.
-    assert "||" not in command and "&&" not in command and ";" not in command, (
-        f"certifying command {command!r} chains another command, which can "
-        f"swallow pytest's exit status"
-    )
-    offenders = sorted(NON_EXECUTING_PYTEST_FLAGS.intersection(tokens))
-    assert not offenders, (
-        f"certifying command carries {offenders}, which can exit 0 without "
-        f"running the registered-boundary cases"
-    )
+    # The default shell decides whether a pipeline's exit status even reaches
+    # the runner, so an override is part of what the command means.
+    assert "shell" not in certify, f"certifying step overrides the shell: {certify.get('shell')!r}"
+    assert job.get("defaults") is None
+    assert workflow.get("defaults") is None
+
+    assert_no_external_test_selection(workflow)
+
+
+def assert_no_external_test_selection(workflow=None):
+    """Nothing outside the command may deselect the certification.
+
+    `PYTEST_ADDOPTS` in the workflow, or an `addopts` carrying a selector in the
+    repo's pytest config, reaches the run with the `run:` line untouched.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    for name in SELECTION_ENV_VARS:
+        assert name not in text, (
+            f"{name} appears in {WORKFLOW_PATH.name}; it can deselect the "
+            f"certification without touching the command"
+        )
+
+    for filename in PYTEST_CONFIG_FILES:
+        path = _REPO / filename
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("addopts"):
+                continue
+            offenders = [flag for flag in SELECTION_ADDOPTS_FLAGS if flag in stripped]
+            assert not offenders, (
+                f"{filename} sets {stripped!r}, carrying {offenders}, which "
+                f"deselects tests for every run including the certification"
+            )

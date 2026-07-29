@@ -12,14 +12,17 @@ See `tests/_mcp_family_contract.py` for the declarations and the contract.
 import pytest
 
 from tests._mcp_family_contract import (
+    CERTIFYING_COMMAND,
     DOCS_ONLY_GUARD,
     EXPECTED_FAMILY_ENV,
     FAMILY_MAJOR,
     JOB_GUARD,
     JOB_ID,
     MCP_FAMILIES,
-    NON_EXECUTING_PYTEST_FLAGS,
+    SELECTION_ENV_VARS,
+    WORKFLOW_PATH,
     assert_family_matrix_contract,
+    assert_no_external_test_selection,
     certifying_step,
     constraint_install_step,
     load_workflow,
@@ -60,26 +63,33 @@ def test_constraint_install_has_no_fallback():
     assert "||" not in line
 
 
-@pytest.mark.parametrize("flag", sorted(NON_EXECUTING_PYTEST_FLAGS))
-def test_certifying_command_carries_no_execution_selector(flag):
-    """Each way a pytest run can exit 0 without running what it names."""
+def test_certifying_step_runs_exactly_the_contract_command():
+    """One exact command, because the bypasses are not an enumerable set.
+
+    `-ktest_x` attaches with no space, `cmd &` is an async list bash calls
+    successful straight away, and GitHub's default Linux shell is `bash -e {0}`
+    with no pipefail, so `cmd | true` swallows pytest's status.
+    """
     job = load_workflow()["jobs"][JOB_ID]
-    command = runnable_lines(certifying_step(job)["run"])[0]
-    assert flag not in command.split()
+    assert runnable_lines(certifying_step(job)["run"]) == [CERTIFYING_COMMAND]
 
 
-def test_certifying_step_runs_one_unchained_pytest_command():
-    """`pytest … || true` exits 0 under GitHub's `bash -e -o pipefail`."""
-    job = load_workflow()["jobs"][JOB_ID]
-    certify = certifying_step(job)
-    lines = runnable_lines(certify["run"])
-    assert len(lines) == 1
-    tokens = lines[0].split()
-    assert tokens[0] == "pytest"
-    assert "tests/test_mcp_server.py" in tokens
-    assert "||" not in lines[0]
-    assert "&&" not in lines[0]
-    assert ";" not in lines[0]
+def test_certifying_step_does_not_override_the_shell():
+    workflow = load_workflow()
+    job = workflow["jobs"][JOB_ID]
+    assert "shell" not in certifying_step(job)
+    assert job.get("defaults") is None
+    assert workflow.get("defaults") is None
+
+
+@pytest.mark.parametrize("name", SELECTION_ENV_VARS)
+def test_workflow_sets_no_pytest_selection_env(name):
+    """`PYTEST_ADDOPTS` deselects everything with the `run:` line untouched."""
+    assert name not in WORKFLOW_PATH.read_text(encoding="utf-8")
+
+
+def test_repo_pytest_config_deselects_nothing():
+    assert_no_external_test_selection()
 
 
 def test_certifying_step_is_wired_to_the_matrix_family_and_only_docs_gated():
