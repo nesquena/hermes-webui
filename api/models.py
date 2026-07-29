@@ -1124,6 +1124,7 @@ def _load_session_from_path(path: Path) -> "Session | None":
     except Exception:
         return None
     data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+    data['messages'], _collapsed_incomplete_ids = _collapse_duplicate_incomplete_message_ids(data.get('messages'))
     return Session(**data)
 
 
@@ -1564,15 +1565,16 @@ class Session:
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        data['messages'], _collapsed_incomplete_ids = _collapse_duplicate_incomplete_message_ids(data.get('messages'))
         session = cls(**data)
-        if _collapsed_partials:
+        if _collapsed_partials or _collapsed_incomplete_ids:
             try:
                 # Self-heal bloated sessions on first full load without touching
                 # recency/index ordering; save() creates a .bak because this
                 # intentionally shrinks the transcript (#2592).
                 session.save(touch_updated_at=False, skip_index=True)
             except Exception:
-                logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+                logger.debug("Failed to persist collapsed duplicate assistant rows for %s", sid, exc_info=True)
         else:
             # #5854: for a LEGACY sidecar (no modern anchor_scene_index key), the
             # cheap metadata-prefix read cannot recover message_count/scenes when
@@ -1582,8 +1584,8 @@ class Session:
             # Keyed by stat signature, so any edit invalidates it; the next
             # save() rewrites the modern layout and the fallback stops firing.
             # expected_sig guards against an atomic replace during the read.
-            # (When _collapsed_partials fired, save() above already rewrote the
-            # modern layout, so no legacy caching is needed.)
+            # (When either duplicate-row repair fired, save() above already
+            # rewrote the modern layout, so no legacy caching is needed.)
             if 'anchor_scene_index' not in data:
                 try:
                     _legacy_sidecar_facts_put(
@@ -2392,6 +2394,58 @@ def _collapse_adjacent_duplicate_partials(messages) -> tuple[list, bool]:
         else:
             previous_partial_sig = None
         collapsed.append(message)
+    return collapsed, changed
+
+
+def _incomplete_reasoning_message_id(message):
+    """Return the stable id of an empty incomplete assistant result, if any."""
+    if not isinstance(message, dict) or message.get('role') != 'assistant':
+        return None
+    if str(message.get('finish_reason') or '').lower() != 'incomplete':
+        return None
+    if str(message.get('content') or '').strip():
+        return None
+    if message.get('tool_call_id') or message.get('tool_calls'):
+        return None
+    message_id = message.get('id')
+    if message_id is None or str(message_id) == '':
+        return None
+    return str(message_id)
+
+
+def _message_information_score(message) -> int:
+    """Prefer the richest replay when one stable incomplete id occurs repeatedly."""
+    if not isinstance(message, dict):
+        return 0
+    try:
+        return len(json.dumps(message, sort_keys=True, ensure_ascii=False, default=str))
+    except (TypeError, ValueError):
+        return len(str(message))
+
+
+def _collapse_duplicate_incomplete_message_ids(messages) -> tuple[list, bool]:
+    """Collapse non-adjacent replays of empty incomplete assistant message ids."""
+    if not isinstance(messages, list):
+        return messages, False
+    collapsed = []
+    seen_indexes = {}
+    changed = False
+    for message in messages:
+        message_id = _incomplete_reasoning_message_id(message)
+        if message_id is None:
+            collapsed.append(message)
+            continue
+        existing_index = seen_indexes.get(message_id)
+        if existing_index is None:
+            seen_indexes[message_id] = len(collapsed)
+            collapsed.append(message)
+            continue
+        changed = True
+        existing = collapsed[existing_index]
+        if message == existing:
+            continue
+        if _message_information_score(message) > _message_information_score(existing):
+            collapsed[existing_index] = message
     return collapsed, changed
 
 

@@ -5987,6 +5987,25 @@ def _message_identity(msg):
                 '',  # no tool_call_id
                 '__partial__' + reasoning_key,
             )
+        # Codex can persist a reasoning-only assistant result with an empty
+        # visible body and finish_reason=incomplete without the legacy
+        # ``_partial`` flag. Those rows still carry the stable core message id.
+        # Returning None here made every reconcile treat the same result as a
+        # fresh context-only row, which amplified alternating replays such as
+        # FD05 message ids 1701/1702 on every subsequent turn.
+        message_id = msg.get('id')
+        if (
+            role == 'assistant'
+            and str(msg.get('finish_reason') or '').lower() == 'incomplete'
+            and message_id is not None
+            and str(message_id) != ''
+        ):
+            return (
+                role,
+                '',
+                '',
+                '__incomplete_message_id__' + str(message_id),
+            )
         return None
     return (
         role,
