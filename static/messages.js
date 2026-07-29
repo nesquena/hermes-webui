@@ -4622,8 +4622,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdMediaTailFlushEntry(entry){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
-    const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
-    const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, m[1]));
+    const m=_mediaTokenAnchoredRe().exec(String(chunk));
+    const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, _unquoteMediaRef(m[1])));
     if(!emitted && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
   }
   function _smdMediaTailFlush(parser){
@@ -4670,7 +4670,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Prose runs go through the owning text writer. MEDIA tokens go through
     // the single-token DOMParser helper only after a delimiter or
     // reliable filename suffix proves the ref is complete.
-    const re=/MEDIA:([^\s\)\]]+)/g;
+    const re=_mediaTokenRe();
     let last=0, m;
     let unmatchedTail=null;
     while((m=re.exec(combined))){
@@ -4679,6 +4679,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const slice = combined.slice(last, m.index);
         writeCurrent(slice);
       }
+      // Hold the token when it runs to the end of what has arrived so far and
+      // has no reliable extension yet — more bytes may still be coming. This
+      // also covers spaced paths: `MEDIA:/tmp/My` buffers instead of emitting a
+      // truncated card, then re-matches whole once ` Files/a.md` lands.
       if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(m[1])){
         const candidate = combined.slice(m.index);
         if(candidate.length < _MEDIA_TAIL_MAX){
@@ -4689,14 +4693,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         last = combined.length;
         break;
       }
-      if(!_smdAppendMediaNode(parent, m[1])) writeCurrent(m[0]);
+      if(!_smdAppendMediaNode(parent, _unquoteMediaRef(m[1]))) writeCurrent(m[0]);
       last = matchEnd;
     }
     // Tail buffer — hold trailing bytes that look like an unterminated
     // MEDIA prefix; flush any prose before the partial MEDIA suffix.
     const rest = combined.slice(last);
     if(rest){
-      const tailMatch = /MEDIA:[^\s\)\]]*$/.exec(rest);
+      // Space-tolerant so a half-arrived spaced path (`MEDIA:/tmp/My Files`)
+      // keeps buffering rather than being flushed into the bubble as prose.
+      // Bounded to the current line: a newline ends any MEDIA token.
+      const tailMatch = /MEDIA:[^\n]*$/.exec(rest);
       const prefixTail = tailMatch ? '' : _smdMediaPrefixTail(rest);
       const tailValue = tailMatch ? tailMatch[0] : prefixTail;
       if(tailValue && rest.length < _MEDIA_TAIL_MAX){

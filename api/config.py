@@ -6372,6 +6372,26 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
     # preserving vendor hierarchy for multi-slash IDs (#3360).
     # Skip for URI-scheme IDs whose slashes are path separators (#3429).
     bare = lookup_id.split("/", 1)[1] if ("/" in lookup_id and not _has_scheme(lookup_id)) else lookup_id
+    # Bedrock/Vertex IDs carry a dotted region + vendor prefix and sometimes a
+    # trailing ``:<n>`` version -- ``us.anthropic.claude-opus-5``,
+    # ``us.anthropic.claude-sonnet-4-5-20250929-v1:0``. Splitting only on "/" and
+    # "-" leaves the dotted head in the label, so the turn footer rendered raw
+    # plumbing ("Us.anthropic.claude Opus 5").
+    #
+    # Drop leading LETTERS-ONLY dot segments (``us``, ``eu``, ``anthropic``) and
+    # stop at the first segment containing a digit or hyphen -- that is the real
+    # model ID. The letters-only test is what keeps version dots safe:
+    # ``gpt-4.1`` splits to ``gpt-4`` / ``1`` and ``gpt-4`` is not letters-only,
+    # so nothing is stripped. The final segment is never dropped.
+    if "." in bare and not _has_scheme(bare):
+        _segs = bare.split(".")
+        _i = 0
+        while _i < len(_segs) - 1 and _segs[_i].isalpha():
+            _i += 1
+        if _i > 0:
+            bare = ".".join(_segs[_i:])
+            # Trailing ``:0`` revision suffix is plumbing, not part of the name.
+            bare = re.sub(r":\d+$", "", bare)
     return " ".join(
         w.upper() if (len(w) <= 3 and w.replace(".", "").isalnum() and not w.isdigit()) else w.capitalize()
         for w in bare.replace("_", "-").split("-")

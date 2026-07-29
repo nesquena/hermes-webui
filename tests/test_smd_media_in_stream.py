@@ -63,6 +63,12 @@ def _extract_js_function(src: str, name: str) -> str:
 def _run_real_smd_media_cases() -> dict:
     helpers = "\n".join(
         [
+            # MEDIA: token matchers live in ui.js and are shared with the settled
+            # renderMd path, so the streaming functions below depend on them.
+            _extract_js_function(UI_JS, "_mediaPathSrc"),
+            _extract_js_function(UI_JS, "_mediaTokenRe"),
+            _extract_js_function(UI_JS, "_mediaTokenAnchoredRe"),
+            _extract_js_function(UI_JS, "_unquoteMediaRef"),
             _extract_js_function(MESSAGES_JS, "_smdMediaPrefixTail"),
             _extract_js_function(MESSAGES_JS, "_smdAppendPlainText"),
             _extract_js_function(MESSAGES_JS, "_smdMediaWriteText"),
@@ -409,7 +415,12 @@ class TestSmdMediaInStream(unittest.TestCase):
         # boundary check must therefore treat a complete http(s) ref as complete
         # even when it has no filename extension.
         self.assertIn("function _smdMediaTailFlush", MESSAGES_JS)
-        self.assertIn("/^MEDIA:([^", MESSAGES_JS)
+        # The anchored single-token matcher is now the shared ui.js helper
+        # (_mediaTokenAnchoredRe) rather than an inline /^MEDIA:([^\s)\]]+)$/,
+        # so spaced paths are matched whole instead of being cut at the first
+        # space. Assert the helper is used and defined.
+        self.assertIn("_mediaTokenAnchoredRe()", MESSAGES_JS)
+        self.assertIn("function _mediaTokenAnchoredRe", UI_JS)
         self.assertIn("_smdMediaTailFlush(_smdParser)", MESSAGES_JS)
 
     def test_extensionless_https_tail_waits_until_stream_end(self):

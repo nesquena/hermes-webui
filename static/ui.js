@@ -2577,6 +2577,75 @@ function _dataImageHtml(ref, altText){
   return `<img class="msg-media-img" src="${esc(ref)}" alt="${esc(altText||'image')}" loading="lazy">`;
 }
 
+// ── MEDIA: path matching (shared with the streaming path in messages.js) ──────
+// A MEDIA path may legitimately contain spaces:
+//   MEDIA:/home/u/vault/Meeting Notes/2026-07-29 - SDE Focus Group.md
+// The original `[^\s\)\]]+` class stopped at the first space, so the artifact
+// card was built from the truncated path ("Meeting"), rendered the wrong
+// basename, and the remainder of the real path leaked into the bubble as raw
+// prose beside the card.
+//
+// Widening cannot be unbounded — greedy space-tolerance would swallow trailing
+// prose ("MEDIA:/tmp/a.png looks good") and glue an adjacent tag
+// ("MEDIA:/a.png MEDIA:/b.png") into one invalid path, which is the bug class
+// the Python gateway already hit (#68773). So the bare form is anchored on a
+// file extension and tempered: it crosses single spaces only while still
+// reaching a `.ext`, never crosses a newline, and never crosses a following
+// MEDIA: keyword. Extension-less paths still match via the fallback branch, so
+// nothing that worked before stops working.
+//
+// Keep this the SINGLE source of truth for MEDIA path shape. messages.js reuses
+// it so the streamed and settled renderings of one token stay byte-identical.
+//
+// Exposed as a FUNCTION, not a const, because the test harnesses in tests/*.py
+// white-box-extract production code by `function <name>(` declaration and eval
+// it in isolation (see tests/test_data_uri_images.py). A bare top-level const is
+// invisible to that extractor, so any renderMd harness would die with
+// "_MEDIA_PATH_SRC is not defined". When you add a helper that renderMd calls,
+// add it to the eval list in every harness that extracts renderMd.
+function _mediaPathSrc(){
+  // One token: no whitespace, and none of the delimiters that close a token.
+  const tok = String.raw`[^\s\)\]]+`;
+  // Space-joined continuation, guarded so a following MEDIA: keyword is never
+  // absorbed into the current path.
+  //
+  // The extension uses `+` rather than a counted quantifier on purpose, and the
+  // comments here deliberately avoid brace characters: the test harnesses
+  // extract production functions by counting brace depth (tests/*.py
+  // `extractFunc`), and that counter does not skip string literals OR comments,
+  // so any unmatched brace anywhere in this function truncates the extraction
+  // mid-literal. A hex escape is not a workaround either — inside a regex it
+  // denotes a literal brace character rather than a quantifier. The trailing
+  // boundary already bounds the run, so `+` costs nothing.
+  const ext = String.raw`[A-Za-z0-9]+`;
+  const bare = String.raw`(?!MEDIA:)${tok}?(?:[^\S\n](?!MEDIA:)${tok}?)*?\.${ext}`;
+  // Bare matches must end at whitespace, a closing delimiter, a glued MEDIA:
+  // keyword, or end of input — never mid-prose. The closing-brace delimiter is
+  // spelled as the hex escape below for the brace-counting reason above.
+  const boundary = String.raw`(?=[\s\)\]\x7d"'*_,;:]|MEDIA:|$)`;
+  // Quoted form wins first (can hold any character), then the bounded spaced
+  // form, then the original no-space fallback for extension-less paths.
+  return String.raw`"[^"\n]+"|'[^'\n]+'|(?:${bare})${boundary}|${tok}`;
+}
+
+/** Global matcher for MEDIA: tokens. Fresh instance per call — a shared /g regex
+ *  carries lastIndex between callers and silently skips matches. */
+function _mediaTokenRe(){
+  return new RegExp(String.raw`MEDIA:(${_mediaPathSrc()})`, 'g');
+}
+
+/** Anchored single-token matcher (streaming chunk === exactly one MEDIA token). */
+function _mediaTokenAnchoredRe(){
+  return new RegExp(String.raw`^MEDIA:(${_mediaPathSrc()})$`);
+}
+
+/** Strip surrounding quotes from a captured MEDIA path. */
+function _unquoteMediaRef(ref){
+  const value = String(ref || '').trim();
+  const quote = value[0];
+  return (quote === '"' || quote === "'") && value.endsWith(quote) ? value.slice(1, -1) : value;
+}
+
 // Markdown image syntax ![alt](url) → HTML. https:// keeps the historical direct
 // <img>; file:// and bare data:image/ URIs route through the same helpers the
 // MEDIA: pipeline uses, so ![x](file:///p.png) renders the artifact card instead
@@ -7007,6 +7076,46 @@ function getModelLabel(modelId){
   }
   // Strip @provider: prefix if present (e.g. @ollama-cloud:kimi-k2.6)
   if (_last.startsWith('@') && _last.includes(':')) _last = _last.split(':').slice(1).join(':');
+  // Bedrock/Vertex ids carry a dotted region + vendor prefix and sometimes a
+  // trailing `:<n>` version — `us.anthropic.claude-opus-5`,
+  // `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. Left intact, the dotted head
+  // survives into the label as raw plumbing ("Us.anthropic.claude Opus 5" in the
+  // turn footer). Drop leading LETTERS-ONLY dot segments (`us`, `eu`,
+  // `anthropic`) and stop at the first segment carrying a digit or hyphen —
+  // that is the real model id.
+  //
+  // The letters-only test is what keeps version dots safe: `gpt-4.1` splits to
+  // `gpt-4` / `1` and `gpt-4` is not letters-only, so nothing is stripped. Same
+  // for `Qwen3.6-35B`. The final segment is never stripped.
+  if (_last.includes('.') && !_last.startsWith('@')) {
+    const _segs = _last.split('.');
+    let _i = 0;
+    while (_i < _segs.length - 1 && /^[a-z]+$/i.test(_segs[_i] || '')) _i++;
+    // Only rewrite when a prefix was actually dropped, so single-dot version
+    // ids (`gpt-4.1`) fall through this block untouched.
+    if (_i > 0) {
+      _last = _segs.slice(_i).join('.').replace(/:\d+$/, '');
+      // The normalized id is what the label tables are keyed on, so retry them —
+      // `us.anthropic.claude-sonnet-4-5` should land on the same "Sonnet 4.5" as
+      // `anthropic/claude-sonnet-4-5` rather than falling through to the raw id.
+      if (_dynamicModelLabels[_last]) return _dynamicModelLabels[_last];
+      if (STATIC_LABELS[_last]) return STATIC_LABELS[_last];
+      if (STATIC_LABELS['anthropic/' + _last]) return STATIC_LABELS['anthropic/' + _last];
+      // No table entry: prettify the Claude family the way the tables do — drop
+      // the `claude-` vendor word, the `-YYYYMMDD` date-pin and `-v1` revision
+      // (snapshot noise, not a name), then title-case. Bedrock is the only
+      // dotted-prefix source here, so this stays scoped to that path.
+      if (/^claude-/i.test(_last)) {
+        _last = _last
+          .replace(/^claude-/i, '')
+          .replace(/-v\d+$/i, '')
+          .replace(/-\d{8}$/, '')
+          .replace(/-/g, ' ')
+          .replace(/\b\w/g, c => c.toUpperCase())
+          .trim();
+      }
+    }
+  }
   const looksLikeOllamaTag = /^[a-z0-9][\w.-]*:[\w.-]+$/i.test(_last);
   const atProvider=(rawId.startsWith('@')&&rawId.includes(':'))
     ? rawId.slice(1,rawId.indexOf(':')).toLowerCase()
@@ -7187,8 +7296,8 @@ function renderMd(raw){
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
   const media_stash=[];
-  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
-    media_stash.push(raw_ref);
+  s=s.replace(_mediaTokenRe(),(_,raw_ref)=>{
+    media_stash.push(_unquoteMediaRef(raw_ref));
     return '\x00D'+(media_stash.length-1)+'\x00';
   });
   // ── End MEDIA stash ─────────────────────────────────────────────────────────
