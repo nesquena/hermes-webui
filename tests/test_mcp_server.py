@@ -17,16 +17,56 @@ from pathlib import Path
 
 import pytest
 
-# Skip the entire module when the optional `mcp` package isn't installed.
-# CI runs with stdlib-only deps (pyyaml + pytest + pytest-timeout), and the
-# `mcp` package is only required for users who actually run the MCP server.
-# Locally with `pip install mcp pytest-asyncio` these tests run; on CI they
-# skip cleanly without breaking the matrix.
-pytest.importorskip("mcp", reason="mcp package not installed (optional MCP server dep)")
+# ── Declared SDK families, and the mandate that pins one ──────────────────
+#
+# mcp_server.py registers its tools through two different SDK APIs and chooses
+# between them at import time (`_HAS_DECORATOR_HANDLERS`, mcp_server.py:462).
+# Only the installed family's branch ever runs, so an ambient environment
+# certifies one branch and reports green about the other.
+#
+# HERMES_MCP_EXPECTED_FAMILY names the family an environment was built to
+# certify. Set, it removes every way this file can stand down: the package must
+# import, production must have selected that family, and the registered
+# handlers must exist. Unset — a lean local install, or the shard matrix's
+# best-effort `pip install mcp` — the original skip-on-absent behavior holds,
+# so nothing about the ambient run changes.
+MCP_FAMILY_DECORATOR = "mcp1"
+MCP_FAMILY_CONSTRUCTOR = "mcp2"
+MCP_FAMILIES = (MCP_FAMILY_DECORATOR, MCP_FAMILY_CONSTRUCTOR)
+# The `mcp` major each family is the SDK API of, so production's hasattr probe
+# can be checked against the package metadata it is probing.
+FAMILY_MAJOR = {MCP_FAMILY_DECORATOR: 1, MCP_FAMILY_CONSTRUCTOR: 2}
+EXPECTED_FAMILY_ENV = "HERMES_MCP_EXPECTED_FAMILY"
 
-# pytest-asyncio is also optional but always installed alongside mcp tests
-# in our local runs. If absent, importorskip the asyncio plugin gracefully.
-pytest.importorskip("pytest_asyncio", reason="pytest-asyncio required for MCP server tests")
+
+def _expected_family():
+    """The family this environment must certify, or None when it is ambient."""
+    want = (os.environ.get(EXPECTED_FAMILY_ENV) or "").strip()
+    if not want:
+        return None
+    if want not in MCP_FAMILIES:
+        # A job pinning a family the repo doesn't declare is a workflow bug;
+        # degrading to an ambient run would hide it behind a green result.
+        raise RuntimeError(
+            f"{EXPECTED_FAMILY_ENV}={want!r} is not a declared SDK family; "
+            f"expected one of {MCP_FAMILIES}"
+        )
+    return want
+
+
+_EXPECTED_FAMILY = _expected_family()
+
+if _EXPECTED_FAMILY is None:
+    # Ambient: `mcp` is an optional runtime dep, only needed by users who
+    # actually run the MCP server, so a lean install skips this file instead
+    # of breaking the matrix.
+    pytest.importorskip("mcp", reason="mcp package not installed (optional MCP server dep)")
+    # pytest-asyncio is optional too, but always installed alongside mcp here.
+    pytest.importorskip("pytest_asyncio", reason="pytest-asyncio required for MCP server tests")
+else:
+    # Mandated: a missing package is the failure this job exists to report.
+    import mcp  # noqa: F401
+    import pytest_asyncio  # noqa: F401
 
 pytestmark = pytest.mark.asyncio
 
@@ -293,8 +333,8 @@ async def _call_protocol_v2(mod, tool_name, arguments=None):
 # `_HAS_DECORATOR_HANDLERS` (`mcp_server.py:462`): the `@server.list_tools()` /
 # `@server.call_tool()` decorators on `mcp` 1.x, or the `on_list_tools=` /
 # `on_call_tool=` constructor keywords on `mcp` 2.x. `requirements` pins no
-# upper bound and CI installs a bare `mcp`, so both families are supported and
-# either can be the installed one.
+# upper bound, so both families are supported and either can be the installed
+# one; the `mcp-family` jobs in .github/workflows/tests.yml pin one apiece.
 #
 # The two families do not share a registry API, so each needs its own dispatch:
 # 1.x keys `server.request_handlers` by request *type*, 2.x looks entries up by
@@ -303,13 +343,34 @@ async def _call_protocol_v2(mod, tool_name, arguments=None):
 # than off a version string means the matrix always exercises the branch that
 # actually built `mod.server`.
 
-MCP_FAMILY_DECORATOR = "mcp1"
-MCP_FAMILY_CONSTRUCTOR = "mcp2"
+
+def _family_matching_mandate(family, want):
+    """`family`, or an AssertionError when the environment mandated another.
+
+    Pure, so the mandate is falsifiable in an ambient run too: a check only
+    reachable inside the pinned job is a check the pinned job could silently
+    lose. `want=None` is the ambient case and passes anything.
+    """
+    if want is not None and family != want:
+        raise AssertionError(
+            f"{EXPECTED_FAMILY_ENV}={want} but mcp_server.py selected {family}. "
+            f"The job's package pin and production's own selector disagree, so "
+            f"this run would certify the wrong branch."
+        )
+    return family
 
 
 def _registered_family(mod):
     """The SDK family whose production branch built `mod.server`."""
-    return MCP_FAMILY_DECORATOR if mod._HAS_DECORATOR_HANDLERS else MCP_FAMILY_CONSTRUCTOR
+    family = MCP_FAMILY_DECORATOR if mod._HAS_DECORATOR_HANDLERS else MCP_FAMILY_CONSTRUCTOR
+    return _family_matching_mandate(family, _EXPECTED_FAMILY)
+
+
+def _installed_mcp_major():
+    """The installed `mcp` package's major version, from its own metadata."""
+    from importlib.metadata import version
+
+    return int(version("mcp").split(".")[0])
 
 
 def _mcp2_request_context(method):
@@ -1261,3 +1322,76 @@ class TestProtocolValidation:
             schema = _tool_schema(self.mod, move_tool)
             assert schema["required"] == ["session_id", "project_id"]
             assert schema["properties"]["project_id"]["type"] == ["string", "null"]
+
+    # ── The family mandate and the module's other ambient probes ───────────
+    #
+    # Everything above runs against whichever family the environment installed.
+    # These four say which family that was, and pin the two probes in
+    # mcp_server.py that also read the ambient package.
+
+    @pytest.mark.parametrize("family, want, accepted", [
+        (MCP_FAMILY_DECORATOR, None, True),
+        (MCP_FAMILY_CONSTRUCTOR, None, True),
+        (MCP_FAMILY_DECORATOR, MCP_FAMILY_DECORATOR, True),
+        (MCP_FAMILY_CONSTRUCTOR, MCP_FAMILY_CONSTRUCTOR, True),
+        (MCP_FAMILY_DECORATOR, MCP_FAMILY_CONSTRUCTOR, False),
+        (MCP_FAMILY_CONSTRUCTOR, MCP_FAMILY_DECORATOR, False),
+    ])
+    async def test_family_mandate_rejects_a_mismatched_selection(self, family, want, accepted):
+        """The mandate check itself, exercised without the pinned job.
+
+        The `mcp-family` jobs are what make both branches execute, but the check
+        they rely on lives here. Reachable only under HERMES_MCP_EXPECTED_FAMILY,
+        it could be deleted with the ambient run still green and both jobs then
+        certifying nothing.
+        """
+        if accepted:
+            assert _family_matching_mandate(family, want) == family
+        else:
+            with pytest.raises(AssertionError, match=EXPECTED_FAMILY_ENV):
+                _family_matching_mandate(family, want)
+
+    async def test_declared_families_cover_every_branch_the_selector_can_pick(self):
+        """`MCP_FAMILIES` drives the job matrix, so an undeclared branch is a gap."""
+        assert set(FAMILY_MAJOR) == set(MCP_FAMILIES)
+        assert _registered_family(self.mod) in MCP_FAMILIES
+        # `_HAS_DECORATOR_HANDLERS` is a bool, so the selector has exactly two
+        # outcomes. A third registration branch added without a third declared
+        # family — and a third job — fails here.
+        assert isinstance(self.mod._HAS_DECORATOR_HANDLERS, bool)
+
+    async def test_selected_family_matches_installed_package_major(self):
+        """Production's probe agrees with the package metadata it is probing.
+
+        Runs ambient as well as pinned, so a probe that stops tracking the SDK
+        is caught by the disagreement rather than by whichever branch happens
+        to still import.
+        """
+        family = _registered_family(self.mod)
+        assert FAMILY_MAJOR[family] == _installed_mcp_major()
+
+    async def test_sdk_result_types_are_importable_on_this_family(self):
+        """The `except ImportError` fallback at mcp_server.py:42-45 is not taken.
+
+        It sets `CallToolResult` and `ListToolsResult` to None, which leaves the
+        import clean and makes `_call_tool_result()` raise TypeError on the first
+        tool call instead. Each declared family proves it here.
+        """
+        assert self.mod.CallToolResult is not None
+        assert self.mod.ListToolsResult is not None
+
+    async def test_tool_schema_field_matches_installed_tool_model(self):
+        """`_TOOL_SCHEMA_FIELD` names a field the installed `Tool` really declares.
+
+        mcp_server.py:460-461 picks `input_schema` or `inputSchema` off whichever
+        fields the model exposes, defaulting to `inputSchema` when it recognizes
+        neither. A rename the probe missed would publish tools whose schema
+        attribute does not exist.
+        """
+        from mcp.types import Tool
+
+        fields = getattr(Tool, "model_fields", None) or getattr(Tool, "__fields__", {})
+        assert self.mod._TOOL_SCHEMA_FIELD in fields
+        move_tool = self.mod.TOOL_BY_NAME["move_session"]
+        published = getattr(move_tool, self.mod._TOOL_SCHEMA_FIELD)
+        assert published["required"] == ["session_id", "project_id"]

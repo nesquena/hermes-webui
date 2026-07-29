@@ -227,6 +227,14 @@ jobs:
           # it so test coverage exists. If mcp install fails (Python 3.13
           # wheel not yet available, etc.), tests/test_mcp_server.py uses
           # importorskip and the matrix stays green.
+          #
+          # Unpinned on purpose: this run's job is to exercise whatever a plain
+          # `pip install mcp` resolves to today, across all three Python
+          # versions. What it CANNOT certify is the SDK family it didn't
+          # resolve — mcp_server.py registers tools two different ways and
+          # picks at import time — nor its own presence, since the fallback
+          # above turns a failed install into a silent skip. The `mcp-family`
+          # jobs below own both of those: one pinned family each, no fallback.
           pip install mcp || echo "mcp install failed — test_mcp_server.py will importorskip"
 
       - name: Get Playwright version
@@ -250,3 +258,83 @@ jobs:
       - name: Run tests (shard ${{ matrix.shard }} of 5)
         if: needs.changes.outputs.docs_only != 'true'
         run: pytest tests/ -v --timeout=60 --shard-id=${{ matrix.shard }} --num-shards=5
+
+  # Pinned per-family registered-boundary matrix.
+  #
+  # mcp_server.py supports two SDK families and selects between them at import
+  # time from `_HAS_DECORATOR_HANDLERS` (mcp_server.py:462): the
+  # `@server.list_tools()` / `@server.call_tool()` decorators on mcp 1.x, or the
+  # `on_list_tools=` / `on_call_tool=` constructor keywords on mcp 2.x. The
+  # shard matrix above installs one unpinned `mcp`, so it runs one of those
+  # branches and says nothing about the other — with an ambient 1.x resolve,
+  # the whole 2.x constructor registration could be deleted and every shard
+  # would still be green, because the direct `_call_tool_v2()` tests reach the
+  # handler function without going through `server`.
+  #
+  # These jobs close that: one family pinned apiece, HERMES_MCP_EXPECTED_FAMILY
+  # asserting production actually selected it, and dispatch through that
+  # package's own registered handler and params types. Nothing here degrades —
+  # a failed install, a family mismatch, or a missing registration fails the
+  # job, which is the whole point of running them separately.
+  mcp-family:
+    needs: changes
+    # Same always() rationale as the test/lint jobs above: if these are ever
+    # promoted to required checks, a skipped job would report pending forever.
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Report both families in one run; a 2.x regression shouldn't hide behind
+      # a 1.x failure or vice versa.
+      fail-fast: false
+      matrix:
+        include:
+          - family: mcp1
+            constraint: 'mcp>=1,<2'
+          - family: mcp2
+            constraint: 'mcp>=2,<3'
+
+    steps:
+      - name: Docs-only short-circuit
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Docs-only change set — skipping the ${{ matrix.family }} registered-boundary job."
+
+      - uses: actions/checkout@v4
+        if: needs.changes.outputs.docs_only != 'true'
+
+      - name: Set up Python
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: |
+            **/setup.cfg
+            **/requirements*.txt
+            **/pyproject.toml
+
+      - name: Install dependencies with ${{ matrix.constraint }}
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          python -m pip install --upgrade pip
+          # Same base set the shard job installs: tests/conftest.py boots the
+          # session-scoped test server for every file, this one included.
+          pip install "pyyaml>=6.0" pytest pytest-timeout pytest-asyncio python-docx openpyxl python-pptx playwright
+          # jsonschema is what mcp_server.py validates tool arguments with. It
+          # arrives transitively with mcp today; name it anyway so a transitive
+          # drop surfaces as a resolution failure, not a collection error.
+          pip install jsonschema
+          # No `|| echo` fallback: this job exists to certify ${{ matrix.family }},
+          # so failing to install it is the result, not a reason to skip.
+          pip install "${{ matrix.constraint }}"
+
+      - name: Show resolved SDK version
+        if: needs.changes.outputs.docs_only != 'true'
+        run: pip show mcp | grep -E '^(Name|Version):'
+
+      - name: Registered-boundary matrix (${{ matrix.family }})
+        if: needs.changes.outputs.docs_only != 'true'
+        env:
+          # Turns tests/test_mcp_server.py's importorskip into a hard import and
+          # makes every registered-surface test assert the selected family.
+          HERMES_MCP_EXPECTED_FAMILY: ${{ matrix.family }}
+        run: pytest tests/test_mcp_server.py -v --timeout=60
