@@ -12,7 +12,8 @@ Before making changes, read:
 1. `README.md`
 2. `CONTRIBUTING.md`
 3. `docs/CONTRACTS.md`
-4. `CHANGELOG.md`
+4. `docs/harness-engineering.md`
+5. `CHANGELOG.md`
 
 For architecture, testing, or setup work, also read the matching reference:
 

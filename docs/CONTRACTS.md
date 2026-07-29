@@ -15,6 +15,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
   public-safety rules, and the short redline checklist.
 - [`CONTRIBUTING.md`](../CONTRIBUTING.md): contribution style, verification,
   PR description expectations, UI evidence, and project-specific constraints.
+- [`docs/harness-engineering.md`](harness-engineering.md): draft Harness /
+  Agenting Engineering plan for spec-first, context-routed, evidence-backed
+  AI-assisted development, with Chinese summary in
+  [`docs/harness-engineering-cn.md`](harness-engineering-cn.md).
 - [`README.md`](../README.md): product overview, quick start, architecture map,
   feature inventory, and docs index.
 - [`CHANGELOG.md`](../CHANGELOG.md): release history maintained by the release

@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import mimetypes
+import importlib
 import os
 import queue
 import random
@@ -22,6 +23,7 @@ import time
 import traceback
 import copy
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -2879,6 +2881,52 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
         image_count += 1
 
     return parts if image_count else workspace_ctx + msg_text
+
+
+def _apply_webui_pre_gateway_dispatch_preflight(
+    msg_text: str,
+    *,
+    session_id: str,
+    workspace: str,
+    profile: str | None = None,
+) -> str:
+    """Apply plugin preflight rewrites to the model-facing current WebUI turn.
+
+    Browser-originated WebUI chats do not pass through ``gateway/run.py``. This
+    bridge reuses the same ``pre_gateway_dispatch`` hook for advisory rewrites,
+    but deliberately ignores blocking actions and never mutates the visible or
+    persisted user message.
+    """
+    text = str(msg_text or "")
+    if not text.strip():
+        return text
+    try:
+        plugins = importlib.import_module("hermes_cli.plugins")
+        plugins.discover_plugins()
+        event = SimpleNamespace(
+            text=text,
+            platform="webui",
+            chat_id=session_id,
+            user_id="webui",
+            raw={
+                "source": "webui",
+                "session_id": session_id,
+                "workspace": str(workspace or ""),
+                "profile": profile,
+            },
+        )
+        for ret in plugins.invoke_hook("pre_gateway_dispatch", event=event):
+            if not isinstance(ret, dict):
+                continue
+            if str(ret.get("action") or "").strip().lower() != "rewrite":
+                continue
+            rewritten = ret.get("text")
+            if isinstance(rewritten, str) and rewritten.strip():
+                text = rewritten
+                event.text = rewritten
+    except Exception:
+        logger.debug("WebUI pre_gateway_dispatch bridge failed", exc_info=True)
+    return text
 
 
 _INLINE_THINKING_TAG_PAIRS = (
@@ -9539,6 +9587,12 @@ def _run_agent_streaming(
             _agent_msg_text = msg_text
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
+            _agent_msg_text = _apply_webui_pre_gateway_dispatch_preflight(
+                _agent_msg_text,
+                session_id=session_id,
+                workspace=str(s.workspace),
+                profile=getattr(s, 'profile', None),
+            )
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             _run_conversation_kwargs = dict(
