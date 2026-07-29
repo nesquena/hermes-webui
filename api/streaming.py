@@ -2278,7 +2278,37 @@ from api.workspace import set_last_workspace
 # metadata added by the webui and must be stripped before the API call.
 # `reasoning_content` is provider-facing for reasoning-capable models. Display
 # metadata such as `reasoning`, `thinking`, and `_reasoning` stays omitted here.
-_API_SAFE_MSG_KEYS = {'role', 'content', 'tool_calls', 'tool_call_id', 'name', 'refusal', 'reasoning_content'}
+def _copy_api_safe_fields(msg: dict) -> dict:
+    """Return a new dict with only API-safe message fields.
+
+    Uses explicit field-by-field access (always O(|safe_keys|)) instead of a
+    dict comprehension over all msg keys (O(|msg_keys|)), which is faster when
+    messages carry extra WebUI metadata fields like ``timestamp``, ``_ts``,
+    ``_error``, ``_partial``, ``_recovered``, ``attachments``, etc. (#6006 perf).
+    """
+    sanitized = {}
+    role = msg.get('role')
+    if role is not None:
+        sanitized['role'] = role
+    content = msg.get('content')
+    if content is not None:
+        sanitized['content'] = content
+    tool_calls = msg.get('tool_calls')
+    if tool_calls is not None:
+        sanitized['tool_calls'] = tool_calls
+    tool_call_id = msg.get('tool_call_id')
+    if tool_call_id is not None:
+        sanitized['tool_call_id'] = tool_call_id
+    name = msg.get('name')
+    if name is not None:
+        sanitized['name'] = name
+    refusal = msg.get('refusal')
+    if refusal is not None:
+        sanitized['refusal'] = refusal
+    reasoning_content = msg.get('reasoning_content')
+    if reasoning_content is not None:
+        sanitized['reasoning_content'] = reasoning_content
+    return sanitized
 
 _NATIVE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
 
@@ -2523,6 +2553,61 @@ def _reset_streaming_hermes_home_override(override_mod, override_token, override
         override_mod.reset_hermes_home_override(override_token)
     except Exception:
         logger.debug("Failed to reset streaming Hermes home override", exc_info=True)
+
+
+# ── Stale terminal-env cache invalidation (issue #5937) ─────────────────
+# When WebUI switches between profiles with different terminal backends
+# (e.g., local → SSH), the agent's `_active_environments["default"]` cache
+# may still hold an environment created under the *previous* profile's
+# backend vars.  This causes a subsequent local-profile turn to execute
+# terminal/file tool calls against the stale remote SSH environment.
+#
+# A single global tracker is sufficient because the cache is collapsed to
+# the shared key "default" — any profile switch that changes the backend
+# type must invalidate the global cached entry.
+_last_terminal_env: str | None = None
+
+
+def _invalidate_stale_terminal_env(profile_runtime_env: dict) -> None:
+    """Drop the cached ``\"default\"`` terminal environment when the backend
+    type changes between WebUI turns.
+
+    Called during streaming turn setup, after the profile's terminal env
+    vars have been written to ``os.environ``, so the next terminal tool
+    call will create a fresh environment with the correct backend config.
+    """
+    global _last_terminal_env
+    current_env = (profile_runtime_env or {}).get("TERMINAL_ENV", "").strip() or None
+
+    if current_env == _last_terminal_env:
+        return
+
+    previous = _last_terminal_env
+    _last_terminal_env = current_env
+
+    try:
+        from tools.terminal_tool import cleanup_vm, get_active_env
+        from tools.file_tools import clear_file_ops_cache
+
+        cached = get_active_env("default")
+        if cached is not None:
+            logger.info(
+                "Terminal backend switched %s -> %s: evicting stale default env",
+                previous or "(none)",
+                current_env or "(none)",
+            )
+            cleanup_vm("default")
+            clear_file_ops_cache("default")
+    except ImportError:
+        logger.debug(
+            "Terminal or file_tools not available for cache invalidation",
+            exc_info=True,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to invalidate stale terminal env",
+            exc_info=True,
+        )
 
 
 # ── Per-turn session identity (xsession wakeup misroute root fix — Option 1) ─
@@ -5675,7 +5760,9 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
     def _safe_projection(msg):
         if not isinstance(msg, dict):
             return None
-        projected = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS and msg.get('role')}
+        projected = _copy_api_safe_fields(msg)
+        if not projected.get('role'):
+            return None
         # Mirror the empty-tool_calls drop applied by _api_safe_message_positions
         # (#5737) so this projection matches the API-safe positions it's aligned
         # against — otherwise a row stored with tool_calls: [] projects
@@ -8719,6 +8806,13 @@ def _run_agent_streaming(
             discover_mcp_tools()
         except Exception:
             pass  # MCP not available or not configured — non-fatal
+
+        # #5937: invalidate the cached "default" terminal environment when
+        # the profile's TERMINAL_ENV backend type changes.  Without this,
+        # a local-backend turn reuses a stale SSH/Docker environment created
+        # by an earlier remote-backend profile session in the same process,
+        # causing terminal/file tool calls to execute on the wrong backend.
+        _invalidate_stale_terminal_env(_safe_profile_runtime_env)
 
         # Register a gateway-style notify callback so the approval system can
         # push the `approval` SSE event the moment a dangerous command is
