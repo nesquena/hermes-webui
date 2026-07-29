@@ -16409,7 +16409,10 @@ function renderMessages(options){
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
     const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||recoveryHtml);
-    if(statusHtml){
+    if(statusHtml&&(String(content||'').trim()||filesHtml)){
+      seg.insertAdjacentHTML('beforeend', statusHtml);
+      seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
+    }else if(statusHtml){
       seg.insertAdjacentHTML('beforeend', statusHtml);
     }else if(hasVisibleBody){
       seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
