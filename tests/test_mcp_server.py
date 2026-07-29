@@ -40,10 +40,17 @@ EXPECTED_FAMILY_ENV = "HERMES_MCP_EXPECTED_FAMILY"
 
 
 def _expected_family():
-    """The family this environment must certify, or None when it is ambient."""
-    want = (os.environ.get(EXPECTED_FAMILY_ENV) or "").strip()
-    if not want:
+    """The family this environment must certify, or None when it is ambient.
+
+    Only an *absent* variable means ambient. A variable that is present but
+    empty, blank, or misspelled is a misconfigured job, and treating it as
+    ambient would let that job pass while certifying nothing, which is the
+    failure this whole mechanism exists to remove.
+    """
+    raw = os.environ.get(EXPECTED_FAMILY_ENV)
+    if raw is None:
         return None
+    want = raw.strip()
     if want not in MCP_FAMILIES:
         # A job pinning a family the repo doesn't declare is a workflow bug;
         # degrading to an ambient run would hide it behind a green result.
@@ -1415,6 +1422,31 @@ class TestProtocolValidation:
         else:
             with pytest.raises(AssertionError, match=EXPECTED_FAMILY_ENV):
                 _family_matching_mandate(family, want)
+
+    @pytest.mark.parametrize("raw, expected", [
+        (None, None),
+        ("mcp1", MCP_FAMILY_DECORATOR),
+        ("mcp2", MCP_FAMILY_CONSTRUCTOR),
+        ("  mcp2  ", MCP_FAMILY_CONSTRUCTOR),
+    ])
+    async def test_expected_family_reads_only_declared_values(self, monkeypatch, raw, expected):
+        if raw is None:
+            monkeypatch.delenv(EXPECTED_FAMILY_ENV, raising=False)
+        else:
+            monkeypatch.setenv(EXPECTED_FAMILY_ENV, raw)
+        assert _expected_family() == expected
+
+    @pytest.mark.parametrize("raw", ["", "   ", "mcp3", "MCP1", "mcp"])
+    async def test_expected_family_rejects_a_misconfigured_value(self, monkeypatch, raw):
+        """Present-but-wrong is a broken job, not a reason to run ambient.
+
+        An empty or misspelled value read as "no family pinned" would let the
+        pinned job pass while certifying nothing, which is the exact shape of
+        the defect these jobs exist to remove.
+        """
+        monkeypatch.setenv(EXPECTED_FAMILY_ENV, raw)
+        with pytest.raises(RuntimeError, match=EXPECTED_FAMILY_ENV):
+            _expected_family()
 
     async def test_declared_families_cover_every_branch_the_selector_can_pick(self):
         """`MCP_FAMILIES` drives the job matrix, so an undeclared branch is a gap."""
