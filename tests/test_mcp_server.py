@@ -30,13 +30,19 @@ import pytest
 # handlers must exist. Unset — a lean local install, or the shard matrix's
 # best-effort `pip install mcp` — the original skip-on-absent behavior holds,
 # so nothing about the ambient run changes.
-MCP_FAMILY_DECORATOR = "mcp1"
-MCP_FAMILY_CONSTRUCTOR = "mcp2"
-MCP_FAMILIES = (MCP_FAMILY_DECORATOR, MCP_FAMILY_CONSTRUCTOR)
-# The `mcp` major each family is the SDK API of, so production's hasattr probe
-# can be checked against the package metadata it is probing.
-FAMILY_MAJOR = {MCP_FAMILY_DECORATOR: 1, MCP_FAMILY_CONSTRUCTOR: 2}
-EXPECTED_FAMILY_ENV = "HERMES_MCP_EXPECTED_FAMILY"
+#
+# The declarations come from tests/_mcp_family_contract.py, which also holds the
+# CI-job contract and is imported by tests/test_mcp_family_ci_contract.py. That
+# check has to run in a different job from the one it inspects, so it cannot
+# live here; keeping one copy of the declarations is what stops the two files
+# from disagreeing about which families exist.
+from tests._mcp_family_contract import (  # noqa: E402
+    EXPECTED_FAMILY_ENV,
+    FAMILY_MAJOR,
+    MCP_FAMILIES,
+    MCP_FAMILY_CONSTRUCTOR,
+    MCP_FAMILY_DECORATOR,
+)
 
 
 def _expected_family():
@@ -82,9 +88,6 @@ _REPO = Path(__file__).parent.parent.resolve()
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-# The workflow that owns the per-family environments. Read, not assumed: the
-# declaration below and the job matrix are otherwise two independent lists.
-WORKFLOW_PATH = _REPO / ".github" / "workflows" / "tests.yml"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1457,56 +1460,12 @@ class TestProtocolValidation:
 
         Deliberately not claiming more: `_HAS_DECORATOR_HANDLERS` is a bool, so
         a third registration branch keyed on some other probe would not show up
-        here. `test_workflow_matrix_declares_a_job_per_declared_family` is what
-        ties the declaration to something outside this file.
+        here. `tests/test_mcp_family_ci_contract.py` is what ties the
+        declaration to the CI matrix that has to cover it.
         """
         assert set(FAMILY_MAJOR) == set(MCP_FAMILIES)
         assert _registered_family(self.mod) in MCP_FAMILIES
         assert isinstance(self.mod._HAS_DECORATOR_HANDLERS, bool)
-
-    async def test_workflow_matrix_declares_a_job_per_declared_family(self):
-        """The CI matrix and `MCP_FAMILIES` are the same set, read from the file.
-
-        Nothing else connects them. Adding a family to the declaration would
-        otherwise leave it with no environment, and deleting a matrix entry
-        would leave a declared family uncertified, both of them green. This also
-        pins the parts of the job that decide whether its result means anything:
-        the constraint bounds, the env wiring, and the absence of any
-        outcome-suppressing switch on the step that does the certifying.
-        """
-        import yaml
-
-        workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
-        job = workflow["jobs"]["mcp-family"]
-        entries = job["strategy"]["matrix"]["include"]
-        assert {entry["family"] for entry in entries} == set(MCP_FAMILIES)
-        # Closed on both ends. An open upper bound would let the next major
-        # resolve into a job that claims to be certifying this one.
-        for entry in entries:
-            major = FAMILY_MAJOR[entry["family"]]
-            assert entry["constraint"] == f"mcp>={major},<{major + 1}"
-        install = next(
-            step for step in job["steps"]
-            if "${{ matrix.constraint }}" in (step.get("run") or "")
-        )
-        # The constraint's own command line, comments excluded: `||` anywhere on
-        # it would turn a resolution failure back into a green step.
-        constraint_line = next(
-            line for line in install["run"].splitlines()
-            if "${{ matrix.constraint }}" in line and not line.strip().startswith("#")
-        )
-        assert "||" not in constraint_line
-        certify = next(
-            step for step in job["steps"]
-            if EXPECTED_FAMILY_ENV in (step.get("env") or {})
-        )
-        assert certify["env"][EXPECTED_FAMILY_ENV] == "${{ matrix.family }}"
-        assert "tests/test_mcp_server.py" in certify["run"]
-        # A skipped or error-tolerated certification step reports the same green
-        # as a passing one, which is the defect class this whole job exists for.
-        assert certify.get("continue-on-error") is None
-        assert job.get("continue-on-error") is None
-        assert certify["if"] == "needs.changes.outputs.docs_only != 'true'"
 
     async def test_selected_family_matches_installed_package_major(self):
         """Production's probe agrees with the package metadata it is probing.
