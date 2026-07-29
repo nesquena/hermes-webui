@@ -40,13 +40,16 @@ def _restore_auth_sessions():
 
 @pytest.fixture
 def _clear_caches():
-    """Snapshot SESSION_AGENT_CACHE and STREAMS so tests don't bleed."""
+    """Snapshot steer owner registries so tests don't bleed."""
     from api.config import (
+        AGENT_INSTANCES,
         ACTIVE_RUNS,
         ACTIVE_RUNS_LOCK,
         SESSION_AGENT_CACHE,
         SESSION_AGENT_CACHE_LOCK,
         STREAMS,
+        STREAM_SESSION_OWNERS,
+        STREAM_SESSION_OWNERS_LOCK,
         STREAMS_LOCK,
     )
     with SESSION_AGENT_CACHE_LOCK:
@@ -54,7 +57,12 @@ def _clear_caches():
         SESSION_AGENT_CACHE.clear()
     with STREAMS_LOCK:
         streams_snap = dict(STREAMS)
+        agent_instances_snap = dict(AGENT_INSTANCES)
         STREAMS.clear()
+        AGENT_INSTANCES.clear()
+    with STREAM_SESSION_OWNERS_LOCK:
+        stream_owners_snap = dict(STREAM_SESSION_OWNERS)
+        STREAM_SESSION_OWNERS.clear()
     with ACTIVE_RUNS_LOCK:
         active_runs_snap = dict(ACTIVE_RUNS)
         ACTIVE_RUNS.clear()
@@ -65,6 +73,11 @@ def _clear_caches():
     with STREAMS_LOCK:
         STREAMS.clear()
         STREAMS.update(streams_snap)
+        AGENT_INSTANCES.clear()
+        AGENT_INSTANCES.update(agent_instances_snap)
+    with STREAM_SESSION_OWNERS_LOCK:
+        STREAM_SESSION_OWNERS.clear()
+        STREAM_SESSION_OWNERS.update(stream_owners_snap)
     with ACTIVE_RUNS_LOCK:
         ACTIVE_RUNS.clear()
         ACTIVE_RUNS.update(active_runs_snap)
@@ -122,6 +135,40 @@ class TestHandleChatSteerHappyPath:
         agent.steer.assert_called_once_with("Use Python instead")
         body = _captured_response(handler)
         assert body == {"accepted": True, "fallback": None, "stream_id": stream_id}
+
+    def test_prefers_agent_bound_to_active_stream_without_cache(self, _clear_caches):
+        from api.streaming import _handle_chat_steer
+        from api.config import (
+            AGENT_INSTANCES,
+            ACTIVE_RUNS,
+            ACTIVE_RUNS_LOCK,
+            STREAMS,
+            STREAMS_LOCK,
+            register_stream_owner,
+        )
+        import queue as _q
+
+        sid, stream_id = "sid_stream", "stream_bound"
+        agent = MagicMock()
+        agent.steer = MagicMock(return_value=True)
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = _q.Queue()
+            AGENT_INSTANCES[stream_id] = agent
+        register_stream_owner(stream_id, sid)
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": "agent"}
+
+        sess = MagicMock(active_stream_id=stream_id)
+        with patch("api.streaming.get_session", return_value=sess):
+            handler = _make_handler()
+            _handle_chat_steer(handler, {"session_id": sid, "text": "Use Python instead"})
+
+        agent.steer.assert_called_once_with("Use Python instead")
+        assert _captured_response(handler) == {
+            "accepted": True,
+            "fallback": None,
+            "stream_id": stream_id,
+        }
 
 
 class TestHandleChatSteerFallbacks:

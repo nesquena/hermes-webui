@@ -11973,54 +11973,9 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if not text:
         return bad(handler, "text required")
 
-    evicted_cached_entry = None
     with _cfg.SESSION_AGENT_CACHE_LOCK:
-        cached = _cfg.SESSION_AGENT_CACHE.get(sid)
-        if cached:
-            agent = cached[0]
-            if not _cached_agent_matches_session(agent, sid):
-                evicted_cached_entry = _cfg.SESSION_AGENT_CACHE.pop(sid, None)
-                logger.warning(
-                    '[webui] Evicted cached agent before steer due to mismatched session identity: cache_key=%s agent_session_id=%s',
-                    sid,
-                    _cached_agent_session_identity(agent),
-                )
-                cached = None
-    if evicted_cached_entry is not None:
-        try:
-            _close_cached_agent_entry_at_session_boundary(sid, evicted_cached_entry)
-        except Exception:
-            logger.debug("Failed to close steer identity-mismatched cached agent for session %s", sid, exc_info=True)
-    if not cached:
-        try:
-            s = get_session(sid)
-            active_stream_id = getattr(s, "active_stream_id", None) or None
-        except KeyError:
-            active_stream_id = None
-        if active_stream_id:
-            with _cfg.STREAMS_LOCK:
-                stream_alive = active_stream_id in _cfg.STREAMS
-            if stream_alive:
-                try:
-                    with _cfg.ACTIVE_RUNS_LOCK:
-                        active_run = dict((_cfg.ACTIVE_RUNS or {}).get(str(active_stream_id)) or {})
-                    if active_run.get("backend") == "gateway":
-                        return j(handler, {"accepted": False, "fallback": "gateway_steer_queued",
-                                           "stream_id": active_stream_id})
-                except Exception:
-                    logger.warning(
-                        "Gateway ownership lookup failed before steer fallback for session=%s stream_id=%s",
-                        sid,
-                        active_stream_id,
-                        exc_info=True,
-                    )
-        # No active local agent for this session — caller surfaces a steer failure
-        # without cancelling the active run.
-        return j(handler, {"accepted": False, "fallback": "no_cached_agent",
-                           "stream_id": None})
-    agent = cached[0]
-    if not hasattr(agent, "steer"):
-        # Older hermes-agent that pre-dates the steer() method
+        preliminary_cached = _cfg.SESSION_AGENT_CACHE.get(sid)
+    if preliminary_cached and not hasattr(preliminary_cached[0], "steer"):
         return j(handler, {"accepted": False, "fallback": "agent_lacks_steer",
                            "stream_id": None})
 
@@ -12030,17 +11985,73 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     try:
         s = get_session(sid)
     except KeyError:
+        if not preliminary_cached:
+            return j(handler, {"accepted": False, "fallback": "no_cached_agent",
+                               "stream_id": None})
         return j(handler, {"accepted": False, "fallback": "session_not_found",
                            "stream_id": None})
-    active_stream_id = getattr(s, "active_stream_id", None) or None
+    active_stream_id = str(getattr(s, "active_stream_id", None) or "").strip()
     if not active_stream_id:
         return j(handler, {"accepted": False, "fallback": "not_running",
                            "stream_id": None})
     with _cfg.STREAMS_LOCK:
         stream_alive = active_stream_id in _cfg.STREAMS
+        agent = _cfg.AGENT_INSTANCES.get(active_stream_id)
     if not stream_alive:
         # Active stream id is stale — stream has ended; caller falls back
         return j(handler, {"accepted": False, "fallback": "stream_dead",
+                           "stream_id": None})
+
+    owner_sid = _cfg.stream_owner_session_id(active_stream_id)
+    if owner_sid and owner_sid != sid:
+        logger.warning(
+            "Refused steer for stream owned by another session: requested=%s stream=%s owner=%s",
+            sid,
+            active_stream_id,
+            owner_sid,
+        )
+        return j(handler, {"accepted": False, "fallback": "stream_dead",
+                           "stream_id": None})
+
+    with _cfg.ACTIVE_RUNS_LOCK:
+        active_run = dict((_cfg.ACTIVE_RUNS or {}).get(active_stream_id) or {})
+    active_run_sid = str(active_run.get("session_id") or "").strip()
+    if active_run_sid and active_run_sid != sid:
+        logger.warning(
+            "Refused steer for run owned by another session: requested=%s stream=%s owner=%s",
+            sid,
+            active_stream_id,
+            active_run_sid,
+        )
+        return j(handler, {"accepted": False, "fallback": "stream_dead",
+                           "stream_id": None})
+
+    if agent is None and active_run.get("backend") == "gateway":
+        return j(handler, {"accepted": False, "fallback": "gateway_steer_queued",
+                           "stream_id": active_stream_id})
+
+    if agent is None:
+        evicted_cached_entry = None
+        with _cfg.SESSION_AGENT_CACHE_LOCK:
+            cached = _cfg.SESSION_AGENT_CACHE.get(sid)
+            if cached:
+                cached_agent = cached[0]
+                if _cached_agent_matches_session(cached_agent, sid):
+                    agent = cached_agent
+                    _cfg.SESSION_AGENT_CACHE.move_to_end(sid)
+                else:
+                    evicted_cached_entry = _cfg.SESSION_AGENT_CACHE.pop(sid, None)
+        if evicted_cached_entry is not None:
+            try:
+                _close_cached_agent_entry_at_session_boundary(sid, evicted_cached_entry)
+            except Exception:
+                logger.debug("Failed to close steer identity-mismatched cached agent for session %s", sid, exc_info=True)
+
+    if agent is None:
+        return j(handler, {"accepted": False, "fallback": "no_cached_agent",
+                           "stream_id": None})
+    if not hasattr(agent, "steer"):
+        return j(handler, {"accepted": False, "fallback": "agent_lacks_steer",
                            "stream_id": None})
 
     try:
