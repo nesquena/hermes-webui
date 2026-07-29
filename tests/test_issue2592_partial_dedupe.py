@@ -1,3 +1,4 @@
+import copy
 import json
 
 
@@ -279,3 +280,223 @@ def test_recovery_still_restores_unique_backup_excess(tmp_path):
     assert status["live_messages"] == 1
     assert status["bak_messages"] == 2
     assert status["recommend"] == "restore"
+
+
+def test_typed_incomplete_ids_round_trip_without_cross_type_collision():
+    from api.models import (
+        _collapse_duplicate_incomplete_message_ids,
+        _strict_incomplete_message_id_key,
+    )
+
+    # Each admissible scalar type carries its own deletion authority.
+    assert _strict_incomplete_message_id_key("abc") == ("str", "abc")
+    assert _strict_incomplete_message_id_key(1701) == ("int", 1701)
+    assert _strict_incomplete_message_id_key(1.5) == ("float", 1.5)
+
+    # 1 vs "1" vs 1.0 vs True vs "True" vs b"1" are DISTINCT rows: none may
+    # collapse into another's bucket, and the bytes id must round-trip intact.
+    typed_ids = [1, "1", 1.0, True, "True", b"1"]
+    rows = [_incomplete_reasoning_only(message_id) for message_id in typed_ids]
+    collapsed, _ = _collapse_duplicate_incomplete_message_ids(rows)
+    assert len(collapsed) == len(rows)
+    kept = [message["id"] for message in collapsed]
+    assert sum(1 for k in kept if type(k) is int and k == 1) == 1
+    assert sum(1 for k in kept if type(k) is str and k == "1") == 1
+    assert sum(1 for k in kept if type(k) is float and k == 1.0) == 1
+    assert sum(1 for k in kept if type(k) is str and k == "True") == 1
+    assert sum(1 for k in kept if type(k) is bool and k is True) == 1
+    assert sum(1 for k in kept if type(k) is bytes and k == b"1") == 1
+
+    # Same-type replays of an admissible id still collapse exactly as before.
+    for message_id in (1, "1", 1.5):
+        pair = [_incomplete_reasoning_only(message_id), _incomplete_reasoning_only(message_id)]
+        deduped, changed = _collapse_duplicate_incomplete_message_ids(pair)
+        assert changed is True
+        assert len(deduped) == 1
+        assert deduped[0]["id"] == message_id
+        assert type(deduped[0]["id"]) is type(message_id)
+
+
+def test_incomplete_id_rejects_bool_container_subclass_and_non_finite():
+    from api.models import _strict_incomplete_message_id_key as key
+
+    class StrId(str):
+        pass
+
+    class IntId(int):
+        pass
+
+    assert key(True) is None
+    assert key(False) is None
+    assert key(None) is None
+    assert key("") is None
+    assert key(["1"]) is None
+    assert key({"id": 1}) is None
+    assert key(("1",)) is None
+    assert key(b"1") is None
+    assert key(StrId("1")) is None
+    assert key(IntId(1)) is None
+    assert key(float("nan")) is None
+    assert key(float("inf")) is None
+    assert key(float("-inf")) is None
+
+
+def test_mixed_type_backup_rows_remain_independently_recoverable(tmp_path):
+    from api.session_recovery import inspect_session_recovery_status
+
+    session_path = tmp_path / "mixed.json"
+    backup_path = tmp_path / "mixed.json.bak"
+    int_row = _incomplete_reasoning_only(1)
+    str_row = _incomplete_reasoning_only("1")
+    session_path.write_text(json.dumps({"messages": [int_row]}), encoding="utf-8")
+    backup_path.write_text(
+        json.dumps({"messages": [int_row, str_row]}), encoding="utf-8"
+    )
+
+    status = inspect_session_recovery_status(session_path)
+    assert status["live_messages"] == 1
+    # "1" is NOT a duplicate-only replay of 1: the distinct backup row keeps
+    # its recovery authority instead of being classified as a replay of 1.
+    assert status["bak_messages"] == 2
+    assert status["recommend"] == "restore"
+
+
+def test_save_deep_isolates_retained_rows_from_concurrent_mutation(tmp_path, monkeypatch):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "index.json")
+
+    session = models.Session(
+        session_id="deep-isolation",
+        messages=[_incomplete_reasoning_only(1701)],
+    )
+    live_row = session.messages[0]
+    real_deepcopy = copy.deepcopy
+
+    def deepcopy_then_mutate(obj, *args, **kwargs):
+        snapshot = real_deepcopy(obj, *args, **kwargs)
+        if isinstance(obj, list) and obj and obj[0] is live_row:
+            # A worker mutates the LIVE nested dict in the window between the
+            # collapse scan and json.dumps; the persisted payload must not
+            # observe it.
+            live_row["codex_reasoning_items"][0]["encrypted_content"] = "MUTATED"
+        return snapshot
+
+    monkeypatch.setattr(models.copy, "deepcopy", deepcopy_then_mutate)
+    session.save(skip_index=True)
+
+    persisted = json.loads((session_dir / "deep-isolation.json").read_text(encoding="utf-8"))
+    assert persisted["messages"][0]["codex_reasoning_items"][0]["encrypted_content"] == "opaque"
+    assert session.messages[0]["codex_reasoning_items"][0]["encrypted_content"] == "MUTATED"
+
+
+def test_save_writes_index_from_same_collapsed_snapshot(tmp_path, monkeypatch):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    index_file = tmp_path / "index.json"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", index_file)
+
+    session = models.Session(
+        session_id="index-parity",
+        messages=[_incomplete_reasoning_only(1701, timestamp=100)],
+    )
+    session.save()  # full-rebuild path creates the index
+
+    # A replayed duplicate carrying a LATER timestamp lands in the live list.
+    session.messages.append(_incomplete_reasoning_only(1701, timestamp=999))
+    session.save()  # fast path: _write_session_index(updates=[self])
+
+    sidecar = json.loads((session_dir / "index-parity.json").read_text(encoding="utf-8"))
+    assert sidecar["message_count"] == 1
+    assert len(sidecar["messages"]) == 1
+
+    index_entries = json.loads(index_file.read_text(encoding="utf-8"))
+    entry = next(e for e in index_entries if e["session_id"] == "index-parity")
+    # The sidebar index must reflect the SAME collapsed snapshot: no count of
+    # 2, and no adoption of the dropped duplicate's later timestamp.
+    assert entry["message_count"] == sidecar["message_count"] == 1
+    assert entry["last_message_at"] == 100
+
+
+def test_recovery_restores_the_collapsed_backup_payload(tmp_path):
+    from api.session_recovery import inspect_session_recovery_status, recover_session
+
+    session_path = tmp_path / "restored.json"
+    backup_path = tmp_path / "restored.json.bak"
+    first = _incomplete_reasoning_only(1701, reasoning="first")
+    unique = {"role": "user", "content": "must survive", "id": 1702}
+    session_path.write_text(json.dumps({"messages": [first]}), encoding="utf-8")
+    backup_path.write_text(
+        json.dumps({"messages": [first, dict(first), unique], "message_count": 3}),
+        encoding="utf-8",
+    )
+
+    status = inspect_session_recovery_status(session_path)
+    assert status["recommend"] == "restore"
+    result = recover_session(session_path)
+    assert result["restored"] is True
+
+    # The restore writes the SAME effective payload _msg_count() evaluated:
+    # the duplicate-only replay is NOT resurrected, the unique row survives,
+    # and message_count is recomputed from the collapsed payload.
+    restored = json.loads(session_path.read_text(encoding="utf-8"))
+    assert restored["messages"] == [first, unique]
+    assert restored["message_count"] == 2
+
+
+def test_reconciliation_and_persistence_share_incomplete_eligibility():
+    from api.models import _incomplete_reasoning_message_id
+    from api.streaming import _message_identity
+
+    def reconciliation_incomplete_key(message):
+        identity = _message_identity(message)
+        if (
+            isinstance(identity, tuple)
+            and len(identity) == 4
+            and str(identity[3]).startswith("__incomplete_message_id__")
+        ):
+            return identity[3]
+        return None
+
+    base = _incomplete_reasoning_only(1701)
+    structured_blank = {
+        **base,
+        "content": [{"type": "output_text", "text": "  <think>hidden</think>  "}],
+    }
+    structured_visible = {
+        **base,
+        "content": [{"type": "output_text", "text": "visible answer"}],
+    }
+    cases_eligible = [
+        base,
+        structured_blank,
+        {**base, "id": 1},
+        {**base, "id": "1"},
+        {**base, "id": 1.5},
+    ]
+    cases_ineligible = [
+        structured_visible,
+        {**base, "tool_call_id": "call_1"},
+        {**base, "tool_calls": [{"id": "call_1"}]},
+        {**base, "id": True},
+        {**base, "id": ""},
+        {**base, "id": None},
+        {**base, "id": ["1"]},
+        {**base, "id": float("nan")},
+    ]
+
+    # Blank content (plain or structured), tool-call identity, and malformed
+    # ids are classified identically by both layers: neither may drop a row
+    # the other considers distinct.
+    for message in cases_eligible:
+        assert _incomplete_reasoning_message_id(message) is not None
+        assert reconciliation_incomplete_key(message) is not None
+    for message in cases_ineligible:
+        assert _incomplete_reasoning_message_id(message) is None
+        assert reconciliation_incomplete_key(message) is None

@@ -68,6 +68,7 @@ from api.models import (
     StateDBSessionMessagesSnapshot,
     _collapse_duplicate_incomplete_message_ids,
     _is_empty_partial_activity_message,
+    _strict_incomplete_message_id_key,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
@@ -5994,19 +5995,22 @@ def _message_identity(msg):
         # Returning None here made every reconcile treat the same result as a
         # fresh context-only row, which amplified alternating replays such as
         # FD05 message ids 1701/1702 on every subsequent turn.
-        message_id = msg.get('id')
+        # #6600: share the persistence boundary's strict typed scalar identity
+        # (api.models._strict_incomplete_message_id_key) so str/int/float ids
+        # never collapse across types and bools/containers/subclasses/non-finite
+        # floats are rejected in BOTH layers.
         if (
             role == 'assistant'
             and str(msg.get('finish_reason') or '').lower() == 'incomplete'
-            and message_id is not None
-            and str(message_id) != ''
         ):
-            return (
-                role,
-                '',
-                '',
-                '__incomplete_message_id__' + str(message_id),
-            )
+            typed_id_key = _strict_incomplete_message_id_key(msg.get('id'))
+            if typed_id_key is not None:
+                return (
+                    role,
+                    '',
+                    '',
+                    '__incomplete_message_id__' + repr(typed_id_key),
+                )
         return None
     return (
         role,

@@ -1392,7 +1392,11 @@ class Session:
         # list.  Active workers can hold an alias to ``self.messages``; replacing
         # it here would detach an append that lands while save() is preparing
         # the payload.  A later save will include any concurrent append.
-        messages_to_persist, _ = _collapse_duplicate_incomplete_message_ids(self.messages)
+        # Deep-copy the retained rows so a worker mutating a nested dict (e.g.
+        # codex_reasoning_items[0].encrypted_content) between the collapse scan
+        # and json.dumps cannot leak into this save's immutable payload (#6600).
+        collapsed_messages, _ = _collapse_duplicate_incomplete_message_ids(self.messages)
+        messages_to_persist = copy.deepcopy(collapsed_messages)
         if touch_updated_at:
             self.updated_at = time.time()
         # Write metadata fields first so load_metadata_only() can read them
@@ -1528,7 +1532,15 @@ class Session:
                 pass
             raise
         if not skip_index:
-            _write_session_index(updates=[self])
+            # #6600: project the sidebar index from the SAME detached snapshot
+            # just serialized — never from the live list — so _index.json can
+            # neither record the uncollapsed message_count nor adopt a dropped
+            # duplicate row's later timestamp.
+            self._index_projection_messages = messages_to_persist
+            try:
+                _write_session_index(updates=[self])
+            finally:
+                self._index_projection_messages = None
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
@@ -1731,14 +1743,21 @@ class Session:
     def compact(self, include_runtime=False, active_stream_ids=None) -> dict:
         active_stream_ids = active_stream_ids if active_stream_ids is not None else set()
         has_pending_user_message = bool(self.pending_user_message)
+        # #6600: during save()'s index update this is the detached, collapsed
+        # snapshot just written to the sidecar, keeping the index projection
+        # identical to the persisted payload.  Outside save() it is None and
+        # the live list is used as before.
+        projection_messages = getattr(self, '_index_projection_messages', None)
+        if projection_messages is None:
+            projection_messages = self.messages
         message_count = (
             self._metadata_message_count
             if self._metadata_message_count is not None
-            else len(self.messages)
+            else len(projection_messages)
         )
         if has_pending_user_message:
             message_count = max(message_count, 1)
-        last_message_at = _last_message_timestamp(self.messages) or self.updated_at
+        last_message_at = _last_message_timestamp(projection_messages) or self.updated_at
         if has_pending_user_message and self.pending_started_at:
             last_message_at = self.pending_started_at
         return {
@@ -2402,20 +2421,97 @@ def _collapse_adjacent_duplicate_partials(messages) -> tuple[list, bool]:
     return collapsed, changed
 
 
+def _strict_incomplete_message_id_key(message_id):
+    """Return a type-tagged deletion key for a persisted message id, or None.
+
+    Only exact ``str``/``int``/finite-``float`` scalars carry deletion
+    authority.  Booleans, containers, subclass instances (e.g. enum-like
+    ids), and non-finite floats are rejected so distinct typed ids such as
+    ``1`` vs ``"1"`` or ``True`` vs ``"True"`` can never collapse into the
+    same bucket — a genuinely distinct backup row must never be classified
+    as a duplicate-only replay (#6600 review).
+    """
+    if isinstance(message_id, bool):
+        return None
+    if type(message_id) is str:
+        return ('str', message_id) if message_id != '' else None
+    if type(message_id) is int:
+        return ('int', message_id)
+    if type(message_id) is float:
+        return ('float', message_id) if math.isfinite(message_id) else None
+    return None
+
+
+def _strip_thinking_markup_for_incomplete(text: str) -> str:
+    """Emptiness-equivalent mirror of api.streaming._strip_thinking_markup.
+
+    Keep the regexes in sync with api.streaming._strip_thinking_markup; the
+    durable incomplete-row predicate must consider exactly the same content
+    "blank" as the reconciliation layer.  Duplicated (rather than imported)
+    because api.streaming already imports api.models at module load, and the
+    .bak recovery path must not depend on the streaming import chain.
+    Parity is pinned by tests/test_issue2592_partial_dedupe.py.
+    """
+    if not text:
+        return ''
+    s = str(text)
+    s = re.sub(r'^\s*<think>.*?</think>\s*', ' ', s, flags=re.IGNORECASE | re.DOTALL)
+    s = re.sub(r'^\s*<\|channel\|?>thought\n?.*?<channel\|>\s*', ' ', s, flags=re.IGNORECASE | re.DOTALL)
+    s = re.sub(r'^\s*<\|turn\|>thinking\n.*?<turn\|>\s*', ' ', s, flags=re.IGNORECASE | re.DOTALL)  # Gemma 4
+    s = re.sub(r'^\s*(the|ther)\s+user\s+is\s+asking[^\n]*(?:\n|$)', ' ', s, flags=re.IGNORECASE)
+    s = re.sub(
+        r"^\s*(?:here(?:'s| is) (?:a |my )?(?:thinking|thought) (?:process|trace|through)\b[^\n]*\n?"
+        r"|let me (?:think|work|reason|analyze|walk) (?:through|about|this|step)\b[^\n]*\n?"
+        r"|i(?:'ll| will) (?:think|work|reason|analyze|break this down)\b[^\n]*\n?"
+        r"|(?:okay|alright|sure|of course),?\s+let me\b[^\n]*\n?)",
+        ' ', s, flags=re.IGNORECASE
+    )
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+def _incomplete_message_content_text(content) -> str:
+    """Extract visible text for the incomplete-row eligibility predicate.
+
+    Mirrors api.streaming._message_text (structured content parts +
+    thinking-markup stripping) so the persistence boundary empties exactly
+    the rows the reconciliation layer empties (#6600 review: one shared
+    eligibility semantics for both layers).
+    """
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get('type') or '').lower()
+            if part_type in ('', 'text', 'input_text', 'output_text'):
+                parts.append(str(
+                    part.get('text') or part.get('content') or part.get('input_text') or part.get('output_text') or ''
+                ))
+        return _strip_thinking_markup_for_incomplete('\n'.join(parts).strip())
+    return _strip_thinking_markup_for_incomplete(str(content or '').strip())
+
+
 def _incomplete_reasoning_message_id(message):
-    """Return the stable id of an empty incomplete assistant result, if any."""
+    """Return the strict typed identity key of an empty incomplete assistant result.
+
+    This is the SINGLE eligibility predicate shared by the persistence
+    boundary (Session.save/load and .bak recovery) and the in-memory
+    reconciliation layer (api.streaming._message_identity): a row one layer
+    collapses is exactly a row the other layer collapses, so neither can
+    drop a row the other considers distinct.  Returns a hashable
+    type-tagged tuple, or None when the row is not an eligible empty
+    incomplete assistant result.
+    """
     if not isinstance(message, dict) or message.get('role') != 'assistant':
         return None
     if str(message.get('finish_reason') or '').lower() != 'incomplete':
         return None
-    if str(message.get('content') or '').strip():
+    if _incomplete_message_content_text(message.get('content')):
         return None
     if message.get('tool_call_id') or message.get('tool_calls'):
         return None
-    message_id = message.get('id')
-    if message_id is None or str(message_id) == '':
-        return None
-    return str(message_id)
+    return _strict_incomplete_message_id_key(message.get('id'))
 
 
 def _message_information_score(message) -> int:
