@@ -4932,6 +4932,30 @@ def _sanitize_messages_for_api(
     return final
 
 
+def _strip_empty_tool_calls_from_messages(messages):
+    """Strip empty ``tool_calls`` arrays from assistant messages in place.
+
+    Strict providers (DeepSeek v4, newer OpenAI) reject ``tool_calls: []``
+    with HTTP 400 even when no orphaned calls exist. This runs on result
+    messages returned by ``run_conversation()`` as a defense-in-depth layer
+    — the agent library's own ``sanitize_api_messages`` already strips these
+    before each API call, but the returned messages may still carry empty
+    arrays from intermediate processing. Stripping here prevents the bad
+    state from persisting in session history.
+    """
+    changed = 0
+    for msg in messages:
+        if (
+            isinstance(msg, dict)
+            and msg.get("role") == "assistant"
+            and "tool_calls" in msg
+            and not (isinstance(msg["tool_calls"], list) and msg["tool_calls"])
+        ):
+            msg.pop("tool_calls", None)
+            changed += 1
+    return changed
+
+
 def _api_safe_message_positions(messages):
     """Return [(original_index, sanitized_message)] for API-safe messages."""
     valid_tool_call_ids: set = set()
@@ -9596,6 +9620,13 @@ def _run_agent_streaming(
                 result=result,
                 agent=agent,
             )
+            # Defense-in-depth: strip empty ``tool_calls`` from result messages
+            # so they never persist in session history. The agent library's
+            # ``sanitize_api_messages`` already strips these before each API
+            # call, but intermediate processing may leave empty arrays on the
+            # returned messages that would cause HTTP 400 on subsequent turns.
+            _result_messages = result.get("messages") or []
+            _strip_empty_tool_calls_from_messages(_result_messages)
             # #4729: the run is done — flush any reasoning tail still in the coalescing
             # buffer (the agent never calls reasoning_callback(None), and a turn can end on
             # reasoning with no trailing token/tool boundary to trigger a flush) so the last
@@ -10048,6 +10079,9 @@ def _run_agent_streaming(
                                     _active_turn_identity,
                                     result=_heal_result,
                                     agent=agent,
+                                )
+                                _strip_empty_tool_calls_from_messages(
+                                    _heal_result.get('messages') or []
                                 )
                                 _heal_all_msgs = _heal_result.get('messages') or []
                                 _heal_ok = _has_new_assistant_reply(_heal_all_msgs, _prev_len) or _token_sent
@@ -11272,6 +11306,9 @@ def _run_agent_streaming(
                             _active_turn_identity,
                             result=_heal_result,
                             agent=_heal_agent,
+                        )
+                        _strip_empty_tool_calls_from_messages(
+                            _heal_result.get('messages') or []
                         )
                         # Retry succeeded — persist the result normally
                         if s is not None:
