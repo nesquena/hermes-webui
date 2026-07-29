@@ -7192,33 +7192,44 @@ def _append_result_partial_on_error(
     messages = result.get('messages')
     if not isinstance(messages, list) or not isinstance(pre_call_context, list):
         return None
-    baseline_len = len(pre_call_context)
-    if len(messages) < baseline_len:
-        return None
-    current_turn_rows = messages[baseline_len:]
     normalized_msg_text = _normalize_user_text(msg_text)
-    baseline_has_current_user = bool(
-        pre_call_context
-        and isinstance(pre_call_context[-1], dict)
-        and pre_call_context[-1].get('role') == 'user'
-        and _normalize_user_text(_message_text(pre_call_context[-1].get('content')))
-        == normalized_msg_text
-    )
-    if not baseline_has_current_user:
-        current_user_index = next(
-            (
-                index
-                for index, row in enumerate(current_turn_rows)
-                if isinstance(row, dict)
-                and row.get('role') == 'user'
-                and _normalize_user_text(_message_text(row.get('content')))
-                == normalized_msg_text
-            ),
-            None,
+    if _messages_have_prefix(messages, pre_call_context):
+        # Append-only result: only rows after the pre-call baseline can
+        # belong to this call.
+        current_turn_rows = messages[len(pre_call_context):]
+        baseline_has_current_user = bool(
+            pre_call_context
+            and isinstance(pre_call_context[-1], dict)
+            and pre_call_context[-1].get('role') == 'user'
+            and _normalize_user_text(_message_text(pre_call_context[-1].get('content')))
+            == normalized_msg_text
         )
-        if current_user_index is None:
+        if not baseline_has_current_user:
+            current_user_index = next(
+                (
+                    index
+                    for index, row in enumerate(current_turn_rows)
+                    if isinstance(row, dict)
+                    and row.get('role') == 'user'
+                    and _normalize_user_text(_message_text(row.get('content')))
+                    == normalized_msg_text
+                ),
+                None,
+            )
+            if current_user_index is None:
+                return None
+            current_turn_rows = current_turn_rows[current_user_index + 1:]
+    else:
+        # Compacted/replayed results can REPLACE the pre-call baseline instead
+        # of appending to it; a numeric suffix slice can then expose a
+        # historical assistant row as this turn's partial. Anchor on the
+        # current user turn instead — the same boundary rule used by
+        # _assistant_reply_added_after_current_turn — and fail closed when no
+        # current-user anchor exists.
+        current_user_idx = _find_current_user_turn(messages, msg_text)
+        if current_user_idx is None:
             return None
-        current_turn_rows = current_turn_rows[current_user_index + 1:]
+        current_turn_rows = messages[current_user_idx + 1:]
     assistant_row = next(
         (
             row

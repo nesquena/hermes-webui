@@ -641,7 +641,13 @@ def test_stale_compression_snapshot_emits_actionable_error_without_replaying_tur
 @pytest.mark.parametrize("failure_mode", ["result", "exception"])
 @pytest.mark.parametrize(
     "second_result",
-    ["recovered", "stale_error", "stale_flag", "stale_without_current_assistant"],
+    [
+        "recovered",
+        "stale_error",
+        "stale_flag",
+        "stale_without_current_assistant",
+        "stale_non_prefix_compacted",
+    ],
 )
 def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
     tmp_path, monkeypatch, failure_mode, second_result
@@ -696,20 +702,41 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
                     },
                 }
             if second_result != "recovered":
+                if second_result == "stale_non_prefix_compacted":
+                    # Compacted/replayed result that REPLACES the pre-call
+                    # baseline instead of appending to it: historical
+                    # assistant rows (including "prior answer") sit before the
+                    # last current-user row and one of them lands in the
+                    # numeric suffix messages[len(baseline):]. There is no
+                    # assistant row for the current turn.
+                    stale_messages = [
+                        {
+                            "role": "assistant",
+                            "content": "[compacted] summary of earlier context",
+                        },
+                        {"role": "user", "content": "prior user"},
+                        {"role": "assistant", "content": "intermediate answer"},
+                        {"role": "assistant", "content": "prior answer"},
+                        {"role": "user", "content": "new webui turn"},
+                    ]
+                elif second_result == "stale_without_current_assistant":
+                    stale_messages = history + [
+                        {"role": "user", "content": "new webui turn"}
+                    ]
+                else:
+                    stale_messages = history + [
+                        {"role": "user", "content": "new webui turn"},
+                        {"role": "assistant", "content": "partial stale"},
+                    ]
                 stale_result = {
                     "completed": False,
                     "final_response": (
-                        "" if second_result == "stale_without_current_assistant" else "partial stale"
+                        ""
+                        if second_result
+                        in ("stale_without_current_assistant", "stale_non_prefix_compacted")
+                        else "partial stale"
                     ),
-                    "messages": (
-                        history + [{"role": "user", "content": "new webui turn"}]
-                        if second_result == "stale_without_current_assistant"
-                        else history
-                        + [
-                            {"role": "user", "content": "new webui turn"},
-                            {"role": "assistant", "content": "partial stale"},
-                        ]
-                    ),
+                    "messages": stale_messages,
                     "partial": True,
                     "failed": False,
                 }
@@ -781,7 +808,10 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
             for message in reloaded.messages
             if message.get("_partial") is True
         ]
-        if second_result == "stale_without_current_assistant":
+        if second_result in (
+            "stale_without_current_assistant",
+            "stale_non_prefix_compacted",
+        ):
             assert not partials
             assert not any(
                 message.get("content") == "prior answer" and message.get("_partial") is True
