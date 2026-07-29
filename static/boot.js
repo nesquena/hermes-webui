@@ -777,11 +777,11 @@ function _micToastKeyForRecognitionError(error){
   }
 
   async function _sendRawAudio(blob,producerHandle=_micComposerProducerToken){
+    if(!_micProducerIsCurrent(producerHandle))return;
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
     if(typeof _composerAddFiles==='function')_composerAddFiles([file],null,producerHandle);
     else S.pendingFiles.push(file);
-    if(!_micProducerIsCurrent(producerHandle))return;
     if(typeof _composerOwnershipTransition==='undefined'||!_composerOwnershipTransition)renderTray();
     // An explicit Send-button click while recording sets _micPendingSend — that
     // is an unambiguous send intent, so honor it even when the composer already
@@ -799,6 +799,7 @@ function _micToastKeyForRecognitionError(error){
   }
 
   function _commitTranscript(text, prefixOverride, producerHandle=_micComposerProducerToken){
+    if(!_micProducerIsCurrent(producerHandle))return;
     // `prefixOverride` is the composer content captured at recording start,
     // passed only by the async server-STT path (recorder.onstop → _transcribeBlob).
     // The sync browser-SR path doesn't call this function — it commits inline
@@ -833,7 +834,6 @@ function _micToastKeyForRecognitionError(error){
     }
     if(typeof _composerSetText==='function')_composerSetText(committed,clean,null,producerHandle);
     else ta.value=committed;
-    if(!_micProducerIsCurrent(producerHandle))return;
     autoResize();
     if(window._micPendingSend){
       window._micPendingSend=false;
@@ -1010,6 +1010,7 @@ function _micToastKeyForRecognitionError(error){
     };
 
     sr.onresult=(event)=>{
+      if(recognition!==sr)return;
       // #5294: a real result means the continuity restarts are PRODUCTIVE, not a
       // stolen-audio-session tight loop — reset the restart budget so a long
       // dictation with many natural pauses isn't silently capped at
@@ -1036,6 +1037,7 @@ function _micToastKeyForRecognitionError(error){
     };
 
     sr.onend=()=>{
+      if(recognition!==sr)return;
       const committed=lifecycleFinalText
         ? (_prefixForLifecycle&&!_prefixForLifecycle.endsWith(' ')&&!_prefixForLifecycle.endsWith('\n')
             ? _prefixForLifecycle+' '+lifecycleFinalText.trimStart()
@@ -1046,10 +1048,6 @@ function _micToastKeyForRecognitionError(error){
       );
       else if(recognition===sr)ta.value=committed;
       if(recognition===sr)autoResize();
-      // A superseded recognition may settle after a newer capture has started.
-      // Its immutable producer handle may finish its own owner write above, but it
-      // must not restart, stop, or send on behalf of the newer lifecycle.
-      if(recognition!==sr)return;
       _finalText=lifecycleFinalText;
       _prefix=_prefixForLifecycle;
       // Mobile / opt-in continuity: a natural pause ends this recognition run but
@@ -1239,7 +1237,10 @@ function _micToastKeyForRecognitionError(error){
       const recorder=new MediaRecorder(captureStream,mimeType?{mimeType}:undefined);
       audioChunks=[];
       const captureChunks=audioChunks;
-      recorder.ondataavailable=e=>{if(e.data&&e.data.size)captureChunks.push(e.data);};
+      recorder.ondataavailable=e=>{
+        if(!_micProducerIsCurrent(captureProducerHandle))return;
+        if(e.data&&e.data.size)captureChunks.push(e.data);
+      };
       recorder.onerror=()=>{
         const isCurrentCapture=mediaRecorder===recorder||mediaStream===captureStream;
         const isCurrentProducer=_micProducerIsCurrent(captureProducerHandle);
@@ -1253,8 +1254,13 @@ function _micToastKeyForRecognitionError(error){
       recorder.onstop=async()=>{
         const isCurrentCapture=mediaRecorder===recorder||mediaStream===captureStream;
         const isCurrentProducer=_micProducerIsCurrent(captureProducerHandle);
+        if(!isCurrentProducer){
+          if(mediaRecorder===recorder) mediaRecorder=null;
+          _stopTracks(captureStream);
+          return;
+        }
         if(mediaRecorder===recorder) mediaRecorder=null;
-        if(isCurrentProducer)_isRecording=false;
+        _isRecording=false;
         // Capture the composer prefix BEFORE _setRecording(false) clears _prefix.
         // The await on _transcribeBlob runs after this sync block, so by the
         // time _transcribeBlob is called, _prefix is already ''. Passing the
@@ -1666,8 +1672,9 @@ window.renderTranscript=function(container, messages, opts){
     _recognition.onstart=()=>{ _finalText=''; };
 
     _recognition.onresult=(event)=>{
+      if(_recognition!==lifecycleRecognition)return;
       // Reset only this active lifecycle's silence timer on any result.
-      if(_recognition===lifecycleRecognition)clearTimeout(_silenceTimer);
+      clearTimeout(_silenceTimer);
       let interim='';
       let final=_finalText;
       for(let i=event.resultIndex;i<event.results.length;i++){
@@ -1679,7 +1686,6 @@ window.renderTranscript=function(container, messages, opts){
         final||interim,final||interim,null,lifecycleProducerToken
       );
       else if(_recognition===lifecycleRecognition)ta.value=final||interim;
-      if(_recognition!==lifecycleRecognition)return;
       autoResize();
 
       // Auto-send on silence after final result

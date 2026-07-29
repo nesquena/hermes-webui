@@ -1045,7 +1045,7 @@ def test_async_composer_producers_route_through_ownership_authority():
     assert "_transcribeBlob(blob,prefixSnapshot,captureProducerHandle)" in BOOT_JS
 
 
-def test_superseded_media_callbacks_route_payload_but_cannot_send_current_composer():
+def test_superseded_media_callbacks_drop_payload_before_composer_mutation():
     node = shutil.which("node")
     if not node:
         pytest.skip("node is required for the browser behavior harness")
@@ -1059,21 +1059,26 @@ def test_superseded_media_callbacks_route_payload_but_cannot_send_current_compos
         let _micComposerProducerToken=handleB;
         let _dictationAppend=false;
         let _prefix='B prefix';
-        const ta={{value:''}};
+        const ta={{value:'seed'}};
         const S={{pendingFiles:[]}};
-        const window={{_micPendingSend:true}};
+        const window={{_micPendingSend:false}};
         let sends=0;
         let resizes=0;
         let trayRenders=0;
         let toasts=0;
+        let composerText=ta.value;
+        const composerFiles=[];
         const routed=[];
         class File {{
           constructor(_parts,name,options){{this.name=name;this.type=options.type;}}
         }}
         function _composerAddFiles(files,_sid,handle){{
+          composerFiles.push(...files.map(file=>file.name));
           routed.push({{kind:'file',name:files[0].name,handle}});
         }}
         function _composerSetText(value,transition,_sid,handle){{
+          composerText=value;
+          ta.value=value;
           routed.push({{kind:'text',value,transition,handle}});
         }}
         function renderTray(){{trayRenders++;}}
@@ -1083,10 +1088,19 @@ def test_superseded_media_callbacks_route_payload_but_cannot_send_current_compos
         function t(value){{return value;}}
         {helpers}
         (async()=>{{
+          _commitTranscript('live-b',undefined,handleB);
+          await _sendRawAudio({{type:'audio/webm'}},handleB);
+          const beforeLateA={{
+            composerText,
+            composerFiles:[...composerFiles],
+            routed:JSON.parse(JSON.stringify(routed)),
+          }};
           await _sendRawAudio({{type:'audio/webm'}},handleA);
           _commitTranscript('late transcript',undefined,handleA);
           process.stdout.write(JSON.stringify({{
-            routed,sends,resizes,trayRenders,toasts,pendingSend:window._micPendingSend
+            beforeLateA,
+            afterLateA:{{composerText,composerFiles,routed}},
+            sends,resizes,trayRenders,toasts,pendingSend:window._micPendingSend
           }}));
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
@@ -1094,19 +1108,22 @@ def test_superseded_media_callbacks_route_payload_but_cannot_send_current_compos
     proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
-    assert result["routed"][0]["kind"] == "file"
-    assert result["routed"][0]["handle"] == {"producerToken": "A"}
-    assert result["routed"][1] == {
+    assert result["beforeLateA"] == result["afterLateA"]
+    assert result["afterLateA"]["composerText"] == "live-b"
+    assert len(result["afterLateA"]["composerFiles"]) == 1
+    assert result["afterLateA"]["routed"][0] == {
         "kind": "text",
-        "value": "late transcript",
-        "transition": "late transcript",
-        "handle": {"producerToken": "A"},
+        "value": "live-b",
+        "transition": "live-b",
+        "handle": {"producerToken": "B"},
     }
+    assert result["afterLateA"]["routed"][1]["kind"] == "file"
+    assert result["afterLateA"]["routed"][1]["handle"] == {"producerToken": "B"}
     assert result["sends"] == 0
-    assert result["resizes"] == 0
-    assert result["trayRenders"] == 0
-    assert result["toasts"] == 0
-    assert result["pendingSend"] is True
+    assert result["resizes"] == 1
+    assert result["trayRenders"] == 1
+    assert result["toasts"] == 1
+    assert result["pendingSend"] is False
 
 
 def test_superseded_get_user_media_completion_cannot_clear_new_recording_state():
@@ -1194,6 +1211,76 @@ def test_superseded_get_user_media_completion_cannot_clear_new_recording_state()
     }
 
 
+def test_superseded_recorder_callbacks_drop_payload_before_buffer_mutation():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = BOOT_JS.index("      const captureChunks=audioChunks;")
+    end = BOOT_JS.index("      _activeCaptureMode=captureMode;", start)
+    recorder_callbacks = BOOT_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        const handleA={{producerToken:'A'}};
+        const handleB={{producerToken:'B'}};
+        let _micComposerProducerToken=handleB;
+        let audioChunks=[];
+        let _isRecording=true;
+        const window={{_micPendingSend:false}};
+        const streamA={{getTracks(){{return [{{stop(){{}}}}];}}}};
+        const streamB={{getTracks(){{return [{{stop(){{}}}}];}}}};
+        const captureStream=streamA;
+        let mediaStream=streamB;
+        const recorder={{mimeType:'audio/webm'}};
+        let mediaRecorder={{mimeType:'audio/webm'}};
+        const captureProducerHandle=handleA;
+        const capturePrefixSnapshot='A prefix';
+        const captureMode='media-raw';
+        const mimeType='audio/webm';
+        const blobs=[];
+        const downstream=[];
+        class Blob {{
+          constructor(parts,options){{
+            this.size=parts.length;
+            this.type=options.type;
+            blobs.push(parts.map(part=>part.label));
+          }}
+        }}
+        function _micProducerIsCurrent(handle){{return handle===_micComposerProducerToken;}}
+        function _setRecording(){{}}
+        function _stopTracks(stream){{if(stream)stream.getTracks().forEach(track=>track.stop());}}
+        function _sendRawAudio(blob,handle){{
+          downstream.push({{kind:'raw',size:blob.size,handle}});
+          return Promise.resolve();
+        }}
+        function _transcribeBlob(blob,_prefix,handle){{
+          downstream.push({{kind:'transcribe',size:blob.size,handle}});
+          return Promise.resolve();
+        }}
+        function _applyDeferredServerSttFlip(){{}}
+        function showToast(){{}}
+        function t(value){{return value;}}
+        {recorder_callbacks}
+
+        (async()=>{{
+          recorder.ondataavailable({{data:{{size:1,label:'late-a'}}}});
+          await recorder.onstop();
+          process.stdout.write(JSON.stringify({{
+            buffered:captureChunks.length,
+            blobs,
+            downstream,
+          }}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "buffered": 0,
+        "blobs": [],
+        "downstream": [],
+    }
+
+
 def test_voice_mode_callback_uses_immutable_lifecycle_producer_token():
     start = BOOT_JS.index("function _startListening(){")
     end = BOOT_JS.index("\n  function _voiceModeSend(){", start)
@@ -1204,6 +1291,84 @@ def test_voice_mode_callback_uses_immutable_lifecycle_producer_token():
     assert "_recognition=new SpeechRecognition()" in lifecycle
     assert "const lifecycleRecognition=_recognition" in lifecycle
     assert lifecycle.count("_recognition!==lifecycleRecognition") >= 3
+
+
+def test_voice_mode_lifecycle_b_text_survives_late_a_callback():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = BOOT_JS.index("function _startListening(){")
+    end = BOOT_JS.index("\n  function _voiceModeSend(){", start)
+    start_listening = BOOT_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        class FakeSpeechRecognition {{ start(){{}} }}
+        const SpeechRecognition=FakeSpeechRecognition;
+        const localStorage={{getItem(){{return 'false';}}}};
+        const _locale={{_speech:'en-US'}};
+        const ta={{value:''}};
+        let _voiceModeActive=true;
+        let _voiceModeState='idle';
+        let _recognition=null;
+        let _voiceComposerProducerToken='voice-mode';
+        let _silenceTimer=null;
+        let producerSequence=0;
+        let composerText='';
+        let resizes=0;
+        const calls=[];
+        function _newComposerProducerHandle(){{
+          producerSequence++;
+          return Object.freeze({{producerToken:String(producerSequence)}});
+        }}
+        function _micOriginNeedsSecureContext(){{return false;}}
+        function _clearBrowserTtsRecovery(){{}}
+        function _setState(state){{_voiceModeState=state;}}
+        function _deactivate(){{_voiceModeActive=false;}}
+        function _voiceModeSend(){{}}
+        function _voiceSilenceMs(){{return 1800;}}
+        function _micToastKeyForRecognitionError(){{return null;}}
+        function showToast(){{}}
+        function t(value){{return value;}}
+        function clearTimeout(){{}}
+        function setTimeout(){{return 1;}}
+        function autoResize(){{resizes++;}}
+        function _composerSetText(value,transition,_owner,handle){{
+          composerText=value;
+          ta.value=value;
+          calls.push({{value,transition,handle}});
+        }}
+        {start_listening}
+
+        _startListening();
+        const lifecycleA=_recognition;
+        lifecycleA.onstart();
+        _startListening();
+        const lifecycleB=_recognition;
+        lifecycleB.onstart();
+
+        const result=text=>({{resultIndex:0,results:[Object.assign([{{transcript:text}}],{{isFinal:true}})]}});
+        lifecycleB.onresult(result('live-b'));
+        const beforeLateA={{composerText,calls:JSON.parse(JSON.stringify(calls)),resizes}};
+        lifecycleA.onresult(result('late-a'));
+        process.stdout.write(JSON.stringify({{
+          beforeLateA,
+          afterLateA:{{composerText,calls,resizes}},
+        }}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["beforeLateA"] == result["afterLateA"]
+    assert result["afterLateA"] == {
+        "composerText": "live-b",
+        "calls": [{
+            "value": "live-b",
+            "transition": "live-b",
+            "handle": {"producerToken": "2"},
+        }],
+        "resizes": 1,
+    }
 
 
 def test_dictation_callback_keeps_lifecycle_local_text_and_handle():
@@ -1217,7 +1382,7 @@ def test_dictation_callback_keeps_lifecycle_local_text_and_handle():
     assert "if(recognition!==sr)return" in lifecycle
 
 
-def test_late_dictation_lifecycle_a_callback_executes_with_handle_a_after_b_starts():
+def test_late_dictation_lifecycle_a_callbacks_are_dropped_after_b_starts():
     node = shutil.which("node")
     if not node:
         pytest.skip("node is required for the browser behavior harness")
@@ -1239,6 +1404,7 @@ def test_late_dictation_lifecycle_a_callback_executes_with_handle_a_after_b_star
         let _activeCaptureMode='speech';
         const window={{_micActive:true,_micPendingSend:false}};
         const ta={{value:''}};
+        let composerText='';
         const calls=[];
         function _micDictationContinuous(){{return false;}}
         function _micShouldRestartDictation(){{return false;}}
@@ -1252,6 +1418,8 @@ def test_late_dictation_lifecycle_a_callback_executes_with_handle_a_after_b_star
         let resizes=0;
         function autoResize(){{resizes++;}}
         function _composerSetText(value,transition,owner,handle){{
+          composerText=value;
+          ta.value=value;
           calls.push({{value,transition,handle}});
         }}
         {ensure_speech}
@@ -1268,20 +1436,30 @@ def test_late_dictation_lifecycle_a_callback_executes_with_handle_a_after_b_star
         lifecycleB.onstart();
 
         const result=text=>({{resultIndex:0,results:[Object.assign([{{transcript:text}}],{{isFinal:true}})]}});
-        lifecycleA.onresult(result('late-a'));
         lifecycleB.onresult(result('live-b'));
-        process.stdout.write(JSON.stringify({{calls,finalText:_finalText,resizes}}));
+        const beforeLateA={{composerText,calls:JSON.parse(JSON.stringify(calls)),finalText:_finalText,resizes}};
+        lifecycleA.onresult(result('late-a'));
+        lifecycleA.onend();
+        process.stdout.write(JSON.stringify({{
+          beforeLateA,
+          afterLateA:{{composerText,calls,finalText:_finalText,resizes}},
+        }}));
         """
     )
     proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
-    assert result["calls"] == [
-        {"value": "A: late-a", "transition": "late-a", "handle": {"producerToken": "A"}},
-        {"value": "B: live-b", "transition": "live-b", "handle": {"producerToken": "B"}},
-    ]
-    assert result["finalText"] == "live-b"
-    assert result["resizes"] == 1
+    assert result["beforeLateA"] == result["afterLateA"]
+    assert result["afterLateA"] == {
+        "composerText": "B: live-b",
+        "calls": [{
+            "value": "B: live-b",
+            "transition": "live-b",
+            "handle": {"producerToken": "B"},
+        }],
+        "finalText": "live-b",
+        "resizes": 1,
+    }
 
 
 def test_immediate_draft_save_refreshes_owner_authority_with_profile_and_revision():
