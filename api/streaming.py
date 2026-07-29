@@ -76,6 +76,7 @@ from api.usage import prompt_cache_hit_percent
 from api.models import (
     StateDBSessionMessagesSnapshot,
     _WEBUI_TRUSTED_AGENT_INPUT_FIELD,
+    _collapse_duplicate_incomplete_message_ids,
     _is_empty_partial_activity_message,
     _message_exact_timestamp_details,
     _message_private_identity_compatible,
@@ -7652,6 +7653,7 @@ def _merge_display_messages_after_agent_result(
     # three inputs consistently so prefix/delta detection below stays aligned.
     # (#5334; same internal-control-message class as #3320/#3821/#4373/#4875)
     previous_display = _drop_synthetic_control_messages(previous_display)
+    previous_display, _ = _collapse_duplicate_incomplete_message_ids(previous_display)
     # Deduplicate stale _partial messages that accumulated in previous_display.
     # A bug in cancel_stream() could insert multiple identical _partial messages
     # when _stripped was empty but _has_reasoning/_has_tools was True. The
@@ -7702,6 +7704,8 @@ def _merge_display_messages_after_agent_result(
     # would otherwise slip into the merged transcript as a real delta. (#5334)
     previous_context = _drop_synthetic_control_messages(previous_context)
     result_messages = _drop_synthetic_control_messages(result_messages)
+    previous_context, _ = _collapse_duplicate_incomplete_message_ids(previous_context)
+    result_messages, _ = _collapse_duplicate_incomplete_message_ids(result_messages)
     if not result_messages:
         return previous_display
     active_turn_row_index = _find_active_turn_checkpoint_index(
