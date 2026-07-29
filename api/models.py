@@ -1364,6 +1364,7 @@ class Session:
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
             )
+        self.messages, _ = _collapse_duplicate_incomplete_message_ids(self.messages)
         if touch_updated_at:
             self.updated_at = time.time()
         # Write metadata fields first so load_metadata_only() can read them
