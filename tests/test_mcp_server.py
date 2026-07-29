@@ -287,51 +287,122 @@ async def _call_protocol_v2(mod, tool_name, arguments=None):
     return result.content[0].text, _call_tool_is_error(result)
 
 
-async def _call_protocol_registered(mod, tool_name, arguments=None):
-    """Dispatch through the handler `@server.call_tool()` actually registered on
-    `mod.server`, rather than calling the module-private dispatcher directly.
+# ── Registered-boundary dispatch, per SDK family ────────────────────────────
+#
+# `mcp_server.py` picks its server-construction branch from
+# `_HAS_DECORATOR_HANDLERS` (`mcp_server.py:462`): the `@server.list_tools()` /
+# `@server.call_tool()` decorators on `mcp` 1.x, or the `on_list_tools=` /
+# `on_call_tool=` constructor keywords on `mcp` 2.x. `requirements` pins no
+# upper bound and CI installs a bare `mcp`, so both families are supported and
+# either can be the installed one.
+#
+# The two families do not share a registry API, so each needs its own dispatch:
+# 1.x keys `server.request_handlers` by request *type*, 2.x looks entries up by
+# method string through `server.get_request_handler()` and carries the params
+# model on the entry. Reading the family off the production selector rather
+# than off a version string means the matrix always exercises the branch that
+# actually built `mod.server`.
 
-    This surface proves the schema is correctly *published*: the SDK decorator
-    validates arguments against the listed `inputSchema` before our handler
-    runs, so its rejections come from the wire contract. The v1 direct surface
-    proves the same schema is *enforced in our own code*. Both matter.
+MCP_FAMILY_DECORATOR = "mcp1"
+MCP_FAMILY_CONSTRUCTOR = "mcp2"
 
-    Registered MCP 2 dispatch has no equivalent here: `mcp` 1.26 exposes no
-    `on_call_tool` constructor keyword, so `mcp_server.py`'s `else` branch never
-    builds a server. That branch goes live when an MCP 2 SDK is installed; until
-    then `_call_protocol_v2` is the only coverage of `_call_tool_v2`.
-    """
-    from mcp.types import CallToolRequest, CallToolRequestParams
 
-    handler = getattr(mod.server, "request_handlers", {}).get(CallToolRequest)
-    if handler is None:
-        pytest.skip("installed MCP SDK registers no CallToolRequest handler")
-    server_result = await handler(
-        CallToolRequest(
-            method="tools/call",
-            params=CallToolRequestParams(name=tool_name, arguments=arguments),
-        )
+def _registered_family(mod):
+    """The SDK family whose production branch built `mod.server`."""
+    return MCP_FAMILY_DECORATOR if mod._HAS_DECORATOR_HANDLERS else MCP_FAMILY_CONSTRUCTOR
+
+
+def _mcp2_request_context(method):
+    from mcp.server import ServerRequestContext
+
+    return ServerRequestContext(
+        session=None,
+        lifespan_context=None,
+        protocol_version="2025-06-18",
+        method=method,
+        params=None,
     )
-    result = getattr(server_result, "root", server_result)
+
+
+def _registered_entry(mod, family, method, request_type_name):
+    """The registered handler for *method*, or a hard failure.
+
+    Never skips. A supported family whose production branch registered nothing
+    is the exact regression this oracle exists to catch, so its absence has to
+    fail the run rather than silently switch the oracle off.
+    """
+    if family == MCP_FAMILY_CONSTRUCTOR:
+        entry = mod.server.get_request_handler(method)
+        if entry is None:
+            pytest.fail(
+                f"{family}: mcp_server.py's constructor branch registered no "
+                f"{method!r} handler on mod.server"
+            )
+        return entry
+    import mcp.types as mcp_types
+
+    request_type = getattr(mcp_types, request_type_name)
+    handler = getattr(mod.server, "request_handlers", {}).get(request_type)
+    if handler is None:
+        pytest.fail(
+            f"{family}: mcp_server.py's decorator branch registered no "
+            f"{request_type_name} handler on mod.server"
+        )
+    return handler
+
+
+async def _call_protocol_registered(mod, tool_name, arguments=None):
+    """Dispatch through the `tools/call` handler actually registered on `mod.server`.
+
+    This surface proves the tool is correctly *published and wired*, using the
+    installed package's own request/params types, rather than calling the
+    module-private dispatcher directly. What that buys differs by family, which
+    is why the error representation below is family-keyed:
+
+    - `mcp1`: the `@server.call_tool()` decorator validates arguments against
+      the published `inputSchema` before our handler runs, so rejections come
+      from the SDK's wire contract, not our code.
+    - `mcp2`: the registry maps `tools/call` straight to the function passed as
+      `on_call_tool=`, and the SDK adds no validation layer at this seam. The
+      oracle is that the constructor keywords landed at all and that MCP 2's own
+      `CallToolRequestParams` is accepted by the handler our branch registered.
+    """
+    family = _registered_family(mod)
+    entry = _registered_entry(mod, family, "tools/call", "CallToolRequest")
+    if family == MCP_FAMILY_CONSTRUCTOR:
+        params = entry.params_type.model_validate(
+            {"name": tool_name, "arguments": arguments}
+        )
+        result = await entry.handler(_mcp2_request_context("tools/call"), params)
+    else:
+        from mcp.types import CallToolRequest, CallToolRequestParams
+
+        server_result = await entry(
+            CallToolRequest(
+                method="tools/call",
+                params=CallToolRequestParams(name=tool_name, arguments=arguments),
+            )
+        )
+        result = getattr(server_result, "root", server_result)
     return result.content[0].text, _call_tool_is_error(result)
 
 
 async def _list_tools_registered(mod):
-    from mcp.types import ListToolsRequest
-
-    handler = getattr(mod.server, "request_handlers", {}).get(ListToolsRequest)
-    if handler is None:
-        pytest.skip("installed MCP SDK registers no ListToolsRequest handler")
-    server_result = await handler(None)
-    return getattr(server_result, "root", server_result).tools
+    family = _registered_family(mod)
+    entry = _registered_entry(mod, family, "tools/list", "ListToolsRequest")
+    if family == MCP_FAMILY_CONSTRUCTOR:
+        result = await entry.handler(_mcp2_request_context("tools/list"), None)
+    else:
+        result = getattr(await entry(None), "root", None)
+    return result.tools
 
 
 async def _call_protocol(mod, surface, tool_name, arguments=None):
     """Return the surface's raw first text block plus its error flag.
 
-    Deliberately not normalized. The three surfaces do not agree on how a
-    schema violation is represented, and flattening them into one shape would
-    erase the difference the registered surface was added to expose.
+    Deliberately not normalized. The surfaces do not agree on how a schema
+    violation is represented, and flattening them into one shape would erase the
+    difference the registered surface was added to expose.
     """
     if surface == "v1":
         return await _call_protocol_v1(mod, tool_name, arguments)
@@ -344,33 +415,42 @@ PROTOCOL_SURFACES = ["v1", "v2", "registered"]
 
 # Who rejects a schema violation on each surface, and therefore what the caller
 # sees. The two direct surfaces reach `_validate_tool_arguments`, so the error
-# arrives in our JSON envelope (`mcp_server.py:570-576` `_error_content`). The
-# registered surface never gets that far: `mcp` 1.26's `@server.call_tool()`
-# decorator validates against the published `inputSchema` first and returns
-# `Server._make_error_result`, which is bare text with no envelope. Same message,
-# different representation, and that is a real wire-visible difference.
+# arrives in our JSON envelope (`mcp_server.py:570-576` `_error_content`).
+#
+# The registered surface splits by family, and that split is the wire-visible
+# fact this table exists to pin:
+# - `mcp1`: `@server.call_tool()` validates against the published `inputSchema`
+#   first and returns `Server._make_error_result`, bare text with no envelope.
+# - `mcp2`: nothing sits between the registry and our handler, so the same
+#   rejection arrives in our envelope, identically to the direct surfaces.
+# Normalizing these together would hide a caller-visible difference in how a
+# rejected `tools/call` reads depending on which SDK is installed.
 VALIDATION_ERROR_REPRESENTATION = {
-    "v1": "json_envelope",
-    "v2": "json_envelope",
-    "registered": "sdk_bare_text",
+    "v1": {MCP_FAMILY_DECORATOR: "json_envelope", MCP_FAMILY_CONSTRUCTOR: "json_envelope"},
+    "v2": {MCP_FAMILY_DECORATOR: "json_envelope", MCP_FAMILY_CONSTRUCTOR: "json_envelope"},
+    "registered": {
+        MCP_FAMILY_DECORATOR: "sdk_bare_text",
+        MCP_FAMILY_CONSTRUCTOR: "json_envelope",
+    },
 }
 
 
-def _assert_validation_error(surface, text, needle):
+def _assert_validation_error(mod, surface, text, needle):
     """Assert the surface's own error representation rather than a flattened one."""
-    assert "Input validation error" in text, (surface, text)
-    assert needle in text, (surface, text)
-    if VALIDATION_ERROR_REPRESENTATION[surface] == "json_envelope":
+    family = _registered_family(mod)
+    assert "Input validation error" in text, (surface, family, text)
+    assert needle in text, (surface, family, text)
+    if VALIDATION_ERROR_REPRESENTATION[surface][family] == "json_envelope":
         payload = json.loads(text)
-        assert set(payload) == {"error"}, (surface, payload)
-        assert payload["error"].startswith("Input validation error: "), (surface, payload)
-        assert needle in payload["error"], (surface, payload)
+        assert set(payload) == {"error"}, (surface, family, payload)
+        assert payload["error"].startswith("Input validation error: "), (surface, family, payload)
+        assert needle in payload["error"], (surface, family, payload)
     else:
         # Bare SDK text. Reading it as our envelope must fail, which is exactly
         # what a caller written against the direct surfaces would hit.
         with pytest.raises(json.JSONDecodeError):
             json.loads(text)
-        assert text.startswith("Input validation error: "), (surface, text)
+        assert text.startswith("Input validation error: "), (surface, family, text)
 
 
 def _tool_schema(mod, tool):
@@ -1079,7 +1159,7 @@ class TestProtocolValidation:
         # Representation is asserted per surface. The direct surfaces carry our
         # JSON envelope; the registered surface carries the SDK validator's bare
         # text. A surface that changed shape fails here instead of being absorbed.
-        _assert_validation_error(surface, text, needle)
+        _assert_validation_error(self.mod, surface, text, needle)
         assert self.api_calls == []
 
     @pytest.mark.parametrize("surface", PROTOCOL_SURFACES)
@@ -1109,6 +1189,68 @@ class TestProtocolValidation:
         # rejections above, all three surfaces do agree here.
         assert json.loads(text) == {"error": "Unknown tool: missing_tool"}
         assert self.api_calls == []
+
+    async def test_production_branch_matches_installed_sdk_family(self):
+        """The branch under test is the one the installed SDK actually selects.
+
+        `_HAS_DECORATOR_HANDLERS` is production's own selector, so reading the
+        family off it cannot drift from what built `mod.server`. Re-deriving the
+        same answer from the SDK class here is what catches a probe that stopped
+        matching the package.
+        """
+        from mcp.server import Server
+
+        sdk_has_decorators = hasattr(Server, "list_tools") and hasattr(Server, "call_tool")
+        assert self.mod._HAS_DECORATOR_HANDLERS is sdk_has_decorators
+        family = _registered_family(self.mod)
+        assert family in (MCP_FAMILY_DECORATOR, MCP_FAMILY_CONSTRUCTOR)
+        if family == MCP_FAMILY_CONSTRUCTOR:
+            # Constructor branch: no decorator API to fall back on.
+            assert not hasattr(Server, "call_tool")
+            assert callable(getattr(self.mod.server, "get_request_handler", None))
+        else:
+            assert isinstance(getattr(self.mod.server, "request_handlers", None), dict)
+
+    async def test_registered_boundary_exists_for_installed_family(self):
+        """Both registered handlers exist, and their absence fails rather than skips.
+
+        `_registered_entry()` is the helper every registered-surface test routes
+        through, so calling it here is the assertion: losing registration on the
+        installed family turns this into a failure, not a quiet skip that leaves
+        the rest of the matrix reporting green against nothing.
+        """
+        family = _registered_family(self.mod)
+        assert _registered_entry(self.mod, family, "tools/call", "CallToolRequest") is not None
+        assert _registered_entry(self.mod, family, "tools/list", "ListToolsRequest") is not None
+
+    async def test_registered_surface_uses_installed_package_param_types(self):
+        """The registered call is built from the installed package's own types."""
+        import mcp.types as mcp_types
+
+        family = _registered_family(self.mod)
+        entry = _registered_entry(self.mod, family, "tools/call", "CallToolRequest")
+        if family == MCP_FAMILY_CONSTRUCTOR:
+            # The entry carries the params model the SDK will feed our handler.
+            assert entry.params_type is mcp_types.CallToolRequestParams
+            params = entry.params_type.model_validate(
+                {"name": "move_session", "arguments": {"session_id": "s1", "project_id": None}}
+            )
+            result = await entry.handler(_mcp2_request_context("tools/call"), params)
+        else:
+            request = mcp_types.CallToolRequest(
+                method="tools/call",
+                params=mcp_types.CallToolRequestParams(
+                    name="move_session",
+                    arguments={"session_id": "s1", "project_id": None},
+                ),
+            )
+            result = getattr(await entry(request), "root", None)
+        assert _call_tool_is_error(result) is False
+        assert json.loads(result.content[0].text)["ok"] is True
+        assert self.api_calls == [{
+            "path": "/api/session/move",
+            "body": {"session_id": "s1", "project_id": None},
+        }]
 
     async def test_listed_move_session_schema_requires_project_id_and_allows_null(self):
         tools_v1 = await self.mod._list_tools_v1()

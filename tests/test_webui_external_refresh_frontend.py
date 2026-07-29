@@ -318,7 +318,11 @@ def test_session_event_profile_filter_tolerates_default_root_aliases():
     assert "if (!_profileMatchesActiveProfile(sessionProfile, activeProfile)) return false;" in SESSIONS_JS
     assert "activeProfileIsDefault:true" in UI_JS
     assert "const activeProfileState = await _resolveActiveProfileBootstrapState();" in BOOT_JS
-    assert "S.activeProfileIsDefault = activeProfileState.isDefault;" in BOOT_JS
+    # The commit onto S lives in its own helper so a regression can drive the real
+    # assignment rather than repeating it; boot calls that helper.
+    assert "function _applyActiveProfileBootstrapState(state)" in BOOT_JS
+    assert "S.activeProfileIsDefault = state.isDefault;" in BOOT_JS
+    assert "_applyActiveProfileBootstrapState(activeProfileState);" in BOOT_JS
     assert "S.activeProfileIsDefault = !!data.is_default;" in PANELS_JS
 
 

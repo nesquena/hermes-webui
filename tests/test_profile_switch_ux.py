@@ -162,9 +162,14 @@ class TestParallelizedFetches:
         # blank-owner-is-root behavior that the inline copy used to provide.
         # Behavior is proven by execution in
         # tests/test_2316_scripts_panel.py::test_switch_to_profile_session_ownership_uses_shared_root_alias_predicate.
-        assert "_profileOwnerMatchesActive(currentSessionProfile, targetActiveProfile, { blankIsRoot: true })" in fn, (
+        assert "_profileOwnerMatchesActive(S.session.profile, targetActiveProfile, { blankIsRoot: true })" in fn, (
             "the accepted-switch session check must route root-alias matching "
-            "through the shared owner predicate"
+            "through the shared owner predicate, on the RAW stored profile: the "
+            "predicate's root-alias branch is exact, and pre-trimming here would "
+            "let ' kinni ' inherit the certified 'kinni' the server rejects"
+        )
+        assert "S.session.profile.trim()" not in fn, (
+            "the owner must not be normalized before the predicate sees it"
         )
         assert "_profileMatchesActiveProfile(currentSessionProfile" not in fn, (
             "the one-way helper must not be re-inlined here; it is asymmetric on "

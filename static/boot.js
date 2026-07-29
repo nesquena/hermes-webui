@@ -3504,6 +3504,19 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       isConsumed:()=>consumed,
     };
   })();
+  // Commit a resolved bootstrap state onto S. Split out of the boot body so the
+  // root-alias seeding is a callable production step rather than a line only the
+  // full boot sequence can reach: a regression that drives boot resolution has
+  // to route through this to observe the seeding, so deleting the assignment
+  // breaks the test instead of leaving it green.
+  function _applyActiveProfileBootstrapState(state) {
+    S.activeProfile = state.profile;
+    S.activeProfileIsDefault = state.isDefault;
+    S.rootProfileAliases = (Array.isArray(state.rootAliases) && state.rootAliases.length)
+      ? state.rootAliases
+      : ['default'];
+  }
+
   async function _resolveActiveProfileBootstrapState({
     loadActiveProfile = () => api('/api/profile/active', {redirect401: false}),
     getNextUrl = () => window.location.pathname + window.location.search,
@@ -3518,7 +3531,14 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       if (p && typeof p === 'object' && typeof p.name === 'string') {
         _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
         if (p.default_workspace) S._profileDefaultWorkspace = p.default_workspace;
-        return {status: 'resolved', profile: p.name || 'default', isDefault: !!p.is_default};
+        return {
+          status: 'resolved',
+          profile: p.name || 'default',
+          isDefault: !!p.is_default,
+          rootAliases: (typeof _normalizeRootProfileAliases === 'function')
+            ? _normalizeRootProfileAliases(p.root_profiles)
+            : ['default'],
+        };
       }
       if (p === undefined && !alreadyAttempted) {
         if (_bootActiveProfileUnauthRedirectBudget.spendOnRedirect(markerStorage)) {
@@ -3528,7 +3548,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       }
       if (p === undefined) _bootActiveProfileUnauthRedirectBudget.spendOnFallback(markerStorage);
       else _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
-      return {status: 'fallback', profile: 'default', isDefault: true};
+      return {status: 'fallback', profile: 'default', isDefault: true, rootAliases: ['default']};
     } catch (e) {
       _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
       if (!alreadyAttempted && e && e.status === 401) {
@@ -3538,15 +3558,18 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         return {status: 'recovery-redirect'};
       }
       if (e && e.status === 401) _bootActiveProfileUnauthRedirectBudget.spendOnFallback(markerStorage);
-      return {status: 'fallback', profile: 'default', isDefault: true};
+      return {status: 'fallback', profile: 'default', isDefault: true, rootAliases: ['default']};
     }
   }
 
   // Fetch active profile
   const activeProfileState = await _resolveActiveProfileBootstrapState();
   if (activeProfileState.status === 'recovery-redirect') return;
-  S.activeProfile = activeProfileState.profile;
-  S.activeProfileIsDefault = activeProfileState.isDefault;
+  // Root identity is seeded here, on the boot path that already blocks on
+  // /api/profile/active, so ownership decisions taken before the profile
+  // dropdown roster warms (1.2 s after load, skipped while hidden) still have
+  // an authority for the renamed root.
+  _applyActiveProfileBootstrapState(activeProfileState);
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');

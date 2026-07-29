@@ -402,28 +402,22 @@ def _invalidate_root_profile_cache() -> None:
         _root_profile_name_cache_loaded = False
 
 
-def _is_root_profile(name: str) -> bool:
-    """True if *name* resolves to the Hermes Agent root profile (~/.hermes).
+def _load_root_profile_names() -> frozenset[str] | None:
+    """Populate and return the memoized root-alias set, or None on failure.
 
-    Matches the legacy 'default' alias plus any name where list_profiles_api()
-    reports is_default=True. Memoized; call _invalidate_root_profile_cache()
-    after mutating profile metadata.
+    Shared by _is_root_profile() and get_root_profile_names() so both answer
+    from one populate path. Done outside the lock to avoid holding it across a
+    hermes_cli subprocess call.
     """
     global _root_profile_name_cache_loaded
-    if not name:
-        return False
-    if name == 'default':
-        return True
     with _root_profile_name_cache_lock:
         if _root_profile_name_cache_loaded:
-            return name in _root_profile_name_cache
-    # Cache miss — populate from list_profiles_api(). Done outside the lock to
-    # avoid holding it across a hermes_cli subprocess call.
+            return frozenset(_root_profile_name_cache)
     try:
         infos = list_profiles_api()
     except Exception:
         logger.debug("Failed to list profiles for root-profile lookup", exc_info=True)
-        return False
+        return None
     with _root_profile_name_cache_lock:
         _root_profile_name_cache.clear()
         _root_profile_name_cache.add('default')
@@ -434,7 +428,39 @@ def _is_root_profile(name: str) -> bool:
             except (AttributeError, TypeError):
                 continue
         _root_profile_name_cache_loaded = True
-        return name in _root_profile_name_cache
+        return frozenset(_root_profile_name_cache)
+
+
+def _is_root_profile(name: str) -> bool:
+    """True if *name* resolves to the Hermes Agent root profile (~/.hermes).
+
+    Matches the legacy 'default' alias plus any name where list_profiles_api()
+    reports is_default=True. Memoized; call _invalidate_root_profile_cache()
+    after mutating profile metadata.
+    """
+    if not name:
+        return False
+    if name == 'default':
+        return True
+    names = _load_root_profile_names()
+    if names is None:
+        return False
+    return name in names
+
+
+def get_root_profile_names() -> list[str]:
+    """Every name that resolves to the root profile, sorted, always including
+    'default'.
+
+    This is _is_root_profile()'s membership set as data, so a client that
+    cannot call the predicate per name (the browser) can still answer the same
+    question. Fails soft to ['default'], which is the pre-rename truth and
+    keeps unknown names failing closed on the caller's side.
+    """
+    names = _load_root_profile_names()
+    if names is None:
+        return ['default']
+    return sorted(names)
 
 
 def _profiles_match(row_profile, active_profile) -> bool:
@@ -1747,6 +1773,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         'profiles': list_profiles_api(),
         'active': name,
         'is_default': _is_root_profile(name),
+        'root_profiles': get_root_profile_names(),
         'default_model': default_model,
         'default_model_provider': default_model_provider,
         'default_workspace': default_workspace,

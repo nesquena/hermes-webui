@@ -7323,17 +7323,24 @@ async function switchToProfile(name) {
     _setCommittedSwitchOwner(S.activeProfile || name);
     if (typeof _resetTasksForProfileTransition === 'function') _resetTasksForProfileTransition();
     S.activeProfileIsDefault = !!data.is_default;
+    // Refresh root identity from the switch response for the same reason boot
+    // seeds it: a rename that happened since boot must not leave the predicate
+    // answering from a stale alias list.
+    if (typeof _normalizeRootProfileAliases === 'function') {
+      S.rootProfileAliases = _normalizeRootProfileAliases(data.root_profiles);
+    }
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
     const targetActiveProfile = S.activeProfile || 'default';
     let sessionProfileMatchesTarget = true;
     if (!sessionInProgress && S.session) {
-      const currentSessionProfile = (typeof S.session.profile === 'string' && S.session.profile.trim())
-        ? S.session.profile.trim()
-        : 'default';
+      // Raw S.session.profile: the predicate does its own blank handling via
+      // blankIsRoot, and pre-trimming would hand its root-alias branch a name the
+      // server never stored. _profiles_match compares `row == active` exactly, so
+      // ' kinni ' must not inherit the certified 'kinni' and keep this session.
       sessionProfileMatchesTarget = typeof _profileOwnerMatchesActive === 'function'
-        && _profileOwnerMatchesActive(currentSessionProfile, targetActiveProfile, { blankIsRoot: true });
+        && _profileOwnerMatchesActive(S.session.profile, targetActiveProfile, { blankIsRoot: true });
       if (!sessionProfileMatchesTarget) {
         sessionInProgress = true;
       }

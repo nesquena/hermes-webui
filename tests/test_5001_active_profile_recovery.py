@@ -155,6 +155,17 @@ eval(budgetBlock.replace(
   '  globalThis._bootActiveProfileUnauthRedirectBudget=(()=>{'
 ));
 eval(extractFunction(bootSrc, '_resolveActiveProfileBootstrapState'));
+// The boot block commits the resolved state onto S through this helper rather
+// than inline. It closes over S, so its source is injected into the block's own
+// scope below instead of being eval'd out here where S does not exist.
+// The end marker deliberately stops at the closing brace and does not include a
+// trailing newline: boot.js is checked out with CRLF endings here, so a marker
+// ending in '\n' would look for '}\n' where the file has '}\r\n'.
+const applyBootStateSrc = extractBlock(
+  bootSrc,
+  '  function _applyActiveProfileBootstrapState(state) {',
+  '\n  }'
+) + '\n  }\n';
 const bootActiveProfileBlock = extractBlock(
   bootSrc,
   'const activeProfileState = await _resolveActiveProfileBootstrapState();',
@@ -166,6 +177,7 @@ const runBootActiveProfileBlock = new Function(
   'applyBotName',
   `
 const _resolveActiveProfileBootstrapState = resolveState;
+${applyBootStateSrc}
 return (async () => {
   ${bootActiveProfileBlock}
   return {continued: true};

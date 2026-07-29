@@ -103,6 +103,195 @@ def test_is_root_profile_handles_list_profiles_failure(monkeypatch):
     assert p._is_root_profile('kinni') is False
 
 
+# ── get_root_profile_names: the same membership set, as data ────────────────
+#
+# A browser cannot call _is_root_profile() per name, so /api/profile/active and
+# the profile-switch result ship the alias set instead. These pin that the two
+# answers cannot drift.
+
+
+def test_get_root_profile_names_default_only_when_root_unrenamed(monkeypatch):
+    import api.profiles as p
+
+    monkeypatch.setattr(p, 'list_profiles_api', lambda: [
+        {'name': 'default', 'is_default': True, 'path': str(p._DEFAULT_HERMES_HOME)},
+        {'name': 'haku', 'is_default': False, 'path': '/tmp/profiles/haku'},
+    ])
+    p._invalidate_root_profile_cache()
+
+    assert p.get_root_profile_names() == ['default']
+
+
+def test_get_root_profile_names_includes_renamed_root(monkeypatch):
+    import api.profiles as p
+
+    monkeypatch.setattr(p, 'list_profiles_api', lambda: [
+        {'name': 'kinni', 'is_default': True, 'path': str(p._DEFAULT_HERMES_HOME)},
+        {'name': 'haku', 'is_default': False, 'path': '/tmp/profiles/haku'},
+    ])
+    p._invalidate_root_profile_cache()
+
+    assert p.get_root_profile_names() == ['default', 'kinni']
+
+
+def test_get_root_profile_names_agrees_with_is_root_profile(monkeypatch):
+    """The list is the predicate's membership set, not a parallel answer."""
+    import api.profiles as p
+
+    roster = [
+        {'name': 'kinni', 'is_default': True, 'path': str(p._DEFAULT_HERMES_HOME)},
+        {'name': 'haku', 'is_default': False, 'path': '/tmp/profiles/haku'},
+        {'name': 'ghost', 'is_default': False, 'path': '/tmp/profiles/ghost'},
+    ]
+    monkeypatch.setattr(p, 'list_profiles_api', lambda: roster)
+    p._invalidate_root_profile_cache()
+
+    names = p.get_root_profile_names()
+    for candidate in ('default', 'kinni', 'haku', 'ghost'):
+        assert (candidate in names) is p._is_root_profile(candidate), candidate
+
+
+def test_get_root_profile_names_invalidation_drops_stale(monkeypatch):
+    import api.profiles as p
+
+    seq = [
+        [{'name': 'kinni', 'is_default': True, 'path': '/tmp/.hermes'}],
+        [{'name': 'noblepro', 'is_default': True, 'path': '/tmp/.hermes'}],
+    ]
+    monkeypatch.setattr(p, 'list_profiles_api', lambda: seq[0] if seq else [])
+
+    p._invalidate_root_profile_cache()
+    assert p.get_root_profile_names() == ['default', 'kinni']
+
+    seq.pop(0)
+    p._invalidate_root_profile_cache()
+    assert p.get_root_profile_names() == ['default', 'noblepro']
+
+
+def test_get_root_profile_names_fails_soft_to_default(monkeypatch):
+    """A roster lookup failure must not widen ownership or raise.
+
+    ['default'] is the pre-rename truth: the browser keeps matching the literal
+    alias and every other name keeps failing closed.
+    """
+    import api.profiles as p
+
+    def boom():
+        raise RuntimeError("hermes_cli explosion")
+    monkeypatch.setattr(p, 'list_profiles_api', boom)
+    p._invalidate_root_profile_cache()
+
+    assert p.get_root_profile_names() == ['default']
+
+
+def test_get_root_profile_names_shares_one_populate_path(monkeypatch):
+    """One list_profiles_api() call serves both the predicate and the list."""
+    import api.profiles as p
+
+    calls = {'n': 0}
+
+    def fake_list():
+        calls['n'] += 1
+        return [{'name': 'kinni', 'is_default': True, 'path': '/tmp/.hermes'}]
+
+    monkeypatch.setattr(p, 'list_profiles_api', fake_list)
+    p._invalidate_root_profile_cache()
+
+    p._is_root_profile('kinni')
+    p.get_root_profile_names()
+    p._is_root_profile('haku')
+    assert calls['n'] == 1
+
+
+def test_switch_profile_result_ships_root_profiles(tmp_path, monkeypatch):
+    """POST /api/profile/switch's payload carries the alias set too.
+
+    Boot seeds it once; a switch can land on a roster the browser has never
+    seen, so the same fact rides the switch result rather than waiting on the
+    dropdown warm.
+    """
+    import api.profiles as p
+
+    (tmp_path / 'webui_state').mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(p, '_DEFAULT_HERMES_HOME', tmp_path)
+    monkeypatch.setattr(p, 'list_profiles_api', lambda: [
+        {'name': 'kinni', 'is_default': True, 'path': str(tmp_path)},
+    ])
+    p._invalidate_root_profile_cache()
+
+    result = p.switch_profile('kinni', process_wide=False)
+
+    assert result['active'] == 'kinni'
+    assert result['is_default'] is True
+    assert result['root_profiles'] == ['default', 'kinni']
+
+
+def test_profile_active_endpoint_ships_root_profiles(monkeypatch):
+    """GET /api/profile/active carries the alias set beside ``is_default``.
+
+    This is the boot payload the browser blocks on, so it is the only place a
+    renamed-root fact can arrive before the profile dropdown roster warms.
+    """
+    from types import SimpleNamespace
+    from urllib.parse import urlparse
+
+    import api.profiles as p
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_j(_handler, payload, status=200, **_kwargs):
+        captured['status'] = status
+        captured['payload'] = payload
+        return captured
+
+    monkeypatch.setattr(routes, 'j', fake_j)
+    monkeypatch.setattr(p, 'get_active_profile_name', lambda: 'kinni')
+    monkeypatch.setattr(p, 'get_active_hermes_home', lambda: '/home/u/.hermes')
+    monkeypatch.setattr(routes, 'get_profile_default_workspace', lambda: '/srv/x')
+    monkeypatch.setattr(p, 'list_profiles_api', lambda: [
+        {'name': 'kinni', 'is_default': True, 'path': '/home/u/.hermes'},
+        {'name': 'haku', 'is_default': False, 'path': '/home/u/.hermes/profiles/haku'},
+    ])
+    p._invalidate_root_profile_cache()
+
+    routes.handle_get(SimpleNamespace(), urlparse('/api/profile/active'))
+
+    payload = captured['payload']
+    assert payload['name'] == 'kinni'
+    assert payload['is_default'] is True
+    assert payload['root_profiles'] == ['default', 'kinni']
+
+
+def test_profile_active_endpoint_root_profiles_survives_roster_failure(monkeypatch):
+    """A boot-critical endpoint must not 500 or widen when the roster fails."""
+    from types import SimpleNamespace
+    from urllib.parse import urlparse
+
+    import api.profiles as p
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_j(_handler, payload, status=200, **_kwargs):
+        captured['payload'] = payload
+        return captured
+
+    def boom():
+        raise RuntimeError('hermes_cli explosion')
+
+    monkeypatch.setattr(routes, 'j', fake_j)
+    monkeypatch.setattr(p, 'get_active_profile_name', lambda: 'default')
+    monkeypatch.setattr(p, 'get_active_hermes_home', lambda: '/home/u/.hermes')
+    monkeypatch.setattr(routes, 'get_profile_default_workspace', lambda: None)
+    monkeypatch.setattr(p, 'list_profiles_api', boom)
+    p._invalidate_root_profile_cache()
+
+    routes.handle_get(SimpleNamespace(), urlparse('/api/profile/active'))
+
+    assert captured['payload']['root_profiles'] == ['default']
+
+
 # ── get_active_hermes_home: returns _DEFAULT_HERMES_HOME for renamed root ──
 
 

@@ -13694,6 +13694,11 @@ def handle_get(handler, parsed) -> bool:
                 "name": active_profile_name,
                 "path": str(profiles_api.get_active_hermes_home()),
                 "is_default": profiles_api._is_root_profile(active_profile_name),
+                # Root identity as data, not just "is the active one root". The
+                # browser decides session/marker ownership before the profile
+                # dropdown roster is warm, and without this it cannot tell that a
+                # session tagged with a renamed root belongs to the active root.
+                "root_profiles": profiles_api.get_root_profile_names(),
                 "default_workspace": _profile_default_workspace,
             },
         )

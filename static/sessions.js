@@ -514,8 +514,12 @@ function _markSessionCompletionUnread(sid, messageCount = 0, meta = null) {
   // cross-profile leak without wiping ordinary chat completion unread (#5960).
   if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
     if (meta.source) entry.source = String(meta.source);
+    // Verbatim owner name; .trim() is only the emptiness test. This value is
+    // persisted and later compared against the active profile, and the server
+    // compares owners exactly, so repairing it here would make the marker claim
+    // an identity api/profiles.py assigns to a different string.
     if (typeof meta.profile === 'string' && meta.profile.trim()) {
-      entry.profile = meta.profile.trim();
+      entry.profile = meta.profile;
     }
   }
   unread[sid] = entry;
@@ -568,8 +572,11 @@ function _isCronSessionForUnread(session) {
 // Build {source, profile} for a cron session row; null for ordinary chat.
 function _cronCompletionUnreadMetaForSession(session) {
   if (!_isCronSessionForUnread(session)) return null;
+  // Owner names are carried verbatim; .trim() is only the emptiness test. The
+  // ownership predicate compares them as exactly as api/profiles.py does, so a
+  // repaired name here would let ' kinni ' inherit the root that 'kinni' is.
   const fromRow = (session && typeof session.profile === 'string' && session.profile.trim())
-    ? session.profile.trim()
+    ? session.profile
     : '';
   const active = (typeof S !== 'undefined' && S && typeof S.activeProfile === 'string' && S.activeProfile.trim())
     ? S.activeProfile.trim()
@@ -581,8 +588,9 @@ function _cronCompletionUnreadMetaForSession(session) {
 // Untagged/legacy markers are migrated from the sidebar session row when known.
 function _resolveCronCompletionMarkerOrigin(sid, marker) {
   let isCron = !!(marker && marker.source === 'cron');
+  // Verbatim owner name, same reason as _cronCompletionUnreadMetaForSession().
   let profile = (marker && typeof marker.profile === 'string' && marker.profile.trim())
-    ? marker.profile.trim()
+    ? marker.profile
     : '';
   let session = null;
   if (Array.isArray(_allSessions)) {
@@ -597,7 +605,7 @@ function _resolveCronCompletionMarkerOrigin(sid, marker) {
     if (!isCron && _isCronSessionForUnread(session)) isCron = true;
     if (!profile) {
       const sp = (typeof session.profile === 'string' && session.profile.trim())
-        ? session.profile.trim()
+        ? session.profile
         : '';
       if (sp) profile = sp;
     }
@@ -610,11 +618,45 @@ function _resolveCronCompletionMarkerOrigin(sid, marker) {
   return {isCron, profile: profile || ''};
 }
 
+// Normalize the server's root_profiles list into the alias set the predicate
+// reads. 'default' is always an alias, so a server that omits the field leaves
+// behavior exactly where it is today rather than widening: unknown names still
+// fail closed.
+//
+// Entries are taken verbatim or dropped, never repaired. api/profiles.py holds
+// root names exactly, so trimming a padded entry here would let the browser
+// call ' spaced ' the root under the name 'spaced' while the server's
+// _profiles_match() still says it is not. A malformed entry is dropped, which
+// fails closed, rather than normalized into a name the server never certified.
+function _normalizeRootProfileAliases(rootProfiles) {
+  const aliases = ['default'];
+  if (!Array.isArray(rootProfiles)) return aliases;
+  for (const name of rootProfiles) {
+    if (typeof name !== 'string') continue;
+    if (!name || name !== name.trim()) continue;
+    if (aliases.indexOf(name) === -1) aliases.push(name);
+  }
+  return aliases;
+}
+
 // A profile name provably resolving to the root profile: the literal
-// 'default' alias, or a roster entry flagged is_default (renamed root).
-// Unknown names fail closed — exact-name matching still applies to them.
+// 'default' alias, a name the server certified as root, or a roster entry
+// flagged is_default (renamed root). Unknown names fail closed — exact-name
+// matching still applies to them.
+//
+// S.rootProfileAliases is the authority. It mirrors the server's own alias set
+// (api/profiles.py::_is_root_profile) and is seeded on the boot path that
+// already blocks on /api/profile/active, so it answers during the cold window
+// where _profilesCache is still null: panels.js declares it null and warms it
+// from a load listener behind a 1200 ms timeout that is skipped outright while
+// document.hidden. The roster stays as a secondary source because it is still
+// true once warm and covers a server too old to send root_profiles.
 function _cronProfileNameIsRootAlias(name) {
   if (name === 'default') return true;
+  if (typeof S !== 'undefined' && S && Array.isArray(S.rootProfileAliases)
+    && S.rootProfileAliases.indexOf(name) !== -1) {
+    return true;
+  }
   if (typeof _profilesCache !== 'undefined' && _profilesCache
     && Array.isArray(_profilesCache.profiles)) {
     const entry = _profilesCache.profiles.find((p) => p && p.name === name);
@@ -627,13 +669,30 @@ function _cronProfileNameIsRootAlias(name) {
 // api/profiles.py::_profiles_match. Unknown names never match; a blank owner
 // fails closed unless opts.blankIsRoot asks for the server's row-or-root coercion.
 function _profileOwnerMatchesActive(owner, activeProfile, opts) {
-  let ownerName = (typeof owner === 'string' && owner.trim()) ? owner.trim() : '';
+  // The owner name is carried verbatim on every branch. api/profiles.py's
+  // _profiles_match compares `row == active` with no normalization, so a name
+  // repaired anywhere on this path claims an identity the server assigns to a
+  // different string. trim() appears here only as an emptiness test.
+  // blankIsRoot coerces only a genuinely absent owner, which is what the server
+  // does: `row_profile or 'default'` leaves a whitespace-only name alone because
+  // it is truthy. Treating '   ' as blank here would hand it the root's identity
+  // that _profiles_match('   ', 'default') refuses.
+  let ownerName = (typeof owner === 'string') ? owner : '';
   if (!ownerName && opts && opts.blankIsRoot) ownerName = 'default';
-  const activeName = (typeof activeProfile === 'string' && activeProfile.trim())
-    ? activeProfile.trim()
+  // The active side is exact for the same reason, and coerced on the same rule:
+  // the server's `active_profile or 'default'` replaces only a falsy value.
+  const activeName = (typeof activeProfile === 'string' && activeProfile)
+    ? activeProfile
     : 'default';
   if (!ownerName) return false;
   if (ownerName === activeName) return true;
+  // A padded name on either side had exact equality as its only chance. Every
+  // branch below asks whether a name resolves to the root, and no padded form
+  // does; these two returns are also what keeps a padded name out of
+  // _profileMatchesActiveProfile(), which normalizes both sides and is
+  // deliberately left alone.
+  if (ownerName !== ownerName.trim()) return false;
+  if (activeName !== activeName.trim()) return false;
   if (typeof _profileMatchesActiveProfile === 'function'
     && _profileMatchesActiveProfile(ownerName, activeName)) {
     return true;
@@ -1611,11 +1670,17 @@ function _clearStuckSessionOnBoot(sid, currentSid){
 // `_sessionStreamSessionId === sid && _sessionEventSource`) — so this never
 // double-arms the success path, which arms the *newly assigned* S.session
 // only after this point.
+//
+// The ownership gate below reads the raw `s.profile`, not the sidebar's trimmed
+// display name: api/profiles.py::_profiles_match compares `row == active`
+// exactly, so ' kinni ' is not the root that 'kinni' is, and pre-trimming would
+// hand the predicate a name the server never stored. The predicate does its own
+// blank handling, including the blankIsRoot coercion this call opts into.
 function _rearmActiveSessionStream(){
   const s=S&&S.session, id=s&&s.session_id;
   if(typeof startSessionStream!=='function' || !id) return;
   if(typeof _profileOwnerMatchesActive==='function'
-    && !_profileOwnerMatchesActive(typeof _sidebarSessionProfileName==='function' ? _sidebarSessionProfileName(s) : '', (S&&S.activeProfile)||'default', {blankIsRoot:true})) return;
+    && !_profileOwnerMatchesActive(s&&s.profile, (S&&S.activeProfile)||'default', {blankIsRoot:true})) return;
   startSessionStream(id);
 }
 

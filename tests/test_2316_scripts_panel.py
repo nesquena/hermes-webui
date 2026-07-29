@@ -18,6 +18,8 @@ REPO_ROOT = Path(__file__).parent.parent.resolve()
 PANELS_JS_PATH = REPO_ROOT / "static" / "panels.js"
 SESSIONS_JS_PATH = REPO_ROOT / "static" / "sessions.js"
 MESSAGES_JS_PATH = REPO_ROOT / "static" / "messages.js"
+BOOT_JS_PATH = REPO_ROOT / "static" / "boot.js"
+UI_JS_PATH = REPO_ROOT / "static" / "ui.js"
 NODE = shutil.which("node")
 
 # Shared owner-predicate chain the real _rearmActiveSessionStream() needs in
@@ -5772,14 +5774,18 @@ const _profilesCache = { profiles: [
 ] };
 """
 
-# The roster is what makes a renamed root provable. `_profilesCache` is declared
-# null at `static/panels.js:6672` and populated only by
-# `_warmProfileDropdownCache()`, which fires from a load listener behind a
-# 1200 ms timeout and is skipped outright while `document.hidden`. Until then the
-# reverse-alias step is inert. Every alias claim in this file is bounded by that.
+# The cold window. `_profilesCache` is declared null at `static/panels.js:6672`
+# and populated only by `_warmProfileDropdownCache()`, which fires from a load
+# listener behind a 1200 ms timeout and is skipped outright while
+# `document.hidden`. The roster is therefore absent for the whole of a normal
+# cold or hidden-page startup, which is why it cannot be the identity authority.
 NULL_ROSTER = """
 const _profilesCache = null;
 """
+
+# What `static/boot.js` puts on `S` before any ownership decision runs, from
+# `/api/profile/active`'s `root_profiles`. Available in the cold window above.
+SEEDED_ROOT_ALIASES = "  rootProfileAliases: ['default', 'kinni'],\n"
 
 REARM_ALIAS_STATES = {
     # 1. Session tagged with the literal root alias while the active surface
@@ -5820,16 +5826,142 @@ const S = {
   session: { session_id: 'current', message_count: 3, profile: 'ghost' },
 };
 """ + ROOT_ALIAS_ROSTER,
-    # 5. Case 2's exact state with a null roster: the pre-warm boot window. The
-    #    alias is true in the world but unprovable in the browser, so the
-    #    predicate refuses and the stream is not armed. The fix is conditional on
-    #    the roster, not unconditional. Same outcome as the pre-change one-way
-    #    helper, which never resolved this direction at all.
-    "renamed_root_under_literal_default_without_roster": """
+    # 5. Case 2's exact state in the cold window with NEITHER authority present:
+    #    no seeded aliases and no roster. The alias is true in the world and
+    #    unprovable in the browser, so the predicate refuses. This is the
+    #    fail-closed floor, not the reachable startup state — case 6 is.
+    "renamed_root_cold_with_no_authority_at_all": """
 const S = {
   activeProfile: 'default',
   activeProfileIsDefault: true,
   session: { session_id: 'current', message_count: 3, profile: 'kinni' },
+};
+""" + NULL_ROSTER,
+    # 6. The reachable cold/hidden startup state: roster still null, but boot
+    #    already seeded the server's alias set. The renamed-root session under a
+    #    literal-default surface re-arms, which is what the server considers
+    #    owned. Without the seed this is case 5 and the pane loses its SSE.
+    "renamed_root_cold_with_seeded_aliases": """
+const S = {
+  activeProfile: 'default',
+  activeProfileIsDefault: true,
+""" + SEEDED_ROOT_ALIASES + """
+  session: { session_id: 'current', message_count: 3, profile: 'kinni' },
+};
+""" + NULL_ROSTER,
+    # 7. Seeding widens nothing it should not: a name the server did not certify
+    #    as root still fails closed in the same cold window.
+    "unknown_owner_cold_with_seeded_aliases_fails_closed": """
+const S = {
+  activeProfile: 'default',
+  activeProfileIsDefault: true,
+""" + SEEDED_ROOT_ALIASES + """
+  session: { session_id: 'current', message_count: 3, profile: 'ghost' },
+};
+""" + NULL_ROSTER,
+    # 8. A named non-root profile is not root just because the active surface is.
+    "named_non_root_owner_cold_with_seeded_aliases_fails_closed": """
+const S = {
+  activeProfile: 'default',
+  activeProfileIsDefault: true,
+""" + SEEDED_ROOT_ALIASES + """
+  session: { session_id: 'current', message_count: 3, profile: 'b' },
+};
+""" + NULL_ROSTER,
+    # 9. The seed is an alias set, not a bypass: under a named non-root active
+    #    surface the renamed root is still not the owner.
+    "renamed_root_owner_under_named_active_with_seeded_aliases": """
+const S = {
+  activeProfile: 'b',
+  activeProfileIsDefault: false,
+""" + SEEDED_ROOT_ALIASES + """
+  session: { session_id: 'current', message_count: 3, profile: 'kinni' },
+};
+""" + NULL_ROSTER,
+    # 10. A PADDED owner is not the root, on either authority.
+    #     `api/profiles.py::_profiles_match` compares `row == active` with no
+    #     trimming, so ' kinni ' is a different owner than 'kinni' to the server.
+    #     The alias branch reads the untrimmed owner for exactly this reason.
+    "padded_renamed_root_owner_with_seeded_aliases_fails_closed": """
+const S = {
+  activeProfile: 'default',
+  activeProfileIsDefault: true,
+""" + SEEDED_ROOT_ALIASES + """
+  session: { session_id: 'current', message_count: 3, profile: ' kinni ' },
+};
+""" + NULL_ROSTER,
+    # 11. Same, with the warm roster as the authority instead of the seed. This
+    #     path predates the seeding change and is closed by the same read.
+    "padded_renamed_root_owner_with_warm_roster_fails_closed": """
+const S = {
+  activeProfile: 'default',
+  activeProfileIsDefault: true,
+  session: { session_id: 'current', message_count: 3, profile: ' kinni ' },
+};
+""" + ROOT_ALIAS_ROSTER,
+    # 12. The EXACT-NAME path, not the alias path: the active surface reports the
+    #     renamed root itself, so a padded owner would have matched on plain
+    #     string equality after normalization. The server compares `row ==
+    #     active` raw, so it does not.
+    "padded_owner_under_matching_named_active_fails_closed": """
+const S = {
+  activeProfile: 'kinni',
+  activeProfileIsDefault: true,
+""" + SEEDED_ROOT_ALIASES + """
+  session: { session_id: 'current', message_count: 3, profile: ' kinni ' },
+};
+""" + NULL_ROSTER,
+    # 13. The control for case 12: the same active surface with an exact owner
+    #     still matches, so the guard removed only the padded form.
+    "exact_owner_under_matching_named_active_arms": """
+const S = {
+  activeProfile: 'kinni',
+  activeProfileIsDefault: true,
+""" + SEEDED_ROOT_ALIASES + """
+  session: { session_id: 'current', message_count: 3, profile: 'kinni' },
+};
+""" + NULL_ROSTER,
+    # 14. A padded LITERAL default owner does not reach the forward-alias branch
+    #     either, which is what keeps a padded name out of
+    #     _profileMatchesActiveProfile(), whose contract normalizes both sides.
+    "padded_default_owner_under_renamed_root_fails_closed": """
+const S = {
+  activeProfile: 'kinni',
+  activeProfileIsDefault: true,
+""" + SEEDED_ROOT_ALIASES + """
+  session: { session_id: 'current', message_count: 3, profile: ' default ' },
+};
+""" + NULL_ROSTER,
+    # 15. A WHITESPACE-ONLY owner is not an absent owner. The server's
+    #     `row_profile or 'default'` leaves it alone because it is truthy, so
+    #     _profiles_match('   ', 'default') is false. blankIsRoot must coerce
+    #     only a genuinely absent owner, not this one.
+    "whitespace_only_owner_is_not_blank": """
+const S = {
+  activeProfile: 'default',
+  activeProfileIsDefault: true,
+""" + SEEDED_ROOT_ALIASES + """
+  session: { session_id: 'current', message_count: 3, profile: '   ' },
+};
+""" + NULL_ROSTER,
+    # 16. Same under a renamed-root active surface, where the coercion would have
+    #     handed it the alias branch as well.
+    "whitespace_only_owner_under_renamed_root_is_not_blank": """
+const S = {
+  activeProfile: 'kinni',
+  activeProfileIsDefault: true,
+""" + SEEDED_ROOT_ALIASES + """
+  session: { session_id: 'current', message_count: 3, profile: '   ' },
+};
+""" + NULL_ROSTER,
+    # 17. The control: a genuinely absent owner still resolves to root under
+    #     blankIsRoot, which is the session-path convention the server shares.
+    "absent_owner_still_resolves_to_root": """
+const S = {
+  activeProfile: 'default',
+  activeProfileIsDefault: true,
+""" + SEEDED_ROOT_ALIASES + """
+  session: { session_id: 'current', message_count: 3 },
 };
 """ + NULL_ROSTER,
 }
@@ -5839,7 +5971,19 @@ REARM_ALIAS_MATRIX = [
     ("renamed_root_session_under_literal_default", True),
     ("untagged_session_under_named_profile", False),
     ("unknown_owner_name_fails_closed", False),
-    ("renamed_root_under_literal_default_without_roster", False),
+    ("renamed_root_cold_with_no_authority_at_all", False),
+    ("renamed_root_cold_with_seeded_aliases", True),
+    ("unknown_owner_cold_with_seeded_aliases_fails_closed", False),
+    ("named_non_root_owner_cold_with_seeded_aliases_fails_closed", False),
+    ("renamed_root_owner_under_named_active_with_seeded_aliases", False),
+    ("padded_renamed_root_owner_with_seeded_aliases_fails_closed", False),
+    ("padded_renamed_root_owner_with_warm_roster_fails_closed", False),
+    ("padded_owner_under_matching_named_active_fails_closed", False),
+    ("exact_owner_under_matching_named_active_arms", True),
+    ("padded_default_owner_under_renamed_root_fails_closed", False),
+    ("whitespace_only_owner_is_not_blank", False),
+    ("whitespace_only_owner_under_renamed_root_is_not_blank", False),
+    ("absent_owner_still_resolves_to_root", True),
 ]
 
 
@@ -5853,6 +5997,216 @@ def test_rearm_active_session_stream_root_alias_matrix(case, expect_armed):
     assert result["rearmAttempts"] == 1, case
     assert result["armedCalls"] == (1 if expect_armed else 0), case
     assert result["eventSourceCalls"] == (1 if expect_armed else 0), case
+
+
+BOOT_ROOT_SEED_CASES = [
+    # Server certifies the renamed root. Boot carries the whole alias set.
+    ("resolved_renamed_root", {"name": "default", "is_default": True,
+                               "root_profiles": ["default", "kinni"]},
+     ["default", "kinni"]),
+    # Field absent (older server): 'default' only, so nothing widens.
+    ("resolved_without_root_profiles", {"name": "default", "is_default": True},
+     ["default"]),
+    # Non-list, blank, duplicate and PADDED entries are dropped, never repaired.
+    # `api/profiles.py` holds root names exactly, so accepting ' spaced ' as
+    # 'spaced' would make the browser call a name root that the server's
+    # _profiles_match() still rejects. Dropping it fails closed instead.
+    ("resolved_with_junk_root_profiles",
+     {"name": "default", "is_default": True,
+      "root_profiles": ["kinni", "kinni", "  ", 7, None, " spaced "]},
+     ["default", "kinni"]),
+    # Payload shape the boot path does not recognize: falls through to the
+    # fallback branch, which seeds the literal alias only.
+    ("fallback_unrecognized_payload", {"unexpected": True}, ["default"]),
+]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("case,payload,expected", BOOT_ROOT_SEED_CASES)
+def test_boot_seeds_root_profile_aliases_before_ownership_decisions(case, payload, expected):
+    """`static/boot.js` puts the server's root-alias set on `S` on every branch.
+
+    This is the production path, not a stand-in: `_resolveActiveProfileBootstrapState()`
+    and `_applyActiveProfileBootstrapState()` are both extracted from
+    `static/boot.js` and `_normalizeRootProfileAliases()` from
+    `static/sessions.js`, and only `/api/profile/active` is faked. The assignment
+    onto `S` is production's, not the harness's, so deleting it fails this test
+    instead of leaving it green. Boot awaits the resolve before session restore,
+    so the aliases exist before any ownership decision runs, including while
+    `document.hidden` keeps `_warmProfileDropdownCache()` from ever firing.
+    """
+    boot_js = BOOT_JS_PATH.read_text(encoding="utf-8")
+    sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(boot_js + "\n" + sessions_js) + """
+const S = {};
+const _bootActiveProfileUnauthRedirectBudget = {
+  readAttempted: () => false,
+  clearAttempted: () => {},
+  spendOnFallback: () => {},
+  spendOnRedirect: () => true,
+};
+eval(extractFunc('_normalizeRootProfileAliases'));
+eval(extractFunc('_resolveActiveProfileBootstrapState'));
+eval(extractFunc('_applyActiveProfileBootstrapState'));
+(async () => {
+  const state = await _resolveActiveProfileBootstrapState({
+    loadActiveProfile: async () => (__PAYLOAD__),
+    getNextUrl: () => '/',
+    redirectToLogin: () => {},
+    markerStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+  });
+  _applyActiveProfileBootstrapState(state);
+  console.log(JSON.stringify({
+    status: state.status,
+    aliases: S.rootProfileAliases,
+    activeProfile: S.activeProfile,
+    activeProfileIsDefault: S.activeProfileIsDefault,
+  }));
+})().catch(err => { console.error(err); process.exit(1); });
+""".replace("__PAYLOAD__", json.dumps(payload))
+    result = json.loads(_run_node(source))
+    assert result["aliases"] == expected, case
+    assert result["status"] in ("resolved", "fallback"), case
+    # `S` starts empty, so every field here was written by production code.
+    assert result["activeProfile"] == "default", case
+    assert result["activeProfileIsDefault"] is True, case
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_cold_hidden_boot_seed_arms_renamed_root_session_end_to_end():
+    """The regression the cold-window gap describes, on the production path.
+
+    `document.hidden` is true and `_profilesCache` is null, so
+    `_warmProfileDropdownCache()` never runs and the roster never arrives. Boot
+    still seeds the alias set from `/api/profile/active`, and a session tagged
+    with the renamed root under a literal-`default` surface keeps its stream.
+
+    Every step between the faked HTTP response and `startSessionStream()` is
+    production code: `_resolveActiveProfileBootstrapState()` and
+    `_applyActiveProfileBootstrapState()` from `static/boot.js`, the predicate
+    chain from `static/sessions.js`, and `S` starting empty so no field the
+    decision reads was written by the harness.
+
+    The rest of the same run proves the seed did not become a bypass: an
+    uncertified owner is refused, and a name the server sent padded (` spaced `)
+    does not certify its trimmed form. `api/profiles.py::_profiles_match` compares
+    `row == active` with no trimming, so a browser that repaired that entry would
+    claim ownership the server denies.
+    """
+    panels_js = PANELS_JS_PATH.read_text(encoding="utf-8")
+    # Drive panels.js's own warm registration rather than asserting a fixture.
+    warm_start = panels_js.find("if(typeof window!=='undefined'){")
+    warm_block = panels_js[warm_start:panels_js.find("}\n", panels_js.find("},{once:true});", warm_start)) + 1]
+    assert "_warmProfileDropdownCache();" in warm_block
+    assert "document.hidden" in warm_block
+
+    boot_js = BOOT_JS_PATH.read_text(encoding="utf-8")
+    sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    messages_js = MESSAGES_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(boot_js + "\n" + sessions_js + "\n" + messages_js) + """
+const document = { hidden: true };
+let _profilesCache = null;
+// Register panels.js's real warm listener and run its load + 1200 ms timer to
+// completion. With document.hidden true the roster must still be null when the
+// ownership decisions below run, which is what makes the cold window reachable
+// rather than merely asserted.
+let warmCalls = 0;
+const _loadListeners = [];
+const _timers = [];
+function _warmProfileDropdownCache(){ warmCalls += 1; _profilesCache = { profiles: [{ name: 'kinni', is_default: true }] }; }
+const setTimeout = (fn) => { _timers.push(fn); };
+const window = { addEventListener: (evt, fn) => { if (evt === 'load') _loadListeners.push(fn); } };
+__WARM_BLOCK__
+_loadListeners.forEach((fn) => fn());
+_timers.forEach((fn) => fn());
+let armedCalls = 0;
+let armedSids = [];
+const S = {};
+const _bootActiveProfileUnauthRedirectBudget = {
+  readAttempted: () => false,
+  clearAttempted: () => {},
+  spendOnFallback: () => {},
+  spendOnRedirect: () => true,
+};
+function startSessionStream(sid) { armedCalls += 1; armedSids.push(sid); }
+function _sidebarSessionProfileName(s) { return (s && s.profile) || ''; }
+eval(extractFunc('_profileMatchesActiveProfile'));
+eval(extractFunc('_normalizeRootProfileAliases'));
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
+eval(extractFunc('_rearmActiveSessionStream'));
+eval(extractFunc('_resolveActiveProfileBootstrapState'));
+eval(extractFunc('_applyActiveProfileBootstrapState'));
+(async () => {
+  const state = await _resolveActiveProfileBootstrapState({
+    loadActiveProfile: async () => ({
+      name: 'default', is_default: true,
+      root_profiles: ['default', 'kinni', ' spaced '],
+    }),
+    getNextUrl: () => '/',
+    redirectToLogin: () => {},
+    markerStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+  });
+  _applyActiveProfileBootstrapState(state);
+
+  const armedAfter = {};
+  for (const [label, profile] of [
+    ['owned', 'kinni'],
+    ['foreign', 'ghost'],
+    ['padded_payload', 'spaced'],
+    ['padded_owner', ' kinni '],
+  ]) {
+    S.session = { session_id: label, message_count: 3, profile };
+    _rearmActiveSessionStream();
+    armedAfter[label] = armedCalls;
+  }
+
+  console.log(JSON.stringify({
+    hidden: document.hidden,
+    roster: _profilesCache,
+    warmCalls,
+    loadListeners: _loadListeners.length,
+    timers: _timers.length,
+    aliases: S.rootProfileAliases,
+    activeProfile: S.activeProfile,
+    armedAfter,
+    totalArmed: armedCalls,
+    armedSids,
+  }));
+})().catch(err => { console.error(err); process.exit(1); });
+""".replace("__WARM_BLOCK__", warm_block)
+    result = json.loads(_run_node(source))
+    # The window really is the cold/hidden one, and panels.js kept it that way:
+    # its load listener ran, its 1200 ms timer fired, and the hidden gate still
+    # refused to warm the roster.
+    assert result["hidden"] is True
+    assert result["loadListeners"] == 1
+    assert result["timers"] == 1
+    assert result["warmCalls"] == 0
+    assert result["roster"] is None
+    # Written by production, not the harness: `S` started empty.
+    assert result["aliases"] == ["default", "kinni"]
+    assert result["activeProfile"] == "default"
+    # Owned renamed-root session keeps its stream; nothing else gets one. The
+    # padded cases cover both directions of the exactness the server enforces:
+    # a padded name in the payload does not certify its trimmed form, and a
+    # padded owner does not borrow the certified name's identity.
+    assert result["armedAfter"] == {
+        "owned": 1, "foreign": 1, "padded_payload": 1, "padded_owner": 1,
+    }
+    assert result["totalArmed"] == 1
+    assert result["armedSids"] == ["owned"]
+
+
+def test_ui_state_seeds_root_profile_aliases_placeholder():
+    """The pre-boot placeholder on `S` is the literal alias only.
+
+    A placeholder listing a renamed root would authorize ownership before the
+    server said anything; a placeholder missing `default` would break the
+    literal case. `['default']` is the one value that is true before boot.
+    """
+    ui_js = UI_JS_PATH.read_text(encoding="utf-8")
+    assert "rootProfileAliases:['default']" in ui_js.replace(" ", "")
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -5873,6 +6227,19 @@ const rootActive = {
   blankDefault: _profileOwnerMatchesActive('', 'default'),
   blankUndefinedOpts: _profileOwnerMatchesActive('   ', 'default', undefined),
   blankAsRoot: _profileOwnerMatchesActive('', 'default', { blankIsRoot: true }),
+  // Absent owners the server also coerces (`row_profile or 'default'`).
+  missingAsRoot: _profileOwnerMatchesActive(undefined, 'default', { blankIsRoot: true }),
+  nonStringAsRoot: _profileOwnerMatchesActive(7, 'default', { blankIsRoot: true }),
+  // Whitespace-only is truthy to the server, so it is NOT an absent owner.
+  whitespaceAsRoot: _profileOwnerMatchesActive('   ', 'default', { blankIsRoot: true }),
+  // The ACTIVE side is exact on the same rule. Only a falsy active value is
+  // coerced, matching `active_profile or 'default'`; a padded or whitespace-only
+  // active name is a name the server would compare literally.
+  activeBlankCoercesToRoot: _profileOwnerMatchesActive('default', ''),
+  activeMissingCoercesToRoot: _profileOwnerMatchesActive('default', undefined),
+  activeWhitespaceIsNotRoot: _profileOwnerMatchesActive('default', '   '),
+  activePaddedRootIsNotRoot: _profileOwnerMatchesActive('kinni', ' default '),
+  activePaddedExactStillMatches: _profileOwnerMatchesActive(' kinni ', ' kinni '),
   reverseAlias: _profileOwnerMatchesActive('kinni', 'default'),
   forwardAlias: _profileOwnerMatchesActive('default', 'default'),
   unknownName: _profileOwnerMatchesActive('ghost', 'default'),
@@ -5895,6 +6262,18 @@ console.log(JSON.stringify(Object.assign({}, rootActive, namedActive)));
     assert result["blankUndefinedOpts"] is False
     # Session contract: an untagged session belongs to root by convention.
     assert result["blankAsRoot"] is True
+    assert result["missingAsRoot"] is True
+    assert result["nonStringAsRoot"] is True
+    # ...but a whitespace-only name is a name, not an absent owner. The server's
+    # `row_profile or 'default'` leaves it alone because it is truthy.
+    assert result["whitespaceAsRoot"] is False
+    # Same rule on the active side: only a falsy active value is coerced.
+    assert result["activeBlankCoercesToRoot"] is True
+    assert result["activeMissingCoercesToRoot"] is True
+    assert result["activeWhitespaceIsNotRoot"] is False
+    assert result["activePaddedRootIsNotRoot"] is False
+    # Exact equality still wins on either side, padded or not.
+    assert result["activePaddedExactStillMatches"] is True
     # Root aliases are equivalent in both directions; unknown names fail closed.
     assert result["reverseAlias"] is True
     assert result["forwardAlias"] is True
@@ -6083,25 +6462,59 @@ SWITCH_OWNERSHIP_CASES = [
     # Renamed-root session while the accepted switch lands on the literal root
     # name. The server calls this owned, so the empty session is retagged in
     # place instead of being replaced.
-    ("roster_warm_renamed_root_is_retained", "kinni", True, False),
+    ("roster_warm_renamed_root_is_retained", "kinni", True, None, False),
     # Name absent from the roster: unknown owners still force the replacement path.
-    ("roster_warm_unknown_owner_is_replaced", "ghost", True, True),
-    # Same renamed-root state, roster still null: the pre-warm boot window. The
-    # alias cannot be proven, so the session is replaced through newSession().
-    # This is unchanged from before this round, where `_profileMatchesActiveProfile`
-    # returned false for this state with or without a roster. The bound is the
-    # 1200 ms `_warmProfileDropdownCache()` timer, not the predicate; seeding
-    # `_profilesCache` from the boot payload is the separate change that lifts it.
-    ("roster_null_renamed_root_is_replaced", "kinni", False, True),
+    ("roster_warm_unknown_owner_is_replaced", "ghost", True, None, True),
+    # Same renamed-root state in the cold window with a server that sends no
+    # root_profiles: neither authority can prove the alias, so the session is
+    # replaced. Fail-closed floor.
+    ("cold_no_authority_renamed_root_is_replaced", "kinni", False, None, True),
+    # The reachable case: roster still null, but the switch response carries the
+    # server's alias set, so the owned session survives the switch.
+    (
+        "cold_switch_seeds_aliases_renamed_root_is_retained",
+        "kinni",
+        False,
+        ["default", "kinni"],
+        False,
+    ),
+    # Seeding from the switch response widens nothing: an uncertified owner is
+    # still replaced.
+    (
+        "cold_switch_seeds_aliases_unknown_owner_is_replaced",
+        "ghost",
+        False,
+        ["default", "kinni"],
+        True,
+    ),
+    # A PADDED owner does not inherit the certified name's identity here either.
+    # `_profiles_match(' kinni ', 'default')` is false, so the accepted switch
+    # must replace this session rather than retag it in place.
+    (
+        "cold_switch_seeds_aliases_padded_owner_is_replaced",
+        " kinni ",
+        False,
+        ["default", "kinni"],
+        True,
+    ),
+    # Same with the roster warm, which is the path that predates the seeding.
+    (
+        "warm_roster_padded_owner_is_replaced",
+        " kinni ",
+        True,
+        None,
+        True,
+    ),
 ]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 @pytest.mark.parametrize(
-    "case,session_profile,roster_warm,expect_replaced", SWITCH_OWNERSHIP_CASES
+    "case,session_profile,roster_warm,switch_root_profiles,expect_replaced",
+    SWITCH_OWNERSHIP_CASES,
 )
 def test_switch_to_profile_session_ownership_uses_shared_root_alias_predicate(
-    case, session_profile, roster_warm, expect_replaced
+    case, session_profile, roster_warm, switch_root_profiles, expect_replaced
 ):
     """Behavioral cover for the accepted-switch session check.
 
@@ -6110,8 +6523,10 @@ def test_switch_to_profile_session_ownership_uses_shared_root_alias_predicate(
     `newSession()` replacement branch. This is the executable counterpart to
     the source-shape assertion in `tests/test_profile_switch_ux.py`.
 
-    The third case pins the bound: correct alias matching starts when the
-    profile roster loads, not when the switch is accepted.
+    The last three cases separate the two authorities. With no roster and no
+    `root_profiles` on the switch response the alias is unprovable and the
+    session is replaced; with the same null roster and the server's alias set on
+    the response, the same session survives. The roster is no longer the bound.
     """
     js = PANELS_JS_PATH.read_text(encoding="utf-8") + '\n' + SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = (_extract_func_script(js) + """
@@ -6137,7 +6552,7 @@ const S = {
 function $(){ return null; }
 async function api(url){
   if (url !== '/api/profile/switch') throw new Error('unexpected api: ' + url);
-  return { active: 'default', is_default: true };
+  return Object.assign({ active: 'default', is_default: true }, __SWITCH_ROOT_PROFILES__);
 }
 async function newSession(){ newSessionCalls.push(S.activeProfile); }
 async function renderSessionList(){}
@@ -6149,6 +6564,7 @@ async function _profileSwitchPanelLoad(){}
 function _refreshProfileSwitchBackground(){}
 function animateNextSessionListRefresh(){}
 """ + REARM_PREDICATE_CHAIN + """
+eval(extractFunc('_normalizeRootProfileAliases'));
 eval(extractFunc('switchToProfile'));
 (async () => {
   await switchToProfile('default');
@@ -6161,7 +6577,12 @@ eval(extractFunc('switchToProfile'));
     toasts,
   }));
 })().catch(err => { console.error(err); process.exit(1); });
-""").replace("__SESSION_PROFILE__", session_profile)
+""").replace("__SESSION_PROFILE__", session_profile).replace(
+        "__SWITCH_ROOT_PROFILES__",
+        json.dumps({"root_profiles": switch_root_profiles})
+        if switch_root_profiles is not None
+        else "{}",
+    )
     result = json.loads(_run_node(source))
     assert result["activeProfile"] == "default", case
     assert result["activeProfileIsDefault"] is True, case

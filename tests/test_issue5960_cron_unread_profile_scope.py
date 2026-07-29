@@ -260,6 +260,96 @@ async function switchToProfile(name){{
     assert state["after"]["persisted"]["new-cron-session"]["profile"] == "profile-b"
 
 
+CRON_MARKER_ALIAS_CASES = [
+    # The renamed root is certified by the server, so its marker is the active
+    # root's and survives a switch to the literal 'default'.
+    ("certified_renamed_root_marker_survives", "kinni", True),
+    # A padded near-match is a different owner to the server
+    # (api/profiles.py::_profiles_match compares `row == active`), so it must be
+    # cleared rather than inheriting the certified name's identity. Marker owner
+    # names are carried verbatim through _resolveCronCompletionMarkerOrigin() so
+    # this decision reaches the predicate unrepaired.
+    ("padded_renamed_root_marker_is_cleared", " kinni ", False),
+    # An uncertified name is not the root.
+    ("uncertified_marker_is_cleared", "ghost", False),
+]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("case,marker_profile,expect_retained", CRON_MARKER_ALIAS_CASES)
+def test_cron_marker_clear_matches_server_owner_exactness(
+    case, marker_profile, expect_retained
+):
+    """Persisted cron markers are kept only for owners the server calls the root.
+
+    The seeded alias set (`S.rootProfileAliases`, from `/api/profile/active`)
+    certifies `kinni` as the renamed root. A marker owned by `kinni` therefore
+    belongs to the active root and stays; ` kinni ` and `ghost` do not, and are
+    dropped. This is the marker-path counterpart to the session-stream matrix.
+    """
+    helpers = "\n".join(
+        [
+            _extract_function(SESSIONS_JS, "_getSessionCompletionUnread"),
+            _extract_function(SESSIONS_JS, "_saveSessionCompletionUnread"),
+            _extract_function(SESSIONS_JS, "_markSessionCompletionUnread"),
+            _extract_function(SESSIONS_JS, "_sourceKeyForSession"),
+            _extract_function(SESSIONS_JS, "_isCronSessionForUnread"),
+            _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
+            _extract_function(SESSIONS_JS, "_resolveCronCompletionMarkerOrigin"),
+            _extract_function(SESSIONS_JS, "_normalizeRootProfileAliases"),
+            _extract_function(SESSIONS_JS, "_cronProfileNameIsRootAlias"),
+            _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile"),
+            _extract_function(SESSIONS_JS, "_profileOwnerMatchesActive"),
+            _extract_function(
+                SESSIONS_JS, "_clearCronSessionCompletionUnreadForInactiveProfiles"
+            ),
+        ]
+    )
+    script = f"""
+const store={{'hermes-session-completion-unread':JSON.stringify({{}})}};
+global.localStorage={{
+  getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
+  setItem:(key,value)=>{{ store[key]=String(value); }},
+  removeItem:(key)=>{{ delete store[key]; }},
+}};
+let _sessionCompletionUnread=null;
+const SESSION_COMPLETION_UNREAD_KEY='hermes-session-completion-unread';
+// Cold window: the profile dropdown roster never warmed. The seeded alias set
+// from the boot payload is the only authority present.
+const _profilesCache=null;
+global.S={{
+  activeProfile:'default',
+  activeProfileIsDefault:true,
+  rootProfileAliases:_normalizeRootProfileAliases(['default','kinni']),
+}};
+const cronRow={{session_id:'cron-session', source:'cron', profile:{json.dumps(marker_profile)}}};
+global._allSessions=[cronRow];
+global.renderSessionListFromCache=()=>{{}};
+{helpers}
+// Write the marker through the real production path and re-read it from the
+// localStorage round-trip, so a repair anywhere between the row and the stored
+// owner is visible here rather than bypassed by a hand-built fixture.
+_markSessionCompletionUnread('cron-session', 1, _cronCompletionUnreadMetaForSession(cronRow));
+_sessionCompletionUnread=null;
+const storedOwner=JSON.parse(store['hermes-session-completion-unread'])['cron-session'].profile;
+_clearCronSessionCompletionUnreadForInactiveProfiles('default');
+process.stdout.write(JSON.stringify({{
+  storedOwner,
+  persisted:JSON.parse(store['hermes-session-completion-unread']),
+  aliases:S.rootProfileAliases,
+}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], check=True, capture_output=True, text=True, timeout=30
+    )
+    state = json.loads(result.stdout)
+    assert state["aliases"] == ["default", "kinni"], case
+    # The persisted owner is the row's own string, unrepaired.
+    assert state["storedOwner"] == marker_profile, case
+    retained = "cron-session" in state["persisted"]
+    assert retained is expect_retained, case
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_cron_poll_tags_persisted_markers_with_active_profile():
     polling = _extract_function(PANELS_JS, "startCronPolling")
