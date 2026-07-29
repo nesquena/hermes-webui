@@ -1699,3 +1699,64 @@ def test_account_usage_semaphore_caps_concurrency(monkeypatch, tmp_path):
     finally:
         unblock.set()
         _restore_config(old_cfg, old_mtime)
+
+
+def test_kimi_coding_account_usage_is_reported(monkeypatch, tmp_path):
+    """Kimi Coding Plan providers must go through the account-limits probe."""
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    old_cfg, old_mtime = _with_config(model={"provider": "kimi-coding"})
+
+    import api.providers as providers
+    seen = {}
+
+    def fake_fetch(provider, home, api_key=None):
+        seen["provider"] = provider
+        return SimpleNamespace(
+            provider="kimi-coding",
+            source="usage_api",
+            title="Account limits",
+            plan="Level Advanced",
+            fetched_at=datetime(2030, 3, 17, 12, 30, tzinfo=timezone.utc),
+            available=True,
+            windows=(
+                SimpleNamespace(
+                    label="Weekly",
+                    used_percent=2.0,
+                    reset_at=datetime(2030, 3, 24, 12, 30, tzinfo=timezone.utc),
+                    detail=None,
+                ),
+                SimpleNamespace(
+                    label="5-hour",
+                    used_percent=12.0,
+                    reset_at=datetime(2030, 3, 17, 17, 30, tzinfo=timezone.utc),
+                    detail=None,
+                ),
+            ),
+            details=("Parallel requests: 30 max",),
+            unavailable_reason=None,
+        )
+
+    monkeypatch.setattr(providers, "_agent_fetch_account_usage_for_home", fake_fetch)
+    try:
+        result = providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert seen["provider"] == "kimi-coding"
+    assert result["ok"] is True
+    assert result["provider"] == "kimi-coding"
+    assert result["supported"] is True
+    assert result["status"] == "available"
+    windows = result["account_limits"]["windows"]
+    assert [w["label"] for w in windows] == ["Weekly", "5-hour"]
+    assert windows[0]["used_percent"] == 2.0
+    assert windows[0]["remaining_percent"] == 98.0
+    assert result["account_limits"]["plan"] == "Level Advanced"
+    assert result["account_limits"]["details"] == ["Parallel requests: 30 max"]
+
+
+def test_kimi_aliases_supported_by_account_usage_probe():
+    import api.providers as providers
+
+    for alias in ("kimi-coding", "kimi-coding-cn", "kimi", "moonshot", "kimi-cn", "moonshot-cn"):
+        assert alias in providers._ACCOUNT_USAGE_PROVIDERS

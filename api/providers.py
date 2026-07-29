@@ -83,7 +83,18 @@ _ACCOUNT_USAGE_CACHE_TTL_SECONDS = 45.0
 _PROVIDERS_CACHE_TTL_SECONDS = 30.0
 _ACCOUNT_USAGE_CACHE_MAX_ENTRIES = 64
 _ACCOUNT_USAGE_WORKER_IDLE_SECONDS = 5 * 60
-_ACCOUNT_USAGE_PROVIDERS = frozenset({"openai-codex", "anthropic"})
+_ACCOUNT_USAGE_PROVIDERS = frozenset({
+    "openai-codex",
+    "anthropic",
+    # Kimi Coding Plan quota comes from Hermes Agent's fetch_account_usage()
+    # (GET {base}/v1/usages), same account-limits abstraction as Codex.
+    "kimi",
+    "kimi-coding",
+    "kimi-coding-cn",
+    "moonshot",
+    "kimi-cn",
+    "moonshot-cn",
+})
 
 # Upper bound on simultaneous profile-isolated quota probe subprocesses.
 # Each probe runs a Python child for up to 35 s; capping concurrency prevents
