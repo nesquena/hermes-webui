@@ -285,11 +285,19 @@ def test_auth_401_classification_receives_stringified_probe_text(tmp_path, monke
     observed = {}
     real_classify = streaming._classify_provider_error
 
-    def _spy_classify_provider_error(err_str, exc=None, *, silent_failure=False):
+    def _spy_classify_provider_error(
+        err_str, exc=None, *, silent_failure=False, result=None
+    ):
         observed["err_str"] = err_str
         observed["exc"] = exc
         observed["silent_failure"] = silent_failure
-        return real_classify(err_str, exc, silent_failure=silent_failure)
+        observed["result"] = result
+        return real_classify(
+            err_str,
+            exc,
+            silent_failure=silent_failure,
+            result=result,
+        )
 
     with mock.patch.object(streaming, "_classify_provider_error", side_effect=_spy_classify_provider_error):
         _run_stream(monkeypatch, session, "stream_auth_probe_text", agent_cls, workspace=str(tmp_path))
