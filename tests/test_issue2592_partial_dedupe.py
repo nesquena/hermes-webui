@@ -164,3 +164,47 @@ def test_context_dedupe_is_idempotent_for_alternating_incomplete_ids():
 
     assert [message["id"] for message in once] == [1701, 1702]
     assert twice == once
+
+
+def test_display_merge_dedupes_incomplete_ids_after_state_db_reconciliation():
+    from api.streaming import _merge_display_messages_after_agent_result
+
+    first = _incomplete_reasoning_only(1701, reasoning="first")
+    second = _incomplete_reasoning_only(1702, reasoning="second")
+    user = {"role": "user", "content": "next", "id": 1703}
+    answer = {"role": "assistant", "content": "done", "id": 1704, "finish_reason": "stop"}
+
+    merged = _merge_display_messages_after_agent_result(
+        [first, second, dict(first), dict(second)],
+        [first, second],
+        [first, second, dict(first), dict(second), user, answer],
+        "next",
+    )
+
+    ids = [message.get("id") for message in merged]
+    assert ids.count(1701) == 1
+    assert ids.count(1702) == 1
+    assert ids[-2:] == [1703, 1704]
+
+
+def test_save_is_a_final_idempotent_barrier_for_incomplete_message_ids(tmp_path, monkeypatch):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "index.json")
+
+    first = _incomplete_reasoning_only(1701, reasoning="first")
+    second = _incomplete_reasoning_only(1702, reasoning="second")
+    session = models.Session(
+        session_id="save-barrier",
+        messages=[first, second, dict(first), dict(second)],
+    )
+
+    session.save(skip_index=True)
+    session.save(skip_index=True)
+
+    assert [message["id"] for message in session.messages] == [1701, 1702]
+    persisted = json.loads(session.path.read_text(encoding="utf-8"))
+    assert [message["id"] for message in persisted["messages"]] == [1701, 1702]
