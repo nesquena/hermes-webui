@@ -1193,41 +1193,57 @@ def _deduplicate_exact_stable_messages(messages):
     dictionary is canonicalized before hashing: same-event rows with enriched
     metadata or changed content remain distinct.
     """
-    if not isinstance(messages, list) or len(messages) < 2:
-        return messages, 0
+    if not isinstance(messages, list):
+        return [], 0
+    if len(messages) < 2:
+        # Save callers require a detached payload snapshot even when there is
+        # nothing to deduplicate; returning the owner-visible list here lets a
+        # concurrent append change serialization after message_count is fixed.
+        return list(messages), 0
 
     seen_by_identity = {}
     guarded = []
     removed = 0
 
-    def _is_stable_identity_value(value):
-        return value is not None and (
-            not isinstance(value, str) or bool(value.strip())
-        )
+    def _stable_identity_component(value):
+        """Return a typed exact built-in scalar, or None when untrusted."""
+        # Numeric/string subclasses (for example an IntEnum) can compare and
+        # serialize exactly like their base scalar, so accepting them would let
+        # a distinct runtime value authorize deletion.
+        if type(value) is str:
+            return ("str", value) if value.strip() else None
+        if type(value) is int:
+            return ("int", value)
+        if type(value) is float:
+            return ("float", value) if math.isfinite(value) else None
+        return None
+
+    def _is_missing_or_blank(value):
+        return value is None or (type(value) is str and not value.strip())
 
     for message in messages:
         if not isinstance(message, dict):
             guarded.append(message)
             continue
         message_id = message.get("id")
-        timestamp = message.get("timestamp")
-        if not _is_stable_identity_value(timestamp):
-            timestamp = message.get("_ts")
-        if not (
-            _is_stable_identity_value(message_id)
-            and _is_stable_identity_value(timestamp)
-        ):
+        message_id_component = _stable_identity_component(message_id)
+        timestamp_value = message.get("timestamp")
+        timestamp_component = _stable_identity_component(timestamp_value)
+        if timestamp_component is None and _is_missing_or_blank(timestamp_value):
+            timestamp_component = _stable_identity_component(message.get("_ts"))
+        if message_id_component is None or timestamp_component is None:
             guarded.append(message)
             continue
         identity = (
             "event",
-            repr(message_id),
+            message_id_component,
             "timestamp",
-            repr(timestamp),
+            timestamp_component,
         )
         try:
             canonical = json.dumps(
                 message,
+                allow_nan=False,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -1455,10 +1471,10 @@ class Session:
             'process_wakeup_pause',
             'share_token', 'share_created_at',
         ]
-        self.messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
+        guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
         if exact_replay_rows_removed:
             logger.warning(
-                "Removed %d exact stable replay messages before saving session %s",
+                "Removed %d exact stable replay messages from persisted snapshot for session %s",
                 exact_replay_rows_removed,
                 self.session_id,
             )
@@ -1469,7 +1485,7 @@ class Session:
         # scene bodies. message_count is placed BEFORE anchor_scene_index so a
         # legacy-format reader that stops at a scene key still finds the count.
         # The full anchor_activity_scenes bodies serialize AFTER messages.
-        meta['message_count'] = len(self.messages or [])
+        meta['message_count'] = len(guarded_messages or [])
         meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
         # Keep the in-memory fingerprint aligned with what we just persisted, so a
         # later metadata-only reload of THIS object (or any fingerprint reader)
@@ -1477,7 +1493,7 @@ class Session:
         # defense-in-depth; the cached-side freshness check reads real records,
         # not this, so this is belt-and-suspenders).
         self._anchor_scene_index = dict(meta['anchor_scene_index'])
-        meta['messages'] = self.messages
+        meta['messages'] = guarded_messages
         meta['tool_calls'] = self.tool_calls
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
@@ -1516,7 +1532,7 @@ class Session:
                     ) = _deduplicate_exact_stable_messages(existing_messages)
                 except (json.JSONDecodeError, ValueError):
                     existing_msg_count = -1  # corrupt → always back up
-                incoming_msg_count = len(self.messages or [])
+                incoming_msg_count = len(guarded_messages or [])
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0
@@ -1589,7 +1605,14 @@ class Session:
             raise
 
         if not skip_index:
-            _write_session_index(updates=[self])
+            # Build the sidebar entry from the same guarded transcript snapshot as
+            # the JSON payload. A shallow copy avoids rebinding/mutating the live
+            # Session while keeping message_count, user count, and last-message
+            # time aligned with what this save actually persisted.
+            persisted_index_session = copy.copy(self)
+            persisted_index_session.messages = guarded_messages
+            persisted_index_session._metadata_message_count = len(guarded_messages)
+            _write_session_index(updates=[persisted_index_session])
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the

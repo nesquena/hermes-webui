@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections import OrderedDict
+from enum import IntEnum
 
 import pytest
 
@@ -13,6 +15,7 @@ def temp_session_dir(tmp_path, monkeypatch):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
     monkeypatch.setattr(models, "SESSIONS", OrderedDict())
     return session_dir
 
@@ -49,6 +52,49 @@ def test_exact_stable_replay_guard_preserves_distinct_and_unstable_rows():
         same_text_without_identity,
         same_text_without_identity,
     ]
+
+
+def test_guard_returns_a_detached_snapshot_for_a_single_message():
+    from api.models import _deduplicate_exact_stable_messages
+
+    message = {
+        "role": "user",
+        "content": "one message",
+        "id": "user-event-single",
+        "timestamp": 123.0,
+    }
+    live_messages = [message]
+
+    guarded, removed = _deduplicate_exact_stable_messages(live_messages)
+    live_messages.append({"role": "assistant", "content": "concurrent append"})
+
+    assert removed == 0
+    assert guarded == [message]
+    assert guarded is not live_messages
+
+
+@pytest.mark.parametrize("identity_field", ["id", "timestamp"])
+def test_exact_stable_replay_guard_rejects_scalar_subclass_identities(identity_field):
+    from api.models import _deduplicate_exact_stable_messages
+
+    class NumericIdentity(IntEnum):
+        ONE = 1
+
+    row = {
+        "role": "assistant",
+        "content": "same answer",
+        "id": "assistant-event-subclass",
+        "timestamp": 124.0,
+    }
+    row[identity_field] = NumericIdentity.ONE
+    duplicate = dict(row)
+
+    guarded, removed = _deduplicate_exact_stable_messages([row, duplicate])
+
+    assert removed == 0
+    assert len(guarded) == 2
+    assert guarded[0] is row
+    assert guarded[1] is duplicate
 
 
 @pytest.mark.parametrize("blank_value", ["", "   ", None])
@@ -88,6 +134,81 @@ def test_exact_stable_replay_guard_falls_back_from_blank_timestamp_to_ts():
 
     assert guarded == [persisted]
     assert removed == 1
+
+
+@pytest.mark.parametrize(
+    "identity_fields",
+    [
+        {"id": [], "timestamp": 125.5},
+        {"id": {}, "timestamp": 125.5},
+        {"id": False, "timestamp": 125.5},
+        {"id": "assistant-event-malformed", "timestamp": []},
+        {"id": "assistant-event-malformed", "timestamp": {}},
+        {"id": "assistant-event-malformed", "timestamp": False},
+        {"id": "assistant-event-malformed", "timestamp": float("nan")},
+        {"id": "assistant-event-malformed", "timestamp": float("inf")},
+        {"id": "assistant-event-malformed", "timestamp": float("-inf")},
+        {
+            "id": "assistant-event-malformed",
+            "timestamp": [],
+            "_ts": 125.5,
+        },
+    ],
+)
+def test_exact_stable_replay_guard_rejects_malformed_identity_values(
+    identity_fields,
+):
+    from api.models import _deduplicate_exact_stable_messages
+
+    row = {
+        "role": "assistant",
+        "content": "same answer",
+        **identity_fields,
+    }
+    duplicate = dict(row)
+
+    guarded, removed = _deduplicate_exact_stable_messages([row, duplicate])
+
+    assert removed == 0
+    assert len(guarded) == 2
+    assert guarded[0] is row
+    assert guarded[1] is duplicate
+
+
+def test_exact_stable_replay_guard_keeps_scalar_identity_types_separate():
+    from api.models import _deduplicate_exact_stable_messages
+
+    string_identity = {
+        "role": "assistant",
+        "content": "same answer",
+        "id": "1",
+        "timestamp": "2",
+    }
+    integer_identity = {
+        "role": "assistant",
+        "content": "same answer",
+        "id": 1,
+        "timestamp": 2,
+    }
+    float_identity = {
+        "role": "assistant",
+        "content": "same answer",
+        "id": 1.0,
+        "timestamp": 2.0,
+    }
+    messages = [
+        string_identity,
+        integer_identity,
+        float_identity,
+        dict(string_identity),
+        dict(integer_identity),
+        dict(float_identity),
+    ]
+
+    guarded, removed = _deduplicate_exact_stable_messages(messages)
+
+    assert removed == 3
+    assert guarded == [string_identity, integer_identity, float_identity]
 
 
 def test_exact_stable_replay_guard_preserves_same_id_at_different_timestamps():
@@ -132,7 +253,103 @@ def test_exact_stable_replay_guard_requires_both_id_and_timestamp(partial_identi
     assert removed == 0
 
 
-def test_session_save_repairs_live_and_backup_exact_replays(temp_session_dir):
+def test_session_save_does_not_detach_a_concurrent_alias_append(
+    temp_session_dir, monkeypatch
+):
+    from api import models
+
+    repeated = {
+        "role": "assistant",
+        "content": "same persisted answer",
+        "id": "assistant-event-concurrent",
+        "timestamp": 125.75,
+    }
+    appended = {
+        "role": "user",
+        "content": "arrived while save was scanning",
+        "id": "user-event-concurrent",
+        "timestamp": 126.75,
+    }
+    session = models.Session(
+        session_id="exact-replay-concurrent-append",
+        messages=[repeated, dict(repeated)],
+    )
+    original_messages = session.messages
+    real_guard = models._deduplicate_exact_stable_messages
+    scan_finished = threading.Event()
+    resume_save = threading.Event()
+    paused_once = threading.Event()
+
+    def pause_after_real_scan(messages):
+        result = real_guard(messages)
+        if messages is original_messages and not paused_once.is_set():
+            paused_once.set()
+            scan_finished.set()
+            assert resume_save.wait(timeout=5), "test did not resume the paused save"
+        return result
+
+    monkeypatch.setattr(
+        models,
+        "_deduplicate_exact_stable_messages",
+        pause_after_real_scan,
+    )
+    errors = []
+
+    def run_save():
+        try:
+            session.save(skip_index=True)
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    save_thread = threading.Thread(target=run_save)
+    save_thread.start()
+    assert scan_finished.wait(timeout=5), "save did not reach the post-scan pause"
+    original_messages.append(appended)
+    resume_save.set()
+    save_thread.join(timeout=5)
+
+    assert not save_thread.is_alive()
+    assert errors == []
+    assert session.messages is original_messages
+    assert session.messages[-1] is appended
+
+    first_persisted = json.loads(session.path.read_text(encoding="utf-8"))
+    assert appended not in first_persisted["messages"]
+
+    session.save(skip_index=True)
+    second_persisted = json.loads(session.path.read_text(encoding="utf-8"))
+    assert appended in second_persisted["messages"]
+    assert second_persisted["message_count"] == len(second_persisted["messages"])
+
+
+def test_session_save_indexes_the_guarded_snapshot_without_mutating_live_messages(
+    temp_session_dir,
+):
+    from api import models
+
+    repeated = {
+        "role": "assistant",
+        "content": "same persisted answer",
+        "id": "assistant-event-index",
+        "timestamp": 126.0,
+    }
+    session = models.Session(
+        session_id="exact-replay-index-snapshot",
+        messages=[repeated, dict(repeated)],
+    )
+
+    session.save()
+
+    payload = json.loads(session.path.read_text(encoding="utf-8"))
+    index = json.loads(models.SESSION_INDEX_FILE.read_text(encoding="utf-8"))
+    indexed = next(row for row in index if row["session_id"] == session.session_id)
+    assert payload["message_count"] == 1
+    assert indexed["message_count"] == 1
+    assert indexed["user_message_count"] == 0
+    assert len(session.messages) == 2
+
+
+def test_session_save_persists_and_backups_guarded_snapshot(temp_session_dir):
     from api.models import Session
     from api.session_recovery import inspect_session_recovery_status
 
