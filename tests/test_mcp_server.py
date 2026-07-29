@@ -82,6 +82,10 @@ _REPO = Path(__file__).parent.parent.resolve()
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+# The workflow that owns the per-family environments. Read, not assumed: the
+# declaration below and the job matrix are otherwise two independent lists.
+WORKFLOW_PATH = _REPO / ".github" / "workflows" / "tests.yml"
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  State-restore bookkeeping
@@ -1448,14 +1452,61 @@ class TestProtocolValidation:
         with pytest.raises(RuntimeError, match=EXPECTED_FAMILY_ENV):
             _expected_family()
 
-    async def test_declared_families_cover_every_branch_the_selector_can_pick(self):
-        """`MCP_FAMILIES` drives the job matrix, so an undeclared branch is a gap."""
+    async def test_declared_families_and_family_majors_agree(self):
+        """The two declaration constants stay in step, and the selector answers inside them.
+
+        Deliberately not claiming more: `_HAS_DECORATOR_HANDLERS` is a bool, so
+        a third registration branch keyed on some other probe would not show up
+        here. `test_workflow_matrix_declares_a_job_per_declared_family` is what
+        ties the declaration to something outside this file.
+        """
         assert set(FAMILY_MAJOR) == set(MCP_FAMILIES)
         assert _registered_family(self.mod) in MCP_FAMILIES
-        # `_HAS_DECORATOR_HANDLERS` is a bool, so the selector has exactly two
-        # outcomes. A third registration branch added without a third declared
-        # family — and a third job — fails here.
         assert isinstance(self.mod._HAS_DECORATOR_HANDLERS, bool)
+
+    async def test_workflow_matrix_declares_a_job_per_declared_family(self):
+        """The CI matrix and `MCP_FAMILIES` are the same set, read from the file.
+
+        Nothing else connects them. Adding a family to the declaration would
+        otherwise leave it with no environment, and deleting a matrix entry
+        would leave a declared family uncertified, both of them green. This also
+        pins the parts of the job that decide whether its result means anything:
+        the constraint bounds, the env wiring, and the absence of any
+        outcome-suppressing switch on the step that does the certifying.
+        """
+        import yaml
+
+        workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+        job = workflow["jobs"]["mcp-family"]
+        entries = job["strategy"]["matrix"]["include"]
+        assert {entry["family"] for entry in entries} == set(MCP_FAMILIES)
+        # Closed on both ends. An open upper bound would let the next major
+        # resolve into a job that claims to be certifying this one.
+        for entry in entries:
+            major = FAMILY_MAJOR[entry["family"]]
+            assert entry["constraint"] == f"mcp>={major},<{major + 1}"
+        install = next(
+            step for step in job["steps"]
+            if "${{ matrix.constraint }}" in (step.get("run") or "")
+        )
+        # The constraint's own command line, comments excluded: `||` anywhere on
+        # it would turn a resolution failure back into a green step.
+        constraint_line = next(
+            line for line in install["run"].splitlines()
+            if "${{ matrix.constraint }}" in line and not line.strip().startswith("#")
+        )
+        assert "||" not in constraint_line
+        certify = next(
+            step for step in job["steps"]
+            if EXPECTED_FAMILY_ENV in (step.get("env") or {})
+        )
+        assert certify["env"][EXPECTED_FAMILY_ENV] == "${{ matrix.family }}"
+        assert "tests/test_mcp_server.py" in certify["run"]
+        # A skipped or error-tolerated certification step reports the same green
+        # as a passing one, which is the defect class this whole job exists for.
+        assert certify.get("continue-on-error") is None
+        assert job.get("continue-on-error") is None
+        assert certify["if"] == "needs.changes.outputs.docs_only != 'true'"
 
     async def test_selected_family_matches_installed_package_major(self):
         """Production's probe agrees with the package metadata it is probing.
