@@ -277,6 +277,10 @@ jobs:
   # a failed install, a family mismatch, or a missing registration fails the
   # job, which is the whole point of running them separately.
   mcp-family:
+    # Name the context off the family alone. The constraint string is an
+    # implementation detail that will move when the supported range does, and a
+    # required check whose name changes with it reports pending forever.
+    name: mcp-family (${{ matrix.family }})
     needs: changes
     # Same always() rationale as the test/lint jobs above: if these are ever
     # promoted to required checks, a skipped job would report pending forever.

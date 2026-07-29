@@ -449,12 +449,23 @@ async def _call_protocol_registered(mod, tool_name, arguments=None):
 
 
 async def _list_tools_registered(mod):
+    """Dispatch `tools/list` through the registered handler, with real params.
+
+    Passing `None` here would satisfy every params type, so a handler wired to
+    the wrong model would still answer. Each family gets the object its own SDK
+    would hand the handler: a `ListToolsRequest` on 1.x, whose registry key is
+    that request class, and an instance of `entry.params_type` on 2.x.
+    """
     family = _registered_family(mod)
     entry = _registered_entry(mod, family, "tools/list", "ListToolsRequest")
+    import mcp.types as mcp_types
+
     if family == MCP_FAMILY_CONSTRUCTOR:
-        result = await entry.handler(_mcp2_request_context("tools/list"), None)
+        params = entry.params_type()
+        result = await entry.handler(_mcp2_request_context("tools/list"), params)
     else:
-        result = getattr(await entry(None), "root", None)
+        request = mcp_types.ListToolsRequest(method="tools/list")
+        result = getattr(await entry(request), "root", None)
     return result.tools
 
 
@@ -473,6 +484,28 @@ async def _call_protocol(mod, surface, tool_name, arguments=None):
 
 
 PROTOCOL_SURFACES = ["v1", "v2", "registered"]
+
+# The exact schema `move_session` publishes on the wire, asserted whole rather
+# than by spot-checking `required`. The alias key is `inputSchema` on both
+# families even though the model field is named differently (`inputSchema` on
+# 1.x, `input_schema` on 2.x), which is why the assertion reads the aliased dump
+# instead of the attribute `_TOOL_SCHEMA_FIELD` names.
+MOVE_SESSION_PUBLISHED_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "session_id": {"type": "string", "description": "Session ID"},
+        "project_id": {
+            "type": ["string", "null"],
+            "description": "Project ID (or null to unassign)",
+        },
+    },
+    "required": ["session_id", "project_id"],
+}
+
+
+def _published_tool_schema(tool):
+    """The tool's schema as the SDK serializes it for the wire."""
+    return tool.model_dump(by_alias=True)["inputSchema"]
 
 # Who rejects a schema violation on each surface, and therefore what the caller
 # sees. The two direct surfaces reach `_validate_tool_arguments`, so the error
@@ -1284,6 +1317,30 @@ class TestProtocolValidation:
         assert _registered_entry(self.mod, family, "tools/call", "CallToolRequest") is not None
         assert _registered_entry(self.mod, family, "tools/list", "ListToolsRequest") is not None
 
+    async def test_registered_list_surface_uses_installed_package_param_types(self):
+        """`tools/list` dispatches on the family's declared params type, not None.
+
+        The declared type is what a mis-wired handler would get wrong, and it is
+        family-specific: 1.x keys the registry by the request class itself, 2.x
+        carries the params model on the entry.
+        """
+        import mcp.types as mcp_types
+
+        family = _registered_family(self.mod)
+        entry = _registered_entry(self.mod, family, "tools/list", "ListToolsRequest")
+        if family == MCP_FAMILY_CONSTRUCTOR:
+            assert entry.params_type is mcp_types.PaginatedRequestParams
+            params = entry.params_type()
+            result = await entry.handler(_mcp2_request_context("tools/list"), params)
+        else:
+            assert mcp_types.ListToolsRequest in self.mod.server.request_handlers
+            request = mcp_types.ListToolsRequest(method="tools/list")
+            result = getattr(await entry(request), "root", None)
+        names = [tool.name for tool in result.tools]
+        assert names == [tool.name for tool in self.mod.TOOLS]
+        move_tool = next(tool for tool in result.tools if tool.name == "move_session")
+        assert _published_tool_schema(move_tool) == MOVE_SESSION_PUBLISHED_INPUT_SCHEMA
+
     async def test_registered_surface_uses_installed_package_param_types(self):
         """The registered call is built from the installed package's own types."""
         import mcp.types as mcp_types
@@ -1322,6 +1379,14 @@ class TestProtocolValidation:
             schema = _tool_schema(self.mod, move_tool)
             assert schema["required"] == ["session_id", "project_id"]
             assert schema["properties"]["project_id"]["type"] == ["string", "null"]
+            # Whole-schema equality against the wire form. Spot-checking two keys
+            # stays green when `session_id`'s type, a description, or the alias
+            # key itself changes, and the published contract is what a client
+            # validates against.
+            published = move_tool.model_dump(by_alias=True)
+            assert "inputSchema" in published
+            assert published["inputSchema"] == MOVE_SESSION_PUBLISHED_INPUT_SCHEMA
+            assert _published_tool_schema(move_tool) == MOVE_SESSION_PUBLISHED_INPUT_SCHEMA
 
     # ── The family mandate and the module's other ambient probes ───────────
     #
