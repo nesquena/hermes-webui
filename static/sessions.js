@@ -2538,7 +2538,11 @@ function _clearSessionSourceTabCounts() {
 }
 
 function _requestedSessionSidebarSource() {
-  return window._showCliSessions ? _sessionSourceFilter : 'webui';
+  if (!window._showCliSessions) return 'webui';
+  // When the preference is enabled and the user is on the default (all) view,
+  // don't filter by source — the backend should return all sessions.
+  if (_sessionSourceFilter === 'webui') return null;
+  return 'cli';
 }
 
 function _sessionListExcludeHiddenEnabled() {
@@ -2556,7 +2560,8 @@ function _sessionArchivePagingFilterActive() {
 
 function _sessionListQueryString() {
   const qs = new URLSearchParams();
-  qs.set('sidebar_source', _requestedSessionSidebarSource());
+  const src = _requestedSessionSidebarSource();
+  if (src !== undefined && src !== null) qs.set('sidebar_source', src);
   if(_sessionListExcludeHiddenEnabled()) qs.set('exclude_hidden','1');
   if(_showAllProfiles) qs.set('all_profiles','1');
   if(_showArchived){
