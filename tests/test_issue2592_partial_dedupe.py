@@ -1,6 +1,18 @@
 import json
 
 
+def _incomplete_reasoning_only(message_id, *, reasoning="encrypted reasoning", timestamp=123):
+    return {
+        "id": message_id,
+        "role": "assistant",
+        "content": "",
+        "timestamp": timestamp,
+        "finish_reason": "incomplete",
+        "reasoning": reasoning,
+        "codex_reasoning_items": [{"type": "reasoning", "encrypted_content": "opaque"}],
+    }
+
+
 def _tool_partial(reasoning="same reasoning", args=None, *, timestamp=123):
     return {
         "role": "assistant",
@@ -85,3 +97,70 @@ def test_session_load_collapses_adjacent_duplicate_partials(tmp_path, monkeypatc
     assert sum(1 for message in persisted["messages"] if message.get("_partial")) == 1
     assert persisted["updated_at"] == 200.0
     assert (session_dir / f"{sid}.json.bak").exists()
+
+
+def test_reasoning_only_incomplete_identity_uses_stable_message_id():
+    from api.streaming import _message_identity
+
+    first = _incomplete_reasoning_only(1701)
+    replay = _incomplete_reasoning_only(1701, timestamp=999)
+    distinct = _incomplete_reasoning_only(1702)
+
+    assert _message_identity(first) == _message_identity(replay)
+    assert _message_identity(first) != _message_identity(distinct)
+    assert _message_identity({"role": "assistant", "content": "", "finish_reason": "incomplete"}) is None
+
+
+def test_session_load_collapses_non_adjacent_duplicate_incomplete_ids(tmp_path, monkeypatch):
+    import api.models as models
+
+    sid = "fd05-copy"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    first = _incomplete_reasoning_only(1701, reasoning="first")
+    second = _incomplete_reasoning_only(1702, reasoning="second")
+    payload = {
+        "session_id": sid,
+        "title": "FD05 duplicated incomplete responses",
+        "workspace": str(tmp_path),
+        "model": "gpt-5.6",
+        "created_at": 100.0,
+        "updated_at": 200.0,
+        "messages": [
+            {"role": "user", "content": "run this"},
+            first,
+            second,
+            dict(first),
+            dict(second),
+            dict(first),
+            dict(second),
+            {"role": "assistant", "content": "final visible answer"},
+        ],
+        "tool_calls": [],
+    }
+    (session_dir / f"{sid}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = models.Session.load(sid)
+
+    assert loaded is not None
+    assert [message.get("id") for message in loaded.messages if message.get("id")] == [1701, 1702]
+    persisted = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    assert [message.get("id") for message in persisted["messages"] if message.get("id")] == [1701, 1702]
+    assert persisted["updated_at"] == 200.0
+    assert (session_dir / f"{sid}.json.bak").exists()
+
+
+def test_context_dedupe_is_idempotent_for_alternating_incomplete_ids():
+    from api.streaming import _deduplicate_context_messages
+
+    first = _incomplete_reasoning_only(1701, reasoning="first")
+    second = _incomplete_reasoning_only(1702, reasoning="second")
+    messages = [first, second, dict(first), dict(second)] * 10
+
+    once = _deduplicate_context_messages(messages)
+    twice = _deduplicate_context_messages(once)
+
+    assert [message["id"] for message in once] == [1701, 1702]
+    assert twice == once
