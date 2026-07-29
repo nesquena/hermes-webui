@@ -13016,12 +13016,25 @@ def handle_get(handler, parsed) -> bool:
             # the wire shape stays byte-equivalent to the previous inline
             # synthesis (the frontend has been reading these exact keys).
             msgs = list(synth.messages or [])
+            _all_msgs_count = len(msgs)
+            # Apply msg_limit/msg_before windowing for foreign sessions,
+            # matching the native WebUI path above (#6491). Without this, CLI/
+            # TUI/Desktop sessions return the full transcript on every load —
+            # ignoring msg_limit and omitting _messages_truncated / _messages_offset.
+            _truncated_msgs, _messages_offset = [], 0
+            if load_messages:
+                _truncated_msgs, _messages_offset = _message_window_for_display(
+                    msgs,
+                    msg_limit=msg_limit,
+                    msg_before=msg_before,
+                    expand_renderable=expand_renderable,
+                )
             sess = {
                 "session_id": synth.session_id,
                 "title": synth.title,
                 "workspace": synth.workspace,
                 "model": synth.model,
-                "message_count": len(msgs),
+                "message_count": _all_msgs_count,
                 "created_at": synth.created_at,
                 "updated_at": synth.updated_at,
                 "last_message_at": (
@@ -13055,10 +13068,24 @@ def handle_get(handler, parsed) -> bool:
                 # sessions and the user only discovers the block at
                 # POST time with a confusing 403.
                 "read_only": bool(getattr(synth, "read_only", False)),
-                "messages": msgs,
+                "messages": _truncated_msgs,
                 "tool_calls": [],
             }
-            attach_todo_state(sess, msgs)
+            # Cold-load: derive the latest settled todo snapshot from the full
+            # merged transcript, not the truncated display window. This keeps
+            # the Todos panel correct after refresh even when the latest todo
+            # tool result is outside msg_limit, and treats an explicit empty
+            # todo list as the current state instead of falling through to an
+            # older non-empty write.
+            if load_messages and msgs:
+                attach_todo_state(sess, msgs)
+            # Signal to the frontend that older messages were omitted. The
+            # message window cursor already reflects visible-row pagination and
+            # avoids false positives when raw hidden tool rows exceed msg_limit.
+            _truncated = load_messages and msg_limit is not None and _messages_offset > 0
+            sess["_messages_truncated"] = _truncated
+            sess["_messages_offset"] = _messages_offset
+            sess["_msg_limit_max"] = _MAX_MSG_LIMIT
             sess = _merge_cli_sidebar_metadata(sess, cli_meta)
             return j(handler, {"session": redact_session_data(sess)})
 
