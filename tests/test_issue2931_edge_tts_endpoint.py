@@ -1,27 +1,28 @@
-"""Validation + security-path coverage for the Edge TTS endpoint (#2931).
+"""Retirement and request-boundary coverage for the former Edge endpoint.
 
-These exercise the guard rails of _handle_tts (method, input cap, voice
-allowlist, rate limiting) in-process via a fake handler — no network and no
-real edge-tts synthesis required, since every rejection happens before the
-edge_tts import / Communicate call.
+Edge remains a reserved migration ID. It is never an executable WebUI engine;
+provider selection and synthesis are owned by Hermes Agent.
 """
+
+from __future__ import annotations
+
 import io
 import json
-import sys
-from types import SimpleNamespace
 
 import pytest
 
 import api.routes as routes
+from api.agent_tts import AgentTtsAudio
 
 
-class _FakeHandler:
-    def __init__(self, body: bytes, command: str = "POST", headers=None, client="1.2.3.4"):
+class Handler:
+    def __init__(self, body, *, command="POST", client="127.0.0.1", headers=None):
+        encoded = json.dumps(body).encode("utf-8")
         self.command = command
-        self.rfile = io.BytesIO(body)
+        self.rfile = io.BytesIO(encoded)
         self.wfile = io.BytesIO()
-        self.headers = headers or {}
-        self.headers.setdefault("Content-Length", str(len(body)))
+        self.headers = dict(headers or {})
+        self.headers.setdefault("Content-Length", str(len(encoded)))
         self.client_address = (client, 12345)
         self.status = None
         self.sent_headers = {}
@@ -36,163 +37,104 @@ class _FakeHandler:
         pass
 
     def payload(self):
-        try:
-            return json.loads(self.wfile.getvalue().decode("utf-8"))
-        except Exception:
-            return None
-
-
-def _post(body_dict, **kw):
-    body = json.dumps(body_dict).encode()
-    return _FakeHandler(body, **kw)
-
-
-def _reset_limiter():
-    # Drop any limiter state carried between tests so rate-limit assertions are
-    # deterministic regardless of run order.
-    if hasattr(routes._handle_tts, "_tts_limiter"):
-        del routes._handle_tts._tts_limiter
+        return json.loads(self.wfile.getvalue().decode("utf-8"))
 
 
 @pytest.fixture(autouse=True)
-def _fresh_tts_limiter(monkeypatch):
-    # The limiter is a function-attribute singleton that persists across the
-    # whole test session; reset it before AND after every test in this module so
-    # neither prior suite state nor these tests leak rate-limit state.
-    # Also force auth OFF: these tests exercise the method/length/voice/rate-limit
-    # guards, which sit before the auth check. Another test in the full suite can
-    # leave is_auth_enabled() True globally, which would 401 these requests before
-    # they reach the path under test. Pin it False so the assertions are
-    # deterministic regardless of suite order.
-    import api.auth as _auth
-    monkeypatch.setattr(_auth, "is_auth_enabled", lambda: False)
-    monkeypatch.setattr(routes, "is_auth_enabled", lambda: False, raising=False)
-    monkeypatch.delenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", raising=False)
-    _reset_limiter()
-    yield
-    _reset_limiter()
+def fresh_limiter(monkeypatch):
+    monkeypatch.setattr(routes, "_tts_synthesis_limiter", routes._TtsRateLimiter(0))
 
 
 def test_tts_requires_post():
-    h = _post({"text": "hello"}, command="GET")
-    routes._handle_tts(h, None)
-    assert h.status == 405
+    handler = Handler({"engine": "agent", "text": "hello"}, command="GET")
+    routes._handle_tts(handler, None)
+    assert handler.status == 405
 
 
-def test_tts_requires_text():
-    h = _post({"text": "   "})
-    routes._handle_tts(h, None)
-    assert h.status == 400
-    assert "text is required" in (h.payload() or {}).get("error", "")
+def test_missing_engine_is_invalid_and_does_not_assume_edge(monkeypatch):
+    monkeypatch.setattr(
+        routes,
+        "synthesize_agent_tts",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("worker called")),
+    )
+    handler = Handler({"text": "hello"})
+    routes._handle_tts(handler, None)
+    assert handler.status == 400
+    assert handler.payload()["code"] == "invalid_request"
 
 
-def test_tts_rejects_overlong_text():
-    h = _post({"text": "x" * 5001}, client="10.0.0.1")
-    routes._handle_tts(h, None)
-    assert h.status == 400
-    assert "too long" in (h.payload() or {}).get("error", "")
-
-
-def test_tts_rejects_unknown_voice():
-    h = _post({"text": "hello", "voice": "evil-voice-injection"}, client="10.0.0.2")
-    routes._handle_tts(h, None)
-    assert h.status == 400
-    assert "invalid voice" in (h.payload() or {}).get("error", "")
-
-
-def test_tts_rejects_invalid_rate_before_engine():
-    h = _post({"text": "hello", "voice": "en-US-AriaNeural", "rate": "<break/>"}, client="10.0.0.6")
-    routes._handle_tts(h, None)
-    assert h.status == 400
-    assert "invalid rate" in (h.payload() or {}).get("error", "")
-
-
-def test_tts_rejects_invalid_pitch_before_engine():
-    h = _post({"text": "hello", "voice": "en-US-AriaNeural", "pitch": "+500Hz"}, client="10.0.0.7")
-    routes._handle_tts(h, None)
-    assert h.status == 400
-    assert "invalid pitch" in (h.payload() or {}).get("error", "")
-
-
-def test_tts_accepts_ui_prosody_shape(monkeypatch):
-    captured = {}
-
-    class FakeCommunicate:
-        def __init__(self, text, voice, **kwargs):
-            captured["text"] = text
-            captured["voice"] = voice
-            captured["kwargs"] = kwargs
-
-        def stream_sync(self):
-            yield {"type": "audio", "data": b"abc"}
-
-    monkeypatch.setitem(sys.modules, "edge_tts", SimpleNamespace(Communicate=FakeCommunicate))
-
-    h = _post(
+def test_edge_is_reserved_migration_state_with_no_agent_dispatch(monkeypatch):
+    monkeypatch.setattr(
+        routes,
+        "synthesize_agent_tts",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("worker called")),
+    )
+    handler = Handler(
         {
+            "engine": "edge",
             "text": "hello",
             "voice": "en-US-AriaNeural",
             "rate": "+10%",
             "pitch": "-5Hz",
-        },
-        client="10.0.0.8",
+        }
     )
-    routes._handle_tts(h, None)
-
-    assert h.status == 200
-    assert captured["text"] == "hello"
-    assert captured["voice"] == "en-US-AriaNeural"
-    assert captured["kwargs"] == {"rate": "+10%", "pitch": "-5Hz"}
+    routes._handle_tts(handler, None)
+    assert handler.status == 409
+    assert handler.payload()["code"] == "legacy_tts_migration_required"
 
 
-def test_tts_rate_limits_second_immediate_request():
-    # The limiter runs (and records the client) BEFORE the voice allowlist and
-    # before any edge-tts synthesis. Use an invalid voice so the first request
-    # still registers with the limiter but returns at the allowlist (400) without
-    # making a real network call; the second immediate request from the SAME
-    # client is then throttled (429). Unique client IP avoids any cross-test key
-    # collision (the autouse fixture also resets the limiter each test).
-    h1 = _post({"text": "hello", "voice": "not-a-real-voice"}, client="10.0.0.3")
-    routes._handle_tts(h1, None)
-    assert h1.status == 400  # rejected at allowlist, limiter recorded the client
-    h2 = _post({"text": "hello", "voice": "not-a-real-voice"}, client="10.0.0.3")
-    routes._handle_tts(h2, None)
-    assert h2.status == 429
+def test_agent_rejects_edge_voice_and_prosody_overrides(monkeypatch):
+    monkeypatch.setattr(
+        routes,
+        "synthesize_agent_tts",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("worker called")),
+    )
+    handler = Handler(
+        {
+            "engine": "agent",
+            "text": "hello",
+            "voice": "en-US-AriaNeural",
+            "rate": "+10%",
+        }
+    )
+    routes._handle_tts(handler, None)
+    assert handler.status == 400
 
 
-def test_tts_rate_limit_ignores_spoofed_forwarded_for_by_default():
-    h1 = _post(
-        {"text": "hello", "voice": "not-a-real-voice"},
+def test_agent_rate_limit_uses_raw_peer_not_spoofed_forwarded_for(monkeypatch):
+    # Authorization/trusted-proxy behavior has dedicated route tests. Isolate
+    # this assertion to limiter ownership of the raw socket peer.
+    monkeypatch.setattr(routes, "_tts_gate_allows", lambda _handler: True)
+    monkeypatch.setattr(routes, "_tts_synthesis_limiter", routes._TtsRateLimiter(60))
+    monkeypatch.setattr(
+        routes,
+        "synthesize_agent_tts",
+        lambda *_a, **_k: AgentTtsAudio(
+            b"RIFF\x08\0\0\0WAVEdata", "audio/wav", "edge"
+        ),
+    )
+    first = Handler(
+        {"engine": "agent", "text": "one"},
+        client="10.0.0.4",
         headers={"X-Forwarded-For": "203.0.113.10"},
-        client="10.0.0.4",
     )
-    routes._handle_tts(h1, None)
-    assert h1.status == 400
-
-    h2 = _post(
-        {"text": "hello", "voice": "not-a-real-voice"},
+    second = Handler(
+        {"engine": "agent", "text": "two"},
+        client="10.0.0.4",
         headers={"X-Forwarded-For": "203.0.113.11"},
-        client="10.0.0.4",
     )
-    routes._handle_tts(h2, None)
-    assert h2.status == 429
+    routes._handle_tts(first, None)
+    routes._handle_tts(second, None)
+    assert first.status == 200
+    assert second.status == 429
 
 
-def test_tts_rate_limit_can_trust_forwarded_for_when_opted_in(monkeypatch):
-    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
-
-    h1 = _post(
-        {"text": "hello", "voice": "not-a-real-voice"},
-        headers={"X-Forwarded-For": "203.0.113.12"},
-        client="10.0.0.5",
+def test_agent_requires_nonempty_text_before_worker(monkeypatch):
+    monkeypatch.setattr(
+        routes,
+        "synthesize_agent_tts",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("worker called")),
     )
-    routes._handle_tts(h1, None)
-    assert h1.status == 400
-
-    h2 = _post(
-        {"text": "hello", "voice": "not-a-real-voice"},
-        headers={"X-Forwarded-For": "203.0.113.13"},
-        client="10.0.0.5",
-    )
-    routes._handle_tts(h2, None)
-    assert h2.status == 400
+    handler = Handler({"engine": "agent", "text": "   "})
+    routes._handle_tts(handler, None)
+    assert handler.status == 400

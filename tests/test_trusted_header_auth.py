@@ -799,3 +799,87 @@ signOut().then(() => process.stdout.write(JSON.stringify(window.location.href)))
 
     assert run_sign_out("https://auth.example.com/logout") == "https://auth.example.com/logout"
     assert run_sign_out(None) == "login"
+
+
+def _first_trusted_tts_handler(body=None, *, method="GET", path="/api/tts/capability"):
+    encoded = b"" if body is None else json.dumps(body).encode("utf-8")
+    handler = _Handler(
+        headers={
+            "Remote-User": "alice",
+            "Origin": "http://localhost",
+            "Host": "localhost",
+            "Content-Type": "application/json",
+            "Content-Length": str(len(encoded)),
+        }
+    )
+    handler.command = method
+    handler.path = path
+    handler.rfile = io.BytesIO(encoded)
+    return handler
+
+
+def test_first_trusted_header_request_can_read_tts_capability(monkeypatch):
+    _trusted_env(monkeypatch)
+    monkeypatch.setattr(
+        routes,
+        "run_agent_tts_operation",
+        lambda *_a, **_k: {"ok": True, "state": "ready", "providers": []},
+    )
+    handler = _first_trusted_tts_handler()
+    parsed = SimpleNamespace(path="/api/tts/capability", query="")
+
+    assert auth.check_auth(handler, parsed) is True
+    assert "Cookie" not in handler.headers
+    routes.handle_get(handler, parsed)
+
+    assert handler.status == 200
+    assert handler.json_body()["state"] == "ready"
+
+
+def test_first_trusted_header_request_cannot_post_agent_tts_without_csrf(monkeypatch):
+    _trusted_env(monkeypatch)
+    monkeypatch.setattr(routes, "_tts_synthesis_limiter", routes._TtsRateLimiter(0))
+    monkeypatch.setattr(
+        routes,
+        "synthesize_agent_tts",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("worker called")),
+    )
+    handler = _first_trusted_tts_handler(
+        {"engine": "agent", "text": "hello"},
+        method="POST",
+        path="/api/tts",
+    )
+    parsed = SimpleNamespace(path="/api/tts", query="")
+
+    assert auth.check_auth(handler, parsed) is True
+    assert "Cookie" not in handler.headers
+    routes.handle_post(handler, parsed)
+
+    assert handler.status == 403
+    assert handler.json_body()["error"] == "Session expired - reload the page"
+
+
+def test_first_trusted_header_request_cannot_post_tts_provider_without_csrf(monkeypatch):
+    _trusted_env(monkeypatch)
+    monkeypatch.setattr(routes, "_tts_provider_limiter", routes._TtsRateLimiter(0))
+    monkeypatch.setattr(
+        routes,
+        "run_agent_tts_operation",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("worker called")),
+    )
+    handler = _first_trusted_tts_handler(
+        {
+            "provider": "Microsoft Edge TTS",
+            "expected_config_fingerprint": "sha256:" + "0" * 64,
+        },
+        method="POST",
+        path="/api/tts/provider",
+    )
+    parsed = SimpleNamespace(path="/api/tts/provider", query="")
+
+    assert auth.check_auth(handler, parsed) is True
+    assert "Cookie" not in handler.headers
+    routes.handle_post(handler, parsed)
+
+    assert handler.status == 403
+    assert handler.json_body()["error"] == "Session expired - reload the page"

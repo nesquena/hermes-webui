@@ -284,7 +284,7 @@ work has shifted from "reach parity" to "harden reliability + widen distribution
 - [x] Opt-in extension loader — serve local static assets, inject same-origin CSS/JS into the app shell
 - [x] One-click install from an in-app gallery (Settings → Extensions) into a WebUI-managed state-dir directory (no restart, no env vars)
 - [x] Manifest contract (`extensions.json`) for bundled / multi-extension installs
-- [x] Capability surface — register custom themes (skins), register custom TTS engines, add nav-actions, declare loopback sidecars, embed an external web app in an iframe tab
+- [x] Capability surface — register custom themes (skins), add nav-actions, declare loopback sidecars, embed an external web app in an iframe tab
 - [x] Per-extension settings schema + owned storage
 - [x] Consented extension sidecar proxy path (no arbitrary backend route registration)
 - [x] Status + diagnostics endpoint

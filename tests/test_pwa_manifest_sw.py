@@ -311,6 +311,14 @@ class TestIndexHtmlIntegration:
             "version query used by index.html"
         )
 
+    def test_sw_precaches_tts_controller(self):
+        """Installed PWAs must retain the controller required by all TTS modes offline."""
+        src = SW.read_text(encoding="utf-8")
+        assert "tts.js' + VQ" in src or 'tts.js" + VQ' in src, (
+            "sw.js SHELL_ASSETS must pre-cache tts.js with the same version query "
+            "used by index.html so offline Listen, auto-read, and voice mode load"
+        )
+
     def test_manifest_has_native_launch_fields(self):
         data = json.loads(MANIFEST.read_text(encoding="utf-8"))
         assert data.get("id") == "./"

@@ -49,25 +49,26 @@ class TestTtsUtilityFunctions:
         assert 'MEDIA:' in src and 'a file' in src, \
             "_stripForTTS must replace MEDIA: paths"
 
-    def test_uses_speech_synthesis(self):
-        """speakMessage must use window.speechSynthesis."""
-        src = _read('ui.js')
-        assert 'SpeechSynthesisUtterance' in src, \
-            "speakMessage must create SpeechSynthesisUtterance"
-        assert 'speechSynthesis.speak' in src, \
-            "speakMessage must call speechSynthesis.speak"
+    def test_uses_shared_tts_controller(self):
+        """Listen delegates playback to the shared controller."""
+        ui = _read('ui.js')
+        controller = _read('tts.js')
+        assert 'window.HermesTTS.speak(clean' in ui
+        assert 'SpeechSynthesisUtterance' not in ui
+        assert 'new SpeechSynthesisUtterance' in controller
+        assert 'window.speechSynthesis.speak' in controller
 
-    def test_speak_message_routes_openai(self):
+    def test_speak_message_has_no_direct_provider_dispatch(self):
         src = _read('ui.js')
-        assert "if(engine==='openai')" in src, \
-            "speakMessage must branch for the OpenAI TTS engine"
-        assert '_playOpenaiTts(clean, btn);' in src, \
-            "speakMessage must route OpenAI TTS through _playOpenaiTts"
+        assert "engine==='openai'" not in src
+        assert '_playOpenaiTts' not in src
+        assert "api/tts" not in src
 
-    def test_auto_read_routes_openai(self):
+    def test_auto_read_uses_shared_controller(self):
         src = _read('ui.js')
-        assert '_playOpenaiTts(clean, null);' in src, \
-            "autoReadLastAssistant must route OpenAI TTS through _playOpenaiTts"
+        assert 'function autoReadLastAssistant(' in src
+        assert "_ttsPlaybackOptions(null,'auto-read')" in src
+        assert '_playOpenaiTts' not in src
 
 
 class TestTtsSpeakerButton:
@@ -121,10 +122,15 @@ class TestTtsSettings:
         assert 'settingsTtsVoice' in src, \
             "TTS voice selector not found in index.html"
 
-    def test_tts_engine_includes_openai_option(self):
+    def test_tts_engine_only_exposes_browser_and_agent(self):
         src = _read('index.html')
-        assert '<option value="openai">OpenAI TTS (server)</option>' in src, \
-            "settingsTtsEngine must expose the OpenAI server TTS option"
+        start = src.index('id="settingsTtsEngine"')
+        end = src.index('</select>', start)
+        options = src[start:end]
+        assert 'value="browser"' in options
+        assert 'value="agent"' in options
+        for retired in ('edge', 'elevenlabs', 'openai', 'server'):
+            assert f'<option value="{retired}">' not in options
 
     def test_tts_rate_slider(self):
         src = _read('index.html')
@@ -150,12 +156,11 @@ class TestTtsSettings:
         assert 'function _applyTtsEnabled(' in src, \
             "_applyTtsEnabled function not found in panels.js"
 
-    def test_openai_voice_placeholder_in_panels(self):
+    def test_agent_voice_surface_uses_provider_guidance(self):
         src = _read('panels.js')
-        assert "engine==='openai'" in src, \
-            "panels.js must branch for the OpenAI TTS engine"
-        assert 'OpenAI voice (server-configured)' in src, \
-            "OpenAI TTS must present a server-configured voice placeholder"
+        assert 'settingsTtsProviderField' in src
+        assert 'tts_provider_guidance' in src
+        assert 'OpenAI voice (server-configured)' not in src
 
 
 class TestTtsI18n:
@@ -188,12 +193,13 @@ class TestTtsAutoRead:
             "autoReadLastAssistant not called in messages.js"
 
     def test_tts_pause_on_composer_focus(self):
-        """Speech should pause when user focuses the composer."""
-        src = _read('messages.js')
-        assert 'speechSynthesis.pause' in src, \
-            "speechSynthesis.pause not called in messages.js"
-        assert 'speechSynthesis.resume' in src, \
-            "speechSynthesis.resume not called in messages.js"
+        """Composer focus pauses through the shared lifecycle owner."""
+        messages = _read('messages.js')
+        controller = _read('tts.js')
+        assert 'window.HermesTTS.pause()' in messages
+        assert 'window.HermesTTS.resume()' in messages
+        assert 'window.speechSynthesis.pause()' in controller
+        assert 'window.speechSynthesis.resume()' in controller
 
 
 class TestTtsBoot:

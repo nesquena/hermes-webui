@@ -466,22 +466,26 @@ else
     fi
     chmod -R u+w "$_stage_src" \
       || error_exit "Failed to make staged hermes-agent source writable (rsync/cp preserved :ro mount perms)"
-    uv pip install "$_stage_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org \
+    # Hermes Agent intentionally blocks wheel/sdist builds. Install the locked
+    # dependency graph into the active WebUI venv without installing the Agent
+    # project itself; runtime imports resolve from the mounted source tree.
+    uv sync --project "$_stage_src" --locked --extra all --active --inexact --no-install-project \
       || error_exit "Failed to install hermes-agent's requirements"
     rm -rf "$_stage_src"
+    # The project itself was intentionally not installed. Make the canonical
+    # read-only source mount importable by the WebUI and every worker child.
+    export PYTHONPATH="$_agent_src${PYTHONPATH:+:$PYTHONPATH}"
   else
     echo ""
-    echo "!! WARNING: hermes-agent source not found."
-    echo "!!   Looked in: ${_agent_paths[0]}"
-    echo "!!              ${_agent_paths[1]}"
-    echo "!! The WebUI will start with reduced functionality (no model auto-detection,"
-    echo "!! no personality routing, no CLI session imports)."
-    echo "!! To fix: mount the agent source volume into the container:"
-    echo "!!   -v /path/to/hermes-agent:/home/hermeswebui/.hermes/hermes-agent"
-    echo "!! Or see the two-container compose example:"
-    echo "!!   https://github.com/nesquena/hermes-webui/blob/master/docker-compose.two-container.yml"
-    echo ""
+    _agent_package_requirement="hermes-agent==0.19.0"
+    echo "== Hermes Agent source not mounted; installing ${_agent_package_requirement}"
+    uv pip install "$_agent_package_requirement" \
+      --trusted-host pypi.org --trusted-host files.pythonhosted.org \
+      || error_exit "Failed to install the packaged Hermes Agent runtime"
   fi
+  /app/venv/bin/python -c \
+    'from tools import tts_tool; from hermes_cli import config, tools_config' \
+    || error_exit "Hermes Agent TTS imports are unavailable"
   touch /app/venv/.deps_installed
 fi
 

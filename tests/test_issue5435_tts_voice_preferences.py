@@ -263,7 +263,7 @@ def test_backend_schema_contains_typed_speech_validation():
 
 def test_boot_mirrors_server_settings_before_tts_apply_and_preserves_failure_fallback():
     mirror_idx = BOOT_JS.index("function _mirrorSpeechSettingsFromServer")
-    success_call_idx = BOOT_JS.index("_mirrorSpeechSettingsFromServer(s);", mirror_idx)
+    success_call_idx = BOOT_JS.index("_mirrorSpeechSettingsFromServer(s,_bootSpeechSettingsGeneration);", mirror_idx)
     apply_idx = BOOT_JS.index("_applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true')", success_call_idx)
     catch_idx = BOOT_JS.index("}catch(e){", success_call_idx)
     failure_apply_idx = BOOT_JS.index("_applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true')", catch_idx)
@@ -416,7 +416,7 @@ def test_settings_panel_persists_speech_fields_and_keeps_immediate_cache_writes(
         "hermes-raw-audio-mode",
     ]:
         assert storage_key in panel_block or storage_key in payload_block
-    assert "_speechSetting('tts_engine','hermes-tts-engine','browser')" in panel_block
+    assert "window.HermesTTS.getSettingsState(settings,{refresh:true})" in PANELS_JS
     assert "function _speechPreferencesPayloadFromUi()" in PANELS_JS
     assert "savedRate||'1'" not in panel_block
     assert "savedPitch||'1'" not in panel_block

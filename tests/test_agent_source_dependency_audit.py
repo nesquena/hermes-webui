@@ -113,7 +113,12 @@ def test_audit_reports_startup_install_dependencies():
     assert ("start.ps1", "HERMES_WEBUI_AGENT_DIR") in anchors
     assert ("api/startup.py", "auto_install_agent_deps") in anchors
     assert ("server.py", "auto_install_agent_deps") in anchors
-    assert any("uv pip install" in text and "[all]" in text for text in texts)
+    assert any(
+        "uv sync" in text
+        and "--extra all" in text
+        and "--no-install-project" in text
+        for text in texts
+    )
 
 
 def test_audit_reports_runtime_agent_execution_imports():

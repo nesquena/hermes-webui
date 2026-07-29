@@ -27,6 +27,8 @@ async function api(path,opts={}){
       delete fetchOpts.retryTimeouts;
       delete fetchOpts.retryStatuses;
       delete fetchOpts.retryDelayMs;
+      const responseType=fetchOpts.responseType||'auto';
+      delete fetchOpts.responseType;
 
       const useTimeout=Number.isFinite(Number(timeoutMs))&&Number(timeoutMs)>0;
       if(useTimeout&&typeof AbortController!=='undefined'){
@@ -78,6 +80,12 @@ async function api(path,opts={}){
           throw err;
         }
         const ct=res.headers.get('content-type')||'';
+        if(responseType==='binary'){
+          const rawLength=res.headers.get('content-length');
+          const contentLength=rawLength===null?null:Number(rawLength);
+          const data=await res.arrayBuffer();
+          return {data,contentType:ct,contentLength,status:res.status,headers:res.headers};
+        }
         return ct.includes('application/json')?await res.json():await res.text();
       })();
       return useTimeout?await Promise.race([

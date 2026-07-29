@@ -915,6 +915,26 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
     return env
 
 
+def _profile_dotenv_keys(home: Path) -> set[str]:
+    """Return declared dotenv names without loading sibling-profile values."""
+    env_path = Path(home).expanduser() / '.env'
+    try:
+        lines = env_path.read_text(encoding='utf-8').splitlines()
+    except (OSError, UnicodeError):
+        return set()
+    keys: set[str] = set()
+    for line in lines:
+        line = line.strip()
+        if line.startswith('export '):
+            line = line[7:].lstrip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key = line.split('=', 1)[0].strip()
+        if key:
+            keys.add(key)
+    return keys
+
+
 # Match Hermes Agent gateway behavior: profile-scoped WebUI runs should
 # project intended runtime vars (credentials, HERMES_HOME, TERMINAL_*)
 # without allowing profile env to override core shell identity variables
@@ -1085,6 +1105,104 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
             if env_name:
                 names.add(env_name)
     return names
+
+
+def _all_profile_homes_for_env_scrub() -> list[Path]:
+    homes = [_DEFAULT_HERMES_HOME]
+    profiles_dir = _DEFAULT_HERMES_HOME / "profiles"
+    try:
+        homes.extend(path for path in profiles_dir.iterdir() if path.is_dir())
+    except OSError:
+        pass
+    return homes
+
+
+def build_profile_subprocess_env(
+    profile_name: str,
+    profile_home: Path | None = None,
+) -> dict[str, str]:
+    """Build an isolated child env without mutating process-global state."""
+    home = Path(
+        profile_home or get_hermes_home_for_profile(profile_name)
+    ).expanduser().resolve(strict=False)
+    child_env = dict(os.environ)
+    try:
+        tts_request_max_chars = int(
+            child_env.get("HERMES_WEBUI_TTS_REQUEST_MAX_CHARS", "4000")
+        )
+    except (TypeError, ValueError):
+        tts_request_max_chars = 4000
+    tts_request_max_chars = max(256, min(tts_request_max_chars, 10000))
+    # A process-wide switch may have loaded arbitrary custom names from another
+    # profile's .env. Scrub every declared profile-owned name before projecting
+    # only the selected profile's values; provider registries cannot enumerate
+    # user-defined command-provider variables.
+    for profile_home_path in _all_profile_homes_for_env_scrub():
+        for key in _profile_dotenv_keys(profile_home_path):
+            child_env.pop(key, None)
+
+    # The one-shot Agent worker needs the selected profile's Agent/provider
+    # runtime, not WebUI authentication posture or interpreter/loader injection
+    # controls inherited from the long-lived server. Apply this denylist both
+    # before and after profile projection so a profile dotenv cannot re-add one.
+    blocked_child_keys = {
+        "BASH_ENV",
+        "ENV",
+        "GCONV_PATH",
+        "LD_AUDIT",
+        "LD_DEBUG",
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "NODE_OPTIONS",
+        "PERL5OPT",
+        "PYTHONBREAKPOINT",
+        "PYTHONHOME",
+        "PYTHONINSPECT",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "RUBYOPT",
+    }
+
+    def scrub_non_agent_runtime(env: dict[str, str]) -> None:
+        for key in tuple(env):
+            if (
+                key in blocked_child_keys
+                or key.startswith("DYLD_")
+                or key.startswith("HERMES_WEBUI_")
+            ):
+                env.pop(key, None)
+
+    scrub_non_agent_runtime(child_env)
+
+    # Remove every credential name known to any local profile before adding the
+    # selected profile's filtered runtime env. This closes stale process-env
+    # leakage from startup/default and prior process-wide profile switches.
+    secret_names: set[str] = set()
+    homes = _all_profile_homes_for_env_scrub()
+    if home not in homes:
+        homes.append(home)
+    for candidate_home in homes:
+        try:
+            secret_names.update(_profile_secret_env_names(Path(candidate_home)))
+        except Exception:
+            logger.debug("Failed to enumerate profile secret env names", exc_info=True)
+    for key in secret_names:
+        child_env.pop(key, None)
+
+    safe_runtime_env = filter_runtime_env_for_gateway_parity(
+        get_profile_runtime_env(home)
+    )
+    child_env.update(safe_runtime_env)
+    scrub_non_agent_runtime(child_env)
+    # Server-owned bindings always win over profile dotenv/config values.
+    child_env["HERMES_HOME"] = str(home)
+    child_env["HERMES_CONFIG_PATH"] = str((home / "config.yaml").resolve(strict=False))
+    child_env["HERMES_SESSION_PLATFORM"] = "webui"
+    # This one bounded server-owned transport knob is part of the worker
+    # contract. Re-add the validated parent value after the blanket WebUI scrub
+    # so profile dotenv files cannot replace it.
+    child_env["HERMES_WEBUI_TTS_REQUEST_MAX_CHARS"] = str(tts_request_max_chars)
+    return child_env
 
 
 def _apply_profile_env_to_process(

@@ -1668,6 +1668,10 @@ async function _switchProfileForSessionLoad(profile){
 
 async function loadSession(sid){
   const opts = arguments[1] || {};
+  if(S.session&&S.session.session_id&&S.session.session_id!==sid){
+    if(typeof window._voiceModeDeactivate==='function'&&window._voiceModeActive&&window._voiceModeActive())window._voiceModeDeactivate();
+    else if(window.HermesTTS)window.HermesTTS.stop('session-changed');
+  }
   // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
   // notifications so extensions always see the canonical session id, not the
   // raw sidebar click id (which may differ after lineage folding).

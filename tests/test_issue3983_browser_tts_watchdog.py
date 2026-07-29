@@ -1,82 +1,76 @@
+"""Browser speech watchdog and unified voice-mode lifecycle regressions."""
+
 from pathlib import Path
-import re
 
 
-REPO = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1]
+TTS_JS = (ROOT / "static" / "tts.js").read_text(encoding="utf-8")
+BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 
 
-def _extract_function(src: str, name: str) -> str:
-    anchor = f"function {name}("
-    start = src.find(anchor)
-    assert start != -1, f"{name}() must exist"
-    body_start = src.find("{", start)
-    assert body_start != -1, f"{name}() must have a body"
-    depth = 1
-    idx = body_start + 1
-    while depth and idx < len(src):
-        if src[idx] == "{":
-            depth += 1
-        elif src[idx] == "}":
-            depth -= 1
-        idx += 1
-    assert depth == 0, f"{name}() body must balance braces"
-    return src[start:idx]
+def _function_region(source: str, start_marker: str, end_marker: str) -> str:
+    start = source.index(start_marker)
+    end = source.index(end_marker, start)
+    return source[start:end]
 
 
-def test_boot_js_declares_browser_tts_recovery_helpers():
-    src = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    assert "let _browserTtsKeepAlive=null;" in src
-    assert "let _browserTtsWatchdog=null;" in src
-    assert "let _browserTtsSuppressNextErrorRearm=false;" in src
-    assert "function _clearBrowserTtsRecovery()" in src
-    assert "function _armBrowserTtsRecovery(clean, rate)" in src
+def test_shared_controller_owns_browser_watchdog_and_keepalive():
+    browser = _function_region(TTS_JS, "async function _browserChunk", "async function _resolveEffectiveEngine")
+    assert "state.watchdog=setTimeout" in browser
+    assert "window.speechSynthesis.cancel()" in browser
+    assert "state.keepAlive=setInterval" in browser
+    assert "window.speechSynthesis.pause()" in browser
+    assert "window.speechSynthesis.resume()" in browser
+    assert ".finally(()=>_clearBrowser(state))" in browser
 
 
-def test_browser_tts_watchdog_rearms_listening_if_onend_drops():
-    src = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    arm_body = _extract_function(src, "_armBrowserTtsRecovery")
-    assert "_browserTtsWatchdog=setTimeout" in arm_body
-    assert "_voiceModeState!=='speaking'" in arm_body
-    assert "_browserTtsSuppressNextErrorRearm=true;" in arm_body
-    assert "speechSynthesis.cancel()" in arm_body
-    assert "_startListening();" in arm_body
-    assert "_browserTtsKeepAlive=setInterval" in arm_body
-    assert "speechSynthesis.pause();" in arm_body
-    assert "speechSynthesis.resume();" in arm_body
+def test_stop_clears_every_browser_recovery_resource():
+    stop = _function_region(TTS_JS, "function stop(", "async function getCapability")
+    clear = _function_region(TTS_JS, "function _clearBrowser", "function stop(")
+    assert "_clearBrowser(state,true)" in stop
+    assert "if(state.chunkReject)" in stop
+    assert "clearTimeout(state.watchdog)" in clear
+    assert "clearInterval(state.keepAlive)" in clear
+    assert "window.speechSynthesis.cancel()" in clear
 
 
-def test_browser_tts_callbacks_and_deactivate_clear_recovery_handles():
-    src = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    speak_body = _extract_function(src, "_speakResponse")
-    assert "const utter=new SpeechSynthesisUtterance(clean);" in speak_body
-    assert "utter.onend=()=>{" in speak_body
-    assert "utter.onerror=()=>{" in speak_body
-    assert speak_body.count("_clearBrowserTtsRecovery();") >= 2, (
-        "Both browser TTS completion callbacks must clear watchdog/keep-alive handles."
-    )
-    assert "_browserTtsSuppressNextErrorRearm=false;" in speak_body
-    assert "_voiceModeActive&&_voiceModeState==='speaking'" in speak_body
-    assert "if(_browserTtsSuppressNextErrorRearm){" in speak_body
-    assert "_armBrowserTtsRecovery(clean, utter.rate);" in speak_body
-
-    deactivate_body = _extract_function(src, "_deactivate")
-    assert "_clearBrowserTtsRecovery();" in deactivate_body, (
-        "_deactivate() must clear browser TTS watchdog/keep-alive handles."
-    )
-    assert "_browserTtsSuppressNextErrorRearm=false;" in deactivate_body
+def test_agent_chunk_has_playback_watchdog_matching_browser_contract():
+    agent = _function_region(TTS_JS, "async function _agentChunk", "async function _browserChunk")
+    # The agent path must own its own watchdog so a hung HTMLAudioElement
+    # cannot stall speak() indefinitely — same defensive pattern as
+    # _browserChunk. The estimate uses the artifact byte length with a
+    # 4 KB/s floor (slowest realistic compressed codec).
+    assert "state.watchdog=setTimeout" in agent
+    assert "length/4" in agent
+    assert "Agent TTS audio playback timed out." in agent
+    assert "clearTimeout(state.watchdog)" in agent
 
 
-def test_edge_audio_branch_stays_separate():
-    src = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    edge_match = re.search(
-        r'if\(engine==="edge"\)\{(.*?)\n\s+return;\n\s+\}',
-        src,
-        re.DOTALL,
-    )
-    assert edge_match, "Edge audio branch must exist"
-    edge_body = edge_match.group(1)
-    assert "const audio = new Audio(url);" in edge_body
-    assert "audio.onended = () => {" in edge_body
-    assert "_armBrowserTtsRecovery" not in edge_body, (
-        "The browser speechSynthesis workaround must not be injected into the Edge audio branch."
-    )
+def test_voice_mode_routes_through_controller_and_rearms_at_most_once():
+    speak = _function_region(BOOT_JS, "function _speakResponse", "// Hook into response completion")
+    assert "window.HermesTTS.speak(clean" in speak
+    assert "const voiceGeneration=++_voiceTtsGeneration" in speak
+    assert "if(_voiceTtsRearmTimer)clearTimeout" in speak
+    assert "voiceGeneration===_voiceTtsGeneration" in speak
+    assert "onEnd:()=>rearm(500)" in speak
+    assert "onError:error=>" in speak
+    assert "onStop:()=>" in speak
+    assert "_deactivate()" in speak
+    assert "SpeechSynthesisUtterance" not in speak
+    assert "fetch(" not in speak
+
+
+def test_voice_mode_does_not_require_browser_tts_globally():
+    voice_setup = _function_region(BOOT_JS, "// ── Turn-based voice mode", "const modeBtn")
+    assert "if(!hasSTT) return;" in voice_setup
+    assert "hasTTS" not in voice_setup
+    assert "speechSynthesis" not in voice_setup
+
+
+def test_session_and_profile_switch_deactivate_voice_mode_before_stopping_tts():
+    session_load = _function_region(SESSIONS_JS, "async function loadSession", "// Resolve canonical lineage SID")
+    profile_switch = _function_region(PANELS_JS, "async function switchToProfile", "// ── #4671 profile-switch")
+    assert "window._voiceModeDeactivate()" in session_load
+    assert "window._voiceModeDeactivate()" in profile_switch

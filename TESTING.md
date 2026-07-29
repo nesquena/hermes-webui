@@ -15,6 +15,69 @@
 
 ---
 
+## Agent-delegated TTS validation
+
+Focused automated gate:
+
+```bash
+./scripts/test.sh \
+  tests/test_agent_tts_worker.py \
+  tests/test_agent_tts_profiles.py \
+  tests/test_agent_tts_capability.py \
+  tests/test_agent_tts_provider_selection.py \
+  tests/test_agent_tts_synthesis.py \
+  tests/test_agent_tts_routes.py \
+  tests/test_agent_tts_integration.py \
+  tests/test_agent_tts_docker_contract.py \
+  tests/test_tts_controller.py \
+  tests/test_tts_settings_migration.py \
+  tests/test_tts_i18n_parity.py \
+  tests/test_extension_tts_engine_registration.py \
+  -q
+npm install --no-save --ignore-scripts --no-audit --no-fund
+npm run lint:runtime
+```
+
+Use isolated profiles and state for integration. Do not print config files,
+`.env`, credentials, cookies, or worker environments. The test profile should
+use an offline Agent command provider that writes known audio. Verify default
+and named profiles concurrently and select a provider through a symlinked
+`config.yaml`; check the link inode separately from the referent and confirm the
+installed Agent loader sees the new selection.
+
+Manual browser matrix (capture screenshots, Console, Network headers/status,
+timing, and before/after worker/temp-file counts):
+
+1. Browser: Listen, auto-read, voice mode, stop, and replacement.
+2. Agent offline command provider: all entry points and long sequential chunks.
+3. Call `registerHermesTtsEngine` with absent/malformed/valid/repeated values;
+   every call returns strict `false`, adds no option/audio, and retains no callback.
+4. Drive hung Agent/504, old-signature/503, unavailable configured provider, and
+   zero-byte audio in voice mode; controls reset, stale audio never plays, rearm
+   occurs at most once, and persisted Agent/legacy selection remains unchanged.
+5. Capability unsupported, provider conflict/timeout, browser speech present and
+   absent, and a former extension persisted ID.
+6. Change provider in another tab and with `hermes tools`; reopen Settings.
+7. Migrate persisted Edge/OpenAI/ElevenLabs on success and verify exact unchanged
+   state on failure. Network must show no direct provider request; stale legacy
+   synthesis returns `409 legacy_tts_migration_required`.
+8. Switch profile during capability, synthesis, playback, and provider POST.
+9. Check 1440×900, 390×844, short landscape, keyboard, and screen reader; status
+   is announced and unavailable rows are disabled.
+10. Check auth enabled and loopback auth-disabled posture, including a trusted-
+    header first request with no incoming cookie.
+11. Console has no attributable errors/warnings; aborted requests are cancelled;
+    worker and temp-directory counts return to baseline after every scenario.
+
+Subpath/reverse-proxy deployments must use relative `/api/tts*` resolution and
+preserve normal cookies/CSRF. For Docker, run the repository compose smoke and
+inside the shipped container verify:
+
+```bash
+python -c "from tools import tts_tool; print(callable(tts_tool.text_to_speech_tool))"
+python -m api.agent_tts_worker </dev/null; test $? -eq 2
+```
+
 ## Static JS runtime lint (brick-class regression guard)
 
 Some JS bugs throw a `TypeError`/`ReferenceError` only when a specific function

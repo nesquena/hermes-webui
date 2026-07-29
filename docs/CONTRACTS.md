@@ -89,6 +89,109 @@ Proposed RFCs are review guardrails, not implementation authorization. Do not
 implement RFC fragments unless the task or tracking issue explicitly asks for
 that slice.
 
+## Agent-delegated text-to-speech contract
+
+Hermes WebUI owns the authenticated browser transport and playback lifecycle,
+but it does **not** own cloud/local provider implementations or credentials. For
+`engine: agent`, each capability, provider-selection, or synthesis operation is
+delegated to one short-lived `api.agent_tts_worker` child using the active
+profile environment. The worker imports the installed Hermes Agent's current
+TTS/configuration callables; no Agent daemon, API, service, or core change is
+required.
+
+The callable compatibility boundary is fail-closed:
+
+- capability requires Agent config loading, TTS catalog visibility/active checks,
+  requirement checks, and `text_to_speech_tool(text, output_path)`;
+- provider writes additionally require `apply_provider_selection`, `save_config`,
+  and config-path discovery;
+- older/missing signatures return a finite sanitized unsupported response and do
+  not alter the persisted WebUI engine;
+- provider rows come from Agent metadata. Known provider IDs map through a fixed
+  lowercase `tts_provider_*` locale allowlist; command/plugin rows use their safe
+  Agent names without dynamically creating locale keys.
+
+The active profile owns the canonical provider and provider credentials in its
+Agent `config.yaml`/environment. The WebUI never accepts provider, model, URL,
+credential, output-path, or environment overrides on synthesis requests. Child
+environments remove every name declared by any profile `.env`, all `HERMES_WEBUI_*`
+authentication/deployment values, and interpreter/dynamic-loader injection
+controls before projecting only the selected profile runtime. Shared YAML writes use
+the same sidecar lock across WebUI threads and Agent TTS children, serialize the
+full read/modify/write transaction, preserve symlink bindings, atomically replace
+the referent, fsync the file and referent directory, and invalidate both link and
+target cache entries.
+
+`POST /api/tts` accepts only `{"engine":"agent","text":"..."}`. Browser
+speech is local and never reaches that endpoint. The reserved IDs `edge`,
+`openai`, `elevenlabs`, and `server` return
+`409 legacy_tts_migration_required`; former extension IDs are inert persisted
+repair values. Only Browser and Hermes Agent are selectable. If a persisted
+Agent/legacy choice is unavailable, effective Browser playback is session-only
+and never silently overwrites the saved choice. Capability discovery is cached by
+profile until explicit Refresh/profile invalidation; concurrent consumers share one
+in-flight request, and a successful provider mutation writes its authoritative
+replacement metadata through to that cache. Legacy migration targets the direct
+built-in provider row rather than a managed row with the same runtime ID, and a
+timed-out migration is successful only when an authoritative settings read confirms
+`tts_engine: agent`.
+
+Ordinary speech-preference autosaves carry the last observed
+`speech_settings_revision`. The server compares that revision while holding the
+shared settings write lock; the revision is a restart-stable hash of the exact
+sparse persisted speech state, so out-of-process edits are visible and stale
+writes return `409 settings_conflict`. Browser
+autosaves are serialized, ignore stale completions, and refetch authoritative
+settings before rolling back a failed optimistic engine change.
+
+Each operation has a 64 KiB request/status limit, a 10-second capability timeout,
+a 60-second synthesis timeout, a 16 MiB audio limit, one concurrent operation per
+canonical principal/profile owner across capability, provider, and synthesis calls;
+auth-disabled deployments use the raw peer unless the existing trusted-proxy
+`X-Forwarded-For` policy is explicitly enabled, in which case the validated
+forwarded client receives its own bucket. Two global workers run by default. `HERMES_WEBUI_TTS_MAX_WORKERS` may set
+1–8 global workers; `HERMES_WEBUI_TTS_REQUEST_MAX_CHARS` may set the transport
+text ceiling (clamped to 256–10,000 and further bounded by the Agent provider).
+Every exit kills and reaps the worker process group, including descendants left by
+an already-exited worker leader; Windows additionally assigns workers to a
+kill-on-close Job Object. Agent providers/plugins remain trusted local code: on
+POSIX, a descendant that deliberately creates a new session can escape process-group
+cleanup unless the deployment supplies cgroup or equivalent supervisor containment.
+Audio is opened beneath the request root without following any path-component
+symlink, then descriptor-, size-, MIME-, and signature-validated before raw bytes
+are returned with `no-store` and `nosniff`; request directories and browser object
+URLs are cleaned on every exit.
+
+Provider writes hold the shared sidecar lock across the full read/validate/save/
+authoritative-reprobe transaction. A non-migration `select_provider` whose
+post-save reprobe fails restores the exact sparse prior `tts` subtree under the
+same lock before raising `config_write_failed`, so a persisted saved choice is
+never silently overwritten by an unverified commit; if compensation itself
+cannot confirm authoritative state, the response is `config_write_compensation_failed`
+and the saved choice's integrity is the operator's responsibility to repair.
+Browser and Agent playback both own a per-chunk watchdog sized to the artifact
+(text or bytes), so a hung `speechSynthesis` utterance or `HTMLAudioElement`
+cannot stall `speak()` indefinitely; `_clearBrowser` clears every recovery
+resource (`watchdog`, `keepAlive`, `utterance`, `speechSynthesis.cancel()`)
+on stop.
+
+All TTS routes use normal WebUI auth and POST CSRF checks. A trusted-header
+first request may establish the session with a GET, but its first unsafe request
+must return the normal CSRF failure until the browser reloads with the new cookie
+and token. When WebUI auth is disabled, the same
+trusted-proxy-aware local-origin gate as the embedded terminal applies before any
+worker is started; spoofed forwarding headers fail closed. Relative `api()` URLs preserve subpath
+and reverse-proxy deployments. Docker must ship an installed Agent package that
+is importable by `sys.executable -m api.agent_tts_worker`.
+
+Safe troubleshooting (do not print `.env`, config contents, keys, or cookies):
+
+```bash
+hermes tools
+python -c "from tools import tts_tool; print(tts_tool.check_tts_requirements())"
+python -c "from hermes_cli import config; print(config.get_config_path())"
+```
+
 ## UI, UX, and theme contracts
 
 - [`DESIGN.md`](../DESIGN.md): design tokens and the current calm-console

@@ -6903,6 +6903,8 @@ function _openProfileSwitchSessionBrowser(){
 }
 
 async function switchToProfile(name) {
+  if(typeof window._voiceModeDeactivate==='function'&&window._voiceModeActive&&window._voiceModeActive())window._voiceModeDeactivate();
+  if(window.HermesTTS)window.HermesTTS.invalidateCapability();
   // ── #4671 profile-switch loading-skeleton — FOUR-GUARD CONTRACT ───────────────
   // The skeleton must never be clobbered by the OLD profile's content and must never
   // strand. Four interacting pieces of state cooperate; an edit touching one without
@@ -7476,6 +7478,9 @@ let _settingsAppearanceAutosaveTimer = null;
 let _settingsAppearanceAutosaveRetryPayload = null;
 let _settingsPreferencesAutosaveTimer = null;
 let _settingsPreferencesAutosaveRetryPayload = null;
+let _settingsPreferencesAutosaveGeneration = 0;
+let _settingsPreferencesAutosaveChain = Promise.resolve();
+let _settingsPanelLoadGeneration = 0;
 
 // ── Sidebar tab visibility/order ────────────────────────────────────────────
 const _ALWAYS_VISIBLE_TABS = new Set(['chat','settings']);
@@ -8600,11 +8605,13 @@ const _SETTINGS_SPEECH_STORAGE_KEYS={
 let _settingsSpeechPersistedKeys=new Set();
 let _settingsSpeechLocalStorageKeys=new Set();
 let _settingsSpeechChangedKeys=new Set();
+let _settingsSpeechRevision=0;
 
 function _captureSpeechPreferenceOwnership(settings){
   _settingsSpeechPersistedKeys=new Set(Array.isArray(settings&&settings.persisted_speech_keys)?settings.persisted_speech_keys:[]);
   _settingsSpeechLocalStorageKeys=new Set();
   _settingsSpeechChangedKeys=new Set();
+  _settingsSpeechRevision=Number.isInteger(settings&&settings.speech_settings_revision)?settings.speech_settings_revision:0;
   Object.entries(_SETTINGS_SPEECH_STORAGE_KEYS).forEach(([settingKey,storageKey])=>{
     try{if(localStorage.getItem(storageKey)!==null) _settingsSpeechLocalStorageKeys.add(settingKey);}catch(_){}
   });
@@ -8616,6 +8623,7 @@ function _speechPreferenceIsOwned(settingKey){
 
 function _markSpeechPreferenceChanged(settingKey){
   _settingsSpeechChangedKeys.add(settingKey);
+  if(typeof window!=='undefined'&&window.HermesTTS)window.HermesTTS.invalidateSettings();
 }
 
 function _syncSpeechPreferenceCache(settingKey,value){
@@ -8625,6 +8633,7 @@ function _syncSpeechPreferenceCache(settingKey,value){
 }
 
 function _setOwnedSpeechPayload(payload,settingKey,value){
+  if(typeof window!=='undefined'&&window.HermesTTS&&window.HermesTTS.isAutosaveSuppressed(settingKey))return;
   if(_speechPreferenceIsOwned(settingKey)) payload[settingKey]=value;
 }
 
@@ -8769,16 +8778,35 @@ function _applyWorkspaceTodosTabVisibility(){
 
 function _schedulePreferencesAutosave(){
   const payload=_preferencesPayloadFromUi();
+  const generation=++_settingsPreferencesAutosaveGeneration;
   _rememberPreferencesSaved(payload);
   _settingsPreferencesAutosaveRetryPayload=payload;
   _setPreferencesAutosaveStatus('saving');
   if(_settingsPreferencesAutosaveTimer) clearTimeout(_settingsPreferencesAutosaveTimer);
-  _settingsPreferencesAutosaveTimer=setTimeout(()=>_autosavePreferencesSettings(payload),350);
+  _settingsPreferencesAutosaveTimer=setTimeout(()=>{
+    _settingsPreferencesAutosaveChain=_settingsPreferencesAutosaveChain
+      .catch(()=>{})
+      .then(()=>_autosavePreferencesSettings(payload,generation));
+  },350);
 }
 
-async function _autosavePreferencesSettings(payload){
+function _preferencesPayloadHasSpeech(payload){
+  return Object.keys(_SETTINGS_SPEECH_STORAGE_KEYS).some(key=>Object.prototype.hasOwnProperty.call(payload||{},key));
+}
+
+async function _autosavePreferencesSettings(payload,generation=_settingsPreferencesAutosaveGeneration){
+  if(generation!==_settingsPreferencesAutosaveGeneration)return;
+  const requestPayload={...payload};
+  if(_preferencesPayloadHasSpeech(requestPayload)){
+    requestPayload.expected_speech_settings_revision=_settingsSpeechRevision;
+  }
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(requestPayload)});
+    if(Number.isInteger(saved&&saved.speech_settings_revision)){
+      _settingsSpeechRevision=saved.speech_settings_revision;
+      _settingsSpeechPersistedKeys=new Set(Array.isArray(saved.persisted_speech_keys)?saved.persisted_speech_keys:[]);
+    }
+    if(generation!==_settingsPreferencesAutosaveGeneration)return;
     if(payload&&payload.terminal_auto_expand_on_output!==undefined){
       window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
     }
@@ -8855,14 +8883,35 @@ async function _autosavePreferencesSettings(payload){
     }
   }catch(e){
     console.warn('[settings] preferences autosave failed', e);
-    _setPreferencesAutosaveStatus('failed');
+    if(_preferencesPayloadHasSpeech(requestPayload)){
+      try{
+        const authoritative=await api('/api/settings',{method:'GET',retries:0,timeoutToast:false});
+        if(Number.isInteger(authoritative&&authoritative.speech_settings_revision)){
+          _settingsSpeechRevision=authoritative.speech_settings_revision;
+        }
+        if(generation===_settingsPreferencesAutosaveGeneration){
+          _captureSpeechPreferenceOwnership(authoritative);
+          const mirrorGeneration=window.HermesTTS?window.HermesTTS.captureSettingsGeneration():undefined;
+          if(typeof window._mirrorSpeechSettingsFromServer==='function'){
+            window._mirrorSpeechSettingsFromServer(authoritative,mirrorGeneration);
+          }
+          await _setupTtsSettings(authoritative);
+        }
+      }catch(reconcileError){
+        console.warn('[settings] speech settings reconciliation failed', reconcileError);
+      }
+    }
+    if(generation===_settingsPreferencesAutosaveGeneration)_setPreferencesAutosaveStatus('failed');
   }
 }
 
 function _retryPreferencesAutosave(){
   const payload=_settingsPreferencesAutosaveRetryPayload||_preferencesPayloadFromUi();
+  const generation=++_settingsPreferencesAutosaveGeneration;
   _setPreferencesAutosaveStatus('saving');
-  _autosavePreferencesSettings(payload);
+  _settingsPreferencesAutosaveChain=_settingsPreferencesAutosaveChain
+    .catch(()=>{})
+    .then(()=>_autosavePreferencesSettings(payload,generation));
 }
 
 function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
@@ -8877,9 +8926,171 @@ function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
     : 'No override';
 }
 
+async function _setupTtsSettings(settings){
+  const setupProfile=typeof S!=='undefined'?String(S.activeProfile||S.profile||'default'):'default';
+  const engineSelect=$('settingsTtsEngine');
+  const providerField=$('settingsTtsProviderField');
+  const providerSelect=$('settingsTtsProvider');
+  const providerRefresh=$('settingsTtsProviderRefresh');
+  const status=$('settingsTtsStatus');
+  const browserFields=[$('settingsTtsVoiceField'),$('settingsTtsRateField'),$('settingsTtsPitchField')].filter(Boolean);
+  if(!engineSelect||!window.HermesTTS)return;
+  const setupToken=Symbol('tts-settings');
+  engineSelect._hermesTtsSetupToken=setupToken;
+  const setupIsCurrent=()=>setupProfile===(typeof S!=='undefined'?String(S.activeProfile||S.profile||'default'):'default')
+    &&engineSelect._hermesTtsSetupToken===setupToken;
+
+  const setStatus=(key,kind='')=>{
+    if(!status||!setupIsCurrent())return;
+    status.textContent=key?t(key):'';
+    status.dataset.state=kind;
+  };
+  const providerLabel=row=>{
+    if(row&&row.label_key){const localized=t(row.label_key);if(localized&&localized!==row.label_key)return localized;}
+    return String(row&&row.name||'');
+  };
+  const render=state=>{
+    if(!setupIsCurrent())return;
+    engineSelect.querySelectorAll('option[data-inert="true"]').forEach(option=>option.remove());
+    if(!['browser','agent'].includes(state.persistedEngine)){
+      const inert=document.createElement('option');
+      inert.value=state.persistedEngine;
+      inert.dataset.inert='true';
+      inert.disabled=true;
+      inert.textContent=t('tts_saved_engine_unavailable').replace('{engine}',state.persistedEngine);
+      engineSelect.appendChild(inert);
+    }
+    engineSelect.value=state.persistedEngine;
+    engineSelect.dataset.persistedEngine=state.persistedEngine;
+    engineSelect.dataset.effectiveEngine=state.effectiveEngine;
+    browserFields.forEach(field=>{field.hidden=state.effectiveEngine!=='browser';});
+    if(providerField)providerField.hidden=state.persistedEngine!=='agent'&&!['edge','elevenlabs','openai'].includes(state.persistedEngine);
+    const statusKey={
+      agent_unavailable:'tts_agent_unavailable_fallback',
+      migration_required:'tts_migration_required',
+      saved_engine_unavailable:'tts_saved_engine_repair',
+      browser_unavailable:'tts_browser_unavailable',
+    }[state.reason]||'';
+    setStatus(statusKey,state.reason);
+    const capability=state.capability;
+    if(providerSelect){
+      providerSelect.innerHTML='';
+      const rows=capability&&Array.isArray(capability.providers)?capability.providers:[];
+      if(!rows.length){
+        const option=document.createElement('option');
+        option.value='';option.textContent=t('tts_provider_none');option.disabled=true;option.selected=true;
+        providerSelect.appendChild(option);
+      }else{
+        rows.forEach(row=>{
+          const option=document.createElement('option');
+          option.value=row.name;
+          option.textContent=providerLabel(row)+(row.available?'':` — ${t('tts_provider_unavailable')}`);
+          option.disabled=!row.selectable;
+          option.selected=!!row.active;
+          providerSelect.appendChild(option);
+        });
+      }
+      providerSelect.disabled=!capability||capability.provider_write_supported!==true;
+      providerSelect.dataset.configFingerprint=capability&&capability.config_fingerprint||'';
+    }
+    if(providerRefresh)providerRefresh.disabled=false;
+    window._populateTtsVoices();
+  };
+
+  let state;
+  try{
+    setStatus('tts_capability_loading','loading');
+    state=await window.HermesTTS.getSettingsState(settings,{refresh:false});
+    if(!setupIsCurrent())return;
+    render(state);
+  }catch(error){
+    if((error&&error.name==='AbortError')||!setupIsCurrent())return;
+    setStatus('tts_agent_unavailable','error');
+    return;
+  }
+
+  engineSelect.onchange=async function(){
+    const previous=state.persistedEngine;
+    const next=this.value;
+    this.disabled=true;
+    this.setAttribute('aria-busy','true');
+    setStatus('tts_migration_saving','loading');
+    try{
+      if(next==='agent'&&['edge','elevenlabs','openai'].includes(previous)){
+        const result=await window.HermesTTS.migrateLegacyEngine(settings,state.capability);
+        const authoritative=result.settings||await api('/api/settings',{method:'GET',retries:0,timeoutToast:false});
+        _captureSpeechPreferenceOwnership(authoritative);
+        state=await window.HermesTTS.getSettingsState(authoritative,{refresh:true});
+        localStorage.setItem('hermes-tts-engine',state.persistedEngine);
+        render(state);
+        setStatus('tts_migration_complete','success');
+      }else{
+        localStorage.setItem('hermes-tts-engine',next);
+        _markSpeechPreferenceChanged('tts_engine');
+        _schedulePreferencesAutosave();
+        state={...state,persistedEngine:next,effectiveEngine:next,reason:''};
+        if(next==='agent'&&(!state.capability||state.capability.active_provider_available!==true)){
+          state.effectiveEngine=('speechSynthesis' in window)?'browser':'unavailable';
+          state.reason='agent_unavailable';
+        }
+        render(state);
+      }
+    }catch(error){
+      if((error&&error.name==='AbortError')||!setupIsCurrent())return;
+      this.value=previous;
+      render(state);
+      setStatus(error&&error.status===409?'tts_provider_conflict':'tts_migration_failed','error');
+    }finally{
+      if(setupIsCurrent()){
+        this.disabled=false;
+        this.removeAttribute('aria-busy');
+      }
+    }
+  };
+
+  if(providerSelect)providerSelect.onchange=async function(){
+    const previous=state.capability&&state.capability.active_provider_name||'';
+    const requested=this.value;
+    this.disabled=true;
+    this.setAttribute('aria-busy','true');
+    setStatus('tts_provider_saving','loading');
+    try{
+      await window.HermesTTS.selectProvider(requested,state.capability);
+      state=await window.HermesTTS.getSettingsState(settings,{refresh:false});
+      render(state);
+      setStatus('tts_provider_saved','success');
+    }catch(error){
+      if((error&&error.name==='AbortError')||!setupIsCurrent())return;
+      this.value=previous;
+      setStatus(error&&error.status===409?'tts_provider_conflict':'tts_provider_failed','error');
+    }finally{
+      if(setupIsCurrent()){
+        this.disabled=!state.capability||state.capability.provider_write_supported!==true;
+        this.removeAttribute('aria-busy');
+      }
+    }
+  };
+
+  if(providerRefresh)providerRefresh.onclick=async function(){
+    this.disabled=true;
+    setStatus('tts_capability_loading','loading');
+    try{state=await window.HermesTTS.getSettingsState(settings,{refresh:true});if(setupIsCurrent())render(state);}
+    catch(error){if((!error||error.name!=='AbortError')&&setupIsCurrent())setStatus('tts_agent_unavailable','error');}
+    finally{if(setupIsCurrent())this.disabled=false;}
+  };
+}
+
 async function loadSettingsPanel(){
+  let speechSettingsGeneration=window.HermesTTS?window.HermesTTS.captureSettingsGeneration():undefined;
+  const settingsLoadGeneration=++_settingsPanelLoadGeneration;
+  const settingsLoadProfile=typeof S!=='undefined'?String(S.activeProfile||S.profile||'default'):'default';
+  const settingsLoadIdentityIsCurrent=()=>settingsLoadGeneration===_settingsPanelLoadGeneration
+    &&settingsLoadProfile===(typeof S!=='undefined'?String(S.activeProfile||S.profile||'default'):'default');
+  const settingsLoadIsCurrent=()=>settingsLoadIdentityIsCurrent()
+    &&(!window.HermesTTS||window.HermesTTS.isSettingsGenerationCurrent(speechSettingsGeneration));
   try{
     const settings=await api('/api/settings');
+    if(!settingsLoadIsCurrent())return;
     checkWebUIVersionSkew(settings);
     // Populate the version badges from the server — keeps them in sync with git
     // tags automatically without any manual release step.
@@ -9104,6 +9315,7 @@ async function loadSettingsPanel(){
       let models=null;
       try{
         models=await api('/api/models');
+        if(!settingsLoadIsCurrent())return;
         for(const g of ((models||{}).groups||[])){
           const og=document.createElement('optgroup');
           og.label=g.provider;
@@ -9349,7 +9561,8 @@ async function loadSettingsPanel(){
         _schedulePreferencesAutosave();
       },{once:false});
     }
-    if(typeof window._mirrorSpeechSettingsFromServer==='function') window._mirrorSpeechSettingsFromServer(settings);
+    if(!settingsLoadIsCurrent())return;
+    if(typeof window._mirrorSpeechSettingsFromServer==='function') window._mirrorSpeechSettingsFromServer(settings,speechSettingsGeneration);
     const persistedSpeechKeys = new Set(
       Array.isArray(settings && settings.persisted_speech_keys)
         ? settings.persisted_speech_keys
@@ -9401,88 +9614,48 @@ async function loadSettingsPanel(){
         _schedulePreferencesAutosave();
       };
     }
-    // TTS engine selector
-    const ttsEngineSel=$('settingsTtsEngine');
-    if(ttsEngineSel){
-      // Re-add any extension-registered TTS engines (window.registerHermesTtsEngine)
-      // as options — the <select> markup only hardcodes the built-ins, and this
-      // settings panel can render after an extension registered its engine.
-      if(typeof window._hermesTtsEngineOptions==='function'){
-        window._hermesTtsEngineOptions().forEach(function(e){
-          if(!ttsEngineSel.querySelector('option[value="'+e.id+'"]')){
-            var opt=document.createElement('option');
-            opt.value=e.id; opt.textContent=e.label;
-            ttsEngineSel.appendChild(opt);
-          }
-        });
-      }
-      const saved=String(_speechSetting('tts_engine','hermes-tts-engine','browser')||'browser');
-      if(!ttsEngineSel.querySelector('option[value="'+saved+'"]')){
-        var savedOpt=document.createElement('option');
-        savedOpt.value=saved; savedOpt.textContent=saved;
-        ttsEngineSel.appendChild(savedOpt);
-      }
-      ttsEngineSel.value=saved;
-      _syncSpeechPreferenceCache('tts_engine',saved);
-      ttsEngineSel.onchange=function(){
-        _markSpeechPreferenceChanged('tts_engine');
-        localStorage.setItem('hermes-tts-engine',this.value);
-        window._populateTtsVoices();
-        _schedulePreferencesAutosave();
-      };
-    }
-    // Populate voice selector based on engine
     const ttsVoiceSel=$('settingsTtsVoice');
     window._populateTtsVoices=function(){
-      if(!ttsVoiceSel) return;
-      const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+      if(!ttsVoiceSel)return;
+      const engineSelect=$('settingsTtsEngine');
+      const effective=engineSelect&&engineSelect.dataset.effectiveEngine||localStorage.getItem('hermes-tts-engine')||'browser';
       const current=String(_speechSetting('tts_voice','hermes-tts-voice','')||'');
       _syncSpeechPreferenceCache('tts_voice',current);
-      if(engine==='elevenlabs'){
-        ttsVoiceSel.innerHTML='<option value="">Hermy — ElevenLabs (server-configured)</option>';
-      } else if(engine==='openai'){
-        ttsVoiceSel.innerHTML='<option value="">OpenAI voice (server-configured)</option>';
-      } else if(engine==='edge'){
-        const edgeVoices=[
-          {value:'zh-CN-XiaoxiaoNeural',label:'Xiaoxiao (Chinese, Female)'},
-          {value:'zh-CN-XiaoyiNeural',label:'Xiaoyi (Chinese, Female)'},
-          {value:'zh-CN-YunxiNeural',label:'Yunxi (Chinese, Male)'},
-          {value:'zh-CN-YunjianNeural',label:'Yunjian (Chinese, Male)'},
-          {value:'zh-CN-YunyangNeural',label:'Yunyang (Chinese, Male)'},
-          {value:'en-US-AriaNeural',label:'Aria (English, Female)'},
-          {value:'en-US-GuyNeural',label:'Guy (English, Male)'},
-          {value:'id-ID-GadisNeural',label:'Gadis (Indonesian, Female)'},
-        ];
-        ttsVoiceSel.innerHTML='<option value="">Default (Xiaoxiao)</option>';
-        edgeVoices.forEach(v=>{
-          const opt=document.createElement('option');
-          opt.value=v.value;opt.textContent=v.label;
-          if(v.value===current) opt.selected=true;
-          ttsVoiceSel.appendChild(opt);
-        });
-      } else {
-        if(!('speechSynthesis' in window)){
-          ttsVoiceSel.innerHTML='<option value="">Speech synthesis not available</option>';
-          return;
-        }
-        const voices=speechSynthesis.getVoices();
-        ttsVoiceSel.innerHTML='<option value="">Default system voice</option>';
-        voices.forEach(v=>{
-          const opt=document.createElement('option');
-          opt.value=v.name;opt.textContent=v.name+(v.lang?' ('+v.lang+')':'');
-          if(v.name===current) opt.selected=true;
-          ttsVoiceSel.appendChild(opt);
-        });
+      if(effective!=='browser'){
+        ttsVoiceSel.innerHTML='';
+        const option=document.createElement('option');
+        option.value='';option.textContent=t('tts_provider_guidance');
+        ttsVoiceSel.appendChild(option);
+        ttsVoiceSel.disabled=true;
+        return;
       }
+      ttsVoiceSel.disabled=false;
+      if(!('speechSynthesis' in window)){
+        ttsVoiceSel.innerHTML=`<option value="">${esc(t('tts_not_supported'))}</option>`;
+        ttsVoiceSel.disabled=true;
+        return;
+      }
+      const voices=speechSynthesis.getVoices();
+      ttsVoiceSel.innerHTML='';
+      const defaultOption=document.createElement('option');
+      defaultOption.value='';defaultOption.textContent=t('tts_browser_default_voice');
+      ttsVoiceSel.appendChild(defaultOption);
+      voices.forEach(voice=>{
+        const option=document.createElement('option');
+        option.value=voice.name;option.textContent=voice.name+(voice.lang?' ('+voice.lang+')':'');
+        option.selected=voice.name===current;
+        ttsVoiceSel.appendChild(option);
+      });
     };
-    if(ttsVoiceSel&&'speechSynthesis' in window){
+    if(ttsVoiceSel){
       window._populateTtsVoices();
-      speechSynthesis.addEventListener('voiceschanged',function(){
-        const engine=localStorage.getItem('hermes-tts-engine')||'browser';
-        if(engine==='browser') window._populateTtsVoices();
-      },{once:false});
+      if('speechSynthesis' in window)speechSynthesis.addEventListener('voiceschanged',window._populateTtsVoices,{once:false});
       ttsVoiceSel.onchange=function(){_markSpeechPreferenceChanged('tts_voice');localStorage.setItem('hermes-tts-voice',this.value);_schedulePreferencesAutosave();};
     }
+    await _setupTtsSettings(settings);
+    if(!settingsLoadIdentityIsCurrent())return;
+    speechSettingsGeneration=window.HermesTTS?window.HermesTTS.captureSettingsGeneration():undefined;
+    if(!settingsLoadIsCurrent())return;
     // TTS rate/pitch sliders
     const ttsRateSlider=$('settingsTtsRate');
     const ttsRateValue=$('settingsTtsRateValue');
@@ -9569,6 +9742,7 @@ async function loadSettingsPanel(){
     // Show auth buttons only when auth is active
     try{
       const authStatus=await api('/api/auth/status');
+      if(!settingsLoadIsCurrent())return;
       _settingsPasswordAuthEnabled=!!authStatus.password_auth_enabled;
       _setSettingsAuthButtonsVisible(!!authStatus.auth_enabled);
       _syncPasswordlessButton(authStatus);
