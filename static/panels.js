@@ -7332,9 +7332,8 @@ async function switchToProfile(name) {
       const currentSessionProfile = (typeof S.session.profile === 'string' && S.session.profile.trim())
         ? S.session.profile.trim()
         : 'default';
-      sessionProfileMatchesTarget = (typeof _profileMatchesActiveProfile === 'function')
-        ? _profileMatchesActiveProfile(currentSessionProfile, targetActiveProfile)
-        : (currentSessionProfile === targetActiveProfile || (currentSessionProfile === 'default' && !!S.activeProfileIsDefault));
+      sessionProfileMatchesTarget = typeof _profileOwnerMatchesActive === 'function'
+        && _profileOwnerMatchesActive(currentSessionProfile, targetActiveProfile, { blankIsRoot: true });
       if (!sessionProfileMatchesTarget) {
         sessionInProgress = true;
       }

@@ -157,8 +157,18 @@ class TestParallelizedFetches:
             "with the target active profile"
         )
         assert "const targetActiveProfile = S.activeProfile || 'default';" in fn
-        assert "currentSessionProfile === targetActiveProfile || (currentSessionProfile === 'default' && !!S.activeProfileIsDefault)" in fn, (
-            "fallback matching must preserve the renamed-default/root-profile alias semantics"
+        # Root-alias semantics are decided by the one shared owner predicate, not
+        # by a hand-inlined copy of its body. blankIsRoot keeps the pre-existing
+        # blank-owner-is-root behavior that the inline copy used to provide.
+        # Behavior is proven by execution in
+        # tests/test_2316_scripts_panel.py::test_switch_to_profile_session_ownership_uses_shared_root_alias_predicate.
+        assert "_profileOwnerMatchesActive(currentSessionProfile, targetActiveProfile, { blankIsRoot: true })" in fn, (
+            "the accepted-switch session check must route root-alias matching "
+            "through the shared owner predicate"
+        )
+        assert "_profileMatchesActiveProfile(currentSessionProfile" not in fn, (
+            "the one-way helper must not be re-inlined here; it is asymmetric on "
+            "the renamed-root alias"
         )
         promote_idx = fn.find("sessionInProgress = true", mismatch_idx)
         assert promote_idx != -1, (

@@ -162,7 +162,7 @@ def test_profile_switch_clears_persisted_old_profile_cron_markers_only():
             _extract_function(SESSIONS_JS, "_sourceKeyForSession"),
             _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
             _extract_function(SESSIONS_JS, "_resolveCronCompletionMarkerOrigin"),
-            _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive"),
+            _extract_function(SESSIONS_JS, "_profileOwnerMatchesActive"),
             _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile"),
             _extract_function(
                 SESSIONS_JS, "_clearCronSessionCompletionUnreadForInactiveProfiles"
@@ -313,7 +313,7 @@ def test_session_list_path_tags_cron_markers_with_source_and_profile():
     is_cron = _extract_function(SESSIONS_JS, "_isCronSessionForUnread")
     meta_fn = _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession")
     source_key = _extract_function(SESSIONS_JS, "_sourceKeyForSession")
-    match_fn = _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive")
+    match_fn = _extract_function(SESSIONS_JS, "_profileOwnerMatchesActive")
     profile_match = _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile")
     script = f"""
 const markCalls=[];
@@ -387,7 +387,7 @@ def test_legacy_untagged_cron_marker_cleared_via_sidebar_metadata():
             _extract_function(SESSIONS_JS, "_sourceKeyForSession"),
             _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
             _extract_function(SESSIONS_JS, "_resolveCronCompletionMarkerOrigin"),
-            _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive"),
+            _extract_function(SESSIONS_JS, "_profileOwnerMatchesActive"),
             _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile"),
             _extract_function(SESSIONS_JS, "_getSessionCompletionUnread"),
             _extract_function(SESSIONS_JS, "_saveSessionCompletionUnread"),
@@ -450,7 +450,7 @@ def test_root_alias_keeps_current_profile_cron_marker():
             _extract_function(SESSIONS_JS, "_sourceKeyForSession"),
             _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
             _extract_function(SESSIONS_JS, "_resolveCronCompletionMarkerOrigin"),
-            _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive"),
+            _extract_function(SESSIONS_JS, "_profileOwnerMatchesActive"),
             _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile"),
             _extract_function(SESSIONS_JS, "_getSessionCompletionUnread"),
             _extract_function(SESSIONS_JS, "_saveSessionCompletionUnread"),
@@ -512,7 +512,7 @@ def test_switch_to_literal_default_clears_other_profile_cron_markers():
             _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
             _extract_function(SESSIONS_JS, "_resolveCronCompletionMarkerOrigin"),
             _extract_function(SESSIONS_JS, "_cronProfileNameIsRootAlias"),
-            _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive"),
+            _extract_function(SESSIONS_JS, "_profileOwnerMatchesActive"),
             _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile"),
             _extract_function(SESSIONS_JS, "_getSessionCompletionUnread"),
             _extract_function(SESSIONS_JS, "_saveSessionCompletionUnread"),
@@ -562,6 +562,8 @@ process.stdout.write(JSON.stringify({{
   rootKept:_hasUnreadForSession({{session_id:'root-cron'}}),
   renamedRootKept:_hasUnreadForSession({{session_id:'renamed-root-cron'}}),
   chatKept:_hasUnreadForSession({{session_id:'plain-chat'}}),
+  blankOwnerFailsClosed:_profileOwnerMatchesActive('','default'),
+  blankOwnerAsRoot:_profileOwnerMatchesActive('','default',{{blankIsRoot:true}}),
   persisted,
 }}));
 """
@@ -574,6 +576,10 @@ process.stdout.write(JSON.stringify({{
     assert state["rootKept"] is True
     assert state["renamedRootKept"] is True
     assert state["chatKept"] is True
+    # The generalized predicate keeps cron markers fail-closed on a blank owner;
+    # only the session consumers opt into the server's row-or-root coercion.
+    assert state["blankOwnerFailsClosed"] is False
+    assert state["blankOwnerAsRoot"] is True
     assert "tagged-old-cron" not in state["persisted"]
     assert "legacy-old-cron" not in state["persisted"]
     assert "root-cron" in state["persisted"]
@@ -592,7 +598,7 @@ def test_switch_to_literal_default_without_roster_fails_closed_on_unknown_names(
             _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
             _extract_function(SESSIONS_JS, "_resolveCronCompletionMarkerOrigin"),
             _extract_function(SESSIONS_JS, "_cronProfileNameIsRootAlias"),
-            _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive"),
+            _extract_function(SESSIONS_JS, "_profileOwnerMatchesActive"),
             _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile"),
             _extract_function(SESSIONS_JS, "_getSessionCompletionUnread"),
             _extract_function(SESSIONS_JS, "_saveSessionCompletionUnread"),
@@ -625,6 +631,8 @@ const persisted=JSON.parse(store['hermes-session-completion-unread']);
 process.stdout.write(JSON.stringify({{
   otherCleared:!_hasUnreadForSession({{session_id:'other-cron'}}),
   rootKept:_hasUnreadForSession({{session_id:'root-cron'}}),
+  blankOwnerFailsClosed:_profileOwnerMatchesActive('','default'),
+  blankOwnerAsRoot:_profileOwnerMatchesActive('','default',{{blankIsRoot:true}}),
   persisted,
 }}));
 """
@@ -634,6 +642,10 @@ process.stdout.write(JSON.stringify({{
     state = json.loads(result.stdout)
     assert state["otherCleared"] is True
     assert state["rootKept"] is True
+    # No roster: the reverse-alias step is inert, so blank still fails closed
+    # for markers and still resolves to root for the session consumers.
+    assert state["blankOwnerFailsClosed"] is False
+    assert state["blankOwnerAsRoot"] is True
     assert "other-cron" not in state["persisted"]
     assert "root-cron" in state["persisted"]
 
@@ -652,7 +664,7 @@ def test_stale_pre_switch_session_list_does_not_recreate_cron_markers():
             _extract_function(sessions_js, "_sourceKeyForSession"),
             _extract_function(sessions_js, "_cronCompletionUnreadMetaForSession"),
             _extract_function(sessions_js, "_resolveCronCompletionMarkerOrigin"),
-            _extract_function(sessions_js, "_cronMarkerProfileMatchesActive"),
+            _extract_function(sessions_js, "_profileOwnerMatchesActive"),
             _extract_function(sessions_js, "_profileMatchesActiveProfile"),
             _extract_function(sessions_js, "_getSessionCompletionUnread"),
             _extract_function(sessions_js, "_saveSessionCompletionUnread"),
@@ -780,7 +792,7 @@ def test_fresh_session_list_still_marks_when_unread_gen_matches():
             _extract_function(sessions_js, "_isCronSessionForUnread"),
             _extract_function(sessions_js, "_sourceKeyForSession"),
             _extract_function(sessions_js, "_cronCompletionUnreadMetaForSession"),
-            _extract_function(sessions_js, "_cronMarkerProfileMatchesActive"),
+            _extract_function(sessions_js, "_profileOwnerMatchesActive"),
             _extract_function(sessions_js, "_profileMatchesActiveProfile"),
             _extract_function(sessions_js, "_getSessionCompletionUnread"),
             _extract_function(sessions_js, "_saveSessionCompletionUnread"),

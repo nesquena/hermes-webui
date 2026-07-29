@@ -274,7 +274,7 @@ async def _call(mod, tool_name, **kwargs):
 
 async def _call_protocol_v1(mod, tool_name, arguments=None):
     result = await mod._call_tool_v1(tool_name, arguments)
-    return json.loads(result.content[0].text), _call_tool_is_error(result)
+    return result.content[0].text, _call_tool_is_error(result)
 
 
 async def _call_protocol_v2(mod, tool_name, arguments=None):
@@ -284,13 +284,93 @@ async def _call_protocol_v2(mod, tool_name, arguments=None):
         None,
         CallToolRequestParams(name=tool_name, arguments=arguments),
     )
-    return json.loads(result.content[0].text), _call_tool_is_error(result)
+    return result.content[0].text, _call_tool_is_error(result)
+
+
+async def _call_protocol_registered(mod, tool_name, arguments=None):
+    """Dispatch through the handler `@server.call_tool()` actually registered on
+    `mod.server`, rather than calling the module-private dispatcher directly.
+
+    This surface proves the schema is correctly *published*: the SDK decorator
+    validates arguments against the listed `inputSchema` before our handler
+    runs, so its rejections come from the wire contract. The v1 direct surface
+    proves the same schema is *enforced in our own code*. Both matter.
+
+    Registered MCP 2 dispatch has no equivalent here: `mcp` 1.26 exposes no
+    `on_call_tool` constructor keyword, so `mcp_server.py`'s `else` branch never
+    builds a server. That branch goes live when an MCP 2 SDK is installed; until
+    then `_call_protocol_v2` is the only coverage of `_call_tool_v2`.
+    """
+    from mcp.types import CallToolRequest, CallToolRequestParams
+
+    handler = getattr(mod.server, "request_handlers", {}).get(CallToolRequest)
+    if handler is None:
+        pytest.skip("installed MCP SDK registers no CallToolRequest handler")
+    server_result = await handler(
+        CallToolRequest(
+            method="tools/call",
+            params=CallToolRequestParams(name=tool_name, arguments=arguments),
+        )
+    )
+    result = getattr(server_result, "root", server_result)
+    return result.content[0].text, _call_tool_is_error(result)
+
+
+async def _list_tools_registered(mod):
+    from mcp.types import ListToolsRequest
+
+    handler = getattr(mod.server, "request_handlers", {}).get(ListToolsRequest)
+    if handler is None:
+        pytest.skip("installed MCP SDK registers no ListToolsRequest handler")
+    server_result = await handler(None)
+    return getattr(server_result, "root", server_result).tools
 
 
 async def _call_protocol(mod, surface, tool_name, arguments=None):
+    """Return the surface's raw first text block plus its error flag.
+
+    Deliberately not normalized. The three surfaces do not agree on how a
+    schema violation is represented, and flattening them into one shape would
+    erase the difference the registered surface was added to expose.
+    """
     if surface == "v1":
         return await _call_protocol_v1(mod, tool_name, arguments)
+    if surface == "registered":
+        return await _call_protocol_registered(mod, tool_name, arguments)
     return await _call_protocol_v2(mod, tool_name, arguments)
+
+
+PROTOCOL_SURFACES = ["v1", "v2", "registered"]
+
+# Who rejects a schema violation on each surface, and therefore what the caller
+# sees. The two direct surfaces reach `_validate_tool_arguments`, so the error
+# arrives in our JSON envelope (`mcp_server.py:570-576` `_error_content`). The
+# registered surface never gets that far: `mcp` 1.26's `@server.call_tool()`
+# decorator validates against the published `inputSchema` first and returns
+# `Server._make_error_result`, which is bare text with no envelope. Same message,
+# different representation, and that is a real wire-visible difference.
+VALIDATION_ERROR_REPRESENTATION = {
+    "v1": "json_envelope",
+    "v2": "json_envelope",
+    "registered": "sdk_bare_text",
+}
+
+
+def _assert_validation_error(surface, text, needle):
+    """Assert the surface's own error representation rather than a flattened one."""
+    assert "Input validation error" in text, (surface, text)
+    assert needle in text, (surface, text)
+    if VALIDATION_ERROR_REPRESENTATION[surface] == "json_envelope":
+        payload = json.loads(text)
+        assert set(payload) == {"error"}, (surface, payload)
+        assert payload["error"].startswith("Input validation error: "), (surface, payload)
+        assert needle in payload["error"], (surface, payload)
+    else:
+        # Bare SDK text. Reading it as our envelope must fail, which is exactly
+        # what a caller written against the direct surfaces would hit.
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(text)
+        assert text.startswith("Input validation error: "), (surface, text)
 
 
 def _tool_schema(mod, tool):
@@ -988,44 +1068,53 @@ class TestProtocolValidation:
         yield
         _cleanup_state_dir(self.state_dir)
 
-    @pytest.mark.parametrize("surface", ["v1", "v2"])
+    @pytest.mark.parametrize("surface", PROTOCOL_SURFACES)
     @pytest.mark.parametrize("arguments, needle", [
-        ({"session_id": "s1"}, "project_id"),
-        ({"session_id": "s1", "project_id": 7}, "not of type"),
+        ({"session_id": "s1"}, "'project_id' is a required property"),
+        ({"session_id": "s1", "project_id": 7}, "is not of type"),
     ])
     async def test_move_session_protocol_rejects_invalid_input_without_api_post(self, surface, arguments, needle):
-        result, is_error = await _call_protocol(self.mod, surface, "move_session", arguments)
+        text, is_error = await _call_protocol(self.mod, surface, "move_session", arguments)
         assert is_error is True
-        assert "Input validation error" in result["error"]
-        assert needle in result["error"]
+        # Representation is asserted per surface. The direct surfaces carry our
+        # JSON envelope; the registered surface carries the SDK validator's bare
+        # text. A surface that changed shape fails here instead of being absorbed.
+        _assert_validation_error(surface, text, needle)
         assert self.api_calls == []
 
-    @pytest.mark.parametrize("surface", ["v1", "v2"])
+    @pytest.mark.parametrize("surface", PROTOCOL_SURFACES)
     async def test_move_session_protocol_allows_explicit_null_unassign(self, surface):
-        result, is_error = await _call_protocol(
+        text, is_error = await _call_protocol(
             self.mod,
             surface,
             "move_session",
             {"session_id": "s1", "project_id": None},
         )
         assert is_error is False
-        assert result["ok"] is True
+        # Success flows through our handler on every surface, so all three agree
+        # on the payload shape. `arguments or {}` in the SDK wrapper preserves an
+        # explicit null instead of collapsing it to an omitted field.
+        assert json.loads(text)["ok"] is True
         assert self.api_calls == [{
             "path": "/api/session/move",
             "body": {"session_id": "s1", "project_id": None},
         }]
 
-    @pytest.mark.parametrize("surface", ["v1", "v2"])
+    @pytest.mark.parametrize("surface", PROTOCOL_SURFACES)
     async def test_unknown_tool_returns_protocol_error(self, surface):
-        result, is_error = await _call_protocol(self.mod, surface, "missing_tool", {})
+        text, is_error = await _call_protocol(self.mod, surface, "missing_tool", {})
         assert is_error is True
-        assert result == {"error": "Unknown tool: missing_tool"}
+        # Unlisted tools skip the SDK validator, so even the registered surface
+        # reaches `_dispatch_tool` and returns our envelope. Unlike the schema
+        # rejections above, all three surfaces do agree here.
+        assert json.loads(text) == {"error": "Unknown tool: missing_tool"}
         assert self.api_calls == []
 
     async def test_listed_move_session_schema_requires_project_id_and_allows_null(self):
         tools_v1 = await self.mod._list_tools_v1()
         tools_v2 = (await self.mod._list_tools_v2(None, None)).tools
-        for tools in (tools_v1, tools_v2):
+        tools_registered = await _list_tools_registered(self.mod)
+        for tools in (tools_v1, tools_v2, tools_registered):
             move_tool = next(tool for tool in tools if tool.name == "move_session")
             schema = _tool_schema(self.mod, move_tool)
             assert schema["required"] == ["session_id", "project_id"]

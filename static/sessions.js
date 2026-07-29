@@ -623,26 +623,28 @@ function _cronProfileNameIsRootAlias(name) {
   return false;
 }
 
-// default/renamed-root equivalence for cron-marker ownership (mirrors server
-// _profiles_match enough for the active surface: literal 'default' ↔ root).
-function _cronMarkerProfileMatchesActive(origin, activeProfile) {
-  const originName = (typeof origin === 'string' && origin.trim()) ? origin.trim() : '';
+// The one browser-side owner-equivalence test, mirroring the server contract at
+// api/profiles.py::_profiles_match. Unknown names never match; a blank owner
+// fails closed unless opts.blankIsRoot asks for the server's row-or-root coercion.
+function _profileOwnerMatchesActive(owner, activeProfile, opts) {
+  let ownerName = (typeof owner === 'string' && owner.trim()) ? owner.trim() : '';
+  if (!ownerName && opts && opts.blankIsRoot) ownerName = 'default';
   const activeName = (typeof activeProfile === 'string' && activeProfile.trim())
     ? activeProfile.trim()
     : 'default';
-  if (!originName) return false;
-  if (originName === activeName) return true;
+  if (!ownerName) return false;
+  if (ownerName === activeName) return true;
   if (typeof _profileMatchesActiveProfile === 'function'
-    && _profileMatchesActiveProfile(originName, activeName)) {
+    && _profileMatchesActiveProfile(ownerName, activeName)) {
     return true;
   }
-  // Reverse alias: marker tagged with the renamed-root name while the active
-  // root surface reports a different alias. Match only when the origin name
+  // Reverse alias: owner tagged with the renamed-root name while the active
+  // root surface reports a different alias. Match only when the owner name
   // ITSELF provably resolves to the root — never "active is default → match
   // all", which under-cleared other profiles' markers on switch to 'default'.
   if (typeof S !== 'undefined' && S && S.activeProfileIsDefault
     && typeof _cronProfileNameIsRootAlias === 'function'
-    && _cronProfileNameIsRootAlias(originName)) {
+    && _cronProfileNameIsRootAlias(ownerName)) {
     return true;
   }
   return false;
@@ -665,7 +667,7 @@ function _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile) {
     // Only clear when we know the owning profile AND it is not the active one
     // (incl. default/renamed-root equivalence). Untagged + unresolvable stays.
     if (!resolved.profile) continue;
-    if (_cronMarkerProfileMatchesActive(resolved.profile, active)) continue;
+    if (_profileOwnerMatchesActive(resolved.profile, active)) continue;
     delete unread[sid];
     changed = true;
   }
@@ -1238,8 +1240,8 @@ function _markPollingCompletionUnreadTransitions(sessions) {
           && meta.source === 'cron'
           && meta.profile
           && !allProfilesOn
-          && typeof _cronMarkerProfileMatchesActive === 'function'
-          && !_cronMarkerProfileMatchesActive(meta.profile, (typeof S !== 'undefined' && S && S.activeProfile) || 'default')
+          && typeof _profileOwnerMatchesActive === 'function'
+          && !_profileOwnerMatchesActive(meta.profile, (typeof S !== 'undefined' && S && S.activeProfile) || 'default')
         ) {
           // Skip mark for inactive-profile cron row.
         } else {
@@ -1612,8 +1614,8 @@ function _clearStuckSessionOnBoot(sid, currentSid){
 function _rearmActiveSessionStream(){
   const s=S&&S.session, id=s&&s.session_id;
   if(typeof startSessionStream!=='function' || !id) return;
-  if(typeof _profileMatchesActiveProfile==='function'
-    && !_profileMatchesActiveProfile(typeof _sidebarSessionProfileName==='function' ? _sidebarSessionProfileName(s) : '', (S&&S.activeProfile)||'default')) return;
+  if(typeof _profileOwnerMatchesActive==='function'
+    && !_profileOwnerMatchesActive(typeof _sidebarSessionProfileName==='function' ? _sidebarSessionProfileName(s) : '', (S&&S.activeProfile)||'default', {blankIsRoot:true})) return;
   startSessionStream(id);
 }
 
@@ -1822,24 +1824,22 @@ async function loadSession(sid){
         };
         const _classifyProfileSwitchSettlement = terminal => {
           if (!terminal) return 'stand_down';
-          const normalizeOwner = value => (typeof value === 'string' && value.trim()) ? value.trim() : '';
           const requestedProfile = _normalizeProfileSwitchTarget(profileMismatch.profile);
           const terminalTarget = _normalizeProfileSwitchTarget(terminal.target);
           const activeProfile = _normalizeProfileSwitchTarget((S && S.activeProfile) || 'default');
           const priorProfileOwner = _previousProfileOwnerOnSwitchFailure;
           const ownsCapturedPane = () => _normalizeCapturedPaneId(S.session && S.session.session_id) === _normalizeCapturedPaneId(currentSid);
           if (!ownsCapturedPane()) return 'stand_down';
-          const terminalOwner = normalizeOwner(terminal.committedProfile || terminal.target);
+          const terminalOwner = terminal.committedProfile || terminal.target;
           const requestedOwnerCommitted = (terminal.outcome === 'already_active' || terminal.outcome === 'committed')
             && terminalTarget === requestedProfile
-            && terminalOwner
-            && _profileMatchesActiveProfile(terminalOwner, activeProfile);
+            && _profileOwnerMatchesActive(terminalOwner, activeProfile);
           if (requestedOwnerCommitted) return 'retry_requested_owner';
           if (terminal.outcome === 'failed' && terminal.retainedResult) {
             const retained = terminal.retainedResult;
             const retainedTarget = _normalizeProfileSwitchTarget(retained.target);
-            const retainedOwner = normalizeOwner(retained.committedProfile || retained.target);
-            if (!retainedOwner || !_profileMatchesActiveProfile(retainedOwner, activeProfile)) return 'stand_down';
+            const retainedOwner = retained.committedProfile || retained.target;
+            if (!_profileOwnerMatchesActive(retainedOwner, activeProfile)) return 'stand_down';
             if (retainedTarget === requestedProfile) return 'retry_requested_owner';
             if (priorProfileOwner && retainedTarget === priorProfileOwner) return 'restore_prior_owner';
             return 'stand_down';

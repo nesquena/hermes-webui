@@ -17,7 +17,19 @@ pytestmark = pytest.mark.usefixtures("test_server")
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 PANELS_JS_PATH = REPO_ROOT / "static" / "panels.js"
 SESSIONS_JS_PATH = REPO_ROOT / "static" / "sessions.js"
+MESSAGES_JS_PATH = REPO_ROOT / "static" / "messages.js"
 NODE = shutil.which("node")
+
+# Shared owner-predicate chain the real _rearmActiveSessionStream() needs in
+# scope. Never stub these: a look-alike would shadow the production gate and
+# keep the harness green through the exact defect it is meant to catch.
+REARM_PREDICATE_CHAIN = """
+eval(extractFunc('_profileMatchesActiveProfile'));
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
+eval(extractFunc('_sidebarSessionProfileName'));
+eval(extractFunc('_rearmActiveSessionStream'));
+"""
 
 
 def _clear_scripts_dir():
@@ -1211,7 +1223,7 @@ console.log(JSON.stringify({
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_failed_profile_switch_reloads_visible_scripts_owner():
-    js = PANELS_JS_PATH.read_text(encoding="utf-8")
+    js = PANELS_JS_PATH.read_text(encoding="utf-8") + '\n' + SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
 let _profileSwitchGeneration = 0;
 let _profileLastCommittedSwitchResult = null;
@@ -1263,6 +1275,12 @@ async function loadScripts(force){ reloads.push(force); }
 async function loadCrons(){}
 eval(extractFunc('_ensureTasksSubtabLoaded'));
 eval(extractFunc('_resetTasksForProfileTransition'));
+// switchToProfile's accepted-switch session check runs the shared owner
+// predicate. _profilesCache stays undefined here, which is the real pre-warm
+// boot state: the reverse-alias step is inert and the gate is exact-name only.
+eval(extractFunc('_profileMatchesActiveProfile'));
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
 eval(extractFunc('switchToProfile'));
 (async () => {
   await switchToProfile('new');
@@ -1324,7 +1342,7 @@ def test_tasks_panes_scroll_in_chromium(width, height):
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_switch_to_profile_clears_scripts_cache_before_panel_reload():
     """Profile switch must retire Tasks state before the panel reload hook runs."""
-    js = PANELS_JS_PATH.read_text(encoding="utf-8")
+    js = PANELS_JS_PATH.read_text(encoding="utf-8") + '\n' + SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
 let _profileSwitchGeneration = 0;
 let _profileLastCommittedSwitchResult = null;
@@ -1376,6 +1394,11 @@ async function _profileSwitchPanelLoad(){ panelLoads.push(_scriptsData); }
 function _refreshProfileSwitchBackground(){}
 function animateNextSessionListRefresh(){}
 eval(extractFunc('_resetTasksForProfileTransition'));
+// Accepted-switch session check runs the shared owner predicate; _profilesCache
+// is null here, so the reverse-alias step is inert (real pre-warm boot state).
+eval(extractFunc('_profileMatchesActiveProfile'));
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
 eval(extractFunc('switchToProfile'));
 (async () => {
   await switchToProfile('work');
@@ -1409,7 +1432,7 @@ eval(extractFunc('switchToProfile'));
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_switch_to_profile_reports_superseded_when_newer_switch_starts_during_panel_reload():
     """A stale switch must not commit after the final panel reload await."""
-    js = PANELS_JS_PATH.read_text(encoding="utf-8")
+    js = PANELS_JS_PATH.read_text(encoding="utf-8") + '\n' + SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
 const deferred = () => {
   let resolve;
@@ -1483,6 +1506,11 @@ async function _profileSwitchPanelLoad(){
 function _refreshProfileSwitchBackground(){}
 function animateNextSessionListRefresh(){}
 eval(extractFunc('_resetTasksForProfileTransition'));
+// Accepted-switch session check runs the shared owner predicate; _profilesCache
+// is null here, so the reverse-alias step is inert (real pre-warm boot state).
+eval(extractFunc('_profileMatchesActiveProfile'));
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
 eval(extractFunc('switchToProfile'));
 (async () => {
   const stale = switchToProfile('b', { returnTransaction: true });
@@ -1678,7 +1706,11 @@ async function api(url, opts) {
   }
   throw new Error('unexpected api ' + url);
 }
-function _rearmActiveSessionStream() {}
+// Real ownership chain; never stub these. A look-alike shadows the gate.
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
+eval(extractFunc('_sidebarSessionProfileName'));
+eval(extractFunc('_rearmActiveSessionStream'));
 function _selectLiveRecoveryInflight() { return null; }
 function stopApprovalPolling() {}
 function hideApprovalCard() {}
@@ -1930,12 +1962,11 @@ async function api(url, opts) {
   }
   throw new Error('unexpected api ' + url);
 }
-function _rearmActiveSessionStream() {
-  const activeProfile = (S && S.activeProfile) || 'default';
-  const sessionProfile = S.session && typeof S.session.profile === 'string' ? S.session.profile.trim() : '';
-  if (!_profileMatchesActiveProfile(sessionProfile, activeProfile)) return;
-  if (S.session && S.session.session_id) startSessionStream(S.session.session_id);
-}
+// Real ownership chain; never stub these. A look-alike shadows the gate.
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
+eval(extractFunc('_sidebarSessionProfileName'));
+eval(extractFunc('_rearmActiveSessionStream'));
 function _selectLiveRecoveryInflight() { return null; }
 function stopApprovalPolling() {}
 function hideApprovalCard() {}
@@ -2229,12 +2260,11 @@ async function api(url, opts) {
   }
   throw new Error('unexpected api ' + url);
 }
-function _rearmActiveSessionStream() {
-  const activeProfile = (S && S.activeProfile) || 'default';
-  const sessionProfile = S.session && typeof S.session.profile === 'string' ? S.session.profile.trim() : '';
-  if (!_profileMatchesActiveProfile(sessionProfile, activeProfile)) return;
-  if (S.session && S.session.session_id) startSessionStream(S.session.session_id);
-}
+// Real ownership chain; never stub these. A look-alike shadows the gate.
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
+eval(extractFunc('_sidebarSessionProfileName'));
+eval(extractFunc('_rearmActiveSessionStream'));
 function _selectLiveRecoveryInflight() { return null; }
 function stopApprovalPolling() {}
 function hideApprovalCard() {}
@@ -2522,12 +2552,11 @@ async function api(url, opts) {
   }
   throw new Error('unexpected api ' + url);
 }
-function _rearmActiveSessionStream() {
-  const activeProfile = (S && S.activeProfile) || 'default';
-  const sessionProfile = S.session && typeof S.session.profile === 'string' ? S.session.profile.trim() : '';
-  if (!_profileMatchesActiveProfile(sessionProfile, activeProfile)) return;
-  if (S.session && S.session.session_id) startSessionStream(S.session.session_id);
-}
+// Real ownership chain; never stub these. A look-alike shadows the gate.
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
+eval(extractFunc('_sidebarSessionProfileName'));
+eval(extractFunc('_rearmActiveSessionStream'));
 function _selectLiveRecoveryInflight() { return null; }
 function stopApprovalPolling() {}
 function hideApprovalCard() {}
@@ -2848,11 +2877,10 @@ async function renderSessionList() {}
 async function _profileSwitchPanelLoad() {
   await panelDeferred.promise;
 }
-function _rearmActiveSessionStream() {
-  const activeProfile = (S && S.activeProfile) || 'default';
-  if (!_profileMatchesActiveProfile(_sidebarSessionProfileName(S.session), activeProfile)) return;
-  if (S.session && S.session.session_id) startSessionStream(S.session.session_id);
-}
+// Real ownership chain; never stub these. A look-alike shadows the gate.
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
+eval(extractFunc('_rearmActiveSessionStream'));
 function _selectLiveRecoveryInflight() { return null; }
 function stopApprovalPolling() {}
 function hideApprovalCard() {}
@@ -3305,11 +3333,10 @@ async function renderSessionList() {}
 async function _profileSwitchPanelLoad() {
   await panelDeferred.promise;
 }
-function _rearmActiveSessionStream() {
-  const activeProfile = (S && S.activeProfile) || 'default';
-  if (!_profileMatchesActiveProfile(_sidebarSessionProfileName(S.session), activeProfile)) return;
-  if (S.session && S.session.session_id) startSessionStream(S.session.session_id);
-}
+// Real ownership chain; never stub these. A look-alike shadows the gate.
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
+eval(extractFunc('_rearmActiveSessionStream'));
 function _selectLiveRecoveryInflight() { return null; }
 function stopApprovalPolling() {}
 function hideApprovalCard() {}
@@ -3573,9 +3600,11 @@ async function api(url) {
   }
   throw new Error('unexpected api ' + url);
 }
-function _rearmActiveSessionStream() {
-  if (S.session && S.session.session_id) startSessionStream(S.session.session_id);
-}
+// Real ownership chain; never stub these. A look-alike shadows the gate.
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
+eval(extractFunc('_sidebarSessionProfileName'));
+eval(extractFunc('_rearmActiveSessionStream'));
 function _selectLiveRecoveryInflight() { return null; }
 function stopApprovalPolling() {}
 function hideApprovalCard() {}
@@ -4528,7 +4557,13 @@ const INFLIGHT = {};
 function $(id) { return id === 'msgInner' ? msgInner : null; }
 function _resolveSessionIdFromSidebarLineage(sid) { return sid; }
 function _hermesNotifySessionOpen() { return null; }
-function _rearmActiveSessionStream() { rearmCalls += 1; }
+// Real ownership chain; never stub these. A look-alike shadows the gate.
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
+eval(extractFunc('_sidebarSessionProfileName'));
+// Attempted-count wrapper: no gating, no predicate logic, delegates to production.
+const _realRearmActiveSessionStream = eval('(' + extractFunc('_rearmActiveSessionStream') + ')');
+function _rearmActiveSessionStream() { rearmCalls += 1; return _realRearmActiveSessionStream(); }
 function stopApprovalPolling() {}
 function hideApprovalCard() {}
 function stopSessionStream() {}
@@ -4598,7 +4633,9 @@ eval(extractFunc('loadSession'));
     assert result["renderMessagesCalls"] == 2
     assert result["renderTrayCalls"] == 1
     assert result["syncTopbarCalls"] == 1
-    assert result["startSessionStreamCalls"] == 0
+    # Attempted twice, armed twice: no activeProfile and no session profile,
+    # so blankIsRoot resolves both sides to root and the gate accepts.
+    assert result["startSessionStreamCalls"] == 2
     assert result["clearPendingSelectionsCalls"] == 1
     assert result["loadingSessionId"] is None
     assert result["sessionId"] == "current"
@@ -4618,6 +4655,7 @@ def test_stale_failed_profile_switch_does_not_restore_over_newer_session():
 const apiCalls = [];
 const switchCalls = [];
 let rearmCalls = 0;
+let startSessionStreamCalls = 0;
 let renderMessagesCalls = 0;
 let renderTrayCalls = 0;
 let restoredSelections = null;
@@ -4673,7 +4711,13 @@ const INFLIGHT = {};
 function $(id) { return id === 'msgInner' ? msgInner : null; }
 function _resolveSessionIdFromSidebarLineage(sid) { return sid; }
 function _hermesNotifySessionOpen() { return null; }
-function _rearmActiveSessionStream() { rearmCalls += 1; }
+// Real ownership chain; never stub these. A look-alike shadows the gate.
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
+eval(extractFunc('_sidebarSessionProfileName'));
+// Attempted-count wrapper: no gating, no predicate logic, delegates to production.
+const _realRearmActiveSessionStream = eval('(' + extractFunc('_rearmActiveSessionStream') + ')');
+function _rearmActiveSessionStream() { rearmCalls += 1; return _realRearmActiveSessionStream(); }
 function _selectLiveRecoveryInflight() { return null; }
 function stopApprovalPolling() {}
 function hideApprovalCard() {}
@@ -4694,7 +4738,7 @@ function renderMessages() {
 }
 function renderTray() { renderTrayCalls += 1; }
 function syncTopbar() {}
-function startSessionStream() {}
+function startSessionStream() { startSessionStreamCalls += 1; }
 function showToast() {}
 async function _switchProfileForSessionLoad(profile) {
   switchCalls.push({
@@ -4786,6 +4830,7 @@ eval(extractFunc('loadSession'));
     apiCalls,
     switchCalls,
     rearmCalls,
+    startSessionStreamCalls,
     renderMessagesCalls,
     renderTrayCalls,
     restoredSelections,
@@ -4828,6 +4873,9 @@ eval(extractFunc('loadSession'));
         "loadGeneration": 1,
     }]
     assert result["renderTrayCalls"] == 0
+    # Attempted and armed are different numbers: the production gate runs.
+    assert result["rearmCalls"] == 3
+    assert result["startSessionStreamCalls"] == 2
     assert result["restoredSelections"] is None
     assert result["loadingSessionId"] is None
     assert result["loadGeneration"] == 2
@@ -4844,6 +4892,7 @@ def test_real_concurrent_c_switch_preserves_newer_profile_owner():
 const apiCalls = [];
 const switchCalls = [];
 let rearmCalls = 0;
+let startSessionStreamCalls = 0;
 let renderMessagesCalls = 0;
 let renderTrayCalls = 0;
 let syncTopbarCalls = 0;
@@ -4930,7 +4979,13 @@ function $(id) {
 }
 function _resolveSessionIdFromSidebarLineage(sid) { return sid; }
 function _hermesNotifySessionOpen() { return null; }
-function _rearmActiveSessionStream() { rearmCalls += 1; }
+// Real ownership chain; never stub these. A look-alike shadows the gate.
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
+eval(extractFunc('_sidebarSessionProfileName'));
+// Attempted-count wrapper: no gating, no predicate logic, delegates to production.
+const _realRearmActiveSessionStream = eval('(' + extractFunc('_rearmActiveSessionStream') + ')');
+function _rearmActiveSessionStream() { rearmCalls += 1; return _realRearmActiveSessionStream(); }
 function _selectLiveRecoveryInflight() { return null; }
 function stopApprovalPolling() {}
 function hideApprovalCard() {}
@@ -4957,7 +5012,7 @@ function renderMessages() {
 }
 function renderTray() { renderTrayCalls += 1; }
 function syncTopbar() { syncTopbarCalls += 1; }
-function startSessionStream() {}
+function startSessionStream() { startSessionStreamCalls += 1; }
 function showToast() {}
 function t(key) { return key; }
 function renderSessionList() { return Promise.resolve(); }
@@ -5056,6 +5111,7 @@ function _isSessionActivelyViewedForList() { return true; }
     apiCalls,
     switchCalls,
     rearmCalls,
+    startSessionStreamCalls,
     renderMessagesCalls,
     renderTrayCalls,
     syncTopbarCalls,
@@ -5098,6 +5154,9 @@ function _isSessionActivelyViewedForList() { return true; }
     assert result["toolCalls"] == [{"id": "c-tool"}]
     assert result["pendingFiles"] == [{"name": "c.txt"}]
     assert result["msgInner"] == "c transcript"
+    # Attempted and armed are different numbers: the production gate runs.
+    assert result["rearmCalls"] == 2
+    assert result["startSessionStreamCalls"] == 1
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -5236,7 +5295,11 @@ async function api(url, opts) {
 }
 function _resolveSessionIdFromSidebarLineage(sid) { return sid; }
 function _hermesNotifySessionOpen() { return null; }
-function _rearmActiveSessionStream() {}
+// Real ownership chain; never stub these. A look-alike shadows the gate.
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
+eval(extractFunc('_sidebarSessionProfileName'));
+eval(extractFunc('_rearmActiveSessionStream'));
 function stopApprovalPolling() {}
 function hideApprovalCard() {}
 function stopSessionStream() {}
@@ -5419,6 +5482,7 @@ def test_stale_failed_profile_switch_restores_when_newer_switch_fails_without_re
     source = _extract_func_script(sessions_js) + """
 const apiCalls = [];
 let rearmCalls = 0;
+let startSessionStreamCalls = 0;
 let restoredSelections = null;
 const msgInner = { innerHTML: '' };
 const window = {
@@ -5452,7 +5516,14 @@ const INFLIGHT = {};
 function $(id) { return id === 'msgInner' ? msgInner : null; }
 function _resolveSessionIdFromSidebarLineage(sid) { return sid; }
 function _hermesNotifySessionOpen() { return null; }
-function _rearmActiveSessionStream() { rearmCalls += 1; }
+// Real ownership chain; never stub these. A look-alike shadows the gate.
+eval(extractFunc('_profileMatchesActiveProfile'));
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
+eval(extractFunc('_sidebarSessionProfileName'));
+// Attempted-count wrapper: no gating, no predicate logic, delegates to production.
+const _realRearmActiveSessionStream = eval('(' + extractFunc('_rearmActiveSessionStream') + ')');
+function _rearmActiveSessionStream() { rearmCalls += 1; return _realRearmActiveSessionStream(); }
 function stopApprovalPolling() {}
 function hideApprovalCard() {}
 function stopSessionStream() {}
@@ -5469,7 +5540,7 @@ function _appRootPath() { return '/'; }
 function renderMessages() { msgInner.innerHTML = S.messages.map(m => m.content || '').join('\\n'); }
 function renderTray() {}
 function syncTopbar() {}
-function startSessionStream() {}
+function startSessionStream() { startSessionStreamCalls += 1; }
 function showToast() {}
 async function _switchProfileForSessionLoad() {
   return {
@@ -5499,6 +5570,7 @@ eval(extractFunc('loadSession'));
   console.log(JSON.stringify({
     apiCalls,
     rearmCalls,
+    startSessionStreamCalls,
     activeProfile: S.activeProfile,
     loadingSessionId: _loadingSessionId,
     sessionId: S.session && S.session.session_id,
@@ -5521,6 +5593,11 @@ eval(extractFunc('loadSession'));
     assert result["pendingFiles"] == [{"name": "current.txt"}]
     assert result["restoredSelections"] == [{"id": "ctx-1", "name": "Context 1", "text": "selected block"}]
     assert result["msgInner"] == "current transcript"
+    # Reading: the restored session is deliberately untagged, so it is not
+    # the named active owner 'a'. The helper is attempted twice and arms
+    # zero times -- the two counters must not be folded together.
+    assert result["rearmCalls"] == 2
+    assert result["startSessionStreamCalls"] == 0
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -5529,6 +5606,7 @@ def test_failed_profile_switch_stands_down_without_exact_pane_owner():
     source = _extract_func_script(sessions_js) + """
 const apiCalls = [];
 let rearmCalls = 0;
+let startSessionStreamCalls = 0;
 let restoredSelections = null;
 const msgInner = { innerHTML: '' };
 const window = {
@@ -5562,7 +5640,14 @@ const INFLIGHT = {};
 function $(id) { return id === 'msgInner' ? msgInner : null; }
 function _resolveSessionIdFromSidebarLineage(sid) { return sid; }
 function _hermesNotifySessionOpen() { return null; }
-function _rearmActiveSessionStream() { rearmCalls += 1; }
+// Real ownership chain; never stub these. A look-alike shadows the gate.
+eval(extractFunc('_profileMatchesActiveProfile'));
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
+eval(extractFunc('_sidebarSessionProfileName'));
+// Attempted-count wrapper: no gating, no predicate logic, delegates to production.
+const _realRearmActiveSessionStream = eval('(' + extractFunc('_rearmActiveSessionStream') + ')');
+function _rearmActiveSessionStream() { rearmCalls += 1; return _realRearmActiveSessionStream(); }
 function stopApprovalPolling() {}
 function hideApprovalCard() {}
 function stopSessionStream() {}
@@ -5579,7 +5664,7 @@ function _appRootPath() { return '/'; }
 function renderMessages() { msgInner.innerHTML = S.messages.map(m => m.content || '').join('\\n'); }
 function renderTray() {}
 function syncTopbar() {}
-function startSessionStream() {}
+function startSessionStream() { startSessionStreamCalls += 1; }
 function showToast() {}
 async function _switchProfileForSessionLoad() {
   S.activeProfile = 'replacement';
@@ -5609,6 +5694,7 @@ eval(extractFunc('loadSession'));
   console.log(JSON.stringify({
     apiCalls,
     rearmCalls,
+    startSessionStreamCalls,
     activeProfile: S.activeProfile,
     loadingSessionId: _loadingSessionId,
     sessionId: S.session && S.session.session_id,
@@ -5633,6 +5719,464 @@ eval(extractFunc('loadSession'));
     assert result["pendingFiles"] == [{"name": "replacement.txt"}]
     assert result["restoredSelections"] is None
     assert result["msgInner"] == "replacement transcript"
+    # The replacement session carries the committed owner, so both re-arm
+    # attempts pass the gate and arm the stream.
+    assert result["rearmCalls"] == 2
+    assert result["startSessionStreamCalls"] == 2
+
+
+def _rearm_alias_source(session_js_literal: str, state_js: str) -> str:
+    """Harness that runs the real re-arm helper, the real owner-predicate chain,
+    and the real startSessionStream() against a fake EventSource.
+
+    Two counters, deliberately not folded together: rearmAttempts counts helper
+    invocations (a no-logic wrapper), armedCalls/eventSourceCalls count the
+    effect the gate authorizes. Only those two are instrumented.
+    """
+    return session_js_literal + """
+let armedCalls = 0;
+let eventSourceCalls = 0;
+let rearmAttempts = 0;
+let _sessionStreamSessionId = null;
+let _sessionEventSource = null;
+let _sessionStreamReconnectTimer = null;
+let _sessionStreamHiddenSid = null;
+class EventSource {
+  constructor(url) { eventSourceCalls += 1; this.url = url; this.readyState = 1; }
+  addEventListener() {}
+  close() { this.readyState = 2; }
+}
+const document = { hidden: false, addEventListener() {} };
+function _apiUrl(path) { return path; }
+function _chatStreamActiveForSession() { return false; }
+function _startHiddenActiveStreamPoll() {}
+function _stopHiddenActiveStreamPoll() {}
+function stopSessionStream() {
+  _sessionEventSource = null;
+  _sessionStreamSessionId = null;
+}
+""" + state_js + """
+const _realStartSessionStream = eval('(' + extractFunc('startSessionStream') + ')');
+function startSessionStream(sid) { armedCalls += 1; return _realStartSessionStream(sid); }
+""" + REARM_PREDICATE_CHAIN + """
+function attemptRearm() { rearmAttempts += 1; _rearmActiveSessionStream(); }
+attemptRearm();
+console.log(JSON.stringify({ rearmAttempts, armedCalls, eventSourceCalls }));
+"""
+
+
+ROOT_ALIAS_ROSTER = """
+const _profilesCache = { profiles: [
+  { name: 'kinni', is_default: true },
+  { name: 'b', is_default: false },
+] };
+"""
+
+# The roster is what makes a renamed root provable. `_profilesCache` is declared
+# null at `static/panels.js:6672` and populated only by
+# `_warmProfileDropdownCache()`, which fires from a load listener behind a
+# 1200 ms timeout and is skipped outright while `document.hidden`. Until then the
+# reverse-alias step is inert. Every alias claim in this file is bounded by that.
+NULL_ROSTER = """
+const _profilesCache = null;
+"""
+
+REARM_ALIAS_STATES = {
+    # 1. Session tagged with the literal root alias while the active surface
+    #    reports the renamed root. This direction already worked; it is the
+    #    control proving the generalization did not lose it.
+    "default_session_under_renamed_root": """
+const S = {
+  activeProfile: 'kinni',
+  activeProfileIsDefault: true,
+  session: { session_id: 'current', message_count: 3, profile: 'default' },
+};
+""" + ROOT_ALIAS_ROSTER,
+    # 2. Reverse alias: session tagged with the renamed-root name while the
+    #    active surface still reports the literal 'default'. The server treats
+    #    this as owned (api/profiles.py::_profiles_match); the one-way helper
+    #    refused it and left the still-owned pane without its SSE.
+    "renamed_root_session_under_literal_default": """
+const S = {
+  activeProfile: 'default',
+  activeProfileIsDefault: true,
+  session: { session_id: 'current', message_count: 3, profile: 'kinni' },
+};
+""" + ROOT_ALIAS_ROSTER,
+    # 3. Untagged session under a named non-root profile. blankIsRoot maps the
+    #    blank owner to root, and root is not the active owner here.
+    "untagged_session_under_named_profile": """
+const S = {
+  activeProfile: 'b',
+  activeProfileIsDefault: false,
+  session: { session_id: 'current', message_count: 3 },
+};
+""" + ROOT_ALIAS_ROSTER,
+    # 4. Owner name absent from the roster. Unknown names fail closed.
+    "unknown_owner_name_fails_closed": """
+const S = {
+  activeProfile: 'b',
+  activeProfileIsDefault: false,
+  session: { session_id: 'current', message_count: 3, profile: 'ghost' },
+};
+""" + ROOT_ALIAS_ROSTER,
+    # 5. Case 2's exact state with a null roster: the pre-warm boot window. The
+    #    alias is true in the world but unprovable in the browser, so the
+    #    predicate refuses and the stream is not armed. The fix is conditional on
+    #    the roster, not unconditional. Same outcome as the pre-change one-way
+    #    helper, which never resolved this direction at all.
+    "renamed_root_under_literal_default_without_roster": """
+const S = {
+  activeProfile: 'default',
+  activeProfileIsDefault: true,
+  session: { session_id: 'current', message_count: 3, profile: 'kinni' },
+};
+""" + NULL_ROSTER,
+}
+
+REARM_ALIAS_MATRIX = [
+    ("default_session_under_renamed_root", True),
+    ("renamed_root_session_under_literal_default", True),
+    ("untagged_session_under_named_profile", False),
+    ("unknown_owner_name_fails_closed", False),
+    ("renamed_root_under_literal_default_without_roster", False),
+]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("case,expect_armed", REARM_ALIAS_MATRIX)
+def test_rearm_active_session_stream_root_alias_matrix(case, expect_armed):
+    sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    messages_js = MESSAGES_JS_PATH.read_text(encoding="utf-8")
+    prelude = _extract_func_script(sessions_js + "\n" + messages_js)
+    result = json.loads(_run_node(_rearm_alias_source(prelude, REARM_ALIAS_STATES[case])))
+    assert result["rearmAttempts"] == 1, case
+    assert result["armedCalls"] == (1 if expect_armed else 0), case
+    assert result["eventSourceCalls"] == (1 if expect_armed else 0), case
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_profile_owner_matches_active_blank_owner_contract():
+    """One predicate, both consumers: markers fail closed on a blank owner,
+    sessions opt into root via blankIsRoot."""
+    sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(sessions_js) + """
+const S = { activeProfile: 'default', activeProfileIsDefault: true };
+const _profilesCache = { profiles: [
+  { name: 'kinni', is_default: true },
+  { name: 'b', is_default: false },
+] };
+eval(extractFunc('_profileMatchesActiveProfile'));
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_profileOwnerMatchesActive'));
+const rootActive = {
+  blankDefault: _profileOwnerMatchesActive('', 'default'),
+  blankUndefinedOpts: _profileOwnerMatchesActive('   ', 'default', undefined),
+  blankAsRoot: _profileOwnerMatchesActive('', 'default', { blankIsRoot: true }),
+  reverseAlias: _profileOwnerMatchesActive('kinni', 'default'),
+  forwardAlias: _profileOwnerMatchesActive('default', 'default'),
+  unknownName: _profileOwnerMatchesActive('ghost', 'default'),
+};
+// Same predicate, named non-root active surface.
+S.activeProfile = 'b';
+S.activeProfileIsDefault = false;
+const namedActive = {
+  blankNamedActive: _profileOwnerMatchesActive('', 'b'),
+  blankAsRootNamedActive: _profileOwnerMatchesActive('', 'b', { blankIsRoot: true }),
+  rootOwnerUnderNamedActive: _profileOwnerMatchesActive('default', 'b'),
+  renamedRootOwnerUnderNamedActive: _profileOwnerMatchesActive('kinni', 'b'),
+  exactName: _profileOwnerMatchesActive('b', 'b'),
+};
+console.log(JSON.stringify(Object.assign({}, rootActive, namedActive)));
+"""
+    result = json.loads(_run_node(source))
+    # Cron-marker contract: an untagged marker's owner is genuinely unknown.
+    assert result["blankDefault"] is False
+    assert result["blankUndefinedOpts"] is False
+    # Session contract: an untagged session belongs to root by convention.
+    assert result["blankAsRoot"] is True
+    # Root aliases are equivalent in both directions; unknown names fail closed.
+    assert result["reverseAlias"] is True
+    assert result["forwardAlias"] is True
+    assert result["unknownName"] is False
+    # blankIsRoot resolves to root, not to "match anything".
+    assert result["blankNamedActive"] is False
+    assert result["blankAsRootNamedActive"] is False
+    assert result["rootOwnerUnderNamedActive"] is False
+    assert result["renamedRootOwnerUnderNamedActive"] is False
+    assert result["exactName"] is True
+
+
+SETTLEMENT_OWNER_CASES = [
+    # Retained owner is the renamed root while the active surface reports the
+    # literal root name. The server calls this owner equivalent, so the prior
+    # conversation is restored instead of standing down on a dead pane.
+    ("kinni", True),
+    # Retained owner absent from the roster: unknown names still stand down, so
+    # the widening is bounded by the roster, not by "active is root".
+    ("ghost", False),
+]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("retained_owner,expect_restore", SETTLEMENT_OWNER_CASES)
+def test_settlement_classifier_root_alias_retained_owner(retained_owner, expect_restore):
+    """`_classifyProfileSwitchSettlement` owner equality, exercised end to end.
+
+    The retained-owner branch at `static/sessions.js:1842` decides between
+    `restore_prior_owner` and `stand_down`. Under a renamed root the one-way
+    helper answered `stand_down` and left the captured pane holding the failed
+    switch's cleared transcript; the shared predicate answers correctly.
+
+    What makes the verdict attributable to the predicate is a differential, not
+    a spread of distinct values. The two parametrized cases are byte-identical
+    except for `retained.committedProfile`, so the flip between restore and
+    stand-down is caused by `_profileOwnerMatchesActive(retainedOwner,
+    activeProfile)` and nothing else. Two distinctness facts carry weight
+    alongside it: the retained owner (`kinni` / `ghost`) differs from the
+    retained target (`default`), so line 1842 is provably reading
+    `committedProfile` rather than the target, and the requested target
+    (`other`) differs from the retained target, so the `retry_requested_owner`
+    branch at 1843 is skipped and the verdict is settled at 1844.
+
+    The prior owner and the active profile do *not* differ here; both normalize
+    to `default`. That collapse is inherent to production, because
+    `_previousProfileOwnerOnSwitchFailure` (`static/sessions.js:1663`) derives
+    the prior owner from `S.activeProfile`, which this harness never changes. It
+    does not conceal the predicate result: the predicate's inputs are the
+    retained owner and the active profile, and the retained owner is neither.
+    """
+    sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = (_extract_func_script(sessions_js) + """
+const apiCalls = [];
+let rearmCalls = 0;
+let startSessionStreamCalls = 0;
+let restoredSelections = null;
+const msgInner = { innerHTML: '' };
+const window = {
+  _clearPendingSelections() {},
+  _snapshotPendingSelections() {
+    return [{ id: 'ctx-root', name: 'Context root', text: 'root selection' }];
+  },
+  _restorePendingSelections(selections) { restoredSelections = selections; },
+};
+const localStorage = { removeItem() {}, getItem() { return null; } };
+const history = { replaceState() {} };
+// Active surface reports the literal root name; the session and the retained
+// owner carry the renamed root name. Prior owner 'default', retained target
+// 'default', requested target 'other' are three distinct values.
+const S = {
+  activeProfile: 'default',
+  activeProfileIsDefault: true,
+  session: { session_id: 'current', message_count: 0, profile: 'kinni' },
+  messages: [{ role: 'assistant', content: 'root transcript' }],
+  toolCalls: [{ id: 'root-tool' }],
+  pendingFiles: [{ name: 'root.txt' }],
+  busy: false,
+  activeStreamId: null,
+};
+""" + ROOT_ALIAS_ROSTER + """
+let _loadingSessionId = null;
+let _loadSessionGeneration = 0;
+let _loadingOlder = false;
+let _pendingCarryForwardSnapshot = null;
+let _messagesTruncated = false;
+let _oldestIdx = 0;
+let _yoloEnabled = false;
+const INFLIGHT = {};
+function $(id) { return id === 'msgInner' ? msgInner : null; }
+function _resolveSessionIdFromSidebarLineage(sid) { return sid; }
+function _hermesNotifySessionOpen() { return null; }
+function stopApprovalPolling() {}
+function hideApprovalCard() {}
+function stopSessionStream() {}
+function _updateYoloPill() {}
+function stopClarifyPolling() {}
+function hideClarifyCard() {}
+async function _saveComposerDraftNow() {}
+function _clearQueueCardDisplay() {}
+function _sessionVisitHasUnreadState() { return false; }
+function _acknowledgeSessionVisit() {}
+function _clearSameSessionForceReloadHint() {}
+function _clearStuckSessionOnBoot() {}
+function _appRootPath() { return '/'; }
+function renderMessages() { msgInner.innerHTML = S.messages.map(m => m.content || '').join('\\n'); }
+function renderTray() {}
+function syncTopbar() {}
+function startSessionStream() { startSessionStreamCalls += 1; }
+function showToast() {}
+""" + REARM_PREDICATE_CHAIN + """
+// The superseded switch clears the captured pane, then settles failed with a
+// newer switch retaining ownership under the renamed-root name.
+async function _switchProfileForSessionLoad() {
+  S.messages = [];
+  S.toolCalls = [];
+  S.pendingFiles = [];
+  renderMessages();
+  return {
+    outcome: 'superseded',
+    terminalResult: Promise.resolve({
+      outcome: 'failed',
+      target: 'other',
+      terminalResult: null,
+      retainedResult: {
+        outcome: 'committed',
+        target: 'default',
+        committedProfile: '__RETAINED_OWNER__',
+        terminalResult: null,
+        retainedResult: null,
+      },
+    }),
+  };
+}
+async function api(url) {
+  apiCalls.push(url);
+  const err = new Error('profile mismatch');
+  err.status = 409;
+  err.body = JSON.stringify({
+    code: 'session_profile_mismatch',
+    profile: 'other',
+    session_id: 'foreign',
+  });
+  throw err;
+}
+eval(extractFunc('_sessionProfileMismatchFromError'));
+eval(extractFunc('loadSession'));
+(async () => {
+  renderMessages();
+  await loadSession('foreign');
+  console.log(JSON.stringify({
+    apiCalls,
+    activeProfile: S.activeProfile,
+    sessionId: S.session && S.session.session_id,
+    messages: S.messages,
+    toolCalls: S.toolCalls,
+    pendingFiles: S.pendingFiles,
+    restoredSelections,
+    msgInner: msgInner.innerHTML,
+  }));
+})().catch(err => { console.error(err); process.exit(1); });
+""").replace("__RETAINED_OWNER__", retained_owner)
+    result = json.loads(_run_node(source))
+    # One /api/session attempt: the settlement never retries the requested owner,
+    # because the retained target is the prior owner, not the requested one.
+    assert result["apiCalls"] == ["/api/session?session_id=foreign&messages=0&resolve_model=0"]
+    assert result["activeProfile"] == "default"
+    assert result["sessionId"] == "current"
+    if expect_restore:
+        assert result["messages"] == [{"role": "assistant", "content": "root transcript"}]
+        assert result["toolCalls"] == [{"id": "root-tool"}]
+        assert result["pendingFiles"] == [{"name": "root.txt"}]
+        assert result["restoredSelections"] == [
+            {"id": "ctx-root", "name": "Context root", "text": "root selection"}
+        ]
+        assert result["msgInner"] == "root transcript"
+    else:
+        assert result["messages"] == []
+        assert result["toolCalls"] == []
+        assert result["pendingFiles"] == []
+        assert result["restoredSelections"] is None
+        assert result["msgInner"] == ""
+
+
+SWITCH_OWNERSHIP_CASES = [
+    # Renamed-root session while the accepted switch lands on the literal root
+    # name. The server calls this owned, so the empty session is retagged in
+    # place instead of being replaced.
+    ("roster_warm_renamed_root_is_retained", "kinni", True, False),
+    # Name absent from the roster: unknown owners still force the replacement path.
+    ("roster_warm_unknown_owner_is_replaced", "ghost", True, True),
+    # Same renamed-root state, roster still null: the pre-warm boot window. The
+    # alias cannot be proven, so the session is replaced through newSession().
+    # This is unchanged from before this round, where `_profileMatchesActiveProfile`
+    # returned false for this state with or without a roster. The bound is the
+    # 1200 ms `_warmProfileDropdownCache()` timer, not the predicate; seeding
+    # `_profilesCache` from the boot payload is the separate change that lifts it.
+    ("roster_null_renamed_root_is_replaced", "kinni", False, True),
+]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize(
+    "case,session_profile,roster_warm,expect_replaced", SWITCH_OWNERSHIP_CASES
+)
+def test_switch_to_profile_session_ownership_uses_shared_root_alias_predicate(
+    case, session_profile, roster_warm, expect_replaced
+):
+    """Behavioral cover for the accepted-switch session check.
+
+    `sessionInProgress` is a local, so it is observed through what it gates:
+    the in-place profile retag at `static/panels.js:7402` and the
+    `newSession()` replacement branch. This is the executable counterpart to
+    the source-shape assertion in `tests/test_profile_switch_ux.py`.
+
+    The third case pins the bound: correct alias matching starts when the
+    profile roster loads, not when the switch is accepted.
+    """
+    js = PANELS_JS_PATH.read_text(encoding="utf-8") + '\n' + SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = (_extract_func_script(js) + """
+let _profileSwitchGeneration = 0;
+let _profileSwitchTransaction = null;
+let _profileLastCommittedSwitchResult = null;
+let _skillsData = ['old'];
+let _workspaceList = ['old'];
+let _loadingSessionId = null;
+const toasts = [];
+const newSessionCalls = [];
+const localStorage = { removeItem() {} };
+const window = {};
+const S = {
+  activeProfile: 'b',
+  activeProfileIsDefault: false,
+  session: { session_id: 'current', message_count: 0, profile: '__SESSION_PROFILE__' },
+  messages: [],
+};
+// Warm roster proves 'kinni' is the renamed root and leaves 'ghost' unproven;
+// the null roster leaves both unproven, which is the real pre-warm boot state.
+""" + (ROOT_ALIAS_ROSTER if roster_warm else NULL_ROSTER) + """
+function $(){ return null; }
+async function api(url){
+  if (url !== '/api/profile/switch') throw new Error('unexpected api: ' + url);
+  return { active: 'default', is_default: true };
+}
+async function newSession(){ newSessionCalls.push(S.activeProfile); }
+async function renderSessionList(){}
+function syncTopbar(){}
+function loadDir(){ return Promise.resolve(); }
+function showToast(key){ toasts.push(key); }
+function t(key){ return key; }
+async function _profileSwitchPanelLoad(){}
+function _refreshProfileSwitchBackground(){}
+function animateNextSessionListRefresh(){}
+""" + REARM_PREDICATE_CHAIN + """
+eval(extractFunc('switchToProfile'));
+(async () => {
+  await switchToProfile('default');
+  console.log(JSON.stringify({
+    activeProfile: S.activeProfile,
+    activeProfileIsDefault: S.activeProfileIsDefault,
+    sessionId: S.session && S.session.session_id,
+    sessionProfile: S.session && S.session.profile,
+    newSessionCalls,
+    toasts,
+  }));
+})().catch(err => { console.error(err); process.exit(1); });
+""").replace("__SESSION_PROFILE__", session_profile)
+    result = json.loads(_run_node(source))
+    assert result["activeProfile"] == "default", case
+    assert result["activeProfileIsDefault"] is True, case
+    if expect_replaced:
+        assert result["newSessionCalls"] == ["default"], case
+        assert "profile_switched_new_conversation" in result["toasts"], case
+        # The doomed session is never retagged into the new profile.
+        assert result["sessionProfile"] == session_profile, case
+    else:
+        assert result["newSessionCalls"] == []
+        assert "profile_switched" in result["toasts"]
+        assert "profile_switched_new_conversation" not in result["toasts"]
+        # Owned session survives the switch and is retagged in place.
+        assert result["sessionId"] == "current"
+        assert result["sessionProfile"] == "default"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
