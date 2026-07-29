@@ -639,11 +639,12 @@ def test_stale_compression_snapshot_emits_actionable_error_without_replaying_tur
 
 
 @pytest.mark.parametrize("failure_mode", ["result", "exception"])
+@pytest.mark.parametrize("second_result", ["recovered", "stale_error", "stale_flag"])
 def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
-    tmp_path, monkeypatch, failure_mode
+    tmp_path, monkeypatch, failure_mode, second_result
 ):
-    sid = f"revision-self-heal-{failure_mode}"
-    stream_id = f"stream-revision-self-heal-{failure_mode}"
+    sid = f"revision-self-heal-{failure_mode}-{second_result}"
+    stream_id = f"stream-revision-self-heal-{failure_mode}-{second_result}"
     db_path = tmp_path / "state.db"
     prior_messages = [
         {"role": "user", "content": "prior user", "timestamp": 1.0},
@@ -691,6 +692,20 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
                         "message": "token invalid",
                     },
                 }
+            if second_result != "recovered":
+                stale_result = {
+                    "completed": False,
+                    "final_response": "partial stale",
+                    "messages": history
+                    + [{"role": "assistant", "content": "partial stale"}],
+                    "partial": True,
+                    "failed": False,
+                }
+                if second_result == "stale_error":
+                    stale_result["error"] = "compression_snapshot_stale"
+                else:
+                    stale_result["compression_snapshot_stale"] = True
+                return stale_result
             return {
                 "completed": True,
                 "final_response": "recovered",
@@ -731,7 +746,24 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
         },
     ]
     events = _drain_events(event_queue)
-    assert not any(event == "apperror" for event, _payload in events)
+    apperrors = [payload for event, payload in events if event == "apperror"]
     reloaded = Session.load(sid)
     assert reloaded is not None
-    assert any(message.get("content") == "recovered" for message in reloaded.messages)
+    assert AuthThenRecoverAgent.runs == 2
+    if second_result == "recovered":
+        assert not apperrors
+        assert any(message.get("content") == "recovered" for message in reloaded.messages)
+    else:
+        assert len(apperrors) == 1
+        assert apperrors[0]["type"] == "compression_snapshot_stale"
+        assert "next message" in apperrors[0]["hint"].lower()
+        assert not any(event == "done" for event, _payload in events)
+        assert reloaded.active_stream_id is None
+        partials = [
+            message
+            for message in reloaded.messages
+            if message.get("content") == "partial stale" and message.get("_partial") is True
+        ]
+        assert len(partials) == 1
+        assert reloaded.messages[-1]["_error"] is True
+        assert "next message" in reloaded.messages[-1]["content"].lower()
