@@ -10353,9 +10353,12 @@ function _pendingCurrentTailUserMessage(messages){
 }
 
 function getPendingSessionMessage(session, messagesOverride=null){
-  const text=String(session?.pending_user_message||'').trim();
-  if(!text) return null;
+  const text=String(session?.pending_user_message||'');
+  if(!text.trim()) return null;
   const attachments=Array.isArray(session?.pending_attachments)?session.pending_attachments.filter(Boolean):[];
+  const source=session?.pending_user_source||undefined;
+  const wakeupMeta=(session?.pending_user_wakeup_meta&&typeof session.pending_user_wakeup_meta==='object')
+    ?session.pending_user_wakeup_meta:undefined;
   const sourceMessages=Array.isArray(messagesOverride)?messagesOverride:session?.messages;
   const messages=Array.isArray(sourceMessages)?sourceMessages:[];
   const currentTailUser=_pendingCurrentTailUserMessage(messages);
@@ -10363,9 +10366,14 @@ function getPendingSessionMessage(session, messagesOverride=null){
     const pendingCandidate={role:'user',content:text};
     const sameCurrentTurn=typeof _sameTranscriptMessage==='function'
       ? _sameTranscriptMessage(currentTailUser,pendingCandidate)
-      : String(msgContent(currentTailUser)||'').trim()===text;
+      : String(msgContent(currentTailUser)||'').trim()===text.trim();
     if(sameCurrentTurn){
       if(attachments.length&&!currentTailUser.attachments?.length) currentTailUser.attachments=attachments;
+      if(source==='process_wakeup'){
+        currentTailUser.content=text;
+        currentTailUser._source=source;
+        if(wakeupMeta) currentTailUser._wakeup_meta=wakeupMeta;
+      }
       return null;
     }
   }
@@ -10375,7 +10383,8 @@ function getPendingSessionMessage(session, messagesOverride=null){
     attachments:attachments.length?attachments:undefined,
     _ts:session?.pending_started_at||Date.now()/1000,
     _pending:true,
-    _source:session?.pending_user_source||undefined,
+    _source:source,
+    _wakeup_meta:wakeupMeta,
   };
 }
 async function checkInflightOnBoot(sid) {
@@ -15609,7 +15618,7 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
 }
 
 // #6345: parse the synthetic wakeup body back into display fields. Mirrors the
-// two structured api/background_process.format_wakeup_prompt shapes (pinned by
+// structured api/background_process.format_wakeup_prompt shapes (pinned by
 // tests/test_background_process_wakeup_format.py); other event kinds return
 // null and keep the raw-notice fallback.
 function _parseProcessWakeupBody(text){
@@ -15623,14 +15632,132 @@ function _parseProcessWakeupBody(text){
   if(m) return {type:'completion',taskId:m[1],exitCode:m[2],command:m[3],output:m[4],pattern:null};
   m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) matched watch pattern "(.*)"\.\nCommand: ([^\n]*)\nMatched output:\n([\s\S]*)\]$/);
   if(m) return {type:'watch_match',taskId:m[1],pattern:m[2],command:m[3],output:m[4],exitCode:null};
-  return null;
+
+  m=s.match(/^\[ASYNC DELEGATION (BATCH )?COMPLETE — ([^\]\n]+)\]\n([\s\S]*)$/);
+  if(!m) return null;
+  const isBatch=!!m[1];
+  const taskId=m[2];
+  const body=m[3];
+  const successful=status=>status==='completed'||status==='success';
+  const partial=status=>status==='partial'||status==='interrupted'||status==='cancelled'||status==='canceled';
+  const failed=status=>status==='error'||status==='failed'||status==='failure'||status==='timeout'||status==='timed_out';
+  const normalizeStatus=status=>{
+    const value=String(status||'').trim().toLowerCase();
+    return successful(value)?'completed':partial(value)?'partial':failed(value)?'error':null;
+  };
+  const aggregate=statuses=>{
+    const normalized=statuses.map(normalizeStatus);
+    if(!normalized.length||normalized.some(status=>status==null)) return null;
+    if(normalized.every(status=>status==='completed')) return 'completed';
+    if(normalized.some(status=>status==='completed'||status==='partial')) return 'partial';
+    return 'error';
+  };
+
+  if(!isBatch){
+    const preambles=[
+      'A background subagent you dispatched earlier has finished.',
+      'A background subagent you dispatched earlier has finished. You may have moved on since dispatching it; the full task source is below so you can act on the result or re-dispatch if things have changed.',
+    ];
+    const preamble=preambles.find(value=>body.startsWith(value+'\n\n'));
+    if(!preamble) return null;
+    const delimiter='\n--- RESULT ---\n';
+    const candidates=[];
+    let offset=body.indexOf(delimiter,preamble.length+2);
+    while(offset!==-1){
+      const header=body.slice(0,offset);
+      const lines=header.split('\n');
+      const statusLine=lines[lines.length-1]||'';
+      const roleLine=lines[lines.length-2]||'';
+      const statusMatch=statusLine.match(/^Status: ([^\s]+)(?:   API calls: [^\n]+)?(?:   Duration: [^\n]*s)?$/);
+      if(
+        statusMatch&&
+        /^Role: [^\n]*   Model: [^\n]*$/.test(roleLine)
+      ) candidates.push(statusMatch[1]);
+      offset=body.indexOf(delimiter,offset+delimiter.length);
+    }
+    if(candidates.length!==1) return null;
+    const status=aggregate(candidates);
+    if(!status) return null;
+    return {type:'async_delegation',taskId,exitCode:null,command:null,output:s,pattern:null,status};
+  }
+
+  const currentPreamble=body.match(/^A background fan-out of (\d+) subagent\(s\) you dispatched earlier has finished\. All ran in parallel and waited on each other; their consolidated results are below\. You may have moved on since dispatching — act on these or re-dispatch if things have changed\.\n\n/);
+  const legacyPreamble=body.match(/^A background fan-out of (\d+) subagent\(s\) has finished\.\n\n/);
+  const preambleMatch=currentPreamble||legacyPreamble;
+  if(!preambleMatch) return null;
+  const taskCount=Number(preambleMatch[1]);
+  if(!Number.isInteger(taskCount)||taskCount<1) return null;
+  const afterPreamble=preambleMatch[0].length;
+  let taskSectionStart=afterPreamble;
+
+  if(currentPreamble){
+    const structural=[];
+    const roleRe=/^Role: [^\n]*?   Model: [^\n]*?(?:   Total duration: [^\n]*s)?$/gm;
+    let roleMatch;
+    while((roleMatch=roleRe.exec(body))!==null){
+      if(roleMatch.index<afterPreamble) continue;
+      const end=roleMatch.index+roleMatch[0].length;
+      if(body.startsWith('\n--- ERROR ---\n',end)){
+        structural.push({kind:'error',start:end+1});
+      }else if(body.startsWith('\n\n--- ',end)){
+        structural.push({kind:'tasks',start:end+2});
+      }
+    }
+    if(structural.length!==1) return null;
+    if(structural[0].kind==='error'){
+      const errorBody=body.slice(structural[0].start);
+      if(!/^--- ERROR ---\nThe batch did not complete successfully: [\s\S]+$/.test(errorBody)) return null;
+      return {type:'async_delegation_batch',taskId,exitCode:null,command:null,output:s,pattern:null,status:'error'};
+    }
+    taskSectionStart=structural[0].start;
+  }
+
+  const taskSection=body.slice(taskSectionStart);
+  const headerRe=/^--- ([✓✗]) TASK (\d+)\/(\d+)(?:: ([^\n]*?))? {1,2}\(status=([^,\s)]+)(?:, api_calls=([^,\n)]+))?(?:, ([^,\n)]*)s)?\) ---$/gm;
+  const headers=[];
+  let headerMatch;
+  while((headerMatch=headerRe.exec(taskSection))!==null){
+    if(headerMatch.index!==0&&taskSection.slice(headerMatch.index-2,headerMatch.index)!=='\n\n') continue;
+    const index=Number(headerMatch[2]);
+    const denominator=Number(headerMatch[3]);
+    if(denominator!==taskCount||index<1||index>taskCount) continue;
+    const rawStatus=String(headerMatch[5]||'').toLowerCase();
+    const status=normalizeStatus(rawStatus);
+    if(!status) return null;
+    const expectedIcon=successful(rawStatus)?'✓':'✗';
+    if(headerMatch[1]!==expectedIcon) return null;
+    headers.push({index,status,offset:headerMatch.index});
+  }
+  if(
+    headers.length!==taskCount||
+    headers[0].offset!==0||
+    headers.some((header,index)=>header.index!==index+1)
+  ) return null;
+  const status=aggregate(headers.map(header=>header.status));
+  if(!status) return null;
+  return {type:'async_delegation_batch',taskId,exitCode:null,command:null,output:s,pattern:null,status};
 }
 // Server-stamped _wakeup_meta (authoritative when present) merged over the
 // client parse; the output section only ever comes from the parse because the
 // meta deliberately carries header fields only.
 function _processWakeupInfo(m, text){
   const parsed=_parseProcessWakeupBody(text);
-  const meta=(m&&m._wakeup_meta&&typeof m._wakeup_meta==='object')?m._wakeup_meta:null;
+  const suppliedMeta=(m&&m._wakeup_meta&&typeof m._wakeup_meta==='object')?m._wakeup_meta:null;
+  let meta=null;
+  if(suppliedMeta){
+    const type=String(suppliedMeta.type||'');
+    if(type==='completion'||type==='watch_match'){
+      meta=suppliedMeta;
+    }else if(type==='async_delegation'||type==='async_delegation_batch'){
+      const status=String(suppliedMeta.status||'').toLowerCase();
+      if(String(suppliedMeta.task_id||'')&&['completed','error','partial'].includes(status)){
+        meta={...suppliedMeta,status};
+      }
+    }
+    // A malformed server stamp must fail closed rather than handing status
+    // authority back to free-form text.
+    if(!meta) return null;
+  }
   if(!parsed&&!meta) return null;
   const pick=(metaKey,parsedKey)=>{
     if(meta&&meta[metaKey]!=null) return meta[metaKey];
@@ -15642,11 +15769,13 @@ function _processWakeupInfo(m, text){
     command:String(pick('command','command')||''),
     exitCode:pick('exit_code','exitCode'),
     pattern:pick('pattern','pattern'),
-    output:parsed?parsed.output:null,
+    output:parsed&&(!meta||parsed.type===meta.type)?parsed.output:null,
+    status:String(pick('status','status')||''),
   };
 }
 function _processWakeupCardHtml(info, rawText, extras){
   const isWatch=info.type==='watch_match';
+  const isAsync=info.type==='async_delegation'||info.type==='async_delegation_batch';
   const exitStr=info.exitCode==null?'':String(info.exitCode);
   // Signal-killed processes report negative exit codes (subprocess returncode).
   const exitKnown=/^-?\d+$/.test(exitStr);
@@ -15654,12 +15783,18 @@ function _processWakeupCardHtml(info, rawText, extras){
   let chip;
   if(isWatch){
     chip=`<span class="process-wakeup-chip watch" title="${esc(t('process_wakeup_matched'))}">${li('eye',11)}<code title="${esc(String(info.pattern||''))}">${esc(String(info.pattern||''))}</code></span>`;
+  }else if(isAsync){
+    const status=info.status;
+    const cls=status==='completed'?'ok':(status==='error'?'fail':'neutral');
+    const icon=status==='completed'?li('check',11):(status==='error'?li('x',11):'');
+    chip=`<span class="process-wakeup-chip ${cls}">${icon}<span>${esc(status)}</span></span>`;
   }else{
     const cls=exitOk?'ok':(exitKnown?'fail':'neutral');
     const icon=exitOk?li('check',11):(exitKnown?li('x',11):'');
     chip=`<span class="process-wakeup-chip ${cls}">${icon}<span>exit ${esc(exitStr||'?')}</span></span>`;
   }
-  const cmdHtml=info.command?`<code class="process-wakeup-cmd" title="${esc(info.command)}">${esc(info.command)}</code>`:'';
+  const summaryTarget=isAsync?info.taskId:info.command;
+  const cmdHtml=summaryTarget?`<code class="process-wakeup-cmd" title="${esc(summaryTarget)}">${esc(summaryTarget)}</code>`:'';
   // Preserve output byte-for-byte for the <pre>; trim ONLY for the
   // empty/non-empty decision so leading indentation and trailing blank lines
   // survive (#6350 review finding 1).
@@ -16177,7 +16312,7 @@ function renderMessages(options){
       currentAssistantTurn=null;
       let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
-      const processText=String(rowDisplayContent||'').trim();
+      const processText=String(rowDisplayContent||'');
       const processFootHtml=`<div class="msg-foot">${timeHtml}<span class="msg-actions">${copyBtn}</span></div>`;
       // #6345: structured completions/watch-matches render as a collapsed
       // summary card; anything unparseable keeps the raw notice below so the
@@ -16191,7 +16326,7 @@ function renderMessages(options){
         if(wakeupInfo.type==='completion'&&/^-?\d+$/.test(exitStr)&&exitStr!=='0') noticeClass+=' process-wakeup-fail';
         noticeInnerHtml=_processWakeupCardHtml(wakeupInfo, processText, {timeHtml, filesHtml, footHtml:`<div class="msg-foot"><span class="msg-actions">${copyBtn}</span></div>`});
       }else{
-        const processTextHtml=processText?`<pre class="process-wakeup-text">${esc(processText)}</pre>`:'';
+        const processTextHtml=processText.trim()?`<pre class="process-wakeup-text">${esc(processText)}</pre>`:'';
         noticeInnerHtml=`<div class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></div>${filesHtml}<div class="msg-body process-wakeup-body">${processTextHtml}</div>${processFootHtml}`;
       }
       const nextRowHtml=`<div class="${noticeClass}">${noticeInnerHtml}</div>`;

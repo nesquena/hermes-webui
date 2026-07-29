@@ -39,6 +39,8 @@ _METADATA_FIELDS = frozenset(
         "pending_user_message",
         "pending_attachments",
         "pending_started_at",
+        "pending_user_source",
+        "pending_user_wakeup_meta",
         "compression_anchor_visible_idx",
         "compression_anchor_message_key",
         "compression_anchor_summary",

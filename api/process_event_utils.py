@@ -116,19 +116,125 @@ def wakeup_display_meta(text: Any) -> dict | None:
     return None
 
 
-def attach_wakeup_display_meta(msg: Any, source: Any) -> None:
-    """Stamp ``_wakeup_meta`` on a process-wakeup user message, best-effort.
+_ASYNC_SUCCESS_STATUSES = frozenset({"completed", "success"})
+_ASYNC_PARTIAL_STATUSES = frozenset(
+    {"partial", "interrupted", "cancelled", "canceled"}
+)
+_ASYNC_ERROR_STATUSES = frozenset({"error", "failed", "failure", "timeout", "timed_out"})
+_ASYNC_DISPLAY_STATUSES = frozenset({"completed", "partial", "error"})
 
-    Companion to the ``_source`` stamp: display-only (``_wakeup_meta`` is not
-    in ``_API_SAFE_MSG_KEYS``, so it never reaches a provider) and never
-    raises — an unparseable body simply leaves the message unstamped and the
-    UI falls back to parsing/raw rendering.
+
+def _async_display_status(statuses: list[Any]) -> str | None:
+    """Collapse trusted producer statuses into the three display states.
+
+    Unknown/missing values fail closed instead of guessing from formatted text.
+    """
+    normalized = [str(status or "").strip().lower() for status in statuses]
+    if not normalized or any(not status for status in normalized):
+        return None
+    known = _ASYNC_SUCCESS_STATUSES | _ASYNC_PARTIAL_STATUSES | _ASYNC_ERROR_STATUSES
+    if any(status not in known for status in normalized):
+        return None
+    if all(status in _ASYNC_SUCCESS_STATUSES for status in normalized):
+        return "completed"
+    non_error = _ASYNC_SUCCESS_STATUSES | _ASYNC_PARTIAL_STATUSES
+    if any(status in non_error for status in normalized):
+        return "partial"
+    return "error"
+
+
+def async_delegation_wakeup_meta(evt: Any) -> dict | None:
+    """Return producer-owned display metadata for an async delegation event.
+
+    Batch status is aggregated only from the structured per-task ``results``
+    list. A no-results crash/error falls back to the producer's top-level event
+    status/error. Free-form goal, summary, and formatted notification text are
+    never inspected, so they cannot spoof the card status.
+    """
+    if not isinstance(evt, dict) or evt.get("type") != "async_delegation":
+        return None
+    task_id = completion_delivery_id(evt)
+    if not task_id:
+        return None
+    results = evt.get("results")
+    is_batch = evt.get("is_batch") is True
+    status: str | None = None
+    if is_batch:
+        if not isinstance(results, list):
+            return None
+        if results:
+            if any(not isinstance(result, dict) for result in results):
+                return None
+            status = _async_display_status([result.get("status") for result in results])
+        else:
+            top_status = evt.get("status")
+            if (not top_status) and evt.get("error"):
+                top_status = "error"
+            status = _async_display_status([top_status])
+    else:
+        status = _async_display_status([evt.get("status")])
+    if status is None:
+        return None
+    return {
+        "type": "async_delegation_batch" if is_batch else "async_delegation",
+        "task_id": task_id,
+        "status": status,
+    }
+
+
+def normalize_wakeup_display_meta(meta: Any) -> dict | None:
+    """Validate and copy display metadata before persisting it on a message."""
+    if not isinstance(meta, dict):
+        return None
+    meta_type = str(meta.get("type") or "").strip()
+    if meta_type in {"async_delegation", "async_delegation_batch"}:
+        task_id = str(meta.get("task_id") or "").strip()
+        status = str(meta.get("status") or "").strip().lower()
+        if not task_id or status not in _ASYNC_DISPLAY_STATUSES:
+            return None
+        return {"type": meta_type, "task_id": task_id, "status": status}
+    if meta_type == "completion":
+        return {
+            "type": meta_type,
+            "task_id": str(meta.get("task_id") or ""),
+            "command": str(meta.get("command") or ""),
+            "exit_code": meta.get("exit_code"),
+        }
+    if meta_type == "watch_match":
+        return {
+            "type": meta_type,
+            "task_id": str(meta.get("task_id") or ""),
+            "command": str(meta.get("command") or ""),
+            "pattern": str(meta.get("pattern") or ""),
+        }
+    return None
+
+
+def attach_wakeup_display_meta(
+    msg: Any,
+    source: Any,
+    wakeup_meta: Any = None,
+) -> None:
+    """Stamp trusted or body-derived display metadata on a process wakeup.
+
+    Producer-owned metadata wins when supplied. Legacy completion/watch bodies
+    retain the exact inverse parser as a compatibility fallback.
     """
     if source != "process_wakeup" or not isinstance(msg, dict):
         return
-    if msg.get("_wakeup_meta"):
-        return
     try:
+        explicit_meta = normalize_wakeup_display_meta(wakeup_meta)
+        if explicit_meta is not None:
+            msg["_wakeup_meta"] = explicit_meta
+            return
+        if wakeup_meta is not None:
+            return
+        existing_meta = msg.get("_wakeup_meta")
+        if existing_meta is not None:
+            normalized_existing = normalize_wakeup_display_meta(existing_meta)
+            if normalized_existing is not None:
+                msg["_wakeup_meta"] = normalized_existing
+            return
         meta = wakeup_display_meta(msg.get("content"))
     except Exception:
         logger.debug("wakeup display-meta derivation failed", exc_info=True)
@@ -137,7 +243,7 @@ def attach_wakeup_display_meta(msg: Any, source: Any) -> None:
         msg["_wakeup_meta"] = meta
 
 
-def stamp_message_source(msg: Any, source: Any) -> None:
+def stamp_message_source(msg: Any, source: Any, wakeup_meta: Any = None) -> None:
     """Stamp ``_source`` and any display metadata on a materialized user turn.
 
     Single choke point for every path that persists a non-``webui`` user turn
@@ -150,7 +256,7 @@ def stamp_message_source(msg: Any, source: Any) -> None:
     if not isinstance(msg, dict) or not source or source == "webui":
         return
     msg["_source"] = source
-    attach_wakeup_display_meta(msg, source)
+    attach_wakeup_display_meta(msg, source, wakeup_meta)
 
 
 def _claim_bounded_local(delegation_id: str) -> bool:
