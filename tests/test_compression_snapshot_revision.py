@@ -544,11 +544,12 @@ def test_webui_run_missing_explicit_profile_passes_no_foreign_revision(
     assert not any(event == "apperror" for event, _payload in events)
 
 
+@pytest.mark.parametrize("delivery", ["exception", "result"])
 def test_stale_compression_snapshot_emits_actionable_error_without_replaying_turn(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, delivery
 ):
-    sid = "revision-stale"
-    stream_id = "stream-revision-stale"
+    sid = f"revision-stale-{delivery}"
+    stream_id = f"stream-revision-stale-{delivery}"
     _make_state_db(
         tmp_path / "state.db",
         sid,
@@ -584,9 +585,25 @@ def test_stale_compression_snapshot_emits_actionable_error_without_replaying_tur
             calls += 1
             if self.stream_delta_callback:
                 self.stream_delta_callback("Partial work completed before the conflict.")
-            raise CompressionSnapshotStaleError(
-                "expected revision count=1 max_id=1; observed count=2 max_id=9"
-            )
+            if delivery == "exception":
+                raise CompressionSnapshotStaleError(
+                    "expected revision count=1 max_id=1; observed count=2 max_id=9"
+                )
+            return {
+                "completed": False,
+                "final_response": "Partial work completed before the conflict.",
+                "messages": [
+                    {"role": "user", "content": "new webui turn"},
+                    {
+                        "role": "assistant",
+                        "content": "Partial work completed before the conflict.",
+                    },
+                ],
+                "error": "compression_snapshot_stale",
+                "partial": True,
+                "failed": False,
+                "compression_snapshot_stale": True,
+            }
 
     monkeypatch.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
 

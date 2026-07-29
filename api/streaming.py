@@ -1209,7 +1209,13 @@ def _provider_error_probe_text(value) -> tuple[str, int | None]:
     return ' '.join(t for t in _texts if t).strip(), _status_code
 
 
-def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = False) -> dict:
+def _classify_provider_error(
+    err_str: str,
+    exc=None,
+    *,
+    silent_failure: bool = False,
+    result=None,
+) -> dict:
     """Classify provider/agent failure text for WebUI apperror UX.
 
     Keep this string-based until hermes-agent exposes stable structured
@@ -1225,14 +1231,27 @@ def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = F
     err_str = str(_probe_text or err_str or '')
     _err_lower = err_str.lower()
     _exc_name = type(exc).__name__ if exc is not None else ''
+    _result_reports_compression_snapshot_stale = (
+        isinstance(result, dict)
+        and (
+            result.get('error') == 'compression_snapshot_stale'
+            or result.get('compression_snapshot_stale') is True
+        )
+    )
     try:
         from agent.conversation_compression import CompressionSnapshotStaleError  # type: ignore[attr-defined]
     except ImportError:
         # Paired deployments export the typed exception. The name-only fallback
         # keeps a rolling WebUI/Agent upgrade actionable without text matching.
-        _is_compression_snapshot_stale = _exc_name == 'CompressionSnapshotStaleError'
+        _is_compression_snapshot_stale = (
+            _result_reports_compression_snapshot_stale
+            or _exc_name == 'CompressionSnapshotStaleError'
+        )
     else:
-        _is_compression_snapshot_stale = isinstance(exc, CompressionSnapshotStaleError)
+        _is_compression_snapshot_stale = (
+            _result_reports_compression_snapshot_stale
+            or isinstance(exc, CompressionSnapshotStaleError)
+        )
     if _is_compression_snapshot_stale:
         return {
             'label': 'Conversation changed during compression',
@@ -9968,6 +9987,7 @@ def _run_agent_streaming(
                     str(_last_err) if _last_err else '',
                     _last_err,
                     silent_failure=not bool(_last_err),
+                    result=result,
                 )
                 _is_quota = _classification['type'] == 'quota_exhausted'
                 _is_auth = _classification['type'] == 'auth_mismatch'
