@@ -3528,18 +3528,18 @@ def _filter_reasoning_efforts_for_provider(
     ]
     normalized = list(dict.fromkeys(normalized))
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
-    bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
-    # OpenAI-family lanes expose the generic max/ultra tiers for GPT-5.6.
-    # Hermes Agent normalizes Codex's product-level ``ultra`` to the Responses
-    # API wire value ``max``. Older GPT-5 generations still cap at xhigh, and
-    # o-series models still cap at high.
-    if provider in {"openai-codex", "openai", "openai-api", "azure-foundry", "azure-openai", "azure"}:
-        if bare.startswith(("o1", "o3", "o4")):
-            return [eff for eff in normalized if eff in {"low", "medium", "high"}]
-        if bare.startswith("gpt-5"):
-            if "gpt-5.6" in bare:
-                return normalized
-            return [eff for eff in normalized if eff not in {"max", "ultra"}]
+    bare = _strip_provider_hint_for_reasoning(model_id, provider).lower().rsplit("/", 1)[-1]
+    # Model-scoped hard ceilings follow the MODEL across every serving lane —
+    # direct OpenAI-family providers, aggregators (OpenRouter/Nous), Copilot,
+    # and custom gateways alike. Older GPT-5 generations reject the generic
+    # max/ultra tiers and o-series models reject anything above ``high`` no
+    # matter which route delivers them; GPT-5.6 is the only GPT-5 generation
+    # exposing max/ultra. Hermes Agent normalizes Codex's product-level
+    # ``ultra`` to the Responses API wire value ``max``. (#6018)
+    if bare.startswith(("o1", "o3", "o4")):
+        return [eff for eff in normalized if eff in {"low", "medium", "high"}]
+    if bare.startswith("gpt-5") and "gpt-5.6" not in bare:
+        return [eff for eff in normalized if eff not in {"max", "ultra"}]
     # Generic top tiers must not be advertised to providers whose native ladder
     # tops out lower; the downgrade ladder then lands on xhigh/high safely.
     if provider in {"gemini", "google", "google-gemini", "google-vertex", "vertex"}:
@@ -3561,9 +3561,19 @@ def _filter_reasoning_efforts_for_provider(
         return normalized
     if zai_supports is False:
         return []
-
+    # DEFAULT-DENY for custom/unrecognized providers: their native effort
+    # ladders are unknown, so the supra-ceiling max/ultra tiers must not leak
+    # through heuristic or metadata fallbacks — unless the operator explicitly
+    # authorized them via a provider ``reasoning_efforts`` allowlist. An empty
+    # provider id skips this gate: the caller simply didn't name a provider,
+    # which is not the same as naming one we don't recognize. (#6018)
+    if provider and not _provider_known_reasoning_capable(provider):
+        allow = set(_provider_configured_reasoning_efforts(provider))
+        normalized = [
+            eff for eff in normalized
+            if eff not in {"max", "ultra"} or eff in allow
+        ]
     return normalized
-
 
 _KNOWN_REASONING_PROVIDERS = frozenset({
     "anthropic", "claude", "anthropic-claude",
@@ -3572,7 +3582,15 @@ _KNOWN_REASONING_PROVIDERS = frozenset({
     "bedrock", "aws-bedrock", "vertex", "google-vertex",
     "gemini", "google", "google-gemini",
     "deepseek", "x-ai", "xai", "grok",
-    "copilot", "github-copilot", "openrouter",
+    # OpenRouter and the Nous Portal are recognized aggregators: model-scoped
+    # ceilings above still cap what each routed model can accept. (#6018)
+    "copilot", "github-copilot", "openrouter", "nous",
+    # First-class WebUI catalog providers are RECOGNIZED lanes, not custom /
+    # unknown gateways — the max/ultra default-deny must not strip them.
+    # (Canonical post-alias slugs; e.g. xai-oauth is the xAI Grok OAuth lane.)
+    "xai-oauth", "zai", "kimi-coding", "minimax", "minimax-cn",
+    "opencode-zen", "opencode-go", "mistralai", "alibaba",
+    "nvidia", "xiaomi",
 })
 
 
@@ -3586,6 +3604,39 @@ def _provider_known_reasoning_capable(provider_id) -> bool:
     """
     prov = _resolve_provider_alias(str(provider_id or "").strip().lower())
     return prov in _KNOWN_REASONING_PROVIDERS
+
+def _provider_configured_reasoning_efforts(provider_id: str) -> list[str]:
+    """Return the explicitly configured reasoning_efforts allowlist for *provider_id*.
+
+    Reads ``providers.<name>.reasoning_efforts`` or the matching named
+    ``custom_providers[]`` entry. Only valid levels (plus the ``none`` sentinel)
+    survive, lowercased, in configured order; [] when nothing valid is set.
+    This is the operator's explicit authorization consulted by the
+    default-deny top-tier gate in _filter_reasoning_efforts_for_provider.
+    """
+    provider = str(provider_id or "").strip().lower()
+    if not provider:
+        return []
+    entries = None
+    try:
+        if provider.startswith("custom:"):
+            for entry in _custom_provider_entries():
+                if _custom_provider_slug_from_name(entry.get("name")) == provider:
+                    entries = entry.get("reasoning_efforts")
+                    break
+        else:
+            prov_entry = (cfg.get("providers") or {}).get(provider, {})
+            if isinstance(prov_entry, dict):
+                entries = prov_entry.get("reasoning_efforts")
+    except Exception:
+        return []
+    if not isinstance(entries, list):
+        return []
+    return [
+        str(x).strip().lower()
+        for x in entries
+        if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}
+    ]
 
 
 def _is_pre_adaptive_anthropic(bare_model: str) -> bool:
@@ -3641,7 +3692,12 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
         if bare.startswith(("gpt-5", "o1", "o3", "o4")):
             if bare.startswith(("o1", "o3", "o4")):
                 return ["low", "medium", "high"]
-            return list(VALID_REASONING_EFFORTS)
+            # Copilot fallback: never hand out the generic top tiers for GPT-5
+            # generations that reject them — the filter applies the GPT-5.6
+            # model check so only 5.6 keeps max/ultra. (#6018)
+            return _filter_reasoning_efforts_for_provider(
+                list(VALID_REASONING_EFFORTS), model, provider
+            )
     prefixes = (
         "deepseek/",
         "anthropic/",
@@ -3653,16 +3709,27 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
         "tencent/hy3-preview",
         "xiaomi/",
     )
+    # The fallback branches here return the expanded global effort list when
+    # capability metadata is unavailable. They MUST route through
+    # _filter_reasoning_efforts_for_provider so the GPT-5.6 model check, the
+    # provider ceilings, and the unknown-provider max/ultra default-deny still
+    # apply — otherwise unsupported models get offered ultra. (#6018)
     if any(model.startswith(prefix) for prefix in prefixes):
-        return list(VALID_REASONING_EFFORTS)
+        return _filter_reasoning_efforts_for_provider(
+            list(VALID_REASONING_EFFORTS), model, provider
+        )
     if _nested_gateway_route_reasoning(model):
-        return list(VALID_REASONING_EFFORTS)
+        return _filter_reasoning_efforts_for_provider(
+            list(VALID_REASONING_EFFORTS), model, provider
+        )
     # Named custom providers often rewrite model ids with dots, underscores, or
     # extra vendor namespaces. Normalize those shapes before applying family-level
     # reasoning heuristics so "deepseek.v3.2", "deepseek_v4_flash", and
     # "vendor.deepseek.v3.2" are treated consistently.
     if any(_candidate_supports_reasoning(candidate) for candidate in _reasoning_name_candidates(bare)):
-        return list(VALID_REASONING_EFFORTS)
+        return _filter_reasoning_efforts_for_provider(
+            list(VALID_REASONING_EFFORTS), model, provider
+        )
     return []
 
 
@@ -4000,6 +4067,17 @@ def _resolve_model_reasoning_efforts_impl(
                     return _filtered
     except Exception:
         pass
+    # 0. Provider config: providers.<name>.reasoning_efforts or named
+    # custom_providers[].reasoning_efforts. When the user has explicitly listed
+    # valid efforts for a provider, return that list directly — no heuristics,
+    # no models.dev lookup.
+    # Only short-circuits when the filtered list is non-empty; an all-invalid
+    # list (e.g. typos) falls through to heuristics instead of hiding reasoning.
+    _re_list = _provider_configured_reasoning_efforts(provider)
+    if _re_list:
+        _filtered = list(dict.fromkeys(_re_list))
+        if _filtered:
+            return _filtered
 
     if provider in {"copilot", "github-copilot"}:
         try:
