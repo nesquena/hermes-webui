@@ -2849,6 +2849,7 @@ from api.helpers import (
     _redact_text,
     _CLIENT_DISCONNECT_ERRORS,
     media_token_pattern,
+    unquote_media_ref,
 )
 from api.agent_health import build_agent_health_payload
 from api.gateway_chat import gateway_chat_config_status
@@ -18853,6 +18854,12 @@ def _session_media_token_allows_path(sid: str, target: Path, allowed_mimes: set[
         if "MEDIA:" not in text:
             continue
         for ref in _MEDIA_TOKEN_RE.findall(text):
+            # A quoted ref (the unambiguous spelling for spaced paths) is
+            # captured WITH its quotes so the matched span covers the whole
+            # token; strip them before touching the filesystem, or the
+            # allow-list entry would carry a literal quote and never match the
+            # path the renderer actually requests.
+            ref = unquote_media_ref(ref)
             if "://" in ref:
                 continue
             try:

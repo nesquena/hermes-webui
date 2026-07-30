@@ -1234,19 +1234,83 @@ _MEDIA_TOKEN_BARE = (
     r"(?!MEDIA:)[^\s)\]]+?(?:[^\S\n](?!MEDIA:)[^\s)\]]+?)*?\.[A-Za-z0-9]+"
 )
 _MEDIA_TOKEN_BOUNDARY = r"(?=[\s)\]}\"'*_,;:]|MEDIA:|$)"
+# Explicit quoted forms. These win before every unquoted alternative so an
+# ambiguous path (spaces, a dotted directory before a space, an internal ``)``
+# or ``]``) has one unambiguous spelling that both languages agree on. A quoted
+# ref may hold any character except its own quote and a newline — a newline
+# always ends a MEDIA token. Mirrors the quoted alternatives in
+# ``_mediaPathSrc()`` (static/ui.js); keep the two in lockstep.
+_MEDIA_TOKEN_QUOTED = r"\"[^\"\n]+\"|'[^'\n]+'"
+
+
+def unquote_media_ref(ref: str) -> str:
+    """Strip one matching pair of surrounding quotes from a MEDIA: capture.
+
+    The capture groups in :func:`media_token_pattern` keep the quotes so the
+    matched span covers the full token (needed to replace it in the source
+    text). Every consumer that turns a capture into a filesystem path must call
+    this first, or a quoted ref reaches ``Path()`` with a literal ``"`` in it.
+
+    Mirrors ``_unquoteMediaRef()`` in static/ui.js.
+    """
+    value = str(ref or "").strip()
+    if len(value) >= 2 and value[0] in ("\"", "'") and value[-1] == value[0]:
+        return value[1:-1]
+    return value
 
 
 def media_token_pattern(extra_exclude: str = "", exclude_urls: bool = False) -> str:
     """Return the MEDIA: path-capture pattern (one capture group).
 
-    ``extra_exclude`` adds characters to the no-space fallback's excluded set
-    (the share inliner also excludes ``>``). ``exclude_urls`` skips
-    ``MEDIA:http(s)://...`` so external images pass through untouched.
+    ``extra_exclude`` adds characters to the excluded set of the unquoted
+    alternatives (the share inliner also excludes ``>``). ``exclude_urls``
+    skips ``MEDIA:http(s)://...`` so external images pass through untouched.
+
+    The alternatives are ordered, and the order is load-bearing:
+
+    1. **Quoted** — the unambiguous spelling; may hold any character.
+    2. **Spaced run whose FINAL space-separated word carries the extension.**
+       The continuation is greedy up to the last ``.ext`` on the line, so
+       ``/tmp/v1.2 Reports/chart.png`` resolves whole instead of stopping at
+       the dotted directory ``/tmp/v1.2``. It is still bounded: each
+       continuation word must itself be extension-free, which is what stops
+       ``MEDIA:/tmp/a.png looks good`` from absorbing prose and keeps two
+       adjacent tags separate.
+    3. **No-space fallback** — legacy shape, any extension or none, so
+       extension-less paths that resolved before keep resolving.
+
+    The returned capture may be quoted; callers must run it through
+    :func:`unquote_media_ref` before treating it as a path.
     """
     url_guard = r"(?!https?://)" if exclude_urls else ""
-    fallback = r"[^\s)\]" + extra_exclude + r"]+"
-    bare = _MEDIA_TOKEN_BARE
-    if extra_exclude:
-        bare = bare.replace(r"[^\s)\]]", r"[^\s)\]" + extra_exclude + r"]")
-    return r"MEDIA:" + url_guard + r"((?:" + bare + r")" + _MEDIA_TOKEN_BOUNDARY + r"|" + fallback + r")"
-
+    # One path character: no whitespace, and none of the delimiters that close
+    # a token (plus any caller-specific exclusions).
+    ch = r"[^\s)\]" + extra_exclude + r"]"
+    # A whole space-separated word with NO dot in it. Requiring the intermediate
+    # words to be dot-free is the bound: the run can cross `Reports/` and
+    # `Notes/` but stops dead at the first word carrying a `.ext`, so trailing
+    # prose after `a.png` is never absorbed.
+    #
+    # Spelled as a dot-free character class rather than a lookbehind to stay
+    # byte-comparable with the JS half, where `(?<!\.)` is a PARSE-TIME brick on
+    # engines without regex lookbehind (Safari < 16.4, some embedded WebViews) —
+    # see tests/test_5552_viewport_anchor_surrogate.py.
+    word_no_dot = r"(?!MEDIA:)[^\s)\]." + extra_exclude + r"]+"
+    # Final word carries the extension.
+    final_with_ext = r"(?!MEDIA:)" + ch + r"+?\.[A-Za-z0-9]+"
+    spaced = (
+        r"(?!MEDIA:)" + ch + r"+?"
+        + r"(?:[^\S\n]" + word_no_dot + r")*?"
+        + r"[^\S\n]" + final_with_ext
+        + _MEDIA_TOKEN_BOUNDARY
+    )
+    nospace = r"(?!MEDIA:)" + ch + r"+?\.[A-Za-z0-9]+" + _MEDIA_TOKEN_BOUNDARY
+    fallback = ch + r"+"
+    return (
+        r"MEDIA:" + url_guard + r"("
+        + _MEDIA_TOKEN_QUOTED
+        + r"|" + spaced
+        + r"|" + nospace
+        + r"|" + fallback
+        + r")"
+    )

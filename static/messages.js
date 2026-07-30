@@ -4614,17 +4614,90 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return !!entry && entry.parent===parent && entry.baseAddText===baseAddText && entry.writeText===writeText;
   }
   function _smdMediaRefHasReliableBoundary(rawRef){
+    // DEPRECATED as a completeness test. An extension at the end of the CURRENT
+    // chunk proves nothing about completeness: `MEDIA:/tmp/archive.png` split
+    // right after `.png` looks "reliable" but the stream continues `.bak`, so
+    // streaming emitted /tmp/archive.png and left `.bak` as prose while settled
+    // parsing consumed the whole ref. Completeness is now decided by
+    // _smdMediaTokenIsSettled (a real lexical delimiter, or stream end).
+    // Retained only because a quoted ref IS self-terminating.
     const raw=String(rawRef||'');
     if(/[?#]$/.test(raw)) return false;
     const ref=raw.split(/[?#]/,1)[0];
     return /\.(?:png|jpe?g|gif|webp|bmp|ico|svg|avif|mp4|webm|mov|m4v|mkv|avi|ogv|mp3|wav|ogg|m4a|aac|wma|opus|flac|oga|pdf|html?|csv|diff|patch|excalidraw)$/i.test(ref);
   }
+  /** True when a MEDIA token that ends at the end of the arrived text can be
+   *  finalized NOW without risking a different result once more bytes land.
+   *
+   *  Only two things settle a token mid-stream:
+   *    - a closed quoted ref — the closing quote is itself the delimiter, so
+   *      no later byte can extend it; or
+   *    - stream end (the caller passes atStreamEnd on flush).
+   *  Everything else buffers, so streamed and settled renderings agree over
+   *  every possible chunk cut. */
+  function _smdMediaTokenIsSettled(rawRef, atStreamEnd){
+    if(atStreamEnd) return true;
+    const raw=String(rawRef||'').trim();
+    const q=raw[0];
+    return (q==='"'||q==="'") && raw.length>=2 && raw[raw.length-1]===q;
+  }
+  /** True when the text AFTER a matched MEDIA token could still be absorbed
+   *  into that token once more bytes arrive.
+   *
+   *  Checking only `matchEnd === combined.length` is not enough. The unquoted
+   *  fallback stops at a space, so `MEDIA:/tmp/v1.2 Reports` matches
+   *  `/tmp/v1.2` with 8 characters still to go — the token does NOT reach the
+   *  end of the arrived text, the at-end guard never fires, and a truncated
+   *  card is emitted even though ` Reports/chart.png` is about to land and the
+   *  settled parse yields the whole path.
+   *
+   *  So: if everything between the match end and the end of the arrived text is
+   *  a run of spaces plus non-delimiter characters on the same line, a
+   *  continuation is still possible and the token must keep buffering. A
+   *  newline, or any token-closing delimiter, ends the MEDIA token for good and
+   *  makes the match final. */
+  function _smdMediaTailCouldExtend(trailing){
+    const rest=String(trailing||'');
+    if(!rest) return false;
+    // A newline or a closing delimiter terminates the token definitively.
+    // The closing brace is spelled \x7d because the test harnesses extract
+    // production functions by counting brace depth and do not skip regex
+    // literals — a literal closing brace here truncates the extraction.
+    return /^(?:[^\S\n]+[^\s)\]\x7d"'*_,;:]*)+$/.test(rest);
+  }
+  /** True when the arrived text opens a quoted MEDIA ref that has not been
+   *  closed yet on the same line.
+   *
+   *  An unterminated quote must keep buffering as a unit: the quoted
+   *  alternative cannot match, so the grammar falls through to the unquoted
+   *  branch and captures a truncated `"/tmp/My` — a leading-quote fragment that
+   *  the settled parse never produces. Bounded to the current line because a
+   *  newline always ends a MEDIA token. */
+  function _smdMediaHasOpenQuote(text){
+    const m=/MEDIA:(["'])([^\n]*)$/.exec(String(text||''));
+    if(!m) return false;
+    return m[2].indexOf(m[1])===-1;
+  }
   function _smdMediaTailFlushEntry(entry){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
-    const m=_mediaTokenAnchoredRe().exec(String(chunk));
+    // Trailing whitespace is a real delimiter, so a buffered token that ended
+    // at a space IS complete — but the anchored ^...$ matcher would reject it
+    // and the whole token would be flushed as prose. Split the trailing
+    // whitespace off, match the token, then re-emit the whitespace as text so
+    // no byte is lost.
+    const raw=String(chunk);
+    const tailWs=/[^\S\n]+$/.exec(raw);
+    const core=tailWs ? raw.slice(0, raw.length-tailWs[0].length) : raw;
+    const m=_mediaTokenAnchoredRe().exec(core);
     const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, _unquoteMediaRef(m[1])));
-    if(!emitted && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
+    if(!emitted && entry){
+      _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, raw);
+      return;
+    }
+    if(emitted && tailWs && entry){
+      _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, tailWs[0]);
+    }
   }
   function _smdMediaTailFlush(parser){
     if(!_SMD_MEDIA_TAIL||!parser||!_SMD_MEDIA_TAIL.get) return;
@@ -4679,11 +4752,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const slice = combined.slice(last, m.index);
         writeCurrent(slice);
       }
-      // Hold the token when it runs to the end of what has arrived so far and
-      // has no reliable extension yet — more bytes may still be coming. This
-      // also covers spaced paths: `MEDIA:/tmp/My` buffers instead of emitting a
-      // truncated card, then re-matches whole once ` Files/a.md` lands.
-      if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(m[1])){
+      // Hold the token when more bytes could still change what it captures.
+      // Two distinct cases, both of which made streaming disagree with settled:
+      //   1. The token runs to the end of the arrived text — the next chunk may
+      //      extend it (`MEDIA:/tmp/archive.png` then `.bak`).
+      //   2. The token ended EARLY at a space with same-line text still
+      //      following — the unquoted fallback stops at the space, so
+      //      `MEDIA:/tmp/v1.2 Reports` matches only `/tmp/v1.2` while the
+      //      settled parse of the finished line yields the whole spaced path.
+      // A closed quoted ref is self-terminating and finalizes immediately; an
+      // OPEN quote must keep buffering, or the unquoted fallback captures a
+      // truncated leading-quote fragment the settled parse never yields.
+      const trailing = combined.slice(matchEnd);
+      const openQuote = _smdMediaHasOpenQuote(combined.slice(m.index));
+      const mayGrow = openQuote
+        || (matchEnd===combined.length)
+        || _smdMediaTailCouldExtend(trailing);
+      if(mayGrow && !_smdMediaTokenIsSettled(m[1], false)){
         const candidate = combined.slice(m.index);
         if(candidate.length < _MEDIA_TAIL_MAX){
           unmatchedTail = candidate;

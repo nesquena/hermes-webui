@@ -76,6 +76,9 @@ def _run_real_smd_media_cases() -> dict:
             _extract_js_function(MESSAGES_JS, "_smdMediaTailEntryChunk"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailSameOwner"),
             _extract_js_function(MESSAGES_JS, "_smdMediaRefHasReliableBoundary"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTokenIsSettled"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTailCouldExtend"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaHasOpenQuote"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailFlushEntry"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailFlush"),
             _extract_js_function(MESSAGES_JS, "_smdMediaAwareAddText"),
@@ -386,13 +389,23 @@ class TestSmdMediaInStream(unittest.TestCase):
         # Greptile re-review: /MEDIA:([^\s)\]]+)/g will happily match
         # "MEDIA:fo" at the end of a chunk even if the next chunk is "o.png".
         # The interceptor must not emit a media node for that partial ref;
-        # it should keep the candidate in unmatchedTail unless a delimiter or
-        # reliable filename suffix proves the ref is complete.
+        # it should keep the candidate in unmatchedTail unless a REAL lexical
+        # delimiter (or stream end) proves the ref is complete.
+        #
+        # Completeness is decided by _smdMediaTokenIsSettled, not by an
+        # extension guess: an extension at the end of the current chunk proves
+        # nothing, because `MEDIA:/tmp/archive.png` split after `.png` continues
+        # `.bak`. The buffer also has to cover a token that ended EARLY at a
+        # space with same-line text still following, which is what
+        # _smdMediaTailCouldExtend detects.
         idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
         block = MESSAGES_JS[idx:idx + 6500]
-        self.assertIn("function _smdMediaRefHasReliableBoundary", MESSAGES_JS)
+        self.assertIn("function _smdMediaTokenIsSettled", MESSAGES_JS)
+        self.assertIn("function _smdMediaTailCouldExtend", MESSAGES_JS)
+        self.assertIn("function _smdMediaHasOpenQuote", MESSAGES_JS)
         self.assertIn("matchEnd===combined.length", block)
-        self.assertIn("!_smdMediaRefHasReliableBoundary(m[1])", block)
+        self.assertIn("!_smdMediaTokenIsSettled(m[1], false)", block)
+        self.assertIn("_smdMediaTailCouldExtend(trailing)", block)
         self.assertIn("unmatchedTail = candidate", block)
 
     def test_media_ref_boundary_extension_list_matches_renderer_formats(self):

@@ -24,7 +24,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from api.config import STATE_DIR
-from api.helpers import redact_session_data, media_token_pattern
+from api.helpers import redact_session_data, media_token_pattern, unquote_media_ref
 # _redact_fn_cached is the ALWAYS-ON credential redactor (agent redactor with
 # force=True + local fallback regex). Unlike redact_session_data it does NOT
 # consult the user-toggleable api_redact_enabled setting — a public share is a
@@ -293,7 +293,10 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
         return None
 
     def _replace_ref(m: re.Match) -> str:
-        raw = (m.group(1) or "").strip()
+        # Quoted refs are captured with their quotes so the replaced span covers
+        # the whole token; strip them before any path resolution, or a spaced
+        # path that the renderer displays would be placeholdered here.
+        raw = unquote_media_ref(m.group(1) or "")
         if not raw:
             return m.group(0)
 

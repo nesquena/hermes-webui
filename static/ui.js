@@ -2604,28 +2604,38 @@ function _dataImageHtml(ref, altText){
 // "_MEDIA_PATH_SRC is not defined". When you add a helper that renderMd calls,
 // add it to the eval list in every harness that extracts renderMd.
 function _mediaPathSrc(){
-  // One token: no whitespace, and none of the delimiters that close a token.
-  const tok = String.raw`[^\s\)\]]+`;
-  // Space-joined continuation, guarded so a following MEDIA: keyword is never
-  // absorbed into the current path.
+  // One path character: no whitespace, and none of the delimiters that close a
+  // token.
+  const ch = String.raw`[^\s\)\]]`;
+  // A whole space-separated word that contains NO dot. Requiring the
+  // intermediate words to be dot-free is what BOUNDS the spaced form: the run
+  // can cross `Reports/` or `Notes/`, but stops dead at the first word carrying
+  // a `.ext`, so trailing prose after `a.png` is never absorbed and two
+  // adjacent MEDIA tags stay two tags.
   //
-  // The extension uses `+` rather than a counted quantifier on purpose, and the
-  // comments here deliberately avoid brace characters: the test harnesses
-  // extract production functions by counting brace depth (tests/*.py
-  // `extractFunc`), and that counter does not skip string literals OR comments,
-  // so any unmatched brace anywhere in this function truncates the extraction
-  // mid-literal. A hex escape is not a workaround either — inside a regex it
-  // denotes a literal brace character rather than a quantifier. The trailing
-  // boundary already bounds the run, so `+` costs nothing.
-  const ext = String.raw`[A-Za-z0-9]+`;
-  const bare = String.raw`(?!MEDIA:)${tok}?(?:[^\S\n](?!MEDIA:)${tok}?)*?\.${ext}`;
+  // Spelled as a dot-free character class rather than a negative lookbehind on
+  // purpose. A lookbehind assertion here would be a PARSE-TIME brick on engines
+  // without regex lookbehind support (Safari < 16.4, some embedded WebViews):
+  // ui.js is a classic deferred script, so the whole file fails to parse and the
+  // app blanks. tests/test_5552_viewport_anchor_surrogate.py enforces that, and
+  // greps the raw source — so do not spell the assertion out even in a comment.
+  const wordNoDot = String.raw`(?!MEDIA:)[^\s\)\]\.]+`;
+  // The final space-separated word carries the extension. This is what makes a
+  // dotted DIRECTORY work: `/tmp/v1.2 Reports/chart.png` must not settle on
+  // `/tmp/v1.2` just because a space follows it.
+  const finalWithExt = String.raw`(?!MEDIA:)${ch}+?\.[A-Za-z0-9]+`;
   // Bare matches must end at whitespace, a closing delimiter, a glued MEDIA:
   // keyword, or end of input — never mid-prose. The closing-brace delimiter is
-  // spelled as the hex escape below for the brace-counting reason above.
+  // spelled as the hex escape below because the harnesses' brace counter does
+  // not skip regex literals or comments, so an unmatched brace anywhere in this
+  // function truncates the extraction mid-literal.
   const boundary = String.raw`(?=[\s\)\]\x7d"'*_,;:]|MEDIA:|$)`;
-  // Quoted form wins first (can hold any character), then the bounded spaced
-  // form, then the original no-space fallback for extension-less paths.
-  return String.raw`"[^"\n]+"|'[^'\n]+'|(?:${bare})${boundary}|${tok}`;
+  const spaced = String.raw`(?!MEDIA:)${ch}+?(?:[^\S\n]${wordNoDot})*?[^\S\n]${finalWithExt}${boundary}`;
+  const nospace = String.raw`(?!MEDIA:)${ch}+?\.[A-Za-z0-9]+${boundary}`;
+  // Quoted form wins first (can hold any character), then the spaced form, then
+  // the no-space form, then the fallback for extension-less paths.
+  // Kept in lockstep with media_token_pattern() in api/helpers.py.
+  return String.raw`"[^"\n]+"|'[^'\n]+'|${spaced}|${nospace}|${ch}+`;
 }
 
 /** Global matcher for MEDIA: tokens. Fresh instance per call — a shared /g regex
@@ -7076,46 +7086,6 @@ function getModelLabel(modelId){
   }
   // Strip @provider: prefix if present (e.g. @ollama-cloud:kimi-k2.6)
   if (_last.startsWith('@') && _last.includes(':')) _last = _last.split(':').slice(1).join(':');
-  // Bedrock/Vertex ids carry a dotted region + vendor prefix and sometimes a
-  // trailing `:<n>` version — `us.anthropic.claude-opus-5`,
-  // `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. Left intact, the dotted head
-  // survives into the label as raw plumbing ("Us.anthropic.claude Opus 5" in the
-  // turn footer). Drop leading LETTERS-ONLY dot segments (`us`, `eu`,
-  // `anthropic`) and stop at the first segment carrying a digit or hyphen —
-  // that is the real model id.
-  //
-  // The letters-only test is what keeps version dots safe: `gpt-4.1` splits to
-  // `gpt-4` / `1` and `gpt-4` is not letters-only, so nothing is stripped. Same
-  // for `Qwen3.6-35B`. The final segment is never stripped.
-  if (_last.includes('.') && !_last.startsWith('@')) {
-    const _segs = _last.split('.');
-    let _i = 0;
-    while (_i < _segs.length - 1 && /^[a-z]+$/i.test(_segs[_i] || '')) _i++;
-    // Only rewrite when a prefix was actually dropped, so single-dot version
-    // ids (`gpt-4.1`) fall through this block untouched.
-    if (_i > 0) {
-      _last = _segs.slice(_i).join('.').replace(/:\d+$/, '');
-      // The normalized id is what the label tables are keyed on, so retry them —
-      // `us.anthropic.claude-sonnet-4-5` should land on the same "Sonnet 4.5" as
-      // `anthropic/claude-sonnet-4-5` rather than falling through to the raw id.
-      if (_dynamicModelLabels[_last]) return _dynamicModelLabels[_last];
-      if (STATIC_LABELS[_last]) return STATIC_LABELS[_last];
-      if (STATIC_LABELS['anthropic/' + _last]) return STATIC_LABELS['anthropic/' + _last];
-      // No table entry: prettify the Claude family the way the tables do — drop
-      // the `claude-` vendor word, the `-YYYYMMDD` date-pin and `-v1` revision
-      // (snapshot noise, not a name), then title-case. Bedrock is the only
-      // dotted-prefix source here, so this stays scoped to that path.
-      if (/^claude-/i.test(_last)) {
-        _last = _last
-          .replace(/^claude-/i, '')
-          .replace(/-v\d+$/i, '')
-          .replace(/-\d{8}$/, '')
-          .replace(/-/g, ' ')
-          .replace(/\b\w/g, c => c.toUpperCase())
-          .trim();
-      }
-    }
-  }
   const looksLikeOllamaTag = /^[a-z0-9][\w.-]*:[\w.-]+$/i.test(_last);
   const atProvider=(rawId.startsWith('@')&&rawId.includes(':'))
     ? rawId.slice(1,rawId.indexOf(':')).toLowerCase()
