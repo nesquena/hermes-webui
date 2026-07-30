@@ -386,12 +386,12 @@ def test_sessions_endpoint_suppresses_duplicate_webui_state_projection(monkeypat
     assert "telegram_tip" in session_ids
 
 
-def test_messaging_session_loader_prefers_longer_sidecar_transcript():
-    """Pin the /api/session invariant that repaired sidecars can be longer than state.db segments."""
+def test_messaging_session_loader_uses_merged_messages():
     handler = _extract_handler("handle_get")
     old = "if is_messaging_session and cli_messages:\n                    _all_msgs = cli_messages"
     assert old not in handler
     assert "_all_msgs = _merged_session_messages_for_display(s, cli_messages)" in handler
     src = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
     assert "sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)" in src
-    assert "len(sidecar_messages) > len(cli_messages)" in src
+    assert "len(sidecar_messages) > len(cli_messages)" not in src
+    assert "_session_message_merge_key(m) for m in sidecar_messages" in src

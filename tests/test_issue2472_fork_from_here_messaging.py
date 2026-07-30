@@ -41,10 +41,13 @@ def test_messaging_merge_helper_matches_session_get_coordinate_space():
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
+    # merge_session_messages_append_only preserves sidecar order first
+    # (append-only), then appends new state.db messages.  Both sources
+    # contribute; messages are deduped by merge key, not dropped by length.
     assert [m["content"] for m in merged] == [
-        "cli earlier",
         "sidecar only",
         "shared",
+        "cli earlier",
         "cli later",
     ]
 
