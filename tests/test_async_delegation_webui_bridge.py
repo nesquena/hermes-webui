@@ -69,6 +69,7 @@ def _install_fake_durable_delivery_api(monkeypatch):
         "mark": [],
         "legacy": [],
         "delivery_state": "pending",
+        "delivery_attempts": 0,
         "pending_ids": set(),
         "restore_failures": 0,
     }
@@ -76,6 +77,9 @@ def _install_fake_durable_delivery_api(monkeypatch):
 
     def _claim(evt, consumer):
         calls["claim"].append((dict(evt), consumer))
+        if calls["delivery_state"] != "pending":
+            return None
+        calls["delivery_attempts"] += 1
         return f"claim:{consumer}"
 
     def _complete(evt, claim_id):
@@ -84,7 +88,9 @@ def _install_fake_durable_delivery_api(monkeypatch):
 
     def _release(evt, claim_id):
         calls["release"].append((dict(evt), claim_id))
-        calls["delivery_state"] = "pending"
+        calls["delivery_state"] = (
+            "dropped" if calls["delivery_attempts"] >= 8 else "pending"
+        )
 
     def _get_durable(delegation_id):
         if calls["delivery_state"] == "pending":
@@ -315,30 +321,38 @@ def test_background_wakeup_releases_claim_when_dispatch_fails(monkeypatch):
     assert "deleg_test123" not in cfg.BG_TASK_COMPLETE_EVENTS_SEEN.get("webui-session-1", set())
 
 
-def test_background_active_turn_releases_and_requeues_without_in_memory_defer(monkeypatch):
+def test_background_active_turn_does_not_consume_durable_delivery_attempts(monkeypatch):
     _reset_wakeup_state()
     registry = _install_fake_process_registry(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
     cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "webui-session-1"
     monkeypatch.setattr(bp, "_session_has_active_turn", lambda _session_id: True)
+    monkeypatch.setattr(peu, "ASYNC_DELIVERY_CLAIM_RETRY_SECONDS", 0.2)
     monkeypatch.setattr(
         bp,
         "_start_async_delegation_wakeup_turn",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must stay deferred")),
     )
 
-    bp._process_one(_async_delegation_event())
+    try:
+        for _ in range(10):
+            bp._process_one(_async_delegation_event())
 
-    assert len(delivery["claim"]) == 1
-    assert delivery["complete"] == []
-    assert len(delivery["release"]) == 1
-    assert registry.completion_queue.qsize() == 1
-    assert cfg.DEFERRED_PROCESS_WAKEUPS == {}
-    assert cfg.BG_TASK_COMPLETE_EVENTS_SEEN == {}
+        assert delivery["claim"] == []
+        assert delivery["delivery_attempts"] == 0
+        assert delivery["complete"] == []
+        assert delivery["release"] == []
+        assert delivery["delivery_state"] == "pending"
+        assert registry.completion_queue.empty()
+        assert peu.async_delivery_retry_timer_count() == 1
+        assert cfg.DEFERRED_PROCESS_WAKEUPS == {}
+        assert cfg.BG_TASK_COMPLETE_EVENTS_SEEN == {}
+    finally:
+        _reset_wakeup_state()
 
 
 @pytest.mark.parametrize("status", [None, 302, 409, 500])
-def test_autonomous_wakeup_only_acks_after_turn_acceptance(monkeypatch, status):
+def test_autonomous_wakeup_rejection_uses_bounded_durable_retry(monkeypatch, status):
     _reset_wakeup_state()
     registry = _install_fake_process_registry(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
@@ -349,26 +363,31 @@ def test_autonomous_wakeup_only_acks_after_turn_acceptance(monkeypatch, status):
         "start_session_turn",
         lambda *_args, **_kwargs: {"_status": status, "error": "busy"},
     )
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 10.0)
     evt = _async_delegation_event()
     claim = peu.claim_async_delegation_delivery(evt, "webui-background")
     assert claim is not None
 
-    bp._start_async_delegation_wakeup_turn(
-        "webui-session-1",
-        "delegation result",
-        delegation_id="deleg_test123",
-        evt=evt,
-        claim=claim,
-        process_registry=registry,
-    )
+    try:
+        bp._start_async_delegation_wakeup_turn(
+            "webui-session-1",
+            "delegation result",
+            delegation_id="deleg_test123",
+            evt=evt,
+            claim=claim,
+            process_registry=registry,
+        )
 
-    assert _wait_until(lambda: len(delivery["release"]) == 1)
-    assert delivery["complete"] == []
-    assert _wait_until(lambda: registry.completion_queue.qsize() == 1)
-    assert "deleg_test123" not in cfg.BG_TASK_COMPLETE_EVENTS_SEEN.get("webui-session-1", set())
+        assert _wait_until(lambda: len(delivery["release"]) == 1)
+        assert delivery["complete"] == []
+        assert registry.completion_queue.empty()
+        assert peu.async_delivery_retry_timer_count() == 1
+        assert "deleg_test123" not in cfg.BG_TASK_COMPLETE_EVENTS_SEEN.get("webui-session-1", set())
+    finally:
+        _reset_wakeup_state()
 
 
-def test_autonomous_wakeup_exception_releases_and_requeues(monkeypatch):
+def test_autonomous_wakeup_exception_uses_bounded_durable_retry(monkeypatch):
     _reset_wakeup_state()
     registry = _install_fake_process_registry(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
@@ -379,22 +398,27 @@ def test_autonomous_wakeup_exception_releases_and_requeues(monkeypatch):
         "start_session_turn",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("start failed")),
     )
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 10.0)
     evt = _async_delegation_event()
     claim = peu.claim_async_delegation_delivery(evt, "webui-background")
     assert claim is not None
 
-    bp._start_async_delegation_wakeup_turn(
-        "webui-session-1",
-        "delegation result",
-        delegation_id="deleg_test123",
-        evt=evt,
-        claim=claim,
-        process_registry=registry,
-    )
+    try:
+        bp._start_async_delegation_wakeup_turn(
+            "webui-session-1",
+            "delegation result",
+            delegation_id="deleg_test123",
+            evt=evt,
+            claim=claim,
+            process_registry=registry,
+        )
 
-    assert _wait_until(lambda: len(delivery["release"]) == 1)
-    assert delivery["complete"] == []
-    assert _wait_until(lambda: registry.completion_queue.qsize() == 1)
+        assert _wait_until(lambda: len(delivery["release"]) == 1)
+        assert delivery["complete"] == []
+        assert registry.completion_queue.empty()
+        assert peu.async_delivery_retry_timer_count() == 1
+    finally:
+        _reset_wakeup_state()
 
 
 def test_autonomous_wakeup_acks_after_successful_turn_acceptance(monkeypatch):
@@ -1062,7 +1086,7 @@ def test_async_completion_with_unresolvable_target_retries_not_silent_drop(monke
     retried: list[dict] = []
     monkeypatch.setattr(
         bp,
-        "_retry_unmapped_async_delegation_event",
+        "_retry_unclaimed_async_delegation_event",
         lambda process_registry, evt: retried.append(dict(evt)),
     )
 

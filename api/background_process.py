@@ -908,8 +908,8 @@ def _requeue_async_delegation_event(
     )
 
 
-def _retry_unmapped_async_delegation_event(process_registry, evt: dict) -> None:
-    """Retry durable routing, or one bounded best-effort legacy routing pass."""
+def _retry_unclaimed_async_delegation_event(process_registry, evt: dict) -> None:
+    """Retry from durable state, or make one bounded legacy routing pass."""
     completion_queue = getattr(process_registry, "completion_queue", None)
     if schedule_async_delegation_claim_retry(
         evt,
@@ -988,7 +988,7 @@ def _start_async_delegation_wakeup_turn(
                 return
 
             release_async_delegation_delivery(evt, claim)
-            _requeue_async_delegation_event(process_registry, evt, claim=claim)
+            _retry_unclaimed_async_delegation_event(process_registry, evt)
             if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
                 logger.info(
                     "async delegation wakeup paused for session %s; delivery remains retryable",
@@ -997,16 +997,16 @@ def _start_async_delegation_wakeup_turn(
             else:
                 logger.debug(
                     "async delegation wakeup not accepted for session %s: "
-                    "status=%s err=%r; requeued",
+                    "status=%s err=%r; durable retry scheduled",
                     session_id,
                     status,
                     (resp or {}).get("error"),
                 )
         except Exception:
             release_async_delegation_delivery(evt, claim)
-            _requeue_async_delegation_event(process_registry, evt, claim=claim)
+            _retry_unclaimed_async_delegation_event(process_registry, evt)
             logger.warning(
-                "async delegation wakeup turn failed for session %s; requeued",
+                "async delegation wakeup turn failed for session %s; durable retry scheduled",
                 session_id,
                 exc_info=True,
             )
@@ -1027,6 +1027,13 @@ def _process_async_delegation_event(
 ) -> None:
     """Claim and route one async completion without private registry markers."""
 
+    # A durable claim has a finite attempt budget. A busy foreground turn is
+    # not a delivery attempt, so leave the record unclaimed and let the shared
+    # restore sweep retry after the session can accept a wakeup.
+    if _session_has_active_turn(session_id):
+        _retry_unclaimed_async_delegation_event(process_registry, evt)
+        return
+
     try:
         claim = claim_async_delegation_delivery(evt, "webui-background")
     except Exception:
@@ -1043,14 +1050,6 @@ def _process_async_delegation_event(
         if not wakeup_prompt:
             raise RuntimeError("async delegation completion could not be formatted")
 
-        # Do not persist async results in the process-local deferred list. If a
-        # foreground turn owns the session, release the durable claim and retry
-        # from the shared queue; the core record therefore remains restart-safe.
-        if _session_has_active_turn(session_id):
-            release_async_delegation_delivery(evt, claim)
-            _requeue_async_delegation_event(process_registry, evt, claim=claim)
-            return
-
         _start_async_delegation_wakeup_turn(
             session_id,
             wakeup_prompt,
@@ -1061,7 +1060,7 @@ def _process_async_delegation_event(
         )
     except Exception:
         release_async_delegation_delivery(evt, claim)
-        _requeue_async_delegation_event(process_registry, evt, claim=claim)
+        _retry_unclaimed_async_delegation_event(process_registry, evt)
         logger.warning(
             "server-side async delegation dispatch failed for session %s",
             session_id,
@@ -1144,7 +1143,7 @@ def _process_one(evt: dict) -> None:
             process_id,
         )
         if evt.get("type") == "async_delegation":
-            _retry_unmapped_async_delegation_event(_process_registry, evt)
+            _retry_unclaimed_async_delegation_event(_process_registry, evt)
         return
     session_id = ""
     if session_key:
@@ -1157,7 +1156,7 @@ def _process_one(evt: dict) -> None:
         # registered shortly after process restore.
         logger.debug("process_complete drop: no session mapping for key=%r", session_key)
         if evt.get("type") == "async_delegation":
-            _retry_unmapped_async_delegation_event(_process_registry, evt)
+            _retry_unclaimed_async_delegation_event(_process_registry, evt)
         return
     # ── xsession wakeup misroute defense-in-depth (Option 3) ──────────────
     # First retain the process-registry spawn-owner cross-check for legacy
@@ -1186,7 +1185,7 @@ def _process_one(evt: dict) -> None:
         # the bounded retry instead (arms a durable retry / one best-effort
         # legacy requeue), so it stays retryable without a spurious ACK.
         if evt.get("type") == "async_delegation":
-            _retry_unmapped_async_delegation_event(_process_registry, evt)
+            _retry_unclaimed_async_delegation_event(_process_registry, evt)
         return
     # ── THE SEAM: async delegations take the durable-claim delivery path,
     # routed to the origin-resolved session. The claim/complete/release
