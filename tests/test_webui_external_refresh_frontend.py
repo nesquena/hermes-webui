@@ -446,6 +446,14 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     assert capture_pos < clear_pos < reset_pos
     assert "const sameSessionForceReload = forceReload && currentSid===sid;" in load_body
     assert "renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined)" in load_body
+    # #6421: same-session force reload must invalidate in-flight older-page
+    # prefetch continuations before releasing the loading lock so a
+    # late-resolving msg_before/msg_limit request does not prepend stale
+    # rows onto a freshly installed authoritative transcript.
+    assert "_bumpMessagesGeneration();" in load_body
+    bump_pos = load_body.index("_bumpMessagesGeneration();")
+    loading_older_pos = load_body.index("_loadingOlder = false;", bump_pos) if "_loadingOlder = false;" in load_body[bump_pos:] else 0
+    assert bump_pos < loading_older_pos
 
 
 def test_same_width_force_reload_invalidates_visible_message_cache():
@@ -469,3 +477,13 @@ def test_same_width_force_reload_invalidates_visible_message_cache():
     assert "msgs = S.messages.slice(0, keepCount).concat(msgs);" in ensure_body
     assert "_oldestIdx = _prevOldestIdx;" in ensure_body
     assert invalidate_pos < ensure_body.index("_prevOldestIdx", invalidate_pos) < replace_pos
+    # #6421: _ensureMessagesLoaded must invalidate any in-flight older-page
+    # continuation that started during the api() round-trip, BEFORE publishing
+    # the fresh S.messages.  The generation bump sits between the cache invalidation
+    # and the replacement so that a late-resolving prefetch's post-await check
+    # sees a mismatch and bails out.
+    assert "clearVisibleMessageRowCache" in ensure_body
+    assert "_bumpMessagesGeneration();" in ensure_body
+    bump_pos = ensure_body.index("_bumpMessagesGeneration();")
+    assert invalidate_pos < bump_pos
+    assert bump_pos < replace_pos
