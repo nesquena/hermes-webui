@@ -4158,6 +4158,7 @@ def get_reasoning_status(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    session_effort: str | None = None,
 ) -> dict:
     """Return current reasoning configuration from the active profile's
     config.yaml — the same source of truth the CLI reads from.
@@ -4183,6 +4184,23 @@ def get_reasoning_status(
                 resolve_provider = str(model_cfg["provider"]).strip()
             if not resolve_base_url and model_cfg.get("base_url"):
                 resolve_base_url = str(model_cfg["base_url"]).strip()
+
+    # Session override wins. Otherwise apply the shared Hermes resolution:
+    # per-model override first, then the profile-global effort.
+    if session_effort is not None and str(session_effort).strip():
+        effort_raw = str(session_effort).strip().lower()
+    else:
+        try:
+            from hermes_constants import resolve_reasoning_config
+
+            resolved_reasoning = resolve_reasoning_config(config_data, resolve_model or "")
+            if isinstance(resolved_reasoning, dict):
+                if resolved_reasoning.get("enabled") is False:
+                    effort_raw = "none"
+                else:
+                    effort_raw = resolved_reasoning.get("effort") or effort_raw
+        except Exception:
+            pass
 
     supported_efforts = resolve_model_reasoning_efforts(
         resolve_model,

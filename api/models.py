@@ -1194,7 +1194,7 @@ class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
                  model=DEFAULT_MODEL,
-                 model_provider=None,
+                 model_provider=None, reasoning_effort=None,
                  messages=None, created_at=None, updated_at=None,
                  tool_calls=None, pinned: bool=False, archived: bool=False,
                  project_id: str=None, profile=None,
@@ -1261,6 +1261,7 @@ class Session:
         )
         self.model = model
         self.model_provider = str(model_provider).strip().lower() if model_provider else None
+        self.reasoning_effort = str(reasoning_effort or '').strip().lower() or None
         # #5979: signature of the model the user DELIBERATELY picked this session
         # (``"<model>\x1f<provider>"``), or None. Used by the streaming resolver
         # to preserve a custom-proxy vendor namespace on a COLD catalog ONLY when
@@ -1391,7 +1392,7 @@ class Session:
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
-            'session_id', 'title', 'workspace', 'created_workspace', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
+            'session_id', 'title', 'workspace', 'created_workspace', 'model', 'model_provider', 'reasoning_effort', 'model_explicit_pick_signature', 'created_at', 'updated_at',
             'pinned', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
@@ -1738,6 +1739,7 @@ class Session:
             'workspace': self.workspace,
             'model': self.model,
             'model_provider': self.model_provider,
+            'reasoning_effort': self.reasoning_effort,
             'message_count': message_count,
             'created_at': self.created_at,
             'updated_at': self.updated_at,

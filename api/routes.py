@@ -12731,12 +12731,20 @@ def handle_get(handler, parsed) -> bool:
         model_id = (query.get("model", [""])[0] or "").strip() or None
         provider_id = (query.get("provider", [""])[0] or "").strip() or None
         base_url = (query.get("base_url", [""])[0] or "").strip() or None
+        session_id = (query.get("session_id", [""])[0] or "").strip()
+        session_effort = None
+        if session_id:
+            try:
+                session_effort = getattr(get_session(session_id, metadata_only=True), "reasoning_effort", None)
+            except (KeyError, PermissionError):
+                session_effort = None
         return j(
             handler,
             get_reasoning_status(
                 model_id=model_id,
                 provider_id=provider_id,
                 base_url=base_url,
+                session_effort=session_effort,
             ),
         )
 
@@ -15094,6 +15102,17 @@ def handle_post(handler, parsed) -> bool:
                     )
                     s.threshold_tokens = 0
                     s.last_prompt_tokens = 0
+                    from api.config import _evict_session_agent
+
+                    _evict_session_agent(body["session_id"])
+            if "reasoning_effort" in body:
+                from api.config import VALID_REASONING_EFFORTS
+
+                raw_effort = str(body.get("reasoning_effort") or "").strip().lower()
+                if raw_effort and raw_effort != "none" and raw_effort not in VALID_REASONING_EFFORTS:
+                    return bad(handler, f"Unknown reasoning effort '{raw_effort}'", 400)
+                if raw_effort != str(getattr(s, "reasoning_effort", None) or ""):
+                    s.reasoning_effort = raw_effort or None
                     from api.config import _evict_session_agent
 
                     _evict_session_agent(body["session_id"])
