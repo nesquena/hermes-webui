@@ -47,7 +47,7 @@ from api.config import (
     warm_models_catalog_provenance_if_cold,
     load_settings,
     parse_reasoning_effort,
-    coerce_reasoning_effort_for_model,
+    resolve_effective_reasoning_effort,
     _main_model_request_overrides,
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
 )
@@ -9476,18 +9476,14 @@ def _run_agent_streaming(
             # (per-model override > global effort).
             try:
                 _session_effort = getattr(s, 'reasoning_effort', None)
-                if _session_effort:
-                    _effort = coerce_reasoning_effort_for_model(
-                        _session_effort,
-                        resolved_model,
-                        provider_id=resolved_provider,
-                        base_url=resolved_base_url,
-                    )
-                    _reasoning_config = parse_reasoning_effort(_effort)
-                else:
-                    from hermes_constants import resolve_reasoning_config
-
-                    _reasoning_config = resolve_reasoning_config(_cfg, resolved_model)
+                _effort = resolve_effective_reasoning_effort(
+                    _cfg,
+                    resolved_model,
+                    provider_id=resolved_provider,
+                    base_url=resolved_base_url,
+                    session_effort=_session_effort,
+                )
+                _reasoning_config = parse_reasoning_effort(_effort)
             except Exception:
                 _reasoning_config = None
 
