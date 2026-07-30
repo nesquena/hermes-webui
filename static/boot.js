@@ -2287,6 +2287,7 @@ $('modelSelect').onchange=async()=>{
   }
 };
 $('msg').addEventListener('input',()=>{
+  S._composerRevision=(Number(S._composerRevision)||0)+1;
   updateSendBtn();
   scheduleComposerAutoResize();
   // Persist composer draft to server (debounced in _saveComposerDraft).

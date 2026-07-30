@@ -33,16 +33,19 @@ Queue means: wait, then send this as the next normal user turn.
 
 Steer means: guide the currently running turn without starting a new turn.
 
-Interrupt is currently a compound behavior: queue the message, cancel the
-current run, then drain the queued message as the next turn. It is not a simple
-send mode.
+Interrupt remains a legacy compound behavior, with a simplified fast path:
+text-only input first makes one capability-gated redirect attempt on the active
+run. Attachments and explicit redirect rejections use the legacy queue, cancel,
+and send fallback; ambiguous transport or server errors preserve the draft
+without queueing or cancelling. It is not a simple send mode.
 
 This mixed model has caused real failures:
 
 - Queue can be lost across refresh, session switch, or restore paths.
 - Steer can be transient and hard to trace.
-- Interrupt-and-send can race with cancellation, so WebUI shows a user message
-  that never reaches the Agent durable conversation chain.
+- The legacy Interrupt-and-send fallback can race with cancellation, so WebUI
+  can show a user message that never reaches the Agent durable conversation
+  chain.
 - The composer primary button is ambiguous while busy.
 
 This RFC defines a clearer pending-intent model for user input while the agent
