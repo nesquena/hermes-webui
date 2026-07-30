@@ -34,8 +34,9 @@ let _pendingCarryForwardSnapshot = null;
 
 // ── Composer draft persistence ────────────────────────────────────────────────
 
-// Debounced save — prevents hammering the server on every keystroke.
-let _draftSaveTimer = null;
+// Debounced saves are scoped to the complete composer owner. A late callback
+// for one profile/session must never cancel another owner's pending draft POST.
+const _draftSaveTimerByOwner = new Map();
 const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 const _composerDraftKnownPayloadSessions = new Set();
@@ -62,6 +63,13 @@ function _composerPendingFilesOwnerKey(sid, ownerProfile) {
     : null;
   const profile = String(ownerProfile || sessionProfile || S.activeProfile || 'default').trim() || 'default';
   return `${profile}\u0000${sid}`;
+}
+
+function _clearComposerDraftSaveTimer(sid, ownerProfile) {
+  const key = _composerPendingFilesOwnerKey(sid, ownerProfile);
+  if (!key || !_draftSaveTimerByOwner.has(key)) return;
+  clearTimeout(_draftSaveTimerByOwner.get(key));
+  _draftSaveTimerByOwner.delete(key);
 }
 
 function _composerPendingFileIsLive(file) {
@@ -266,16 +274,23 @@ async function _restoreRememberedNewChatDraftSession() {
 
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
-  clearTimeout(_draftSaveTimer);
-  _rememberComposerPendingFiles(sid, files);
+  const ownerProfile=String(
+    arguments[3]||(S.session&&S.session.session_id===sid&&S.session.profile)
+    ||S.activeProfile||'default'
+  ).trim()||'default';
+  const ownerKey=_composerPendingFilesOwnerKey(sid,ownerProfile);
+  _clearComposerDraftSaveTimer(sid,ownerProfile);
+  _rememberComposerPendingFiles(sid, files, ownerProfile);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
-  _syncComposerOwnerStateFromDraft(sid, normalizedText, files);
+  _syncComposerOwnerStateFromDraft(sid, normalizedText, files, ownerProfile);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
     _composerDraftKnownPayloadSessions.add(sid);
   }
-  _draftSaveTimer = setTimeout(() => {
+  const timer=setTimeout(() => {
+    if(_draftSaveTimerByOwner.get(ownerKey)!==timer)return;
+    _draftSaveTimerByOwner.delete(ownerKey);
     const enqueue=typeof _queueComposerDraftWrite==='function'
       ? _queueComposerDraftWrite
       : (_sid,write)=>Promise.resolve().then(write);
@@ -286,6 +301,7 @@ function _saveComposerDraft(sid, text, files) {
       _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
     })).catch(() => {});
   }, _DRAFT_SAVE_DELAY_MS);
+  _draftSaveTimerByOwner.set(ownerKey,timer);
 }
 
 function _composerDraftHasPayload(text, files) {
@@ -342,7 +358,7 @@ function _saveComposerDraftNow(sid, text, files) {
   ).trim()||'default';
   const rejectOnError=!!(arguments[4]&&arguments[4].rejectOnError);
   if (!sid) return Promise.resolve();
-  clearTimeout(_draftSaveTimer);
+  _clearComposerDraftSaveTimer(sid,ownerProfile);
   _rememberComposerPendingFiles(sid, files, ownerProfile);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -424,7 +440,11 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
 // Clear the saved draft for a session (called when message is sent).
 function _clearComposerDraft(sid, text, files) {
   if (!sid) return;
-  clearTimeout(_draftSaveTimer);
+  const ownerProfile=String(
+    arguments[3]||(S.session&&S.session.session_id===sid&&S.session.profile)
+    ||S.activeProfile||'default'
+  ).trim()||'default';
+  _clearComposerDraftSaveTimer(sid,ownerProfile);
   _forgetComposerPendingFiles(sid);
   if(typeof _releaseComposerOwnerFiles==='function') _releaseComposerOwnerFiles(sid);
   _clearRememberedNewChatDraftSession(sid);

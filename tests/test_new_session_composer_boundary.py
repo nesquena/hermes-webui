@@ -306,6 +306,7 @@ def _run_new_session_harness(
 
     function_source = _new_session_function()
     authority_source = _composer_authority_helpers()
+    add_files_source = _add_files_function()
     initial_session = json.dumps(
         {"session_id": "old-session", "workspace": "/workspace", "message_count": 2}
         if has_session
@@ -315,6 +316,7 @@ def _run_new_session_harness(
         f"""
         const assert = require('assert');
         {authority_source}
+        {add_files_source}
         {function_source}
 
         let _newSessionInFlight = null;
@@ -325,6 +327,10 @@ def _run_new_session_harness(
         let _oldestIdx = 0;
         const saves = [];
         let createCalls = 0;
+        let trayRenders = 0;
+        let sendButtonUpdates = 0;
+        let autoResizeCalls = 0;
+        const MAX_UPLOAD_BYTES = 1024;
         const pendingFile = {{ name: 'private.pdf', size: 42, type: 'application/pdf' }};
         const lateFile = {{ name: 'late-audio.webm', size: 7, type: 'audio/webm' }};
         const msg = {{ value: 'draft owned by the old session', focus() {{}} }};
@@ -348,6 +354,7 @@ def _run_new_session_harness(
           busy: false,
           activeStreamId: null,
         }};
+        let visibleTray = S.pendingFiles.map(file => file.name);
         const window = {{ _defaultModel: null }};
         const localStorage = {{ setItem() {{}}, getItem() {{ return null; }}, removeItem() {{}} }};
         const document = {{ createElement() {{ return {{ dataset: {{}} }}; }} }};
@@ -374,13 +381,13 @@ def _run_new_session_harness(
         async function api(path) {{
           assert.strictEqual(path, '/api/session/new');
           createCalls += 1;
-          if ({str(fail_create).lower()}) throw new Error('create failed');
           const lateText = {json.dumps(late_text)};
           if(lateText !== null) {{
             const destinationText = lateText.replace('draft owned by the old session', '');
             _composerSetText(lateText, destinationText);
           }}
-          if({str(late_file).lower()}) _composerAddFiles([lateFile]);
+          if({str(late_file).lower()}) addFiles([lateFile]);
+          if ({str(fail_create).lower()}) throw new Error('create failed');
           return {{ session: {{
             session_id: 'new-session', profile:'default', workspace: '/workspace', messages: [],
             composer_draft: {{ text: '', files: [] }}, message_count: 0,
@@ -391,9 +398,12 @@ def _run_new_session_harness(
         function _setActiveSessionUrl() {{}}
         function startSessionStream() {{}}
         function _setSessionViewedCount() {{}}
-        function autoResize() {{}}
-        function renderTray() {{}}
-        function updateSendBtn() {{}}
+        function autoResize() {{ autoResizeCalls += 1; }}
+        function renderTray() {{
+          trayRenders += 1;
+          visibleTray = S.pendingFiles.map(file => file.name);
+        }}
+        function updateSendBtn() {{ sendButtonUpdates += 1; }}
         function setStatus() {{}}
         function syncTopbar() {{}}
         function renderMessages() {{}}
@@ -410,6 +420,10 @@ def _run_new_session_harness(
             pendingFileNames: S.pendingFiles.map(file => file.name),
             lateFileIdentity: S.pendingFiles.includes(lateFile),
             sourceFileIdentity: S.pendingFiles.includes(pendingFile),
+            visibleTray,
+            trayRenders,
+            sendButtonUpdates,
+            autoResizeCalls,
             createCalls,
             saves,
           }}));
@@ -625,6 +639,140 @@ def test_files_dropped_while_new_session_is_pending_are_replayed_after_settlemen
     assert result["trayRenders"] == 1
 
 
+def test_hidden_owner_callback_cannot_cancel_visible_owner_pending_draft_save():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+
+    draft_helpers = _composer_draft_helpers()
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const msg = {{value:'foreground-unsaved'}};
+        const S = {{
+          session:{{
+            session_id:'owner-b',profile:'beta',
+            composer_draft:{{text:'baseline-b',files:[]}}
+          }},
+          activeProfile:'beta',activeProfileIsDefault:false,pendingFiles:[]
+        }};
+        const $ = id => id === 'msg' ? msg : null;
+        const localStorage = {{getItem(){{return null;}},setItem(){{}},removeItem(){{}}}};
+        const posts = [];
+        function api(path, options) {{
+          if(path !== '/api/session/draft') throw new Error(`unexpected path: ${{path}}`);
+          posts.push(JSON.parse(options.body));
+          return Promise.resolve({{ok:true}});
+        }}
+        function renderTray() {{}}
+        function autoResize() {{}}
+        function updateSendBtn() {{}}
+        {draft_helpers}
+        {authority}
+
+        _rememberComposerOwnerState('owner-a','alpha',{{
+          text:'baseline-a',files:[],revision:1,
+        }},1);
+        _saveComposerDraft('owner-b','foreground-unsaved',[],'beta');
+        _composerSetText('background-a','background-a','owner-a','late-a','alpha');
+
+        setTimeout(() => {{
+          process.stdout.write(JSON.stringify(posts));
+        }}, _DRAFT_SAVE_DELAY_MS + 100);
+        """
+    )
+    proc = subprocess.run(
+        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    posts = json.loads(proc.stdout)
+    assert [(post["session_id"], post["text"]) for post in posts] == [
+        ("owner-a", "background-a"),
+        ("owner-b", "foreground-unsaved"),
+    ]
+
+
+def test_draft_debounce_is_scoped_by_profile_and_session_id():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+
+    draft_helpers = _composer_draft_helpers()
+    script = textwrap.dedent(
+        f"""
+        const S = {{
+          session:{{session_id:'shared',profile:'beta',composer_draft:{{text:'',files:[]}}}},
+          activeProfile:'beta',activeProfileIsDefault:false,pendingFiles:[]
+        }};
+        const $ = () => null;
+        const localStorage = {{getItem(){{return null;}},setItem(){{}},removeItem(){{}}}};
+        const posts = [];
+        function api(_path, options) {{
+          posts.push(JSON.parse(options.body));
+          return Promise.resolve({{ok:true}});
+        }}
+        {draft_helpers}
+
+        _saveComposerDraft('shared','alpha-draft',[],'alpha');
+        _saveComposerDraft('shared','beta-draft',[],'beta');
+        setTimeout(() => {{
+          process.stdout.write(JSON.stringify(posts));
+        }}, _DRAFT_SAVE_DELAY_MS + 100);
+        """
+    )
+    proc = subprocess.run(
+        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert [post["text"] for post in json.loads(proc.stdout)] == [
+        "alpha-draft",
+        "beta-draft",
+    ]
+
+
+def test_clearing_hidden_owner_draft_cannot_cancel_visible_owner_pending_save():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+
+    draft_helpers = _composer_draft_helpers()
+    script = textwrap.dedent(
+        f"""
+        const S = {{
+          session:{{
+            session_id:'owner-b',profile:'beta',
+            composer_draft:{{text:'baseline-b',files:[]}}
+          }},
+          activeProfile:'beta',activeProfileIsDefault:false,pendingFiles:[]
+        }};
+        const $ = () => null;
+        const localStorage = {{getItem(){{return null;}},setItem(){{}},removeItem(){{}}}};
+        const posts = [];
+        function api(_path, options) {{
+          posts.push(JSON.parse(options.body));
+          return Promise.resolve({{ok:true}});
+        }}
+        {draft_helpers}
+
+        _saveComposerDraft('owner-b','foreground-unsaved',[],'beta');
+        _clearComposerDraft('owner-a','background-a',[],'alpha');
+        setTimeout(() => {{
+          process.stdout.write(JSON.stringify(posts));
+        }}, _DRAFT_SAVE_DELAY_MS + 100);
+        """
+    )
+    proc = subprocess.run(
+        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert [
+        (post["session_id"], post.get("text")) for post in json.loads(proc.stdout)
+    ] == [
+        ("owner-a", ""),
+        ("owner-b", "foreground-unsaved"),
+    ]
+
+
 def test_draft_writes_for_one_session_are_serialized():
     node = shutil.which("node")
     if not node:
@@ -729,7 +877,7 @@ def test_immediate_draft_save_can_fail_closed_at_owner_boundary():
         f"""
         {source}
         const S = {{session:null}};
-        const _draftSaveTimer = null;
+        function _clearComposerDraftSaveTimer() {{}}
         const _composerDraftKnownPayloadSessions = new Set();
         function _rememberComposerPendingFiles() {{}}
         function _composerDraftFilesForPersist(files) {{ return files; }}
@@ -1479,9 +1627,8 @@ def test_immediate_draft_save_refreshes_owner_authority_with_profile_and_revisio
     script = textwrap.dedent(
         f"""
         const S={{session:{{session_id:'sid-a',profile:'work'}},activeProfile:'work'}};
-        let _draftSaveTimer=null;
+        function _clearComposerDraftSaveTimer(){{}}
         const remembered=[];
-        function clearTimeout(){{}}
         function _rememberComposerPendingFiles(){{}}
         function _composerDraftFilesForPersist(files){{return files.map(file=>file.name);}}
         function _composerDraftHasPayload(text,files){{return !!(text||files.length);}}
@@ -1539,10 +1686,9 @@ def test_ordinary_switch_save_r2_invalidates_deferred_failed_send_r1_snapshot():
           activeProfile:'default',pendingFiles:[]
         }};
         const $=id=>id==='msg'?msg:null;
-        let _draftSaveTimer=null;
+        function _clearComposerDraftSaveTimer(){{}}
         const _composerDraftKnownPayloadSessions=new Set();
         const writes=[];
-        function clearTimeout(){{}}
         function _rememberComposerPendingFiles(){{}}
         function _composerDraftFilesForPersist(files){{return files.map(f=>f.name||f);}}
         function _composerDraftHasPayload(text,files){{return !!(text||files.length);}}
@@ -1928,3 +2074,18 @@ def test_failed_new_session_keeps_old_session_composer_visible():
     ]
     assert result["value"] == "draft owned by the old session"
     assert result["pendingFileNames"] == ["private.pdf"]
+
+
+def test_failed_new_session_reconciles_file_dropped_during_create_with_visible_tray():
+    result = _run_new_session_harness(fail_create=True, late_file=True)
+
+    assert result["error"] == "create failed"
+    assert result["activeSid"] == "old-session"
+    assert result["pendingFileNames"] == ["private.pdf", "late-audio.webm"]
+    assert result["lateFileIdentity"] is True
+    assert result["visibleTray"] == ["private.pdf", "late-audio.webm"], (
+        "a retained staged file must be visible after New Chat creation aborts"
+    )
+    assert result["trayRenders"] >= 1
+    assert result["sendButtonUpdates"] >= 1
+    assert result["autoResizeCalls"] >= 1

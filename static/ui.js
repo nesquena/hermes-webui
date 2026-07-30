@@ -441,6 +441,11 @@ function _drainComposerOwnershipTransition(token,aborted=false){
       text:token.abortState.text,files:token.abortState.files,
       revision:token.abortState.revision,
     },token.generation);
+    const input=$('msg');
+    if(typeof renderTray==='function')renderTray();
+    if(typeof autoResize==='function')autoResize();
+    if(typeof updateSendBtn==='function')updateSendBtn();
+    if(input&&input.disabled!==true&&typeof input.focus==='function')input.focus();
   }else{
     if(token.destinationSlots.size)_composerSetText(token.destinationText);
     for(const mutation of token.mutations){
