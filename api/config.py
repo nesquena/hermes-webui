@@ -4164,14 +4164,34 @@ def resolve_effective_reasoning_effort(
     """Resolve session > per-model > global effort, then clamp to capability."""
     raw_effort = str(session_effort or "").strip().lower()
     if not raw_effort:
+        resolved = None
         try:
             from hermes_constants import resolve_reasoning_config
 
             resolved = resolve_reasoning_config(config_data, model_id or "")
-            if isinstance(resolved, dict):
-                raw_effort = "none" if resolved.get("enabled") is False else str(resolved.get("effort") or "")
+        except (ImportError, ModuleNotFoundError):
+            # hermes-webui's CI and standalone installs do not necessarily ship
+            # hermes-agent on sys.path. Preserve the same resolution contract
+            # locally instead of silently disabling reasoning in that case.
+            agent_cfg = config_data.get("agent") if isinstance(config_data, dict) else {}
+            agent_cfg = agent_cfg if isinstance(agent_cfg, dict) else {}
+            overrides = agent_cfg.get("reasoning_overrides")
+            overrides = overrides if isinstance(overrides, dict) else {}
+            model_raw = str(model_id or "").strip()
+            candidates = [model_raw]
+            if model_raw.startswith("@") and ":" in model_raw:
+                candidates.append(model_raw.split(":", 1)[1])
+            if "/" in model_raw:
+                candidates.append(model_raw.rsplit("/", 1)[-1])
+            override = next(
+                (overrides[key] for key in candidates if key and key in overrides),
+                agent_cfg.get("reasoning_effort"),
+            )
+            resolved = {"enabled": str(override or "").strip().lower() != "none", "effort": override}
         except Exception:
-            raw_effort = ""
+            resolved = None
+        if isinstance(resolved, dict):
+            raw_effort = "none" if resolved.get("enabled") is False else str(resolved.get("effort") or "")
     return coerce_reasoning_effort_for_model(
         raw_effort,
         model_id,
