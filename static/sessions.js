@@ -1809,6 +1809,14 @@ async function loadSession(sid){
     if (currentSid && currentSid !== sid && typeof closeOtherLiveStreams === 'function') {
       closeOtherLiveStreams(sid);
     }
+    // #6421: invalidate any in-flight older-page continuation before
+    // releasing the loading lock so a late-resolving prefetch does not
+    // prepend stale rows onto the fresh authoritative transcript that
+    // _ensureMessagesLoaded is about to install (#6392 same-session reload
+    // race).  _loadOlderMessages snapshots _messagesGeneration before its
+    // await; bumping now poisons that snapshot's post-await generation check
+    // so the stale continuation bails out cleanly.
+    _bumpMessagesGeneration();
     _loadingOlder = false;
     const _msgInner = $('msgInner');
     if (_msgInner && currentSid !== sid) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
@@ -3191,6 +3199,15 @@ async function _ensureMessagesLoaded(sid, opts) {
       _oldestIdx = _prevOldestIdx;
     }
   }
+  // #6421: invalidate any in-flight _loadOlderMessages continuation that
+  // started during the api() round-trip above (after loadSession's initial
+  // bump but before this point).  A second bump is needed here because
+  // _loadOlderMessages snapshots _messagesGeneration before its await, and
+  // a prefetch may have begun during the metadata/messages fetch.  Bumping
+  // now means the old prefetch's post-await generation check will mismatch
+  // and bail out instead of prepending stale rows onto the fresh
+  // authoritative transcript we are about to install (#6392).
+  _bumpMessagesGeneration();
   S.messages = msgs;
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.
