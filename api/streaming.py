@@ -4549,10 +4549,13 @@ def _migrate_compression_session_ownership(
                     new_sid,
                 )
                 return False
+            SESSION_AGENT_LOCKS[old_sid] = agent_lock
             SESSION_AGENT_LOCKS[new_sid] = agent_lock
 
     if not _preserve_pre_compression_snapshot(s, old_sid, new_sid):
         with SESSION_AGENT_LOCKS_LOCK:
+            if old_lock is missing and SESSION_AGENT_LOCKS.get(old_sid) is agent_lock:
+                SESSION_AGENT_LOCKS.pop(old_sid, None)
             if new_lock is missing and SESSION_AGENT_LOCKS.get(new_sid) is agent_lock:
                 SESSION_AGENT_LOCKS.pop(new_sid, None)
         return False
@@ -4582,8 +4585,7 @@ def _migrate_compression_session_ownership(
 
                 if SESSIONS.get(old_sid) is s:
                     SESSIONS.pop(old_sid, None)
-                if SESSION_AGENT_LOCKS.get(old_sid) is agent_lock:
-                    SESSION_AGENT_LOCKS.pop(old_sid, None)
+
     except Exception:
         with LOCK:
             with _models._INDEX_WRITE_LOCK:
@@ -4600,6 +4602,11 @@ def _migrate_compression_session_ownership(
                 SESSIONS[old_sid] = s
             s.session_id, s.pre_compression_snapshot, s.pre_compression_continuation_session_id, s.parent_session_id = previous_state
             with SESSION_AGENT_LOCKS_LOCK:
+                if SESSION_AGENT_LOCKS.get(old_sid) is agent_lock:
+                    if old_lock is missing:
+                        SESSION_AGENT_LOCKS.pop(old_sid, None)
+                    else:
+                        SESSION_AGENT_LOCKS[old_sid] = old_lock
                 if SESSION_AGENT_LOCKS.get(new_sid) is agent_lock:
                     if new_lock is missing:
                         SESSION_AGENT_LOCKS.pop(new_sid, None)
