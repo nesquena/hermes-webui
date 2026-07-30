@@ -37,6 +37,7 @@ from api.config import (
     _set_thread_env, _clear_thread_env,
     register_active_run, update_active_run, unregister_active_run,
     unregister_stream_owner,
+    stream_owner_session_id,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
     resolve_custom_provider_connection,
@@ -11836,6 +11837,11 @@ def cancel_stream(stream_id: str) -> bool:
     _cancel_session_id = getattr(agent, 'session_id', None) if agent else None
     if not _cancel_session_id and active_run_session_id:
         _cancel_session_id = active_run_session_id
+    # Third fallback: stream owner registry — populated before the worker
+    # thread starts, so it's always available even for early cancels that
+    # race ahead of AGENT_INSTANCES and ACTIVE_RUNS (#6623).
+    if not _cancel_session_id and stream_id:
+        _cancel_session_id = stream_owner_session_id(stream_id)
     # Use the snapshots captured under streams_lock above (the worker's finally
     # may have popped the live buffers by now via agent.interrupt()). For the
     # ACTIVE_RUNS-only path (stream absent) the snapshots are None → fall back to
