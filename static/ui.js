@@ -1665,20 +1665,6 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
     const n=Number(scrollTop);
     return Math.max(0,Math.min(Number.isFinite(n)?n:container.scrollTop,maxTop));
   };
-  const targetScrollTop=(target,block)=>{
-    const containerRect=container.getBoundingClientRect();
-    const targetRect=target.getBoundingClientRect();
-    let scrollTop=container.scrollTop+targetRect.top-containerRect.top;
-    if(block==='center') scrollTop+=(targetRect.height-container.clientHeight)/2;
-    return clampTargetScrollTop(scrollTop);
-  };
-  const claimReaderScrollOwnership=(scrollTop)=>{
-    const maxTop=Math.max(0,container.scrollHeight-container.clientHeight);
-    if(maxTop-clampTargetScrollTop(scrollTop)<=80) return;
-    _scrollPinned=false;
-    _messageUserUnpinned=true;
-    _nearBottomCount=0;
-  };
   const scrollToTarget=()=>{
     const hasAssistant=typeof assistantRawIdx==='number'&&assistantRawIdx>=0;
     if(hasAssistant){
@@ -1690,7 +1676,6 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
       const segs=container.querySelectorAll('[data-msg-idx="'+assistantRawIdx+'"]');
       for(const seg of segs){
         if(seg.getClientRects().length>0){
-          claimReaderScrollOwnership(targetScrollTop(seg,'start'));
           seg.scrollIntoView({block:'start',behavior:'smooth'});
           return true;
         }
@@ -1698,22 +1683,21 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
     }
     const row=document.getElementById(_userMessageDomId(questionRawIdx));
     if(!row) return false;
-    claimReaderScrollOwnership(targetScrollTop(row,'center'));
     row.scrollIntoView({block:'center',behavior:'smooth'});
     _highlightQuestionRow(row);
     return true;
   };
   // Cancel load-time bottom settling before any visible or virtualized target
-  // path can return. Sticky reader ownership is claimed separately, only after
-  // the resolved and clamped destination is known to sit beyond the 80px tail.
+  // path can return. The jump owner keeps every native smooth-scroll frame out
+  // of the manual-reader listener, then reconciles against the final geometry.
   _cancelBottomSettle();
+  _beginMessageJumpScroll(container);
   if(scrollToTarget()) return;
   const visWithIdx=_getVisibleMessagesWithIdx();
   const visibleIdx=_messageVisibleIndexForRawIdx(questionRawIdx, visWithIdx);
   if(visibleIdx>=0){
     _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
     const virtualTarget=clampTargetScrollTop(_messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container));
-    claimReaderScrollOwnership(virtualTarget);
     container.scrollTop=virtualTarget;
     _messageVirtualWindowKey='';
     renderMessages({ preserveScroll:true });
@@ -5786,6 +5770,72 @@ function _freshProgrammaticScrollActive(){
   return true;
 }
 function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollResetTimer);_programmaticScrollResetTimer=setTimeout(()=>{_programmaticScroll=false;},ms||80);}
+let _messageJumpScrollGeneration=0;
+let _messageJumpScrollOwner=null;
+let _messageJumpScrollSettleTimer=0;
+function _messageJumpSessionId(){
+  if(typeof currentSid!=='undefined'&&currentSid) return String(currentSid);
+  if(typeof S!=='undefined'&&S.session&&S.session.session_id) return String(S.session.session_id);
+  return '';
+}
+function _scheduleMessageJumpScrollReconcile(generation,ms){
+  if(!_messageJumpScrollOwner||_messageJumpScrollOwner.generation!==generation) return;
+  clearTimeout(_messageJumpScrollSettleTimer);
+  _messageJumpScrollSettleTimer=setTimeout(()=>_finishMessageJumpScroll(generation),ms||220);
+}
+function _beginMessageJumpScroll(container){
+  const previous=_messageJumpScrollOwner;
+  const preserved=previous?previous.preserved:{
+    scrollPinned:_scrollPinned,
+    messageUserUnpinned:_messageUserUnpinned,
+    nearBottomCount:_nearBottomCount,
+  };
+  clearTimeout(_messageJumpScrollSettleTimer);
+  const generation=++_messageJumpScrollGeneration;
+  _messageJumpScrollOwner={generation,container,sessionId:_messageJumpSessionId(),preserved};
+  _programmaticScroll=true;
+  _programmaticScrollSetAt=performance.now();
+  _scheduleMessageJumpScrollReconcile(generation,300);
+  return generation;
+}
+function _finishMessageJumpScroll(generation){
+  const owner=_messageJumpScrollOwner;
+  if(!owner||owner.generation!==generation) return;
+  if(owner.sessionId!==_messageJumpSessionId()){
+    _cancelMessageJumpScroll();
+    return;
+  }
+  clearTimeout(_messageJumpScrollSettleTimer);
+  _messageJumpScrollSettleTimer=0;
+  const container=owner.container;
+  const maxTop=Math.max(0,container.scrollHeight-container.clientHeight);
+  const top=Math.max(0,Math.min(Number(container.scrollTop)||0,maxTop));
+  const bottomDistance=maxTop-top;
+  if(bottomDistance>80){
+    _scrollPinned=false;
+    _messageUserUnpinned=true;
+    _nearBottomCount=0;
+  }else{
+    _scrollPinned=owner.preserved.scrollPinned;
+    _messageUserUnpinned=owner.preserved.messageUserUnpinned;
+    _nearBottomCount=owner.preserved.nearBottomCount;
+  }
+  _lastScrollTop=container.scrollTop;
+  _lastMessageClientHeight=container.clientHeight;
+  _messageJumpScrollOwner=null;
+  _programmaticScroll=false;
+  if(typeof _syncScrollToBottomCue==='function'){
+    _syncScrollToBottomCue(!_scrollPinned&&bottomDistance>80,{newMessage:_newMessageCueVisible});
+  }
+  if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
+}
+function _cancelMessageJumpScroll(){
+  ++_messageJumpScrollGeneration;
+  clearTimeout(_messageJumpScrollSettleTimer);
+  _messageJumpScrollSettleTimer=0;
+  _messageJumpScrollOwner=null;
+  _programmaticScroll=false;
+}
 let _nearBottomCount=0;
 let _lastScrollTop=null;
 let _lastMessageClientHeight=null;   // #4702: track scroller height to ignore iOS portrait toolbar-settle reflows (a clientHeight increase fires a scroll event with decreased scrollTop that is NOT a user scroll)
@@ -5831,7 +5881,7 @@ let _lastMessageRenderAt=-Infinity;
 function _recentMessageRenderArtifactWindow(ms){
   return performance.now()-_lastMessageRenderAt<(ms||1400);
 }
-function _cancelBottomSettle(){ _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); clearTimeout(_settleFinalTimer); cancelAnimationFrame(_settleRAF); }
+function _cancelBottomSettle(){ _cancelMessageJumpScroll(); _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); clearTimeout(_settleFinalTimer); cancelAnimationFrame(_settleRAF); }
 function _markMessageTouchScrollIntent(active=true){
   _messageTouchScrollActive=!!active;
   _lastMessageTouchScrollIntentMs=performance.now();
@@ -5884,15 +5934,21 @@ function _recordNonMessageScrollIntent(e){
   const target=e&&e.target;
   if(!el||!target) return;
   if(!el.contains(target)){ _lastNonMessageScrollIntentMs=performance.now(); return; }
+  // Capture the guards before cancelling the active owner: cancellation clears
+  // the programmatic flag and jump owner, but a low-delta upward wheel must still
+  // count as reader takeover when it interrupted an owned scroll.
+  const wheelUp=typeof e.deltaY==='number'&&e.deltaY<0;
+  const guardedWheelUp=wheelUp&&_freshProgrammaticScrollActive();
+  const jumpScrollOwned=typeof _messageJumpScrollOwner!=='undefined'&&!!_messageJumpScrollOwner;
   if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY!==0)){
     if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
+    if(jumpScrollOwned||e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)||guardedWheelUp){
+      if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
+    }
   }
   if(typeof e.deltaY==='number'&&e.deltaY<0) _lastMessageWheelIntentMs=performance.now();
   // Keep e.deltaY< -30 as the ordinary direct sticky-unpin threshold.
-  const wheelUp=typeof e.deltaY==='number'&&e.deltaY<0;
-  const guardedWheelUp=wheelUp&&_freshProgrammaticScrollActive();
   if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)||guardedWheelUp){
-    _cancelBottomSettle();
     if(e.type==='touchmove') _markMessageTouchScrollIntent(true);
     if((typeof e.deltaY==='number'&&e.deltaY< -30)||guardedWheelUp){
       _messageUserUnpinned=true;
@@ -5984,6 +6040,7 @@ if(typeof document!=='undefined'){
 // prevent the new chat's first scroll comparing against the previous chat's
 // scrollTop (Opus stage-302 SHOULD-FIX, #1731 follow-up).
 function _resetScrollDirectionTracker(){
+  _cancelMessageJumpScroll();
   _clearNewMessageScrollCue();
   _lastScrollTop=null;
   _lastMessageClientHeight=null;
@@ -6097,6 +6154,7 @@ if(typeof window!=='undefined'){
   if(!el) return;
   el.addEventListener('pointerdown',(e)=>{
     if(e.target===el&&e.offsetX>=el.clientWidth){
+      if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
       _scrollbarDragActive=true;
       if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
     }
@@ -6144,6 +6202,7 @@ if(typeof window!=='undefined'){
     // Count only when the message pane itself is the scroll target: it is focused,
     // contains the focus, or the pointer is over it (keyboard scroll w/o focus).
     if(a===el||el.contains(a)||el.matches(':hover')){
+      if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
       const now=performance.now();
       if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
       _lastMessageKeyScrollIntentMs=now;
@@ -6154,6 +6213,10 @@ if(typeof window!=='undefined'){
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
     _scheduleMessageVirtualizedRender();
+    if(_messageJumpScrollOwner){
+      _scheduleMessageJumpScrollReconcile(_messageJumpScrollOwner.generation);
+      return;
+    }
     if(_freshProgrammaticScrollActive()) return;
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
