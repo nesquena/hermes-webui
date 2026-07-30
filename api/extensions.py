@@ -2071,7 +2071,10 @@ def _is_safe_relative_path(rel: str) -> bool:
     if not rel or "\x00" in rel or "\\" in rel:
         return False
     for segment in rel.split("/"):
-        if not segment or segment in (".", "..") or segment.startswith("."):
+        # Reject empty and traversal segments only. Hidden leaf files such as
+        # ".gitkeep" or ".env.example" are legitimate and not a traversal risk
+        # (containment is also enforced by the resolved.relative_to(root) check).
+        if not segment or segment in (".", ".."):
             return False
     return True
 
