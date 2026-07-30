@@ -1188,7 +1188,7 @@ def model_explicit_pick_signature(model, model_provider) -> str:
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL,
-                 model_provider=None, reasoning_effort=None,
+                 model_provider=None,
                  messages=None, created_at=None, updated_at=None,
                  tool_calls=None, pinned: bool=False, archived: bool=False,
                  project_id: str=None, profile=None,
@@ -1234,6 +1234,7 @@ class Session:
                  process_wakeup_pause=None,
                  share_token=None,
                  share_created_at=None,
+                 reasoning_effort=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
