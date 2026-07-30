@@ -5174,6 +5174,8 @@ function _reasoningEffortContext(){
 
 function _reasoningEffortQuery(){
   const params=new URLSearchParams(_reasoningEffortContext());
+  const session=S&&S.session;
+  if(session&&session.session_id) params.set('session_id',session.session_id);
   const qs=params.toString();
   return qs?('?'+qs):'';
 }
@@ -5400,13 +5402,16 @@ document.addEventListener('click',function(e){
     // silently ignore the Default click and leave the toggle one-way off-only.
     // (#6219 round-3)
     if(opt){
-      const payload=Object.assign({effort:effort},_reasoningEffortContext());
-      api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
+      const session=S&&S.session;
+      const request=session&&session.session_id
+        ?api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:session.session_id,workspace:session.workspace,reasoning_effort:effort})})
+        :api('/api/reasoning',{method:'POST',body:JSON.stringify(Object.assign({effort:effort},_reasoningEffortContext()))});
+      request
         .then(function(st){
-          // For Default (effort=''), the returned reasoning_effort is '' (clear)
-          // — display 'Default' rather than an empty toast.
-          const display=(st&&st.reasoning_effort)||effort||'Default';
-          _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
+          if(session) session.reasoning_effort=effort||null;
+          const display=effort||'Auto';
+          if(!effort) fetchReasoningChip();
+          else _applyReasoningChip(effort, st||{});
           showToast('🧠 Reasoning effort set to '+display);
         })
         .catch(function(){showToast('🧠 Failed to set effort');});
