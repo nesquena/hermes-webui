@@ -12767,7 +12767,7 @@ def handle_get(handler, parsed) -> bool:
         base_url = (query.get("base_url", [""])[0] or "").strip() or None
         session_id = (query.get("session_id", [""])[0] or "").strip()
         session_effort = None
-        if session_id:
+        if session_id and _session_id_visible_to_request_profile(handler, session_id, emit_error=False):
             try:
                 session_effort = getattr(get_session(session_id, metadata_only=True), "reasoning_effort", None)
             except (KeyError, PermissionError):
@@ -14729,6 +14729,7 @@ def handle_post(handler, parsed) -> bool:
                 workspace=session.workspace,
                 model=session.model,
                 model_provider=session.model_provider,
+                reasoning_effort=getattr(session, "reasoning_effort", None),
                 messages=copy.deepcopy(session.messages),
                 tool_calls=copy.deepcopy(session.tool_calls),
                 # Reset ephemeral / per-session-instance flags. Duplicating an
@@ -15156,6 +15157,13 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be updated from WebUI", 403)
+        raw_effort = None
+        if "reasoning_effort" in body:
+            from api.config import VALID_REASONING_EFFORTS
+
+            raw_effort = str(body.get("reasoning_effort") or "").strip().lower()
+            if raw_effort and raw_effort != "none" and raw_effort not in VALID_REASONING_EFFORTS:
+                return bad(handler, f"Unknown reasoning effort '{raw_effort}'", 400)
         old_ws = getattr(s, "workspace", "")
         old_model = getattr(s, "model", None)
         old_provider = getattr(s, "model_provider", None)
@@ -15188,11 +15196,6 @@ def handle_post(handler, parsed) -> bool:
 
                     _evict_session_agent(body["session_id"])
             if "reasoning_effort" in body:
-                from api.config import VALID_REASONING_EFFORTS
-
-                raw_effort = str(body.get("reasoning_effort") or "").strip().lower()
-                if raw_effort and raw_effort != "none" and raw_effort not in VALID_REASONING_EFFORTS:
-                    return bad(handler, f"Unknown reasoning effort '{raw_effort}'", 400)
                 if raw_effort != str(getattr(s, "reasoning_effort", None) or ""):
                     s.reasoning_effort = raw_effort or None
                     from api.config import _evict_session_agent
@@ -15613,6 +15616,7 @@ def handle_post(handler, parsed) -> bool:
             workspace=source.workspace,
             model=source.model,
             model_provider=getattr(source, "model_provider", None),
+            reasoning_effort=getattr(source, "reasoning_effort", None),
             profile=getattr(source, "profile", None),
             title=branch_title,
             messages=forked_messages,
@@ -23110,6 +23114,7 @@ def _handle_session_compression_recovery_start(handler, body):
                 workspace=getattr(source, "workspace", get_last_workspace()),
                 model=getattr(source, "model", None),
                 model_provider=getattr(source, "model_provider", None),
+                reasoning_effort=getattr(source, "reasoning_effort", None),
                 messages=[],
                 tool_calls=[],
                 pinned=False,

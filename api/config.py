@@ -4327,6 +4327,33 @@ def coerce_reasoning_effort_for_model(
     return raw
 
 
+def resolve_effective_reasoning_effort(
+    config_data: dict,
+    model_id: str | None,
+    *,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+    session_effort: str | None = None,
+) -> str:
+    """Resolve session > per-model > global effort, then clamp to capability."""
+    raw_effort = str(session_effort or "").strip().lower()
+    if not raw_effort:
+        try:
+            from hermes_constants import resolve_reasoning_config
+
+            resolved = resolve_reasoning_config(config_data, model_id or "")
+            if isinstance(resolved, dict):
+                raw_effort = "none" if resolved.get("enabled") is False else str(resolved.get("effort") or "")
+        except Exception:
+            raw_effort = ""
+    return coerce_reasoning_effort_for_model(
+        raw_effort,
+        model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
+
+
 def get_reasoning_status(
     *,
     model_id: str | None = None,
@@ -4359,22 +4386,13 @@ def get_reasoning_status(
             if not resolve_base_url and model_cfg.get("base_url"):
                 resolve_base_url = str(model_cfg["base_url"]).strip()
 
-    # Session override wins. Otherwise apply the shared Hermes resolution:
-    # per-model override first, then the profile-global effort.
-    if session_effort is not None and str(session_effort).strip():
-        effort_raw = str(session_effort).strip().lower()
-    else:
-        try:
-            from hermes_constants import resolve_reasoning_config
-
-            resolved_reasoning = resolve_reasoning_config(config_data, resolve_model or "")
-            if isinstance(resolved_reasoning, dict):
-                if resolved_reasoning.get("enabled") is False:
-                    effort_raw = "none"
-                else:
-                    effort_raw = resolved_reasoning.get("effort") or effort_raw
-        except Exception:
-            pass
+    effort_raw = resolve_effective_reasoning_effort(
+        config_data,
+        resolve_model,
+        provider_id=resolve_provider,
+        base_url=resolve_base_url,
+        session_effort=session_effort,
+    )
 
     supported_efforts = resolve_model_reasoning_efforts(
         resolve_model,

@@ -427,8 +427,8 @@ class TestStreamingReasoningWiring:
             "api/streaming.py must import parse_reasoning_effort to translate "
             "config.yaml agent.reasoning_effort into AIAgent reasoning_config"
         )
-        assert 'coerce_reasoning_effort_for_model' in src, (
-            "api/streaming.py must clamp/drop unsupported model-specific effort "
+        assert 'resolve_effective_reasoning_effort' in src, (
+            "api/streaming.py must resolve and clamp session/model/global effort "
             "levels before sending reasoning_config to the provider"
         )
         assert "reasoning_config" in src and "'reasoning_config' in _agent_params" in src, (
