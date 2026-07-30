@@ -12,6 +12,8 @@ import mimetypes
 import os
 import queue
 import random
+import hashlib
+import importlib
 import re
 import sqlite3
 import shlex
@@ -2312,59 +2314,258 @@ def _reset_streaming_hermes_home_override(override_mod, override_token, override
         logger.debug("Failed to reset streaming Hermes home override", exc_info=True)
 
 
-# ── Stale terminal-env cache invalidation (issue #5937) ─────────────────
+# ── Terminal backend identity and generation tracking (issue #5937) ──────
 # When WebUI switches between profiles with different terminal backends
-# (e.g., local → SSH), the agent's `_active_environments["default"]` cache
-# may still hold an environment created under the *previous* profile's
-# backend vars.  This causes a subsequent local-profile turn to execute
-# terminal/file tool calls against the stale remote SSH environment.
+# (e.g., local ↔ SSH or SSH host A → host B), the agent's
+# `_active_environments["default"]` cache may still hold an environment
+# created under the *previous* profile's backend vars.  This is a
+# security-class issue: a turn using profile B must never reuse an
+# environment created for profile A, even when both use the same
+# TERMINAL_ENV type.
 #
-# A single global tracker is sufficient because the cache is collapsed to
-# the shared key "default" — any profile switch that changes the backend
-# type must invalidate the global cached entry.
-_last_terminal_env: str | None = None
+# Design:
+#  1. Compute a normalized **fingerprint** of ALL terminal-relevant env
+#     vars (the same set consumed by terminal_tool._get_env_config()).
+#  2. Maintain a monotonic **generation counter**; bump it when the
+#     fingerprint changes between turns.
+#  3. Tag the live environment object with the generation that created it
+#     (via a side-attribute set after agent execution).
+#  4. At turn setup, compare fingerprints and bump generation; evict the
+#     cached env only if it matches the *stale* generation (i.e. no other
+#     concurrent turn has already replaced it).
+#  5. After each turn, tag any newly-created env with the current
+#     generation so the next setup can detect staleness.
+#  6. Monkey-patch terminal_tool.terminal_tool for atomic identity
+#     validation in the acquisition critical section, eliminating the
+#     os.environ race between setup and tool execution.
+
+# All env var keys that terminal_tool._get_env_config() reads, sorted.
+# Must be kept in sync with tools/terminal_tool.py:_get_env_config().
+_BACKEND_IDENTITY_KEYS: tuple[str, ...] = (
+    'TERMINAL_ENV',
+    'TERMINAL_CWD',
+    'TERMINAL_TIMEOUT',
+    'TERMINAL_LIFETIME_SECONDS',
+    'TERMINAL_MODAL_MODE',
+    'TERMINAL_DOCKER_IMAGE',
+    'TERMINAL_DOCKER_FORWARD_ENV',
+    'TERMINAL_DOCKER_ENV',
+    'TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE',
+    'TERMINAL_SINGULARITY_IMAGE',
+    'TERMINAL_MODAL_IMAGE',
+    'TERMINAL_DAYTONA_IMAGE',
+    'TERMINAL_CONTAINER_CPU',
+    'TERMINAL_CONTAINER_MEMORY',
+    'TERMINAL_CONTAINER_DISK',
+    'TERMINAL_CONTAINER_PERSISTENT',
+    'TERMINAL_DOCKER_VOLUMES',
+    'TERMINAL_PERSISTENT_SHELL',
+    'TERMINAL_SSH_HOST',
+    'TERMINAL_SSH_USER',
+    'TERMINAL_SSH_PORT',
+    'TERMINAL_SSH_KEY',
+    'TERMINAL_SSH_PERSISTENT',
+    'TERMINAL_LOCAL_PERSISTENT',
+    'TERMINAL_DOCKER_RUN_AS_HOST_USER',
+    'TERMINAL_DOCKER_NETWORK',
+    'TERMINAL_DOCKER_EXTRA_ARGS',
+    'TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES',
+    'TERMINAL_DOCKER_ORPHAN_REAPER',
+)
+
+# Backend identity and generation tracking
+_backend_generation_lock = threading.Lock()
+_current_backend_generation: int = 0  # monotonically increasing, bumps on identity change
+_env_backend_generations: dict[str, int] = {}  # task_key -> generation that created it
+_file_backend_generations: dict[str, int] = {}  # task_key -> generation for file ops cache
+_last_backend_identity: str | None = None  # sha256 fingerprint of the last-seen config
+_terminal_env_guard_installed: bool = False
 
 
-def _invalidate_stale_terminal_env(profile_runtime_env: dict) -> None:
-    """Drop the cached ``\"default\"`` terminal environment when the backend
-    type changes between WebUI turns.
+def _compute_backend_identity(profile_runtime_env: dict | None) -> str:
+    """Return a collision-resistant fingerprint of the terminal backend config.
 
-    Called during streaming turn setup, after the profile's terminal env
-    vars have been written to ``os.environ``, so the next terminal tool
-    call will create a fresh environment with the correct backend config.
+    Includes every env var that terminal_tool._get_env_config() reads, so two
+    profiles with the same TERMINAL_ENV but different SSH hosts, Docker images,
+    resource limits, etc. produce distinct fingerprints.
     """
-    global _last_terminal_env
-    current_env = (profile_runtime_env or {}).get("TERMINAL_ENV", "").strip() or None
+    env = profile_runtime_env or {}
+    parts: list[str] = []
+    for key in _BACKEND_IDENTITY_KEYS:
+        val = env.get(key, '')
+        if isinstance(val, bool):
+            val = 'true' if val else 'false'
+        elif not isinstance(val, str):
+            val = str(val)
+        parts.append(f'{key}={val}')
+    raw = '\n'.join(parts)
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
-    if current_env == _last_terminal_env:
+
+def _get_expected_backend_generation(task_key: str) -> int | None:
+    """Return the expected generation for *task_key*, or None if untracked."""
+    with _backend_generation_lock:
+        return _env_backend_generations.get(task_key)
+
+
+def _mark_env_backend_generation(task_key: str, generation: int) -> None:
+    """Record the generation under which the env task_key was created."""
+    with _backend_generation_lock:
+        _env_backend_generations[task_key] = generation
+
+
+def _invalidate_stale_terminal_backend(profile_runtime_env: dict | None) -> None:
+    """Evict the cached terminal/file environment when the backend config changes.
+
+    Called at turn startup, *after* _ENV_LOCK is released.  Uses a full backend
+    identity fingerprint (not just TERMINAL_ENV) and a generation counter so
+    that:
+      - SSH host A -> SSH host B (same TERMINAL_ENV=ssh) is detected
+      - The eviction targets only the exact stale generation, not an env
+        that another concurrent session has already replaced.
+    """
+    global _last_backend_identity, _current_backend_generation
+
+    identity = _compute_backend_identity(profile_runtime_env)
+
+    stale_generation: int | None = None
+
+    with _backend_generation_lock:
+        if identity == _last_backend_identity:
+            return  # same config, nothing to do
+        # Config changed — bump generation
+        _last_backend_identity = identity
+        stale_generation = _current_backend_generation
+        _current_backend_generation += 1
+        _env_backend_generations.pop('default', None)
+        _file_backend_generations.pop('default', None)
+
+    if stale_generation is None:
         return
 
-    previous = _last_terminal_env
-    _last_terminal_env = current_env
+    logger.info(
+        'Terminal backend identity changed (gen %d -> %d): checking for stale env',
+        stale_generation,
+        stale_generation + 1,
+    )
 
     try:
         from tools.terminal_tool import cleanup_vm, get_active_env
         from tools.file_tools import clear_file_ops_cache
 
-        cached = get_active_env("default")
-        if cached is not None:
-            logger.info(
-                "Terminal backend switched %s -> %s: evicting stale default env",
-                previous or "(none)",
-                current_env or "(none)",
+        # Only evict the env if its recorded generation matches our stale one.
+        # If another concurrent turn already replaced it with a newer generation
+        # (or removed it), we skip the eviction.
+        recorded = _get_expected_backend_generation('default')
+        if recorded != stale_generation:
+            logger.debug(
+                'Skipping eviction — cached env gen %s != stale gen %s',
+                recorded, stale_generation,
             )
-            cleanup_vm("default")
-            clear_file_ops_cache("default")
+            return
+
+        cached = get_active_env('default')
+        if cached is not None:
+            # Double-check the env object's side-attribute also confirms staleness
+            env_gen = getattr(cached, '_webui_backend_generation', None)
+            if env_gen is not None and env_gen != stale_generation:
+                logger.debug(
+                    'Skipping eviction — env object gen %s != stale gen %s',
+                    env_gen, stale_generation,
+                )
+                return
+            logger.info(
+                'Evicting stale terminal environment (gen %s) for new config',
+                stale_generation,
+            )
+            cleanup_vm('default')
+        clear_file_ops_cache('default')
     except ImportError:
         logger.debug(
-            "Terminal or file_tools not available for cache invalidation",
+            'Terminal or file_tools not available for cache invalidation',
             exc_info=True,
         )
     except Exception:
         logger.debug(
-            "Failed to invalidate stale terminal env",
+            'Failed to invalidate stale terminal env',
             exc_info=True,
         )
+
+
+def _refresh_env_generation_tag() -> None:
+    """After the agent turn, tag any newly-created environment with the
+    current generation so the next setup can detect staleness.
+
+    Safe to call multiple times: only tags an untagged or stale-tagged env.
+    """
+    try:
+        from tools.terminal_tool import get_active_env
+
+        env = get_active_env('default')
+        if env is not None:
+            recorded = _get_expected_backend_generation('default')
+            if recorded is not None:
+                env._webui_backend_generation = recorded
+    except ImportError:
+        pass
+    except Exception:
+        logger.debug('Failed to refresh env generation tag', exc_info=True)
+
+
+def _install_terminal_env_generation_guard() -> None:
+    """Monkey-patch terminal_tool.terminal_tool to validate environment
+    generation atomically inside the acquisition critical section.
+
+    This eliminates the os.environ race between turn-setup (which writes
+    env vars) and tool-execution (which reads them): the check happens
+    under _env_lock, in the same code path that acquires the cached env.
+    """
+    global _terminal_env_guard_installed
+    if _terminal_env_guard_installed:
+        return
+
+    try:
+        tt = importlib.import_module('tools.terminal_tool')
+
+        original_terminal_tool = tt.terminal_tool
+
+        def _wrapped_terminal_tool(
+            command, background=False, timeout=None, task_id=None,
+            session_id=None, force=False, workdir=None, pty=False,
+            notify_on_complete=False, watch_patterns=None,
+        ):
+            # Pre-flight: evict stale env under _env_lock, in the same
+            # critical section the acquisition path uses.
+            effective_task_id = tt._resolve_container_task_id(task_id)
+            with tt._env_lock:
+                env = tt.get_active_env(task_id)
+                if env is not None:
+                    env_gen = getattr(env, '_webui_backend_generation', None)
+                    if env_gen is not None:
+                        expected = _get_expected_backend_generation(effective_task_id)
+                        if expected is not None and env_gen != expected:
+                            # This env belongs to a stale generation — evict so
+                            # the acquisition path below creates a fresh one.
+                            logger.info(
+                                'Guard evicting stale env (gen %s, expected %s) on task %s',
+                                env_gen, expected, effective_task_id,
+                            )
+                            tt._active_environments.pop(effective_task_id, None)
+                            tt._last_activity.pop(effective_task_id, None)
+
+            return original_terminal_tool(
+                command, background=background, timeout=timeout,
+                task_id=task_id, session_id=session_id, force=force,
+                workdir=workdir, pty=pty,
+                notify_on_complete=notify_on_complete,
+                watch_patterns=watch_patterns,
+            )
+
+        tt.terminal_tool = _wrapped_terminal_tool
+        _terminal_env_guard_installed = True
+        logger.debug('Installed terminal env generation guard on terminal_tool')
+    except Exception:
+        logger.debug('Could not install terminal env generation guard', exc_info=True)
 
 
 # ── Per-turn session identity (xsession wakeup misroute root fix — Option 1) ─
@@ -8395,11 +8596,12 @@ def _run_agent_streaming(
             pass  # MCP not available or not configured — non-fatal
 
         # #5937: invalidate the cached "default" terminal environment when
-        # the profile's TERMINAL_ENV backend type changes.  Without this,
-        # a local-backend turn reuses a stale SSH/Docker environment created
-        # by an earlier remote-backend profile session in the same process,
-        # causing terminal/file tool calls to execute on the wrong backend.
-        _invalidate_stale_terminal_env(_safe_profile_runtime_env)
+        # the profile's terminal backend identity changes.  Uses a full
+        # config fingerprint (not just TERMINAL_ENV type) and generation
+        # tracking so SSH host A -> host B is detected and only the exact
+        # stale generation is evicted.
+        _invalidate_stale_terminal_backend(_safe_profile_runtime_env)
+        _install_terminal_env_generation_guard()
 
         # Register a gateway-style notify callback so the approval system can
         # push the `approval` SSE event the moment a dangerous command is
@@ -11215,6 +11417,10 @@ def _run_agent_streaming(
                     _unreg_clarify_notify(session_id)
                 except Exception:
                     logger.debug("Failed to unregister clarify callback")
+            # #5937: tag the live env with its current generation so the next
+            # turn's setup can detect staleness.  Run before env var restoration
+            # so get_active_env() still works.
+            _refresh_env_generation_tag()
             with _ENV_LOCK:
                 for _key, _old_value in old_profile_env.items():
                     if _old_value is None: os.environ.pop(_key, None)
