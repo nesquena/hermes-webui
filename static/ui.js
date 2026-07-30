@@ -1634,12 +1634,17 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
     _highlightQuestionRow(row);
     return true;
   };
+  // This is an explicit reader navigation away from the tail. Cancel any
+  // load-time bottom settle before the visible-target fast path can return;
+  // otherwise its delayed fallback can snap the first jump back to the bottom.
+  _cancelBottomSettle();
+  _scrollPinned=false;
+  _messageUserUnpinned=true;
+  _nearBottomCount=0;
   if(scrollToTarget()) return;
   const visWithIdx=_getVisibleMessagesWithIdx();
   const visibleIdx=_messageVisibleIndexForRawIdx(questionRawIdx, visWithIdx);
   if(visibleIdx>=0){
-    _scrollPinned=false;
-    _messageUserUnpinned=true;
     _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
     container.scrollTop=_messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container);
     _messageVirtualWindowKey='';
