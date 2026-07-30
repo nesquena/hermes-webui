@@ -141,7 +141,23 @@ def test_harness_pillar_routing_for_context_permission_and_compaction(capsys):
     assert "docs/rfcs/README.md" in payload["contract_docs"]
     assert "python3 scripts/harness_quality_gate.py --files <changed-files> --format json" in payload["recommended_checks"]
     assert any("visible-vs-model-facing" in note for note in payload["routing_notes"])
-    assert any("fail closed" in note for note in payload["routing_notes"])
+    assert any("unknown approval/preflight/sandbox state must fail closed" in note for note in payload["routing_notes"])
+    assert any("negative denial or bypass attempt" in note for note in payload["routing_notes"])
+
+
+def test_permission_contract_routes_unknown_state_to_fail_closed_evidence():
+    gate = load_module()
+
+    analysis = gate.analyze_changed_files([
+        "api/approval_preflight.py",
+        "static/sandbox-permissions.js",
+    ])
+
+    assert "harness_permissions" in analysis.categories
+    assert "security" in analysis.categories
+    assert "python3 scripts/harness_quality_gate.py --files <changed-files> --format json" in analysis.recommended_checks
+    assert any("unknown approval/preflight/sandbox state must fail closed" in note for note in analysis.routing_notes)
+    assert any("negative denial or bypass attempt" in note for note in analysis.routing_notes)
 
 
 def test_pr_body_format_is_not_supported(capsys):

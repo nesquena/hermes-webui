@@ -214,6 +214,21 @@ Harness-specific routing mirrors the `awesome-cc-harness` pillars in Hermes term
 
 This is a Hermes-native adaptation of the Claude Code harness model, not a wholesale port of Claude Code's permission modes, hook matrix, sandbox adapter, or telemetry stack.
 
+### Permission Contract
+
+Hermes-native permission hardening is a contract around existing runtime surfaces, not a second Claude Code permission runtime. The contract owner is the component that can actually allow, rewrite, deny, execute, persist, or dispatch the operation.
+
+| Surface | Owner | Contract |
+|---|---|---|
+| Tool approval | Hermes Agent approval layer | Unknown or missing approval state must fail closed; approval checks must happen at the point of execution, not only during advisory classification. |
+| WebUI preflight | `api/streaming.py` bridge | Harness rewrites may affect only the model-facing current turn; visible and persisted user text must stay unchanged. Plugin failures must not become silent permission grants for dangerous operations. |
+| Gateway preflight | Hermes gateway hook dispatcher | `allow` / `rewrite` / `skip` actions remain advisory unless the gateway approval layer explicitly denies execution. |
+| Toolsets and plugins | Hermes tool/plugin registry | A classifier may recommend routing, but must not enable tools, create tasks, write state, or bypass caller permission checks. |
+| Cron and Kanban workers | Scheduler / board dispatcher | Durable dispatch requires explicit task state and evidence; GC or review helpers must not delete state, restart services, change credentials, or auto-dispatch workers without human approval. |
+| Sandbox / shell execution | Terminal backend and approval policy | Unknown sandbox identity, missing workspace ownership, or ambiguous destructive command scope must block or request approval before execution. |
+
+Permission-sensitive changes must include negative evidence: a denial path, bypass attempt, unknown-state case, or equivalent manual abuse case. A source-only assertion that the code "checks permission" is not enough.
+
 Example:
 
 ```bash

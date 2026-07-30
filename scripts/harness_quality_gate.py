@@ -83,6 +83,7 @@ HARNESS_COMPANION_DOCS = (
     "docs/harness-engineering.md",
     "docs/harness-engineering-cn.md",
 )
+PERMISSION_CONTRACT_CHECK = "python3 scripts/harness_quality_gate.py --files <changed-files> --format json"
 
 
 @dataclass
@@ -186,10 +187,11 @@ def analyze_changed_files(files: list[str]) -> HarnessAnalysis:
         notes.append("Harness context change: verify prompt/context routing, skill or memory retention layer, and visible-vs-model-facing message boundaries.")
     if "harness_context_lifecycle" in analysis.categories:
         contracts.append("docs/rfcs/README.md")
-        checks.append("python3 scripts/harness_quality_gate.py --files <changed-files> --format json")
+        checks.append(PERMISSION_CONTRACT_CHECK)
         notes.append("Context lifecycle change: prove compaction/memory/replay behavior with state-layer evidence, not only source inspection.")
     if "harness_permissions" in analysis.categories:
-        notes.append("Harness permission change: fail closed on unknown approval/preflight/sandbox state and include a negative denial or bypass attempt.")
+        checks.append(PERMISSION_CONTRACT_CHECK)
+        notes.append("Harness permission contract: unknown approval/preflight/sandbox state must fail closed, preserve visible-vs-model-facing boundaries, and include a negative denial or bypass attempt.")
     if "docs" in analysis.categories or "changelog" in analysis.categories:
         notes.append("Docs/release-note routing: do not edit CHANGELOG.md in ordinary contributor PRs; put release-note wording in the PR body when needed.")
 
