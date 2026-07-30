@@ -10,6 +10,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 UI_JS_PATH = REPO_ROOT / "static" / "ui.js"
+SESSIONS_JS_PATH = REPO_ROOT / "static" / "sessions.js"
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -70,12 +71,17 @@ let _settleFinalTimer = 0;
 let targetScrolls = 0;
 let snappedBackToBottom = false;
 
+const container = {
+  scrollHeight: 900,
+  clientHeight: 500,
+  scrollTop: 400,
+  getBoundingClientRect(){ return {top: 100, height: 500}; },
+  querySelectorAll(){ return [assistantSegment]; },
+};
 const assistantSegment = {
   getClientRects(){ return [{}]; },
-  scrollIntoView(){ targetScrolls += 1; },
-};
-const container = {
-  querySelectorAll(){ return [assistantSegment]; },
+  getBoundingClientRect(){ return {top: -300, height: 40}; },
+  scrollIntoView(){ targetScrolls += 1; container.scrollTop = 0; },
 };
 function $(id){ return id === 'messages' ? container : null; }
 function _userMessageDomId(rawIdx){ return 'msg-user-' + rawIdx; }
@@ -115,3 +121,99 @@ eval(extractFunc('jumpToTurnQuestion'));
         "messageUserUnpinned": True,
         "bottomSettleToken": 1,
     }
+
+
+@pytest.mark.parametrize(
+    ("scroll_range", "expect_reader_owned"),
+    [
+        (0, False),
+        (79, False),
+        (81, True),
+        (400, True),
+    ],
+)
+def test_jump_geometry_controls_active_session_refresh_deferral(
+    scroll_range: int, expect_reader_owned: bool
+):
+    ui_js = UI_JS_PATH.read_text(encoding="utf-8")
+    sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(ui_js + "\n" + sessions_js) + rf"""
+let _scrollPinned = true;
+let _messageUserUnpinned = false;
+let _nearBottomCount = 2;
+let _bottomSettleToken = 0;
+let _settleRAF = 0;
+let _settleRO = null;
+let _settleTimer = 0;
+let _settleFinalTimer = 0;
+let _activeSessionExternalRefreshInFlight = false;
+let _deferredActiveSessionExternalRefreshReason = '';
+let apiCalls = 0;
+
+const scrollRange = {scroll_range};
+const container = {{
+  scrollHeight: 500 + scrollRange,
+  clientHeight: 500,
+  scrollTop: scrollRange,
+  getBoundingClientRect(){{ return {{top: 100, height: 500}}; }},
+  querySelectorAll(){{ return [assistantSegment]; }},
+}};
+const assistantSegment = {{
+  getClientRects(){{ return [{{}}]; }},
+  getBoundingClientRect(){{ return {{top: 100 - scrollRange, height: 40}}; }},
+  scrollIntoView(){{ container.scrollTop = 0; }},
+}};
+const document = {{hidden: false, getElementById(){{ return null; }}}};
+const window = {{}};
+const S = {{
+  session: {{session_id: 'active', message_count: 1, last_message_at: 1}},
+  messages: [{{role: 'user'}}],
+  busy: false,
+  activeStreamId: null,
+}};
+
+function $(id){{ return id === 'messages' ? container : null; }}
+function _userMessageDomId(rawIdx){{ return 'msg-user-' + rawIdx; }}
+function _highlightQuestionRow(){{}}
+function _getVisibleMessagesWithIdx(){{ throw new Error('visible target should use fast path'); }}
+function cancelAnimationFrame(){{}}
+function _isMessageReaderUnpinned(){{ return _messageUserUnpinned; }}
+function _deferActiveSessionExternalRefresh(reason){{
+  _deferredActiveSessionExternalRefreshReason = reason || 'poll';
+}}
+function _isExternalSession(){{ return false; }}
+async function api(){{
+  apiCalls += 1;
+  return {{session: {{message_count: 1, last_message_at: 1}}}};
+}}
+
+eval(extractFunc('_cancelBottomSettle'));
+eval(extractFunc('jumpToTurnQuestion'));
+eval(extractFunc('refreshActiveSessionIfExternallyUpdated'));
+
+(async () => {{
+  await jumpToTurnQuestion(4, 5);
+  const refreshResult = await refreshActiveSessionIfExternallyUpdated('idle-reconcile', {{ignoreStreamJustFinished:true}});
+  console.log(JSON.stringify({{
+    scrollRange,
+    scrollTop: container.scrollTop,
+    scrollPinned: _scrollPinned,
+    messageUserUnpinned: _messageUserUnpinned,
+    refreshResult,
+    deferredReason: _deferredActiveSessionExternalRefreshReason,
+    apiCalls,
+  }}));
+}})().catch(error => {{
+  console.error(error);
+  process.exit(1);
+}});
+"""
+    result = json.loads(_run_node(source))
+
+    assert result["scrollRange"] == scroll_range
+    assert result["scrollTop"] == 0
+    assert result["scrollPinned"] is (not expect_reader_owned)
+    assert result["messageUserUnpinned"] is expect_reader_owned
+    assert result["refreshResult"] == ("skipped" if expect_reader_owned else "unchanged")
+    assert result["deferredReason"] == ("idle-reconcile" if expect_reader_owned else "")
+    assert result["apiCalls"] == (0 if expect_reader_owned else 1)
