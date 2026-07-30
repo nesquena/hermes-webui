@@ -16349,9 +16349,12 @@ function renderMessages(options){
         const isLastTextPart=partIdx===lastTextPartIdx;
         const partBodyHtml=_getCachedRender(partDisplayText,false);
         if(isLastTextPart&&statusHtml){
+          orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${partBodyHtml}</div>`);
           orderedSeg.insertAdjacentHTML('beforeend', statusHtml);
+          orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?footHtml:''}`);
+        }else{
+          orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
         }
-        orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
         blocks.appendChild(orderedSeg);
         if(!firstSeg) firstSeg=orderedSeg;
       });
@@ -16410,8 +16413,9 @@ function renderMessages(options){
     }
     const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||recoveryHtml);
     if(statusHtml&&(String(content||'').trim()||filesHtml)){
+      seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>`);
       seg.insertAdjacentHTML('beforeend', statusHtml);
-      seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
+      seg.insertAdjacentHTML('beforeend', footHtml);
     }else if(statusHtml){
       seg.insertAdjacentHTML('beforeend', statusHtml);
     }else if(hasVisibleBody){
