@@ -1302,9 +1302,75 @@ async function cmdQueue(args){
   showToast(t('cmd_queue_confirm'),2000);
 }
 
+function _interruptOwnerIsCurrent(ownerSid){
+  return !!(typeof S !== 'undefined' && ownerSid && S.session && S.session.session_id === ownerSid);
+}
+
+async function _tryInterrupt(msg, confirmToastKey='busy_interrupt_confirm', cancelReason='busy-interrupt'){
+  const pendingFilesSnapshot=(typeof S !== 'undefined' && Array.isArray(S.pendingFiles)) ? [...S.pendingFiles] : [];
+  const originalMsg=String(msg||'').trim();
+  if(!originalMsg&&pendingFilesSnapshot.length===0){showToast(t('cmd_interrupt_no_msg'));return false;}
+  const ownerSid=(typeof S !== 'undefined' && S.session && S.session.session_id) || null;
+  if(!ownerSid){showToast(t('no_active_session'));return false;}
+  const ownerStreamId=(typeof S !== 'undefined' && (S.activeStreamId || (S.session && S.session.active_stream_id))) || null;
+  const ownerModelState=(typeof _chatPayloadModelState === 'function' ? _chatPayloadModelState() : null) || {};
+  const ownerProfile=(typeof S !== 'undefined' && typeof S.activeProfile === 'string' && S.activeProfile)
+    ? S.activeProfile
+    : 'default';
+
+  if(!pendingFilesSnapshot.length && ownerStreamId){
+    try{
+      const result=await api('/api/chat/interrupt',{
+        method:'POST',
+        body:JSON.stringify({
+          session_id:ownerSid,
+          stream_id:String(ownerStreamId),
+          text:originalMsg,
+        }),
+      });
+      if(result&&result.accepted){
+        if(_interruptOwnerIsCurrent(ownerSid)){
+          _clearComposerAfterQueuedSelectionSend(ownerSid);
+        }else if(typeof _clearComposerDraft==='function'){
+          _clearComposerDraft(ownerSid, originalMsg, pendingFilesSnapshot);
+        }
+        showToast(t(confirmToastKey),2000);
+        return true;
+      }
+    }catch(_){
+      // Network/error fallback to legacy queue+cancel below.
+    }
+  }
+
+  queueSessionMessage(ownerSid,{
+    text:originalMsg,
+    files:[...pendingFilesSnapshot],
+    model:ownerModelState.model || '',
+    model_provider:ownerModelState.model_provider || '',
+    profile:ownerProfile,
+  });
+  if(typeof updateQueueBadge==='function') updateQueueBadge(ownerSid);
+  if(_interruptOwnerIsCurrent(ownerSid)){
+    _clearComposerAfterQueuedSelectionSend(ownerSid);
+    S.pendingFiles=[];
+    renderTray();
+  }else if(typeof _clearComposerDraft==='function'){
+    _clearComposerDraft(ownerSid, originalMsg, pendingFilesSnapshot);
+  }
+
+  if(_ownerStreamIsCurrent(ownerSid,ownerStreamId)&&typeof cancelStream==='function'){
+    if(await cancelStream(cancelReason)) showToast(t(confirmToastKey),2000);
+    else showToast(t('cancel_failed'),null,'error');
+  }else if(_interruptOwnerIsCurrent(ownerSid)){
+    showToast(`Queued: "${originalMsg.slice(0,40)}${originalMsg.length>40?'…':''}"`,2000);
+  }
+
+  return false;
+}
+
 /**
  * /interrupt <message> — Cancel the current turn and send a new message.
- * Calls cancelStream() then queues the message so the drain picks it up.
+ * Calls /api/chat/interrupt first, then falls back to legacy queue+cancel.
  */
 async function cmdInterrupt(args){
   const msg=(args||'').trim();
@@ -1317,15 +1383,7 @@ async function cmdInterrupt(args){
     return;
   }
   if(!S.session){showToast(t('no_active_session'));return;}
-  // Queue the message first (before cancel sets busy=false and drains)
-  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
-  updateQueueBadge(S.session.session_id);
-  S.pendingFiles=[];renderTray();
-  // Cancel the active stream; setBusy(false) will drain the queue
-  if(typeof cancelStream==='function'){
-    if(await cancelStream('slash-interrupt')) showToast(t('cmd_interrupt_confirm'),2000);
-    else showToast(t('cancel_failed'),null,'error');
-  }
+  await _tryInterrupt(msg,'cmd_interrupt_confirm','slash-interrupt');
 }
 
 /**
@@ -1454,14 +1512,14 @@ function _steerFallbackIsDeadRun(fallback){
   return fallback==='stream_dead';
 }
 
-function _steerOwnerStreamIsCurrent(ownerSid, ownerStreamId){
+function _ownerStreamIsCurrent(ownerSid, ownerStreamId){
   if(!_steerOwnerIsCurrent(ownerSid)||typeof S==='undefined'||!ownerStreamId)return false;
   const activeIds=[S.activeStreamId,S.session&&S.session.active_stream_id].filter(Boolean).map(String);
   return activeIds.length>0&&activeIds.every(id=>id===String(ownerStreamId));
 }
 
 function _steerClearCurrentOwnerDeadRun(ownerSid, ownerStreamId){
-  if(!_steerOwnerStreamIsCurrent(ownerSid,ownerStreamId))return false;
+  if(!_ownerStreamIsCurrent(ownerSid,ownerStreamId))return false;
   let changed=false;
   if(S.busy){S.busy=false;changed=true;}
   if(S.activeStreamId){S.activeStreamId=null;changed=true;}
@@ -1648,7 +1706,7 @@ async function _trySteer(msg, explicitSteer){
   // Interrupt if that is what they want next. Pending files remain staged.
   const fallbackCode = result && result.fallback;
   const deadRunFallback = _steerFallbackIsDeadRun(fallbackCode);
-  const applyCurrentFailure = !deadRunFallback||_steerOwnerStreamIsCurrent(ownerSid,ownerStreamId);
+  const applyCurrentFailure = !deadRunFallback||_ownerStreamIsCurrent(ownerSid,ownerStreamId);
   if(_steerOwnerIsCurrent(ownerSid)&&applyCurrentFailure){
     const inp=$('msg');
     if(inp){

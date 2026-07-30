@@ -1388,18 +1388,7 @@ async function send(){
         // _trySteer clears staged files only after /api/chat/steer accepts, and
         // only when the visible session still matches the captured owner sid.
       } else if(defaultMessageMode==='interrupt'){
-        // Queue the message, then cancel so drain re-sends it.
-        const _modelState=_chatPayloadModelState();
-        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
-        updateQueueBadge(S.session.session_id);
-        _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
-        S.pendingFiles=[];renderTray();
-        if(S.activeStreamId&&typeof cancelStream==='function'){
-          if(await cancelStream('busy-interrupt')) showToast(t('busy_interrupt_confirm'),2000);
-          else showToast(t('cancel_failed'),null,'error');
-        } else {
-          showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
-        }
+        await _tryInterrupt(text);
       } else {
         // Default: queue mode (current behavior). Also the fallback for
         // 'steer' mode when no stream is active or _trySteer is unavailable.

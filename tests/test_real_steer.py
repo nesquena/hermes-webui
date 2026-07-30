@@ -46,6 +46,7 @@ def _clear_caches():
         ACTIVE_RUNS_LOCK,
         SESSION_AGENT_CACHE,
         SESSION_AGENT_CACHE_LOCK,
+        AGENT_INSTANCES,
         STREAMS,
         STREAMS_LOCK,
     )
@@ -55,6 +56,8 @@ def _clear_caches():
     with STREAMS_LOCK:
         streams_snap = dict(STREAMS)
         STREAMS.clear()
+        agent_instances_snap = dict(AGENT_INSTANCES)
+        AGENT_INSTANCES.clear()
     with ACTIVE_RUNS_LOCK:
         active_runs_snap = dict(ACTIVE_RUNS)
         ACTIVE_RUNS.clear()
@@ -65,6 +68,8 @@ def _clear_caches():
     with STREAMS_LOCK:
         STREAMS.clear()
         STREAMS.update(streams_snap)
+        AGENT_INSTANCES.clear()
+        AGENT_INSTANCES.update(agent_instances_snap)
     with ACTIVE_RUNS_LOCK:
         ACTIVE_RUNS.clear()
         ACTIVE_RUNS.update(active_runs_snap)
@@ -122,6 +127,78 @@ class TestHandleChatSteerHappyPath:
         agent.steer.assert_called_once_with("Use Python instead")
         body = _captured_response(handler)
         assert body == {"accepted": True, "fallback": None, "stream_id": stream_id}
+
+
+class TestHandleChatInterruptHappyPath:
+    """Endpoint should prefer exact per-stream redirect and accept when supported."""
+
+    def test_accepts_when_stream_agent_supports_redirect(self, _clear_caches):
+        from api.streaming import _handle_chat_interrupt
+        from api.config import AGENT_INSTANCES, STREAMS, STREAMS_LOCK
+        import queue as _q
+
+        sid, stream_id = "sid_interrupt_ok", "stream_interrupt_ok"
+        agent = MagicMock()
+        agent._supports_active_turn_redirect = True
+        agent.redirect = MagicMock(return_value=True)
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = _q.Queue()
+            AGENT_INSTANCES[stream_id] = agent
+
+        sess = MagicMock()
+        sess.active_stream_id = stream_id
+        with patch("api.streaming.get_session", return_value=sess):
+            handler = _make_handler()
+            _handle_chat_interrupt(handler, {"session_id": sid, "stream_id": stream_id, "text": "skip this turn"})
+
+        agent.redirect.assert_called_once_with("skip this turn")
+        body = _captured_response(handler)
+        assert body == {"accepted": True, "fallback": None, "stream_id": stream_id}
+
+
+class TestHandleChatInterruptFallbacks:
+    """Failure modes must return a stable fallback for frontend routing."""
+
+    @pytest.mark.parametrize(
+        "sid,stream_id,active_stream_id,supports_redirect,fallback",
+        [
+            ("sid_interrupt_mismatch", "stream_requested", "stream_active", True, "stream_mismatch"),
+            ("sid_interrupt_unsupported", "stream_interrupt_unsupported", "stream_interrupt_unsupported", False, "unsupported_redirect"),
+        ],
+    )
+    def test_blocked_without_redirect(self, _clear_caches, sid, stream_id, active_stream_id, supports_redirect, fallback):
+        from api.streaming import _handle_chat_interrupt
+        from api.config import AGENT_INSTANCES, STREAMS, STREAMS_LOCK
+        import queue as _q
+
+        agent = MagicMock()
+        agent._supports_active_turn_redirect = supports_redirect
+        agent.redirect = MagicMock(return_value=True)
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = _q.Queue()
+            AGENT_INSTANCES[stream_id] = agent
+
+        sess = MagicMock()
+        sess.active_stream_id = active_stream_id
+        with patch("api.streaming.get_session", return_value=sess):
+            handler = _make_handler()
+            _handle_chat_interrupt(handler, {"session_id": sid, "stream_id": stream_id, "text": "keep going"})
+
+        body = _captured_response(handler)
+        assert body["accepted"] is False
+        assert body["fallback"] == fallback
+        assert body["stream_id"] == stream_id
+        agent.redirect.assert_not_called()
+
+
+class TestHandleChatInterruptInputValidation:
+    """Bad interrupt input must be rejected at trust boundary with 400."""
+
+    def test_missing_text(self, _clear_caches):
+        from api.streaming import _handle_chat_interrupt
+        handler = _make_handler()
+        _handle_chat_interrupt(handler, {"session_id": "sid", "stream_id": "stream"})
+        assert _captured_status(handler) == 400
 
 
 class TestHandleChatSteerFallbacks:
@@ -273,12 +350,14 @@ class TestHandleChatSteerInputValidation:
 # ── Routing ───────────────────────────────────────────────────────────────
 
 class TestRouting:
-    """The POST handler must dispatch /api/chat/steer to _handle_chat_steer."""
+    """The POST handler must dispatch both intent-control endpoints."""
 
     def test_route_registered(self):
         src = (Path(__file__).parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
         assert '/api/chat/steer' in src
         assert '_handle_chat_steer' in src
+        assert '/api/chat/interrupt' in src
+        assert '_handle_chat_interrupt' in src
 
 
 # ── Frontend: cmdSteer + busy-mode steer use the new endpoint ────────────

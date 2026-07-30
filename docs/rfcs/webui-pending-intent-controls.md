@@ -33,9 +33,10 @@ Queue means: wait, then send this as the next normal user turn.
 
 Steer means: guide the currently running turn without starting a new turn.
 
-Interrupt is currently a compound behavior: queue the message, cancel the
-current run, then drain the queued message as the next turn. It is not a simple
-send mode.
+Interrupt is currently implemented as a text-only attempt to redirect the
+active turn via `/api/chat/interrupt` first. If redirect is unavailable,
+unsupported, rejected, or attachments are included, WebUI retains Queue + Cancel +
+Send as fallback.
 
 This mixed model has caused real failures:
 
@@ -90,9 +91,9 @@ Stop-and-send is an upgrade action for Queue.
 
 ### Interrupt
 
-Interrupt is a legacy term from the current implementation and older UI copy. It
-was previously treated as a default busy send mode, but its behavior is closer
-to Queue + Cancel + Send.
+Interrupt is a legacy term from the current implementation and older UI copy.
+WebUI now attempts an active-turn redirect first, with Queue + Cancel + Send
+retained as fallback.
 
 This RFC no longer defines Interrupt as a user-facing default busy mode. If the
 term remains, it should be legacy/internal wording or an implementation detail
