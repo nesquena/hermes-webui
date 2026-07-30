@@ -197,11 +197,22 @@ It currently:
 
 - Detects changed files from git, including staged, unstaged, and untracked files.
 - Accepts an explicit comma/newline-separated file list via `--files` for CI or agent use.
-- Classifies touched areas into Python, frontend, UI/UX, docs, tests, changelog, setup/onboarding, runtime state, and security-sensitive categories.
+- Classifies touched areas into Python, frontend, UI/UX, docs, tests, changelog, setup/onboarding, runtime state, security-sensitive, Harness context, Harness context lifecycle, and Harness permission categories.
 - Maps categories to relevant contract docs.
 - Prints a concise `## Harness Technical Gate` block by default.
 - Supports `--format json` for CI, plugin, or hook consumption.
 - Recommends verification commands without executing them unless `--run-fast` is used.
+
+Harness-specific routing mirrors the `awesome-cc-harness` pillars in Hermes terms:
+
+| Pillar | Local gate category | Required proof |
+|---|---|---|
+| Context Engineering | `harness_context` | Prompt/context routing, skill or memory retention layer, and visible-vs-model-facing message boundaries. |
+| Context lifecycle | `harness_context_lifecycle` | Compaction, memory, replay, or state-layer evidence rather than source inspection only. |
+| Architectural Constraints | `harness_permissions` / `security` | Fail-closed approval/preflight/sandbox behavior plus a negative denial or bypass attempt. |
+| Entropy Management | `gc-template` / Kanban evidence | Drift findings become triage cards with evidence and human-gated recommendations. |
+
+This is a Hermes-native adaptation of the Claude Code harness model, not a wholesale port of Claude Code's permission modes, hook matrix, sandbox adapter, or telemetry stack.
 
 Example:
 

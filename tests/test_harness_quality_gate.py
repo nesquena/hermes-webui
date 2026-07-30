@@ -115,11 +115,33 @@ def test_json_format_is_machine_readable(capsys):
     assert rc == 0
     assert payload["base"] == "origin/master"
     assert payload["mode"] == "advisory"
-    assert payload["categories"] == ["python", "runtime_state", "tests"]
+    assert payload["categories"] == ["harness_context", "python", "runtime_state", "tests"]
     assert payload["files"] == ["api/streaming.py", "tests/test_harness_quality_gate.py"]
     assert "TESTING.md" in payload["contract_docs"]
     assert "routing_notes" in payload
     assert "evidence_notes" not in payload
+
+
+def test_harness_pillar_routing_for_context_permission_and_compaction(capsys):
+    gate = load_module()
+
+    rc = gate.main([
+        "--files",
+        "api/preflight_permissions.py,api/context_compaction_memory.py,docs/harness-engineering.md",
+        "--format",
+        "json",
+    ])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert "harness_context" in payload["categories"]
+    assert "harness_context_lifecycle" in payload["categories"]
+    assert "harness_permissions" in payload["categories"]
+    assert "docs/harness-engineering.md" in payload["contract_docs"]
+    assert "docs/rfcs/README.md" in payload["contract_docs"]
+    assert "python3 scripts/harness_quality_gate.py --files <changed-files> --format json" in payload["recommended_checks"]
+    assert any("visible-vs-model-facing" in note for note in payload["routing_notes"])
+    assert any("fail closed" in note for note in payload["routing_notes"])
 
 
 def test_pr_body_format_is_not_supported(capsys):

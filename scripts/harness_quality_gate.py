@@ -39,6 +39,8 @@ STATE_MARKERS = (
     "journal",
     "lineage",
     "compress",
+    "compaction",
+    "compact",
     "replay",
     "sidebar",
     "workspace",
@@ -54,7 +56,32 @@ SECURITY_MARKERS = (
     "csp",
     "tls",
     "approval",
+    "permission",
+    "sandbox",
+    "hook",
+    "preflight",
     "toctou",
+)
+HARNESS_CONTEXT_MARKERS = (
+    "agents.md",
+    "contributing.md",
+    "contract",
+    "contracts",
+    "context",
+    "prompt",
+    "memory",
+    "skill",
+    "mcp",
+    "plugin",
+    "harness",
+    "preflight",
+    "kanban",
+    "evidence",
+    "cron",
+)
+HARNESS_COMPANION_DOCS = (
+    "docs/harness-engineering.md",
+    "docs/harness-engineering-cn.md",
 )
 
 
@@ -123,6 +150,12 @@ def analyze_changed_files(files: list[str]) -> HarnessAnalysis:
             analysis.categories.add("runtime_state")
         if any(marker in lowered for marker in SECURITY_MARKERS):
             analysis.categories.add("security")
+        if any(marker in lowered for marker in HARNESS_CONTEXT_MARKERS):
+            analysis.categories.add("harness_context")
+        if "compress" in lowered or "compact" in lowered or "memory" in lowered or "context" in lowered:
+            analysis.categories.add("harness_context_lifecycle")
+        if "approval" in lowered or "permission" in lowered or "sandbox" in lowered or "preflight" in lowered or "hook" in lowered:
+            analysis.categories.add("harness_permissions")
 
     if "python" in analysis.categories:
         checks.append("python3 scripts/ruff_lint.py --diff origin/master")
@@ -148,6 +181,15 @@ def analyze_changed_files(files: list[str]) -> HarnessAnalysis:
         notes.append("Runtime-state change: name the mutated state layer and prove replay/recovery/sidebar invariants.")
     if "security" in analysis.categories:
         notes.append("Security-sensitive change: include a negative test or manual abuse case.")
+    if "harness_context" in analysis.categories:
+        contracts.extend(HARNESS_COMPANION_DOCS)
+        notes.append("Harness context change: verify prompt/context routing, skill or memory retention layer, and visible-vs-model-facing message boundaries.")
+    if "harness_context_lifecycle" in analysis.categories:
+        contracts.append("docs/rfcs/README.md")
+        checks.append("python3 scripts/harness_quality_gate.py --files <changed-files> --format json")
+        notes.append("Context lifecycle change: prove compaction/memory/replay behavior with state-layer evidence, not only source inspection.")
+    if "harness_permissions" in analysis.categories:
+        notes.append("Harness permission change: fail closed on unknown approval/preflight/sandbox state and include a negative denial or bypass attempt.")
     if "docs" in analysis.categories or "changelog" in analysis.categories:
         notes.append("Docs/release-note routing: do not edit CHANGELOG.md in ordinary contributor PRs; put release-note wording in the PR body when needed.")
 
