@@ -4509,12 +4509,71 @@ def _migrate_compression_session_ownership(
     )
     old_path = SESSION_DIR / f'{old_sid}.json'
     index_path = _models.SESSION_INDEX_FILE
+    index_row_snapshot = None
+    index_file_existed = False
     try:
         old_preimage = old_path.read_text(encoding='utf-8')
-        index_preimage = index_path.read_text(encoding='utf-8') if index_path.exists() else None
+        with _models._INDEX_WRITE_LOCK:
+            index_file_existed = index_path.exists()
+            if index_file_existed:
+                try:
+                    index_payload = json.loads(index_path.read_bytes())
+                except (OSError, json.JSONDecodeError):
+                    logger.debug(
+                        "Could not capture compression marker index row",
+                        exc_info=True,
+                    )
+                    return False
+                if not isinstance(index_payload, list):
+                    logger.debug(
+                        "Could not capture compression marker index row: index is not a list",
+                        exc_info=True,
+                    )
+                    return False
+                for row in index_payload:
+                    if (
+                        isinstance(row, dict)
+                        and str(row.get('session_id') or '') == old_sid
+                    ):
+                        index_row_snapshot = copy.deepcopy(row)
+                        break
     except OSError:
         logger.debug("Could not capture compression marker preimage", exc_info=True)
         return False
+
+    def _restore_durable_snapshot() -> None:
+        def _updated_at_key(entry):
+            try:
+                return float((entry or {}).get('updated_at') or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        with _models._INDEX_WRITE_LOCK:
+            _atomic_write_text(old_path, old_preimage, encoding='utf-8')
+            if not index_path.exists():
+                if not index_file_existed:
+                    return
+                current_rows = []
+            else:
+                current_rows = json.loads(index_path.read_bytes())
+                if not isinstance(current_rows, list):
+                    raise ValueError("session index must be a list")
+
+            filtered = [
+                row for row in current_rows
+                if not (isinstance(row, dict) and str(row.get('session_id') or '') == old_sid)
+            ]
+            if index_row_snapshot is not None:
+                filtered.append(index_row_snapshot)
+                filtered.sort(key=_updated_at_key, reverse=True)
+            elif filtered == current_rows:
+                return
+            _payload = json.dumps(
+                filtered,
+                ensure_ascii=False,
+                indent=2,
+            )
+            _atomic_write_text(index_path, _payload, encoding='utf-8')
 
     with LOCK:
         if SESSIONS.get(old_sid) is not s or str(getattr(s, 'session_id', '') or '') != old_sid:
@@ -4587,13 +4646,14 @@ def _migrate_compression_session_ownership(
                     SESSIONS.pop(old_sid, None)
 
     except Exception:
+        try:
+            _restore_durable_snapshot()
+        except Exception:
+            logger.debug(
+                "Failed to restore compression marker durable state",
+                exc_info=True,
+            )
         with LOCK:
-            with _models._INDEX_WRITE_LOCK:
-                _atomic_write_text(old_path, old_preimage, encoding='utf-8')
-                if index_preimage is None:
-                    index_path.unlink(missing_ok=True)
-                else:
-                    _atomic_write_text(index_path, index_preimage, encoding='utf-8')
             if SESSIONS.get(new_sid) is s:
                 SESSIONS.pop(new_sid, None)
             if existing_new_session is not missing:

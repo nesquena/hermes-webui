@@ -795,6 +795,197 @@ def test_draft_compression_migration_rollback_when_evictor_interleaves_after_loc
             streaming.SESSION_AGENT_LOCKS.pop(old_sid, None)
 
 
+def test_draft_compression_migration_rollback_restores_marker_and_unrelated_index_row(tmp_path, monkeypatch):
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+
+    old_sid = "sid-rotation-old-row-rollback"
+    new_sid = "sid-rotation-new-row-rollback"
+    unrelated_sid = "sid-rotation-unrelated-row-rollback"
+    index_path = session_dir / "_index.json"
+
+    models.Session(
+        session_id=old_sid,
+        title="old marker",
+        messages=[{"role": "user", "content": "before migration"}],
+    ).save(touch_updated_at=False)
+    models.Session(
+        session_id=unrelated_sid,
+        title="unrelated stale marker",
+        messages=[{"role": "user", "content": "unrelated"}],
+    ).save(touch_updated_at=False)
+
+    pre_sidecar = (session_dir / f"{old_sid}.json").read_bytes()
+    pre_index = json.loads(index_path.read_text(encoding="utf-8"))
+    pre_old_row = next(
+        row for row in pre_index
+        if row.get("session_id") == old_sid
+    )
+
+    migrating = models.Session(
+        session_id=old_sid,
+        title="old marker",
+        messages=[{"role": "user", "content": "compressed"}],
+    )
+    lock = routes._get_session_agent_lock(old_sid)
+    with routes.LOCK:
+        routes.SESSIONS.clear()
+        routes.SESSIONS[old_sid] = migrating
+
+    unrelated = models.Session.load(unrelated_sid)
+    original_preserve = streaming._preserve_pre_compression_snapshot
+
+    def _preserve_then_save_unrelated(session, preserve_old_sid, preserve_new_sid):
+        assert original_preserve(session, preserve_old_sid, preserve_new_sid) is True
+        unrelated.title = "updated unrelated marker"
+        unrelated.messages = [
+            {"role": "assistant", "content": "interleaved"},
+        ]
+        unrelated.save(touch_updated_at=False, skip_index=False)
+        return True
+
+    def _evict_with_publication_failure(_cap=None):
+        raise RuntimeError("injected publication failure")
+
+    with monkeypatch.context() as m:
+        m.setattr(
+            streaming,
+            "_preserve_pre_compression_snapshot",
+            _preserve_then_save_unrelated,
+        )
+        m.setattr(streaming, "_evict_sessions_over_cap", _evict_with_publication_failure)
+        try:
+            result = streaming._migrate_compression_session_ownership(
+                migrating,
+                old_sid,
+                new_sid,
+                lock,
+            )
+        finally:
+            with routes.LOCK:
+                routes.SESSIONS.clear()
+            with streaming.SESSION_AGENT_LOCKS_LOCK:
+                streaming.SESSION_AGENT_LOCKS.pop(old_sid, None)
+                streaming.SESSION_AGENT_LOCKS.pop(new_sid, None)
+
+    assert result is False
+
+    post_sidecar = (session_dir / f"{old_sid}.json").read_bytes()
+    assert post_sidecar == pre_sidecar
+
+    post_index = json.loads(index_path.read_text(encoding="utf-8"))
+    post_old_row = next(
+        row for row in post_index
+        if row.get("session_id") == old_sid
+    )
+    assert post_old_row == pre_old_row
+    assert any(
+        row.get("session_id") == unrelated_sid and row.get("title") == "updated unrelated marker"
+        for row in post_index
+    )
+    assert any(row.get("session_id") == unrelated_sid for row in pre_index)
+    assert len({row.get("session_id") for row in post_index}) >= 2
+
+
+def test_draft_compression_migration_rollback_avoids_lock_order_deadlock(tmp_path, monkeypatch):
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+
+    old_sid = "sid-rotation-old-deadlock"
+    new_sid = "sid-rotation-new-deadlock"
+
+    models.Session(
+        session_id=old_sid,
+        title="old deadlock marker",
+        messages=[{"role": "user", "content": "marker"}],
+    ).save(touch_updated_at=False)
+
+    migrating = models.Session(
+        session_id=old_sid,
+        title="old deadlock marker",
+        messages=[{"role": "assistant", "content": "compressed"}],
+    )
+    lock = routes._get_session_agent_lock(old_sid)
+    with routes.LOCK:
+        routes.SESSIONS.clear()
+        routes.SESSIONS[old_sid] = migrating
+
+    writer_holding_index = threading.Event()
+    writer_acquired_lock = threading.Event()
+    writer_completed = threading.Event()
+    evict_writer_thread = {}
+
+    def _index_writer():
+        acquired_index_lock = models._INDEX_WRITE_LOCK.acquire(timeout=3)
+        if not acquired_index_lock:
+            writer_completed.set()
+            return
+        try:
+            writer_holding_index.set()
+            lock_acquired = models.LOCK.acquire(timeout=3)
+            if lock_acquired:
+                writer_acquired_lock.set()
+                models.LOCK.release()
+        finally:
+            writer_completed.set()
+            models._INDEX_WRITE_LOCK.release()
+
+    def _evict_sessions_over_cap(_cap=None):
+        writer_holding_index.clear()
+        writer_completed.clear()
+        writer_acquired_lock.clear()
+        writer = threading.Thread(
+            target=_index_writer,
+            name="compression-index-lock-writer",
+        )
+        evict_writer_thread["thread"] = writer
+        writer.start()
+        if not writer_holding_index.wait(timeout=2):
+            writer.join(timeout=1)
+            raise RuntimeError("index writer failed to hold index lock")
+        raise RuntimeError("inject publication failure")
+
+    with monkeypatch.context() as m:
+        m.setattr(streaming, "_preserve_pre_compression_snapshot", lambda *_args, **_kwargs: True)
+        m.setattr(streaming, "_evict_sessions_over_cap", _evict_sessions_over_cap)
+
+        outcome = {}
+
+        def _run_migration():
+            outcome["result"] = streaming._migrate_compression_session_ownership(
+                migrating,
+                old_sid,
+                new_sid,
+                lock,
+            )
+
+        migration_thread = threading.Thread(target=_run_migration, name="compression-migration")
+        migration_thread.start()
+        try:
+            migration_thread.join(timeout=4)
+            evicted_writer = evict_writer_thread.get("thread")
+            if evicted_writer is not None:
+                evicted_writer.join(timeout=4)
+            assert not migration_thread.is_alive()
+            assert (evicted_writer is None or not evicted_writer.is_alive())
+            assert writer_completed.is_set()
+            assert writer_acquired_lock.is_set()
+            assert outcome.get("result") is False
+            assert not (session_dir / f"{new_sid}.json").exists()
+            assert not migration_thread.daemon
+
+            with routes.LOCK:
+                assert routes.SESSIONS.get(old_sid) is not None
+            with streaming.SESSION_AGENT_LOCKS_LOCK:
+                assert streaming.SESSION_AGENT_LOCKS.get(old_sid) is lock
+        finally:
+            with routes.LOCK:
+                routes.SESSIONS.clear()
+            with streaming.SESSION_AGENT_LOCKS_LOCK:
+                streaming.SESSION_AGENT_LOCKS.pop(old_sid, None)
+                streaming.SESSION_AGENT_LOCKS.pop(new_sid, None)
+
+
 def test_draft_post_for_stale_pre_compression_snapshot_hops_exhausted_rejected(tmp_path, monkeypatch):
     models, routes, session_dir, old_sid, continuation_sid, fork_sid = _build_pre_compression_migration_state(
         tmp_path,
