@@ -7195,6 +7195,10 @@ const _BEDROCK_REGION_PREFIXES = new Set(['us', 'eu', 'apac', 'global', 'us-gov'
 const _DOTTED_VENDOR_PREFIXES = new Set([
   'anthropic', 'amazon', 'meta', 'mistral', 'cohere', 'ai21',
   'stability', 'writer', 'deepseek', 'qwen', 'openai', 'google',
+  // Bedrock foundation-model vendors added after the first pass. Without these,
+  // real IDs rendered with the namespace intact ("Us.luma.ray 2",
+  // "Twelvelabs.marengo Embed 2 7", "Ibm.granite 3 8B Instruct").
+  'luma', 'twelvelabs', 'ibm', 'nvidia', 'snowflake',
 ]);
 /** Drop a Bedrock/Vertex dotted routing+vendor prefix from a model id.
  *
