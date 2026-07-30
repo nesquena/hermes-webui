@@ -1660,6 +1660,25 @@ function _highlightQuestionRow(row){
 async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
   const container=$('messages');
   if(!container||typeof questionRawIdx!=='number'||questionRawIdx<0) return;
+  const clampTargetScrollTop=(scrollTop)=>{
+    const maxTop=Math.max(0,container.scrollHeight-container.clientHeight);
+    const n=Number(scrollTop);
+    return Math.max(0,Math.min(Number.isFinite(n)?n:container.scrollTop,maxTop));
+  };
+  const targetScrollTop=(target,block)=>{
+    const containerRect=container.getBoundingClientRect();
+    const targetRect=target.getBoundingClientRect();
+    let scrollTop=container.scrollTop+targetRect.top-containerRect.top;
+    if(block==='center') scrollTop+=(targetRect.height-container.clientHeight)/2;
+    return clampTargetScrollTop(scrollTop);
+  };
+  const claimReaderScrollOwnership=(scrollTop)=>{
+    const maxTop=Math.max(0,container.scrollHeight-container.clientHeight);
+    if(maxTop-clampTargetScrollTop(scrollTop)<=80) return;
+    _scrollPinned=false;
+    _messageUserUnpinned=true;
+    _nearBottomCount=0;
+  };
   const scrollToTarget=()=>{
     const hasAssistant=typeof assistantRawIdx==='number'&&assistantRawIdx>=0;
     if(hasAssistant){
@@ -1671,6 +1690,7 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
       const segs=container.querySelectorAll('[data-msg-idx="'+assistantRawIdx+'"]');
       for(const seg of segs){
         if(seg.getClientRects().length>0){
+          claimReaderScrollOwnership(targetScrollTop(seg,'start'));
           seg.scrollIntoView({block:'start',behavior:'smooth'});
           return true;
         }
@@ -1678,23 +1698,23 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
     }
     const row=document.getElementById(_userMessageDomId(questionRawIdx));
     if(!row) return false;
+    claimReaderScrollOwnership(targetScrollTop(row,'center'));
     row.scrollIntoView({block:'center',behavior:'smooth'});
     _highlightQuestionRow(row);
     return true;
   };
-  // This is an explicit reader navigation away from the tail. Cancel any
-  // load-time bottom settle before the visible-target fast path can return;
-  // otherwise its delayed fallback can snap the first jump back to the bottom.
+  // Cancel load-time bottom settling before any visible or virtualized target
+  // path can return. Sticky reader ownership is claimed separately, only after
+  // the resolved and clamped destination is known to sit beyond the 80px tail.
   _cancelBottomSettle();
-  _scrollPinned=false;
-  _messageUserUnpinned=true;
-  _nearBottomCount=0;
   if(scrollToTarget()) return;
   const visWithIdx=_getVisibleMessagesWithIdx();
   const visibleIdx=_messageVisibleIndexForRawIdx(questionRawIdx, visWithIdx);
   if(visibleIdx>=0){
     _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-    container.scrollTop=_messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container);
+    const virtualTarget=clampTargetScrollTop(_messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container));
+    claimReaderScrollOwnership(virtualTarget);
+    container.scrollTop=virtualTarget;
     _messageVirtualWindowKey='';
     renderMessages({ preserveScroll:true });
     requestAnimationFrame(()=>{
