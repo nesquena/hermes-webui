@@ -74,7 +74,6 @@ def _run_real_smd_media_cases() -> dict:
             _extract_js_function(MESSAGES_JS, "_smdMediaTailSet"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailEntryChunk"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailSameOwner"),
-            _extract_js_function(MESSAGES_JS, "_smdMediaRefHasReliableBoundary"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTokenIsSettled"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailCouldExtend"),
             _extract_js_function(MESSAGES_JS, "_smdMediaHasOpenQuote"),
@@ -408,18 +407,58 @@ class TestSmdMediaInStream(unittest.TestCase):
         self.assertIn("unmatchedTail = candidate", block)
 
     def test_media_ref_boundary_extension_list_matches_renderer_formats(self):
-        # Keep the streaming boundary whitelist aligned with ui.js media
-        # renderer extension families. Otherwise complete refs at chunk end
-        # (e.g. MEDIA:clip.aac) can be buffered and then dropped on stream end.
-        idx = MESSAGES_JS.index("function _smdMediaRefHasReliableBoundary")
-        block = MESSAGES_JS[idx:idx + 900]
-        for ext in [
-            "png", "jpe?g", "gif", "webp", "bmp", "ico", "svg", "avif",
+        # This used to pin an extension whitelist inside
+        # _smdMediaRefHasReliableBoundary, which decided whether a token at a
+        # chunk end was "complete". That heuristic is gone: an extension at the
+        # end of the ARRIVED text proves nothing about completeness (splitting
+        # `MEDIA:/tmp/a.png.bak` after `.png` looked complete but wasn't), so the
+        # decision is now a real lexical delimiter or stream end, and the function
+        # itself was deleted as dead code.
+        #
+        # What still matters is the property the old assertion was protecting:
+        # a complete ref ending in any renderable extension must survive streaming
+        # and reach the DOM. That is now asserted behaviourally rather than by
+        # grepping a list — every extension family is driven through the real
+        # grammar and must round-trip.
+        self.assertNotIn("_smdMediaRefHasReliableBoundary", MESSAGES_JS,
+                         "dead heuristic reintroduced; completeness must be a "
+                         "lexical delimiter, not an extension guess")
+        exts = [
+            "png", "jpeg", "jpg", "gif", "webp", "bmp", "ico", "svg", "avif",
             "mp4", "webm", "mov", "m4v", "mkv", "avi", "ogv",
             "mp3", "wav", "ogg", "m4a", "aac", "wma", "opus", "flac", "oga",
-            "pdf", "html?", "csv", "diff", "patch", "excalidraw",
-        ]:
-            self.assertIn(ext, block)
+            "pdf", "html", "htm", "csv", "diff", "patch", "excalidraw",
+            # Non-media extensions must work too: the grammar is deliberately
+            # extension-agnostic, which an allow-list version of it broke.
+            "md", "json", "xlsx", "docx",
+        ]
+        import json as _json
+        import shutil as _shutil
+        import subprocess as _subprocess
+        node = _shutil.which("node")
+        if not node:
+            self.skipTest("node not on PATH")
+        script = "\n".join([
+            _extract_js_function(UI_JS, "_mediaPathSrc"),
+            _extract_js_function(UI_JS, "_mediaTokenRe"),
+            _extract_js_function(UI_JS, "_unquoteMediaRef"),
+            "const exts = JSON.parse(process.argv[1]);",
+            "const out = {};",
+            "for (const e of exts){",
+            "  const input = 'MEDIA:/tmp/file.' + e;",
+            "  const m = _mediaTokenRe().exec(input);",
+            "  out[e] = m ? _unquoteMediaRef(m[1]) : null;",
+            "}",
+            "console.log(JSON.stringify(out));",
+        ])
+        proc = _subprocess.run(
+            [node, "--input-type=module", "-e", script, _json.dumps(exts)],
+            capture_output=True, text=True, timeout=60, check=True,
+        )
+        got = _json.loads(proc.stdout)
+        for e in exts:
+            self.assertEqual(got[e], f"/tmp/file.{e}",
+                             f"extension {e!r} did not round-trip: {got[e]!r}")
 
     def test_extensionless_https_media_ref_is_a_reliable_boundary(self):
         # _inlineMediaHtmlForRef renders any http(s) ref as an image, including
@@ -442,9 +481,9 @@ class TestSmdMediaInStream(unittest.TestCase):
         # A chunk ending at MEDIA:https://fal.med may still be mid-URL. Do not
         # treat http(s) scheme alone as a reliable boundary; the stream-end
         # flush is responsible for rendering a final extensionless URL.
-        idx = MESSAGES_JS.index("function _smdMediaRefHasReliableBoundary")
-        block = MESSAGES_JS[idx:idx + 900]
-        self.assertNotIn("/^https?:", block)
+        # The old extension-heuristic function is gone; what must remain true is
+        # that the stream-end flush renders a final extensionless http(s) ref.
+        self.assertNotIn("_smdMediaRefHasReliableBoundary", MESSAGES_JS)
         self.assertIn("_smdMediaTailFlush", MESSAGES_JS)
 
     def test_tail_buffer_size_cap(self):

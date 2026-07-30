@@ -4613,19 +4613,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdMediaTailSameOwner(entry, parent, baseAddText, writeText){
     return !!entry && entry.parent===parent && entry.baseAddText===baseAddText && entry.writeText===writeText;
   }
-  function _smdMediaRefHasReliableBoundary(rawRef){
-    // DEPRECATED as a completeness test. An extension at the end of the CURRENT
-    // chunk proves nothing about completeness: `MEDIA:/tmp/archive.png` split
-    // right after `.png` looks "reliable" but the stream continues `.bak`, so
-    // streaming emitted /tmp/archive.png and left `.bak` as prose while settled
-    // parsing consumed the whole ref. Completeness is now decided by
-    // _smdMediaTokenIsSettled (a real lexical delimiter, or stream end).
-    // Retained only because a quoted ref IS self-terminating.
-    const raw=String(rawRef||'');
-    if(/[?#]$/.test(raw)) return false;
-    const ref=raw.split(/[?#]/,1)[0];
-    return /\.(?:png|jpe?g|gif|webp|bmp|ico|svg|avif|mp4|webm|mov|m4v|mkv|avi|ogv|mp3|wav|ogg|m4a|aac|wma|opus|flac|oga|pdf|html?|csv|diff|patch|excalidraw)$/i.test(ref);
-  }
   /** True when a MEDIA token that ends at the end of the arrived text can be
    *  finalized NOW without risking a different result once more bytes land.
    *
@@ -4804,7 +4791,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const tailMatch = /MEDIA:[^\n]*$/.exec(rest);
       const prefixTail = tailMatch ? '' : _smdMediaPrefixTail(rest);
       const tailValue = tailMatch ? tailMatch[0] : prefixTail;
-      if(tailValue && rest.length < _MEDIA_TAIL_MAX){
+      // Bound the BUFFER by what is actually buffered (tailValue), not by the
+      // length of the whole remaining text. Gating on `rest.length` meant a long
+      // prose run ending in a MEDIA prefix blew the cap and discarded the tail:
+      // the partial `MEDIA:/t` was flushed as prose, the next chunk arrived with
+      // no buffered tail, and the token never reassembled — so a ref preceded by
+      // more than _MEDIA_TAIL_MAX characters of prose silently lost its card
+      // while settled parsing rendered it. The cap exists to stop unbounded tail
+      // growth, and only tailValue can grow.
+      if(tailValue && tailValue.length < _MEDIA_TAIL_MAX){
         const tailStart = tailMatch ? tailMatch.index : rest.length-prefixTail.length;
         if(tailStart>0) writeCurrent(rest.slice(0, tailStart));
         unmatchedTail = tailValue;
