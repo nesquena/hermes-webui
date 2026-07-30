@@ -7185,8 +7185,12 @@ function _fmtOllamaLabel(mid){
   return label;
 }
 
-// Bedrock cross-region inference routing heads.
-const _BEDROCK_REGION_PREFIXES = new Set(['us', 'eu', 'apac', 'us-gov']);
+// Bedrock cross-region inference routing heads. `global` belongs here too: the
+// catalog in api/config.py ships six `global.anthropic.claude-*` IDs and the
+// first-party routing notes treat that as the canonical Bedrock shape. Keep this
+// set byte-identical to _regions in api/config.py — backend catalog labels and
+// runtime picker fallback labels diverge otherwise.
+const _BEDROCK_REGION_PREFIXES = new Set(['us', 'eu', 'apac', 'global', 'us-gov']);
 // Vendor namespaces Bedrock/Vertex put in front of the real model id.
 const _DOTTED_VENDOR_PREFIXES = new Set([
   'anthropic', 'amazon', 'meta', 'mistral', 'cohere', 'ai21',

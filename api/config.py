@@ -6410,7 +6410,12 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
     # Kept in lockstep with ``_stripDottedModelPrefix()`` in static/ui.js --
     # tests/test_dotted_model_label.py drives both from one table.
     if bare and "." in bare and not _has_scheme(bare):
-        _regions = {"us", "eu", "apac", "us-gov"}
+        # ``global`` is a real Bedrock routing head, not just a region code --
+        # the catalog at api/config.py:1901-1909 ships six
+        # ``global.anthropic.claude-*`` IDs and the routing notes below use that
+        # as the canonical Bedrock shape. Omitting it left those labels reading
+        # "Global.anthropic.claude Opus 4 7".
+        _regions = {"us", "eu", "apac", "global", "us-gov"}
         _vendors = {
             "anthropic", "amazon", "meta", "mistral", "cohere", "ai21",
             "stability", "writer", "deepseek", "qwen", "openai", "google",

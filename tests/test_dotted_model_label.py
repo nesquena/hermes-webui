@@ -38,6 +38,21 @@ STRIP_CASES = [
     ("eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
      "claude-sonnet-4-5-20250929-v1"),
     ("apac.anthropic.claude-haiku-4", "claude-haiku-4"),
+    # ``global`` is a routing head the catalog actually ships (six
+    # ``global.anthropic.claude-*`` IDs at api/config.py:1901-1909, and the
+    # first-party routing notes use it as the canonical Bedrock shape). Omitting
+    # it from the region set left every one of those labels reading
+    # "Global.anthropic.claude Opus 4 7".
+    ("global.anthropic.claude-opus-4-7", "claude-opus-4-7"),
+    ("global.anthropic.claude-opus-4-6-v1", "claude-opus-4-6-v1"),
+    ("global.anthropic.claude-sonnet-4-6", "claude-sonnet-4-6"),
+    ("global.anthropic.claude-opus-4-5-20251101-v1:0",
+     "claude-opus-4-5-20251101-v1"),
+    ("global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+     "claude-sonnet-4-5-20250929-v1"),
+    ("global.anthropic.claude-haiku-4-5-20251001-v1:0",
+     "claude-haiku-4-5-20251001-v1"),
+    ("us-gov.anthropic.claude-opus-5", "claude-opus-5"),
     ("mistral.mistral-large-2407-v1:0", "mistral-large-2407-v1"),
     ("amazon.nova-pro-v1:0", "nova-pro-v1"),
     ("meta.llama3-70b-instruct-v1:0", "llama3-70b-instruct-v1"),
@@ -124,7 +139,7 @@ def test_frontend_strip_matches_the_table():
     """The JS half must normalize exactly as specified — same table."""
     ids = [c[0] for c in STRIP_CASES]
     js = _js_strip(ids)
-    for (model_id, expected), js_out in zip(STRIP_CASES, js):
+    for (model_id, expected), js_out in zip(STRIP_CASES, js, strict=True):
         assert js_out == expected, (
             f"js drifted for {model_id!r}: js={js_out!r} expected={expected!r}"
         )
@@ -136,7 +151,7 @@ def test_frontend_and_backend_agree_on_every_case():
     disagreed, the picker and the turn footer would disagree with the server."""
     ids = [c[0] for c in STRIP_CASES]
     js = _js_strip(ids)
-    for model_id, js_normalized in zip(ids, js):
+    for model_id, js_normalized in zip(ids, js, strict=True):
         assert _get_label_for_model(model_id, []) == _get_label_for_model(
             js_normalized, []
         ), (
@@ -145,6 +160,55 @@ def test_frontend_and_backend_agree_on_every_case():
             f"normalizes to {js_normalized!r} → "
             f"{_get_label_for_model(js_normalized, [])!r}"
         )
+
+
+def test_every_catalog_dotted_id_loses_its_routing_prefix():
+    """Catalog-driven guard against region-set drift.
+
+    The region allow-list and the shipped model catalog are two lists that must
+    agree. They didn't: six ``global.anthropic.claude-*`` IDs shipped in the
+    catalog while ``global`` was missing from the region set, so every one of
+    them rendered as "Global.anthropic.claude Opus 4 7".
+
+    Rather than hardcode today's regions, scrape the catalog for dotted IDs whose
+    head is a known Bedrock routing head and assert none of them keeps a dotted
+    namespace in its label. A new routing prefix added to the catalog without
+    updating the region set fails here.
+    """
+    import re as _re
+
+    config_src = (REPO_ROOT / "api" / "config.py").read_text(encoding="utf-8")
+    # IDs of the form <head>.<vendor>.<model> that appear in catalog literals.
+    ids = set(_re.findall(
+        r'"id":\s*"([a-z0-9-]+\.[a-z0-9]+\.[^"]+)"', config_src
+    ))
+    assert ids, "no dotted catalog IDs found — did the catalog format change?"
+
+    offenders = []
+    for model_id in sorted(ids):
+        label = _get_label_for_model(model_id, [])
+        # A correctly normalized label never retains a dotted namespace head.
+        if "." in label and label.split(".")[0].lower() in {
+            "us", "eu", "apac", "global", "us-gov", "anthropic", "amazon",
+            "meta", "mistral", "cohere", "ai21", "stability", "writer",
+            "deepseek", "qwen", "openai", "google",
+        }:
+            offenders.append((model_id, label))
+
+    assert not offenders, (
+        "catalog IDs still carry a routing/vendor prefix in their label — add "
+        f"the missing head to the region/vendor sets: {offenders}"
+    )
+
+
+def test_global_region_is_recognized_in_both_implementations():
+    """Explicit pin for the reported gap, both sides."""
+    label = _get_label_for_model("global.anthropic.claude-opus-4-7", [])
+    assert "global" not in label.lower(), label
+    assert "anthropic" not in label.lower(), label
+    assert _js_strip(["global.anthropic.claude-opus-4-7"]) == [
+        "claude-opus-4-7"
+    ]
 
 
 def test_frontend_helper_exists_and_is_used():
