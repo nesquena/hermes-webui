@@ -10208,6 +10208,20 @@ def _run_agent_streaming(
                         if _err_type == 'tool_limit_reached':
                             _error_payload['terminal_state'] = 'tool_limit_reached'
                             _error_payload['terminal_reason'] = 'max_iterations'
+                        # #6625: Invalidate SESSION_AGENT_CACHE entry on terminal failure
+                        # to prevent a stale cached AIAgent from creating an infinite retry
+                        # loop with a non-retryable 400 error. The poisoned agent retains
+                        # internal state that causes the same failure on reuse; a fresh
+                        # AIAgent is required on the next turn to break the cycle.
+                        try:
+                            from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SACL
+                            with _SACL:
+                                _evicted = _SAC.pop(session_id, None)
+                            if _evicted is not None:
+                                _close_cached_agent_entry_at_session_boundary(session_id, _evicted)
+                                logger.debug('[webui] Invalidated cached agent for session %s on terminal failure', session_id)
+                        except Exception:
+                            logger.debug('[webui] Failed to invalidate cached agent for session %s', session_id, exc_info=True)
                         put('apperror', _error_payload)
                         # Legacy #373 source tests and clients look for the
                         # no_response type; #1765 keeps that type but improves
