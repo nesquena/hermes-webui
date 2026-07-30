@@ -424,6 +424,8 @@ def _entry_exhausted_ttl_seconds(error_code):
     code = str(error_code or "").strip()
     if code == "401":
         return 5 * 60
+    if code == "402":
+        return 2 * 60
     return 60 * 60
 
 
@@ -823,6 +825,8 @@ def _entry_exhausted_ttl_seconds(error_code):
     code = str(error_code or "").strip()
     if code == "401":
         return 5 * 60
+    if code == "402":
+        return 2 * 60
     return 60 * 60
 
 
