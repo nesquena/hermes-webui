@@ -5959,6 +5959,12 @@ main.main > #mainPlugin{display:none;}
      WebKit and on Android it re-opens the #4856 / #5338 mobile jump-to-top
      regression the scroll-anchor work fought hard to close. */
 }
+/* Silent-turn streaming suppression: while the accumulated live assistant text
+   is a prefix of the [[SILENT]] sentinel (or the exact sentinel), the live turn
+   bubble is hidden so the token never flashes before the persisted silent-turn
+   filter takes over at stream end. The attribute is managed per-token by
+   _syncSilentLiveTurnSuppression() in ui.js. */
+#liveAssistantTurn[data-silent-pending="1"] { display: none !important; }
 .msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); }
 .msg-body code,
 .msg-body pre,

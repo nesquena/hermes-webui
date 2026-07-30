@@ -2485,6 +2485,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return _extractInlineThinkingFromContent(rawContent, existingReasoning, {streaming:false});
   }
   function syncInflightAssistantMessage(){
+    if(typeof _syncSilentLiveTurnSuppression==='function') _syncSilentLiveTurnSuppression(assistantText);
     const inflight=INFLIGHT[activeSid];
     if(!inflight) return;
     inflight.lastAssistantText=assistantText;

@@ -630,21 +630,82 @@ function _messageIsRenderable(m){
   const hasAssistantVisibleAnchor=hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m);
   return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasReasoningAnchor||hasAssistantVisibleAnchor)));
 }
+const SILENT_TURN_SENTINEL='[[SILENT]]';
+function _isSilentSentinelContent(text){
+  return String(text==null?'':text).trim()===SILENT_TURN_SENTINEL;
+}
+// Silent-turn contract: an assistant message whose entire trimmed content is
+// the sentinel is the agent acknowledging a background wakeup without speaking
+// to the user — it must not render. When a turn opened by a process_wakeup
+// user row ENDS with the sentinel, the whole turn collapses: the wakeup row
+// itself plus every assistant message of the turn, including tool-carrying
+// ones (role 'tool' rows are already non-renderable). Hidden rows remain true
+// turn boundaries via _hasHiddenProcessWakeupBoundaryBefore. Render-only:
+// persisted session data is never mutated.
+function _computeSilentTurnHiddenIdxs(messages){
+  const hidden=new Set();
+  const msgs=Array.isArray(messages)?messages:[];
+  let turnStart=-1;
+  let turnAssistantIdxs=[];
+  const closeTurn=()=>{
+    if(turnStart===-1) return;
+    const lastIdx=turnAssistantIdxs.length?turnAssistantIdxs[turnAssistantIdxs.length-1]:-1;
+    const last=lastIdx>=0?msgs[lastIdx]:null;
+    if(last&&_isSilentSentinelContent(msgContent(last))){
+      hidden.add(turnStart);
+      for(const i of turnAssistantIdxs) hidden.add(i);
+    }
+    turnStart=-1;
+    turnAssistantIdxs=[];
+  };
+  for(let i=0;i<msgs.length;i++){
+    const m=msgs[i];
+    if(!m||typeof m!=='object') continue;
+    if(m.role==='user'){
+      closeTurn();
+      if(m._source==='process_wakeup'){ turnStart=i; turnAssistantIdxs=[]; }
+      continue;
+    }
+    if(m.role==='assistant'){
+      if(_isSilentSentinelContent(msgContent(m))) hidden.add(i);
+      if(turnStart!==-1) turnAssistantIdxs.push(i);
+    }
+  }
+  closeTurn();
+  return hidden;
+}
+// Live-stream suppression: while the accumulated assistant text is a prefix of
+// the sentinel (or exactly the sentinel), the live turn carries nothing the
+// user should see, so the token handler hides the live bubble before the final
+// persisted filter takes over. Exact-equality stays hidden so the completed
+// sentinel never flashes at stream end.
+function _isSilentSentinelStreamPrefix(text){
+  const trimmed=String(text==null?'':text).trim();
+  return !!trimmed&&SILENT_TURN_SENTINEL.startsWith(trimmed);
+}
+function _syncSilentLiveTurnSuppression(accumulatedText){
+  const turn=typeof $==='function'?$('liveAssistantTurn'):null;
+  if(!turn) return;
+  if(_isSilentSentinelStreamPrefix(accumulatedText)) turn.setAttribute('data-silent-pending','1');
+  else turn.removeAttribute('data-silent-pending');
+}
 function _hasHiddenProcessWakeupBoundaryBefore(rawIdx){
-  if(window._showBackgroundWakeups!==false) return false;
+  const hiddenSilent=_computeSilentTurnHiddenIdxs(S.messages);
   for(let idx=Number(rawIdx)-1;idx>=0;idx--){
+    if(hiddenSilent.has(idx)) return true;
     const previous=(S.messages||[])[idx];
-    if(previous&&previous._source==='process_wakeup') return true;
+    if(previous&&previous._source==='process_wakeup'&&window._showBackgroundWakeups===false) return true;
     if(_messageIsRenderable(previous)) return false;
   }
   return false;
 }
 function _getVisibleMessagesWithIdx(){
   if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages){
+    const hiddenSilent=_computeSilentTurnHiddenIdxs(S.messages);
     const rebuilt=[];
     let rawIdx=0;
     for(const m of (S.messages||[])){
-      if(_messageIsRenderable(m)) rebuilt.push({m,rawIdx});
+      if(!hiddenSilent.has(rawIdx)&&_messageIsRenderable(m)) rebuilt.push({m,rawIdx});
       rawIdx++;
     }
     _visWithIdxCache=rebuilt;

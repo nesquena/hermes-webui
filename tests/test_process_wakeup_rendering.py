@@ -73,6 +73,15 @@ const heightStart = src.indexOf('const MESSAGE_RENDER_WINDOW_DEFAULT');
 const heightEnd = src.indexOf('const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS', heightStart);
 if(heightStart !== -1 && heightEnd !== -1) eval(src.slice(heightStart, heightEnd));
 if(src.indexOf('function _isProcessWakeupMessage') !== -1) eval(extractFunc('_isProcessWakeupMessage'));
+// Silent-turn helpers: _getVisibleMessagesWithIdx and
+// _hasHiddenProcessWakeupBoundaryBefore depend on them. The sentinel const is
+// eval'd in the same scope as the two helpers because eval'd const bindings
+// do not leak across separate eval calls.
+const sentinelStart = src.indexOf('const SILENT_TURN_SENTINEL');
+if(sentinelStart !== -1){
+  const sentinelEnd = src.indexOf('\n', sentinelStart);
+  eval(src.slice(sentinelStart, sentinelEnd) + '\n' + extractFunc('_isSilentSentinelContent') + '\n' + extractFunc('_computeSilentTurnHiddenIdxs'));
+}
 if(src.indexOf('function _hasHiddenProcessWakeupBoundaryBefore') !== -1) eval(extractFunc('_hasHiddenProcessWakeupBoundaryBefore'));
 function _assistantVisibleContentForReasoningCompare(m){ return String((m && m.content) || ''); }
 eval(extractFunc('_assistantTurnFinalVisibleContentMap'));
