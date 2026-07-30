@@ -31,11 +31,15 @@ def test_workspace_dropdown_exposes_new_worktree_conversation_action():
     assert "li('git-branch',12)" in src
 
 
-def test_session_sidebar_renders_worktree_indicator():
+def test_session_sidebar_keeps_worktree_context_in_title_tooltip():
     src = read("static/sessions.js")
-    assert "session-worktree-indicator" in src
-    assert "s.worktree_path" in src
-    assert "s.worktree_branch" in src
+    # Icon-free sidebar rows: with worktree-per-session enabled, nearly every
+    # row carried the same git-branch glyph, which read as noise. Worktree and
+    # fork context now live in the title tooltip instead of per-row icons.
+    assert "session.worktree_path" in src
+    assert "session.worktree_branch" in src
+    assert "_sessionFullTitleTooltip" in src
+    assert "session-worktree-indicator" not in src
 
 
 def test_worktree_indicator_styles_and_i18n_exist():

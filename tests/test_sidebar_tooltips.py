@@ -29,7 +29,9 @@ def test_sidebar_status_badges_have_explanatory_tooltips():
     assert "function _sessionLineageBadgeTooltip" in js
     assert "function _sessionChildBadgeTooltip" in js
     assert "function _sessionStateTooltip" in js
-    assert "branchInd.title=_sessionForkTooltip(parentLabel);" in js
+    # Fork context moved from the removed per-row branch icon into the title
+    # tooltip; the explanatory tooltip contract is preserved there.
+    assert "lines.push(_sessionForkTooltip(parentLabel));" in js
     assert "segmentCountEl.title=_sessionLineageBadgeTooltip(segmentLabel,canExpandLineageSegments);" in js
     assert "childCountEl.title=_sessionChildBadgeTooltip(childLabel);" in js
     assert "_sessionStateTooltip({isStreaming,hasUnread})" in js

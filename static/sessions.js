@@ -6881,7 +6881,18 @@ function _sessionFullTitleTooltip(rawTitle, cleanTitle, session){
   const full=String(rawTitle||fallback).trim()||fallback;
   const title=full.startsWith('[SYSTEM:') ? fallback : full;
   if(typeof t==='function'&&_isReadOnlySession(session)) return t('session_readonly_title_hint', title);
-  return title;
+  // The sidebar list itself stays icon-free; fork/worktree context lives here
+  // so it remains available on hover without per-row glyph noise.
+  const lines=[title];
+  if(session&&session.parent_session_id){
+    const parentLabel=_sessionTitleForForkParent(session.parent_session_id)||_truncatedSessionId(session.parent_session_id);
+    lines.push(_sessionForkTooltip(parentLabel));
+  }
+  if(session&&session.worktree_path){
+    const wtLabel=(typeof t==='function'?t('session_worktree_badge'):'Worktree');
+    lines.push(`${wtLabel}: ${session.worktree_branch||session.worktree_path}`);
+  }
+  return lines.join('\n');
 }
 
 function _sessionForkTooltip(parentLabel){
@@ -8037,23 +8048,11 @@ function renderSessionListFromCache(){
       pinInd.innerHTML=ICONS.pin;
       titleRow.appendChild(pinInd);
     }
-    if(s.worktree_path){
-      const wtInd=document.createElement('span');
-      wtInd.className='session-worktree-indicator';
-      wtInd.innerHTML=li('git-branch',12);
-      const wtLabel=(typeof t==='function'?t('session_worktree_badge'):'Worktree');
-      wtInd.title=`${wtLabel}: ${s.worktree_branch||s.worktree_path}`;
-      titleRow.appendChild(wtInd);
-    }
-    // Parent session indicator for forked/branched sessions (#465)
-    if(s.parent_session_id){
-      const branchInd=document.createElement('span');
-      branchInd.className='session-branch-indicator';
-      branchInd.innerHTML=li('git-branch',12);
-      const parentLabel=_sessionTitleForForkParent(s.parent_session_id)||_truncatedSessionId(s.parent_session_id);
-      branchInd.title=_sessionForkTooltip(parentLabel);
-      titleRow.appendChild(branchInd);
-    }
+    // Sidebar rows stay icon-free: with worktree-per-session enabled nearly
+    // every row carried the same git-branch glyph (twice when a parent link
+    // existed), which read as visual noise instead of information. Worktree
+    // and fork context remain available in the title tooltip
+    // (_sessionFullTitleTooltip) and in the details panel.
     const title=document.createElement('span');
     title.className='session-title';
     const displayTitle=cleanTitle||'Untitled';

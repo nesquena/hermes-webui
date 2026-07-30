@@ -128,7 +128,12 @@ def test_all_sessions_exposes_state_db_lineage_metadata_for_webui_json_sessions(
         assert rows["lineage_api_tip"].get("parent_session_id") == "lineage_api_root"
         assert rows["lineage_api_tip"].get("_lineage_root_id") == "lineage_api_root"
         assert rows["lineage_api_tip"].get("_compression_segment_count") == 2
-        assert "_lineage_root_id" not in rows["lineage_api_root"]
+        # The visible root now carries a self-referenced lineage key so the
+        # client can collapse the whole chain (and re-attach forks to the root
+        # row) even when intermediate segments are hidden from the payload.
+        assert rows["lineage_api_root"].get("_lineage_root_id") == "lineage_api_root"
+        assert rows["lineage_api_root"].get("_lineage_tip_id") == "lineage_api_tip"
+        assert rows["lineage_api_root"].get("_compression_segment_count") == 2
     finally:
         conn.close()
 

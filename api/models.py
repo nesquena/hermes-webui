@@ -6165,6 +6165,67 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
             ):
                 entry.pop(key, None)
             session.update(entry)
+    _enrich_sidebar_orphan_file_parent_links(sessions, metadata)
+
+
+def _enrich_sidebar_orphan_file_parent_links(sessions: list[dict], metadata: dict) -> None:
+    """Re-attach child rows whose parent link exists only in the WebUI file.
+
+    Manual forks record ``parent_session_id`` in their session JSON, but the
+    state.db mirror can keep ``parent_session_id`` NULL (observed on fork rows
+    later rotated by compression). The state.db lineage pass then returns no
+    relationship for them and the sidebar promotes them to context-less
+    top-level rows that look like duplicate conversations. Resolve the parent
+    lineage by parent id — from the payload first, then from a bounded state.db
+    lookup — so the client can stack them under the visible lineage root
+    instead.
+    """
+    by_id = {str(s.get('session_id')): s for s in sessions if s.get('session_id')}
+    orphans: dict[str, dict] = {}
+    for session in sessions:
+        sid = str(session.get('session_id') or '')
+        if not sid or sid in metadata:
+            continue
+        if session.get('relationship_type') or session.get('_lineage_root_id'):
+            continue
+        parent_id = str(session.get('parent_session_id') or '').strip()
+        if not parent_id:
+            continue
+        orphans[sid] = session
+    if not orphans:
+        return
+    missing_parent_ids = {
+        str(session.get('parent_session_id'))
+        for session in orphans.values()
+        if str(session.get('parent_session_id')) not in by_id
+    }
+    parent_metadata: dict = {}
+    if missing_parent_ids:
+        try:
+            parent_metadata = read_session_lineage_metadata(
+                _active_state_db_path(), missing_parent_ids,
+            )
+        except Exception:
+            parent_metadata = {}
+    for sid, session in orphans.items():
+        parent_id = str(session.get('parent_session_id') or '')
+        parent_row = by_id.get(parent_id)
+        pmd = parent_metadata.get(parent_id) or metadata.get(parent_id) or {}
+        root = str(pmd.get('_lineage_root_id') or '').strip()
+        if not root and parent_row is not None:
+            root = str(parent_row.get('_lineage_root_id') or '').strip()
+        if not root and (pmd or parent_row is not None):
+            root = parent_id
+        if not root:
+            continue
+        session['relationship_type'] = 'child_session'
+        session['_parent_lineage_root_id'] = root
+        tip = pmd.get('_lineage_tip_id')
+        if tip:
+            session['_parent_lineage_tip_id'] = tip
+        parent_title = (parent_row or {}).get('title') or pmd.get('_state_db_title')
+        if parent_title and not session.get('parent_title'):
+            session['parent_title'] = parent_title
 
 
 def _diag_stage(diag, name: str) -> None:

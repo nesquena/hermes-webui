@@ -305,6 +305,16 @@ def is_cli_session_row_visible(row: dict) -> bool:
     return _count_user_turns(row) >= CLI_MIN_UNTITLED_USER_MESSAGE_COUNT
 
 
+# WebUI compression rotation starts the successor session a fraction of a
+# second BEFORE closing the predecessor (observed in production: -0.1s to
+# -1.0s overlap). A strict ``started_at >= ended_at`` check therefore
+# misclassifies every such rotation as a plain child session, and compression
+# chains fragment into duplicate sidebar rows. Allow a bounded overlap for
+# compression-ended parents only; ``cli_close`` stays strict because a manual
+# close + ``hermes -c`` restart can never overlap.
+_COMPRESSION_CONTINUATION_OVERLAP_SECONDS = 120.0
+
+
 def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     """Return True when ``child`` is the next segment of the same conversation.
 
@@ -312,7 +322,8 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     by ``hermes -c`` also records a new child session; for sidebar projection it
     should continue the same visible conversation rather than becoming a
     separate child-session row. Plain parent/child links that started before the
-    parent's ended boundary remain child sessions.
+    parent's ended boundary remain child sessions, except for the bounded
+    compression-rotation overlap described above.
 
     Do not collapse lineage across raw sources. A WebUI session that continues
     from a Telegram/CLI/etc. parent must remain visible as its own surface-owned
@@ -327,7 +338,8 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     child_source = str(child.get('source') or '').strip().lower()
     if parent_source and child_source and parent_source != child_source:
         return False
-    if parent.get('end_reason') not in {'compression', 'cli_close'}:
+    end_reason = parent.get('end_reason')
+    if end_reason not in {'compression', 'cli_close'}:
         return False
     ended_at = parent.get('ended_at')
     if ended_at is None:
@@ -336,9 +348,15 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         # continuations when no boundary timestamp is available.
         return True
     try:
-        return float(child.get('started_at') or 0) >= float(ended_at)
+        started = float(child.get('started_at') or 0)
+        ended = float(ended_at)
     except (TypeError, ValueError):
         return False
+    if started >= ended:
+        return True
+    if end_reason == 'compression':
+        return started >= ended - _COMPRESSION_CONTINUATION_OVERLAP_SECONDS
+    return False
 
 
 def _continuation_root_id(rows_by_id: dict[str, dict], session_id: str | None) -> str | None:
@@ -1195,5 +1213,21 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             tip_id, tip_depth = lineage_tip_cache[root_id]
             entry['_lineage_tip_id'] = tip_id
             entry['_compression_segment_count'] = max(segment_count, tip_depth)
+            continue
+
+        # Self-referenced lineage root: a visible root with continuation
+        # descendants carries its own lineage key so client-side collapse can
+        # group the whole chain (and forks can re-attach to the root row) even
+        # when intermediate segments are hidden from the payload.
+        if not children_by_parent.get(sid):
+            continue
+        if sid not in lineage_tip_cache:
+            lineage_tip_cache[sid] = freshest_continuation_tip(sid)
+        tip_id, tip_depth = lineage_tip_cache[sid]
+        if tip_id != sid:
+            entry = metadata.setdefault(sid, {})
+            entry['_lineage_root_id'] = sid
+            entry['_lineage_tip_id'] = tip_id
+            entry['_compression_segment_count'] = tip_depth
 
     return metadata
