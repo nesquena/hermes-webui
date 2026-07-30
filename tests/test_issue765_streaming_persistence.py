@@ -990,3 +990,207 @@ class TestCrossClientDesyncMerge:
             f"/retry resurrected tail messages: {contents}"
         )
         assert persisted["message_count"] == 1
+
+
+class TestCrossClientDesyncMerge6422:
+    """Regression tests for cross-client desync re-gate (PR #6422).
+
+    Validates the fixes from the maintainer review:
+      1. No nested ``with _agent_lock:`` (tested via structured unit test)
+      2. Collision-safe IDs: equal N+1 IDs from production assignment
+      3. Truncation generation guard in ``_merge_concurrent_appends()``
+      4. Cross-process CAS guard in ``save()``
+      5. Three-client reconciliation
+    """
+
+    def test_equal_length_divergent_tails_with_ids(self, _isolate_session_dir):
+        """Two clients each append one message with the same production-assigned ID.
+
+        ``_assign_stable_message_ids()`` uses ``max(existing id) + 1``, so two
+        clients loaded from the same base can both assign ``id=4`` to different
+        messages.  The merge must detect this collision via content comparison
+        and produce ``[A, B, C, D1, D2]`` — not just ``[A, B, C, D2]``.
+        """
+        session_dir, index_file = _isolate_session_dir
+        base = [
+            {"id": 1, "role": "user", "content": "hello"},
+            {"id": 2, "role": "assistant", "content": "greeting"},
+        ]
+
+        # Client 1 appends message with id=3, saves
+        c1_msg = {"id": 3, "role": "user", "content": "follow-up-A"}
+        s1 = Session(session_id="collision_test", messages=[dict(m) for m in base])
+        s1.save()
+        s1.messages.append(dict(c1_msg))
+        s1.save()
+
+        # Client 2 tries to append a DIFFERENT message also with id=3 (collision)
+        c2_msg = {"id": 3, "role": "user", "content": "follow-up-B"}
+        s2 = Session(session_id="collision_test", messages=[dict(m) for m in base])
+        s2.messages.append(dict(c2_msg))
+        s2._merge_concurrent_appends()
+        s2.save()
+
+        persisted = json.loads((session_dir / "collision_test.json").read_text(encoding="utf-8"))
+        contents = [m["content"] for m in persisted["messages"]]
+        assert contents == ["hello", "greeting", "follow-up-A", "follow-up-B"], (
+            f"Expected all 4 messages but got {contents}"
+        )
+        assert persisted["message_count"] == 4
+
+    def test_truncation_guard_in_merge_concurrent_appends(self, _isolate_session_dir):
+        """When disk is SHORTER than our copy (_merge_concurrent_appends path),
+        the truncation guard must not resurrect deleted messages.
+
+        Scenario:
+          1. Both load [A, B, C]
+          2. Client 1 does /undo → truncates to [A, B] → save()
+          3. Client 2 (still holding [A, B, C]) calls _merge_concurrent_appends()
+             then save().  Must produce [A, B] (the truncation is recognized),
+             NOT resurrect C.
+        """
+        session_dir, index_file = _isolate_session_dir
+        full = [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "q2"},
+        ]
+
+        s1 = Session(session_id="trunc_guard_test", messages=list(full))
+        s1.save()
+
+        # Client 1: /undo truncates to [q1]
+        s1.messages = full[:1]
+        s1.save()
+
+        # Client 2: stale copy [q1, a1, q2], calls _merge concurent appends
+        s2 = Session(session_id="trunc_guard_test", messages=list(full))
+        s2._merge_concurrent_appends()
+        s2.save()
+
+        persisted = json.loads((session_dir / "trunc_guard_test.json").read_text(encoding="utf-8"))
+        contents = [m["content"] for m in persisted["messages"]]
+        # The truncation guard should keep disk state: [q1]
+        assert contents == ["q1"], (
+            f"Truncation guard resurrected messages: {contents}"
+        )
+        assert persisted["message_count"] == 1
+
+    def test_truncation_guard_with_append_after_undo(self, _isolate_session_dir):
+        """When disk is SHORTER and our caller has appended, the merge
+        must fail-closed: take the disk state rather than resurrect.
+
+        Scenario:
+          1. Both load [A, B, C]
+          2. Client 1 does /undo → [A] → save()
+          3. Client 2 (stale [A, B, C]) calls _merge_concurrent_appends()
+             with a new message D appended.  Must produce [A], discarding
+             stale tail (A is better than resurrecting B, C).
+        """
+        session_dir, index_file = _isolate_session_dir
+        base = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply1"},
+            {"role": "user", "content": "second"},
+        ]
+
+        s1 = Session(session_id="trunc_append_test", messages=list(base))
+        s1.save()
+
+        # Client 1: /undo truncates to [first]
+        s1.messages = base[:1]
+        s1.save()
+
+        # Client 2: stale [first, reply1, second] + its own new message
+        new_msg = {"role": "assistant", "content": "fresh_reply"}
+        s2 = Session(session_id="trunc_append_test", messages=list(base))
+        s2.messages.append(dict(new_msg))
+        s2._merge_concurrent_appends()
+        s2.save()
+
+        persisted = json.loads((session_dir / "trunc_append_test.json").read_text(encoding="utf-8"))
+        contents = [m["content"] for m in persisted["messages"]]
+        # Fail-closed: truncation guard takes disk state [first] only.
+        # fresh_reply is lost, but that's better than resurrecting reply1+second.
+        assert contents == ["first"], (
+            f"Truncation guard resurrected messages: {contents}"
+        )
+        assert persisted["message_count"] == 1
+
+    def test_three_client_reconciliation(self, _isolate_session_dir):
+        """Three concurrent clients append to the same session base [A].
+
+        C1 saves [A, B], C2 saves [A, B, C], C3 saves [A, B, C, D].
+        The final transcript must contain all four messages.
+        """
+        session_dir, index_file = _isolate_session_dir
+        base = [{"role": "user", "content": "start"}]
+        c1_msg = {"role": "user", "content": "second"}
+        c2_msg = {"role": "user", "content": "third"}
+        c3_msg = {"role": "user", "content": "fourth"}
+
+        s1 = Session(session_id="three_client_test", messages=list(base))
+        s1.save()
+        s1.messages.append(dict(c1_msg))
+        s1.save()
+
+        s2 = Session(session_id="three_client_test", messages=list(base))
+        s2.messages.append(dict(c2_msg))
+        s2._merge_concurrent_appends()
+        s2.save()
+
+        s3 = Session(session_id="three_client_test", messages=list(base))
+        s3.messages.append(dict(c3_msg))
+        s3._merge_concurrent_appends()
+        s3.save()
+
+        persisted = json.loads((session_dir / "three_client_test.json").read_text(encoding="utf-8"))
+        contents = [m["content"] for m in persisted["messages"]]
+        assert contents == ["start", "second", "third", "fourth"], (
+            f"Three-client reconciliation failed: {contents}"
+        )
+        assert persisted["message_count"] == 4
+
+    def test_cas_guard_detects_cross_process_write(self, _isolate_session_dir):
+        """CAS guard in save() detects when a cross-process write happened
+        between _merge_concurrent_appends() and the atomic save.
+
+        After merge but before save, simulate another process writing to the
+        file.  save() must re-read, detect the fingerprint mismatch, and
+        re-merge before writing.
+        """
+        session_dir, index_file = _isolate_session_dir
+        base = [{"role": "user", "content": "start"}]
+        c1_msg = {"role": "user", "content": "client-1-msg"}
+        intruder_msg = {"role": "user", "content": "intruder-msg"}
+
+        # Client 1 saves [start, c1_msg]
+        s1 = Session(session_id="cas_guard_test", messages=list(base))
+        s1.save()
+        s1.messages.append(dict(c1_msg))
+        s1.save()
+
+        # Client 2 loads base, does _merge (captures fingerprint of [start, c1_msg]),
+        # then we simulate a cross-process write before save().
+        s2 = Session(session_id="cas_guard_test", messages=list(base))
+        s2.messages.append({"role": "user", "content": "client-2-msg"})
+        s2._merge_concurrent_appends()
+
+        # Simulated cross-process write between merge and save.
+        simul = Session(session_id="cas_guard_test", messages=[
+            {"role": "user", "content": "start"},
+            {"role": "user", "content": "client-1-msg"},
+            dict(intruder_msg),
+        ])
+        simul.save()
+
+        # Now s2 saves — CAS guard should re-read, detect fingerprint mismatch,
+        # re-merge, and produce [start, c1_msg, intruder, c2_msg].
+        s2.save()
+
+        persisted = json.loads((session_dir / "cas_guard_test.json").read_text(encoding="utf-8"))
+        contents = [m["content"] for m in persisted["messages"]]
+        assert contents == ["start", "client-1-msg", "intruder-msg", "client-2-msg"], (
+            f"CAS guard failed to re-merge after cross-process write: {contents}"
+        )
+        assert persisted["message_count"] == 4

@@ -1338,6 +1338,9 @@ class Session:
             except (TypeError, ValueError):
                 parsed_message_count = None
         self._metadata_message_count = parsed_message_count if parsed_message_count is not None and parsed_message_count >= 0 else None
+        # #6422: cross-process CAS fingerprint.  Set by _merge_concurrent_appends()
+        # to the crc32 of the file text it merged against, then verified in save().
+        self._merge_snapshot_fingerprint = None
 
     @property
     def path(self):
@@ -1360,7 +1363,12 @@ class Session:
         messages (e.g. streaming completion handler).  It must NOT be called
         from generic ``save()``, because ``save()`` cannot distinguish an
         append race from an intentional truncation (``/undo``, ``/retry``).
+
+        Stores ``_merge_snapshot_fingerprint`` so the subsequent ``save()``
+        can verify no cross-process write landed between the merge and the
+        atomic write (CAS guard, PR #6422).
         """
+        self._merge_snapshot_fingerprint = None  # Reset on every call.
         if not self.path.exists():
             return
         try:
@@ -1386,12 +1394,32 @@ class Session:
             if our_id is not None and disk_id is not None:
                 if our_id != disk_id:
                     break
+                # ── #6422 collision guard ────────────────────────────────
+                # ``_assign_stable_message_ids()`` uses ``max(existing id) +
+                # 1``, so two clients loaded from the same base can assign
+                # the *same* next integer ID to different appended messages.
+                # When IDs are equal but content differs, the messages are
+                # distinct concurrent appends — treat this as a divergence.
+                if (our_msg.get('role'), our_msg.get('content')) != (disk_msg.get('role'), disk_msg.get('content')):
+                    break
             elif (our_msg.get('role'), our_msg.get('content')) != (disk_msg.get('role'), disk_msg.get('content')):
                 break
             prefix_len += 1
 
         if prefix_len == 0:
             return  # No common ground — bail, don't risk data corruption.
+
+        # ── #6422 truncation guard ──────────────────────────────────────
+        # If the on-disk session is now SHORTER than our copy at this
+        # prefix boundary, another client must have truncated via /undo or
+        # /retry since we loaded.  Fail closed: take the disk state and
+        # discard our stale suffix.  This may lose our new messages too
+        # in the rare truncation-while-streaming scenario, but it avoids
+        # the worse outcome of resurrecting deleted messages.
+        if prefix_len == len(existing_msgs) and prefix_len < len(our_msgs):
+            self.messages = list(existing_msgs)
+            self._merge_snapshot_fingerprint = _fast_fingerprint(existing_text)
+            return
 
         # Messages on disk beyond the common prefix.
         disk_tail = existing_msgs[prefix_len:]
@@ -1401,6 +1429,7 @@ class Session:
         # Case 1: our messages are a prefix of disk (append race).
         if prefix_len == len(our_msgs):
             self.messages = list(our_msgs) + list(disk_tail)
+            self._merge_snapshot_fingerprint = _fast_fingerprint(existing_text)
             return
 
         # Case 2: same length but divergent tails (concurrent equal-length append)
@@ -1408,6 +1437,7 @@ class Session:
         # Merge: keep the common prefix, insert disk's extras, then our extras.
         our_tail = our_msgs[prefix_len:]
         self.messages = list(our_msgs[:prefix_len]) + list(disk_tail) + list(our_tail)
+        self._merge_snapshot_fingerprint = _fast_fingerprint(existing_text)
 
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
@@ -1548,6 +1578,41 @@ class Session:
                             pass
         except OSError:
             pass
+
+        # ── #6422 cross-process CAS guard ───────────────────────────────
+        # If _merge_concurrent_appends() was called before this save(),
+        # verify the file hasn't been modified by another process between
+        # the merge and the atomic write (TOCTOU window).  Re-read the
+        # on-disk state and compare fingerprint.  If it changed, re-merge
+        # and rebuild the payload with bounded retry (3 attempts).
+        _cas_fp = getattr(self, '_merge_snapshot_fingerprint', None)
+        if _cas_fp is not None:
+            for _cas_attempt in range(3):
+                try:
+                    _cas_text = self.path.read_text(encoding='utf-8')
+                except OSError:
+                    break  # File vanished — proceed, atomic write will create it.
+                _cur_fp = _fast_fingerprint(_cas_text)
+                if _cur_fp == _cas_fp:
+                    break  # File unchanged since merge — continue to write.
+                # File changed — re-merge against current state.
+                _orig_messages = list(self.messages or [])
+                self._merge_concurrent_appends()
+                _new_fp = getattr(self, '_merge_snapshot_fingerprint', None)
+                if _new_fp is None or _new_fp == _cur_fp:
+                    break  # Re-merge converged or had nothing to merge.
+                # Stalemate — another write happened during re-merge.
+                if _cas_attempt == 2:
+                    logger.warning(
+                        "Cross-process CAS retries exhausted for session %s "
+                        "(attempts=%d, fingerprint=%s); proceeding with best-effort merge",
+                        self.session_id, _cas_attempt + 1, _cur_fp,
+                    )
+            if _cas_fp != getattr(self, '_merge_snapshot_fingerprint', None):
+                # Messages changed during re-merge — rebuild payload.
+                meta['message_count'] = len(self.messages or [])
+                meta['messages'] = self.messages
+                payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
 
         tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
         try:
@@ -3933,6 +3998,17 @@ def _disk_scene_fingerprint(disk_meta_prefix: dict):
                 latest = fv
         return keys, latest
     return None
+
+
+def _fast_fingerprint(text: str) -> int:
+    """Fast stable fingerprint of session file text for CAS guard.
+
+    Uses crc32 so different processes produce the same fingerprint for
+    identical input.  Collision probability is near zero for session-file
+    sizes (tens of KB).
+    """
+    import zlib
+    return zlib.crc32(text.encode('utf-8'))
 
 
 def _sidecar_stat_signature(path):

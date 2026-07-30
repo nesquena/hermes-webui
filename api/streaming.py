@@ -10128,8 +10128,14 @@ def _run_agent_streaming(
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                     put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
-                with _agent_lock:
-                    s._merge_concurrent_appends()
+                # ── #6422 cross-client append merge ───────────────────────
+                # Read the on-disk message list and merge any rows a *different*
+                # process/thread appended since we loaded this session.  Safe
+                # here because the caller KNOWS it is appending new messages
+                # (streaming completion), so any extra rows on disk belong in
+                # the transcript.  The outer with _agent_lock: (line ~9145)
+                # serializes this against concurrent process-local writers.
+                s._merge_concurrent_appends()
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
                 if cancel_event.is_set():
