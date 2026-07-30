@@ -67,7 +67,6 @@ def _run_real_smd_media_cases() -> dict:
             # renderMd path, so the streaming functions below depend on them.
             _extract_js_function(UI_JS, "_mediaPathSrc"),
             _extract_js_function(UI_JS, "_mediaTokenRe"),
-            _extract_js_function(UI_JS, "_mediaTokenAnchoredRe"),
             _extract_js_function(UI_JS, "_unquoteMediaRef"),
             _extract_js_function(MESSAGES_JS, "_smdMediaPrefixTail"),
             _extract_js_function(MESSAGES_JS, "_smdAppendPlainText"),
@@ -428,12 +427,15 @@ class TestSmdMediaInStream(unittest.TestCase):
         # boundary check must therefore treat a complete http(s) ref as complete
         # even when it has no filename extension.
         self.assertIn("function _smdMediaTailFlush", MESSAGES_JS)
-        # The anchored single-token matcher is now the shared ui.js helper
-        # (_mediaTokenAnchoredRe) rather than an inline /^MEDIA:([^\s)\]]+)$/,
-        # so spaced paths are matched whole instead of being cut at the first
-        # space. Assert the helper is used and defined.
-        self.assertIn("_mediaTokenAnchoredRe()", MESSAGES_JS)
-        self.assertIn("function _mediaTokenAnchoredRe", UI_JS)
+        # The stream-end flush now PARTITIONS the buffered candidate with the
+        # shared global matcher instead of applying the anchored ^...$ matcher to
+        # the whole thing. The anchored form could not handle a candidate that is
+        # a complete token PLUS same-line prose (`MEDIA:/tmp/a.png and after`):
+        # the match failed and production emitted the entire string as literal
+        # prose, losing the media card. Assert the partition contract.
+        self.assertIn("_mediaTokenRe()", MESSAGES_JS)
+        self.assertIn("m.index===0", MESSAGES_JS)
+        self.assertIn("raw.slice(m[0].length)", MESSAGES_JS)
         self.assertIn("_smdMediaTailFlush(_smdParser)", MESSAGES_JS)
 
     def test_extensionless_https_tail_waits_until_stream_end(self):

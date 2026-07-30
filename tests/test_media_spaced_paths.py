@@ -176,10 +176,11 @@ MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 def test_frontend_media_shape_is_shared():
     assert "function _mediaPathSrc" in UI_JS
     assert "function _mediaTokenRe" in UI_JS
-    assert "function _mediaTokenAnchoredRe" in UI_JS
     # messages.js must consume the shared helpers, not re-declare the pattern.
     assert "_mediaTokenRe()" in MESSAGES_JS
-    assert "_mediaTokenAnchoredRe()" in MESSAGES_JS
+    # The anchored single-token matcher was removed: the stream-end flush now
+    # partitions the buffered candidate with the shared global matcher, because a
+    # candidate can be a token PLUS same-line prose.
 
 
 def test_no_surface_kept_the_truncating_class():

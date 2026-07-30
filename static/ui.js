@@ -2644,11 +2644,6 @@ function _mediaTokenRe(){
   return new RegExp(String.raw`MEDIA:(${_mediaPathSrc()})`, 'g');
 }
 
-/** Anchored single-token matcher (streaming chunk === exactly one MEDIA token). */
-function _mediaTokenAnchoredRe(){
-  return new RegExp(String.raw`^MEDIA:(${_mediaPathSrc()})$`);
-}
-
 /** Strip surrounding quotes from a captured MEDIA path. */
 function _unquoteMediaRef(ref){
   const value = String(ref || '').trim();
@@ -8617,8 +8612,11 @@ function _stripForTTS(text){
   text=text.replace(/^#{1,6}\s+/gm,'');
   // Strip links, keep text
   text=text.replace(/\[([^\]]+)\]\([^)]+\)/g,'$1');
-  // Replace MEDIA: paths with a simple label
-  text=text.replace(/MEDIA:[^\s]+/g,'a file');
+  // Replace MEDIA: refs with a simple label. Uses the SHARED token grammar so a
+  // dotted/spaced or quoted path is removed whole — `/MEDIA:[^\s]+/g` stopped at
+  // the first space, leaving the local-path tail ("Reports/chart.png") to be read
+  // aloud, and left the closing quote of a quoted ref behind.
+  text=text.replace(_mediaTokenRe(),'a file');
   // Strip emoji and emoticons
   text=text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}]/gu,'');
   // Strip HTML tags that may leak through markdown

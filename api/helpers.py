@@ -1259,6 +1259,26 @@ def unquote_media_ref(ref: str) -> str:
     return value
 
 
+def is_external_media_url(ref: str) -> bool:
+    """True when an (already unquoted) MEDIA ref points at a REMOTE http(s) URL.
+
+    Scheme comparison is case-insensitive because URI schemes are
+    case-insensitive (RFC 3986 §3.1), so ``HTTPS://`` is as external as
+    ``https://``.
+
+    Deliberately HTTP(S)-only. ``file://`` is NOT reported here: a public share
+    must actively reject it (absolute and un-scoped, so it can point anywhere on
+    the host), and callers use this predicate to decide "leave the token alone",
+    which for ``file://`` would mean leaking the path into the share instead of
+    replacing it with a placeholder. Same for ``data:`` — the share boundary
+    handles those on their own terms.
+
+    Mirrors ``_isExternalMediaUrl()`` in static/ui.js.
+    """
+    value = unquote_media_ref(ref)
+    return bool(_re.match(r"(?i)^https?://", value))
+
+
 def media_token_pattern(extra_exclude: str = "", exclude_urls: bool = False) -> str:
     """Return the MEDIA: path-capture pattern (one capture group).
 
@@ -1282,7 +1302,18 @@ def media_token_pattern(extra_exclude: str = "", exclude_urls: bool = False) -> 
     The returned capture may be quoted; callers must run it through
     :func:`unquote_media_ref` before treating it as a path.
     """
-    url_guard = r"(?!https?://)" if exclude_urls else ""
+    # The URL guard is case-insensitive and sits inside an optional quote so a
+    # QUOTED external URL is skipped too. Spelling it `(?!https?://)` outside the
+    # capture (the previous shape) let two classes through, both of which the
+    # share inliner then resolved as LOCAL paths and replaced with the
+    # missing-media placeholder while the frontend rendered them as remote
+    # images: `MEDIA:"https://…"` (quote consumed before the guard could see the
+    # scheme) and `MEDIA:HTTPS://…` (schemes are case-insensitive per RFC 3986).
+    #
+    # Callers that need the URL rejected AFTER unquoting should also run
+    # `is_external_media_url()` on the unquoted capture — the guard here only
+    # keeps the pattern from matching in the first place.
+    url_guard = r"(?![\"']?(?i:https?)://)" if exclude_urls else ""
     # One path character: no whitespace, and none of the delimiters that close
     # a token (plus any caller-specific exclusions).
     ch = r"[^\s)\]" + extra_exclude + r"]"

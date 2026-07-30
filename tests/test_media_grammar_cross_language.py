@@ -132,10 +132,18 @@ def test_quoted_ref_from_user_content_is_still_rejected(tmp_path, monkeypatch):
 
 
 # A 1x1 PNG that passes the share inliner's magic-byte and MIME checks.
-_TINY_PNG = bytes.fromhex(
-    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
-    "1f15c4890000000a49444154789c63000100000500010d0a2db4"
-    "0000000049454e44ae426082"
+# Explicit bytes literal, not bytes.fromhex(...): an opaque hex blob in a test
+# fixture reads like obfuscation to reviewers and to untrusted-code gates.
+_TINY_PNG = (
+    b"\x89PNG\r\n\x1a\n"                      # signature
+    b"\x00\x00\x00\rIHDR"                     # IHDR chunk header
+    b"\x00\x00\x00\x01\x00\x00\x00\x01"       # 1x1
+    b"\x08\x06\x00\x00\x00"                   # 8-bit RGBA
+    b"\x1f\x15\xc4\x89"                       # IHDR CRC
+    b"\x00\x00\x00\nIDAT"                     # IDAT chunk header
+    b"x\x9cc\x00\x01\x00\x00\x05\x00\x01"     # zlib-compressed single pixel
+    b"\r\n-\xb4"                              # IDAT CRC
+    b"\x00\x00\x00\x00IEND\xaeB`\x82"         # IEND
 )
 
 

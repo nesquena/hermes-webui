@@ -4681,23 +4681,36 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdMediaTailFlushEntry(entry){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
-    // Trailing whitespace is a real delimiter, so a buffered token that ended
-    // at a space IS complete — but the anchored ^...$ matcher would reject it
-    // and the whole token would be flushed as prose. Split the trailing
-    // whitespace off, match the token, then re-emit the whitespace as text so
-    // no byte is lost.
+    // Stream end: the buffered candidate is final, so decide it here.
+    //
+    // The candidate is NOT necessarily just a token. `_smdMediaAwareAddText`
+    // buffers from the MEDIA keyword to end-of-line whenever the same-line
+    // suffix could still extend the token, so at flush time the candidate can be
+    // `MEDIA:/tmp/a.png and after` — a complete token PLUS trailing prose.
+    //
+    // Matching the whole candidate with the anchored ^...$ matcher fails on that
+    // shape, and the old fallback wrote the entire string as literal prose: the
+    // media card vanished and the raw `MEDIA:` keyword was shown to the user,
+    // while settled `renderMd()` rendered the card and kept ` and after`.
+    //
+    // So PARTITION instead: match the shared token grammar anchored at offset 0,
+    // emit the normalized capture, and hand the exact unmatched remainder to the
+    // owning text writer. Byte-preserving by construction — the emitted span
+    // plus the remainder reconstruct the candidate. If nothing matches at offset
+    // 0, or the media append fails, fall back to writing the raw candidate so no
+    // text is ever dropped.
     const raw=String(chunk);
-    const tailWs=/[^\S\n]+$/.exec(raw);
-    const core=tailWs ? raw.slice(0, raw.length-tailWs[0].length) : raw;
-    const m=_mediaTokenAnchoredRe().exec(core);
-    const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, _unquoteMediaRef(m[1])));
-    if(!emitted && entry){
-      _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, raw);
+    const re=_mediaTokenRe();
+    const m=re.exec(raw);
+    const matchedAtStart=!!(m && m.index===0);
+    const emitted=!!(matchedAtStart && entry && entry.parent
+      && _smdAppendMediaNode(entry.parent, _unquoteMediaRef(m[1])));
+    if(!emitted){
+      if(entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, raw);
       return;
     }
-    if(emitted && tailWs && entry){
-      _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, tailWs[0]);
-    }
+    const rest=raw.slice(m[0].length);
+    if(rest && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, rest);
   }
   function _smdMediaTailFlush(parser){
     if(!_SMD_MEDIA_TAIL||!parser||!_SMD_MEDIA_TAIL.get) return;

@@ -24,7 +24,12 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from api.config import STATE_DIR
-from api.helpers import redact_session_data, media_token_pattern, unquote_media_ref
+from api.helpers import (
+    redact_session_data,
+    media_token_pattern,
+    unquote_media_ref,
+    is_external_media_url,
+)
 # _redact_fn_cached is the ALWAYS-ON credential redactor (agent redactor with
 # force=True + local fallback regex). Unlike redact_session_data it does NOT
 # consult the user-toggleable api_redact_enabled setting — a public share is a
@@ -298,6 +303,13 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
         # path that the renderer displays would be placeholdered here.
         raw = unquote_media_ref(m.group(1) or "")
         if not raw:
+            return m.group(0)
+        # Defence in depth: the pattern-level guard already skips external URLs,
+        # but re-check AFTER unquoting and case-insensitively so a quoted or
+        # uppercase-scheme URL can never be resolved as a local path and
+        # placeholdered. Leave the token untouched so the renderer still shows
+        # the remote image.
+        if is_external_media_url(raw):
             return m.group(0)
 
         # --- Resolve and validate against allowed roots -----------------------
