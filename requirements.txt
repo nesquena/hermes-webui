@@ -1,0 +1,18 @@
+# Hermes Web UI -- minimal Python dependencies
+# The server uses PyYAML plus cryptography for optional local passkey/WebAuthn support.
+# All heavy ML/agent deps live in the Hermes agent venv.
+#
+# OPTIONAL: the Edge TTS speech engine (Settings -> Voice -> TTS Engine -> "Edge TTS")
+# needs `edge-tts`. It is intentionally NOT a hard dependency — the /api/tts
+# endpoint returns 503 with an install hint when it's absent. Install it only if
+# you want server-side Microsoft neural voices:  pip install edge-tts
+#
+# OPTIONAL: macOS/non-procfs CPU/RAM system-health metrics need `psutil`.
+# Linux uses procfs without this dependency; install only if you want aggregate
+# CPU/RAM metrics on platforms without /proc:  pip install psutil>=5.9
+pyyaml>=6.0
+cryptography>=42.0
+# OPTIONAL: Office workspace preview/edit support needs these parsers.
+# The workspace file routes return 503 with an install hint when they are absent.
+# Install them only if you want .docx/.xlsx/.pptx preview support:
+#   pip install python-docx>=1.1.2 openpyxl>=3.1.5 python-pptx>=1.0.2

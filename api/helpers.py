@@ -1,0 +1,1210 @@
+"""
+Hermes Web UI -- HTTP helper functions.
+"""
+import base64 as _base64
+import binascii as _binascii
+import functools
+import json as _json
+import logging
+import os
+import re as _re
+import ssl
+from pathlib import Path
+from api.config import IMAGE_EXTS, MD_EXTS
+
+logger = logging.getLogger(__name__)
+
+
+# Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
+# connections often end this way when a browser tab sleeps, a phone switches
+# networks, or Tailscale leaves the socket half-closed.
+_CLIENT_DISCONNECT_ERRORS = (
+    BrokenPipeError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    TimeoutError,
+    ssl.SSLError,
+)
+
+
+def require(body: dict, *fields) -> None:
+    """Phase D: Validate required fields. Raises ValueError with clean message."""
+    missing = [f for f in fields if not body.get(f) and body.get(f) != 0]
+    if missing:
+        raise ValueError(f"Missing required field(s): {', '.join(missing)}")
+
+
+def bad(handler, msg, status: int=400):
+    """Return a clean JSON error response."""
+    return j(handler, {'error': msg}, status=status)
+
+
+def _sanitize_error(e: Exception) -> str:
+    """Strip filesystem paths from exception messages before returning to client."""
+    import re
+    msg = str(e)
+    # Remove absolute paths (Unix and Windows)
+    msg = re.sub(r'(?:(?:/[a-zA-Z0-9_.-]+)+|(?:[A-Z]:\\[^\s]+))', '<path>', msg)
+    return msg
+
+
+def safe_resolve(root: Path, requested: str) -> Path:
+    """Resolve a relative path inside root, raising ValueError on traversal."""
+    resolved = (root / requested).resolve()
+    resolved.relative_to(root.resolve())  # raises ValueError if outside root
+    return resolved
+
+
+_CSP_CONNECT_BASE = (
+    "'self' http://127.0.0.1:* http://localhost:* http://ipc.localhost "
+    "https://127.0.0.1:* https://localhost:* "
+    "ws://127.0.0.1:* ws://localhost:*"
+)
+_CSP_EXTRA_CONNECT_RE = _re.compile(
+    r"^(?:https?|wss?)://(?:\*\.)?[A-Za-z0-9._~-]+(?::(?P<port>\d{1,5}|\*))?$"
+)
+# Validator for an opt-in frame-src allowlist entry (HERMES_WEBUI_CSP_FRAME_EXTRA).
+# Only http(s) origins (optional wildcard subdomain + optional port) are accepted —
+# the same shape as the connect-extra validator minus the ws/wss schemes, since an
+# iframe src is always http(s).
+_CSP_EXTRA_FRAME_RE = _re.compile(
+    r"^https?://(?:\*\.)?[A-Za-z0-9._~-]+(?::(?P<port>\d{1,5}|\*))?$"
+)
+_CSP_HEADER_NAME = 'Content-Security-Policy'
+_CSP_SHARED_POLICY_TEMPLATE = (
+    "default-src 'self' https://*.cloudflareaccess.com; "
+    "object-src 'none'; "
+    "frame-ancestors 'none'; "
+    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com blob:; "
+    "worker-src blob: 'self' https://cdn.jsdelivr.net; "
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
+    "img-src 'self' data: https: blob:; "
+    "font-src 'self' data: https://fonts.gstatic.com; "
+    "media-src 'self' data: blob:; "
+    "connect-src {connect_src}; "
+    "frame-src {frame_src}; "
+    "manifest-src 'self' https://*.cloudflareaccess.com; "
+    "base-uri 'self'; form-action 'self'"
+)
+# Base frame-src: same-origin only by default (so the existing same-origin
+# dashboard/extension iframes keep working). An operator can widen it, opt-in,
+# via HERMES_WEBUI_CSP_FRAME_EXTRA — e.g. to embed a self-hosted dashboard in an
+# extension tab. This governs what THIS page may embed; it does NOT affect
+# frame-ancestors (who may embed the WebUI), which stays 'none'.
+_CSP_FRAME_BASE = "'self'"
+
+
+def _valid_csp_extra_connect_source(source: str) -> bool:
+    match = _CSP_EXTRA_CONNECT_RE.fullmatch(source)
+    if not match:
+        return False
+    port = match.group("port")
+    if not port or port == "*":
+        return True
+    try:
+        return 1 <= int(port) <= 65535
+    except ValueError:
+        return False
+
+
+def _csp_extra_connect_src() -> str:
+    raw = os.getenv("HERMES_WEBUI_CSP_CONNECT_EXTRA", "").strip()
+    if not raw:
+        return ""
+    sources = raw.split()
+    if not sources or any(not _valid_csp_extra_connect_source(src) for src in sources):
+        logger.warning("Ignoring invalid HERMES_WEBUI_CSP_CONNECT_EXTRA value")
+        return ""
+    return " " + " ".join(sources)
+
+
+def _valid_csp_extra_frame_source(source: str) -> bool:
+    match = _CSP_EXTRA_FRAME_RE.fullmatch(source)
+    if not match:
+        return False
+    port = match.group("port")
+    if not port or port == "*":
+        return True
+    try:
+        return 1 <= int(port) <= 65535
+    except ValueError:
+        return False
+
+
+def _csp_extra_frame_src() -> str:
+    raw = os.getenv("HERMES_WEBUI_CSP_FRAME_EXTRA", "").strip()
+    if not raw:
+        return ""
+    sources = raw.split()
+    if not sources or any(not _valid_csp_extra_frame_source(src) for src in sources):
+        logger.warning("Ignoring invalid HERMES_WEBUI_CSP_FRAME_EXTRA value")
+        return ""
+    return " " + " ".join(sources)
+
+
+def _csp_connect_src(extra_connect_src: str = "") -> str:
+    return f"{_CSP_CONNECT_BASE} https://cdn.jsdelivr.net{extra_connect_src}"
+
+
+def _csp_frame_src(extra_frame_src: str = "") -> str:
+    return f"{_CSP_FRAME_BASE}{extra_frame_src}"
+
+
+def _build_csp_enforced_policy(
+    extra_connect_src: str | None = None,
+    extra_frame_src: str | None = None,
+) -> str:
+    if extra_connect_src is None:
+        extra_connect_src = _csp_extra_connect_src()
+    if extra_frame_src is None:
+        extra_frame_src = _csp_extra_frame_src()
+    return _CSP_SHARED_POLICY_TEMPLATE.format(
+        connect_src=_csp_connect_src(extra_connect_src),
+        frame_src=_csp_frame_src(extra_frame_src),
+    )
+
+
+def _build_csp_report_only_policy(
+    extra_connect_src: str | None = None,
+    extra_frame_src: str | None = None,
+) -> str:
+    return (
+        _build_csp_enforced_policy(extra_connect_src, extra_frame_src)
+        + "; report-uri /api/csp-report; report-to csp-endpoint"
+    )
+
+
+def _security_headers(handler):
+    """Add security headers to every response."""
+    extra_connect_src = _csp_extra_connect_src()
+    extra_frame_src = _csp_extra_frame_src()
+    handler._csp_extra_connect_src = extra_connect_src
+    handler._csp_extra_frame_src = extra_frame_src
+    handler.send_header('X-Content-Type-Options', 'nosniff')
+    handler.send_header('X-Frame-Options', 'DENY')
+    handler.send_header('Referrer-Policy', 'same-origin')
+    handler.send_header(_CSP_HEADER_NAME, _build_csp_enforced_policy(extra_connect_src, extra_frame_src))
+    handler.send_header(
+        'Permissions-Policy',
+        'camera=(), microphone=(self), geolocation=(), clipboard-write=(self)'
+    )
+
+
+def flush_pending_auth_cookies(handler) -> None:
+    pending = getattr(handler, '_pending_set_cookies', None)
+    if not pending:
+        return
+    handler._pending_set_cookies = []
+    for cookie in pending:
+        handler.send_header('Set-Cookie', cookie)
+
+
+def _accepts_gzip(handler) -> bool:
+    """Check if the client accepts gzip encoding."""
+    headers = getattr(handler, 'headers', None)
+    if not headers:
+        return False
+    ae = headers.get('Accept-Encoding', '')
+    return 'gzip' in ae
+
+
+def _safe_write(handler, body: bytes) -> None:
+    """Write response body, ignoring expected client disconnect errors.
+
+    Logs disconnects at debug level so they are observable without
+    polluting stdout/stderr during normal operation (SSE reconnects,
+    tab closes, mobile network switches, etc.).
+    """
+    try:
+        handler.end_headers()
+        handler.wfile.write(body)
+    except _CLIENT_DISCONNECT_ERRORS as exc:
+        import logging
+        logging.getLogger("hermes.webui").debug(
+            "Client disconnected mid-response (%s): %s",
+            type(exc).__name__,
+            getattr(handler, "path", "?"),
+        )
+
+
+def _json_response_body(payload, *, pretty: bool = True) -> bytes:
+    """Serialize API JSON responses.
+
+    Sidebar/session endpoints can return thousands of rows on large installs.
+    Pretty-printing large list responses inflates both CPU and wire bytes. Keep
+    the public helper default stable for existing tests/callers; hot paths can
+    opt into compact JSON with ``pretty=False``.
+    """
+    if pretty:
+        return _json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
+    return _json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+
+
+def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bool = True) -> None:
+    """Send a JSON response.
+
+    *extra_headers*: optional dict of additional headers to include
+    (e.g., {'Set-Cookie': '...'}).  Headers are sent before end_headers().
+    """
+    body = _json_response_body(payload, pretty=pretty)
+    handler.send_response(status)
+    handler.send_header('Content-Type', 'application/json; charset=utf-8')
+
+    # Gzip-compress responses over 1KB when the client accepts it.
+    # Typical JSON API responses compress 70-80%, giving a big speedup
+    # for large payloads (session history, message lists).
+    if _accepts_gzip(handler) and len(body) > 1024:
+        import gzip
+        body = gzip.compress(body, compresslevel=4)
+        handler.send_header('Content-Encoding', 'gzip')
+
+    handler.send_header('Content-Length', str(len(body)))
+    handler.send_header('Cache-Control', 'no-store')
+    _security_headers(handler)
+    flush_pending_auth_cookies(handler)
+    if extra_headers:
+        for k, v in extra_headers.items():
+            handler.send_header(k, v)
+    _safe_write(handler, body)
+
+
+def t(
+    handler,
+    payload,
+    status: int=200,
+    content_type: str='text/plain; charset=utf-8',
+    extra_headers: dict=None,
+) -> None:
+    """Send a plain text or HTML response."""
+    body = payload if isinstance(payload, bytes) else str(payload).encode('utf-8')
+    handler.send_response(status)
+    handler.send_header('Content-Type', content_type)
+    handler.send_header('Content-Length', str(len(body)))
+    handler.send_header('Cache-Control', 'no-store')
+    _security_headers(handler)
+    if extra_headers:
+        for k, v in extra_headers.items():
+            handler.send_header(k, v)
+    flush_pending_auth_cookies(handler)
+    _safe_write(handler, body)
+
+
+MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
+
+
+# ── Credential redaction ──────────────────────────────────────────────────────
+
+def _build_redact_fn():
+    """Return a redactor backed by hermes-agent plus local fallback patterns."""
+    # Fallback mirrors the agent's known credential prefixes so WebUI API
+    # responses remain a hard redaction boundary even without hermes-agent.
+    # Keep this active even when hermes-agent is importable so API responses do
+    # not regress if the agent redactor misses a token shape.
+    _CRED_RE = _re.compile(
+        r"(?<![A-Za-z0-9_-])("
+        r"sk-[A-Za-z0-9_-]{10,}"          # OpenAI / Anthropic / OpenRouter
+        r"|ghp_[A-Za-z0-9]{10,}"          # GitHub PAT (classic)
+        r"|github_pat_[A-Za-z0-9_]{10,}"  # GitHub PAT (fine-grained)
+        r"|gho_[A-Za-z0-9]{10,}"          # GitHub OAuth token
+        r"|ghu_[A-Za-z0-9]{10,}"          # GitHub user-to-server token
+        r"|ghs_[A-Za-z0-9]{10,}"          # GitHub server-to-server token
+        r"|ghr_[A-Za-z0-9]{10,}"          # GitHub refresh token
+        r"|xox[baprs]-[A-Za-z0-9-]{10,}"  # Slack tokens
+        r"|AIza[A-Za-z0-9_-]{30,}"        # Google API keys
+        r"|pplx-[A-Za-z0-9]{10,}"         # Perplexity
+        r"|fal_[A-Za-z0-9_-]{10,}"        # Fal.ai
+        r"|fc-[A-Za-z0-9]{10,}"           # Firecrawl
+        r"|bb_live_[A-Za-z0-9_-]{10,}"    # BrowserBase
+        r"|gAAAA[A-Za-z0-9_=-]{20,}"      # Codex encrypted tokens
+        r"|AKIA[A-Z0-9]{16}"              # AWS Access Key ID
+        r"|sk_live_[A-Za-z0-9]{10,}"      # Stripe secret key (live)
+        r"|sk_test_[A-Za-z0-9]{10,}"      # Stripe secret key (test)
+        r"|rk_live_[A-Za-z0-9]{10,}"      # Stripe restricted key
+        r"|SG\.[A-Za-z0-9_-]{10,}"        # SendGrid API key
+        r"|hf_[A-Za-z0-9]{10,}"           # HuggingFace token
+        r"|r8_[A-Za-z0-9]{10,}"           # Replicate API token
+        r"|npm_[A-Za-z0-9]{10,}"          # npm access token
+        r"|pypi-[A-Za-z0-9_-]{10,}"       # PyPI API token
+        r"|dop_v1_[A-Za-z0-9]{10,}"       # DigitalOcean PAT
+        r"|doo_v1_[A-Za-z0-9]{10,}"       # DigitalOcean OAuth
+        r"|am_[A-Za-z0-9_-]{10,}"         # AgentMail API key
+        r"|sk_[A-Za-z0-9_]{10,}"          # ElevenLabs TTS key
+        r"|tvly-[A-Za-z0-9]{10,}"         # Tavily search API key
+        r"|exa_[A-Za-z0-9]{10,}"          # Exa search API key
+        r"|gsk_[A-Za-z0-9]{10,}"          # Groq Cloud API key
+        r"|syt_[A-Za-z0-9]{10,}"          # Matrix access token
+        r"|retaindb_[A-Za-z0-9]{10,}"     # RetainDB API key
+        r"|hsk-[A-Za-z0-9]{10,}"          # Hindsight API key
+        r"|mem0_[A-Za-z0-9]{10,}"         # Mem0 Platform API key
+        r"|brv_[A-Za-z0-9]{10,}"          # ByteRover API key
+        r")(?![A-Za-z0-9_-])"
+    )
+    _AUTH_HDR_RE = _re.compile(
+        r"""(Authorization:\s*(?:Bearer|Bot)\s+)([^\s'",\]\)]+)""",
+        _re.IGNORECASE,
+    )
+    # A rejected image data URI can place a syntactically valid AWS key at an
+    # arbitrary base64 alignment, immediately after another base64 character.
+    # The general credential regex uses token boundaries to avoid rewriting
+    # prose identifiers; this defense-in-depth pass ensures the fail-closed
+    # image path still removes the maintainer's embedded-suffix attack even
+    # when hermes-agent is unavailable and the local fallback owns redaction.
+    _EMBEDDED_AWS_ACCESS_KEY_RE = _re.compile(r"AKIA[A-Z0-9]{16}")
+    _ENV_RE = _re.compile(
+        r"([A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50})"
+        r"\s*=\s*(['\"]?)(\S+)\2"
+    )
+
+    _PRIVKEY_RE = _re.compile(
+        r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
+    )
+
+    def _mask(token: str) -> str:
+        return f"{token[:6]}...{token[-4:]}" if len(token) >= 18 else "***"
+
+    def _env_replacement(match) -> str:
+        key, quote, value = match.group(1), match.group(2), match.group(3)
+        if not any(ch.isalnum() for ch in value):
+            return match.group(0)
+        return f"{key}={quote}{_mask(value)}{quote}"
+
+    _CODE_ENV_KEY_LITERAL_RE = _re.compile(
+        r"([A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50}=)([\"'][)\]:,]+|[)\]:,]+)"
+    )
+    _ENV_KEY_PREFIX_RE = _re.compile(
+        r"([A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50}=)"
+    )
+    _REDACTED_ENV_VALUE_RE = _re.compile(
+        r"(?:\*{3,}|[A-Za-z0-9][A-Za-z0-9_.:/+-]{0,32}\.\.\.[A-Za-z0-9_.:/+-]{1,16})"
+    )
+
+    def _restore_code_env_key_literals(original: str, redacted: str) -> str:
+        if not isinstance(original, str) or not isinstance(redacted, str):
+            return redacted
+        literal_occurrences: dict[tuple[str, int], str] = {}
+        original_counts: dict[str, int] = {}
+        for match in _ENV_KEY_PREFIX_RE.finditer(original):
+            key_prefix = match.group(1)
+            occurrence = original_counts.get(key_prefix, 0)
+            original_counts[key_prefix] = occurrence + 1
+            literal_match = _CODE_ENV_KEY_LITERAL_RE.match(original, match.start())
+            if literal_match:
+                literal_occurrences[(key_prefix, occurrence)] = literal_match.group(2)
+        if not literal_occurrences:
+            return redacted
+        redacted_counts: dict[str, int] = {}
+        pieces = []
+        last = 0
+        for match in _ENV_KEY_PREFIX_RE.finditer(redacted):
+            key_prefix = match.group(1)
+            occurrence = redacted_counts.get(key_prefix, 0)
+            redacted_counts[key_prefix] = occurrence + 1
+            literal_suffix = literal_occurrences.get((key_prefix, occurrence))
+            if literal_suffix is None:
+                continue
+            value_match = _REDACTED_ENV_VALUE_RE.match(redacted, match.end())
+            if not value_match:
+                continue
+            pieces.append(redacted[last:value_match.start()])
+            pieces.append(literal_suffix)
+            last = value_match.end()
+        if not pieces:
+            return redacted
+        pieces.append(redacted[last:])
+        return "".join(pieces)
+
+    def _fallback_redact(text: str) -> str:
+        if not isinstance(text, str) or not text:
+            return text
+        text = _CRED_RE.sub(lambda m: _mask(m.group(1)), text)
+        text = _EMBEDDED_AWS_ACCESS_KEY_RE.sub(lambda m: _mask(m.group(0)), text)
+        text = _AUTH_HDR_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
+        text = _ENV_RE.sub(_env_replacement, text)
+        text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
+        return text
+
+    try:
+        from agent.redact import redact_sensitive_text
+    except ImportError:
+        return _fallback_redact
+
+    def _combined_redact(text: str) -> str:
+        if not isinstance(text, str) or not text:
+            return text
+        # WebUI API responses are a hard safety boundary — pass force=True so the
+        # agent's broader patterns (Stripe sk_live_, Google AIza…, JWT eyJ…, DB
+        # connection strings, Telegram bot tokens) run regardless of the user's
+        # HERMES_REDACT_SECRETS opt-in. The local fallback then handles the
+        # common short-prefix shapes the agent omits (ghp_, sk-, hf_, AKIA).
+        try:
+            agent_redacted = redact_sensitive_text(text, force=True)
+        except TypeError:
+            # Older hermes-agent builds that predate the force kwarg.
+            agent_redacted = redact_sensitive_text(text)
+        agent_redacted = _restore_code_env_key_literals(text, agent_redacted)
+        return _fallback_redact(agent_redacted)
+
+    return _combined_redact
+
+
+_redact_fn_uncached = _build_redact_fn()
+
+# Repeated dashboard polls re-request the same unchanged session payloads, so
+# the combined redactor (~15 regex passes per string) was the dominant CPU cost
+# under concurrent polling — enough to wedge the single-process server behind
+# the GIL and surface as "Mất kết nối" in the browser. The redactor is pure and
+# deterministic (force=True, fixed masking), so identical strings always map to
+# identical output and are safe to memoize without invalidation.
+_redact_fn_lru = functools.lru_cache(maxsize=4096)(_redact_fn_uncached)
+
+# Cap per-entry size so a handful of giant tool-output dumps can't evict the
+# thousands of small recurring strings that actually benefit, or balloon RSS.
+_REDACT_CACHE_MAX_TEXT_LEN = 16384
+
+
+def _redact_fn_cached(text):
+    if len(text) > _REDACT_CACHE_MAX_TEXT_LEN:
+        return _redact_fn_uncached(text)
+    return _redact_fn_lru(text)
+
+
+_SENSITIVE_CASE_MARKERS = (
+    "sk-",
+    "ghp_",
+    "github_pat_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "AKIA",
+    "xoxb-",
+    "xoxa-",
+    "xoxp-",
+    "xoxr-",
+    "xoxs-",
+    "AIza",
+    "pplx-",
+    "fal_",
+    "fc-",
+    "bb_live_",
+    "gAAAA",
+    "sk_live_",
+    "sk_test_",
+    "rk_live_",
+    "SG.",
+    "hf_",
+    "r8_",
+    "npm_",
+    "pypi-",
+    "dop_v1_",
+    "doo_v1_",
+    "am_",
+    "sk_",
+    "tvly-",
+    "exa_",
+    "gsk_",
+    "syt_",
+    "retaindb_",
+    "hsk-",
+    "mem0_",
+    "brv_",
+    "eyJ",
+    "-----BEGIN",
+)
+_SENSITIVE_LOWER_MARKERS = (
+    "authorization: bearer ",
+    "authorization: bot ",
+    "private key",
+    "postgres://",
+    "postgresql://",
+    "mysql://",
+    "mongodb://",
+    "redis://",
+    "amqp://",
+    "://",  # stage-348 Opus SHOULD-FIX: catch http(s)/ws(s)/ftp URL userinfo + sensitive query params (#2171 follow-up)
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "api_key",
+    "apikey",
+    "client_secret",
+    "auth_token",
+    "raw_secret",
+    "secret_input",
+    "key_material",
+    "x-amz-signature",
+    "token=",
+    "secret=",
+    "password=",
+    "authorization=",
+    "key=",
+    '"token"',
+    '"secret"',
+    '"password"',
+    '"bearer"',
+)
+_SENSITIVE_TELEGRAM_MARKER_RE = _re.compile(r"(?:bot)?\d{8,}:[-A-Za-z0-9_]{30,}")
+_SENSITIVE_DISCORD_MARKER_RE = _re.compile(r"<@!?\d{17,20}>")
+_SENSITIVE_PHONE_MARKER_RE = _re.compile(r"(?<![A-Za-z0-9])\+[1-9]\d{6,14}(?![A-Za-z0-9])")
+
+
+def _might_contain_sensitive_text(text: str) -> bool:
+    """Cheap prefilter before the full agent+fallback redaction pass."""
+    if not isinstance(text, str) or not text:
+        return False
+    if any(marker in text for marker in _SENSITIVE_CASE_MARKERS):
+        return True
+    lower = text.lower()
+    if any(marker in lower for marker in _SENSITIVE_LOWER_MARKERS):
+        return True
+    if ":" in text and _SENSITIVE_TELEGRAM_MARKER_RE.search(text):
+        return True
+    if "<@" in text and _SENSITIVE_DISCORD_MARKER_RE.search(text):
+        return True
+    if "+" in text and _SENSITIVE_PHONE_MARKER_RE.search(text):
+        return True
+    return False
+
+
+def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
+    """Redact sensitive text from API responses. Respects api_redact_enabled setting.
+
+    The ``_enabled`` parameter is an internal optimization for callers that
+    redact many strings in a single response — `redact_session_data()` reads
+    the setting once and threads it through ``_redact_value`` so we avoid
+    re-loading settings.json from disk per string. (Opus pre-release perf fix.)
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    if _enabled is None:
+        from api.config import load_settings
+        _enabled = bool(load_settings().get("api_redact_enabled", True))
+    if not _enabled:
+        return text
+    if not _might_contain_sensitive_text(text):
+        return text
+    return _redact_fn_cached(text)
+
+
+_RASTER_IMAGE_DATA_URI_PREFIXES = (
+    ("data:image/png;base64,", "png"),
+    ("data:image/jpeg;base64,", "jpeg"),
+    ("data:image/jpg;base64,", "jpeg"),
+    ("data:image/gif;base64,", "gif"),
+    ("data:image/webp;base64,", "webp"),
+    ("data:image/bmp;base64,", "bmp"),
+)
+
+
+def _is_native_raster_data_uri(text: str) -> bool:
+    """Return whether *text* is one complete, canonical raster data URI.
+
+    Native image content is opaque binary, not text that the credential regexes
+    can safely rewrite. The exemption is a credential-boundary decision, so a
+    matching header or magic prefix is not enough: decode the entire canonical
+    base64 payload and require the image format to terminate exactly at the end
+    of the decoded bytes. Any malformed, ambiguous, or trailing content falls
+    through to normal text redaction.
+    """
+    if not isinstance(text, str):
+        return False
+    image_kind = None
+    payload_start = 0
+    for prefix, candidate_kind in _RASTER_IMAGE_DATA_URI_PREFIXES:
+        # URI schemes and MIME type tokens are case-insensitive. Only normalize
+        # this short header slice — never the multi-megabyte base64 payload.
+        if text[:len(prefix)].lower() == prefix:
+            image_kind = candidate_kind
+            payload_start = len(prefix)
+            break
+    if image_kind is None:
+        return False
+
+    payload = text[payload_start:]
+    if not payload:
+        return False
+    try:
+        raw = _base64.b64decode(payload, validate=True)
+    except (_binascii.Error, ValueError):
+        return False
+    # validate=True rejects foreign characters and misplaced padding; this
+    # round-trip also rejects non-canonical pad bits and missing/extra padding.
+    if _base64.b64encode(raw).decode("ascii") != payload:
+        return False
+
+    if image_kind == "png":
+        return _is_complete_png(raw)
+    if image_kind == "jpeg":
+        return _is_complete_jpeg(raw)
+    if image_kind == "gif":
+        return _is_complete_gif(raw)
+    if image_kind == "webp":
+        return _is_complete_webp(raw)
+    if image_kind == "bmp":
+        return _is_complete_bmp(raw)
+    return False
+
+
+def _is_complete_png(raw: bytes) -> bool:
+    if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return False
+    pos = 8
+    chunk_index = 0
+    saw_idat = False
+    while pos < len(raw):
+        if pos + 12 > len(raw):
+            return False
+        length = int.from_bytes(raw[pos:pos + 4], "big")
+        chunk_type = raw[pos + 4:pos + 8]
+        data_start = pos + 8
+        data_end = data_start + length
+        chunk_end = data_end + 4
+        if chunk_end > len(raw):
+            return False
+        if not all((65 <= value <= 90) or (97 <= value <= 122) for value in chunk_type):
+            return False
+        if not 65 <= chunk_type[2] <= 90:  # PNG reserved bit must be zero.
+            return False
+        expected_crc = int.from_bytes(raw[data_end:chunk_end], "big")
+        actual_crc = _binascii.crc32(chunk_type + raw[data_start:data_end]) & 0xFFFFFFFF
+        if actual_crc != expected_crc:
+            return False
+
+        if chunk_index == 0:
+            if chunk_type != b"IHDR" or length != 13:
+                return False
+            width = int.from_bytes(raw[data_start:data_start + 4], "big")
+            height = int.from_bytes(raw[data_start + 4:data_start + 8], "big")
+            bit_depth = raw[data_start + 8]
+            color_type = raw[data_start + 9]
+            valid_depths = {
+                0: {1, 2, 4, 8, 16},
+                2: {8, 16},
+                3: {1, 2, 4, 8},
+                4: {8, 16},
+                6: {8, 16},
+            }
+            if (
+                not width
+                or not height
+                or bit_depth not in valid_depths.get(color_type, set())
+                or raw[data_start + 10] != 0
+                or raw[data_start + 11] != 0
+                or raw[data_start + 12] not in {0, 1}
+            ):
+                return False
+        elif chunk_type == b"IHDR":
+            return False
+
+        if chunk_type == b"IDAT":
+            saw_idat = True
+        if chunk_type == b"IEND":
+            return length == 0 and saw_idat and chunk_end == len(raw)
+        pos = chunk_end
+        chunk_index += 1
+    return False
+
+
+_JPEG_SOF_MARKERS = {
+    0xC0, 0xC1, 0xC2, 0xC3,
+    0xC5, 0xC6, 0xC7,
+    0xC9, 0xCA, 0xCB,
+    0xCD, 0xCE, 0xCF,
+}
+
+
+def _is_complete_jpeg(raw: bytes) -> bool:
+    if len(raw) < 4 or raw[:2] != b"\xff\xd8":
+        return False
+    pos = 2
+    saw_sof = False
+    saw_scan = False
+    while pos < len(raw):
+        marker_start = pos
+        if raw[pos] != 0xFF:
+            return False
+        while pos < len(raw) and raw[pos] == 0xFF:
+            pos += 1
+        if pos >= len(raw):
+            return False
+        marker = raw[pos]
+        pos += 1
+        if marker == 0xD9:
+            return saw_sof and saw_scan and pos == len(raw)
+        if marker in {0x00, 0x01, 0xD8} or 0xD0 <= marker <= 0xD7:
+            return False
+        if pos + 2 > len(raw):
+            return False
+        segment_length = int.from_bytes(raw[pos:pos + 2], "big")
+        if segment_length < 2:
+            return False
+        segment_end = pos + segment_length
+        if segment_end > len(raw):
+            return False
+        if marker in _JPEG_SOF_MARKERS:
+            if segment_length < 8:
+                return False
+            saw_sof = True
+        if marker != 0xDA:
+            pos = segment_end
+            continue
+
+        saw_scan = True
+        pos = segment_end
+        while pos < len(raw):
+            if raw[pos] != 0xFF:
+                pos += 1
+                continue
+            marker_start = pos
+            while pos < len(raw) and raw[pos] == 0xFF:
+                pos += 1
+            if pos >= len(raw):
+                return False
+            scan_marker = raw[pos]
+            if scan_marker == 0x00 or 0xD0 <= scan_marker <= 0xD7:
+                pos += 1
+                continue
+            pos = marker_start
+            break
+        else:
+            return False
+    return False
+
+
+def _gif_subblocks_end(raw: bytes, pos: int) -> int | None:
+    while pos < len(raw):
+        size = raw[pos]
+        pos += 1
+        if size == 0:
+            return pos
+        if pos + size > len(raw):
+            return None
+        pos += size
+    return None
+
+
+def _is_complete_gif(raw: bytes) -> bool:
+    if len(raw) < 14 or not raw.startswith((b"GIF87a", b"GIF89a")):
+        return False
+    width = int.from_bytes(raw[6:8], "little")
+    height = int.from_bytes(raw[8:10], "little")
+    if not width or not height:
+        return False
+    packed = raw[10]
+    pos = 13
+    if packed & 0x80:
+        pos += 3 * (1 << ((packed & 0x07) + 1))
+    if pos > len(raw):
+        return False
+    saw_image = False
+    while pos < len(raw):
+        introducer = raw[pos]
+        pos += 1
+        if introducer == 0x3B:
+            return saw_image and pos == len(raw)
+        if introducer == 0x21:
+            if pos >= len(raw):
+                return False
+            pos += 1  # extension label
+            end = _gif_subblocks_end(raw, pos)
+            if end is None:
+                return False
+            pos = end
+            continue
+        if introducer != 0x2C or pos + 9 > len(raw):
+            return False
+        image_width = int.from_bytes(raw[pos + 4:pos + 6], "little")
+        image_height = int.from_bytes(raw[pos + 6:pos + 8], "little")
+        image_packed = raw[pos + 8]
+        if not image_width or not image_height:
+            return False
+        pos += 9
+        if image_packed & 0x80:
+            pos += 3 * (1 << ((image_packed & 0x07) + 1))
+        if pos >= len(raw):
+            return False
+        lzw_minimum_code_size = raw[pos]
+        if not 2 <= lzw_minimum_code_size <= 11:
+            return False
+        pos += 1
+        end = _gif_subblocks_end(raw, pos)
+        if end is None:
+            return False
+        pos = end
+        saw_image = True
+    return False
+
+
+def _is_webp_image_chunk(chunk_type: bytes, data: bytes) -> bool:
+    if chunk_type == b"VP8 ":
+        if len(data) < 10 or data[3:6] != b"\x9d\x01\x2a":
+            return False
+        width = int.from_bytes(data[6:8], "little") & 0x3FFF
+        height = int.from_bytes(data[8:10], "little") & 0x3FFF
+        return bool(width and height)
+    if chunk_type == b"VP8L":
+        # The three high bits of the fifth byte are the version number. The
+        # current lossless bitstream defines only version zero.
+        return len(data) >= 5 and data[0] == 0x2F and not data[4] & 0xE0
+    return False
+
+
+def _is_complete_webp_frame(data: bytes) -> bool:
+    """Validate the nested chunks in one extended-WebP animation frame."""
+    if len(data) < 16 or data[15] & 0xFC:
+        return False
+    pos = 16
+    saw_image = False
+    while pos < len(data):
+        if pos + 8 > len(data):
+            return False
+        chunk_type = data[pos:pos + 4]
+        chunk_size = int.from_bytes(data[pos + 4:pos + 8], "little")
+        data_start = pos + 8
+        data_end = data_start + chunk_size
+        chunk_end = data_end + (chunk_size & 1)
+        if chunk_end > len(data):
+            return False
+        chunk_data = data[data_start:data_end]
+        if chunk_type in {b"VP8 ", b"VP8L"}:
+            if saw_image or not _is_webp_image_chunk(chunk_type, chunk_data):
+                return False
+            saw_image = True
+        elif chunk_type != b"ALPH":
+            return False
+        pos = chunk_end
+    return saw_image and pos == len(data)
+
+
+def _is_complete_webp(raw: bytes) -> bool:
+    if (
+        len(raw) < 20
+        or raw[:4] != b"RIFF"
+        or raw[8:12] != b"WEBP"
+        or int.from_bytes(raw[4:8], "little") + 8 != len(raw)
+    ):
+        return False
+    pos = 12
+    saw_image = False
+    while pos < len(raw):
+        if pos + 8 > len(raw):
+            return False
+        chunk_type = raw[pos:pos + 4]
+        chunk_size = int.from_bytes(raw[pos + 4:pos + 8], "little")
+        data_start = pos + 8
+        data_end = data_start + chunk_size
+        chunk_end = data_end + (chunk_size & 1)
+        if chunk_end > len(raw):
+            return False
+        data = raw[data_start:data_end]
+        if chunk_type in {b"VP8 ", b"VP8L"}:
+            if saw_image or not _is_webp_image_chunk(chunk_type, data):
+                return False
+            saw_image = True
+        elif chunk_type == b"VP8X":
+            if len(data) != 10 or data[0] & 0x81 or any(data[1:4]):
+                return False
+        elif chunk_type == b"ANMF":
+            if not _is_complete_webp_frame(data):
+                return False
+            saw_image = True
+        pos = chunk_end
+    return saw_image and pos == len(raw)
+
+
+def _is_complete_bmp(raw: bytes) -> bool:
+    if len(raw) < 26 or raw[:2] != b"BM":
+        return False
+    if int.from_bytes(raw[2:6], "little") != len(raw):
+        return False
+    pixel_offset = int.from_bytes(raw[10:14], "little")
+    dib_size = int.from_bytes(raw[14:18], "little")
+    if dib_size == 12:
+        width = int.from_bytes(raw[18:20], "little")
+        height = int.from_bytes(raw[20:22], "little")
+        planes = int.from_bytes(raw[22:24], "little")
+        bits_per_pixel = int.from_bytes(raw[24:26], "little")
+    elif dib_size >= 40 and 14 + dib_size <= len(raw):
+        width = int.from_bytes(raw[18:22], "little", signed=True)
+        height = int.from_bytes(raw[22:26], "little", signed=True)
+        planes = int.from_bytes(raw[26:28], "little")
+        bits_per_pixel = int.from_bytes(raw[28:30], "little")
+    else:
+        return False
+    return (
+        bool(width)
+        and bool(height)
+        and planes == 1
+        and bits_per_pixel in {1, 2, 4, 8, 16, 24, 32}
+        and 14 + dib_size <= pixel_offset < len(raw)
+    )
+
+
+def _redact_value(v, *, _enabled: bool | None = None):
+    """Recursively redact credentials from strings, dicts, and lists.
+
+    ``_enabled`` is threaded through so a single response-level redact pass
+    only reads settings.json once. (Opus pre-release perf fix.)
+    """
+    if isinstance(v, str):
+        return _redact_text(v, _enabled=_enabled)
+    if isinstance(v, dict):
+        return {
+            key: _redact_value(value, _enabled=_enabled)
+            for key, value in v.items()
+        }
+    if isinstance(v, list):
+        return [_redact_value(item, _enabled=_enabled) for item in v]
+    return v
+
+
+def _redact_message_content_part(part, *, _enabled: bool):
+    """Redact one canonical ``messages[*].content[*]`` part.
+
+    The raster exemption exists only at this authoritative schema position.
+    Image-shaped dictionaries in metadata, tools, todos, journals, or arbitrary
+    nested values remain on the normal fail-closed redaction path.
+    """
+    if not _enabled or not (
+        isinstance(part, dict)
+        and part.get("type") == "image_url"
+        and isinstance(part.get("image_url"), dict)
+    ):
+        return _redact_value(part, _enabled=_enabled)
+    result = {}
+    for key, value in part.items():
+        if key != "image_url":
+            result[key] = _redact_value(value, _enabled=_enabled)
+            continue
+        result[key] = {
+            image_key: image_value
+            if image_key == "url" and _is_native_raster_data_uri(image_value)
+            else _redact_value(image_value, _enabled=_enabled)
+            for image_key, image_value in value.items()
+        }
+    return result
+
+
+def _redact_messages(messages, *, _enabled: bool):
+    if not isinstance(messages, list):
+        return _redact_value(messages, _enabled=_enabled)
+    redacted = []
+    for message in messages:
+        if not isinstance(message, dict):
+            redacted.append(_redact_value(message, _enabled=_enabled))
+            continue
+        item = {}
+        allow_native_image = message.get("role") == "user"
+        for key, value in message.items():
+            if allow_native_image and key == "content" and isinstance(value, list):
+                item[key] = [
+                    _redact_message_content_part(part, _enabled=_enabled)
+                    for part in value
+                ]
+            else:
+                item[key] = _redact_value(value, _enabled=_enabled)
+        redacted.append(item)
+    return redacted
+
+
+def redact_session_data(session_dict: dict) -> dict:
+    """Redact credentials from message content, tool data, and session sidecars.
+
+    Applies to: messages[], tool_calls[], todo_state, runtime_journal_snapshot,
+    and title.
+    The underlying session file is not modified; redaction is response-layer only.
+
+    Reads the ``api_redact_enabled`` setting ONCE for the entire response and
+    threads it through to avoid hundreds of settings.json reads per session
+    payload (a 50-message session has hundreds of nested strings). When the
+    setting is disabled this is also a fast path: the recursion still walks
+    but every string returns early.
+    """
+    from api.config import load_settings
+    _enabled = bool(load_settings().get("api_redact_enabled", True))
+    result = dict(session_dict)
+    if isinstance(result.get('title'), str):
+        result['title'] = _redact_text(result['title'], _enabled=_enabled)
+    if 'messages' in result:
+        result['messages'] = _redact_messages(result['messages'], _enabled=_enabled)
+    if 'tool_calls' in result:
+        result['tool_calls'] = _redact_value(result['tool_calls'], _enabled=_enabled)
+    if 'todo_state' in result:
+        result['todo_state'] = _redact_value(result['todo_state'], _enabled=_enabled)
+    if 'runtime_journal_snapshot' in result:
+        result['runtime_journal_snapshot'] = _redact_value(
+            result['runtime_journal_snapshot'],
+            _enabled=_enabled,
+        )
+    return result
+
+
+def read_body(handler) -> dict:
+    """Read and JSON-parse a POST request body (capped at 20MB)."""
+    raw_length = handler.headers.get('Content-Length', 0)
+    try:
+        length = int(raw_length)
+    except (TypeError, ValueError):
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        raise ValueError(f'Invalid Content-Length: {raw_length!r}')
+    if length < 0:
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        raise ValueError(f'Invalid Content-Length: {length}')
+    if length > MAX_BODY_BYTES:
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        raise ValueError(f'Request body too large ({length} bytes, max {MAX_BODY_BYTES})')
+    raw = handler.rfile.read(length) if length else b'{}'
+    try:
+        return _json.loads(raw)
+    except Exception:
+        return {}
+
+
+# ── Profile cookie helpers (issue #798) ─────────────────────────────────────
+
+PROFILE_COOKIE_NAME = 'hermes_profile'
+_PROFILE_COOKIE_ENV = 'HERMES_WEBUI_PROFILE_COOKIE_NAME'
+_LEGACY_PROFILE_COOKIE_ENV = 'WEBUI_PROFILE_COOKIE_NAME'
+_legacy_profile_cookie_warned = False
+
+
+def get_profile_cookie_name() -> str:
+    """Return the cookie name used to persist the active WebUI profile.
+
+    Honours ``HERMES_WEBUI_PROFILE_COOKIE_NAME`` so multiple WebUI instances
+    sharing a hostname (different ports) can use distinct profile-cookie names
+    instead of trampling each other; browsers scope cookies by host, not
+    host+port (RFC 6265). The original ``WEBUI_PROFILE_COOKIE_NAME`` is still
+    honoured as a deprecated fallback (warned once per process, since this is
+    called on every request).
+    """
+    name = os.getenv(_PROFILE_COOKIE_ENV, '').strip()
+    if name:
+        return name
+    legacy = os.getenv(_LEGACY_PROFILE_COOKIE_ENV, '').strip()
+    if legacy:
+        global _legacy_profile_cookie_warned
+        if not _legacy_profile_cookie_warned:
+            logger.warning(
+                '%s is deprecated; use %s instead.',
+                _LEGACY_PROFILE_COOKIE_ENV,
+                _PROFILE_COOKIE_ENV,
+            )
+            _legacy_profile_cookie_warned = True
+        return legacy
+    return PROFILE_COOKIE_NAME
+
+
+def get_profile_cookie(handler) -> str | None:
+    """Extract and authenticate the active-profile cookie value.
+
+    When WebUI auth is enabled, the profile cookie is treated as an
+    authorization input for profile-scoped routes. Require it to be signed for
+    the current auth session so clients cannot forge ``hermes_profile`` to
+    impersonate another profile. In no-auth deployments, keep the historical
+    plain profile-name cookie behavior.
+    """
+    cookie_header = handler.headers.get('Cookie', '')
+    if not cookie_header:
+        return None
+    import http.cookies as _hc
+    cookie = _hc.SimpleCookie()
+    try:
+        cookie.load(cookie_header)
+    except _hc.CookieError:
+        return None
+    cookie_name = get_profile_cookie_name()
+    morsel = cookie.get(cookie_name)
+    if not (morsel and morsel.value):
+        return None
+
+    from api.profiles import _PROFILE_ID_RE
+
+    def _valid_profile_name(val: str) -> bool:
+        return val == 'default' or bool(_PROFILE_ID_RE.fullmatch(val))
+
+    raw_val = morsel.value
+    try:
+        from api.auth import is_auth_enabled, parse_cookie, verify_profile_cookie_value
+        if is_auth_enabled():
+            val = verify_profile_cookie_value(raw_val, parse_cookie(handler))
+            return val if val and _valid_profile_name(val) else None
+    except Exception:
+        logger.warning("Failed to verify active profile cookie", exc_info=True)
+        return None
+
+    # No-auth mode: the cookie is a per-browser UI preference, not an authz
+    # boundary, so retain the legacy plain profile-name format.
+    return raw_val if _valid_profile_name(raw_val) else None
+
+
+def build_profile_cookie(name: str, handler=None, *, session_cookie_value: str | None = None) -> str:
+    """Build a Set-Cookie header value for the active-profile cookie.
+
+    Always persist the selected profile in the cookie, including 'default'.
+    Clearing the cookie causes the backend to fall back to process-global
+    _active_profile, which can unexpectedly switch clients back to another
+    profile.
+
+    Set HttpOnly because the UI reads the active profile from
+    /api/profile/active JSON and does not need to access this cookie via
+    document.cookie.
+    """
+    import http.cookies as _hc
+    cookie = _hc.SimpleCookie()
+    cookie_name = get_profile_cookie_name()
+    value = name
+    # Guard against a future call site silently emitting an UNSIGNED profile
+    # cookie while auth is enabled (which a client could then... not forge, but
+    # it would weaken the binding). If auth is on we require a handler so the
+    # cookie is bound to the session. (#4023 Opus hardening.)
+    try:
+        from api.auth import is_auth_enabled
+        _auth_on = is_auth_enabled()
+    except Exception:
+        _auth_on = False
+    if _auth_on and handler is None:
+        if session_cookie_value is None:
+            raise RuntimeError("build_profile_cookie requires a request handler when auth is enabled (to bind the profile cookie to the session)")
+    if session_cookie_value is not None:
+        try:
+            from api.auth import sign_profile_cookie_value
+            value = sign_profile_cookie_value(name, session_cookie_value)
+        except Exception as exc:
+            logger.warning("Failed to sign active profile cookie", exc_info=True)
+            raise RuntimeError("could not sign active profile cookie") from exc
+    elif handler is not None:
+        try:
+            from api.auth import is_auth_enabled, parse_cookie, sign_profile_cookie_value
+            if is_auth_enabled():
+                value = sign_profile_cookie_value(name, parse_cookie(handler))
+        except Exception as exc:
+            logger.warning("Failed to sign active profile cookie", exc_info=True)
+            raise RuntimeError("could not sign active profile cookie") from exc
+    cookie[cookie_name] = value
+    cookie[cookie_name]['path'] = '/'
+    cookie[cookie_name]['httponly'] = True
+    cookie[cookie_name]['samesite'] = 'Lax'
+    return cookie[cookie_name].OutputString()
+
+
+def clear_profile_cookie(handler) -> None:
+    import http.cookies as _hc
+
+    cookie = _hc.SimpleCookie()
+    cookie_name = get_profile_cookie_name()
+    cookie[cookie_name] = ''
+    cookie[cookie_name]['path'] = '/'
+    cookie[cookie_name]['httponly'] = True
+    cookie[cookie_name]['samesite'] = 'Lax'
+    cookie[cookie_name]['max-age'] = '0'
+    handler.send_header('Set-Cookie', cookie[cookie_name].OutputString())

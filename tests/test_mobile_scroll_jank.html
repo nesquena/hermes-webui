@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Mobile Scroll Jank Test</title>
+<style>
+  /* Simulate the Hermes WebUI messages container */
+  *{box-sizing:border-box;margin:0;padding:0}
+
+  .shell{display:flex;flex-direction:column;height:100vh;width:100%;max-width:430px;margin:0 auto;border:1px solid #ccc;position:relative;}
+
+  .header{height:48px;background:#333;color:#fff;display:flex;align-items:center;padding:0 16px;font:14px/1.4 sans-serif;flex-shrink:0;}
+
+  .messages-shell{flex:1;min-height:0;position:relative;display:flex;flex-direction:column;}
+
+  /* EXACT copy of the .messages CSS from hermes-webui */
+  .messages{flex:1;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;min-height:0;position:relative;z-index:0;
+    -webkit-overflow-scrolling:touch;touch-action:pan-y;overscroll-behavior-y:contain;
+  }
+  /* Test target: start with overflow-anchor:auto so it matches the new fix */
+  .messages.test-auto{overflow-anchor:auto;}
+  /* Legacy (buggy): overflow-anchor:none — simulate the OLD behavior */
+  .messages.test-none{overflow-anchor:none;}
+
+  .msgInner{padding:16px;}
+
+  .message{padding:12px 16px;margin-bottom:8px;border-radius:12px;background:#f0f0f0;font:14px/1.5 sans-serif;max-width:85%;}
+  .message.user{background:#007aff;color:#fff;align-self:flex-end;margin-left:auto;}
+  .message.assistant{background:#e9e9eb;color:#000;align-self:flex-start;}
+  .message .thinking{color:#666;font-style:italic;margin-bottom:8px;border-left:2px solid #999;padding-left:8px;}
+  .message .reasoning{background:rgba(0,0,0,.05);border-radius:8px;padding:8px;font-size:13px;line-height:1.4;margin-bottom:6px;}
+
+  .composer{height:56px;border-top:1px solid #ddd;display:flex;align-items:center;padding:0 16px;background:#fff;flex-shrink:0;gap:8px;}
+  .composer input{flex:1;height:36px;border:1px solid #ddd;border-radius:18px;padding:0 16px;font:14px sans-serif;outline:none;}
+  .composer button{height:36px;padding:0 16px;border:none;border-radius:18px;background:#007aff;color:#fff;font:14px sans-serif;cursor:pointer;}
+
+  .controls{display:flex;gap:8px;padding:8px 16px;background:#f8f8f8;align-items:center;flex-wrap:wrap;border-bottom:1px solid #eee;flex-shrink:0;}
+  .controls label{font:12px sans-serif;display:flex;align-items:center;gap:4px;cursor:pointer;}
+  .controls button{font:12px sans-serif;padding:4px 8px;border:1px solid #ccc;border-radius:4px;background:#fff;cursor:pointer;}
+  .controls button.active{background:#007aff;color:#fff;border-color:#007aff;}
+  .controls .status{font:11px monospace;color:#666;margin-left:auto;}
+
+  #status{position:fixed;bottom:0;left:0;right:0;background:rgba(0,0,0,.8);color:#0f0;font:11px monospace;padding:4px 8px;z-index:999;}
+  #status.fail{color:#f00;}
+  #status.warn{color:#ff0;}
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <div class="header">🤖 Hermes WebUI (Mobile Test)</div>
+
+  <div class="controls">
+    <label><input type="checkbox" id="fixCss" checked> overflow-anchor: auto (on mobile)</label>
+    <label><input type="checkbox" id="fixJs" checked> window._fixMobileScrollJank()</label>
+    <button id="btnStream">▶ Simulate Stream</button>
+    <button id="btnRender">⚡ Simulate renderMessages()</button>
+    <button id="btnReset">↺ Reset</button>
+    <span class="status" id="stats">Ready</span>
+  </div>
+
+  <div class="messages-shell">
+    <div class="messages" id="messages" tabindex="0">
+      <div class="msgInner" id="msgInner"></div>
+    </div>
+  </div>
+
+  <div class="composer">
+    <input type="text" id="composerInput" placeholder="Type a message..." value="Привет, расскажи про мобильный баг">
+    <button id="btnSend">Send</button>
+  </div>
+</div>
+
+<div id="status">Test ready. Open DevTools > Elements > #messages to inspect. Scroll somewhere above bottom, then click "Simulate Stream".</div>
+
+<script>
+(function(){
+  // ---------------------------------------------------------------
+  // Simulate Hermes WebUI scroll infrastructure
+  // ---------------------------------------------------------------
+  const messages=document.getElementById('messages');
+  const msgInner=document.getElementById('msgInner');
+  const status=document.getElementById('status');
+
+  let _msgIdx=0;
+  let _scrollPinned=true;
+  let _messageUserUnpinned=false;
+  let _nearBottomCount=1;
+  let _lastScrollTop=0;
+  let _bottomSettleToken=0;
+  let _programmaticScroll=false;
+  let _animationCount=0;
+  let _jankCount=0;
+
+  // Helper to set status
+  function setStatus(text,type){
+    status.textContent=text;
+    status.className=type||'';
+  }
+
+  // ---------------------------------------------------------------
+  // Overflow-anchor toggle for fix-js test
+  // ---------------------------------------------------------------
+  window._fixMobileScrollJank=function _fixMobileScrollJank(){
+    if(!document.getElementById('fixJs').checked) return; // test: fix disabled
+    const el=document.getElementById('messages');
+    if(!el) return;
+    if(window.matchMedia('(hover:hover) and (pointer:fine)').matches) return;
+    el.style.overflowAnchor='auto';
+    requestAnimationFrame(()=>{if(el.style.overflowAnchor==='auto') el.style.overflowAnchor='';});
+  };
+
+  // ---------------------------------------------------------------
+  // Messages scroll helpers (mirrors Hermes WebUI)
+  // ---------------------------------------------------------------
+  function _setMessageScrollToBottom(){
+    _programmaticScroll=true;
+    messages.scrollTop=messages.scrollHeight;
+    _lastScrollTop=messages.scrollTop;
+    _nearBottomCount=1;
+    _scrollPinned=true;
+  }
+
+  function scrollIfPinned(){
+    if(!_scrollPinned||_messageUserUnpinned) return;
+    const dist=messages.scrollHeight-messages.scrollTop-messages.clientHeight;
+    if(dist>500) _setMessageScrollToBottom();
+  }
+
+  function _captureMessageScrollSnapshot(){
+    return {
+      top:messages.scrollTop,
+      bottom:Math.max(0,messages.scrollHeight-messages.scrollTop-messages.clientHeight),
+      scrollHeight:messages.scrollHeight,
+      pinned:_scrollPinned,
+      userUnpinned:_messageUserUnpinned,
+    };
+  }
+
+  function _restoreSnapshot(snap){
+    if(!snap) return;
+    const maxTop=Math.max(0,messages.scrollHeight-messages.clientHeight);
+    const target=snap.pinned
+      ? maxTop-Math.max(0,snap.bottom||0)
+      : Math.min(Number(snap.top)||0, maxTop);
+    messages.scrollTop=Math.max(0,target);
+    _lastScrollTop=messages.scrollTop;
+    if(snap.pinned) _scrollPinned=true;
+  }
+
+  // ---------------------------------------------------------------
+  // Content helpers
+  // ---------------------------------------------------------------
+  function addMessage(role,content){
+    const div=document.createElement('div');
+    div.className='message '+role;
+    div.innerHTML=content;
+    msgInner.appendChild(div);
+  }
+
+  function fillInitialMessages(count){
+    msgInner.innerHTML='';
+    for(let i=0;i<count;i++){
+      const role=i%2===0?'user':'assistant';
+      addMessage(role,`Message ${i+1}: `+'Lorem ipsum dolor sit amet consectetur adipiscing elit. '.repeat(3));
+    }
+    // Scroll to bottom initially
+    _setMessageScrollToBottom();
+  }
+
+  function appendStreamingChunk(text){
+    // Find or create a "live" assistant turn
+    let live=document.getElementById('liveAssistantTurn');
+    if(!live){
+      const div=document.createElement('div');
+      div.id='liveAssistantTurn';
+      div.className='message assistant';
+      div.dataset.liveAssistant='1';
+      const thinking=document.createElement('div');
+      thinking.className='thinking';
+      thinking.id='liveThinking';
+      thinking.textContent='Thinking...';
+      div.appendChild(thinking);
+      msgInner.appendChild(div);
+      live=div;
+    }
+    // Update thinking content
+    const thinking=document.getElementById('liveThinking');
+    if(!text||text.trim()===''){
+      // Initial: thinking card
+    } else {
+      // Replace thinking with content + new thinking card
+      live.innerHTML='<div style="margin-bottom:6px;background:rgba(0,0,0,.03);border-radius:8px;padding:8px;"><b>Reasoning:</b> '+text.slice(0,100)+'...</div><div style="margin-top:6px;"><span class="reasoning">'+text+'</span><br>▶ Response content...</div>';
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // THE BUG REPRODUCTION: simulate innerHTML=''
+  // ---------------------------------------------------------------
+  function simulateRenderMessages(preserveScroll){
+    const snap=_captureMessageScrollSnapshot();
+
+    // THE PROBLEM: before the fix, this innerHTML='' on mobile with
+    // overflow-anchor:none causes scrollTop to jank to 0 for one frame.
+    if(document.getElementById('fixJs').checked && typeof window._fixMobileScrollJank==='function'){
+      window._fixMobileScrollJank();
+    }
+
+    msgInner.innerHTML='';
+
+    // Rebuild DOM (simple: just add a few messages back)
+    for(let i=0;i<3;i++){
+      addMessage('user','User message during re-render');
+      addMessage('assistant','Assistant response during re-render');
+    }
+
+    // Capture the jank
+    const currentTop=messages.scrollTop;
+
+    // Restore
+    if(preserveScroll) _restoreSnapshot(snap);
+
+    const afterRestore=messages.scrollTop;
+
+    return {scrollBeforeWipe:messages.scrollTop,scrollAfterWipe:currentTop,scrollAfterRestore:afterRestore};
+  }
+
+  // ---------------------------------------------------------------
+  // THE BUG REPRODUCTION: stream simulation
+  // ---------------------------------------------------------------
+  function simulateStreamTick(){
+    const chunk=`Step ${++_animationCount}: `+'Detected potential scroll boundary... overflow-anchor='.repeat(5);
+
+    const snap=_captureMessageScrollSnapshot();
+
+    // HACK: to trigger the bug reliably, set overflow-anchor:none
+    // so the browser paints a frame with scrollTop=0
+    // Only for test-none mode when fixJs is OFF
+    if(!document.getElementById('fixJs').checked && document.querySelector('#messages').classList.contains('test-none')){
+      // Force jank: clear DOM without protection
+    }
+
+    // Apply JS fix if enabled
+    if(document.getElementById('fixJs').checked && typeof window._fixMobileScrollJank==='function'){
+      window._fixMobileScrollJank();
+    }
+
+    // Simulate _doRender logic:
+    appendStreamingChunk(chunk);
+
+    // Simulate scrollIfPinned
+    scrollIfPinned();
+
+    // Check for jank:
+    const el=messages;
+    const current=el.scrollTop;
+    const maxScroll=Math.max(0,el.scrollHeight-el.clientHeight);
+
+    // Detect jank: scrollTop fell to 0 or very low when user was pinned
+    // at the bottom or scrolled up to read a mid-stream message
+    if(snap.pinned && maxScroll>100 && (current<10 || (current < maxScroll-50 && snap.bottom>0 && snap.bottom<500))){
+      // This is the jank!
+      _jankCount++;
+      setStatus(`⚠️ JANK DETECTED #${_jankCount}: scrollTop=${current}, maxScroll=${maxScroll}, snap.top=${snap.top}, bottom=${snap.bottom}`, 'fail');
+      return false;
+    }
+
+    setStatus(`✓ Stream tick #${_animationCount}: scrollTop=${current}/${maxScroll}`, '');
+    return true;
+  }
+
+  // ---------------------------------------------------------------
+  // Test: Simulate full stream sequence (5 ticks)
+  // ---------------------------------------------------------------
+  async function runStreamTest(){
+    setStatus('Starting stream test...','');
+    _jankCount=0;
+    _animationCount=0;
+
+    // Record fix mode
+    const cssFix=document.getElementById('fixCss').checked;
+    const jsFix=document.getElementById('fixJs').checked;
+
+    // Apply CSS fix: update overflow-anchor
+    const el=messages;
+    if(cssFix){
+      el.classList.remove('test-none');
+      el.classList.add('test-auto');
+    } else {
+      el.classList.remove('test-auto');
+      el.classList.add('test-none');
+    }
+
+    for(let i=0;i<10;i++){
+      await new Promise(r=>setTimeout(r,150));
+      const ok=simulateStreamTick();
+      if(!ok && !cssFix && !jsFix){
+        // Expected: buggy mode janks
+        setStatus(`BUG REPRODUCED: jank #${_jankCount} at tick ${i+1} (expected in buggy mode)`, 'warn');
+      }
+    }
+
+    // Final status
+    if(cssFix||jsFix){
+      if(_jankCount===0){
+        setStatus(`✓ PASS: ${_jankCount} janks with fix (css=${cssFix}, js=${jsFix})`, '');
+      } else {
+        setStatus(`⚠️ PARTIAL: ${_jankCount} janks with fix (css=${cssFix}, js=${jsFix})`, 'warn');
+      }
+    } else {
+      setStatus(`ℹ️ BUG MODE: ${_jankCount} janks (expected — no fixes active)`, 'warn');
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Test: simulate renderMessages innerHTML wipe
+  // ---------------------------------------------------------------
+  function runRenderTest(){
+    const cssFix=document.getElementById('fixCss').checked;
+    const jsFix=document.getElementById('fixJs').checked;
+
+    const el=messages;
+    if(cssFix){
+      el.classList.remove('test-none');
+      el.classList.add('test-auto');
+    } else {
+      el.classList.remove('test-auto');
+      el.classList.add('test-none');
+    }
+
+    // First, scroll user up a bit (as if reading)
+    messages.scrollTop=Math.max(0,messages.scrollHeight-messages.clientHeight-200);
+    _scrollPinned=false;
+    _messageUserUnpinned=true;
+    setStatus(`Scrolled up to ${messages.scrollTop}. Running renderMessages(preserveScroll)...`,'');
+
+    const result=simulateRenderMessages(true);
+    setStatus(`Render test: jank window=${result.scrollAfterWipe}, restore=${result.scrollAfterRestore}`, result.scrollAfterWipe<10&&!cssFix&&!jsFix?'warn':'');
+  }
+
+  // ---------------------------------------------------------------
+  // Setup
+  // ---------------------------------------------------------------
+  fillInitialMessages(20);
+
+  // Event listeners
+  document.getElementById('btnStream').addEventListener('click', runStreamTest);
+  document.getElementById('btnRender').addEventListener('click', runRenderTest);
+  document.getElementById('btnReset').addEventListener('click', function(){
+    _jankCount=0;
+    _animationCount=0;
+    _scrollPinned=true;
+    _messageUserUnpinned=false;
+    fillInitialMessages(20);
+    setStatus('Reset. Tap "Simulate Stream" or "renderMessages" to test.','');
+  });
+
+  document.getElementById('fixCss').addEventListener('change', function(){
+    const el=messages;
+    if(this.checked){
+      el.classList.remove('test-none');
+      el.classList.add('test-auto');
+    } else {
+      el.classList.remove('test-auto');
+      el.classList.add('test-none');
+    }
+    setStatus(`CSS overflow-anchor: ${this.checked?'auto':'none'}`,'');
+  });
+
+  document.getElementById('btnSend').addEventListener('click', function(){
+    const input=document.getElementById('composerInput');
+    const text=input.value.trim();
+    if(!text) return;
+    addMessage('user',text);
+    // Auto-scroll bottom
+    _setMessageScrollToBottom();
+    input.value='';
+    setStatus(`Sent: "${text.slice(0,30)}..."`,'');
+    // Simulate a thinking card appearing
+    setTimeout(()=>{
+      appendStreamingChunk('');
+      _setMessageScrollToBottom();
+      setStatus('Assistant is thinking...','');
+    },300);
+  });
+})();
+</script>
+</body>
+</html>

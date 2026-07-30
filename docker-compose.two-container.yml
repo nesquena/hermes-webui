@@ -1,0 +1,151 @@
+# Two-container Docker Compose: Hermes Agent + Hermes WebUI
+#
+# QUICK START:
+#   docker compose -f docker-compose.two-container.yml up -d
+#   Open http://localhost:8787
+#
+# This runs the agent and web UI in separate containers connected via shared
+# Docker volumes. The WebUI installs the agent's Python dependencies from the
+# shared agent source volume at startup.
+#
+# WHEN TO USE THIS:
+#   - You want isolation between the agent gateway and the WebUI
+#   - You're already running hermes-agent in its own container
+#   - You don't need the dashboard (use docker-compose.three-container.yml for that)
+#
+# WHEN NOT TO USE THIS:
+#   - You hit "Permission denied" trying to share an existing ~/.hermes directory
+#     → use docker-compose.yml (single-container) instead, OR
+#     → keep this file but switch to NAMED VOLUMES (the default) instead of bind mounts
+#   - You're on Podman 3.4 or older without keep-id namespace support
+#     → see https://github.com/sunnysktsang/hermes-suite for an all-in-one image
+#
+# KNOWN LIMITATION (#681): tools triggered from the WebUI run in the WebUI
+# container, not the agent container. If you need git/node/etc. on the
+# WebUI's filesystem, install them in the WebUI image — or use a single-
+# container setup where everything lives in one place.
+#
+# NOTE ON VOLUMES:
+#   This file uses named Docker volumes (hermes-home, hermes-agent-src) which
+#   work out of the box on every Docker installation. If you prefer bind mounts
+#   to share an existing host directory:
+#
+#     volumes:
+#       hermes-home:
+#         driver: local
+#         driver_opts:
+#           type: none
+#           o: bind
+#           device: /home/youruser/.hermes
+#
+#   When using bind mounts, BOTH containers must mount the same host path,
+#   AND your host directory must be readable by UID 1000 (the default). Run:
+#     id -u && id -g
+#   to find your host UID/GID, then put them in a .env file:
+#     echo "UID=$(id -u)" >> .env
+#     echo "GID=$(id -g)" >> .env
+
+services:
+  hermes-agent:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-agent
+    command: gateway run
+    ports:
+      # Gateway API — exposed on localhost only.
+      # Other containers on hermes-net reach it via http://hermes-agent:8642.
+      # Remove 127.0.0.1: to expose on the host network (e.g. for remote clients).
+      - "127.0.0.1:8642:8642"
+    volumes:
+      # Persist config, state, sessions, skills, memory across restarts
+      - hermes-home:/home/hermes/.hermes
+      # Expose agent source so the WebUI can install dependencies from it
+      - hermes-agent-src:/opt/hermes
+    environment:
+      - HERMES_HOME=/home/hermes/.hermes
+      # Align UID/GID across containers sharing the hermes-home volume.
+      # Defaults to 1000 to match WANTED_UID/WANTED_GID in the webui service.
+      # The agent image's entrypoint already supports usermod remapping.
+      - HERMES_UID=${UID:-1000}
+      - HERMES_GID=${GID:-1000}
+      # Bind-mount permission handling for the agent — narrow set of overrides.
+      # NOTE: The agent's HERMES_HOME_MODE applies to the HERMES_HOME *directory*
+      # mode (default 0700) — NOT to credential files like the WebUI's variant.
+      # If you set this, you MUST keep the owner-execute bit so the agent can
+      # traverse its own home directory. 0640 BREAKS the agent (no x bit → no
+      # traversal). Use 0750 for group-traversable or 0701 for x-only.
+      # The agent's container detection (/.dockerenv) already auto-skips
+      # credential chmod inside Docker, so HERMES_SKIP_CHMOD is redundant here.
+      # - HERMES_HOME_MODE=0750
+    restart: unless-stopped
+    networks:
+      - hermes-net
+
+  hermes-webui:
+    image: ghcr.io/nesquena/hermes-webui:latest
+    container_name: hermes-webui
+    depends_on:
+      - hermes-agent
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      # Same hermes home as the agent — shares config, sessions, state
+      - hermes-home:/home/hermeswebui/.hermes
+      # Agent source mounted where docker_init.bash expects it.
+      # Mounted read-only — the WebUI only reads this volume to install
+      # the agent's Python dependencies at startup (`uv pip install`).
+      # Read-only enforces that defence-in-depth at the kernel layer.
+      - hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent:ro
+      # Workspace directory — browse and edit files from the WebUI.
+      # Adapt the host path to your project directory.
+      # Override with: HERMES_WORKSPACE=/your/path docker compose up
+      # ${HOME} is used rather than `~` so the default resolves the same way
+      # across Linux, macOS, WSL2, and Docker Desktop on Windows.
+      - ${HERMES_WORKSPACE:-${HOME}/workspace}:/workspace
+    environment:
+      - HERMES_WEBUI_HOST=0.0.0.0
+      - HERMES_WEBUI_PORT=8787
+      - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
+      # Let the WebUI health/status checks reach the gateway container over
+      # the compose network. Cron listing is local, but scheduled ticking and
+      # the Tasks/System gateway pill need a reachable gateway URL (#4483).
+      - HERMES_API_URL=http://hermes-agent:8642
+      # Match your host user's UID/GID for correct file permissions.
+      # In two-container setups the WebUI auto-detects UID/GID from the shared
+      # hermes-home volume, but you can override explicitly if needed (#668):
+      # Run `id -u` and `id -g` to find your values.
+      # On macOS, UIDs start at 501 — set these in a .env file:
+      #   echo "UID=$(id -u)" >> .env && echo "GID=$(id -g)" >> .env
+      - WANTED_UID=${UID:-1000}
+      - WANTED_GID=${GID:-1000}
+      # Optional: set a password for remote access
+      # - HERMES_WEBUI_PASSWORD=your-secret-password
+      # Bind-mount permission handling for the WebUI (fixes #1389, #1399).
+      # NOTE: WebUI's HERMES_HOME_MODE is a credential-file threshold (allow
+      # group bits on .env/.signing_key/etc.), DIFFERENT from the agent's
+      # which applies to the HERMES_HOME directory itself. 0640 is correct
+      # for the WebUI; do NOT copy this value to the agent service block.
+      # - HERMES_SKIP_CHMOD=1
+      # - HERMES_HOME_MODE=0640
+    restart: unless-stopped
+    networks:
+      - hermes-net
+
+networks:
+  hermes-net:
+    driver: bridge
+
+volumes:
+  # IMPORTANT — upgrading the agent image:
+  #   The `hermes-agent-src` volume is initialised from the agent image's
+  #   `/opt/hermes` on first `up`, and Docker reuses the volume verbatim on
+  #   later runs — even after `docker pull` of a newer agent image. After
+  #   upgrading the agent image, run:
+  #
+  #     docker compose down
+  #     docker volume rm <project>_hermes-agent-src
+  #     docker compose pull
+  #     docker compose up -d
+  #
+  #   The full procedure (and why) is documented in docs/docker.md.
+  hermes-home:
+  hermes-agent-src:

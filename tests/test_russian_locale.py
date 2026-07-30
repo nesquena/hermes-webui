@@ -1,0 +1,148 @@
+from collections import Counter
+from pathlib import Path
+import re
+from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
+
+
+REPO = Path(__file__).resolve().parent.parent
+PROFILE_CONCEPT_FALLBACK_KEYS = {
+    *PROFILE_CONCEPT_KEYS,
+    "workspace_artifact_source_session",
+}
+
+
+def read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def test_russian_locale_block_exists():
+    src = read(REPO / "static" / "i18n.js")
+    assert "\n  ru: {" in src
+    assert "_label: 'Русский'" in src
+    assert "_speech: 'ru-RU'" in src
+
+
+def extract_locale_block(src: str, locale_key: str) -> str:
+    start_match = re.search(rf"\b{re.escape(locale_key)}\s*:\s*\{{", src)
+    assert start_match, f"{locale_key} locale block not found"
+
+    start = start_match.end() - 1
+    depth = 0
+    in_single = False
+    in_double = False
+    in_backtick = False
+    escape = False
+
+    for i in range(start, len(src)):
+        ch = src[i]
+
+        if escape:
+            escape = False
+            continue
+
+        if in_single:
+            if ch == "\\":
+                escape = True
+            elif ch == "'":
+                in_single = False
+            continue
+
+        if in_double:
+            if ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_double = False
+            continue
+
+        if in_backtick:
+            if ch == "\\":
+                escape = True
+            elif ch == "`":
+                in_backtick = False
+            continue
+
+        if ch == "'":
+            in_single = True
+            continue
+        if ch == '"':
+            in_double = True
+            continue
+        if ch == "`":
+            in_backtick = True
+            continue
+
+        if ch == "{":
+            depth += 1
+            continue
+        if ch == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start + 1 : i]
+
+    raise AssertionError(f"{locale_key} locale block braces are not balanced")
+
+
+def test_russian_locale_includes_representative_translations():
+    src = read(REPO / "static" / "i18n.js")
+    expected = [
+        "settings_title: '\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438'",
+        "login_title: '\u0412\u0445\u043e\u0434'",
+        "approval_heading: '\u0422\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044f \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435'",
+        "tab_tasks: '\u0417\u0430\u0434\u0430\u0447\u0438'",
+        "tab_profiles: '\u041f\u0440\u043e\u0444\u0438\u043b\u0438'",
+        "session_time_bucket_today: '\u0421\u0435\u0433\u043e\u0434\u043d\u044f'",
+        "onboarding_title: '\u0414\u043e\u0431\u0440\u043e \u043f\u043e\u0436\u0430\u043b\u043e\u0432\u0430\u0442\u044c \u0432 Hermes Web UI'",
+        "onboarding_complete: '\u041f\u0435\u0440\u0432\u0438\u0447\u043d\u0430\u044f \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0430'",
+        "profile_default_label: '\u0028\u043f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e\u0029'",
+        "profile_name_placeholder: '\u041d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 \u043f\u0440\u043e\u0444\u0438\u043b\u044f \u0028\u0441\u0442\u0440\u043e\u0447\u043d\u044b\u0435 \u0431\u0443\u043a\u0432\u044b, a-z, 0-9, \u0434\u0435\u0444\u0438\u0441\u044b\u0029'",
+        "profile_clone_label: '\u0421\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u044e \u0438\u0437 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0433\u043e \u043f\u0440\u043e\u0444\u0438\u043b\u044f'",
+        "profile_base_url_placeholder: '\u0411\u0430\u0437\u043e\u0432\u044b\u0439 URL \u0028\u043d\u0435\u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u043e, \u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440 http://localhost:11434\u0029'",
+        "profile_api_key_placeholder: 'API-\u043a\u043b\u044e\u0447 \u0028\u043d\u0435\u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u043e\u0029'",
+        "mcp_tools_title: '\u0418\u043d\u0441\u0442\u0440\u0443\u043c\u0435\u043d\u0442\u044b MCP'",
+        "goal_status_none: '\u0410\u043a\u0442\u0438\u0432\u043d\u043e\u0439 \u0446\u0435\u043b\u0438 \u043d\u0435\u0442. \u0417\u0430\u0434\u0430\u0439\u0442\u0435 \u0435\u0451 \u043a\u043e\u043c\u0430\u043d\u0434\u043e\u0439 /goal <\u0442\u0435\u043a\u0441\u0442>.'",
+        "settings_heading_title: '\u0426\u0435\u043d\u0442\u0440 \u0443\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u044f'",
+        "providers_tab_title: '\u041f\u0440\u043e\u0432\u0430\u0439\u0434\u0435\u0440\u044b'",
+        "wiki_not_configured: 'Wiki \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d\u0430'",
+    ]
+    for entry in expected:
+        assert entry in src
+
+
+def test_public_share_locale_values_are_not_swapped():
+    src = read(REPO / "static" / "i18n.js")
+    en_block = extract_locale_block(src, "en")
+    ru_block = extract_locale_block(src, "ru")
+
+    assert "share_session: 'Share'" in en_block
+    assert "share_session_tooltip: 'Create a public read-only share link'" in en_block
+    assert "stop_sharing_session: 'Stop sharing'" in en_block
+    assert "share_session: 'Поделиться'" not in en_block
+
+    assert "share_session: 'Поделиться'" in ru_block
+    assert "share_session_tooltip: 'Создать публичную ссылку только для чтения'" in ru_block
+    assert "stop_sharing_session: 'Закрыть доступ'" in ru_block
+    assert "share_session: 'Share'" not in ru_block
+
+
+def test_russian_locale_covers_english_keys():
+    src = read(REPO / "static" / "i18n.js")
+    key_pattern = re.compile(r"^\s+([a-zA-Z0-9_]+):", re.MULTILINE)
+    en_keys = set(key_pattern.findall(extract_locale_block(src, "en")))
+    ru_keys = set(key_pattern.findall(extract_locale_block(src, "ru")))
+
+    missing = sorted((en_keys - ru_keys) - PROFILE_CONCEPT_FALLBACK_KEYS)
+    assert not missing, f"Russian locale missing keys: {missing}"
+
+
+def test_russian_locale_has_no_duplicate_keys():
+    src = read(REPO / "static" / "i18n.js")
+    key_pattern = re.compile(r"^\s+([a-zA-Z0-9_]+):", re.MULTILINE)
+    keys = key_pattern.findall(extract_locale_block(src, "ru"))
+    duplicates = sorted(k for k, count in Counter(keys).items() if count > 1)
+    assert not duplicates, f"Russian locale has duplicate keys: {duplicates}"
+
+
+def test_russian_locale_has_no_cjk_fallback_text():
+    src = read(REPO / "static" / "i18n.js")
+    ru_block = extract_locale_block(src, "ru")
+    assert not re.search(r"[\u3400-\u9fff\u3040-\u30ff]", ru_block)

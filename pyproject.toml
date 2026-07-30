@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools>=80", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-webui"
+description = "Hermes WebUI server and static runtime"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Hermes WebUI contributors"}]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+requires-python = ">=3.11"
+dynamic = ["version", "dependencies"]
+
+[project.urls]
+Repository = "https://github.com/nesquena/hermes-webui"
+Issues = "https://github.com/nesquena/hermes-webui/issues"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["api", "static"]
+py-modules = ["bootstrap", "server", "mcp_server"]
+
+[tool.setuptools.package-data]
+static = ["**/*"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools_scm]
+version_file = "api/_scm_version.py"
+
+# Hermes WebUI — build metadata plus Python tooling config.
+#
+# The project now exposes standard Python build metadata for the current flat
+# runtime layout while still keeping the source-checkout launch surface
+# (`bootstrap.py`, `start.sh`, `ctl.sh`) authoritative. The Ruff gate remains
+# forward-looking and line-scoped on NEW/CHANGED Python code; see
+# scripts/ruff_lint.py and TESTING.md > "Python lint gate (ruff)".
+
+[tool.ruff]
+# Match the Python versions exercised in CI (tests.yml matrix: 3.11–3.13).
+target-version = "py311"
+# Keep the linter scoped to the application + tests; never crawl vendored or
+# generated trees. (These are belt-and-suspenders; the gate passes explicit files.)
+extend-exclude = [
+    "node_modules",
+    "static",
+    ".git",
+    "scripts/windows",
+    "scripts/wsl",
+]
+
+[tool.ruff.lint]
+# Curated, correctness-leaning ruleset — high signal, low noise. We deliberately do
+# NOT enable the pure-style families (E1/E2/E5/E7 line-length & whitespace) so the
+# gate never demands a whitespace reformat of existing code.
+#
+#   E9  — syntax / IO / runtime errors (E999 etc). The whole tree is already clean
+#         of these and the in-suite test (tests/test_ruff_forward_lint.py) keeps it
+#         that way across every shard.
+#   F   — pyflakes: unused imports (F401), unused/undefined names (F841/F821),
+#         redefinitions (F811), f-strings with no placeholders (F541). The most
+#         valuable family for keeping NEW code clean.
+#   B   — flake8-bugbear: genuine latent-bug shapes — mutable default args (B006),
+#         raise-without-from (B904), loop-variable capture in closures (B023),
+#         zip-without-strict (B905). This is where the real future-regression-
+#         prevention value lives.
+select = ["E9", "F", "B"]
+
+# No global `ignore` of F401/F841/etc. The existing-tree backlog is handled by
+# line-scoping the gate to changed lines (scripts/ruff_lint.py), NOT by globally
+# disabling the rules — disabling them would blind the gate to the single most
+# common new-code defect (a stray unused import). Forward enforcement of the full
+# curated set is the whole point.
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately use `assert False` as an explicit failure marker (B011) and
+# occasionally shadow loop vars in table-driven cases (B007); that's idiomatic in a
+# test suite and not a production-code risk.
+"tests/**" = ["B011", "B007"]
