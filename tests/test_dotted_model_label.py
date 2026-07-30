@@ -1,0 +1,167 @@
+"""Dotted Bedrock/Vertex model-label normalization (split out of PR #6607).
+
+``us.anthropic.claude-opus-5`` carries a cross-region routing prefix and a vendor
+namespace. Left intact both survive into the human label, so the turn footer
+rendered "Us.anthropic.claude Opus 5".
+
+The normalization is implemented twice — inlined in ``_get_label_for_model()``
+(api/config.py) and as ``_stripDottedModelPrefix()`` (static/ui.js) — so these
+tests are PAIRED: one table drives both sides, and a divergence fails.
+
+The allow-list is closed on purpose. A generic "drop leading letters-only dot
+segments" loop rewrote arbitrary uncatalogued IDs (``deepseek.v3`` → "V3",
+``foo.bar.baz`` → "BAZ"); those cases are pinned below.
+"""
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).parent.parent.resolve()
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from api.config import _get_label_for_model  # noqa: E402
+
+UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+
+# (model_id, expected_normalized_id) — what the dotted-prefix step must leave
+# behind, BEFORE the shared cosmetic title-casing that both sides apply after.
+STRIP_CASES = [
+    # --- documented Bedrock/Vertex shapes: prefix is plumbing --------------
+    ("us.anthropic.claude-opus-5", "claude-opus-5"),
+    ("eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+     "claude-sonnet-4-5-20250929-v1"),
+    ("apac.anthropic.claude-haiku-4", "claude-haiku-4"),
+    ("mistral.mistral-large-2407-v1:0", "mistral-large-2407-v1"),
+    ("amazon.nova-pro-v1:0", "nova-pro-v1"),
+    ("meta.llama3-70b-instruct-v1:0", "llama3-70b-instruct-v1"),
+    # --- must be left BYTE-INTACT ------------------------------------------
+    # Vendor is the whole name: stripping it would render the model as "V3".
+    ("deepseek.v3", "deepseek.v3"),
+    # Uncatalogued vendor: not our shape, do not touch.
+    ("foo.bar.baz", "foo.bar.baz"),
+    ("acme.super-model-9", "acme.super-model-9"),
+    # A known region head with an unknown vendor is not our shape either.
+    ("us.foo.bar", "us.foo.bar"),
+    # Version dots must survive.
+    ("gpt-4.1", "gpt-4.1"),
+    ("qwen3.6-35b", "qwen3.6-35b"),
+    ("o1.5-preview", "o1.5-preview"),
+    # URI-scheme IDs are paths, not dotted namespaces.
+    ("https://host/v1.2/model", "https://host/v1.2/model"),
+    # No dot at all.
+    ("claude-opus-5", "claude-opus-5"),
+]
+
+# End-to-end labels through the real backend function.
+LABEL_CASES = [
+    ("us.anthropic.claude-opus-5", "Claude Opus 5"),
+    ("mistral.mistral-large-2407-v1:0", "Mistral Large 2407 V1"),
+    ("gpt-4.1", "GPT 4.1"),
+    ("qwen3.6-35b", "Qwen3.6 35B"),
+]
+
+
+@pytest.mark.parametrize("model_id,expected", LABEL_CASES)
+def test_backend_label_drops_dotted_plumbing(model_id, expected):
+    assert _get_label_for_model(model_id, []) == expected
+
+
+@pytest.mark.parametrize("model_id", [
+    "deepseek.v3", "foo.bar.baz", "acme.super-model-9", "us.foo.bar",
+])
+def test_backend_label_keeps_uncatalogued_vendor_name(model_id):
+    """The vendor word must not be silently deleted from an unknown ID."""
+    vendor = model_id.split(".")[0]
+    label = _get_label_for_model(model_id, [])
+    assert vendor.lower() in label.lower(), (
+        f"{model_id!r} lost its vendor: label={label!r}"
+    )
+
+
+def _js_strip(model_ids: list[str]) -> list[str]:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+
+    def extract(src: str, name: str) -> str:
+        start = src.index(f"function {name}(")
+        depth = 0
+        started = False
+        for i in range(start, len(src)):
+            if src[i] == "{":
+                depth += 1
+                started = True
+            elif src[i] == "}":
+                depth -= 1
+                if started and depth == 0:
+                    return src[start:i + 1]
+        raise AssertionError(f"unbalanced braces extracting {name}")
+
+    # The two Sets the helper closes over are declared immediately above it.
+    sets_start = UI_JS.index("const _BEDROCK_REGION_PREFIXES")
+    sets_end = UI_JS.index("function _stripDottedModelPrefix")
+    script = "\n".join([
+        UI_JS[sets_start:sets_end],
+        extract(UI_JS, "_stripDottedModelPrefix"),
+        "const ids = JSON.parse(process.argv[1]);",
+        "console.log(JSON.stringify(ids.map(_stripDottedModelPrefix)));",
+    ])
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", script, json.dumps(model_ids)],
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+    return json.loads(proc.stdout)
+
+
+def test_frontend_strip_matches_the_table():
+    """The JS half must normalize exactly as specified — same table."""
+    ids = [c[0] for c in STRIP_CASES]
+    js = _js_strip(ids)
+    for (model_id, expected), js_out in zip(STRIP_CASES, js):
+        assert js_out == expected, (
+            f"js drifted for {model_id!r}: js={js_out!r} expected={expected!r}"
+        )
+
+
+def test_frontend_and_backend_agree_on_every_case():
+    """Paired assertion: the backend label of each normalized ID must match the
+    backend label of the ID the FRONTEND normalized it to. If the two sides
+    disagreed, the picker and the turn footer would disagree with the server."""
+    ids = [c[0] for c in STRIP_CASES]
+    js = _js_strip(ids)
+    for model_id, js_normalized in zip(ids, js):
+        assert _get_label_for_model(model_id, []) == _get_label_for_model(
+            js_normalized, []
+        ), (
+            f"label divergence for {model_id!r}: backend labels it "
+            f"{_get_label_for_model(model_id, [])!r} but the frontend "
+            f"normalizes to {js_normalized!r} → "
+            f"{_get_label_for_model(js_normalized, [])!r}"
+        )
+
+
+def test_frontend_helper_exists_and_is_used():
+    assert "function _stripDottedModelPrefix" in UI_JS
+    assert "_stripDottedModelPrefix(_last)" in UI_JS
+    # The generic letters-only loop must be gone.
+    assert "/^[a-z]+$/i.test(_segs[_i]" not in UI_JS
+
+
+def test_backend_uses_a_closed_allow_list():
+    """Guard the design: the fix must not regress to a generic prefix loop."""
+    config_src = (REPO_ROOT / "api" / "config.py").read_text(encoding="utf-8")
+    idx = config_src.index("def _get_label_for_model")
+    block = config_src[idx:idx + 4000]
+    assert "_regions" in block and "_vendors" in block, (
+        "the dotted-prefix strip must be gated on explicit provider allow-lists"
+    )
+    assert "while _i < len(_segs) - 1 and _segs[_i].isalpha()" not in block, (
+        "the generic letters-only loop rewrites uncatalogued IDs"
+    )
