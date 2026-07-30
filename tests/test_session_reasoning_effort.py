@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import inspect
+import sys
 
 import api.config as config
 from api.models import Session
@@ -48,6 +49,15 @@ def test_effective_reasoning_clamps_model_override_to_provider_capability(monkey
     cfg = {"agent": {"reasoning_effort": "medium", "reasoning_overrides": {"kimi-k3": "max"}}}
 
     assert config.resolve_effective_reasoning_effort(cfg, "kimi-k3") == "high"
+
+
+def test_effective_reasoning_has_standalone_fallback_without_agent_module(monkeypatch):
+    monkeypatch.setitem(sys.modules, "hermes_constants", None)
+    monkeypatch.setattr(config, "resolve_model_reasoning_efforts", lambda *a, **k: ["low", "medium", "max"])
+    cfg = {"agent": {"reasoning_effort": "medium", "reasoning_overrides": {"gpt-5.6-sol": "low"}}}
+
+    assert config.resolve_effective_reasoning_effort(cfg, "@openai-codex:gpt-5.6-sol") == "low"
+    assert config.resolve_effective_reasoning_effort(cfg, "other-model") == "medium"
 
 
 def test_reasoning_parameter_does_not_shift_legacy_session_arguments():
