@@ -1,6 +1,7 @@
 """Session-scoped reasoning effort with per-model automatic fallback."""
 
 from pathlib import Path
+import inspect
 
 import api.config as config
 from api.models import Session
@@ -42,15 +43,38 @@ def test_effective_reasoning_prefers_session_then_model_override_then_global(mon
     assert config.get_reasoning_status(model_id="kimi-k3", session_effort="medium")["reasoning_effort"] == "medium"
 
 
+def test_effective_reasoning_clamps_model_override_to_provider_capability(monkeypatch):
+    monkeypatch.setattr(config, "resolve_model_reasoning_efforts", lambda *a, **k: ["low", "high"])
+    cfg = {"agent": {"reasoning_effort": "medium", "reasoning_overrides": {"kimi-k3": "max"}}}
+
+    assert config.resolve_effective_reasoning_effort(cfg, "kimi-k3") == "high"
+
+
+def test_reasoning_parameter_does_not_shift_legacy_session_arguments():
+    params = list(inspect.signature(Session.__init__).parameters)
+    assert params.index("reasoning_effort") > params.index("share_created_at")
+
+
 def test_session_update_route_accepts_and_evicts_reasoning_effort():
     assert '"reasoning_effort" in body' in ROUTES
     assert "s.reasoning_effort" in ROUTES
     assert "_evict_session_agent(body[\"session_id\"])" in ROUTES
+    handler = ROUTES.split('if parsed.path == "/api/session/update":', 1)[1].split('if parsed.path == "/api/session/worktree/remove":', 1)[0]
+    assert handler.index('raw_effort =') < handler.index('s.workspace = new_ws')
+
+
+def test_reasoning_status_checks_session_profile_visibility():
+    handler = ROUTES.split('if parsed.path == "/api/reasoning":', 1)[1].split('if parsed.path == "/api/onboarding/status":', 1)[0]
+    assert "_session_id_visible_to_request_profile" in handler
+
+
+def test_duplicate_and_fork_inherit_session_reasoning_effort():
+    assert ROUTES.count('reasoning_effort=getattr(') >= 3
 
 
 def test_streaming_uses_session_effort_before_resolved_model_config():
     assert "getattr(s, 'reasoning_effort', None)" in STREAMING
-    assert "resolve_reasoning_config" in STREAMING
+    assert "resolve_effective_reasoning_effort" in STREAMING
 
 
 def test_reasoning_chip_queries_session_and_writes_session_update():
