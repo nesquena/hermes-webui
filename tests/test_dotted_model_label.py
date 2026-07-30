@@ -163,42 +163,90 @@ def test_frontend_and_backend_agree_on_every_case():
 
 
 def test_every_catalog_dotted_id_loses_its_routing_prefix():
-    """Catalog-driven guard against region-set drift.
+    """Catalog-driven guard against region/vendor-set drift.
 
-    The region allow-list and the shipped model catalog are two lists that must
-    agree. They didn't: six ``global.anthropic.claude-*`` IDs shipped in the
-    catalog while ``global`` was missing from the region set, so every one of
-    them rendered as "Global.anthropic.claude Opus 4 7".
+    The allow-lists and the shipped catalog are two lists that must agree. They
+    didn't, twice: first ``global`` was missing (six IDs mislabeled), then
+    ``luma``/``twelvelabs``/``ibm`` were missing (real Bedrock vendors rendering
+    as "Us.luma.ray 2").
 
-    Rather than hardcode today's regions, scrape the catalog for dotted IDs whose
-    head is a known Bedrock routing head and assert none of them keeps a dotted
-    namespace in its label. A new routing prefix added to the catalog without
-    updating the region set fails here.
+    An earlier version of this test scraped only three-segment
+    ``<region>.<vendor>.<model>`` literals and therefore inspected **6** of the
+    **75** dotted catalog IDs — reassuring, but nearly blind. This version:
+
+    - scrapes ANY quoted ``id`` value (single or double quotes, any segment count);
+    - derives the offending prefixes from the PRODUCTION allow-lists rather than a
+      retyped copy, so a set that grows without test updates is still covered;
+    - skips version dots (``qwen3.6-plus``, ``gpt-5.4``), which are not namespaces.
     """
     import re as _re
 
     config_src = (REPO_ROOT / "api" / "config.py").read_text(encoding="utf-8")
-    # IDs of the form <head>.<vendor>.<model> that appear in catalog literals.
-    ids = set(_re.findall(
-        r'"id":\s*"([a-z0-9-]+\.[a-z0-9]+\.[^"]+)"', config_src
-    ))
-    assert ids, "no dotted catalog IDs found — did the catalog format change?"
+
+    # Derive the real allow-lists out of production source, don't retype them.
+    def _set_literal(marker: str) -> set[str]:
+        start = config_src.index(marker)
+        body = config_src[start:config_src.index("}", start)]
+        return {m.lower() for m in _re.findall(r'"([a-z0-9-]+)"', body)}
+
+    regions = _set_literal("_regions = {")
+    vendors = _set_literal("_vendors = {")
+    assert regions and vendors, "could not derive allow-lists from api/config.py"
+    namespace_heads = regions | vendors
+
+    ids = {
+        i for i in _re.findall(r"""['"]id['"]\s*:\s*['"]([^'"]+)['"]""", config_src)
+        if "." in i
+    }
+    assert len(ids) > 20, f"catalog scrape found only {len(ids)} dotted ids"
 
     offenders = []
     for model_id in sorted(ids):
+        head = model_id.split(".")[0].lower()
+        # Only IDs whose head is a KNOWN namespace should be stripped; a version
+        # dot such as `qwen3.6-plus` has no namespace head and is left alone.
+        if head not in namespace_heads:
+            continue
         label = _get_label_for_model(model_id, [])
-        # A correctly normalized label never retains a dotted namespace head.
-        if "." in label and label.split(".")[0].lower() in {
-            "us", "eu", "apac", "global", "us-gov", "anthropic", "amazon",
-            "meta", "mistral", "cohere", "ai21", "stability", "writer",
-            "deepseek", "qwen", "openai", "google",
-        }:
+        if head in label.lower().replace(" ", "."):
             offenders.append((model_id, label))
 
     assert not offenders, (
-        "catalog IDs still carry a routing/vendor prefix in their label — add "
-        f"the missing head to the region/vendor sets: {offenders}"
+        "catalog IDs still carry a routing/vendor prefix in their label — add the "
+        f"missing head to the region/vendor sets: {offenders}"
     )
+
+
+def test_known_bedrock_vendors_are_all_covered():
+    """Real Bedrock foundation-model vendors must all be in the allow-list.
+
+    These were shipping mislabeled: `luma.ray-2` rendered as "Luma.ray 2",
+    `us.twelvelabs.marengo-embed-2-7` as "Us.twelvelabs.marengo Embed 2 7".
+
+    The assertion is that no DOTTED NAMESPACE survives — not that the vendor word
+    is absent, because a vendor legitimately reappears inside some model names
+    (``mistral.mistral-large-2407`` → "Mistral Large 2407").
+    """
+    for model in [
+        "luma.ray-2",
+        "twelvelabs.marengo-embed-2-7",
+        "ibm.granite-3-8b-instruct",
+        "anthropic.claude-opus-5",
+        "amazon.nova-pro-v1:0",
+        "mistral.mistral-large-2407-v1:0",
+    ]:
+        head = model.split(".")[0]
+        label = _get_label_for_model(model, [])
+        assert f"{head}." not in label.lower(), (
+            f"{model!r} kept its vendor namespace: {label!r}"
+        )
+        # And with a region prefix in front.
+        regional = f"us.{model}"
+        rlabel = _get_label_for_model(regional, [])
+        assert "us." not in rlabel.lower() and f"{head}." not in rlabel.lower(), (
+            f"{regional!r} kept its namespace: {rlabel!r}"
+        )
+
 
 
 def test_global_region_is_recognized_in_both_implementations():

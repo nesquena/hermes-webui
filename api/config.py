@@ -6398,6 +6398,10 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
         _vendors = {
             "anthropic", "amazon", "meta", "mistral", "cohere", "ai21",
             "stability", "writer", "deepseek", "qwen", "openai", "google",
+            # Bedrock foundation-model vendors added after the first pass. Without
+            # these, real IDs rendered with the namespace intact -- "Us.luma.ray 2",
+            # "Twelvelabs.marengo Embed 2 7", "Ibm.granite 3 8B Instruct".
+            "luma", "twelvelabs", "ibm", "nvidia", "snowflake",
         }
         _segs = bare.split(".")
         _i = 0
