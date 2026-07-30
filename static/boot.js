@@ -3455,6 +3455,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _checkUpdates=()=>{
     if(_bootSettings.check_for_updates===false||sessionStorage.getItem('hermes-update-dismissed')) return;
     api('api/updates/check',{method:'POST',body:JSON.stringify({force:false})}).then(d=>{
+      // Re-check dismissed state after fetch — the user may have dismissed
+      // the banner while the request was in flight, preventing a race where
+      // _showUpdateBanner() re-displays a banner the user just closed.
+      if(sessionStorage.getItem('hermes-update-dismissed')) return;
       if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0)) _showUpdateBanner(d);
     }).catch(()=>{});
   };
