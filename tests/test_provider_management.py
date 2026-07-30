@@ -495,7 +495,9 @@ class TestRemoveProviderKey:
         stale = yaml.safe_load(stale_config.read_text(encoding="utf-8"))
         active = yaml.safe_load(active_config.read_text(encoding="utf-8"))
         assert stale["providers"]["openai"]["api_key"] == "stale-secret"
-        assert "api_key" not in active["providers"]["openai"]
+        # The providers.openai entry was fully removed since it only had api_key,
+        # and the empty providers section was itself removed (#6335 / #6581).
+        assert "providers" not in active
         assert active["model"] == {"provider": "openai"}
 
     def test_clean_custom_provider_key_matches_safe_name_slug(self, monkeypatch, tmp_path):
@@ -527,6 +529,141 @@ class TestRemoveProviderKey:
         custom_provider = reloaded["custom_providers"][0]
         assert custom_provider["name"] == "Local (127.0.0.1:15721)"
         assert "api_key" not in custom_provider
+
+    def test_clean_provider_key_removes_empty_entry_and_section(self, monkeypatch, tmp_path):
+        """Provider entry with only api_key -> entry removed and empty providers section removed."""
+        import yaml
+
+        import api.config as cfg_mod
+        import api.providers as providers
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({
+                "providers": {"openai": {"api_key": "sk-secret"}},
+                "model": {"provider": "openai"},
+            }),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(cfg_mod, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(providers, "reload_config", lambda: None)
+
+        providers._clean_provider_key_from_config("openai")
+
+        reloaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        # The provider entry had only api_key — both the entry and empty
+        # providers section should be removed (#6335).
+        assert "providers" not in reloaded
+        assert reloaded == {"model": {"provider": "openai"}}
+
+    def test_clean_provider_key_preserves_other_config_keys(self, monkeypatch, tmp_path):
+        """Provider with api_key plus other config keys -> only api_key removed, entry stays."""
+        import yaml
+
+        import api.config as cfg_mod
+        import api.providers as providers
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({
+                "providers": {
+                    "openai": {
+                        "api_key": "sk-secret",
+                        "base_url": "https://custom-openai.example.com/v1",
+                        "organization_id": "org-abc",
+                    },
+                },
+                "model": {"provider": "openai"},
+            }),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(cfg_mod, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(providers, "reload_config", lambda: None)
+
+        providers._clean_provider_key_from_config("openai")
+
+        reloaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        provider_entry = reloaded["providers"]["openai"]
+        assert "api_key" not in provider_entry
+        assert provider_entry["base_url"] == "https://custom-openai.example.com/v1"
+        assert provider_entry["organization_id"] == "org-abc"
+        # providers section stays because the entry still has other keys
+        assert "providers" in reloaded
+
+    def test_clean_provider_key_preserves_siblings(self, monkeypatch, tmp_path):
+        """Multiple configured providers: removing one empty target preserves siblings."""
+        import yaml
+
+        import api.config as cfg_mod
+        import api.providers as providers
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({
+                "providers": {
+                    "openai": {"api_key": "sk-openai"},
+                    "anthropic": {"api_key": "sk-anthropic"},
+                },
+                "model": {"provider": "openai", "api_key": "sk-model"},
+            }),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(cfg_mod, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(providers, "reload_config", lambda: None)
+
+        providers._clean_provider_key_from_config("openai")
+
+        reloaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        # openai entry was removed (only had api_key)
+        assert "openai" not in reloaded["providers"]
+        # anthropic sibling is preserved
+        assert reloaded["providers"]["anthropic"]["api_key"] == "sk-anthropic"
+        # providers section stays because anthropic still exists
+        assert "providers" in reloaded
+        # model.api_key was also cleaned (openai was active provider)
+        assert reloaded["model"] == {"provider": "openai"}
+
+    def test_clean_provider_key_invalidates_model_cache(self, monkeypatch, tmp_path):
+        """_clean_provider_key_from_config must call invalidate_models_cache()."""
+        import yaml
+
+        import api.config as cfg_mod
+        import api.providers as providers
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({
+                "providers": {"openai": {"api_key": "sk-secret"}},
+                "model": {"provider": "openai"},
+            }),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(cfg_mod, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(providers, "reload_config", lambda: None)
+
+        model_cache_invalidated = []
+        providers_cache_invalidated = []
+        monkeypatch.setattr(
+            providers, "invalidate_models_cache",
+            lambda: model_cache_invalidated.append(True),
+        )
+        monkeypatch.setattr(
+            providers, "invalidate_providers_cache",
+            lambda: providers_cache_invalidated.append(True),
+        )
+
+        providers._clean_provider_key_from_config("openai")
+
+        assert model_cache_invalidated == [True], (
+            "_clean_provider_key_from_config must call invalidate_models_cache()"
+        )
+        assert providers_cache_invalidated == [True], (
+            "_clean_provider_key_from_config must call invalidate_providers_cache()"
+        )
 
     def test_remove_provider_key_calls_set_with_none(self, monkeypatch, tmp_path):
         """remove_provider_key should delegate to set_provider_key(id, None)."""
