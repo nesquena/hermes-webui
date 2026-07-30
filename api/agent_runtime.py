@@ -145,6 +145,17 @@ def require_ai_agent_class():
     from run_agent import AIAgent  # noqa: PLC0415
 
     _capture_loaded_agent_revision()
+    # Close the #6481 producer/executor boundary: wrap the Agent's tool-result
+    # message builder so fresh terminal ``verification_evidence`` is stripped
+    # before the same-turn model request and before the incremental SessionDB
+    # flush. Installed once per process, at the chokepoint every Agent entry
+    # path (streaming, sync chat, gateway, heal) passes through.
+    try:
+        from api.streaming import _install_agent_verification_evidence_sanitizer
+
+        _install_agent_verification_evidence_sanitizer()
+    except Exception:
+        pass
     return AIAgent
 
 

@@ -1444,6 +1444,168 @@ def _clean_synthetic_control_messages_with_provenance(messages):
     return _drop_synthetic_control_messages(raw_messages), has_verification_nudge
 
 
+def _strip_verification_evidence_from_tool_content(content):
+    """Strip the ``verification_evidence`` field from a terminal tool result.
+
+    The Hermes Agent stamps every terminal result that matches a known
+    verification command (pytest, lint, etc.) with ``verification_evidence``
+    metadata in the JSON result dict. This field is an internal audit artifact
+    used by the agent's verify-on-stop loop; it has no display value and must
+    never be persisted in the stored transcript or fed back to the model on
+    subsequent turns where it can trigger phantom assistant messages (#6481).
+
+    Accepts both the in-process representation (a ``{"output": ...,
+    "exit_code": ..., "verification_evidence": {...}}`` dict — what the Agent's
+    ``tools/terminal_tool.py`` returns and ``make_tool_result_message`` embeds
+    before WebUI regains control) and the JSON-serialized string form found in
+    persisted transcripts. When ``verification_evidence`` is present the field
+    is removed (dict stays a dict, string is re-serialized); otherwise the
+    input is returned unchanged.
+    """
+    if isinstance(content, dict):
+        if "verification_evidence" not in content:
+            return content
+        return {k: v for k, v in content.items() if k != "verification_evidence"}
+    if not isinstance(content, str):
+        return content
+    if "verification_evidence" not in content:
+        return content
+    try:
+        parsed = json.loads(content)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return content
+    if not isinstance(parsed, dict):
+        return content
+    if "verification_evidence" not in parsed:
+        return content
+    parsed.pop("verification_evidence", None)
+    return json.dumps(parsed, ensure_ascii=False, sort_keys=False)
+
+
+def _correlate_tool_call_name(messages, tool_msg):
+    """Return the function name of the assistant tool_call matching a tool message.
+
+    Legacy tool-role rows can lack the ``name``/``tool_name`` fields the Agent
+    now stamps. To decide whether such a row is a terminal result without
+    trusting the payload text, correlate its ``tool_call_id`` against the
+    preceding assistant ``tool_calls`` entries. Returns ``""`` when no
+    correlation can be established (caller must then skip conservatively).
+    """
+    tid = tool_msg.get("tool_call_id") or tool_msg.get("call_id") or ""
+    if not tid:
+        return ""
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            tc_id = tc.get("id") or tc.get("call_id") or ""
+            if tc_id != tid:
+                continue
+            fn = tc.get("function") or {}
+            if isinstance(fn, dict) and fn.get("name"):
+                return fn.get("name") or ""
+            return tc.get("name") or ""
+    return ""
+
+
+def _strip_verification_from_messages(messages):
+    """Strip ``verification_evidence`` from terminal tool-role message content in a message list.
+
+    The Hermes Agent stamps terminal tool results with ``verification_evidence``
+    metadata in the JSON result string. This field is an internal audit artifact
+    and must not be stored in the WebUI transcript or fed back to the model on
+    subsequent turns, where it can trigger phantom assistant messages (#6481).
+
+    Operates on all messages in the list, modifying terminal tool-role message
+    ``content`` values in-place (dict content and JSON-string content are both
+    handled). Only strips from messages confirmed to be terminal tool results to
+    avoid deleting legitimate data from non-terminal tools:
+
+    - messages whose ``name`` or ``tool_name`` is ``\"terminal\"`` are stripped;
+    - legacy messages lacking both fields are correlated through ``tool_call_id``
+      against the preceding assistant ``tool_calls`` — stripped only when the
+      correlated function name is ``\"terminal\"``, preserved otherwise.
+    """
+    for msg in list(messages or []):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") != "tool":
+            continue
+        # Only strip from confirmed terminal tool results to avoid corrupting
+        # legitimate JSON content from plugin/MCP/native tools that might
+        # happen to use a top-level ``verification_evidence`` key.
+        msg_name = msg.get("name") or msg.get("tool_name") or ""
+        if msg_name:
+            if msg_name != "terminal":
+                continue
+        else:
+            # Legacy row without name/tool_name: correlate through tool_call_id.
+            if _correlate_tool_call_name(messages, msg) != "terminal":
+                continue
+        content = msg.get("content")
+        if not isinstance(content, (str, dict)):
+            continue
+        cleaned = _strip_verification_evidence_from_tool_content(content)
+        if cleaned != content:
+            msg["content"] = cleaned
+
+
+_AGENT_VERIFICATION_SANITIZER_INSTALLED = False
+
+
+def _install_agent_verification_evidence_sanitizer() -> None:
+    """Install a WebUI-owned wrapper on the Agent's tool-result message builder.
+
+    Closes the producer/executor boundary for #6481. The installed Hermes Agent
+    stamps ``verification_evidence`` onto terminal result dicts in
+    ``tools/terminal_tool.py``, and ``agent/tool_executor.py`` builds the
+    tool-role message from that dict and flushes it to state.db BEFORE WebUI
+    regains control of the turn. A WebUI post-run sanitizer can clean a later
+    display/sidecar copy, but it cannot prevent the same-turn model request or
+    the Agent's canonical SessionDB row from seeing the fresh field.
+
+    Wrapping ``make_tool_result_message`` at the message-construction chokepoint
+    strips the field before the message is appended to the live conversation and
+    before the incremental SessionDB flush, so neither the same-turn provider
+    payload nor the durable transcript ever contains it. The Agent's separate
+    verification ledger (``record_terminal_result``) is left untouched.
+
+    Idempotent — safe to call from every Agent entry point.
+    """
+    global _AGENT_VERIFICATION_SANITIZER_INSTALLED
+    if _AGENT_VERIFICATION_SANITIZER_INSTALLED:
+        return
+    try:
+        import agent.tool_dispatch_helpers as _tdh
+    except Exception:
+        logger.debug("verification evidence sanitizer: agent tool helpers unavailable", exc_info=True)
+        return
+    original = getattr(_tdh, "make_tool_result_message", None)
+    if original is None:
+        return
+    if getattr(original, "_webui_verification_sanitized", False):
+        _AGENT_VERIFICATION_SANITIZER_INSTALLED = True
+        return
+
+    def _sanitized_make_tool_result_message(name, content, tool_call_id, **kwargs):
+        if name == "terminal":
+            content = _strip_verification_evidence_from_tool_content(content)
+        return original(name, content, tool_call_id, **kwargs)
+
+    _sanitized_make_tool_result_message.__dict__["_webui_verification_sanitized"] = True
+    _tdh.make_tool_result_message = _sanitized_make_tool_result_message
+    # agent.tool_executor imports the helper via ``from ... import``, so it
+    # holds its own module-level reference that must be patched in place too.
+    try:
+        import agent.tool_executor as _te
+        _te.make_tool_result_message = _sanitized_make_tool_result_message
+    except Exception:
+        logger.debug("verification evidence sanitizer: tool_executor not yet importable", exc_info=True)
+    _AGENT_VERIFICATION_SANITIZER_INSTALLED = True
+
+
 def _active_turn_authority(session, stream_id, msg_text):
     """Capture the stream-owned pending turn before settlement mutates it."""
     pending_text = getattr(session, 'pending_user_message', None)
@@ -4848,6 +5010,11 @@ def _sanitize_messages_for_api(
             if not tid or tid not in valid_tool_call_ids:
                 # Orphaned tool result — skip to avoid 400 from strict providers.
                 continue
+            # Strip ``verification_evidence`` from terminal tool results BEFORE
+            # the message reaches the model API or persistence layer (#6481).
+            # This prevents the field from contaminating the model's context on
+            # subsequent turns and triggering phantom assistant messages.
+            _strip_verification_from_messages([msg])
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
         # Drop empty tool_calls — strict providers (DeepSeek, newer OpenAI)
         # reject tool_calls: [] with HTTP 400 even when no orphaned calls exist.
@@ -6172,6 +6339,14 @@ def _merge_display_messages_after_agent_result(
     # would otherwise slip into the merged transcript as a real delta. (#5334)
     previous_context = _drop_synthetic_control_messages(previous_context)
     result_messages = _drop_synthetic_control_messages(result_messages)
+    # Strip ``verification_evidence`` from terminal tool-role message content
+    # in ALL three inputs as a safety net. The primary strip happens in
+    # ``_sanitize_messages_for_api`` (before the model boundary); this is
+    # belt-and-suspenders at the persistence boundary for any fresh evidence
+    # from the just-returned agent result (#6481).
+    _strip_verification_from_messages(previous_display)
+    _strip_verification_from_messages(previous_context)
+    _strip_verification_from_messages(result_messages)
     if not result_messages:
         return previous_display
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
