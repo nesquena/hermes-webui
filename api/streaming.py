@@ -1783,6 +1783,154 @@ def _settle_result_messages(
     return result_messages
 
 
+def _extract_current_turn_completed_tool_rows(
+    result_messages,
+    msg_text,
+    *,
+    active_turn_identity=None,
+    previous_context_messages=None,
+):
+    """Return user + complete tool-call/result rows for the current turn."""
+    if isinstance(result_messages, dict):
+        result_messages = result_messages.get('messages')
+    cleaned = _drop_synthetic_control_messages(result_messages)
+    cleaned = _drop_synthetic_max_iteration_summary_requests(cleaned)
+    if not cleaned:
+        return []
+
+    previous_context_messages = list(previous_context_messages or [])
+    if _active_turn_boundary_is_valid(active_turn_identity):
+        current_user_idx = _find_active_turn_checkpoint_index(
+            cleaned,
+            previous_context_messages,
+            active_turn_identity,
+            msg_text,
+        )
+        if current_user_idx is None:
+            return []
+    else:
+        current_user_idx = _find_current_user_turn(cleaned, msg_text)
+    if current_user_idx is None:
+        return []
+
+    turn_messages = cleaned[current_user_idx:]
+    if len(turn_messages) < 2:
+        return []
+
+    for idx in range(1, len(turn_messages)):
+        if (
+            isinstance(turn_messages[idx], dict)
+            and turn_messages[idx].get('role') == 'user'
+        ):
+            turn_messages = turn_messages[:idx]
+            break
+
+    turn_messages = _sanitize_messages_for_api(turn_messages)
+    if not turn_messages:
+        return []
+    current_user = turn_messages[0]
+    if not isinstance(current_user, dict) or current_user.get('role') != 'user':
+        return []
+
+    completed_tool_result_ids = {
+        str(msg.get('tool_call_id') or '')
+        for msg in turn_messages
+        if isinstance(msg, dict)
+        and msg.get('role') == 'tool'
+        and str(msg.get('tool_call_id') or '')
+    }
+    if not completed_tool_result_ids:
+        return []
+
+    last_tool_result_idx = max(
+        idx
+        for idx, msg in enumerate(turn_messages)
+        if isinstance(msg, dict)
+        and msg.get('role') == 'tool'
+        and str(msg.get('tool_call_id') or '') in completed_tool_result_ids
+    )
+
+    rows = [copy.deepcopy(current_user)]
+    for msg in turn_messages[1:last_tool_result_idx + 1]:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get('role')
+        if role == 'assistant' and msg.get('tool_calls'):
+            cleaned_calls = []
+            for tc in msg.get('tool_calls') or []:
+                if not isinstance(tc, dict):
+                    continue
+                tc_id = str(tc.get('id') or tc.get('call_id') or '')
+                if tc_id in completed_tool_result_ids:
+                    cleaned_calls.append(copy.deepcopy(tc))
+            if not cleaned_calls:
+                continue
+            tool_row = copy.deepcopy(msg)
+            tool_row['tool_calls'] = cleaned_calls
+            rows.append(tool_row)
+            continue
+        if role == 'tool' and str(msg.get('tool_call_id') or '') in completed_tool_result_ids:
+            rows.append(copy.deepcopy(msg))
+    return rows
+
+
+def _preserve_cancelled_turn_tool_context(
+    session,
+    stream_id,
+    result_messages,
+    previous_context_messages,
+    msg_text,
+    source,
+    active_turn_identity,
+    ephemeral=False,
+):
+    """Persist completed current-turn tool context for a cancelled turn."""
+    if ephemeral:
+        return True
+    if not _can_settle_cancelled_turn_result(session, stream_id, msg_text):
+        return False
+
+    context_rows = _extract_current_turn_completed_tool_rows(
+        result_messages,
+        msg_text,
+        active_turn_identity=active_turn_identity,
+        previous_context_messages=previous_context_messages,
+    )
+    if not context_rows:
+        return True
+
+    context_rows = list(context_rows)
+    if previous_context_messages is None:
+        previous_context = list(session.context_messages or [])
+    else:
+        previous_context = list(previous_context_messages)
+    if [
+        _message_text(msg.get('content')) for msg in (session.context_messages or [])
+        if _is_context_compression_marker(msg)
+    ] != [
+        _message_text(msg.get('content')) for msg in previous_context
+        if _is_context_compression_marker(msg)
+    ]:
+        return True
+    merge_base = previous_context + list(context_rows)
+    next_context = _dedupe_replayed_context_messages(
+        previous_context,
+        merge_base,
+        msg_text,
+    )
+    next_context = _settle_current_turn_boundary(
+        previous_context,
+        next_context,
+        active_turn_identity,
+        msg_text,
+        source,
+    )
+    session.context_messages = _deduplicate_context_messages(
+        next_context if next_context else previous_context
+    )
+    return True
+
+
 def _current_turn_already_has_visible_assistant_answer(messages, *, active_turn_identity=None):
     """Return True only when the token-owned current turn already has visible assistant prose."""
     if not isinstance(active_turn_identity, dict) or not active_turn_identity.get('token'):
@@ -6065,6 +6213,59 @@ def _stream_writeback_can_supersede_recovery_marker(session, msg_text):
     return False
 
 
+def _stream_writeback_can_supersede_cancelled_turn_marker(session, msg_text):
+    """Allow a finishing worker to replace a persisted cancel marker row.
+
+    cancel_stream() may clear ``active_stream_id`` before the stream worker
+    finishes; in that case this helper permits that worker to retain completed
+    tool context as long as this turn is the visible latest cancellation turn.
+    """
+    if getattr(session, 'active_stream_id', None):
+        return False
+    if getattr(session, 'pending_user_message', None):
+        return False
+    if getattr(session, 'pending_attachments', None):
+        return False
+
+    messages = list(getattr(session, 'messages', None) or [])
+    if not messages:
+        return False
+
+    marker = messages[-1]
+    if not isinstance(marker, dict):
+        return False
+    if marker.get('role') != 'assistant' or not marker.get('_error'):
+        return False
+    content = str(marker.get('content') or '')
+    norm = content.strip().lower()
+    if not any(pattern in norm for pattern in _CANCEL_MARKER_PATTERNS):
+        return False
+
+    expected = ' '.join(str(msg_text or '').split())
+    if not expected:
+        return False
+    for idx in range(len(messages) - 2, -1, -1):
+        msg = messages[idx]
+        if not isinstance(msg, dict):
+            continue
+        if msg.get('_error'):
+            continue
+        if msg.get('role') != 'user':
+            continue
+        actual = ' '.join(str(msg.get('content') or '').split())
+        return actual == expected
+    return False
+
+
+def _can_settle_cancelled_turn_result(session, stream_id, msg_text):
+    """Return True when interrupted-result settlement for this turn is still valid."""
+    if _stream_writeback_is_current(session, stream_id):
+        return True
+    if _stream_writeback_can_supersede_cancelled_turn_marker(session, msg_text):
+        return True
+    return False
+
+
 def _advance_truncation_watermark_after_commit(session) -> None:
     """Advance a positive truncation watermark once a new user turn is committed
     to ``session.messages`` (#3831).
@@ -9594,6 +9795,21 @@ def _run_agent_streaming(
                 result=result,
                 agent=agent,
             )
+
+            def _settle_cancelled_turn_tool_context():
+                try:
+                    _preserve_cancelled_turn_tool_context(
+                        s,
+                        stream_id,
+                        result,
+                        _previous_owner_context_messages,
+                        msg_text,
+                        _turn_pending_source,
+                        _active_turn_identity,
+                        ephemeral,
+                    )
+                except Exception:
+                    logger.debug("Failed to preserve tool context during cancellation", exc_info=True)
             # #4729: the run is done — flush any reasoning tail still in the coalescing
             # buffer (the agent never calls reasoning_callback(None), and a turn can end on
             # reasoning with no trailing token/tool boundary to trigger a flush) so the last
@@ -9608,6 +9824,7 @@ def _run_agent_streaming(
                     _cleanup_ephemeral_cancelled_turn(s)
                 else:
                     with _agent_lock:
+                        _settle_cancelled_turn_tool_context()
                         _finalize_cancelled_turn(s, ephemeral=False)
                         try:
                             append_turn_journal_event_for_stream(
@@ -9650,6 +9867,7 @@ def _run_agent_streaming(
                 _ckpt_thread.join(timeout=15)
             if cancel_event.is_set():
                 with _agent_lock:
+                    _settle_cancelled_turn_tool_context()
                     _finalize_cancelled_turn(s, ephemeral=False)
                     try:
                         append_turn_journal_event_for_stream(
@@ -9711,6 +9929,7 @@ def _run_agent_streaming(
                         if isinstance(result, dict):
                             result = {**result, 'messages': _result_messages}
                     if cancel_event.is_set():
+                        _settle_cancelled_turn_tool_context()
                         _finalize_cancelled_turn(s, ephemeral=False)
                         try:
                             append_turn_journal_event_for_stream(
@@ -9963,6 +10182,7 @@ def _run_agent_streaming(
                 # _token_sent tracks whether on_token() was called (any streamed text)
                 if _terminal_failure or (not _assistant_added and not _token_sent):
                     if cancel_event.is_set():
+                        _settle_cancelled_turn_tool_context()
                         _finalize_cancelled_turn(s, ephemeral=ephemeral)
                         if not ephemeral:
                             try:
@@ -10624,6 +10844,7 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to append assistant_started turn journal event", exc_info=True)
                 if cancel_event.is_set():
+                    _settle_cancelled_turn_tool_context()
                     _finalize_cancelled_turn(s, ephemeral=False)
                     try:
                         append_turn_journal_event_for_stream(
@@ -10642,6 +10863,7 @@ def _run_agent_streaming(
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
                 if cancel_event.is_set():
+                    _settle_cancelled_turn_tool_context()
                     _finalize_cancelled_turn(s, ephemeral=False)
                     try:
                         append_turn_journal_event_for_stream(
@@ -10746,6 +10968,7 @@ def _run_agent_streaming(
             _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
             with _lock_ctx:
                 if cancel_event.is_set():
+                    _settle_cancelled_turn_tool_context()
                     _finalize_cancelled_turn(s, ephemeral=False)
                     try:
                         append_turn_journal_event_for_stream(
@@ -10778,6 +11001,7 @@ def _run_agent_streaming(
                             s.save(touch_updated_at=False)
                         except Exception:
                             logger.debug("Failed to persist restored process wakeup pause", exc_info=True)
+                        _settle_cancelled_turn_tool_context()
                         _finalize_cancelled_turn(s, ephemeral=False)
                         try:
                             append_turn_journal_event_for_stream(
@@ -10801,6 +11025,7 @@ def _run_agent_streaming(
                             s.save(touch_updated_at=False)
                         except Exception:
                             logger.debug("Failed to persist restored process wakeup pause", exc_info=True)
+                        _settle_cancelled_turn_tool_context()
                         _finalize_cancelled_turn(s, ephemeral=False)
                         try:
                             append_turn_journal_event_for_stream(
