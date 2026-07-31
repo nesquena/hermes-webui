@@ -350,8 +350,8 @@ def test_branch_fork_sessions_nest_under_parent():
         "Fork resolution must resolve the durable lineage authority per row"
     assert "visibleByLineageKey.get(scopedIdentityKey(child, childLineageKey||parentSid))" in block, \
         "Filtered renders must resolve visible lineage rows in the child's own scope"
-    assert "!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsFor(s)))" in block, \
-        "Only unpinned resolvable fork rows should be filtered out of the top-level rows array"
+    assert "!_isForkWithResolvableParent(s, sessionIdsFor(s))&&!forkHasVisibleParent(s)" in block, \
+        "Only forks with no visible parent should remain in the top-level rows array"
     render_fn = re.search(r'function _renderSidebarRowsFromRawSessions\(.*?\n\}', src, re.DOTALL)
     assert render_fn, "Could not find _renderSidebarRowsFromRawSessions"
     render_block = render_fn.group(0)
