@@ -680,11 +680,15 @@ function _buildSidebarLineageIndex(sessions, referenceSessions){
   const sourceFor=(row)=>_sidebarLineageSourceBucket(row);
   const profileFor=(row)=>_sessionProfileScope(row);
   const baseScope=(row)=>`${sourceFor(row)}\u0000${profileFor(row)}`;
-  const keyFor=(row,id)=>`${baseScope(row)}\u0000${String(id||'')}`;
+  const baseKeyFor=(row,id)=>baseScope(row)+'\u0000'+String(id||'');
   const isFork=(row)=>String(row&&row.session_source||'').toLowerCase()==='fork'
     || !!(row&&row.forked_from_session_id);
   const isProjection=(row)=>!!(row&&_isReadOnlySession(row)&&!isFork(row)
     &&(row.relationship_type==='child_session'||row.role==='child_session'||row._cross_surface_child_session));
+  const projectDiscriminator=(row)=>isProjection(row)
+    ?'projection'
+    :(row&&row.project_id===undefined||row&&row.project_id===null?'unassigned':String(row.project_id));
+  const keyFor=(row,id)=>baseKeyFor(row,id)+'\u0000'+projectDiscriminator(row);
   for(const row of rows){
     if(!row||!row.session_id) continue;
     const key=keyFor(row,row.session_id);
@@ -699,12 +703,19 @@ function _buildSidebarLineageIndex(sessions, referenceSessions){
     }
     nodeForRow.set(row,node);
   }
+  const nodesByBaseKey=new Map();
+  for(const node of nodesByKey.values()){
+    const base=node.key.slice(0,node.key.lastIndexOf('\u0000'));
+    if(!nodesByBaseKey.has(base)) nodesByBaseKey.set(base,[]);
+    nodesByBaseKey.get(base).push(node);
+  }
   for(const node of nodesByKey.values()){
     for(const field of ancestorFields){
       const id=node.row[field];
       if(!id||(field==='_lineage_root_id'||field==='lineage_root_id')&&id===node.row.session_id) continue;
-      const parent=nodesByKey.get(keyFor(node.row,id));
-      node.parents.push(parent||null);
+      const parents=nodesByBaseKey.get(baseKeyFor(node.row,id))||[];
+      if(parents.length) node.parents.push(...parents);
+      else node.parents.push(null);
     }
   }
   const cycleNodes=new Set();
@@ -802,9 +813,14 @@ function _buildSidebarLineageIndex(sessions, referenceSessions){
       for(const field of ancestorFields){
         const id=row[field];
         if(!id||(field==='_lineage_root_id'||field==='lineage_root_id')&&id===row.session_id) continue;
-        node.parents.push(nodesByKey.get(keyFor(row,id))||null);
+        const parents=nodesByBaseKey.get(baseKeyFor(row,id))||[];
+        if(parents.length) node.parents.push(...parents);
+        else node.parents.push(null);
       }
       nodesByKey.set(key,node);
+      const base=baseKeyFor(row,row.session_id);
+      if(!nodesByBaseKey.has(base)) nodesByBaseKey.set(base,[]);
+      nodesByBaseKey.get(base).push(node);
     }
     nodeForRow.set(row,node);
     return node;
