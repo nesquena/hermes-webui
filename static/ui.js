@@ -7153,6 +7153,15 @@ function _usedModelTurnChipLabel(msg){
   if(!usedModel)return'';
   return _compactComposerModelChipLabel(usedModel,getModelLabel(usedModel));
 }
+function _reasoningEffortChipLabel(msg){
+  // Effective reasoning effort stamped on the turn by the backend (post
+  // override + capability clamp). Raw level token ('high', 'max', …) or
+  // 'off' when reasoning is explicitly disabled. Empty = unknown (provider
+  // default) → render nothing rather than guess.
+  const v=String(msg&&msg._reasoningEffort||'').trim().toLowerCase();
+  if(!v)return'';
+  return v==='off'?(t('reasoning_off')||'reasoning off'):v;
+}
 function _gatewayRoutingFailoverText(routing){
   if(!routing||!routing.has_failover)return'';
   const attempts=Array.isArray(routing.routing)?routing.routing:[];
@@ -12159,7 +12168,7 @@ function _transparentTurnMetaMessage(turn){
     const candidate=S.messages[Number(mi)];
     if(!candidate||candidate.role!=='assistant')continue;
     if(!fallback)fallback=candidate;
-    if(candidate._turnDuration!=null||candidate._usedModel||candidate._firstTokenMs!=null||candidate._turnUsage)return candidate;
+    if(candidate._turnDuration!=null||candidate._usedModel||candidate._reasoningEffort||candidate._firstTokenMs!=null||candidate._turnUsage)return candidate;
   }
   return fallback;
 }
@@ -12167,13 +12176,14 @@ function _transparentTurnMetaMessage(turn){
 // Mirrors the live run-status line for settled turns in transparent
 // mode. Shows duration, first-token time, token usage, and final status.
 // Only rendered for turns that have transparent event rows.
-function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText, modelTitle){
+function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText, modelTitle, effortText){
   const parts=[];
   if(durationText) parts.push(`<span class="lf-time">${esc(durationText)}</span>`);
   if(modelText){
     const titleAttr=(modelTitle&&modelTitle!==modelText)?` title="${esc(modelTitle)}"`:'';
     parts.push(`<span class="lf-model"${titleAttr}>${esc(modelText)}</span>`);
   }
+  if(effortText) parts.push(`<span class="lf-effort" title="${esc(t('reasoning_effort')||'Effective reasoning effort')}">${esc(effortText)}</span>`);
   if(ttftText) parts.push(`<span class="lf-ttft" title="${esc(t('first_token_time')||'Time to first token')}">TTFT ${esc(ttftText)}</span>`);
   if(tokensText) parts.push(`<span class="lf-tokens">${esc(tokensText)}</span>`);
   if(statusText) parts.push(`<span class="lf-status">${esc(statusText)}</span>`);
@@ -12196,8 +12206,9 @@ function _renderTransparentTurnFooter(turn, opts){
   const modelTitle=opts&&opts.modelTitle||'';
   const ttftText=opts&&opts.ttftText||'';
   const tokensText=opts&&opts.tokensText||'';
+  const effortText=opts&&opts.effortText||'';
   const statusText=opts&&opts.statusText||(t('done')||'Done');
-  const html=_transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText, modelTitle);
+  const html=_transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText, modelTitle, effortText);
   let footer=turn.querySelector('.transparent-turn-footer');
   if(!html){
     if(footer) footer.remove();
@@ -14264,6 +14275,7 @@ function ensureRunActivityGroup(inner, opts){
 const _liveRunStatusTimers={};  // keyed by sessionId, max 1 active
 let _liveRunStatusTokens=null;
 let _liveRunStatusSessionId=null;
+let _liveRunMeta=null;  // {model, effort} announced by the backend run_meta SSE
 function _formatRunElapsed(seconds){
   const n=Number(seconds);
   if(!Number.isFinite(n)||n<0)return'00:00';
@@ -14328,11 +14340,17 @@ function _renderLiveRunStatusContent(el,startedAt){
   const elapsed=startedAt?Math.max(0,now-startedAt):0;
   const timeStr=_formatRunElapsed(elapsed);
   const tokens=_liveRunStatusTokens;
-  el.innerHTML=`<span class="live-run-status-dot tool-card-running-dot"></span><span class="live-run-status-text lf-time">${timeStr}</span>${tokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}<span class="lf-sep">·</span><span class="lf-status">Running</span>`;
+  const meta=_liveRunMeta||{};
+  const metaModelRaw=String(meta.model||((S.session&&S.session.model)||'')).trim();
+  const metaModel=metaModelRaw?_compactComposerModelChipLabel(metaModelRaw,getModelLabel(metaModelRaw)):'';
+  const metaEffort=String(meta.effort||'').trim().toLowerCase();
+  const effortLabel=metaEffort==='off'?(t('reasoning_off')||'reasoning off'):metaEffort;
+  el.innerHTML=`<span class="live-run-status-dot tool-card-running-dot"></span><span class="live-run-status-text lf-time">${timeStr}</span>${tokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}${metaModel?`<span class="lf-sep">·</span><span class="lf-model">${esc(metaModel)}</span>`:''}${effortLabel?`<span class="lf-sep">·</span><span class="lf-effort" title="${esc(t('reasoning_effort')||'Effective reasoning effort')}">${esc(effortLabel)}</span>`:''}<span class="lf-sep">·</span><span class="lf-status">Running</span>`;
 }
 function updateLiveRunStatus(opts){
   if(opts&&opts.sessionId&&_liveRunStatusSessionId&&opts.sessionId!==_liveRunStatusSessionId) return;
   if(opts&&opts.tokens!==undefined)_liveRunStatusTokens=opts.tokens;
+  if(opts&&opts.meta)_liveRunMeta=opts.meta;
   const el=$('liveRunStatus');
   if(el&&!el.hidden){
     _moveLiveRunStatusToTurnEnd(el);
@@ -14366,6 +14384,7 @@ function hideLiveRunStatus(sid){
   _clearLiveRunStatusTimer(sid||_liveRunStatusSessionId);
   _liveRunStatusTokens=null;
   _liveRunStatusSessionId=null;
+  _liveRunMeta=null;
 }
 function _startLiveRunStatusTimer(sid,startedAt){
   if(!sid)return;
@@ -17459,12 +17478,13 @@ function renderMessages(options){
       const compactWorklogForMessage=isCompactWorklogMode()&&(toolCallAssistantIdxs.has(mi)||assistantThinking.has(mi));
       const durationText=compactWorklogForMessage?'':_formatTurnDuration(msg._turnDuration);
       const usedModelText=_usedModelTurnChipLabel(msg);
-      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!usedModelText) continue;
+      const effortText=_reasoningEffortChipLabel(msg);
+      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!usedModelText&&!effortText) continue;
       const seg=assistantSegments.get(mi);
       const row=seg?seg.closest('.assistant-turn'):null;
       const footerRows=row?row.querySelectorAll('.msg-foot'):[];
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
-      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-used-model-inline')) continue;
+      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-used-model-inline,.msg-reasoning-inline')) continue;
       const fragments=[];
       if(modelWarningText){
         const warning=document.createElement('span');
@@ -17506,6 +17526,13 @@ function renderMessages(options){
         const usedModelFull=String(msg._usedModel||'').trim();
         if(usedModelFull&&usedModelFull!==usedModelText) usedModel.title=usedModelFull;
         fragments.push(usedModel);
+      }
+      if(effortText){
+        const effort=document.createElement('span');
+        effort.className='msg-reasoning-inline';
+        effort.textContent=effortText;
+        effort.title=t('reasoning_effort')||'Effective reasoning effort';
+        fragments.push(effort);
       }
       if(window._showTokenUsage&&hasTurnUsage){
         const usage=document.createElement('span');
@@ -17564,10 +17591,12 @@ function renderMessages(options){
         let modelTitle='';
         let ttftText='';
         let tokensText='';
+        let effortText='';
         if(msg){
           if(msg._turnDuration!=null) durationText=_formatTurnDuration(msg._turnDuration);
           modelText=_usedModelTurnChipLabel(msg);
           if(modelText) modelTitle=String(msg._usedModel||'').trim();
+          effortText=_reasoningEffortChipLabel(msg);
           if(msg._firstTokenMs!=null) ttftText=_formatFirstToken(msg._firstTokenMs);
           if(msg._turnUsage){
             const inTok=msg._turnUsage.input_tokens||0;
@@ -17581,6 +17610,7 @@ function renderMessages(options){
           modelTitle,
           ttftText,
           tokensText,
+          effortText,
           statusText: t('done')||'Done',
         });
       }else{
