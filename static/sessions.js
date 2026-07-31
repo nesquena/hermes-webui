@@ -6828,22 +6828,26 @@ function _isForkWithResolvableParent(s, sessionIdsInList){
 
 function _sessionLineageKey(s, sessionIdsInList, sessionsById, lineageIndex){
   if(!s||!s.session_id) return null;
+  const scopedIdentity=(row,identity)=>lineageIndex?lineageIndex.identityKey(row,identity):identity;
   if(_isChildSession(s)) return null;
   if(s.session_source==='fork') return null;
   const lineageKey=s._lineage_root_id||s.lineage_root_id||null;
-  if(lineageKey) return lineageIndex?lineageIndex.identityKey(s,lineageKey):lineageKey;
+  if(lineageKey) return scopedIdentity(s,lineageKey);
   // WebUI-native context compression may only persist parent_session_id:
   // the preserved parent snapshot is marked pre_compression_snapshot while
   // the new continuation points at it.  When both rows are in the sidebar
   // payload, still collapse them into one conversation (#2489).
-  const parent=s.parent_session_id&&sessionsById?sessionsById.get(s.parent_session_id):null;
+  const parent=s.parent_session_id&&sessionsById
+    ?sessionsById.get(scopedIdentity(s,s.parent_session_id)):null;
   if(s.pre_compression_snapshot||parent&&parent.pre_compression_snapshot){
     let root=s;
     const seen=new Set();
-    while(root&&root.parent_session_id&&sessionsById&&sessionsById.has(root.parent_session_id)&&!seen.has(root.parent_session_id)){
-      const next=sessionsById.get(root.parent_session_id);
+    while(root&&root.parent_session_id&&sessionsById
+      &&sessionsById.has(scopedIdentity(root,root.parent_session_id))
+      &&!seen.has(scopedIdentity(root,root.parent_session_id))){
+      const next=sessionsById.get(scopedIdentity(root,root.parent_session_id));
       if(!next||_isChildSession(next)||next.session_source==='fork'||!(root.pre_compression_snapshot||next.pre_compression_snapshot)) break;
-      seen.add(root.session_id);
+      seen.add(scopedIdentity(root,root.session_id));
       root=next;
     }
     const raw=root&&root.session_id||s.parent_session_id||s.session_id;
@@ -6852,11 +6856,11 @@ function _sessionLineageKey(s, sessionIdsInList, sessionsById, lineageIndex){
   // If parent_session_id points to another session in the current list,
   // this is a subagent/fork child without compression metadata — don't
   // collapse it into lineage (#494).
-  if(s.parent_session_id && sessionIdsInList && sessionIdsInList.has(s.parent_session_id)){
+  if(s.parent_session_id&&sessionIdsInList&&sessionIdsInList.has(scopedIdentity(s,s.parent_session_id))){
     return null;
   }
   const raw=s.parent_session_id || null;
-  return raw&&(lineageIndex?lineageIndex.identityKey(s,raw):raw);
+  return raw&&scopedIdentity(s,raw);
 }
 
 function _sessionLineageContainsSession(s, sid){
@@ -7032,6 +7036,9 @@ function _fetchLineageReportForRow(s,lineageKey){
 
 function _sidebarLineageKeyForRow(s, lineageIndex){
   if(!s) return null;
+  const stored=s._lineage_key||null;
+  if(stored&&stored.includes('\u0000')) return stored;
+  if(stored) return lineageIndex?lineageIndex.identityKey(s,stored):stored;
   const raw=s.session_source==='fork'
     ? s.session_id||s.parent_session_id
     : s._lineage_root_id||s.lineage_root_id||s.parent_session_id||s.session_id;
@@ -7099,7 +7106,10 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     : new Set(referenceSessions.map(s=>s&&s.session_id).filter(Boolean));
   const index=(lineageIndex&&lineageIndex._index)||lineageIndex||_buildSidebarLineageIndex(rawSessions,referenceSessions);
   const scopeKeyForSession=(session)=>index.scopeKey(session);
-  const scopedIdentityKey=(session, identity)=>index.identityKey(session, identity);
+  const scopedIdentityKey=(session, identity)=>{
+    const raw=String(identity||'');
+    return raw.includes('\u0000')?raw:index.identityKey(session,identity);
+  };
   const sessionIdsFor=(session)=>{
     if(durableLineageIds instanceof Map){
       const key=scopeKeyForSession(session);
@@ -7322,8 +7332,14 @@ function _syncSidebarExpansionForActiveSession(rows, activeSid, lineageIndex){
 function _collapseSessionLineageForSidebar(sessions, lineageIndex){
   const result=[];
   const index=lineageIndex||_buildSidebarLineageIndex(sessions,[]);
-  const sessionIdsInList=new Set((sessions||[]).map(s=>s.session_id));
-  const sessionsById=new Map((sessions||[]).filter(s=>s&&s.session_id).map(s=>[s.session_id,s]));
+  const scopedIdentityKey=(session, identity)=>{
+    const raw=String(identity||'');
+    return raw.includes('\u0000')?raw:index.identityKey(session,identity);
+  };
+  const sessionIdsInList=new Set((sessions||[])
+    .map(s=>s&&s.session_id&&scopedIdentityKey(s,s.session_id)).filter(Boolean));
+  const sessionsById=new Map((sessions||[]).filter(s=>s&&s.session_id).map(s=>[
+    scopedIdentityKey(s,s.session_id),s]));
   const groups=new Map();
   for(const s of sessions||[]){
     const key=_sessionLineageKey(s, sessionIdsInList, sessionsById,index);

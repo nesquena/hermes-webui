@@ -91,13 +91,6 @@ eval(extractFunc('_sessionProfileScope'));
 eval(extractFunc('_sidebarLineageSourceBucket'));
 eval(extractFunc('_isReadOnlySession'));
 eval(extractFunc('_buildSidebarLineageIndex'));
-function _buildSidebarLineageProjectResolver(s,r){{
-  const index=_buildSidebarLineageIndex(s,r);
-  const resolver=row=>index.projectFor(row);
-  Object.assign(resolver,index); resolver._index=index; return resolver;
-}}
-function _sidebarLineageScopeKey(s){{return _buildSidebarLineageIndex([s],[]).scopeKey(s);}}
-function _sidebarScopedIdentityKey(s,id){{return _buildSidebarLineageIndex([s],[]).identityKey(s,id);}}
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_sessionDisplayTitle'));
@@ -132,7 +125,7 @@ const allMatched = [
   { session_id:'unrelated_empty', title:'Unrelated empty', session_source:'webui', raw_source:'webui', source_tag:'webui', message_count:0, updated_at:50 },
 ];
 const activeSid = 'active_parent';
-const effectiveProject = _buildSidebarLineageProjectResolver(allMatched, []);
+const effectiveProject = _buildSidebarLineageIndex(allMatched, []);
 const part = _partitionSidebarSessionRows(allMatched, activeSid, effectiveProject);
 const rows = _renderSidebarRowsFromRawSessions(part.sessionsRaw, part.webuiReferenceRaw, {isCli:false, project:null}, effectiveProject);
 const parent = rows.find(r=>r.session_id==='active_parent') || {};
@@ -173,7 +166,7 @@ function renderOnce(childMsgCount){
     { session_id:'active_parent', title:'Parent WebUI', session_source:'webui', raw_source:'webui', source_tag:'webui', message_count:5, is_streaming:true, active_stream_id:'s1', updated_at:100, last_message_at:100 },
     { session_id:'subagent_child', title:'Subagent Session', parent_session_id:'active_parent', relationship_type:'child_session', raw_source:'subagent', source_tag:'subagent', session_source:'other', _parent_lineage_root_id:'active_parent', _cross_surface_child_session:true, message_count:childMsgCount, updated_at:101, last_message_at:101 },
   ];
-  const effectiveProject = _buildSidebarLineageProjectResolver(allMatched, []);
+  const effectiveProject = _buildSidebarLineageIndex(allMatched, []);
   const part = _partitionSidebarSessionRows(allMatched, 'active_parent', effectiveProject);
   const rows = _renderSidebarRowsFromRawSessions(part.sessionsRaw, part.webuiReferenceRaw, {isCli:false, project:null}, effectiveProject);
   const parent = rows.find(r=>r.session_id==='active_parent') || {};
@@ -221,7 +214,7 @@ const allMatched = [
   { session_id:'proj_parent', title:'Parent WebUI', session_source:'webui', raw_source:'webui', source_tag:'webui', message_count:5, project_id:'projX', updated_at:100, last_message_at:100 },
       { session_id:'subagent_child', title:'Subagent Session', parent_session_id:'proj_parent', relationship_type:'child_session', read_only:true, raw_source:'subagent', source_tag:'subagent', session_source:'other', _parent_lineage_root_id:'proj_parent', _cross_surface_child_session:true, message_count:3, updated_at:101, last_message_at:101 },
 ];
-const effectiveProject = _buildSidebarLineageProjectResolver(allMatched, []);
+const effectiveProject = _buildSidebarLineageIndex(allMatched, []);
 const part = _partitionSidebarSessionRows(allMatched, null, effectiveProject);
 const rows = _renderSidebarRowsFromRawSessions(part.sessionsRaw, part.webuiReferenceRaw, {isCli:false, project:global._activeProject}, effectiveProject);
 console.log(JSON.stringify({
@@ -250,14 +243,14 @@ const parentA = { session_id:'parent', profile:'work', profile_scope:'work', pro
 const parentOtherProfile = { session_id:'parent', profile:'other', profile_scope:'other', project_id:'projB', session_source:'webui', message_count:3 };
     const child = { session_id:'child', profile:'work', profile_scope:'work', parent_session_id:'parent', _parent_lineage_root_id:'parent', relationship_type:'child_session', read_only:true, session_source:'other', raw_source:'subagent', _cross_surface_child_session:true, message_count:2 };
 const projectBSiblingFork = { session_id:'forkB', profile:'work', profile_scope:'work', parent_session_id:'parent', session_source:'fork', project_id:'projB', message_count:3 };
-const uniqueResolver = _buildSidebarLineageProjectResolver([parentA, parentOtherProfile, child, projectBSiblingFork], []);
+const uniqueResolver = _buildSidebarLineageIndex([parentA, parentOtherProfile, child, projectBSiblingFork], []);
 const uniquePart = _partitionSidebarSessionRows([parentA, parentOtherProfile, child, projectBSiblingFork], null, uniqueResolver);
 const uniqueRows = _renderSidebarRowsFromRawSessions(uniquePart.sessionsRaw, [], {isCli:false, project:'projA'}, uniqueResolver);
 const ambiguous = { ...parentA, project_id:'projB' };
-const ambiguousResolver = _buildSidebarLineageProjectResolver([parentA, ambiguous, child], []);
+const ambiguousResolver = _buildSidebarLineageIndex([parentA, ambiguous, child], []);
 console.log(JSON.stringify({
-  inherited: uniqueResolver(child),
-  sibling: uniqueResolver(projectBSiblingFork),
+  inherited: uniqueResolver.projectFor(child),
+  sibling: uniqueResolver.projectFor(projectBSiblingFork),
   uniqueRaw: uniquePart.sessionsRaw.map(s=>s.session_id),
   uniqueChildren: (uniqueRows.find(r=>r.session_id==='parent')||{})._child_sessions?.map(s=>s.session_id)||[],
       ambiguous: ambiguousResolver.ownership(child),
@@ -287,7 +280,7 @@ const diamondRoot = { session_id:'diamond_root', profile_scope:'work', project_i
 const selfRoot = { session_id:'self_root', profile_scope:'work', project_id:'projA', _lineage_root_id:'self_root', session_source:'webui', message_count:3 };
     const selfRootChild = { session_id:'self_root_child', profile_scope:'work', parent_session_id:'self_root', relationship_type:'child_session', read_only:true, session_source:'webui', message_count:2 };
 const raw = [cyclicParent, cyclicChild, diamondRoot, diamondLeft, diamondRight, diamondTip, selfRoot, selfRootChild];
-const effectiveProject = _buildSidebarLineageProjectResolver(raw, []);
+const effectiveProject = _buildSidebarLineageIndex(raw, []);
 const part = _partitionSidebarSessionRows(raw, null, effectiveProject);
 const rows = _renderSidebarRowsFromRawSessions(part.sessionsRaw, [], {isCli:false, project:'projA'}, effectiveProject);
 const parent = rows.find(r=>r.session_id==='cyclic_parent') || {};
@@ -317,7 +310,7 @@ const collapsed = [];  // parent absent from this render
 const raw = [
   { session_id:'subagent_child', title:'Subagent Session', parent_session_id:'filtered_parent', relationship_type:'child_session', raw_source:'subagent', source_tag:'subagent', session_source:'other', source_label:'Subagent', _parent_lineage_root_id:'filtered_parent', _cross_surface_child_session:true, message_count:2 },
 ];
-const effectiveProject = _buildSidebarLineageProjectResolver(raw, []);
+const effectiveProject = _buildSidebarLineageIndex(raw, []);
 const rows = _attachChildSessionsToSidebarRows(collapsed, raw, [], undefined, effectiveProject);
 console.log(JSON.stringify(rows.map(r=>({sid:r.session_id, orphan:!!r._orphan_child_session}))));
 """
@@ -337,7 +330,7 @@ const raw = [
   collapsed[0],
   { session_id:'subagent_child', title:'Subagent Session', parent_session_id:'webui_parent', relationship_type:'child_session', raw_source:'subagent', source_tag:'subagent', session_source:'other', source_label:'Subagent', _parent_lineage_root_id:'webui_parent', _cross_surface_child_session:true, message_count:2 },
 ];
-const effectiveProject = _buildSidebarLineageProjectResolver(raw, []);
+const effectiveProject = _buildSidebarLineageIndex(raw, []);
 const rows = _attachChildSessionsToSidebarRows(collapsed, raw, [], undefined, effectiveProject);
 const parent = rows.find(r=>r.session_id==='webui_parent') || {};
 console.log(JSON.stringify({
@@ -362,7 +355,7 @@ const raw = [
   collapsed[0],
   { session_id:'webui_tip', title:'Current WebUI continuation', parent_session_id:'telegram_parent', relationship_type:'child_session', parent_source:'telegram', source_label:'Telegram', session_source:'messaging', raw_source:'telegram', _cross_surface_child_session:true },
 ];
-const effectiveProject = _buildSidebarLineageProjectResolver(raw, []);
+const effectiveProject = _buildSidebarLineageIndex(raw, []);
 const rows = _attachChildSessionsToSidebarRows(collapsed, raw, [], undefined, effectiveProject);
 console.log(JSON.stringify(rows.map(r=>({sid:r.session_id, orphan:!!r._orphan_child_session}))));
 """
