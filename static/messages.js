@@ -1483,7 +1483,7 @@ async function send(){
       let _pushedUser=false;
       if(!_cmd.noEcho){
         if(!S.session){await newSession();await renderSessionList();}
-        if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         _pushedUser=true;
         renderMessages();
@@ -1502,7 +1502,8 @@ async function send(){
     if(_parsedCmd&&!_cmd){
       if(_parsedCmd.name==='pet'){
         if(!S.session){await newSession();await renderSessionList();}
-        if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+        const _asyncCommandSid=S.session&&S.session.session_id;
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _petOutput=null;
         try{
@@ -1512,8 +1513,9 @@ async function send(){
         }catch(e){
           _petOutput={handled:false,message:`Desktop Companion command error: ${e&&e.message||e}`};
         }
+        if(!S.session||S.session.session_id!==_asyncCommandSid)return;
         if(_petOutput&&_petOutput.message){
-          if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+          if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'assistant',content:String(_petOutput.message),_ts:Date.now()/1000});
         }
         renderMessages();
@@ -1528,14 +1530,16 @@ async function send(){
         if(typeof renderSessionList==='function') await renderSessionList();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
+      const _asyncCommandSid=S.session&&S.session.session_id;
       const _agentCmd=typeof getAgentCommandMetadata==='function'
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
+      if(!S.session||S.session.session_id!==_asyncCommandSid)return;
       if(_agentCmd&&_agentCmd.cli_only){
         if(!S.session){await newSession();await renderSessionList();}
-        if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-        if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
@@ -1543,7 +1547,7 @@ async function send(){
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
         if(!S.session){await newSession();await renderSessionList();}
-        if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _agentOutput='(no output)';
         try{
@@ -1553,14 +1557,15 @@ async function send(){
         }catch(e){
           _agentOutput=`Agent command error: ${e&&e.message||e}`;
         }
-        if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+        if(!S.session||S.session.session_id!==_asyncCommandSid)return;
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
         if(!S.session){await newSession();await renderSessionList();}
-        if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _pluginOutput='(no output)';
         try{
@@ -1570,7 +1575,8 @@ async function send(){
         }catch(e){
           _pluginOutput=`Plugin command error: ${e&&e.message||e}`;
         }
-        if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+        if(!S.session||S.session.session_id!==_asyncCommandSid)return;
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'assistant',content:String(_pluginOutput||'(no output)'),_ts:Date.now()/1000});
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
@@ -1581,21 +1587,24 @@ async function send(){
         if(!_moaArgs){
           let _moaUsage='/moa <prompt>';
           try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
-          if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+          if(!S.session||S.session.session_id!==_asyncCommandSid)return;
+          if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-          if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+          if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'assistant',content:_moaUsage,_ts:Date.now()/1000});
           renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
         }
         try{
           await api('/api/commands/moa/resolve');
+          if(!S.session||S.session.session_id!==_asyncCommandSid)return;
           _slashDisplayTextOverride=text;
           text=_moaArgs;
           _pendingMoaConfig=true;
         }catch(_e){
-          if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+          if(!S.session||S.session.session_id!==_asyncCommandSid)return;
+          if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-          if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+          if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'assistant',content:'MoA unavailable: '+(_e&&_e.message||_e),_ts:Date.now()/1000});
           renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
         }
@@ -1603,20 +1612,23 @@ async function send(){
       const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'
         ? await getBundleCommandMetadata(_parsedCmd.name)
         : null;
+      if(!S.session||S.session.session_id!==_asyncCommandSid)return;
       if(_bundleCmd){
         try{
           const _bundleResolved=typeof resolveBundleCommand==='function'
             ? await resolveBundleCommand(text,_bundleCmd)
             : null;
+          if(!S.session||S.session.session_id!==_asyncCommandSid)return;
           const _bundleMessage=String(_bundleResolved&&_bundleResolved.message||'').trim();
           if(!_bundleMessage) throw new Error('Bundle command runtime returned no invocation text.');
           _slashDisplayTextOverride=text;
           text=_bundleMessage;
         }catch(e){
+          if(!S.session||S.session.session_id!==_asyncCommandSid)return;
           if(!S.session){await newSession();await renderSessionList();}
-          if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+          if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-          if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+          if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
           renderMessages();
           $('msg').value='';autoResize();hideCmdDropdown();return;
@@ -7233,10 +7245,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
 }
 
-function transcript(){
-  const lines=[`# Hermes session ${S.session?.session_id||''}`,``,
-    `Workspace: ${S.session?.workspace||''}`,`Model: ${S.session?.model||''}`,``];
-  for(const m of S.messages){
+function transcript(sessionInput, messagesInput){
+  const session = sessionInput || S.session || {};
+  const messages = Array.isArray(messagesInput) ? messagesInput : (S.messages || []);
+  const lines=[`# Hermes session ${session.session_id||''}`,``,
+    `Workspace: ${session.workspace||''}`,`Model: ${session.model||''}`,``];
+  for(const m of messages){
     if(!m||m.role==='tool')continue;
     let c=m.content||'';
     if(Array.isArray(c))c=c.filter(p=>p&&p.type==='text').map(p=>p.text||'').join('\n');

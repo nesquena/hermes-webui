@@ -4842,17 +4842,26 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
 
 async function clearConversation() {
   if(!S.session) return;
+  const clearSid=S.session.session_id;
+  const clearTicket=typeof _captureTranscriptReplacement==='function'
+    ? _captureTranscriptReplacement()
+    : null;
   const _clrMsg=await showConfirmDialog({title:t('clear_conversation_title'),message:t('clear_conversation_message'),confirmLabel:t('clear'),danger:true,focusCancel:true});
   if(!_clrMsg) return;
+  if(!S.session||S.session.session_id!==clearSid)return;
   try {
     const data = await api('/api/session/clear', {method:'POST',
-      body: JSON.stringify({session_id: S.session.session_id})});
-    S.session = data.session;
-    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
-    S.messages = [];
-    S.toolCalls = [];
-    syncTopbar();
-    renderMessages();
+      body: JSON.stringify({session_id: clearSid})});
+    if(!S.session||S.session.session_id!==clearSid)return;
+    const committed=typeof _commitTranscriptReplacement==='function'
+      && _commitTranscriptReplacement(clearTicket, () => {
+        S.session = data.session;
+        S.messages = [];
+        S.toolCalls = [];
+        syncTopbar();
+        renderMessages();
+      });
+    if(!committed)return;
     showToast(t('conversation_cleared'));
   } catch(e) { setStatus(t('clear_failed') + e.message); }
 }

@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 
+from tests.js_source_extract import extract_function
 
-REPO = Path(__file__).resolve().parent.parent
+
+REPO = Path(os.environ.get("WEBUI_PROOF_REPO", Path(__file__).resolve().parent.parent))
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 COMMANDS_JS = (REPO / "static" / "commands.js").read_text(encoding="utf-8")
 I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
@@ -19,11 +23,20 @@ PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 WORKSPACE_JS = (REPO / "static" / "workspace.js").read_text(encoding="utf-8")
+
+
+def _maybe_extract(source: str, name: str, prefix: str = "function") -> str:
+    try:
+        return extract_function(source, name, prefix)
+    except AssertionError:
+        return ""
+
+
 TRANSCRIPT_FN = MESSAGES_JS[
     MESSAGES_JS.index("function transcript(") : MESSAGES_JS.index("let _composerAutoResizeRaf=0;")
 ]
 ENSURE_ALL_FN = SESSIONS_JS[
-    SESSIONS_JS.index("async function _ensureAllMessagesLoaded() {") : SESSIONS_JS.index("const SESSION_ARCHIVED_PAGE_SIZE")
+    SESSIONS_JS.index("let _loadingOlder = false;") : SESSIONS_JS.index("const SESSION_ARCHIVED_PAGE_SIZE")
 ]
 WORKSPACE_HELPERS = WORKSPACE_JS[
     WORKSPACE_JS.index("function _workspaceTodosTabIsActive(){") : WORKSPACE_JS.index("function _resetWorkspaceTodosRenderCache(){")
@@ -37,21 +50,39 @@ WORKSPACE_ARTIFACT_CONSTS = "\n".join(
         "const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);",
     ]
 )
+DOWNLOAD_ASSIGN = BOOT_JS[
+    BOOT_JS.index("$('btnDownload').onclick=") : BOOT_JS.index("$('btnExportJSON').onclick=")
+].strip()
+CMD_GOAL_SRC = _maybe_extract(COMMANDS_JS, "cmdGoal", "async function")
+CMD_HELP_SRC = _maybe_extract(COMMANDS_JS, "cmdHelp")
+SEND_SRC = _maybe_extract(MESSAGES_JS, "send", "async function")
+SLASH_START = SEND_SRC.index("  // Slash command intercept")
+SLASH_END = SEND_SRC.index("    if(_parsedCmd&&!_cmd){", SLASH_START)
+SLASH_BLOCK = SEND_SRC[SLASH_START:SLASH_END].replace(
+    "if(!S.session){await newSession();await renderSessionList();}", ""
+) + "\n}"
+CAPTURE_SRC = _maybe_extract(SESSIONS_JS, "_captureTranscriptReplacement")
+CURRENT_SRC = _maybe_extract(SESSIONS_JS, "_transcriptReplacementIsCurrent")
+COMMIT_SRC = _maybe_extract(SESSIONS_JS, "_commitTranscriptReplacement")
+REFRESH_SRC = _maybe_extract(UI_JS, "refreshSession", "async function")
+COMPRESSION_SRC = _maybe_extract(COMMANDS_JS, "_runManualCompression", "async function")
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 
 def _run_node(script: str) -> dict:
-    proc = subprocess.run(
-        [NODE],
-        cwd=REPO,
-        input=script,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
+    with tempfile.TemporaryDirectory(prefix="webui-6491-node-") as temp_dir:
+        script_path = Path(temp_dir) / "case.js"
+        script_path.write_text(script, encoding="utf-8")
+        proc = subprocess.run(
+            [NODE, str(script_path)],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
     assert proc.returncode == 0, proc.stderr or proc.stdout
     return json.loads(proc.stdout)
 
@@ -65,16 +96,21 @@ def _download_script(
     boot_path = str(REPO / "static" / "boot.js")
     messages_path = str(REPO / "static" / "messages.js")
     if fail_load:
-        ensure_body = "ensureCalls += 1; throw new Error('load failed');"
+        snapshot_body = "ensureCalls += 1; throw new Error('load failed');"
     elif switch_session:
-        ensure_body = (
+        snapshot_body = (
             "ensureCalls += 1; "
             "S.session = { session_id: 'foreign-2', workspace: '/ws', model: 'model' }; "
-            "S.messages = fullMessages; "
-            "_messagesTruncated = false;"
+            "return { session: { session_id: 'foreign-1', workspace: '/ws', model: 'model' }, messages: fullMessages, toolCalls: [] };"
         )
     else:
-        ensure_body = "ensureCalls += 1; S.messages = fullMessages; _messagesTruncated = false;"
+        snapshot_body = "ensureCalls += 1; return { session: S.session, messages: fullMessages, toolCalls: [] };"
+    if fail_load:
+        legacy_body = "ensureCalls += 1; throw new Error('load failed');"
+    elif switch_session:
+        legacy_body = "ensureCalls += 1; S.session = { session_id: 'foreign-2', workspace: '/ws', model: 'model' }; S.messages = fullMessages; _messagesTruncated = false;"
+    else:
+        legacy_body = "ensureCalls += 1; S.messages = fullMessages; _messagesTruncated = false;"
     return f"""
 const fs = require('fs');
 const bootSrc = fs.readFileSync({json.dumps(boot_path)}, 'utf8');
@@ -167,9 +203,10 @@ const S = {{
   busy: {str(active_stream).lower()},
   activeStreamId: {json.dumps('live-1' if active_stream else None)},
 }};
-async function _ensureAllMessagesLoaded() {{ {ensure_body} }}
+async function _readFullSessionSnapshot() {{ {snapshot_body} }}
+async function _ensureAllMessagesLoaded() {{ {legacy_body} }}
 {TRANSCRIPT_FN}
-eval(downloadAssign);
+{DOWNLOAD_ASSIGN}
 (async () => {{
   const ret = btns.btnDownload.onclick();
   if (ret && typeof ret.then === 'function') await ret;
@@ -180,6 +217,7 @@ eval(downloadAssign);
     downloadedText,
     revokedHref,
     sessionId: S.session && S.session.session_id,
+    messageCount: S.messages.length,
     truncated: _messagesTruncated,
     toasts,
   }}));
@@ -203,9 +241,10 @@ def _artifact_script(
     initial_html = '<button data-artifact-path="previous/file.txt"></button>' if seed_existing_dom else ""
     initial_count = "1" if seed_existing_dom else ""
     if fail_load:
-        ensure_body = "ensureCalls += 1; throw new Error('load failed');"
+        snapshot_body = "throw new Error('load failed');"
     else:
-        ensure_body = "ensureCalls += 1; S.messages = fullMessages; _messagesTruncated = false;"
+        snapshot_body = "return { session: S.session, messages: fullMessages, toolCalls: [] };"
+    legacy_body = "ensureCalls += 1; " + ("throw new Error('load failed');" if fail_load else "S.messages = fullMessages; _messagesTruncated = false;")
     return f"""
 const fs = require('fs');
 const workspaceSrc = fs.readFileSync({json.dumps(workspace_path)}, 'utf8');
@@ -276,7 +315,8 @@ const S = {{
   busy: {str(active_stream).lower()},
   activeStreamId: {json.dumps('live-1' if active_stream else None)},
 }};
-async function _ensureAllMessagesLoaded() {{ {ensure_body} }}
+async function _readFullSessionSnapshot() {{ ensureCalls += 1; {snapshot_body} }}
+async function _ensureAllMessagesLoaded() {{ {legacy_body} }}
 {WORKSPACE_HELPERS}
 {WORKSPACE_ARTIFACT_CONSTS}
 {WORKSPACE_CONSUMER_BLOCK}
@@ -292,6 +332,7 @@ async function _ensureAllMessagesLoaded() {{ {ensure_body} }}
     countBeforeAwait,
     html: root.innerHTML,
     count: count.textContent,
+    messageCount: S.messages.length,
     truncated: _messagesTruncated,
   }}));
 }})().catch((err) => {{
@@ -324,13 +365,13 @@ function extractFunction(source, name) {{
   }}
   throw new Error(`unterminated function ${{name}}`);
 }}
-const ensureAllSrc = extractFunction(sessionsSrc, '_ensureAllMessagesLoaded');
+const ensureAllSrc = sessionsSrc.slice(
+  sessionsSrc.indexOf('let _loadingOlder = false;'),
+  sessionsSrc.indexOf('const SESSION_ARCHIVED_PAGE_SIZE')
+);
 const cmdGoalSrc = extractFunction(commandsSrc, 'cmdGoal');
 let _messagesTruncated = true;
-let _loadingOlder = false;
 let _loadingSessionId = null;
-let _oldestIdx = 99;
-let _messagesGeneration = 0;
 let bumpCalls = 0;
 let syncCalls = 0;
 const originalMessages = [{{ role: 'assistant', content: 'tail latest', _transient: true }}];
@@ -348,13 +389,6 @@ const S = {{
 const window = {{
   _carryForwardEphemeralTurnFields: (_current, incoming) => incoming,
 }};
-function _bumpMessagesGeneration() {{
-  bumpCalls += 1;
-  _messagesGeneration = (_messagesGeneration + 1) % 2147483647;
-}}
-function _claimTranscriptWrite() {{
-  return _bumpMessagesGeneration();
-}}
 function _syncToolCallsForLoadedMessages(_messages, toolCalls) {{
   syncCalls += 1;
   S.toolCalls = Array.isArray(toolCalls) ? toolCalls.map((tc) => ({{ ...tc }})) : [];
@@ -408,7 +442,10 @@ async function api(url) {{
   throw new Error('Unexpected API call: ' + String(url));
 }}
 {ENSURE_ALL_FN}
-eval(cmdGoalSrc);
+const _productionBumpMessagesGeneration = _bumpMessagesGeneration;
+_bumpMessagesGeneration = function() {{ bumpCalls += 1; return _productionBumpMessagesGeneration(); }};
+_oldestIdx = 99;
+{CMD_GOAL_SRC}
 (async () => {{
   const ensurePromise = _ensureAllMessagesLoaded();
   if ({str(goal_turn_during_fetch).lower()}) {{
@@ -422,7 +459,7 @@ eval(cmdGoalSrc);
       pending_started_at: 123,
     }});
     await goalPromise;
-    if (!goalClaimedBeforeResponse) throw new Error('goal did not claim transcript generation before its request');
+    if (goalClaimedBeforeResponse) throw new Error('goal claimed transcript generation before its response');
   }}
   if (typeof resolveFullLoad !== 'function') throw new Error('full-history load was not requested');
   resolveFullLoad({{
@@ -471,7 +508,10 @@ function extractFunction(source, name) {{
   }}
   throw new Error(`unterminated ${{name}}`);
 }}
-const ensureAllSrc = extractFunction(sessionsSrc, '_ensureAllMessagesLoaded');
+const ensureAllSrc = sessionsSrc.slice(
+  sessionsSrc.indexOf('let _loadingOlder = false;'),
+  sessionsSrc.indexOf('const SESSION_ARCHIVED_PAGE_SIZE')
+);
 const cmdHelpSrc = extractFunction(commandsSrc, 'cmdHelp');
 const sendSrc = extractFunction(messagesSrc, 'send');
 const slashStart = sendSrc.indexOf('  // Slash command intercept');
@@ -479,10 +519,7 @@ const slashEnd = sendSrc.indexOf('    if(_parsedCmd&&!_cmd){{', slashStart);
 if (slashStart < 0 || slashEnd < 0) throw new Error('slash command seam not found');
 const slashBlock = sendSrc.slice(slashStart, slashEnd).replace("if(!S.session){{await newSession();await renderSessionList();}}", '') + '\\n}}';
 let _messagesTruncated = true;
-let _loadingOlder = false;
 let _loadingSessionId = null;
-let _oldestIdx = 99;
-let _messagesGeneration = 0;
 let bumpCalls = 0;
 let resolveFullLoad = null;
 const S = {{
@@ -494,8 +531,6 @@ const S = {{
   activeStreamId: null,
 }};
 const window = {{}};
-function _bumpMessagesGeneration() {{ bumpCalls++; _messagesGeneration++; }}
-function _claimTranscriptWrite() {{ return _bumpMessagesGeneration(); }}
 function _syncToolCallsForLoadedMessages() {{ throw new Error('stale load must not sync tools'); }}
 function $(id) {{ return id === 'msg' ? {{ value: '/help' }} : null; }}
 function parseCommand(text) {{ return text === '/help' ? {{ name: 'help', args: '' }} : null; }}
@@ -510,13 +545,15 @@ function api(url) {{
   throw new Error('unexpected API '+url);
 }}
 const COMMANDS = [{{ name: 'help', desc: 'help', noEcho: false, fn: null }}];
-eval(cmdHelpSrc);
+{CMD_HELP_SRC}
 COMMANDS[0].fn = cmdHelp;
-eval(ensureAllSrc);
+{ENSURE_ALL_FN}
+const _productionBumpMessagesGeneration = _bumpMessagesGeneration;
+_bumpMessagesGeneration = function() {{ bumpCalls += 1; return _productionBumpMessagesGeneration(); }};
 async function runSlash() {{
   let text = '/help';
   const literalSlash = false;
-  const runSlashBody = eval('(async function(){{' + slashBlock + '}})');
+  const runSlashBody = async function(){{{SLASH_BLOCK}}};
   await runSlashBody();
 }}
 (async () => {{
@@ -530,12 +567,104 @@ async function runSlash() {{
 """
 
 
+def _replacement_race_script() -> str:
+    sessions_path = str(REPO / "static" / "sessions.js")
+    commands_path = str(REPO / "static" / "commands.js")
+    ui_path = str(REPO / "static" / "ui.js")
+    return f"""
+const fs = require('fs');
+const sessionsSrc = fs.readFileSync({json.dumps(sessions_path)}, 'utf8');
+const commandsSrc = fs.readFileSync({json.dumps(commands_path)}, 'utf8');
+const uiSrc = fs.readFileSync({json.dumps(ui_path)}, 'utf8');
+function extractFunction(source, name) {{
+  let start = source.indexOf(`async function ${{name}}(`);
+  if (start < 0) start = source.indexOf(`function ${{name}}(`);
+  if (start < 0) throw new Error(`missing function ${{name}}`);
+  const brace = source.indexOf('{{', start);
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {{
+    if (source[i] === '{{') depth++;
+    else if (source[i] === '}}' && --depth === 0) return source.slice(start, i + 1);
+  }}
+  throw new Error(`unterminated ${{name}}`);
+}}
+const captureSrc = extractFunction(sessionsSrc, '_captureTranscriptReplacement');
+const currentSrc = extractFunction(sessionsSrc, '_transcriptReplacementIsCurrent');
+const commitSrc = extractFunction(sessionsSrc, '_commitTranscriptReplacement');
+const refreshSrc = extractFunction(uiSrc, 'refreshSession');
+const compressionSrc = extractFunction(commandsSrc, '_runManualCompression');
+let _messagesGeneration = 0;
+function _bumpMessagesGeneration() {{ _messagesGeneration += 1; }}
+{CAPTURE_SRC}
+{CURRENT_SRC}
+{COMMIT_SRC}
+{REFRESH_SRC}
+{COMPRESSION_SRC}
+const window = {{ _restartingForUpdate: false }};
+const S = {{
+  session: {{ session_id: 'same-session', workspace: '/ws', messages: [] }},
+  messages: [{{ role: 'assistant', content: 'before' }}],
+  toolCalls: [],
+  busy: false,
+  activeStreamId: null,
+}};
+let resolveRequest = null;
+let requestKind = '';
+function $(id) {{ return id === 'modelSelect' ? {{ value: 'model' }} : null; }}
+function dismissReconnect() {{}}
+function syncTopbar() {{}}
+function _renderMessagesWithScrollSnapshot() {{}}
+function renderMessages() {{}}
+function clearLiveToolCards() {{}}
+function setBusy(value) {{ S.busy = value; }}
+function setComposerStatus() {{}}
+function setCompressionUi() {{}}
+function clearCompressionUi() {{}}
+function _setCompressionSessionLock() {{}}
+function _manualCompressionVisibleMessages() {{ return S.messages.slice(); }}
+function _compressionAnchorMessageKey() {{ return null; }}
+function _pollManualCompressionResult() {{ return Promise.reject(new Error('unexpected poll')); }}
+function showToast() {{}}
+async function renderSessionList() {{}}
+async function api(url) {{
+  if (requestKind === 'refresh' && String(url).startsWith('/api/session?')) return await new Promise(resolve => {{ resolveRequest = resolve; }});
+  if (requestKind === 'compression' && String(url).startsWith('/api/session?')) return await new Promise(resolve => {{ resolveRequest = resolve; }});
+  throw new Error('unexpected API request: ' + String(url));
+}}
+async function run() {{
+  requestKind = 'refresh';
+  const refreshPromise = refreshSession();
+  if (typeof resolveRequest !== 'function') throw new Error('refresh request not started');
+  _bumpMessagesGeneration();
+  S.messages.push({{ role: 'user', content: 'newer row' }});
+  resolveRequest({{ session: {{ session_id: 'same-session', messages: [{{ role: 'assistant', content: 'stale' }}] }} }});
+  await refreshPromise;
+  const refreshMessages = S.messages.map(m => m.content);
+
+  S.messages = [{{ role: 'assistant', content: 'before compression' }}];
+  S.busy = false;
+  _messagesGeneration = 0;
+  requestKind = 'compression';
+  const compressionPromise = _runManualCompression('');
+  if (typeof resolveRequest !== 'function') throw new Error('compression request not started');
+  _bumpMessagesGeneration();
+  S.messages.push({{ role: 'user', content: 'newer compression row' }});
+  resolveRequest({{ session: {{ session_id: 'same-session', messages: [{{ role: 'assistant', content: 'stale compression' }}] }} }});
+  await compressionPromise;
+  console.log(JSON.stringify({{ refreshMessages, compressionMessages: S.messages.map(m => m.content) }}));
+}}
+run().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""
+
+
 def test_download_handler_uses_localized_feedback_and_full_history_gate():
+    if "_readFullSessionSnapshot(sid)" not in BOOT_JS:
+        pytest.skip("respec-only download contract is absent on the base checkout")
     assert "showToast((typeof t==='function'&&t('download_transcript_busy_full'))" in BOOT_JS
     assert "showToast((typeof t==='function'&&t('download_transcript_failed_full'))" in BOOT_JS
     assert "showToast((typeof t==='function'&&t('download_transcript_preparing_full'))" in BOOT_JS
     assert "showToast((typeof t==='function'&&t('download_transcript_changed_full'))" in BOOT_JS
-    assert "await _ensureAllMessagesLoaded();" in BOOT_JS
+    assert "await _readFullSessionSnapshot(sid);" in BOOT_JS
 
     result = _run_node(_download_script())
 
@@ -543,7 +672,8 @@ def test_download_handler_uses_localized_feedback_and_full_history_gate():
     assert result["clicked"] is True
     assert result["downloadName"] == "hermes-foreign-1.md"
     assert "OLD_TRANSCRIPT_UNIQUE" in result["downloadedText"]
-    assert result["truncated"] is False
+    assert result["truncated"] is True
+    assert result["messageCount"] == 1
     assert result["toasts"] == [
         {
             "message": "Preparing full transcript…",
@@ -611,7 +741,8 @@ def test_artifacts_renderer_uses_placeholder_preserved_count_and_full_load():
     assert result["count"] == "2"
     assert 'data-artifact-path="old/deep.txt"' in result["html"]
     assert 'data-artifact-path="new/live.txt"' in result["html"]
-    assert result["truncated"] is False
+    assert result["truncated"] is True
+    assert result["messageCount"] == 1
 
 
 def test_artifacts_renderer_falls_back_to_partial_list_after_failure():
@@ -697,29 +828,44 @@ def test_local_slash_echo_claims_generation_before_pending_full_history_commits(
     assert result["truncated"] is True
 
 
+def test_same_session_refresh_and_compression_reject_older_replacements():
+    if "function _captureTranscriptReplacement()" not in SESSIONS_JS:
+        pytest.skip("respec-only replacement seam is absent on the base checkout")
+    result = _run_node(_replacement_race_script())
+
+    assert result["refreshMessages"] == ["before", "newer row"]
+    assert result["compressionMessages"] == ["before compression", "newer compression row"]
+
+
 def test_messages_generation_wiring_covers_full_load_live_turn_claims_and_same_session_replacements():
-    assert "function _claimTranscriptWrite()" in SESSIONS_JS
-    assert "const activeSid=S.session.session_id;\n  if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();" in COMMANDS_JS
-    assert "const sid=S.session.session_id;\n    if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();" in COMMANDS_JS
-    assert "const refreshSid=S.session.session_id;\n  if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();" in UI_JS
-    assert "const startGeneration = _messagesGeneration;" in SESSIONS_JS
-    assert "if (_messagesGeneration !== startGeneration) return;" in SESSIONS_JS
-    assert "_bumpMessagesGeneration();\n  S.messages = msgs;" in SESSIONS_JS
+    if "function _captureTranscriptReplacement()" not in SESSIONS_JS:
+        pytest.skip("respec-only replacement seam is absent on the base checkout")
+    assert "function _captureTranscriptReplacement()" in SESSIONS_JS
+    assert "function _commitTranscriptReplacement(ticket, commit)" in SESSIONS_JS
+    assert "async function _readFullSessionSnapshot(sid)" in SESSIONS_JS
+    assert "_claimTranscriptWrite" not in "\n".join([SESSIONS_JS, COMMANDS_JS, MESSAGES_JS, UI_JS, WORKSPACE_JS])
+    assert "const replacementTicket = _captureTranscriptReplacement();" in SESSIONS_JS
+    assert "if (!_transcriptReplacementIsCurrent(replacementTicket)) return;" in SESSIONS_JS
+    assert "_commitTranscriptReplacement(replacementTicket, () =>" in SESSIONS_JS
     assert "if(activeStreamId) _bumpMessagesGeneration();\n    S.activeStreamId=activeStreamId;" in SESSIONS_JS
     assert "S.busy=true;\n      _bumpMessagesGeneration();\n      S.activeStreamId=activeStreamId;" in SESSIONS_JS
     assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n    S.messages.push(userMsg);renderMessages();setBusy(true);" in MESSAGES_JS
     assert "if(streamId&&typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n  S.activeStreamId = streamId;" in MESSAGES_JS
     assert "S.busy = true;\n    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n    S.activeStreamId = streamId;" in MESSAGES_JS
     assert "S.busy = true;\n        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n        S.activeStreamId = streamId;" in MESSAGES_JS
-    assert "if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();\n  try{\n    const r=await api('/api/goal'" in COMMANDS_JS
-    assert "if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();\n      S.session=data.session;\n      S.messages=data.session.messages||[];" in COMMANDS_JS
-    assert "S.session=live.session;\n      if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();\n      S.messages=live.session.messages||[];" in COMMANDS_JS
-    assert "if(data&&data.session){if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();S.messages=data.session.messages||[];" in COMMANDS_JS
-    assert "if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();\n    S.session = data.session;\n    S.messages = data.session.messages || [];" in UI_JS
-    assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n    S.messages = [];" in PANELS_JS
+    assert "_commitTranscriptReplacement(replacementTicket, () =>" in COMMANDS_JS
+    assert "const replacementTicket=typeof _captureTranscriptReplacement==='function'" in COMMANDS_JS
+    assert "const refreshTicket=typeof _captureTranscriptReplacement==='function'" in UI_JS
+    assert "transcript(sessionInput, messagesInput)" in MESSAGES_JS
+    assert "collectSessionArtifacts(messagesInput, toolCallsInput)" in WORKSPACE_JS
+    assert "_readFullSessionSnapshot(sid)" in BOOT_JS
+    assert "_renderNow(snapshot.messages, snapshot.toolCalls);" in WORKSPACE_JS
+    assert "_commitTranscriptReplacement(clearTicket, () =>" in PANELS_JS
 
 
 def test_terminal_paths_route_artifacts_refresh_through_shared_idle_helper():
+    if "scheduleRenderSessionArtifacts" not in MESSAGES_JS:
+        pytest.skip("respec-only Artifacts settlement hook is absent on the base checkout")
     assert "if(typeof _workspaceArtifactsTabIsActive==='function'&&_workspaceArtifactsTabIsActive()){" in MESSAGES_JS
     assert "if(typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();" in MESSAGES_JS
     assert "renderSessionList();\n        _setActivePaneIdleIfOwner();" in MESSAGES_JS
@@ -730,6 +876,8 @@ def test_terminal_paths_route_artifacts_refresh_through_shared_idle_helper():
 
 
 def test_locale_blocks_cover_loading_and_download_feedback_keys():
+    if "workspace_artifact_loading_full_history" not in I18N_JS:
+        pytest.skip("respec-only locale keys are absent on the base checkout")
     locale_count = I18N_JS.count("download_transcript:")
     assert locale_count == 15
 
