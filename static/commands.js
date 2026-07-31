@@ -914,6 +914,7 @@ async function resumeManualCompressionForSession(sid){
     if(S.session&&S.session.session_id===sid&&typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
     const status=await api(`/api/session/compress/status?session_id=${encodeURIComponent(sid)}`);
     if(!status||status.status!=='running') return;
+    if(!S.session||S.session.session_id!==sid) return;
     const visibleMessages=_manualCompressionVisibleMessages();
     const visibleCount=visibleMessages.length;
     const anchorMessageKey=_compressionAnchorMessageKey(visibleMessages[visibleMessages.length-1]||null);
@@ -974,6 +975,7 @@ async function _runManualCompression(focusTopic){
       if(!live||!live.session||live.session.session_id!==sid){
         throw new Error('session no longer available');
       }
+      if(!S.session||S.session.session_id!==sid) return;
       S.session=live.session;
       if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
       S.messages=live.session.messages||[];
@@ -1016,6 +1018,7 @@ async function _runManualCompression(focusTopic){
       throw err;
     }
     const data=(started&&started.status==='done')?started:await _pollManualCompressionResult(sid);
+    if(!S.session||S.session.session_id!==sid) return;
     await _applyManualCompressionResult(data, focusTopic, visibleCount, commandText);
   }catch(e){
     if(typeof setCompressionUi==='function'){
@@ -1281,6 +1284,7 @@ async function cmdGoal(args){
       explicit_model_pick:_explicitPick,
       profile:S.activeProfile||S.session.profile||'default',
     })});
+    if(!S.session||S.session.session_id!==activeSid)return;
     const msg = (() => {
       const raw = String((r && r.message) || '').trim();
       const key = String((r && r.message_key) || '').trim();
@@ -1331,6 +1335,7 @@ async function cmdGoal(args){
     attachLiveStream(activeSid,r.stream_id,[]);
     if(typeof renderSessionList==='function')void renderSessionList();
   }catch(e){
+    if(!S.session||S.session.session_id!==activeSid)return;
     const err=String((e&&e.message)||e||'Goal command failed');
     if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
     S.messages.push({role:'assistant',content:`**Goal command failed:** ${err}`,_ts:Date.now()/1000,_error:true});

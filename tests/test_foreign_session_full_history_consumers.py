@@ -44,8 +44,9 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 def _run_node(script: str) -> dict:
     proc = subprocess.run(
-        [NODE, "-e", script],
+        [NODE],
         cwd=REPO,
+        input=script,
         capture_output=True,
         text=True,
         timeout=20,
@@ -450,6 +451,85 @@ eval(cmdGoalSrc);
 """
 
 
+def _slash_command_generation_race_script() -> str:
+    sessions_path = str(REPO / "static" / "sessions.js")
+    commands_path = str(REPO / "static" / "commands.js")
+    messages_path = str(REPO / "static" / "messages.js")
+    return f"""
+const fs = require('fs');
+const sessionsSrc = fs.readFileSync({json.dumps(sessions_path)}, 'utf8');
+const commandsSrc = fs.readFileSync({json.dumps(commands_path)}, 'utf8');
+const messagesSrc = fs.readFileSync({json.dumps(messages_path)}, 'utf8');
+function extractFunction(source, name) {{
+  let start = source.indexOf(`async function ${{name}}(`);
+  if (start < 0) start = source.indexOf(`function ${{name}}(`);
+  const brace = source.indexOf('{{', start);
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {{
+    if (source[i] === '{{') depth++;
+    else if (source[i] === '}}' && --depth === 0) return source.slice(start, i + 1);
+  }}
+  throw new Error(`unterminated ${{name}}`);
+}}
+const ensureAllSrc = extractFunction(sessionsSrc, '_ensureAllMessagesLoaded');
+const cmdHelpSrc = extractFunction(commandsSrc, 'cmdHelp');
+const sendSrc = extractFunction(messagesSrc, 'send');
+const slashStart = sendSrc.indexOf('  // Slash command intercept');
+const slashEnd = sendSrc.indexOf('    if(_parsedCmd&&!_cmd){{', slashStart);
+if (slashStart < 0 || slashEnd < 0) throw new Error('slash command seam not found');
+const slashBlock = sendSrc.slice(slashStart, slashEnd).replace("if(!S.session){{await newSession();await renderSessionList();}}", '') + '\\n}}';
+let _messagesTruncated = true;
+let _loadingOlder = false;
+let _loadingSessionId = null;
+let _oldestIdx = 99;
+let _messagesGeneration = 0;
+let bumpCalls = 0;
+let resolveFullLoad = null;
+const S = {{
+  session: {{ session_id: 'foreign-1', message_count: 1 }},
+  messages: [],
+  toolCalls: [],
+  pendingFiles: [],
+  busy: false,
+  activeStreamId: null,
+}};
+const window = {{}};
+function _bumpMessagesGeneration() {{ bumpCalls++; _messagesGeneration++; }}
+function _claimTranscriptWrite() {{ return _bumpMessagesGeneration(); }}
+function _syncToolCallsForLoadedMessages() {{ throw new Error('stale load must not sync tools'); }}
+function $(id) {{ return id === 'msg' ? {{ value: '/help' }} : null; }}
+function parseCommand(text) {{ return text === '/help' ? {{ name: 'help', args: '' }} : null; }}
+function t(key) {{ return key; }}
+function renderMessages() {{}}
+function showToast() {{}}
+function autoResize() {{}}
+function hideCmdDropdown() {{}}
+function newSession() {{}}
+function api(url) {{
+  if (String(url).startsWith('/api/session?')) return new Promise(resolve => {{ resolveFullLoad = resolve; }});
+  throw new Error('unexpected API '+url);
+}}
+const COMMANDS = [{{ name: 'help', desc: 'help', noEcho: false, fn: null }}];
+eval(cmdHelpSrc);
+COMMANDS[0].fn = cmdHelp;
+eval(ensureAllSrc);
+async function runSlash() {{
+  let text = '/help';
+  const literalSlash = false;
+  const runSlashBody = eval('(async function(){{' + slashBlock + '}})');
+  await runSlashBody();
+}}
+(async () => {{
+  const ensurePromise = _ensureAllMessagesLoaded();
+  await runSlash();
+  if (typeof resolveFullLoad !== 'function') throw new Error('full-history load was not requested');
+  resolveFullLoad({{ session: {{ messages: [{{ role: 'user', content: 'OLD' }}], tool_calls: [] }} }});
+  await ensurePromise;
+  console.log(JSON.stringify({{ messages: S.messages, bumpCalls, truncated: _messagesTruncated }}));
+}})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""
+
+
 def test_download_handler_uses_localized_feedback_and_full_history_gate():
     assert "showToast((typeof t==='function'&&t('download_transcript_busy_full'))" in BOOT_JS
     assert "showToast((typeof t==='function'&&t('download_transcript_failed_full'))" in BOOT_JS
@@ -604,6 +684,17 @@ def test_ensure_all_messages_loaded_still_hydrates_when_generation_is_stable():
     assert result["syncCalls"] == 1
     assert result["oldestIdx"] == 0
     assert result["count"] == 2
+
+
+def test_local_slash_echo_claims_generation_before_pending_full_history_commits():
+    result = _run_node(_slash_command_generation_race_script())
+
+    assert [{"role": m["role"], "content": m["content"]} for m in result["messages"]] == [
+        {"role": "user", "content": "/help"},
+        {"role": "assistant", "content": "available_commands\n  /help — help"},
+    ]
+    assert result["bumpCalls"] >= 2
+    assert result["truncated"] is True
 
 
 def test_messages_generation_wiring_covers_full_load_live_turn_claims_and_same_session_replacements():
