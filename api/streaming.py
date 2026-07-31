@@ -8188,54 +8188,117 @@ def _run_agent_streaming(
             # normal send never trips a TypeError on an older hermes-agent whose
             # run_conversation() predates the moa_config kwarg.
             if moa_config is not None:
-                _run_conversation_kwargs["moa_config"] = moa_config
+                _user_message = msg_text
 
-            # ── Retry loop for silent provider failures ──
-            # Retry up to 3 times with exponential backoff when provider returns
-            # no content and no error (silent failure), to handle transient issues
-            # like rate limits that don't return HTTP 429, temporary outages, etc.
+            # For provider-call boundary retry, silent failures are detected BEFORE
+            # the agent runs, not around the entire turn. This ensures we don't
+            # replay an entire logical turn when the provider fails silently.
+            
+            # Make the provider call (agent.run_conversation) - this should NOT be
+            # wrapped in retry logic since retries happen at provider level
+            result = agent.run_conversation(**_run_conversation_kwargs)
+
+            # ── Provider-call boundary retry (WebUI-level hardening) ──
+            # Detect silent provider failures using a turn-aware predicate and
+            # retry only the provider call. Flush reasoning after each provider
+            # return and make backoff cancellation-aware.
             _retry_state = {"attempt": 0, "max_retries": 3, "base_delay": 1.0}
             _last_silent_failure = False
 
+            # Determine the previous-message count for turn-aware detection.
+            _prev_len = len(_run_conversation_kwargs.get("conversation_history") or [])
+
             while True:
                 _retry_state["attempt"] += 1
+
+                # Make the provider call (single logical turn prologue already done)
                 result = agent.run_conversation(**_run_conversation_kwargs)
 
-                # Check if this was a silent provider failure
-                _last_err = None
-                _has_messages = False
-                if result is not None:
-                    _last_err = getattr(agent, '_last_error', None) or result.get('error')
-                    _has_messages = bool(result.get('messages'))
-                # Silent failure: no error key AND no messages
-                _is_silent_failure = _last_err is None and not _has_messages
+                # Immediately flush any buffered reasoning produced by this attempt
+                try:
+                    _flush_reasoning_buffer()
+                except Exception:
+                    pass
 
-                if _is_silent_failure and _retry_state["attempt"] < _retry_state["max_retries"]:
-                    # Calculate exponential backoff with jitter
-                    _delay = _retry_state["base_delay"] * (2 ** (_retry_state["attempt"] - 1))
-                    _delay = min(_delay, 30.0)  # Cap at 30 seconds
-                    _jitter = _delay * 0.2 * (random.random() - 0.5) * 2
-                    _delay = max(0, _delay + _jitter)
-
-                    logger.info(
-                        f"[PROVIDER-RETRY] Session {s.session_id} silent provider failure "
-                        f"(attempt {_retry_state['attempt']}/{_retry_state['max_retries']}), "
-                        f"retrying in {_delay:.1f}s"
-                    )
-
-                    # Wait before retry
-                    time.sleep(_delay)
-                    _last_silent_failure = True
-                    continue
+                # Normalize None -> empty-result to avoid downstream AttributeError
+                if result is None:
+                    _last_err = getattr(agent, '_last_error', None)
+                    _msgs = []
                 else:
-                    # Either succeeded, not a silent failure, or retries exhausted
-                    if _last_silent_failure and _retry_state["attempt"] >= _retry_state["max_retries"]:
-                        logger.warning(
-                            f"[PROVIDER-RETRY] Session {s.session_id} exhausted all retries "
-                            f"for silent provider failure"
-                        )
+                    _last_err = getattr(agent, '_last_error', None) or result.get('error')
+                    _msgs = result.get('messages') or []
+
+                # Use turn-aware helper to detect new assistant reply beyond history
+                try:
+                    _has_new_reply = _has_new_assistant_reply(_msgs, _prev_len)
+                except Exception:
+                    # Defensive fallback: consider messages list truthiness if helper fails
+                    _has_new_reply = bool(_msgs)
+
+                _is_silent_failure = _last_err is None and not _has_new_reply
+
+                # Success path: either an error was returned (non-silent) or new assistant reply
+                if not _is_silent_failure:
                     break
-            _flush_reasoning_buffer()
+
+                # If we've reached max retries, stop retrying
+                if _retry_state["attempt"] >= _retry_state["max_retries"]:
+                    _last_silent_failure = True
+                    logger.warning(
+                        f"[PROVIDER-RETRY] Session {s.session_id} exhausted all provider-level "
+                        f"retries for silent provider failure"
+                    )
+                    break
+
+                # Exponential backoff (cancellation-aware)
+                _delay = _retry_state["base_delay"] * (2 ** (_retry_state["attempt"] - 1))
+                _delay = min(_delay, 30.0)
+                _jitter = _delay * 0.2 * (random.random() - 0.5) * 2
+                _delay = max(0, _delay + _jitter)
+
+                logger.info(
+                    f"[PROVIDER-RETRY] Session {s.session_id} silent provider failure "
+                    f"(attempt {_retry_state['attempt']}/{_retry_state['max_retries']}), retrying in {_delay:.1f}s"
+                )
+
+                # Wait with cancellation awareness
+                try:
+                    cancelled_during_backoff = cancel_event.wait(_delay)
+                except Exception:
+                    # If cancel_event is not waitable for any reason, fallback to sleep
+                    time.sleep(_delay)
+                    cancelled_during_backoff = cancel_event.is_set() if hasattr(cancel_event, 'is_set') else False
+
+                if cancelled_during_backoff:
+                    # Honor cancellation: finalize and return a cancel event
+                    if _checkpoint_stop is not None:
+                        _checkpoint_stop.set()
+                    if _ckpt_thread is not None:
+                        _ckpt_thread.join(timeout=15)
+                    if ephemeral:
+                        _cleanup_ephemeral_cancelled_turn(s)
+                    else:
+                        with _agent_lock:
+                            _finalize_cancelled_turn(s, ephemeral=False)
+                            try:
+                                append_turn_journal_event_for_stream(
+                                    s.session_id,
+                                    stream_id,
+                                    {
+                                        "event": "interrupted",
+                                        "created_at": time.time(),
+                                        "reason": "cancelled",
+                                    },
+                                )
+                            except Exception:
+                                logger.debug("Failed to append cancelled turn journal event", exc_info=True)
+                    put('cancel', _cancel_event_payload('Cancelled by user'))
+                    return
+
+                # Prepare to retry: call provider again in next loop iteration
+                _last_silent_failure = True
+                continue
+            # End retry loop — reasoning buffer already flushed per-attempt
             if cancel_event.is_set():
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
