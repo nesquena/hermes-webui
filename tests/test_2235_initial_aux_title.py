@@ -10,7 +10,6 @@ Covers:
   3. Refresh path parity — configured aux routing still applies to the
      adaptive title refresh path.
 """
-import sys
 import threading
 import unittest
 from unittest.mock import MagicMock, patch
