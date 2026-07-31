@@ -55,10 +55,7 @@ def test_start_profile_gateway_is_profile_scoped(monkeypatch, tmp_path):
     assert result["status"] == "running"
     assert result["profile"] == "maverick"
     assert "pid" not in result
-    assert created[0].args == [
-        "/venv/bin/hermes", "--profile", "maverick", "gateway", "run",
-        "--external-supervisor",
-    ]
+    assert created[0].args == ["/venv/bin/hermes", "gateway", "run"]
     assert created[0].kwargs["env"]["HERMES_HOME"] == str(home)
     assert created[0].kwargs["start_new_session"] is True
 
