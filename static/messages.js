@@ -6098,6 +6098,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     });
 
+    // run_meta: backend announces the run's effective model + reasoning effort
+    // up front so the live footer shows them during streaming, not only after
+    // the turn settles. Replayed by the run journal on reconnect.
+    source.addEventListener('run_meta',e=>{
+      try{
+        const d=JSON.parse(e.data||'{}');
+        if(d&&d.session_id&&activeSid&&d.session_id!==activeSid)return;
+        if(typeof updateLiveRunStatus==='function'){
+          updateLiveRunStatus({sessionId:activeSid,meta:{
+            model:String((d&&d.model)||''),
+            effort:String((d&&d.reasoning_effort)||''),
+          }});
+        }
+      }catch(_){}
+    });
+
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;
       _clearStreamEndRecovery();
@@ -6269,6 +6285,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               }
               if(typeof d.usage.duration_seconds==='number'){
                 lastAsst._turnDuration=d.usage.duration_seconds;
+              }
+              if(typeof d.usage.reasoning_effort==='string'&&d.usage.reasoning_effort){
+                lastAsst._reasoningEffort=d.usage.reasoning_effort;
               }
               if(typeof d.usage.tps==='number'&&d.usage.tps>0){
                 lastAsst._turnTps=d.usage.tps;
@@ -6916,7 +6935,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       })();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','run_meta','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }

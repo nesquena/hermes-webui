@@ -2605,6 +2605,26 @@ def _normalize_gateway_routing_metadata(payload, requested_model=None, requested
     return normalized
 
 
+def _effective_reasoning_effort_label(agent, fallback_config=None):
+    """Effective reasoning effort for footer display: level str, 'off', or None.
+
+    Reads the frozen per-agent reasoning_config (the same dict the run actually
+    used) so the footer reflects the effective effort — after per-model
+    overrides and capability clamping — rather than the raw configured value.
+    Returns None when no explicit reasoning config exists (provider default is
+    unknown; the UI renders no chip instead of guessing).
+    """
+    cfg = getattr(agent, 'reasoning_config', None)
+    if not isinstance(cfg, dict) or 'enabled' not in cfg:
+        cfg = fallback_config
+    if not isinstance(cfg, dict) or 'enabled' not in cfg:
+        return None
+    if cfg.get('enabled') is False:
+        return 'off'
+    effort = str(cfg.get('effort') or '').strip().lower()
+    return effort or None
+
+
 def _extract_gateway_routing_metadata(agent, result, requested_model=None, requested_provider=None):
     candidates = []
     if isinstance(result, dict):
@@ -10482,6 +10502,18 @@ def _run_agent_streaming(
                     put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
 
+            # Announce the run's effective model + reasoning effort up front so
+            # the live footer can display them during streaming, not only after
+            # the turn settles. The effort label reads the frozen agent config —
+            # the value actually used for this run (overrides + clamp applied).
+            _run_meta_effort = _effective_reasoning_effort_label(agent, _reasoning_config)
+            put('run_meta', {
+                'session_id': session_id,
+                'model': getattr(agent, 'model', None) or resolved_model or model,
+                'provider': resolved_provider or '',
+                'reasoning_effort': _run_meta_effort,
+            })
+
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
             workspace_ctx = _workspace_context_prefix(str(s.workspace))
@@ -11668,6 +11700,9 @@ def _run_agent_streaming(
                                 _dm['_firstTokenMs'] = _ttft_ms
                             if _used_model:
                                 _dm['_usedModel'] = _used_model
+                            _effort_label = _effective_reasoning_effort_label(agent, _reasoning_config)
+                            if _effort_label:
+                                _dm['_reasoningEffort'] = _effort_label
                             break
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
@@ -12057,6 +12092,9 @@ def _run_agent_streaming(
                 usage['ttft_ms'] = _ttft_ms
             if _used_model:
                 usage['used_model'] = _used_model
+            _effort_label_done = _effective_reasoning_effort_label(agent, _reasoning_config)
+            if _effort_label_done:
+                usage['reasoning_effort'] = _effort_label_done
             # Include context window data from the agent's compressor for the UI indicator.
             # The session-level persistence happens above (before s.save()) so the values
             # survive a page reload; this block only populates the live SSE usage payload.

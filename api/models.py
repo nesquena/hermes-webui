@@ -8706,6 +8706,7 @@ _SESSION_MESSAGE_DISPLAY_METADATA_KEYS = (
     "_turnUsage",
     "_firstTokenMs",
     "_usedModel",
+    "_reasoningEffort",
     "_gatewayRouting",
     "_statusCard",
     "_anchor_stream_id",
