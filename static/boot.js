@@ -2101,6 +2101,8 @@ $('btnNewChat').onclick=async()=>{
 $('btnDownload').onclick=async()=>{
   if(!S.session)return;
   const sid=S.session.session_id;
+  let transcriptSession=S.session;
+  let transcriptMessages=S.messages;
   if(typeof _messagesTruncated!=='undefined'&&_messagesTruncated){
     if(S.busy||S.activeStreamId){
       if(typeof showToast==='function'){
@@ -2108,7 +2110,7 @@ $('btnDownload').onclick=async()=>{
       }
       return;
     }
-    if(typeof _ensureAllMessagesLoaded!=='function'){
+    if(typeof _readFullSessionSnapshot!=='function'){
       if(typeof showToast==='function'){
         showToast((typeof t==='function'&&t('download_transcript_failed_full'))||'Failed to load the full transcript.',4000,'error');
       }
@@ -2118,7 +2120,12 @@ $('btnDownload').onclick=async()=>{
       showToast((typeof t==='function'&&t('download_transcript_preparing_full'))||'Preparing full transcript…',2000);
     }
     try{
-      await _ensureAllMessagesLoaded();
+      const snapshot=await _readFullSessionSnapshot(sid);
+      if(!snapshot||!snapshot.session){
+        throw new Error('full transcript snapshot unavailable');
+      }
+      transcriptSession=snapshot.session;
+      transcriptMessages=snapshot.messages||[];
     }catch(e){
       console.warn('btnDownload full-load failed:',e);
       if(typeof showToast==='function'){
@@ -2132,7 +2139,7 @@ $('btnDownload').onclick=async()=>{
       }
       return;
     }
-    if(_messagesTruncated||S.busy||S.activeStreamId){
+    if(S.busy||S.activeStreamId){
       if(typeof showToast==='function'){
         showToast(
           (typeof t==='function'&&t(
@@ -2151,7 +2158,7 @@ $('btnDownload').onclick=async()=>{
       return;
     }
   }
-  const blob=new Blob([transcript()],{type:'text/markdown'});
+  const blob=new Blob([transcript(transcriptSession,transcriptMessages)],{type:'text/markdown'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);
   a.download=`hermes-${S.session.session_id}.md`;a.click();URL.revokeObjectURL(a.href);
 };

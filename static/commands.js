@@ -856,23 +856,34 @@ async function _pollManualCompressionResult(sid){
   }
 }
 
-async function _applyManualCompressionResult(data, focusTopic, visibleCount, commandText){
+async function _applyManualCompressionResult(data, focusTopic, visibleCount, commandText, replacementTicket){
+  const ownerSid=S.session&&S.session.session_id;
   if(data&&data.session){
     const currentSid=S.session&&S.session.session_id;
     if(data.session.session_id&&data.session.session_id!==currentSid){
       await loadSession(data.session.session_id);
+      if(!S.session||S.session.session_id!==data.session.session_id)return false;
     }else{
-      if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
-      S.session=data.session;
-      S.messages=data.session.messages||[];
-      S.toolCalls=data.session.tool_calls||[];
-      clearLiveToolCards();
-      try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
-      if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
-      syncTopbar();
-      renderMessages();
+      const ticket=replacementTicket||(
+        typeof _captureTranscriptReplacement==='function'
+          ? _captureTranscriptReplacement()
+          : null
+      );
+      const committed=typeof _commitTranscriptReplacement==='function'
+        && _commitTranscriptReplacement(ticket, () => {
+          S.session=data.session;
+          S.messages=data.session.messages||[];
+          S.toolCalls=data.session.tool_calls||[];
+          clearLiveToolCards();
+          try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+          if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+          syncTopbar();
+          renderMessages();
+        });
+      if(!committed)return false;
       await renderSessionList();
-      updateQueueBadge(S.session.session_id);
+      if(!S.session||S.session.session_id!==ownerSid)return false;
+      updateQueueBadge(ownerSid);
     }
   }
   const summary=data&&data.summary;
@@ -904,10 +915,12 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
 async function resumeManualCompressionForSession(sid){
   if(!sid) return;
   try{
-    if(S.session&&S.session.session_id===sid&&typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+    const statusTicket=typeof _captureTranscriptReplacement==='function'
+      ? _captureTranscriptReplacement()
+      : {sessionId:sid,generation:_messagesGeneration,used:false};
     const status=await api(`/api/session/compress/status?session_id=${encodeURIComponent(sid)}`);
     if(!status||status.status!=='running') return;
-    if(!S.session||S.session.session_id!==sid) return;
+    if(!S.session||S.session.session_id!==sid||!_transcriptReplacementIsCurrent(statusTicket)) return;
     const visibleMessages=_manualCompressionVisibleMessages();
     const visibleCount=visibleMessages.length;
     const anchorMessageKey=_compressionAnchorMessageKey(visibleMessages[visibleMessages.length-1]||null);
@@ -925,9 +938,12 @@ async function resumeManualCompressionForSession(sid){
       });
     }
     renderMessages();
+    const pollTicket=typeof _captureTranscriptReplacement==='function'
+      ? _captureTranscriptReplacement()
+      : {sessionId:sid,generation:_messagesGeneration,used:false};
     const done=await _pollManualCompressionResult(sid);
-    if(!S.session||S.session.session_id!==sid) return;
-    await _applyManualCompressionResult(done, status.focus_topic||'', visibleCount, status.focus_topic?`/compress ${status.focus_topic}`:'/compress');
+    if(!S.session||S.session.session_id!==sid||!_transcriptReplacementIsCurrent(pollTicket)) return;
+    await _applyManualCompressionResult(done, status.focus_topic||'', visibleCount, status.focus_topic?`/compress ${status.focus_topic}`:'/compress', pollTicket);
   }catch(e){
     // No active compression job or transient server error — not a real failure.
     // 404: route missed or session gone; 5xx: backend exception during status check.
@@ -960,7 +976,9 @@ async function _runManualCompression(focusTopic){
   let visibleCount=0;
   try{
     const sid=S.session.session_id;
-    if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+    const preflightTicket=typeof _captureTranscriptReplacement==='function'
+      ? _captureTranscriptReplacement()
+      : {sessionId:sid,generation:_messagesGeneration,used:false};
     // Preflight: verify the viewed session still exists before compressing.
     // This avoids a confusing "not found" toast when the UI is stale.
     try{
@@ -968,12 +986,15 @@ async function _runManualCompression(focusTopic){
       if(!live||!live.session||live.session.session_id!==sid){
         throw new Error('session no longer available');
       }
-      if(!S.session||S.session.session_id!==sid) return;
-      S.session=live.session;
-      if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
-      S.messages=live.session.messages||[];
-      S.toolCalls=live.session.tool_calls||[];
-      if(typeof _messagesTruncated!=='undefined') _messagesTruncated=false;
+      if(!S.session||S.session.session_id!==sid||!_transcriptReplacementIsCurrent(preflightTicket)) return;
+      const committed=typeof _commitTranscriptReplacement==='function'
+        && _commitTranscriptReplacement(preflightTicket, () => {
+          S.session=live.session;
+          S.messages=live.session.messages||[];
+          S.toolCalls=live.session.tool_calls||[];
+          if(typeof _messagesTruncated!=='undefined') _messagesTruncated=false;
+        });
+      if(!committed)return;
     }catch(preflightErr){
       if(typeof clearCompressionUi==='function') clearCompressionUi();
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
@@ -1004,6 +1025,9 @@ async function _runManualCompression(focusTopic){
     }
     if(typeof setComposerStatus==='function') setComposerStatus(t('compressing'));
     renderMessages();
+    const runTicket=typeof _captureTranscriptReplacement==='function'
+      ? _captureTranscriptReplacement()
+      : {sessionId:sid,generation:_messagesGeneration,used:false};
     const started=await api('/api/session/compress/start',{method:'POST',body:JSON.stringify(body)});
     if(started&&started.status==='error'){
       const err=new Error(started.error||'Compression failed');
@@ -1011,8 +1035,8 @@ async function _runManualCompression(focusTopic){
       throw err;
     }
     const data=(started&&started.status==='done')?started:await _pollManualCompressionResult(sid);
-    if(!S.session||S.session.session_id!==sid) return;
-    await _applyManualCompressionResult(data, focusTopic, visibleCount, commandText);
+    if(!S.session||S.session.session_id!==sid||!_transcriptReplacementIsCurrent(runTicket)) return;
+    await _applyManualCompressionResult(data, focusTopic, visibleCount, commandText, runTicket);
   }catch(e){
     if(typeof setCompressionUi==='function'){
       const currentSid=S.session&&S.session.session_id;
@@ -1104,8 +1128,10 @@ async function cmdTheme(args){
 }
 
 async function cmdSkills(args){
+  const ownerSid=S.session&&S.session.session_id;
   try{
     const data = await api('/api/skills');
+    if(!ownerSid||!S.session||S.session.session_id!==ownerSid)return;
     let skills = data.skills || [];
     if(args){
       const q = args.toLowerCase();
@@ -1159,7 +1185,7 @@ async function cmdUse(args){
   const pending = {sessionId:S.session&&S.session.session_id||null,promise:null};
   pending.promise = new Promise(r => { resolve = r; });
   _forcedSkillDirectivePending = pending;
-  const isCurrentSession = () => !pending.sessionId || (S.session&&S.session.session_id)===pending.sessionId;
+  const isCurrentSession = () => !!pending.sessionId && (S.session&&S.session.session_id)===pending.sessionId;
   try{
     const data = await api('/api/skills');
     const skills = data.skills || [];
@@ -1175,6 +1201,11 @@ async function cmdUse(args){
       return;
     }
     const detail = await api(`/api/skills/content?name=${encodeURIComponent(match.name)}`);
+    if(!isCurrentSession()){
+      resolve(null);
+      if(_forcedSkillDirectivePending===pending)_forcedSkillDirectivePending = null;
+      return;
+    }
     const skillContent = detail&&typeof detail.content==='string' ? detail.content.trim() : '';
     if(!skillContent) throw new Error(`Skill \`${match.name}\` has no readable content.`);
     const directive = `[USER OVERRIDE] You MUST follow the skill '${match.name}' content provided below before responding to the next message.`;
@@ -1194,10 +1225,12 @@ async function cmdUse(args){
 
 async function cmdPersonality(args){
   if(!S.session){showToast(t('no_active_session'));return;}
+  const ownerSid=S.session.session_id;
   if(!args){
     // List available personalities
     try{
       const data=await api('/api/personalities');
+      if(!S.session||S.session.session_id!==ownerSid)return;
       if(!data.personalities||!data.personalities.length){
         showToast(t('no_personalities'));
         return;
@@ -1213,12 +1246,14 @@ async function cmdPersonality(args){
   if(name.toLowerCase()==='none'||name.toLowerCase()==='default'||name.toLowerCase()==='clear'){
     try{
       await api('/api/personality/set',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,name:''})});
+      if(!S.session||S.session.session_id!==ownerSid)return;
       showToast(t('personality_cleared'));
     }catch(e){showToast(t('failed_colon')+e.message);}
     return;
   }
   try{
     const res=await api('/api/personality/set',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,name})});
+    if(!S.session||S.session.session_id!==ownerSid)return;
     if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
     S.messages.push({role:'assistant',content:t('personality_set')+`**${name}**`});
     renderMessages();
@@ -1240,7 +1275,6 @@ async function cmdGoal(args){
   if(!S.session){await newSession();await renderSessionList();}
   if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return;}
   const activeSid=S.session.session_id;
-  if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
   try{
     const r=await api('/api/goal',{method:'POST',body:JSON.stringify({
       session_id:activeSid,
@@ -1263,11 +1297,13 @@ async function cmdGoal(args){
       return raw;
     })();
     if(msg){
+      if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
       S.messages.push({role:'assistant',content:msg,_ts:Date.now()/1000,_goalStatus:true,_transient:true});
       renderMessages({preserveScroll:true});
       showToast(msg.split('\n')[0],2600);
     }
     if(!r||!r.stream_id)return;
+    if(!S.session||S.session.session_id!==activeSid)return;
     S.toolCalls=[];
     if(typeof clearLiveToolCards==='function')clearLiveToolCards();
     appendThinking();setBusy(true);
@@ -1687,6 +1723,7 @@ async function _trySteer(msg, explicitSteer){
 
 async function cmdTitle(args){
   if(!S.session){showToast(t('no_active_session'));return;}
+  const activeSid=S.session.session_id;
   const name=(args||'').trim();
   if(!name){
     if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
@@ -1696,6 +1733,7 @@ async function cmdTitle(args){
   try{
     const r=await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,title:name})});
     if(r&&r.error){showToast(r.error);return;}
+    if(!S.session||S.session.session_id!==activeSid)return;
     S.session.title=(r&&r.session&&r.session.title)||name;
     if(typeof syncTopbar==='function')syncTopbar();
     if(typeof renderSessionList==='function')renderSessionList();
@@ -1719,15 +1757,28 @@ async function cmdRetry(){
   // false negative for an already-applied pick). Captured pre-await, scoped to
   // activeSid. No non-default pick → no re-arm → server compatible-model resolution runs.
   const _recoveryPick=_deliberateSessionModelPick(activeSid);
+  const replacementTicket=typeof _captureTranscriptReplacement==='function'
+    ? _captureTranscriptReplacement()
+    : null;
   try{
     const r=await api('/api/session/retry',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
-    if(!S.session||S.session.session_id!==activeSid)return;
+    if(!S.session||S.session.session_id!==activeSid||
+       (replacementTicket&&!_transcriptReplacementIsCurrent(replacementTicket)))return;
     const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
     // #5924 SILENT-race guard: a session switch during the GET await must not let
     // this recovery apply session A's intent to whatever session is now visible.
     if(!S.session||S.session.session_id!==activeSid)return;
-    if(data&&data.session){if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
+    if(data&&data.session){
+      const committed=typeof _commitTranscriptReplacement==='function'
+        && _commitTranscriptReplacement(replacementTicket, () => {
+          S.messages=data.session.messages||[];S.toolCalls=[];
+          if(typeof clearLiveToolCards==='function')clearLiveToolCards();
+          if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;
+          renderMessages();
+        });
+      if(!committed)return;
+    }
     $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();
     // Re-arm the single-shot explicit-pick marker from the captured non-default
     // pick — but only if it's still safe at fire time (session unchanged, current
@@ -1741,12 +1792,24 @@ async function cmdUndo(){
   if(!S.session){showToast(t('no_active_session'));return;}
   if(S.session.is_cli_session){showToast(t('cmd_webui_only_session'));return;}
   const activeSid=S.session.session_id;
+  const replacementTicket=typeof _captureTranscriptReplacement==='function'
+    ? _captureTranscriptReplacement()
+    : null;
   try{
     const r=await api('/api/session/undo',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
     const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
-    if(data&&data.session){if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
+    if(data&&data.session){
+      const committed=typeof _commitTranscriptReplacement==='function'
+        && _commitTranscriptReplacement(replacementTicket, () => {
+          S.messages=data.session.messages||[];S.toolCalls=[];
+          if(typeof clearLiveToolCards==='function')clearLiveToolCards();
+          if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;
+          renderMessages();
+        });
+      if(!committed)return;
+    }
     showToast(`↩ ${t('undid_n_messages')} ${r.removed_count} ${t('undid_messages_suffix')}`);
   }catch(e){showToast(t('undo_failed')+e.message);}
 }

@@ -3645,8 +3645,42 @@ function _bumpMessagesGeneration() {
   _messagesGeneration = (_messagesGeneration + 1) | 0;
   return _messagesGeneration;
 }
-function _claimTranscriptWrite() {
-  return _bumpMessagesGeneration();
+function _captureTranscriptReplacement() {
+  return {
+    sessionId: S.session && S.session.session_id || null,
+    generation: _messagesGeneration,
+    used: false,
+  };
+}
+function _transcriptReplacementIsCurrent(ticket) {
+  return !!(
+    ticket &&
+    S.session &&
+    S.session.session_id === ticket.sessionId &&
+    _messagesGeneration === ticket.generation
+  );
+}
+function _commitTranscriptReplacement(ticket, commit) {
+  if (!_transcriptReplacementIsCurrent(ticket) || ticket.used) return false;
+  ticket.used = true;
+  _bumpMessagesGeneration();
+  commit();
+  return true;
+}
+async function _readFullSessionSnapshot(sid) {
+  if (!sid) return null;
+  const data = await api(
+    `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`,
+    {timeoutMs:120000}
+  );
+  if (!data || !data.session) return null;
+  const session = data.session;
+  return {
+    session,
+    messages: (session.messages || []).filter(m => m && m.role),
+    toolCalls: Array.isArray(session.tool_calls) ? session.tool_calls : [],
+    truncated: !!session._messages_truncated,
+  };
 }
 
 async function _loadOlderMessages() {
@@ -3660,6 +3694,7 @@ async function _loadOlderMessages() {
   // bails out so we never prepend stale older messages onto a freshly
   // rebuilt transcript (#1937).
   const startGeneration = _messagesGeneration;
+  const replacementTicket = _captureTranscriptReplacement();
   try {
     // Two strategies, chosen by whether the growing tail window still fits under
     // the server's msg_limit ceiling (_MSG_LIMIT_MAX, mirroring backend
@@ -3767,14 +3802,6 @@ async function _loadOlderMessages() {
     const viewportAnchor = (container && typeof _captureMessageViewportAnchor === 'function')
       ? _captureMessageViewportAnchor()
       : null;
-    // Carry forward ephemeral turn fields (_turnUsage/_turnDuration/_turnTps/
-    // _gatewayRouting/_statusCard/_anchor_stream_id) before the wholesale replace so the badge
-    // does not briefly appear and disappear during older-message expansion.
-    if (typeof window._carryForwardEphemeralTurnFields === 'function') {
-      nextMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
-    }
-    S.messages = nextMessages;
-    _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
     // renderMessages() windows long transcripts from the end. If we do not
     // expand that window before rendering, the newly prepended page stays
     // hidden and the "hidden" counter rises while the viewport appears stuck.
@@ -3791,32 +3818,41 @@ async function _loadOlderMessages() {
       const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
       return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||hasPartialTc||(typeof _messageHasReasoningPayload==='function'&&_messageHasReasoningPayload(m))||(typeof _assistantMessageHasVisibleContent==='function'&&_assistantMessageHasVisibleContent(m)))));
     }).length;
-    _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
-    _messagesTruncated = !!responseSession._messages_truncated;
-    _oldestIdx = responseSession._messages_offset || 0;
-    renderMessages({ preserveScroll: true });
-    if (container) {
-      // Prepending older messages must not teleport the reader. Anchor to the
-      // first visible rendered row and restore that row's top offset after the
-      // prepend so synthetic virtual spacer heights cannot skew the delta.
-      const restoredViaAnchor = (viewportAnchor && typeof _restoreMessageViewportAnchor === 'function')
-        ? _restoreMessageViewportAnchor(viewportAnchor, olderMsgs.length)
-        : false;
-      if (!restoredViaAnchor) {
-        const virtualAddedHeight = (typeof _messageVirtualPrependedHeightDelta === 'function')
-          ? _messageVirtualPrependedHeightDelta(addedRenderable)
-          : null;
-        const newScrollH = container.scrollHeight;
-        const addedHeight = Number.isFinite(virtualAddedHeight)
-          ? virtualAddedHeight
-          : Math.max(0, newScrollH - prevScrollH);
-        _programmaticScroll = true;
-        _programmaticScrollSetAt = performance.now();
-        container.scrollTop = oldTop + addedHeight;
-        requestAnimationFrame(()=>{ _programmaticScroll = false; });
+    if (!_commitTranscriptReplacement(replacementTicket, () => {
+      // #3306: preserve ephemeral turn fields across the guarded replacement.
+      let committedMessages = nextMessages;
+      if (typeof window._carryForwardEphemeralTurnFields === 'function') {
+        committedMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
       }
-    }
-    _scrollPinned = false;
+      S.messages = committedMessages;
+      _syncToolCallsForLoadedMessages(committedMessages, responseSession.tool_calls);
+      _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
+      _messagesTruncated = !!responseSession._messages_truncated;
+      _oldestIdx = responseSession._messages_offset || 0;
+      renderMessages({ preserveScroll: true });
+      if (container) {
+        // Prepending older messages must not teleport the reader. Anchor to the
+        // first visible rendered row and restore that row's top offset after the
+        // prepend so synthetic virtual spacer heights cannot skew the delta.
+        const restoredViaAnchor = (viewportAnchor && typeof _restoreMessageViewportAnchor === 'function')
+          ? _restoreMessageViewportAnchor(viewportAnchor, olderMsgs.length)
+          : false;
+        if (!restoredViaAnchor) {
+          const virtualAddedHeight = (typeof _messageVirtualPrependedHeightDelta === 'function')
+            ? _messageVirtualPrependedHeightDelta(addedRenderable)
+            : null;
+          const newScrollH = container.scrollHeight;
+          const addedHeight = Number.isFinite(virtualAddedHeight)
+            ? virtualAddedHeight
+            : Math.max(0, newScrollH - prevScrollH);
+          _programmaticScroll = true;
+          _programmaticScrollSetAt = performance.now();
+          container.scrollTop = oldTop + addedHeight;
+          requestAnimationFrame(()=>{ _programmaticScroll = false; });
+        }
+      }
+      _scrollPinned = false;
+    })) return;
   } catch(e) {
     console.warn('_loadOlderMessages failed:', e);
   } finally {
@@ -3859,38 +3895,33 @@ async function _ensureAllMessagesLoaded() {
   _loadingOlder = true;
   try {
     const sid = S.session.session_id;
-    const startGeneration = _messagesGeneration;
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`, {timeoutMs:120000});
+    const replacementTicket = _captureTranscriptReplacement();
+    const data = await _readFullSessionSnapshot(sid);
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) return;
     // Session may have been switched while we awaited. Bail rather than
     // overwrite the new session's messages.
     if (!S.session || S.session.session_id !== sid) return;
     if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
-    if (_messagesGeneration !== startGeneration) return;
+    if (!_transcriptReplacementIsCurrent(replacementTicket)) return;
     // A same-session live turn can start while this fetch is in flight. Let the
     // live path own S.messages rather than replace it with settled history.
     if (S.busy || S.activeStreamId) return;
     const msgs = (data.session.messages || []).filter(m => m && m.role);
-    // Bump the generation BEFORE the wholesale replace so any racing
-    // prefetch (whose snapshot was taken before this call's mutex
-    // acquisition) sees the new value and aborts.
-    _bumpMessagesGeneration();
-    // #3306: Same ephemeral-field carry-forward as _ensureMessagesLoaded.
-    // Loading older messages also does a wholesale replace of S.messages
-    // and would otherwise drop _turnUsage/_turnDuration/_turnTps/
-    // _gatewayRouting/_statusCard/_anchor_stream_id on the existing turns.
-    let _msgsToAssign = msgs;
-    if (typeof window._carryForwardEphemeralTurnFields === 'function') {
-      _msgsToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], msgs);
-    }
-    S.messages = _msgsToAssign;
-    _messagesTruncated = false;
-    _oldestIdx = 0;
-    _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
-    if (S.session && S.session.session_id === sid) {
-      S.session.message_count = Number(data.session.message_count || msgs.length);
-    }
+    if (!_commitTranscriptReplacement(replacementTicket, () => {
+      // #3306: preserve ephemeral turn fields across the guarded replacement.
+      let _msgsToAssign = msgs;
+      if (typeof window._carryForwardEphemeralTurnFields === 'function') {
+        _msgsToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], msgs);
+      }
+      S.messages = _msgsToAssign;
+      _messagesTruncated = false;
+      _oldestIdx = 0;
+      _syncToolCallsForLoadedMessages(_msgsToAssign, data.toolCalls);
+      if (S.session && S.session.session_id === sid) {
+        S.session.message_count = Number(data.session.message_count || msgs.length);
+      }
+    })) return;
   } finally {
     _loadingOlder = false;
   }

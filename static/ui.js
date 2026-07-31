@@ -9598,23 +9598,28 @@ async function refreshSession() {
   dismissReconnect();
   if (!S.session) return;
   const refreshSid=S.session.session_id;
-  if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
+  const refreshTicket=typeof _captureTranscriptReplacement==='function'
+    ? _captureTranscriptReplacement()
+    : {sessionId:refreshSid,generation:_messagesGeneration,used:false};
   try {
     const data = await api(`/api/session?session_id=${encodeURIComponent(refreshSid)}`);
-    if(!S.session||S.session.session_id!==refreshSid) return;
-    if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
-    S.session = data.session;
-    S.messages = data.session.messages || [];
-    _messagesTruncated = !!data.session._messages_truncated;
-    _oldestIdx = data.session._messages_offset || 0;
-    if (typeof _mergePendingSessionMessage !== 'function') {
-      throw new Error('Pending-session merge helper unavailable');
-    }
-    _mergePendingSessionMessage(data.session, S.messages);
-    S.activeStreamId = data.session.active_stream_id || null;
-
-    syncTopbar(); _renderMessagesWithScrollSnapshot();
-    showToast('Conversation refreshed');
+    if(!data||!data.session) return;
+    const commit=typeof _commitTranscriptReplacement==='function'
+      ? _commitTranscriptReplacement(refreshTicket, () => {
+        S.session = data.session;
+        S.messages = data.session.messages || [];
+        _messagesTruncated = !!data.session._messages_truncated;
+        _oldestIdx = data.session._messages_offset || 0;
+        if (typeof _mergePendingSessionMessage !== 'function') {
+          throw new Error('Pending-session merge helper unavailable');
+        }
+        _mergePendingSessionMessage(data.session, S.messages);
+        S.activeStreamId = data.session.active_stream_id || null;
+        syncTopbar(); _renderMessagesWithScrollSnapshot();
+        showToast('Conversation refreshed');
+      })
+      : false;
+    if(!commit) return;
   } catch(e) { setStatus('Refresh failed: ' + e.message); }
 }
 // ── Update banner ──
@@ -18663,6 +18668,9 @@ async function submitEdit(msgIdx, newText) {
     await _ensureAllMessagesLoaded();
   }
   if(!S.session || S.session.session_id !== initialSid) return;
+  const editTicket=typeof _captureTranscriptReplacement==='function'
+    ? _captureTranscriptReplacement()
+    : null;
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
       session_id: initialSid,
@@ -18672,15 +18680,15 @@ async function submitEdit(msgIdx, newText) {
     // let this recovery apply session A's intent (truncate/re-arm/send) to the
     // newly-visible session.
     if(!S.session || S.session.session_id !== initialSid) return;
-    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
-    S.messages = S.messages.slice(0, absoluteKeepCount);
-    renderMessages();
-    $('msg').value = newText;
-    // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
-    // Re-arm the single-shot explicit-pick marker from the captured non-default
-    // pick — only if still safe at fire time (session unchanged, current model
-    // still matches, no newer onchange marker to clobber). See _reArmRecoveryPick.
-    _reArmRecoveryPick(initialSid, _recoveryPick);
+    const committed=typeof _commitTranscriptReplacement==='function'
+      && _commitTranscriptReplacement(editTicket, () => {
+        S.messages = S.messages.slice(0, absoluteKeepCount);
+        renderMessages();
+        $('msg').value = newText;
+        // #5924: re-arm only for the session that supplied the edit request.
+        _reArmRecoveryPick(initialSid, _recoveryPick);
+      });
+    if(!committed)return;
     await send();
   } catch(e) { setStatus(t('edit_failed') + e.message); }
 }
@@ -18702,15 +18710,21 @@ async function regenerateResponse(btn) {
     await _ensureAllMessagesLoaded();
   }
   if(!S.session || S.session.session_id !== initialSid) return;
+  const regenerateTicket=typeof _captureTranscriptReplacement==='function'
+    ? _captureTranscriptReplacement()
+    : null;
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
       session_id: initialSid,
       keep_count: absoluteKeepCount
     })});
-    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
-    S.messages = S.messages.slice(0, absoluteKeepCount);
-    renderMessages();
-    $('msg').value = lastUserText;
+    const committed=typeof _commitTranscriptReplacement==='function'
+      && _commitTranscriptReplacement(regenerateTicket, () => {
+        S.messages = S.messages.slice(0, absoluteKeepCount);
+        renderMessages();
+        $('msg').value = lastUserText;
+      });
+    if(!committed)return;
     await send();
   } catch(e) { setStatus(t('regen_failed') + e.message); }
 }
