@@ -120,7 +120,7 @@ def test_completion_paths_keep_focus_gate_for_hidden_tab_completions():
     focus-gated _isSessionActivelyViewedForList, not a focus-independent variant.
     """
     background = _function_block("_markSessionCompletionUnreadIfBackground", "function _clearSessionCompletionUnread")
-    assert "_isSessionActivelyViewedForList(sid)" in background, (
+    assert "_isSessionActivelyViewedForList(sid, stateRow)" in background, (
         "background completion must keep the focus-gated read check so a hidden-tab "
         "completion is not prematurely marked read"
     )
@@ -128,7 +128,7 @@ def test_completion_paths_keep_focus_gate_for_hidden_tab_completions():
     polling_start = SESSIONS_JS.index("function _markPollingCompletionUnreadTransitions(sessions)")
     polling_end = SESSIONS_JS.index("const staleRuntimeStateSids", polling_start)
     polling = SESSIONS_JS[polling_start:polling_end]
-    assert "!_isSessionActivelyViewedForList(sid)" in polling, (
+    assert "!_isSessionActivelyViewedForList(sid, s)" in polling, (
         "polling completion must keep the focus-gated read check so a hidden-tab "
         "completion is not prematurely marked read"
     )

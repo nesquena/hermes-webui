@@ -54,6 +54,10 @@ eval(extractFunc('_sidebarActiveSessionIdentityKey'));
 eval(extractFunc('_sidebarIdentityMatchesActiveSession'));
 eval(extractFunc('_sidebarSessionMatchesActiveSession'));
 eval(extractFunc('_sidebarRuntimeIdentityKey'));
+eval(extractFunc('_sidebarRuntimeKey'));
+eval(extractFunc('_sidebarRuntimeRowForSid'));
+eval(extractFunc('_sidebarStateKey'));
+eval(extractFunc('_migrateSidebarStateEntry'));
 eval(extractFunc('_sessionLineageContainsSession'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
@@ -180,6 +184,44 @@ console.log(JSON.stringify({
 """))
     assert result["a"] != result["b"]
     assert result["active"] == result["a"]
+
+
+def test_viewed_and_completion_state_keep_duplicate_session_ids_scoped():
+    result = _run_node(_harness("""
+const store = {};
+global.localStorage = {
+  getItem:key => Object.prototype.hasOwnProperty.call(store,key) ? store[key] : null,
+  setItem:(key,value) => { store[key] = String(value); },
+};
+let _sessionViewedCounts = null;
+let _sessionCompletionUnread = null;
+const SESSION_VIEWED_COUNTS_KEY = 'session-viewed-counts';
+const SESSION_COMPLETION_UNREAD_KEY = 'session-completion-unread';
+eval(extractFunc('_getSessionViewedCounts'));
+eval(extractFunc('_saveSessionViewedCounts'));
+eval(extractFunc('_setSessionViewedCount'));
+eval(extractFunc('_getSessionCompletionUnread'));
+eval(extractFunc('_saveSessionCompletionUnread'));
+eval(extractFunc('_clearSessionCompletionUnread'));
+eval(extractFunc('_markSessionCompletionUnread'));
+eval(extractFunc('_hasSessionCompletionUnread'));
+const rowA = {session_id:'same', profile_scope:'work', project_id:'projA'};
+const rowB = {session_id:'same', profile_scope:'work', project_id:'projB'};
+global._allSessions = [rowA, rowB];
+global.S = {session: rowA};
+_setSessionViewedCount('same', 1, rowA);
+_setSessionViewedCount('same', 2, rowB);
+_markSessionCompletionUnread('same', 3, null, rowA);
+_markSessionCompletionUnread('same', 4, null, rowB);
+console.log(JSON.stringify({
+  viewed:Object.keys(_getSessionViewedCounts()),
+  unread:Object.keys(_getSessionCompletionUnread()),
+  values:Object.values(_getSessionCompletionUnread()).map(item=>item.message_count).sort(),
+}));
+"""))
+    assert len(result["viewed"]) == 2
+    assert len(result["unread"]) == 2
+    assert result["values"] == [3, 4]
 
 
 def test_compression_parent_lookup_stays_within_profile_scope():
