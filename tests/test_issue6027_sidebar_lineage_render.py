@@ -131,6 +131,25 @@ console.log(JSON.stringify({root:index.ownership(root), missing:index.ownership(
     assert result["rootKey"] != result["missingKey"]
 
 
+def test_same_profile_project_duplicates_fail_closed_before_attachment():
+    result = _run_node(_harness("""
+const parentA = {session_id:'parent', profile_scope:'work', project_id:'projA'};
+const parentB = {session_id:'parent', profile_scope:'work', project_id:'projB'};
+const delegate = {session_id:'delegate', profile_scope:'work', relationship_type:'child_session',
+  read_only:true, parent_session_id:'parent'};
+const tipA = {session_id:'tipA', profile_scope:'work', project_id:'projA', _lineage_root_id:'same'};
+const tipB = {session_id:'tipB', profile_scope:'work', project_id:'projB', _lineage_root_id:'same'};
+const index = _buildSidebarLineageIndex([parentA, parentB, delegate, tipA, tipB], []);
+const collapsed = _collapseSessionLineageForSidebar([tipA, tipB], index);
+console.log(JSON.stringify({delegate:index.ownership(delegate),
+  project:index.projectFor(delegate)===undefined?'invalid':index.projectFor(delegate),
+  collapsed:collapsed.map(row=>row.session_id)}));
+"""))
+    assert result["delegate"]["status"] == "ambiguous"
+    assert result["project"] == "invalid"
+    assert result["collapsed"] == ["tipA", "tipB"]
+
+
 def test_compression_parent_lookup_stays_within_profile_scope():
     result = _run_node(_harness("""
 const parentA = {session_id:'parent', profile_scope:'A', project_id:'projA',
