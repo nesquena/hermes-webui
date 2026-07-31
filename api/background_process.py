@@ -908,8 +908,19 @@ def _requeue_async_delegation_event(
     )
 
 
-def _retry_unclaimed_async_delegation_event(process_registry, evt: dict) -> None:
-    """Retry from durable state, or make one bounded legacy routing pass."""
+def _retry_unclaimed_async_delegation_event(
+    process_registry,
+    evt: dict,
+    *,
+    keep_legacy_retrying: bool = False,
+) -> None:
+    """Retry from durable state, or make a bounded legacy routing pass.
+
+    ``keep_legacy_retrying`` is reserved for a completion whose target session
+    is known but currently busy. That wait state is neither an unroutable event
+    nor a failed delivery attempt, so compatibility-mode delivery must keep
+    backing off until the session becomes idle.
+    """
     completion_queue = getattr(process_registry, "completion_queue", None)
     if schedule_async_delegation_claim_retry(
         evt,
@@ -917,10 +928,11 @@ def _retry_unclaimed_async_delegation_event(process_registry, evt: dict) -> None
         delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
     ):
         return
-    if evt.get("_webui_routing_retry_attempted"):
+    if not keep_legacy_retrying and evt.get("_webui_routing_retry_attempted"):
         return
     retry_evt = dict(evt)
-    retry_evt["_webui_routing_retry_attempted"] = True
+    if not keep_legacy_retrying:
+        retry_evt["_webui_routing_retry_attempted"] = True
     _requeue_async_delegation_event(
         process_registry,
         retry_evt,
@@ -1031,7 +1043,11 @@ def _process_async_delegation_event(
     # not a delivery attempt, so leave the record unclaimed and let the shared
     # restore sweep retry after the session can accept a wakeup.
     if _session_has_active_turn(session_id):
-        _retry_unclaimed_async_delegation_event(process_registry, evt)
+        _retry_unclaimed_async_delegation_event(
+            process_registry,
+            evt,
+            keep_legacy_retrying=True,
+        )
         return
 
     try:
