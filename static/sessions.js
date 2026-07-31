@@ -7030,21 +7030,36 @@ function _lineageReportNeedsFetch(s,lineageKey,segmentCount){
   return Number(segmentCount||0)>_lineageLocalSegmentCount(s);
 }
 
-function _lineageSegmentsForRender(s,lineageKey,skipCached){
+function _lineageSegmentsForRender(s,lineageKey,skipCached,lineageIndex){
   const segments=[];
   const seen=new Set();
   const currentSid=s&&s.session_id;
-  const addSegment=(seg)=>{
+  const scopeReportSegment=(seg)=>{
+    const ownerProject=lineageIndex&&typeof lineageIndex.projectFor==='function'
+      ?lineageIndex.projectFor(s):undefined;
+    const scoped={
+      ...seg,
+      profile_scope:seg.profile_scope||s.profile_scope||s.profile,
+      profile:seg.profile||s.profile||s.profile_scope,
+      source_tag:seg.source_tag||s.source_tag,
+      raw_source:seg.raw_source||s.raw_source,
+      session_source:seg.session_source||s.session_source,
+    };
+    if(ownerProject!==undefined) scoped.project_id=ownerProject;
+    else if(s.project_id!==undefined) scoped.project_id=s.project_id;
+    return scoped;
+  };
+  const addSegment=(seg, fromReport=false)=>{
     if(!seg||!seg.session_id||seg.session_id===currentSid||seen.has(seg.session_id)) return;
     if(seg.role==='child_session') return;
     seen.add(seg.session_id);
-    segments.push({...seg});
+    segments.push(fromReport?scopeReportSegment(seg):{...seg});
   };
   for(const seg of (Array.isArray(s&&s._lineage_segments)?s._lineage_segments:[])) addSegment(seg);
   if(!skipCached){
     const cached=_lineageReportCache.get(_lineageReportCacheKey(s,lineageKey));
     if(cached&&Array.isArray(cached.segments)){
-      for(const seg of cached.segments) addSegment(seg);
+      for(const seg of cached.segments) addSegment(seg,true);
     }
   }
   return segments;
@@ -7366,10 +7381,10 @@ function _syncSidebarExpansionForActiveSession(rows, activeSid, lineageIndex){
   for(const row of rows||[]){
     const key=_sidebarLineageKeyForRow(row,lineageIndex);
     if(!key) continue;
-    if(Array.isArray(row._child_sessions)&&row._child_sessions.some(child=>child&&child.session_id===activeSid)){
+    if(Array.isArray(row._child_sessions)&&row._child_sessions.some(child=>_sidebarSessionMatchesActiveSession(child,activeSid,lineageIndex))){
       _expandedChildSessionKeys.add(key);
     }
-    if(Array.isArray(row._lineage_segments)&&row._lineage_segments.some(seg=>seg&&seg.session_id===activeSid&&seg.session_id!==row.session_id)){
+    if(Array.isArray(row._lineage_segments)&&row._lineage_segments.some(seg=>_sidebarSessionMatchesActiveSession(seg,activeSid,lineageIndex)&&seg.session_id!==row.session_id)){
       _expandedLineageKeys.add(key);
     }
   }
@@ -8414,7 +8429,7 @@ function renderSessionListFromCache(){
     const lineageKey=_sidebarLineageKeyForRow(s,lineageIndex);
     const segmentCount=showLineageMetadata?_sessionSegmentCount(s):0;
     const needsLineageReport=showLineageMetadata?_lineageReportNeedsFetch(s,lineageKey,segmentCount):false;
-    const lineageSegments=showLineageMetadata?_lineageSegmentsForRender(s,lineageKey,needsLineageReport):[];
+    const lineageSegments=showLineageMetadata?_lineageSegmentsForRender(s,lineageKey,needsLineageReport,lineageIndex):[];
     const lineageReportKey=showLineageMetadata?_lineageReportCacheKey(s,lineageKey):null;
     const canExpandLineageSegments=showLineageMetadata&&Boolean(lineageKey&&segmentCount>1&&(lineageSegments.length>0||needsLineageReport||_lineageReportInflight.has(lineageReportKey)));
     const lineageSegmentsExpanded=canExpandLineageSegments&&_expandedLineageKeys.has(lineageKey);

@@ -19,6 +19,11 @@ def _run_node(source: str) -> str:
         "eval(extractFunc('_sidebarLineageSourceBucket'));"
         "eval(extractFunc('_isReadOnlySession'));"
         "eval(extractFunc('_buildSidebarLineageIndex'));"
+        "eval(extractFunc('_sidebarActiveSessionIdentityKey'));"
+        "eval(extractFunc('_sidebarIdentityMatchesActiveSession'));"
+        "eval(extractFunc('_sidebarSessionMatchesActiveSession'));"
+        "eval(extractFunc('_sessionLineageContainsSession'));"
+        "eval(extractFunc('_resolveSessionIdFromSidebarLineage'));"
     )
     if "eval(extractFunc('_collapseSessionLineageForSidebar'));" in source:
         source = source.replace(
@@ -30,6 +35,12 @@ def _run_node(source: str) -> str:
         source = source.replace(
             "eval(extractFunc('_attachChildSessionsToSidebarRows'));",
             index_bootstrap + "eval(extractFunc('_attachChildSessionsToSidebarRows'));",
+            1,
+        )
+    elif "eval(extractFunc('_syncSidebarExpansionForActiveSession'));" in source:
+        source = source.replace(
+            "eval(extractFunc('_syncSidebarExpansionForActiveSession'));",
+            index_bootstrap + "eval(extractFunc('_syncSidebarExpansionForActiveSession'));",
             1,
         )
     # Pass source via stdin rather than `-e <source>` argv — the latter is
@@ -1962,7 +1973,7 @@ def test_sidebar_lineage_segment_badge_is_detailed_density_only_and_localized():
     assert "const showLineageMetadata=density==='detailed';" in js
     assert "const segmentCount=showLineageMetadata?_sessionSegmentCount(s):0;" in js
     assert "const needsLineageReport=showLineageMetadata?_lineageReportNeedsFetch(s,lineageKey,segmentCount):false;" in js
-    assert "const lineageSegments=showLineageMetadata?_lineageSegmentsForRender(s,lineageKey,needsLineageReport):[];" in js
+    assert "const lineageSegments=showLineageMetadata?_lineageSegmentsForRender(s,lineageKey,needsLineageReport,lineageIndex):[];" in js
     assert "const canExpandLineageSegments=showLineageMetadata&&Boolean(" in js
     assert "t('session_meta_segments', segmentCount)" in js
     assert "titleRow.appendChild(segmentCountEl);" in js
@@ -2172,6 +2183,41 @@ const segments = _lineageSegmentsForRender(row, 'root').map(seg => seg.session_i
 console.log(JSON.stringify(segments));
 """
     assert json.loads(_run_node(source)) == ["root", "older"]
+
+
+def test_cached_lineage_report_segments_keep_the_owner_scope():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start), depth = 1; i++;
+  while (depth && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+const _lineageReportCache = new Map();
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_authoritativeLineageTipId'));
+eval(extractFunc('_lineageReportCacheKey'));
+eval(extractFunc('_lineageSegmentsForRender'));
+const row = {{session_id:'delegate', profile_scope:'work', profile:'work',
+  source_tag:'webui', raw_source:'webui', session_source:'webui', project_id:null,
+  _lineage_key:'root'}};
+_lineageReportCache.set('root', {{segments:[{{session_id:'root', role:'hidden_segment'}}]}});
+const index = {{projectFor:()=> 'projA'}};
+console.log(JSON.stringify(_lineageSegmentsForRender(row, 'root', false, index)[0]));
+"""
+    segment = json.loads(_run_node(source))
+    assert segment["profile_scope"] == "work"
+    assert segment["profile"] == "work"
+    assert segment["session_source"] == "webui"
+    assert segment["project_id"] == "projA"
 
 
 def test_lineage_report_fetch_uses_endpoint_once_and_caches_result():
