@@ -693,6 +693,7 @@ def test_source_filtered_cache_preserves_hidden_bucket_runtime_state():
     readonly_fn = _extract_function(src, "_isReadOnlySession")
     index_fn = _extract_function(src, "_buildSidebarLineageIndex")
     runtime_key_fn = _extract_function(src, "_sidebarRuntimeIdentityKey")
+    runtime_scope_key_fn = _extract_function(src, "_sidebarRuntimeKey")
     active_key_fn = _extract_function(src, "_sidebarActiveSessionIdentityKey")
     active_identity_fn = _extract_function(src, "_sidebarIdentityMatchesActiveSession")
     active_match_fn = _extract_function(src, "_sidebarSessionMatchesActiveSession")
@@ -732,6 +733,7 @@ global._forgetObservedStreamingSession = () => {{}};
 {active_identity_fn}
 {active_match_fn}
 {runtime_key_fn}
+{runtime_scope_key_fn}
 {remember_source_fn}
 {remember_streaming_fn}
 {remember_snapshot_fn}

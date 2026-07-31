@@ -51,7 +51,7 @@ def test_background_completion_unread_uses_explicit_marker_not_message_delta():
     assert has_unread_idx != -1, "_hasUnreadForSession not found"
     has_unread_block = SESSIONS_JS[has_unread_idx:SESSIONS_JS.find("async function newSession", has_unread_idx)]
 
-    marker_idx = has_unread_block.find("_hasSessionCompletionUnread(s.session_id)")
+    marker_idx = has_unread_block.find("_hasSessionCompletionUnread(s.session_id, s)")
     count_idx = has_unread_block.find("s.message_count > Number")
     assert marker_idx != -1, "_hasUnreadForSession must check explicit completion unread marker"
     assert count_idx != -1, "_hasUnreadForSession must keep the existing message_count fallback"
@@ -117,16 +117,16 @@ def test_sidebar_cache_completion_handles_compression_session_rotation():
 
     assert "function _markSessionCompletedInList(session, previousSid = null)" in helper_block
     assert "const finalSid = session.session_id || previousSid;" in helper_block
-    assert "const finalIdx = _allSessions.findIndex(s => s && s.session_id === finalSid);" in helper_block
-    assert "const previousIdx = previousSid ? _allSessions.findIndex(s => s && s.session_id === previousSid) : -1;" in helper_block
+    assert "const finalIdx = _allSessions.findIndex(s => rowMatches(s,finalSid));" in helper_block
+    assert "const previousIdx = previousSid ? _allSessions.findIndex(s => rowMatches(s,previousSid)) : -1;" in helper_block
     assert "const idx = finalIdx >= 0 ? finalIdx : previousIdx;" in helper_block
     assert "const {messages: _messages, tool_calls: _toolCalls, ...sessionMeta} = session;" in helper_block
     assert "...sessionMeta" in helper_block
     assert "session_id: finalSid" in helper_block
-    assert "_sessionStreamingById.set(finalSid, false);" in helper_block
+    assert "_sessionStreamingById.set(finalKey, false);" in helper_block
     assert "if (previousSid && previousSid !== finalSid)" in helper_block
-    assert "_sessionStreamingById.delete(previousSid);" in helper_block
-    assert "_sessionListSnapshotById.delete(previousSid);" in helper_block
+    assert "_sessionStreamingById.delete(previousKey);" in helper_block
+    assert "_sessionListSnapshotById.delete(previousKey);" in helper_block
 
 
 def test_polling_transition_marks_completion_unread_without_sse_done():
@@ -149,7 +149,7 @@ def test_polling_transition_marks_completion_unread_without_sse_done():
     apply_block = SESSIONS_JS[apply_idx:render_idx]
 
     assert "const _sessionStreamingById = new Map();" in SESSIONS_JS
-    assert "const wasStreaming = _sessionStreamingById.get(sid);" in transition_block
+    assert "const wasStreaming = _sessionStreamingById.get(runtimeKey);" in transition_block
     assert "const isStreaming = _isSessionEffectivelyStreaming(s);" in transition_block
     assert "s.is_streaming" in effective_block
     assert "s.active_stream_id" not in effective_block
@@ -161,7 +161,7 @@ def test_polling_transition_marks_completion_unread_without_sse_done():
     )
     # #5960/#5975: third arg may carry cron source+profile meta; still mark unread.
     assert "_markSessionCompletionUnread(sid, s.message_count" in transition_block
-    assert "_sessionStreamingById.set(sid, isStreaming);" in transition_block
+    assert "_sessionStreamingById.set(runtimeKey, isStreaming);" in transition_block
     assert "const _streamingPollMs = 30000;" in SESSIONS_JS
     # Greptile #5975: apply carries unreadGen so stale pre-switch lists skip mark.
     assert "_applySessionListPayload(sessData,projData,{unreadGen});" in refresh_block
@@ -276,7 +276,7 @@ def test_polling_transition_does_not_mark_historical_first_render():
         "first-render undefined state must not be treated as a completed stream"
     )
     mark_idx = transition_block.find("_markSessionCompletionUnread(sid")
-    set_idx = transition_block.find("_sessionStreamingById.set(sid, isStreaming)")
+    set_idx = transition_block.find("_sessionStreamingById.set(runtimeKey, isStreaming)")
     assert mark_idx != -1 and set_idx != -1 and mark_idx < set_idx, (
         "the current render should seed streaming state only after checking for "
         "a prior observed streaming state"
@@ -297,7 +297,7 @@ def test_polling_transition_skips_visible_focused_active_session():
     assert "_loadingSessionId !== sid" in helper_block
     assert "document.visibilityState !== 'visible'" in helper_block
     assert "!document.hasFocus()" in helper_block
-    assert "!_isSessionActivelyViewedForList(sid)" in transition_block, (
+    assert "!_isSessionActivelyViewedForList(sid, s)" in transition_block, (
         "polling fallback must not create an unread marker for a session the "
         "user is visibly and focusedly reading"
     )
@@ -339,7 +339,7 @@ def test_cache_render_seeds_streaming_transition_state_for_visible_spinners():
     render_block = SESSIONS_JS[render_idx:SESSIONS_JS.find("const hasUnread=", render_idx)]
 
     assert "if (!s || !s.session_id || !isStreaming) return;" in remember_block
-    assert "_sessionStreamingById.set(s.session_id, true);" in remember_block
+    assert "_sessionStreamingById.set(_sidebarRuntimeKey(s), true);" in remember_block
     assert "const ownStreaming=_isSessionEffectivelyStreaming(s)" in render_block
     assert "_rememberRenderedStreamingState(s, ownStreaming);" in render_block, (
         "renderSessionListFromCache can display a spinner from local INFLIGHT "
@@ -360,15 +360,15 @@ def test_polling_transition_marks_completion_when_long_running_stream_snapshot_a
     assert "SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming'" in SESSIONS_JS
     assert "function _rememberObservedStreamingSession(" in SESSIONS_JS
     assert "function _forgetObservedStreamingSession(" in SESSIONS_JS
-    assert "const previousSnapshot = _sessionListSnapshotById.get(sid);" in transition_block
-    assert "const observedStreaming = _getSessionObservedStreaming()[sid];" in transition_block
+    assert "const previousSnapshot = _sessionListSnapshotById.get(runtimeKey);" in transition_block
+    assert "const observedStreaming = _getSessionObservedStreaming()[runtimeKey];" in transition_block
     assert "const completedWithNewMessages = Boolean(" in transition_block
     assert "(previousSnapshot || observedStreaming)" in transition_block
     assert "messageCount > Number((previousSnapshot || observedStreaming).message_count || 0)" in transition_block
     assert "lastMessageAt > Number((previousSnapshot || observedStreaming).last_message_at || 0)" in transition_block
     assert "const completedPersistedObservedStream = Boolean(observedStreaming && !isStreaming);" in transition_block
     assert "completedObservedStream || completedPersistedObservedStream || completedWithNewMessages" in transition_block
-    assert "_sessionListSnapshotById.set(sid, {" in transition_block
+    assert "_sessionListSnapshotById.set(runtimeKey, {" in transition_block
     assert "_rememberRenderedSessionSnapshot(s);" in render_block, (
         "a visible sidebar spinner can outlive the original SSE context for "
         "long-running tasks, so rendered rows must seed the message snapshot "
@@ -382,10 +382,10 @@ def test_polling_snapshot_fallback_does_not_mark_first_seen_historical_sessions(
         "newSession",
     )
 
-    prev_idx = transition_block.find("const previousSnapshot = _sessionListSnapshotById.get(sid);")
+    prev_idx = transition_block.find("const previousSnapshot = _sessionListSnapshotById.get(runtimeKey);")
     fallback_idx = transition_block.find("const completedWithNewMessages = Boolean(")
     mark_idx = transition_block.find("_markSessionCompletionUnread(sid")
-    snapshot_set_idx = transition_block.find("_sessionListSnapshotById.set(sid, {")
+    snapshot_set_idx = transition_block.find("_sessionListSnapshotById.set(runtimeKey, {")
 
     assert prev_idx != -1 and fallback_idx != -1 and mark_idx != -1 and snapshot_set_idx != -1
     assert "(previousSnapshot || observedStreaming)\n      && !isStreaming" in transition_block, (
@@ -413,7 +413,7 @@ def test_rendered_streaming_rows_persist_observation_across_reload():
     )
     assert "if (isStreaming) {" in transition_block
     assert "_rememberObservedStreamingSession(s);" in transition_block
-    assert "} else {\n      _forgetObservedStreamingSession(sid);" in transition_block
+    assert "} else {\n      _forgetObservedStreamingSession(runtimeKey);" in transition_block
 
 
 def test_active_done_marks_viewed_without_setting_unread_marker():
@@ -561,6 +561,6 @@ def test_historical_sessions_are_not_marked_unread_on_list_render():
     assert "_markSessionCompletionUnread" not in has_unread_block, (
         "rendering old historical sessions must not create completion-unread markers"
     )
-    assert "_setSessionViewedCount(s.session_id, Number(s.message_count || 0));" in has_unread_block, (
+    assert "_setSessionViewedCount(s.session_id, Number(s.message_count || 0), s);" in has_unread_block, (
         "missing viewed-count baseline should still initialize as read for historical sessions"
     )

@@ -85,9 +85,21 @@ def test_served_sidebar_lineage_fixture_has_stable_grouping(tmp_path):
                   project_id:null, message_count:1};
                 _allSessions = [root, delegate, fork];
                 _sidebarReferenceSessions = [];
+                _expandedChildSessionKeys.clear();
+                const narrowIndex = _buildSidebarLineageIndex(_allSessions, _sidebarReferenceSessions);
+                _expandedChildSessionKeys.add(_sidebarLineageKeyForRow(root, narrowIndex));
                 renderSessionListFromCache();
-                const rows = [...document.querySelectorAll('#sessionList .session-item')];
-                return {rows: rows.map(row => row.textContent), count: rows.length,
+                const tree = () => ({
+                  rows: [...document.querySelectorAll('#sessionList .session-item')].map(row => row.textContent),
+                  children: [...document.querySelectorAll('#sessionList .session-child-sessions > *')].map(row => row.textContent),
+                });
+                const narrow = tree();
+                _sidebarReferenceSessions = [root];
+                renderSessionListFromCache();
+                const restored = tree();
+                return {narrow, restored, count: narrow.rows.length,
+                  childCount: narrow.children.length,
+                  stableTree: JSON.stringify(narrow) === JSON.stringify(restored),
                   hasError: !!document.querySelector('.session-load-error')};
               }
             """)
@@ -95,8 +107,11 @@ def test_served_sidebar_lineage_fixture_has_stable_grouping(tmp_path):
             browser.close()
         assert not errors, errors
         assert result["count"] == 2
-        assert any("Renamed root" in row for row in result["rows"])
-        assert any("Writable fork" in row for row in result["rows"])
+        assert result["childCount"] == 2
+        assert any("Renamed root" in row for row in result["narrow"]["rows"])
+        assert any("Writable fork" in row for row in result["narrow"]["rows"])
+        assert any("Delegated child" in row for row in result["narrow"]["children"])
+        assert result["stableTree"]
         assert not result["hasError"]
     finally:
         process.terminate()
