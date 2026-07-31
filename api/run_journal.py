@@ -297,12 +297,19 @@ def _read_last_complete_line_before(path: Path, end_offset: int) -> dict | None:
     """Return the summary of the last complete JSONL record strictly before
     ``end_offset``, without materializing a multi-MB payload.
 
-    Finds the last complete line boundary before ``end_offset`` (two backward
-    newline scans), then uses ``_extract_boundary_record_summary`` (the bounded
-    prefix extractor) to read ONLY the record's summary fields. This keeps the
-    recovery path within the cap even when the preceding record is itself an
-    oversized multi-MB event. Returns the summary dict, or None if there's no
-    preceding complete record.
+    Scans backward across preceding complete lines, skipping any that are blank,
+    malformed (JSONDecodeError), or non-dict, until a valid event dict is found.
+    For each candidate line, uses ``_extract_boundary_record_summary`` (the
+    bounded prefix extractor) to read ONLY the record's summary fields when the
+    line is oversized. This keeps the recovery path within the cap even when the
+    preceding valid record is itself an oversized multi-MB event. Returns the
+    summary dict, or None if there's no valid preceding record.
+
+    This loop fixes #6139 r7: a shape like ``token\\n\\n<oversized partial done>``
+    (a valid event, then a blank line, then a crash-truncated oversized record)
+    defeats a single-scan implementation — the first preceding line is blank,
+    json.loads("") fails, and recovery fails. The backward loop skips the blank
+    line and recovers the valid event.
     """
     if end_offset <= 0:
         return None
@@ -311,27 +318,50 @@ def _read_last_complete_line_before(path: Path, end_offset: int) -> dict | None:
     except (FileNotFoundError, OSError):
         return None
     scan_end = min(end_offset, size)
-    # Find the newline at or before scan_end (terminator of the preceding line).
-    first_nl = _rfind_byte_before(path, b"\n", scan_end)
-    if first_nl is None or first_nl == 0:
-        return None
-    # Find the start of that line (newline before it, or byte 0).
-    second_nl = _rfind_byte_before(path, b"\n", first_nl)
-    line_start = (second_nl + 1) if second_nl is not None else 0
-    line_len = first_nl - line_start
-    # For a normal-sized preceding record, read and parse the whole line.
-    # For an oversized one, use the bounded prefix extractor.
-    if line_len <= _BOUNDARY_SUMMARY_PREFIX_BYTES:
-        try:
-            with path.open("rb") as fh:
-                fh.seek(line_start)
-                raw = fh.read(line_len)
-            parsed = json.loads(raw.decode("utf-8", errors="replace"))
-            return parsed if isinstance(parsed, dict) else None
-        except (json.JSONDecodeError, OSError):
+    # Loop backward across preceding complete lines, skipping blank / malformed /
+    # non-dict lines, until a valid event dict is found. Without this loop, a
+    # shape like `token\n\n<big>` (a blank line between the valid event and the
+    # truncated boundary record) defeats recovery: the first preceding line is
+    # blank, json.loads("") fails, and the function returns None instead of
+    # continuing back to the valid event. (#6139 r7)
+    while scan_end > 0:
+        first_nl = _rfind_byte_before(path, b"\n", scan_end)
+        if first_nl is None or first_nl == 0:
+            return None  # no preceding complete line
+        second_nl = _rfind_byte_before(path, b"\n", first_nl)
+        line_start = (second_nl + 1) if second_nl is not None else 0
+        line_len = first_nl - line_start
+        if line_len <= 0:
+            # Blank line (e.g. the gap in `token\n\n<big>`). Skip it: continue the
+            # backward scan from before this blank line.
+            scan_end = line_start  # strictly < previous scan_end (line_start <= first_nl < scan_end)
+            if scan_end <= 0:
+                return None
+            continue
+        # Attempt to read + parse this candidate line (bounded for oversized).
+        if line_len <= _BOUNDARY_SUMMARY_PREFIX_BYTES:
+            try:
+                with path.open("rb") as fh:
+                    fh.seek(line_start)
+                    raw = fh.read(line_len)
+                parsed = json.loads(raw.decode("utf-8", errors="replace"))
+            except (json.JSONDecodeError, OSError):
+                parsed = None
+            if isinstance(parsed, dict):
+                return parsed
+            # Malformed or non-dict: skip, continue backward.
+            scan_end = line_start
+            if scan_end <= 0:
+                return None
+            continue
+        # Oversized preceding record: bounded prefix extraction (no payload materialized).
+        candidate = _extract_boundary_record_summary(path, line_start)
+        if isinstance(candidate, dict):
+            return candidate
+        scan_end = line_start
+        if scan_end <= 0:
             return None
-    # Oversized preceding record: bounded prefix extraction (no payload materialized).
-    return _extract_boundary_record_summary(path, line_start)
+    return None
 
 
 def _rfind_byte_before(path: Path, byte: bytes, end_offset: int) -> int | None:
