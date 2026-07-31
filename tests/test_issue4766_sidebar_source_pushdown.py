@@ -293,6 +293,38 @@ def test_lineage_metadata_reads_the_database_for_each_row_profile(monkeypatch):
     assert rows[1]["_lineage_root_id"] == "other.db:same-id"
 
 
+def test_state_db_overrides_read_the_database_for_each_row_profile(monkeypatch):
+    rows = [
+        {"session_id": "same-id", "profile": "work", "is_cli_session": True},
+        {"session_id": "same-id", "profile": "other", "is_cli_session": True},
+    ]
+    calls = []
+
+    def profile_db_path(*, profile, fallback_to_active):
+        calls.append((profile, fallback_to_active))
+        return f"{profile}.db"
+
+    def profile_overrides(db_path, session_ids, count_session_ids=None):
+        return {
+            sid: {
+                "_state_db_source": "webui",
+                "_state_db_source_tag": "webui",
+                "_state_db_raw_source": "webui",
+                "_state_db_session_source": "webui",
+                "_state_db_source_label": "WebUI",
+            }
+            for sid in session_ids
+        }
+
+    monkeypatch.setattr(models, "_agent_state_db_path", profile_db_path)
+    monkeypatch.setattr(models, "_read_state_db_sidebar_overrides", profile_overrides)
+
+    models._apply_sidebar_state_db_overrides(rows)
+
+    assert calls == [("work", False), ("other", False)]
+    assert [row["is_cli_session"] for row in rows] == [False, False]
+
+
 def test_sidebar_source_cli_excludes_webui_rows(monkeypatch):
     rows = _session_rows(webui_count=30, cli_count=20)
     _install_common_monkeypatches(monkeypatch, rows)

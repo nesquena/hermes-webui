@@ -6887,20 +6887,32 @@ function _sessionLineageKey(s, sessionIdsInList, sessionsById, lineageIndex){
   return raw&&scopedIdentity(s,raw);
 }
 
-function _sessionLineageContainsSession(s, sid, lineageIndex){
-  if(!s||!sid) return false;
+function _sidebarActiveSessionIdentityKey(sid, lineageIndex){
   const activeSession=typeof S!=='undefined'&&S&&S.session&&S.session.session_id===sid?S.session:null;
-  const hasActiveScope=!!(activeSession&&(
+  if(!activeSession||!lineageIndex) return null;
+  const hasScope=!!(
     activeSession.profile_scope||activeSession.profile||
     activeSession.project_id!==undefined||activeSession.session_source||
     activeSession.source_tag||activeSession.raw_source
-  ));
-  const activeKey=hasActiveScope&&lineageIndex
-    ?lineageIndex.identityKey(activeSession,sid):null;
+  );
+  return hasScope?lineageIndex.identityKey(activeSession,sid):null;
+}
+
+function _sidebarIdentityMatchesActiveSession(row, identity, sid, lineageIndex){
+  if(!row||!identity||!sid||String(identity)!==String(sid)) return false;
+  const activeKey=_sidebarActiveSessionIdentityKey(sid,lineageIndex);
+  if(!activeKey||!lineageIndex) return true;
+  return lineageIndex.identityKey(row,identity)===activeKey;
+}
+
+function _sidebarSessionMatchesActiveSession(row, sid, lineageIndex){
+  return _sidebarIdentityMatchesActiveSession(row,row&&row.session_id,sid,lineageIndex);
+}
+
+function _sessionLineageContainsSession(s, sid, lineageIndex){
+  if(!s||!sid) return false;
   const matches=(candidate)=>{
-    if(!candidate||candidate.session_id!==sid) return false;
-    if(!activeKey||!lineageIndex) return true;
-    return lineageIndex.identityKey(candidate,sid)===activeKey;
+    return _sidebarSessionMatchesActiveSession(candidate,sid,lineageIndex);
   };
   if(matches(s)) return true;
   if(Array.isArray(s._lineage_segments)&&s._lineage_segments.some(matches)) return true;
@@ -6918,7 +6930,7 @@ function _resolveSessionIdFromSidebarLineage(sid, lineageIndex){
   if(!sid||!Array.isArray(_allSessions)||!_allSessions.length) return sid||null;
   const index=lineageIndex||_buildSidebarLineageIndex(_allSessions,typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
   const visibleRows=_collapseSessionLineageForSidebar(_allSessions,index).filter(row=>row&&!_isChildSession(row));
-  if(visibleRows.some(row=>row&&row.session_id===sid)) return sid;
+  if(visibleRows.some(row=>_sidebarSessionMatchesActiveSession(row,sid,index))) return sid;
   const candidates=[];
   for(const row of visibleRows){
     if(!row||!row.session_id) continue;
@@ -6930,7 +6942,10 @@ function _resolveSessionIdFromSidebarLineage(sid, lineageIndex){
     );
     if(!lineageLike) continue;
     const key=_sidebarLineageKeyForRow(row,index);
-    if(key===sid||row.parent_session_id===sid||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid,index)){
+    if(key===sid||_sidebarIdentityMatchesActiveSession(row,row.parent_session_id,sid,index)
+      ||_sidebarIdentityMatchesActiveSession(row,row._lineage_root_id,sid,index)
+      ||_sidebarIdentityMatchesActiveSession(row,row.lineage_root_id,sid,index)
+      ||_sessionLineageContainsSession(row,sid,index)){
       candidates.push(row);
     }
   }
@@ -7449,7 +7464,10 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
   if((S.session.title==='Untitled'||!S.session.title)&&title){
     S.session.title=title;
   }
-  const existingIdx=_allSessions.findIndex(s=>s&&s.session_id===sid);
+  const lineageIndex=_buildSidebarLineageIndex(
+    [...(_allSessions||[]), S.session],
+    typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
+  const existingIdx=_allSessions.findIndex(s=>_sidebarSessionMatchesActiveSession(s,sid,lineageIndex));
   const row={
     ...S.session,
     session_id:sid,
@@ -7470,7 +7488,10 @@ function _sessionRowsWithActiveEphemeralSession(rows){
   rows=Array.isArray(rows)?rows:[];
   if(!S.session||!S.session.session_id) return rows;
   const sid=S.session.session_id;
-  if(rows.some(s=>s&&s.session_id===sid)) return rows;
+  const lineageIndex=_buildSidebarLineageIndex(
+    [...rows, S.session],
+    typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
+  if(rows.some(s=>_sidebarSessionMatchesActiveSession(s,sid,lineageIndex))) return rows;
   const nowSec=Math.floor(Date.now()/1000);
   const activeRow={
     ...S.session,
@@ -7490,8 +7511,12 @@ function _sessionRowsWithActiveEphemeralSession(rows){
 function _ensureActiveSessionRowPresent(rows, sourceRows){
   rows=Array.isArray(rows)?rows:[];
   const activeSid=_activeSessionIdForSidebar();
-  if(!activeSid||rows.some(s=>s&&s.session_id===activeSid)) return rows;
-  const activeRow=(Array.isArray(sourceRows)?sourceRows:[]).find(s=>s&&s.session_id===activeSid);
+  const source=Array.isArray(sourceRows)?sourceRows:[];
+  const lineageIndex=_buildSidebarLineageIndex(
+    [...rows, ...source, ...(S.session?[S.session]:[])],
+    typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
+  if(!activeSid||rows.some(s=>_sidebarSessionMatchesActiveSession(s,activeSid,lineageIndex))) return rows;
+  const activeRow=source.find(s=>_sidebarSessionMatchesActiveSession(s,activeSid,lineageIndex));
   // Only re-inject the active FRESHLY-CREATED 0-message ephemeral chat. An active
   // conversation that already has messages and was filtered out by the search
   // query must stay filtered — re-adding it here would pollute unrelated search
@@ -7511,7 +7536,10 @@ function clearOptimisticSessionStreaming(sid){
     S.activeStreamId=null;
   }
   if(Array.isArray(_allSessions)){
-    const idx=_allSessions.findIndex(s=>s&&s.session_id===sid);
+    const lineageIndex=_buildSidebarLineageIndex(
+      [..._allSessions, ...(S.session?[S.session]:[])],
+      typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
+    const idx=_allSessions.findIndex(s=>_sidebarSessionMatchesActiveSession(s,sid,lineageIndex));
     if(idx>=0){
       _allSessions[idx]={
         ..._allSessions[idx],
@@ -7675,14 +7703,14 @@ function _sessionAttentionState(s){
   return {kind,count,severity:String(attention.severity||''),label,title};
 }
 
-function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
+function _sidebarRowHasVisibleMessages(s, activeSidForSidebar, lineageIndex){
   return (s.message_count||0)>0 ||
     _sessionAttentionState(s) ||
     _isSessionEffectivelyStreaming(s) ||
     !!s.active_stream_id ||
     !!s.pending_user_message ||
     !!s.has_pending_user_message ||
-    (activeSidForSidebar&&s.session_id===activeSidForSidebar) ||
+    _sidebarSessionMatchesActiveSession(s,activeSidForSidebar,lineageIndex) ||
     // #5306: a linked delegate child of the currently-active/streaming parent
     // must stay rendered for the duration of the parent's turn. A subagent child
     // that transiently reports message_count===0 between /api/sessions polls would
@@ -7691,8 +7719,8 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
     // reappears on the next refresh once its list metadata catches up — the flicker.
     // Scoped to children of the ACTIVE parent, mirroring the active-session
     // exception above, so unrelated truly-empty sessions are still hidden.
-    (activeSidForSidebar&&s.parent_session_id===activeSidForSidebar&&_isChildSession(s)) ||
-    (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
+    (_sidebarIdentityMatchesActiveSession(s,s.parent_session_id,activeSidForSidebar,lineageIndex)&&_isChildSession(s)) ||
+    (_sidebarSessionMatchesActiveSession(s,activeSidForSidebar,lineageIndex)&&(S.session.message_count||0)>0);
 }
 
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar, lineageIndex){
@@ -7706,7 +7734,7 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar, lineageIn
   let webuiArchivedCount=0;
   let cliArchivedCount=0;
   for(const s of allMatched){
-    if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
+    if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar, lineageIndex)) continue;
     const isCli=_isCliSession(s);
     if(isCli) cliSessionCount++;
     const project=lineageIndex?lineageIndex.projectFor(s):s.project_id;
@@ -8491,7 +8519,7 @@ function renderSessionListFromCache(){
       for(const seg of sortedSegments){
         const row=document.createElement('button');
         row.type='button';
-        row.className='session-lineage-segment'+(activeSidForSidebar&&seg.session_id===activeSidForSidebar?' active':'');
+        row.className='session-lineage-segment'+(_sidebarSessionMatchesActiveSession(seg,activeSidForSidebar,lineageIndex)?' active':'');
         const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');
         const segTime=_formatRelativeSessionTime(_sessionTimestampMs(seg));
         row.textContent=`-> ${segTitle} - ${segTime}`;
@@ -8704,7 +8732,7 @@ function renderSessionListFromCache(){
       };
       for(const child of sortedChildren){
         if(child.session_source==='fork'){
-          const childIsActive=!!(activeSidForSidebar&&child.session_id===activeSidForSidebar);
+          const childIsActive=_sidebarSessionMatchesActiveSession(child,activeSidForSidebar,lineageIndex);
           const childStreaming=_isSessionEffectivelyStreaming(child);
           const childHasUnread=_hasUnreadForSession(child)&&!childIsActive;
           const childAttention=_sessionAttentionState(child);
@@ -8800,7 +8828,7 @@ function renderSessionListFromCache(){
         }
         const row=document.createElement('button');
         row.type='button';
-        row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
+        row.className='session-child-session'+(_sidebarSessionMatchesActiveSession(child,activeSidForSidebar,lineageIndex)?' active':'');
         row.textContent=childLabelFor(child);
         row.title='Open child session';
         row.onclick=async(e)=>{
