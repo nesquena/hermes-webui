@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 import traceback
+import unicodedata
 import urllib.error
 import urllib.request
 import uuid
@@ -1352,6 +1353,32 @@ def _is_known_model_provider(provider_id: str) -> bool:
     return False
 
 
+def _ascii_slug_from_name(name: object) -> str:
+    """Return an ASCII-safe slug derived from a provider display name.
+
+    Non-ASCII characters are stripped so the slug is safe for use in
+    provider IDs, API-key environment variable names, and the
+    ``@provider:model`` grammar.  If stripping all non-ASCII characters
+    yields an empty string (e.g. a pure-CJK name), a deterministic
+    fallback is produced from the Unicode-normalised (NFC) name so that
+    every distinct name still maps to a distinct slug.
+    """
+    raw = str(name or "").strip().lower()
+    if not raw:
+        return ""
+    # Normalize to NFC so composed/decomposed forms are equivalent
+    raw = unicodedata.normalize("NFC", raw)
+    # ASCII-only slug
+    slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)
+    if slug:
+        return slug
+    # Fallback: deterministic hash of Unicode-normalised name
+    normalized = unicodedata.normalize("NFC", raw)
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:8]
+    return "provider-" + digest
+
+
 def _custom_provider_slug_from_name(name: object) -> str:
     raw = str(name or "").strip().lower()
     if not raw:
@@ -1361,8 +1388,7 @@ def _custom_provider_slug_from_name(name: object) -> str:
     # Keep name-derived custom provider slugs out of the @provider:model colon
     # grammar. Endpoint-derived slugs may still be custom:<host>:<port>, but a
     # friendly name like "Local (127.0.0.1:15721)" should not preserve ':'.
-    slug = re.sub(r"[^\w._-]+", "-", raw, flags=re.UNICODE).strip("-")
-    slug = re.sub(r"-{2,}", "-", slug)
+    slug = _ascii_slug_from_name(raw)
     if not slug:
         return ""
     return "custom:" + slug

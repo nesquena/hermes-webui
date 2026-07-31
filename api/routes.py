@@ -6520,13 +6520,20 @@ def _custom_provider_slug_for_context(name: object) -> str:
 
         return _custom_provider_slug_from_name(name)
     except Exception:
+        import unicodedata
+
         raw = str(name or "").strip().lower()
         if not raw:
             return ""
         if raw.startswith("custom:"):
             return raw
+        raw = unicodedata.normalize("NFC", raw)
         slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
         slug = re.sub(r"-{2,}", "-", slug)
+        if not slug:
+            normalized = unicodedata.normalize("NFC", raw)
+            digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:8]
+            slug = "provider-" + digest
         return f"custom:{slug}" if slug else ""
 
 
