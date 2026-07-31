@@ -50,6 +50,7 @@ eval(extractFunc('_isForkWithResolvableParent'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_authoritativeLineageTipId'));
 eval(extractFunc('_buildSidebarLineageIndex'));
+eval(extractFunc('_sessionLineageContainsSession'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
@@ -148,6 +149,17 @@ console.log(JSON.stringify({delegate:index.ownership(delegate),
     assert result["delegate"]["status"] == "ambiguous"
     assert result["project"] == "invalid"
     assert result["collapsed"] == ["tipA", "tipB"]
+
+
+def test_active_session_matching_uses_scoped_lineage_identity():
+    result = _run_node(_harness("""
+global.S = {session:{session_id:'same', profile_scope:'work', project_id:'projA'}};
+const rowA = {session_id:'same', profile_scope:'work', project_id:'projA'};
+const rowB = {session_id:'same', profile_scope:'work', project_id:'projB'};
+const index = _buildSidebarLineageIndex([rowA, rowB], []);
+console.log(JSON.stringify({same:_sessionLineageContainsSession(rowA, 'same', index), other:_sessionLineageContainsSession(rowB, 'same', index)}));
+"""))
+    assert result == {"same": True, "other": False}
 
 
 def test_compression_parent_lookup_stays_within_profile_scope():
