@@ -61,9 +61,20 @@ SLASH_END = SEND_SRC.index("    if(_parsedCmd&&!_cmd){", SLASH_START)
 SLASH_BLOCK = SEND_SRC[SLASH_START:SLASH_END].replace(
     "if(!S.session){await newSession();await renderSessionList();}", ""
 ) + "\n}"
+SLASH_HELPERS = SEND_SRC[
+    SEND_SRC.index("  const _slashOwnerIsCurrent=") : SLASH_START
+]
+ASYNC_SLASH_BLOCK = SEND_SRC[
+    SEND_SRC.index("  let _slashDisplayTextOverride=") : SEND_SRC.index(
+        "\n  if(!S.session){await newSession();await renderSessionList();}\n\n  const activeSid=",
+        SEND_SRC.index("  let _slashDisplayTextOverride=")
+    )
+]
+BACKGROUND_SRC = _maybe_extract(MESSAGES_JS, "startBackgroundPolling")
 CAPTURE_SRC = _maybe_extract(SESSIONS_JS, "_captureTranscriptReplacement")
 CURRENT_SRC = _maybe_extract(SESSIONS_JS, "_transcriptReplacementIsCurrent")
 COMMIT_SRC = _maybe_extract(SESSIONS_JS, "_commitTranscriptReplacement")
+APPLY_COMPRESSION_SRC = _maybe_extract(COMMANDS_JS, "_applyManualCompressionResult", "async function")
 REFRESH_SRC = _maybe_extract(UI_JS, "refreshSession", "async function")
 COMPRESSION_SRC = _maybe_extract(COMMANDS_JS, "_runManualCompression", "async function")
 NODE = shutil.which("node")
@@ -83,7 +94,7 @@ def _run_node(script: str) -> dict:
             timeout=20,
             check=False,
         )
-    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert proc.returncode == 0 and proc.stdout.strip(), proc.stderr or proc.stdout or "node produced no JSON output"
     return json.loads(proc.stdout)
 
 
@@ -236,12 +247,15 @@ def _artifact_script(
     tab_hidden: bool = False,
     panel_hidden: bool = False,
     seed_existing_dom: bool = False,
+    generation_abort: bool = False,
 ) -> str:
     workspace_path = str(REPO / "static" / "workspace.js")
     initial_html = '<button data-artifact-path="previous/file.txt"></button>' if seed_existing_dom else ""
     initial_count = "1" if seed_existing_dom else ""
     if fail_load:
         snapshot_body = "throw new Error('load failed');"
+    elif generation_abort:
+        snapshot_body = "_bumpMessagesGeneration(); return { session: S.session, messages: fullMessages, toolCalls: [] };"
     else:
         snapshot_body = "return { session: S.session, messages: fullMessages, toolCalls: [] };"
     legacy_body = "ensureCalls += 1; " + ("throw new Error('load failed');" if fail_load else "S.messages = fullMessages; _messagesTruncated = false;")
@@ -548,6 +562,7 @@ const COMMANDS = [{{ name: 'help', desc: 'help', noEcho: false, fn: null }}];
 {CMD_HELP_SRC}
 COMMANDS[0].fn = cmdHelp;
 {ENSURE_ALL_FN}
+{SLASH_HELPERS}
 const _productionBumpMessagesGeneration = _bumpMessagesGeneration;
 _bumpMessagesGeneration = function() {{ bumpCalls += 1; return _productionBumpMessagesGeneration(); }};
 async function runSlash() {{
@@ -654,6 +669,162 @@ async function run() {{
   console.log(JSON.stringify({{ refreshMessages, compressionMessages: S.messages.map(m => m.content) }}));
 }}
 run().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""
+
+
+def _async_slash_owner_script(command: str, *, blank_page: bool = False, switch_on_completion: bool = False) -> str:
+    command_json = json.dumps(command)
+    session_literal = "null" if blank_page else "{ session_id: 'session-a', message_count: 0 }"
+    return f"""
+const S = {{
+  session: {session_literal},
+  messages: [],
+  pendingFiles: [],
+  toolCalls: [],
+  busy: false,
+  activeStreamId: null,
+}};
+let generation = 0;
+let resolveCommand = null;
+let resolveMoa = null;
+let renderCount = 0;
+const toasts = [];
+function _bumpMessagesGeneration() {{ generation += 1; return generation; }}
+function _isSessionCurrentPane(sid) {{ return !!(S.session && S.session.session_id === sid); }}
+function $(id) {{ return id === 'msg' ? {{ value: {command_json} }} : null; }}
+function parseCommand(text) {{ return {{ name: text.slice(1).split(/\\s+/)[0], args: text.split(/\\s+/).slice(1).join(' ') }}; }}
+function t(key) {{ return key; }}
+function renderMessages() {{ renderCount += 1; }}
+function showToast(message) {{ toasts.push(String(message)); }}
+function autoResize() {{}}
+function hideCmdDropdown() {{}}
+function clearLiveToolCards() {{}}
+function setBusy(value) {{ S.busy = value; }}
+function setComposerStatus() {{}}
+async function renderSessionList() {{}}
+async function newSession() {{
+  await Promise.resolve();
+  S.session = {{ session_id: 'session-new', message_count: 0 }};
+  S.messages = [];
+}}
+const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set(['agent']);
+function getAgentCommandMetadata(name) {{
+  if ({command_json} === '/agent') return Promise.resolve({{ name: 'agent' }});
+  if ({command_json} === '/plugin') return Promise.resolve({{ name: 'plugin', category: 'Plugin' }});
+  if ({command_json} === '/moa') return Promise.resolve({{ name: 'moa' }});
+  return Promise.resolve(null);
+}}
+function _deferredResult() {{ return new Promise(resolve => {{ resolveCommand = resolve; }}); }}
+function handlePetSlashCommand() {{ return _deferredResult().then(() => ({{ handled: true, message: 'pet result' }})); }}
+function executeAgentCommand() {{ return _deferredResult().then(() => 'agent result'); }}
+function executeAgentPluginCommand() {{ return _deferredResult().then(() => 'plugin result'); }}
+function api(url) {{
+  if (String(url).includes('/api/commands/moa/resolve')) return new Promise(resolve => {{ resolveMoa = resolve; }});
+  throw new Error('unexpected api '+url);
+}}
+const COMMANDS = [];
+{SLASH_HELPERS}
+async function runSlash() {{
+  let text = {command_json};
+  const literalSlash = false;
+{ASYNC_SLASH_BLOCK}
+}}
+function switchToOtherSession() {{
+  S.session = {{ session_id: 'session-b', message_count: 1 }};
+  S.messages = [{{ role: 'assistant', content: 'session b existing' }}];
+}}
+(async () => {{
+  const pending = runSlash();
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  if ({str(switch_on_completion).lower()}) switchToOtherSession();
+  if (resolveCommand) resolveCommand();
+  if (resolveMoa) resolveMoa({{ usage: '/moa <prompt>' }});
+  await pending;
+  console.log(JSON.stringify({{ sessionId: S.session && S.session.session_id, messages: S.messages, renderCount, toasts }}));
+}})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""
+
+
+def _background_polling_script(*, switch_session: bool = False, change_generation: bool = False) -> str:
+    messages_path = str(REPO / "static" / "messages.js")
+    return f"""
+const fs = require('fs');
+const messagesSrc = fs.readFileSync({json.dumps(messages_path)}, 'utf8');
+let depth = 0;
+const start = messagesSrc.indexOf('function startBackgroundPolling(');
+const brace = messagesSrc.indexOf('{{', start);
+for (let i = brace; i < messagesSrc.length; i++) {{
+  if (messagesSrc[i] === '{{') depth++;
+  else if (messagesSrc[i] === '}}' && --depth === 0) {{ var backgroundSrc = messagesSrc.slice(start, i + 1); break; }}
+}}
+let _messagesGeneration = 0;
+let resolveStatus = null;
+let timerCount = 0;
+const hidden = [];
+const toasts = [];
+const S = {{ session: {{ session_id: 'parent' }}, messages: [], busy: false, activeStreamId: null }};
+const _bgPollTimers = {{}};
+function _isSessionCurrentPane(sid) {{ return !!(S.session && S.session.session_id === sid); }}
+function _bumpMessagesGeneration() {{ _messagesGeneration += 1; }}
+function hideBackgroundBadge(taskId) {{ hidden.push(taskId); }}
+function renderMessages() {{ S.rendered = true; }}
+function showToast(message) {{ toasts.push(message); }}
+function t(key) {{ return key; }}
+function api() {{ return new Promise(resolve => {{ resolveStatus = resolve; }}); }}
+function setTimeout(fn) {{ timerCount += 1; return timerCount; }}
+{BACKGROUND_SRC}
+startBackgroundPolling('parent', 'task-1', 'prompt');
+(async () => {{
+  await Promise.resolve();
+  if ({str(switch_session).lower()}) S.session = {{ session_id: 'other' }};
+  if ({str(change_generation).lower()}) _bumpMessagesGeneration();
+  resolveStatus({{ results: [{{ task_id: 'task-1', answer: 'done' }}] }});
+  await Promise.resolve();
+  console.log(JSON.stringify({{ hidden, messages: S.messages, rendered: !!S.rendered, toasts, timerCount, sessionId: S.session && S.session.session_id }}));
+}})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""
+
+
+def _compression_post_render_generation_script() -> str:
+    return f"""
+let _messagesGeneration = 0;
+function _bumpMessagesGeneration() {{ _messagesGeneration += 1; return _messagesGeneration; }}
+{CAPTURE_SRC}
+{CURRENT_SRC}
+{COMMIT_SRC}
+{APPLY_COMPRESSION_SRC}
+const S = {{
+  session: {{ session_id: 'same-session', workspace: '/ws' }},
+  messages: [{{ role: 'assistant', content: 'tail' }}],
+  toolCalls: [],
+}};
+let queueCalls = 0;
+let compressionUiCalls = 0;
+let composerCalls = 0;
+let renderCalls = 0;
+let busyCalls = 0;
+function $(id) {{ return null; }}
+function clearLiveToolCards() {{}}
+function syncTopbar() {{}}
+function renderMessages() {{ renderCalls += 1; }}
+function _isContextCompactionMessage() {{ return false; }}
+function msgContent(message) {{ return message && message.content || ''; }}
+function updateQueueBadge() {{ queueCalls += 1; }}
+function setCompressionUi() {{ compressionUiCalls += 1; }}
+function setComposerStatus() {{ composerCalls += 1; }}
+function setBusy() {{ busyCalls += 1; }}
+function _setCompressionSessionLock() {{}}
+async function renderSessionList() {{ _bumpMessagesGeneration(); }}
+const ticket = _captureTranscriptReplacement();
+(async () => {{
+  const applied = await _applyManualCompressionResult(
+    {{ session: {{ session_id: 'same-session', workspace: '/ws', messages: [{{ role: 'assistant', content: 'compressed' }}], tool_calls: [] }}, summary: {{}} }},
+    '', 1, '/compress', ticket
+  );
+  console.log(JSON.stringify({{ applied, messages: S.messages.map(message => message.content), queueCalls, compressionUiCalls, composerCalls, renderCalls, busyCalls }}));
+}})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
 """
 
 
@@ -783,6 +954,18 @@ def test_artifacts_renderer_skips_full_load_when_panel_is_not_really_visible():
         assert result["truncated"] is True
 
 
+def test_artifacts_renderer_repaints_after_fulfilled_generation_abort():
+    result = _run_node(_artifact_script(seed_existing_dom=True, generation_abort=True))
+
+    assert result["ensureCalls"] == 1
+    assert "Loading full history…" in result["htmlBeforeAwait"]
+    assert result["countBeforeAwait"] == "1"
+    assert result["count"] == "1"
+    assert 'data-artifact-path="new/live.txt"' in result["html"]
+    assert 'data-artifact-path="old/deep.txt"' not in result["html"]
+    assert result["truncated"] is True
+
+
 def test_ensure_all_messages_loaded_preserves_settled_turn_that_finished_mid_fetch():
     result = _run_node(_ensure_all_messages_loaded_script(goal_turn_during_fetch=True))
 
@@ -828,6 +1011,68 @@ def test_local_slash_echo_claims_generation_before_pending_full_history_commits(
     assert result["truncated"] is True
 
 
+@pytest.mark.parametrize(
+    ("command", "blank_page", "switch_on_completion", "expected_messages"),
+    [
+        ("/pet", True, False, ["/pet", "pet result"]),
+        ("/agent", False, True, ["session b existing"]),
+        ("/plugin", True, False, ["/plugin", "plugin result"]),
+        ("/moa", True, False, ["/moa", "/moa <prompt>"]),
+    ],
+)
+def test_async_slash_completions_bind_blank_and_current_pane_owners(
+    command, blank_page, switch_on_completion, expected_messages
+):
+    result = _run_node(
+        _async_slash_owner_script(
+            command,
+            blank_page=blank_page,
+            switch_on_completion=switch_on_completion,
+        )
+    )
+
+    assert [message["content"] for message in result["messages"]] == expected_messages
+    if switch_on_completion:
+        assert result["sessionId"] == "session-b"
+    else:
+        assert result["sessionId"] == "session-new"
+
+
+def test_background_polling_rejects_stale_owner_or_generation_and_keeps_retry():
+    current = _run_node(_background_polling_script())
+    assert current["hidden"] == ["task-1"]
+    assert current["messages"][0]["content"].endswith("done")
+    assert current["rendered"] is True
+    assert current["toasts"] == ["bg_complete"]
+    assert current["timerCount"] == 0
+
+    switched = _run_node(_background_polling_script(switch_session=True))
+    assert switched["hidden"] == []
+    assert switched["messages"] == []
+    assert switched["rendered"] is False
+    assert switched["toasts"] == []
+    assert switched["timerCount"] == 1
+
+    newer_writer = _run_node(_background_polling_script(change_generation=True))
+    assert newer_writer["hidden"] == []
+    assert newer_writer["messages"] == []
+    assert newer_writer["rendered"] is False
+    assert newer_writer["toasts"] == []
+    assert newer_writer["timerCount"] == 1
+
+
+def test_compression_stops_post_render_updates_when_generation_changes():
+    result = _run_node(_compression_post_render_generation_script())
+
+    assert result["applied"] is False
+    assert result["messages"] == ["compressed"]
+    assert result["queueCalls"] == 0
+    assert result["compressionUiCalls"] == 0
+    assert result["composerCalls"] == 0
+    assert result["busyCalls"] == 0
+    assert result["renderCalls"] == 1
+
+
 def test_same_session_refresh_and_compression_reject_older_replacements():
     if "function _captureTranscriptReplacement()" not in SESSIONS_JS:
         pytest.skip("respec-only replacement seam is absent on the base checkout")
@@ -856,8 +1101,15 @@ def test_messages_generation_wiring_covers_full_load_live_turn_claims_and_same_s
     assert "_commitTranscriptReplacement(replacementTicket, () =>" in COMMANDS_JS
     assert "const replacementTicket=typeof _captureTranscriptReplacement==='function'" in COMMANDS_JS
     assert "const refreshTicket=typeof _captureTranscriptReplacement==='function'" in UI_JS
-    assert "transcript(sessionInput, messagesInput)" in MESSAGES_JS
-    assert "collectSessionArtifacts(messagesInput, toolCallsInput)" in WORKSPACE_JS
+    assert "function transcript()" in MESSAGES_JS
+    assert "const sessionInput = arguments.length > 0 ? arguments[0] : null;" in MESSAGES_JS
+    assert "function collectSessionArtifacts()" in WORKSPACE_JS
+    assert "const messagesInput = arguments.length > 0 ? arguments[0] : null;" in WORKSPACE_JS
+    assert "const requestGeneration=typeof _messagesGeneration==='number'" in MESSAGES_JS
+    assert "ticket.committedGeneration = _messagesGeneration;" in SESSIONS_JS
+    assert "ticket.committedGeneration!==undefined" in COMMANDS_JS
+    assert "const _ensureSlashOwner=async()=>" in MESSAGES_JS
+    assert "if(_metadataSid&&!_slashOwnerIsCurrent(_metadataSid))return;" in MESSAGES_JS
     assert "_readFullSessionSnapshot(sid)" in BOOT_JS
     assert "_renderNow(snapshot.messages, snapshot.toolCalls);" in WORKSPACE_JS
     assert "_commitTranscriptReplacement(clearTicket, () =>" in PANELS_JS

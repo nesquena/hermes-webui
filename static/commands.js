@@ -889,7 +889,9 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
         });
       if(!committed)return false;
       await renderSessionList();
-      if(!S.session||S.session.session_id!==ownerSid)return false;
+      if(!S.session||S.session.session_id!==ownerSid
+        || (ticket && ticket.committedGeneration!==undefined
+          && _messagesGeneration!==ticket.committedGeneration)) return false;
       updateQueueBadge(ownerSid);
     }
   }
@@ -921,10 +923,16 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
 
 async function resumeManualCompressionForSession(sid){
   if(!sid) return;
+  let ownerGeneration=null;
+  const ownerStateIsCurrent=()=>!!(
+    S.session&&S.session.session_id===sid
+    && (ownerGeneration===null||_messagesGeneration===ownerGeneration)
+  );
   try{
     const statusTicket=typeof _captureTranscriptReplacement==='function'
       ? _captureTranscriptReplacement()
       : {sessionId:sid,generation:_messagesGeneration,used:false};
+    ownerGeneration=statusTicket.generation;
     const status=await api(`/api/session/compress/status?session_id=${encodeURIComponent(sid)}`);
     if(!status||status.status!=='running') return;
     if(!S.session||S.session.session_id!==sid||!_transcriptReplacementIsCurrent(statusTicket)) return;
@@ -951,11 +959,12 @@ async function resumeManualCompressionForSession(sid){
     const done=await _pollManualCompressionResult(sid);
     if(!S.session||S.session.session_id!==sid||!_transcriptReplacementIsCurrent(pollTicket)) return;
     await _applyManualCompressionResult(done, status.focus_topic||'', visibleCount, status.focus_topic?`/compress ${status.focus_topic}`:'/compress', pollTicket);
+    if(pollTicket.committedGeneration!==undefined) ownerGeneration=pollTicket.committedGeneration;
   }catch(e){
     // No active compression job or transient server error — not a real failure.
     // 404: route missed or session gone; 5xx: backend exception during status check.
     if(e&&(!e.status||e.status===404||e.status>=500)) return;
-    if(S.session&&S.session.session_id===sid&&typeof setCompressionUi==='function'){
+    if(ownerStateIsCurrent()&&typeof setCompressionUi==='function'){
       const visibleMessages=_manualCompressionVisibleMessages();
       setCompressionUi({
         sessionId:sid,
@@ -970,7 +979,7 @@ async function resumeManualCompressionForSession(sid){
       renderMessages();
     }
   }finally{
-    if(S.session&&S.session.session_id===sid){
+    if(ownerStateIsCurrent()){
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
       if(typeof setBusy==='function') setBusy(false);
       if(typeof setComposerStatus==='function') setComposerStatus('');
@@ -981,11 +990,18 @@ async function resumeManualCompressionForSession(sid){
 async function _runManualCompression(focusTopic){
   if(!S.session){showToast(t('no_active_session'));return;}
   let visibleCount=0;
+  let ownerGeneration=null;
+  const ownerSid=S.session.session_id;
+  const ownerStateIsCurrent=()=>!!(
+    S.session&&S.session.session_id===ownerSid
+    && (ownerGeneration===null||_messagesGeneration===ownerGeneration)
+  );
   try{
     const sid=S.session.session_id;
     const preflightTicket=typeof _captureTranscriptReplacement==='function'
       ? _captureTranscriptReplacement()
       : {sessionId:sid,generation:_messagesGeneration,used:false};
+    ownerGeneration=preflightTicket.generation;
     // Preflight: verify the viewed session still exists before compressing.
     // This avoids a confusing "not found" toast when the UI is stale.
     try{
@@ -1002,7 +1018,10 @@ async function _runManualCompression(focusTopic){
           if(typeof _messagesTruncated!=='undefined') _messagesTruncated=false;
         });
       if(!committed)return;
+      ownerGeneration=preflightTicket.committedGeneration===undefined
+        ? _messagesGeneration : preflightTicket.committedGeneration;
     }catch(preflightErr){
+      if(!ownerStateIsCurrent()) return;
       if(typeof clearCompressionUi==='function') clearCompressionUi();
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
       if(typeof setBusy==='function') setBusy(false);
@@ -1035,6 +1054,7 @@ async function _runManualCompression(focusTopic){
     const runTicket=typeof _captureTranscriptReplacement==='function'
       ? _captureTranscriptReplacement()
       : {sessionId:sid,generation:_messagesGeneration,used:false};
+    ownerGeneration=runTicket.generation;
     const started=await api('/api/session/compress/start',{method:'POST',body:JSON.stringify(body)});
     if(started&&started.status==='error'){
       const err=new Error(started.error||'Compression failed');
@@ -1044,7 +1064,9 @@ async function _runManualCompression(focusTopic){
     const data=(started&&started.status==='done')?started:await _pollManualCompressionResult(sid);
     if(!S.session||S.session.session_id!==sid||!_transcriptReplacementIsCurrent(runTicket)) return;
     await _applyManualCompressionResult(data, focusTopic, visibleCount, commandText, runTicket);
+    if(runTicket.committedGeneration!==undefined) ownerGeneration=runTicket.committedGeneration;
   }catch(e){
+    if(!ownerStateIsCurrent()) return;
     if(typeof setCompressionUi==='function'){
       const currentSid=S.session&&S.session.session_id;
       setCompressionUi({
@@ -1065,7 +1087,7 @@ async function _runManualCompression(focusTopic){
     showToast('Compression failed: '+e.message);
     return;
   }
-  if(typeof setBusy==='function') setBusy(false);
+  if(ownerStateIsCurrent()&&typeof setBusy==='function') setBusy(false);
 }
 
 async function cmdCompress(args){
@@ -1192,7 +1214,7 @@ async function cmdUse(args){
   const pending = {sessionId:S.session&&S.session.session_id||null,promise:null};
   pending.promise = new Promise(r => { resolve = r; });
   _forcedSkillDirectivePending = pending;
-  const isCurrentSession = () => !!pending.sessionId && (S.session&&S.session.session_id)===pending.sessionId;
+  const isCurrentSession = () => !pending.sessionId || (S.session&&S.session.session_id)===pending.sessionId;
   try{
     const data = await api('/api/skills');
     const skills = data.skills || [];

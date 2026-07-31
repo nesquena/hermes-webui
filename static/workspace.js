@@ -526,7 +526,9 @@ async function refreshOpenPreviewIfMutated(){
   await openFile(_previewCurrentPath, { bustCache: true });
 }
 
-function collectSessionArtifacts(messagesInput, toolCallsInput){
+function collectSessionArtifacts(){
+  const messagesInput = arguments.length > 0 ? arguments[0] : null;
+  const toolCallsInput = arguments.length > 1 ? arguments[1] : null;
   const items = [];
   const seen = new Set();
   const push = (path, source) => {
