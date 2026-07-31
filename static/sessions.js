@@ -709,9 +709,18 @@ function _buildSidebarLineageIndex(sessions, referenceSessions){
     || !!(row&&row.forked_from_session_id);
   const isProjection=(row)=>!!(row&&_isReadOnlySession(row)&&!isFork(row)
     &&(row.relationship_type==='child_session'||row.role==='child_session'||row._cross_surface_child_session));
-  const projectDiscriminator=(row)=>isProjection(row)
-    ?'projection'
-    :(row&&row.project_id===undefined||row&&row.project_id===null?'unassigned':String(row.project_id));
+  const projectDiscriminator=(row)=>{
+    if(!isProjection(row)){
+      return row&&row.project_id===undefined||row&&row.project_id===null
+        ?'unassigned':String(row.project_id);
+    }
+    const parentRefs=ancestorFields.map(field=>[
+      field,String(row&&row[field]||'')
+    ]).filter(([,value])=>value);
+    const ownProject=row&&row.project_id!==undefined&&row.project_id!==null
+      ?String(row.project_id):'';
+    return `projection:${JSON.stringify({parentRefs,ownProject})}`;
+  };
   const keyFor=(row,id)=>baseKeyFor(row,id)+'\u0000'+projectDiscriminator(row);
   for(const row of rows){
     if(!row||!row.session_id) continue;
@@ -941,7 +950,10 @@ function _sidebarRuntimeIdentityKey(rowOrSid, sidOverride=null){
     (typeof _sidebarRuntimeRowForSid==='function'?_sidebarRuntimeRowForSid(sid):null);
   if(!row||typeof _buildSidebarLineageIndex!=='function') return sid;
   try{
-    const index=_buildSidebarLineageIndex([row],[]);
+    const contextRows=Array.isArray(_allSessions)?_allSessions:[];
+    const index=_buildSidebarLineageIndex(
+      contextRows.includes(row)?contextRows:[row,...contextRows],
+      typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
     return index.identityKey(row,sid)||sid;
   }catch(_){ return sid; }
 }
@@ -962,7 +974,9 @@ function _sidebarRuntimeRowForSid(sid, preferredRow=null){
   if(candidates.length===1) return candidates[0];
   if(candidates.length>1&&typeof _sidebarSessionMatchesActiveSession==='function'
     &&typeof _buildSidebarLineageIndex==='function'){
-    const index=_buildSidebarLineageIndex(candidates,[]);
+    const index=_buildSidebarLineageIndex(
+      _allSessions,
+      typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
     return candidates.find(item=>_sidebarSessionMatchesActiveSession(item,normalized,index))||candidates[0];
   }
   return candidates[0]||null;
