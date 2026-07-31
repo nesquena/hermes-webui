@@ -293,6 +293,22 @@ def test_lineage_metadata_reads_the_database_for_each_row_profile(monkeypatch):
     assert rows[1]["_lineage_root_id"] == "other.db:same-id"
 
 
+def test_profileless_sidebar_rows_do_not_inherit_a_named_active_profile_db(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "work")
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: "active.db")
+
+    def profile_db_path(*, profile, fallback_to_active):
+        calls.append((profile, fallback_to_active))
+        return "default.db"
+
+    monkeypatch.setattr(models, "_agent_state_db_path", profile_db_path)
+
+    assert models._sidebar_state_db_path(None) == "default.db"
+    assert calls == [("default", False)]
+
+
 def test_state_db_overrides_read_the_database_for_each_row_profile(monkeypatch):
     rows = [
         {"session_id": "same-id", "profile": "work", "is_cli_session": True},
@@ -672,6 +688,14 @@ def test_source_filtered_cache_preserves_hidden_bucket_runtime_state():
     remember_snapshot_fn = _extract_function(src, "_rememberRenderedSessionSnapshot")
     purge_fn = _extract_function(src, "_purgeStaleInflightEntries")
     mark_fn = _extract_function(src, "_markPollingCompletionUnreadTransitions")
+    profile_fn = _extract_function(src, "_sessionProfileScope")
+    source_fn = _extract_function(src, "_sidebarLineageSourceBucket")
+    readonly_fn = _extract_function(src, "_isReadOnlySession")
+    index_fn = _extract_function(src, "_buildSidebarLineageIndex")
+    runtime_key_fn = _extract_function(src, "_sidebarRuntimeIdentityKey")
+    active_key_fn = _extract_function(src, "_sidebarActiveSessionIdentityKey")
+    active_identity_fn = _extract_function(src, "_sidebarIdentityMatchesActiveSession")
+    active_match_fn = _extract_function(src, "_sidebarSessionMatchesActiveSession")
     script = f"""
 global._allSessions = [{{
   session_id: 'cli-1',
@@ -700,6 +724,14 @@ global._setSessionViewedCount = () => {{}};
 global._rememberObservedStreamingSession = () => {{}};
 global._forgetObservedStreamingSession = () => {{}};
 {is_cli_fn}
+{profile_fn}
+{source_fn}
+{readonly_fn}
+{index_fn}
+{active_key_fn}
+{active_identity_fn}
+{active_match_fn}
+{runtime_key_fn}
 {remember_source_fn}
 {remember_streaming_fn}
 {remember_snapshot_fn}
@@ -744,11 +776,13 @@ def test_sid_only_source_remembering_skips_scope_fallback():
     src = SESSIONS_JS.read_text(encoding="utf-8")
     is_cli_fn = _extract_function(src, "_isCliSession")
     remember_source_fn = _extract_function(src, "_rememberSessionListSource")
+    runtime_key_fn = _extract_function(src, "_sidebarRuntimeIdentityKey")
     script = f"""
 global._allSessions = [];
 global._allSessionsScope = {{ sidebarSource: 'cli' }};
 global._sessionListSourceById = new Map();
 {is_cli_fn}
+{runtime_key_fn}
 {remember_source_fn}
 _rememberSessionListSource(null, 'detached-sid', false);
 console.log(JSON.stringify({{
@@ -801,6 +835,14 @@ def test_scope_mismatch_error_path_respects_sidebar_source():
         _extract_function(src, "_runRenderSessionListRefresh"),
         "_runRenderSessionListRefresh",
     )
+    profile_fn = _extract_function(src, "_sessionProfileScope")
+    source_fn = _extract_function(src, "_sidebarLineageSourceBucket")
+    readonly_fn = _extract_function(src, "_isReadOnlySession")
+    index_fn = _extract_function(src, "_buildSidebarLineageIndex")
+    runtime_key_fn = _extract_function(src, "_sidebarRuntimeIdentityKey")
+    active_key_fn = _extract_function(src, "_sidebarActiveSessionIdentityKey")
+    active_identity_fn = _extract_function(src, "_sidebarIdentityMatchesActiveSession")
+    active_match_fn = _extract_function(src, "_sidebarSessionMatchesActiveSession")
     script = f"""
 global.window = {{ _showCliSessions: true }};
 global._showAllProfiles = false;
@@ -837,6 +879,14 @@ global.renderSessionListFromCache = () => {{
 global.api = () => Promise.reject(new Error('boom'));
     global.clearInflightState = sid => cleared.push(sid);
     {purge_fn}
+    {profile_fn}
+    {source_fn}
+    {readonly_fn}
+    {index_fn}
+    {active_key_fn}
+    {active_identity_fn}
+    {active_match_fn}
+    {runtime_key_fn}
     {clear_fn}
     {requested_source_fn}
     {exclude_hidden_fn}

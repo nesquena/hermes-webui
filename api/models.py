@@ -5650,9 +5650,13 @@ def _agent_state_db_path(*, profile=None, fallback_to_active=True) -> Path | Non
 
 def _sidebar_state_db_path(profile: str | None) -> Path | None:
     """Resolve a sidebar row's database without crossing profile boundaries."""
+    from api.profiles import _PROFILE_ID_RE, _is_root_profile, get_active_profile_name
+
     if profile is None:
-        return _active_state_db_path()
-    from api.profiles import _PROFILE_ID_RE, _is_root_profile
+        active_profile = get_active_profile_name() or 'default'
+        if _is_root_profile(active_profile):
+            return _active_state_db_path()
+        profile = 'default'
     if not _is_root_profile(profile) and not _PROFILE_ID_RE.fullmatch(profile):
         return None
     return _agent_state_db_path(profile=profile, fallback_to_active=False)
