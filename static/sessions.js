@@ -3608,7 +3608,29 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
     let candidate=msg;
     if(!candidate) continue;
     const duplicate=String(candidate.role||'')==='user'
-      ? _hasCurrentTailUserDuplicate(merged,candidate)
+      ? (()=>{
+          // When the base ends with the current turn's user message
+          // (after _dropCurrentTurnAssistantMessages has removed the
+          // completed assistant reply), dedup against the last user
+          // message. Walk backwards past compaction markers and live
+          // messages to find the last real user message.
+          for(let i=merged.length-1;i>=0;i--){
+            const m=merged[i];
+            if(!m||m._live) continue;
+            const role=String(m.role||'');
+            if(role==='user'){
+              if(typeof _isContextCompactionMessage==='function'
+                &&_isContextCompactionMessage(m)) continue;
+              return _sameTranscriptMessage(m,candidate);
+            }
+            if(role==='tool') continue;
+            // Non-live assistant: turn is complete, don't dedup
+            // against a historical user message.
+            if(role==='assistant') return false;
+            break;
+          }
+          return false;
+        })()
       : merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
     if(!duplicate) merged.push(candidate);
   }
