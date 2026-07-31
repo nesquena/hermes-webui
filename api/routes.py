@@ -9505,7 +9505,7 @@ CLI_VISIBLE_SESSION_CAP = 20
 
 
 def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int = CLI_VISIBLE_SESSION_CAP) -> list[dict]:
-    """Keep only the most recent CLI-visible sessions after filtering."""
+    """Cap the default CLI list while retaining project-addressable rows."""
     if cli_cap <= 0:
         return sessions
     kept = []
@@ -9514,7 +9514,11 @@ def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int = CLI_VISIBLE_SE
         if _is_cli_session_for_settings(session):
             cli_seen += 1
             if cli_seen > cli_cap:
-                continue
+                project_id = str(session.get("project_id") or "").strip()
+                if not project_id:
+                    continue
+                session = dict(session)
+                session["default_hidden"] = True
         kept.append(session)
     return kept
 

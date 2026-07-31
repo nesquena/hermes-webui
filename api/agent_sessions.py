@@ -392,7 +392,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
     for children in children_by_parent.values():
         children.sort(key=lambda row: row.get('started_at') or 0, reverse=True)
 
-    def compression_tip(row: dict) -> tuple[dict | None, int]:
+    def compression_tip(row: dict) -> tuple[dict | None, int, str | None]:
         """Return the freshest importable continuation descendant for ``row``.
 
         Compression parents can have multiple continuation-looking children when
@@ -404,6 +404,9 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         latest_importable = row if (row.get('actual_message_count') or 0) > 0 else None
         segment_count = 0
         best_depth = 1
+        latest_project_id: str | None = None
+        project_depth = 0
+        project_score = -1.0
         best_score = (
             _as_score(latest_importable.get('last_activity'), latest_importable.get('started_at'))
             if latest_importable
@@ -421,6 +424,17 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
             segment_count += 1
 
             current_score = _as_score(current.get('last_activity'), current.get('started_at'))
+            current_project_id = str(current.get('project_id') or '').strip()
+            if (
+                current_project_id
+                and (
+                    current_score > project_score
+                    or (current_score == project_score and depth >= project_depth)
+                )
+            ):
+                latest_project_id = current_project_id
+                project_depth = depth
+                project_score = current_score
             if (
                 (current.get('actual_message_count') or 0) > 0
                 and (current_score > best_score or (current_score == best_score and depth >= best_depth))
@@ -436,7 +450,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
                     continue
                 stack.append((child, depth + 1))
 
-        return latest_importable, max(segment_count, 1)
+        return latest_importable, max(segment_count, 1), latest_project_id
 
     projected = []
     for row in rows:
@@ -445,8 +459,9 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
 
         segment_count = 1
         tip = row
+        lineage_project_id = str(row.get('project_id') or '').strip() or None
         if row.get('end_reason') in {'compression', 'cli_close'}:
-            tip, segment_count = compression_tip(row)
+            tip, segment_count, lineage_project_id = compression_tip(row)
         if not tip or (tip.get('actual_message_count') or 0) <= 0:
             continue
 
@@ -469,6 +484,8 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         ):
             if key in tip:
                 merged[key] = tip[key]
+        if lineage_project_id:
+            merged['project_id'] = lineage_project_id
         if str(tip.get('source') or '').strip().lower() == 'tui':
             # TUI continuation rows are user-visible session segments (#6, #17,
             # ...), not opaque compression snapshots. Keep navigation pointed at
@@ -501,6 +518,7 @@ def read_importable_agent_session_rows(
     log=None,
     exclude_sources: tuple[str, ...] | None = ("cron", "webui"),
     include_sources: tuple[str, ...] | None = None,
+    require_project_id: bool = False,
 ) -> list[dict]:
     """Return agent sessions projected as importable conversations.
 
@@ -582,6 +600,7 @@ def read_importable_agent_session_rows(
         origin_chat_id_expr = _optional_col('origin_chat_id', session_cols)
         origin_user_id_expr = _optional_col('origin_user_id', session_cols)
         platform_expr = _optional_col('platform', session_cols)
+        project_id_expr = _optional_col('project_id', session_cols)
         # Older/minimal state.db schemas can have NO ``messages`` table at all,
         # or a ``messages`` table without a ``session_id`` / ``timestamp`` column.
         # The projection SQL below joins ``messages`` and aggregates
@@ -662,6 +681,53 @@ def read_importable_agent_session_rows(
                 placeholders = ", ".join("?" for _ in excluded)
                 where_clauses.append(f"s.source NOT IN ({placeholders})")
                 params.extend(excluded)
+        if require_project_id:
+            if 'project_id' not in session_cols:
+                return []
+            if {'parent_session_id', 'end_reason'} <= session_cols:
+                continuation_checks = [
+                    "parent.end_reason IN ('compression', 'cli_close')",
+                    "(parent.source IS NULL OR child.source IS NULL "
+                    "OR LOWER(TRIM(parent.source)) = LOWER(TRIM(child.source)))",
+                ]
+                if 'ended_at' in session_cols:
+                    continuation_checks.append(
+                        "(parent.ended_at IS NULL OR child.started_at >= parent.ended_at)"
+                    )
+                if 'session_source' in session_cols:
+                    continuation_checks.append(
+                        "LOWER(TRIM(COALESCE(child.session_source, ''))) != 'fork'"
+                    )
+                continuation_where = " AND ".join(continuation_checks)
+                where_clauses.append(
+                    f"""
+                    s.id IN (
+                        WITH RECURSIVE project_lineage(id) AS (
+                            SELECT seed.id
+                            FROM sessions seed
+                            WHERE seed.project_id IS NOT NULL
+                              AND TRIM(seed.project_id) != ''
+                            UNION
+                            SELECT child.id
+                            FROM sessions child
+                            JOIN project_lineage lineage ON child.parent_session_id = lineage.id
+                            JOIN sessions parent ON parent.id = lineage.id
+                            WHERE {continuation_where}
+                            UNION
+                            SELECT parent.id
+                            FROM sessions child
+                            JOIN project_lineage lineage ON child.id = lineage.id
+                            JOIN sessions parent ON parent.id = child.parent_session_id
+                            WHERE {continuation_where}
+                        )
+                        SELECT id FROM project_lineage
+                    )
+                    """
+                )
+            else:
+                where_clauses.append(
+                    "s.project_id IS NOT NULL AND TRIM(s.project_id) != ''"
+                )
 
         use_preaggregated_candidate_order = (
             use_messages_join
@@ -701,6 +767,7 @@ def read_importable_agent_session_rows(
                    {origin_chat_id_expr},
                    {origin_user_id_expr},
                    {platform_expr},
+                   {project_id_expr},
                    {parent_expr},
                    {ended_expr},
                    {end_reason_expr},

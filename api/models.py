@@ -48,6 +48,9 @@ from api.process_event_utils import stamp_message_source
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
+# Project chips must remain able to reveal older assigned CLI/TUI sessions even
+# after newer unassigned rows fill the normal sidebar window.
+PROJECT_ASSIGNED_CLI_LIMIT = 200
 # How many messageful cron sessions to surface in the project-chip layer.
 # Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
 # addressable even when many newer non-cron sessions dominate the default
@@ -7563,6 +7566,16 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
     return dict(metadata)
 
 
+def _state_db_supports_project_ids(db_path: Path) -> bool:
+    """Return whether the agent session schema can persist project assignments."""
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            rows = conn.execute("PRAGMA table_info(sessions)").fetchall()
+    except Exception:
+        return False
+    return any(str(row[1]) == "project_id" for row in rows)
+
+
 def _load_cli_sessions_uncached(
     hermes_home: Path,
     db_path: Path,
@@ -7570,6 +7583,7 @@ def _load_cli_sessions_uncached(
     source_filter=None,
     *,
     visible_session_limit: int | None = None,
+    project_assigned_limit: int | None | bool = PROJECT_ASSIGNED_CLI_LIMIT,
     cron_project_limit: int | None | bool = CRON_PROJECT_CHIP_LIMIT,
     webhook_project_limit: int | None | bool = WEBHOOK_PROJECT_CHIP_LIMIT,
     kanban_project_limit: int | None | bool = KANBAN_PROJECT_CHIP_LIMIT,
@@ -7652,12 +7666,14 @@ def _load_cli_sessions_uncached(
             _webhook_pid_cache[0] = ensure_webhook_project()
         return _webhook_pid_cache[0]
 
-    def _state_row_project_id(sid: str, source: str | None) -> str | None:
+    def _state_row_project_id(row: dict) -> str | None:
+        sid = row['id']
+        source = row.get('source')
         if is_cron_session(sid, source):
             return _cron_pid()
         if is_webhook_session(sid, source):
             return _webhook_pid()
-        return None
+        return row.get('project_id')
 
     profile_value = _cli_profile or 'default'
     # A deleted WebUI session is tombstoned (see _record_webui_deleted_session_tombstone)
@@ -7670,7 +7686,7 @@ def _load_cli_sessions_uncached(
         _deleted_webui_tombstone = _load_webui_deleted_session_tombstone()
     except Exception:
         _deleted_webui_tombstone = frozenset()
-    for row in read_importable_agent_session_rows(
+    state_rows = read_importable_agent_session_rows(
         db_path,
         limit=visible_session_limit if visible_session_limit is not None else (
             CRON_PROJECT_CHIP_LIMIT if source_filter == 'cron'
@@ -7684,7 +7700,49 @@ def _load_cli_sessions_uncached(
         # (especially kanban) from evicting every CLI/TUI/ACP conversation.
         exclude_sources=("cron", "webhook", "kanban") if source_filter is None else None,
         include_sources=None if source_filter is None else (source_filter,),
+    )
+    if (
+        source_filter is None
+        and project_assigned_limit is not False
+        and _state_db_supports_project_ids(db_path)
     ):
+        represented_rows: dict[str, dict] = {}
+        for row in state_rows:
+            for key in ("id", "_lineage_root_id", "_lineage_tip_id"):
+                value = row.get(key)
+                if value:
+                    represented_rows.setdefault(str(value), row)
+        try:
+            assigned_rows = read_importable_agent_session_rows(
+                db_path,
+                limit=project_assigned_limit,
+                log=logger,
+                exclude_sources=("cron", "webhook"),
+                require_project_id=True,
+            )
+            for row in assigned_rows:
+                lineage_ids = [
+                    str(value)
+                    for key in ("id", "_lineage_root_id", "_lineage_tip_id")
+                    if (value := row.get(key))
+                ]
+                existing = next(
+                    (represented_rows[value] for value in lineage_ids if value in represented_rows),
+                    None,
+                )
+                if existing is not None:
+                    existing.clear()
+                    existing.update(row)
+                    for value in lineage_ids:
+                        represented_rows[value] = existing
+                    continue
+                state_rows.append(row)
+                for value in lineage_ids:
+                    represented_rows[value] = row
+        except Exception:
+            logger.debug("Project-assigned CLI second pass failed", exc_info=True)
+
+    for row in state_rows:
         sid = row['id']
         raw_ts = row['last_activity'] or row['started_at']
         # Prefer the CLI session's own profile from the DB; fall back to
@@ -7726,7 +7784,7 @@ def _load_cli_sessions_uncached(
             'updated_at': raw_ts,
             'pinned': False,
             'archived': _archived,
-            'project_id': _state_row_project_id(sid, _source),
+            'project_id': _state_row_project_id(row),
             'profile': profile,
             'source_tag': _source,
             'raw_source': row.get('raw_source') or _source_meta.get('raw_source'),
@@ -8032,7 +8090,7 @@ def get_cli_sessions(
                     )
                 )
             return merged
-        load_kwargs = {'source_filter': source_filter}
+        load_kwargs: dict = {'source_filter': source_filter}
         if loader_supports_include_claude_code:
             load_kwargs['include_claude_code'] = include_claude_code
         return _load_cli_sessions_uncached(
