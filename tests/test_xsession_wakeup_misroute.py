@@ -257,3 +257,53 @@ def test_resolve_wakeup_target_passthrough_when_owner_unknown():
         session_key_resolved_sid=sid,
         proc_session=None,
     ) == sid
+
+
+# ---------------------------------------------------------------------------
+# Exact origin_ui_session_id ownership (complements Option 3)
+# ---------------------------------------------------------------------------
+
+def test_resolve_completion_target_prefers_origin_ui_session_id():
+    """When session_key resolves to B but origin_ui_session_id is A, route to A."""
+    bp = importlib.import_module("api.background_process")
+    assert hasattr(bp, "_resolve_completion_target"), (
+        "missing _resolve_completion_target — exact-owner routing not implemented"
+    )
+    SESS_A = "webui-tab-A"
+    SESS_B = "webui-tab-B"
+    assert bp._resolve_completion_target(
+        session_key_resolved_sid=SESS_B,
+        origin_ui_session_id=SESS_A,
+    ) == SESS_A
+
+
+def test_resolve_completion_target_fallback_without_origin():
+    bp = importlib.import_module("api.background_process")
+    sid = "legacy-only"
+    assert bp._resolve_completion_target(
+        session_key_resolved_sid=sid,
+        origin_ui_session_id="",
+    ) == sid
+
+
+def test_env_immune_owner_prefers_origin_ui_session_id():
+    bp = importlib.import_module("api.background_process")
+    ps = _fake_ps(session_key="B", spawn_session_id="spawn-B")
+    # Duck-typed modern field wins over legacy spawn_session_id.
+    ps.origin_ui_session_id = "tab-A"
+    assert bp._env_immune_spawn_owner(ps) == "tab-A"
+
+
+def test_turn_identity_binder_sets_ui_session_id():
+    """Option 1 must also bind HERMES_UI_SESSION_ID so terminal_tool can stamp
+    origin_ui_session_id on notify_on_complete spawns."""
+    streaming = importlib.import_module("api.streaming")
+    pytest.importorskip("gateway.session_context", reason="hermes-agent not installed")
+    from gateway import session_context as sc
+
+    bind = streaming._bind_turn_session_identity
+    assert sc._SESSION_UI_SESSION_ID.get() is sc._UNSET
+    with bind("webui-sid-42"):
+        assert sc._SESSION_UI_SESSION_ID.get() == "webui-sid-42"
+        assert sc.get_session_env("HERMES_UI_SESSION_ID", "") == "webui-sid-42"
+    assert sc._SESSION_UI_SESSION_ID.get() is sc._UNSET

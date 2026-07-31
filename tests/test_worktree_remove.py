@@ -78,6 +78,80 @@ def test_remove_clean_worktree_succeeds(tmp_path):
     assert not wt_path.exists()
 
 
+def test_remove_locked_worktree_succeeds_without_force(tmp_path):
+    """Issue #6023: WebUI-created worktrees are locked at creation by the
+    agent (cli._setup_worktree).  Removal must unlock first — otherwise git
+    refuses with \"use 'remove -f -f' to override or unlock first\" and every
+    WebUI-created worktree is unremovable from the UI."""
+    import subprocess
+    from api.models import Session
+
+    main = _make_minimal_git_repo(tmp_path)
+    wt_path = tmp_path / "wt_locked"
+    subprocess.run(
+        ["git", "-C", str(main), "worktree", "add", str(wt_path), "-b", "hermes/testlocked"],
+        check=True, capture_output=True,
+    )
+    # Reproduce the agent's creation-time lock.
+    subprocess.run(
+        ["git", "-C", str(main), "worktree", "lock", "--reason", "hermes pid=12345", str(wt_path)],
+        check=True, capture_output=True,
+    )
+
+    s = Session(
+        session_id="testlocked",
+        title="Locked",
+        workspace=str(wt_path),
+        worktree_path=str(wt_path),
+        worktree_branch="hermes/testlocked",
+        worktree_repo_root=str(main),
+    )
+
+    result = worktrees.remove_worktree_for_session(s, force=False)
+    assert result["ok"] is True
+    assert result["removed_path"] == str(wt_path.resolve())
+    assert not wt_path.exists()
+    listed = subprocess.run(
+        ["git", "-C", str(main), "worktree", "list", "--porcelain"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    assert str(wt_path.resolve()) not in listed
+
+
+def test_remove_never_locked_worktree_unlock_is_fail_soft(tmp_path):
+    """The pre-remove unlock must be fail-soft: removing a worktree that was
+    never locked still succeeds (unlock exits non-zero, _run_git is
+    check=False, remove proceeds)."""
+    import subprocess
+    from api.models import Session
+
+    main = _make_minimal_git_repo(tmp_path)
+    wt_path = tmp_path / "wt_neverlocked"
+    subprocess.run(
+        ["git", "-C", str(main), "worktree", "add", str(wt_path), "-b", "hermes/testneverlocked"],
+        check=True, capture_output=True,
+    )
+    # Sanity: not locked — `git worktree unlock` on it would fail.
+    probe = subprocess.run(
+        ["git", "-C", str(main), "worktree", "unlock", str(wt_path)],
+        capture_output=True, text=True,
+    )
+    assert probe.returncode != 0
+
+    s = Session(
+        session_id="testneverlocked",
+        title="Never locked",
+        workspace=str(wt_path),
+        worktree_path=str(wt_path),
+        worktree_branch="hermes/testneverlocked",
+        worktree_repo_root=str(main),
+    )
+
+    result = worktrees.remove_worktree_for_session(s, force=False)
+    assert result["ok"] is True
+    assert not wt_path.exists()
+
+
 def test_remove_clean_worktree_does_not_force(tmp_path, monkeypatch):
     from api.models import Session
 
@@ -111,7 +185,9 @@ def test_remove_clean_worktree_does_not_force(tmp_path, monkeypatch):
 
     result = worktrees.remove_worktree_for_session(s, force=False)
     assert result["ok"] is True
-    assert calls[0] == ["worktree", "remove", str(worktree_path.resolve())]
+    # Unlock (fail-soft) runs first, then the non-force remove.
+    assert calls[0] == ["worktree", "unlock", str(worktree_path.resolve())]
+    assert calls[1] == ["worktree", "remove", str(worktree_path.resolve())]
 
 
 def test_remove_dirty_worktree_without_force_is_rejected(tmp_path, monkeypatch):
@@ -234,7 +310,9 @@ def test_remove_force_warns_and_uses_git_force(tmp_path, monkeypatch):
 
     result = worktrees.remove_worktree_for_session(s, force=True)
     assert result["ok"] is True
-    assert calls[0] == ["worktree", "remove", "--force", str(worktree_path.resolve())]
+    # Unlock (fail-soft) runs first, then the forced remove.
+    assert calls[0] == ["worktree", "unlock", str(worktree_path.resolve())]
+    assert calls[1] == ["worktree", "remove", "--force", str(worktree_path.resolve())]
     assert "untracked file" in " ".join(result["warnings"])
     assert "unpushed commit" in " ".join(result["warnings"])
 

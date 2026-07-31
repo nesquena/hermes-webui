@@ -226,7 +226,7 @@ def test_webui_continuation_session_opens_with_snapshot_parent_messages(monkeypa
     monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda s: None)
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda sid: {})
     monkeypatch.setattr(routes, "_is_messaging_session_record", lambda s: False)
-    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda sid, profile=None: [])
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda sid, profile=None, since_timestamp=None, include_inactive=False, limit=None: [])
     monkeypatch.setattr(routes.Session, "load", lambda sid: parent if sid == "parent-webui" else None)
     monkeypatch.setattr(routes, "_resolve_effective_session_model_for_display", lambda s: getattr(s, "model", None))
     monkeypatch.setattr(routes, "_resolve_effective_session_model_provider_for_display", lambda s: None)

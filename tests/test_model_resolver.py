@@ -121,6 +121,60 @@ def test_cross_provider_routes_through_openrouter():
     assert base_url is None  # openrouter uses its own endpoint
 
 
+def test_cross_provider_routes_through_openrouter_with_alias_prefix():
+    """A model whose prefix is a _PROVIDER_ALIASES entry (not itself a
+    _PROVIDER_MODELS key) but resolves to a canonical provider key still
+    routes through the cross-provider OpenRouter branch.
+
+    Regression test for #6131 — before the fix, ``z-ai/glm-5.2`` with
+    config provider ``anthropic`` would fall through and return the stale
+    config provider because ``z-ai`` was checked directly against
+    ``_PROVIDER_MODELS`` instead of being resolved through
+    ``_PROVIDER_ALIASES`` first.
+    """
+    model, provider, base_url = _resolve_with_config(
+        'z-ai/glm-5.2', provider='anthropic',
+    )
+    assert model == 'z-ai/glm-5.2'
+    assert provider == 'openrouter'
+    assert base_url is None  # openrouter uses its own endpoint
+
+
+def test_cross_provider_openrouter_qwen_selection_not_stale_routed():
+    """An OpenRouter Qwen selection under a different config provider must
+    still route through openrouter — NOT inherit the stale config provider.
+
+    Regression guard for #6131's fix: ``qwen`` canonicalises to ``qwen``
+    (a _PROVIDER_MODELS key), but its hermes_cli *alias* target is
+    ``alibaba`` (NOT a _PROVIDER_MODELS key). An earlier fix that resolved
+    through _PROVIDER_ALIASES instead of the idempotent
+    _canonicalise_provider_id would have mapped ``qwen`` → ``alibaba``,
+    missed the membership check, and wrongly returned the stale provider.
+    """
+    model, provider, base_url = _resolve_with_config(
+        'qwen/qwen3-max', provider='anthropic',
+    )
+    assert model == 'qwen/qwen3-max'
+    assert provider == 'openrouter'
+    assert base_url is None
+
+
+def test_alias_prefix_matching_active_provider_not_cross_routed():
+    """A namespaced model whose prefix is an *alias of its own active
+    provider* must NOT be cross-routed to openrouter.
+
+    ``z-ai/glm-5.2`` under provider ``zai`` — the prefix ``z-ai`` and the
+    config provider ``zai`` canonicalise to the SAME id (``zai``), so this
+    is a same-provider selection, not a cross-provider one. The fix compares
+    canonical prefix against canonical config provider (not the raw prefix)
+    so the inequality guard correctly suppresses the openrouter cross-route.
+    """
+    model, provider, base_url = _resolve_with_config(
+        'z-ai/glm-5.2', provider='zai',
+    )
+    assert provider != 'openrouter'
+
+
 # ── Bare model names ─────────────────────────────────────────────────────
 
 def test_bare_model_uses_config_provider():
@@ -800,6 +854,46 @@ def test_custom_provider_models_dict_routes_to_named_custom_provider():
     assert base_url == 'http://127.0.0.1:8080/v1'
 
 
+def test_custom_provider_models_string_list_routes_to_named_custom_provider_6121():
+    """#6121: picker-visible string-list models must route to their custom provider."""
+    model, provider, base_url = _resolve_with_config(
+        'qwen3.6:35b-a3b',
+        provider='anthropic',
+        default='claude-haiku-4-5',
+        custom_providers=[{
+            'name': 'storm-ollama',
+            'base_url': 'http://ollama.test:11434/v1',
+            'models': ['qwen3.6:35b-a3b', 'violet-lotus:latest'],
+        }],
+    )
+    assert model == 'qwen3.6:35b-a3b'
+    assert provider == 'custom:storm-ollama'
+    assert base_url == 'http://ollama.test:11434/v1'
+
+
+def test_custom_provider_models_object_list_routes_to_named_custom_provider_6121():
+    """#6121: resolver accepts the same object-list ids as the model picker."""
+    for model_entry in (
+        {'id': 'picker-model-id'},
+        {'model': 'picker-model-name'},
+        {'name': 'picker-model-label'},
+    ):
+        requested_model = next(iter(model_entry.values()))
+        model, provider, base_url = _resolve_with_config(
+            requested_model,
+            provider='anthropic',
+            default='claude-haiku-4-5',
+            custom_providers=[{
+                'name': 'Picker Parity',
+                'base_url': 'https://models.example.test/v1',
+                'models': [model_entry],
+            }],
+        )
+        assert model == requested_model
+        assert provider == 'custom:picker-parity'
+        assert base_url == 'https://models.example.test/v1'
+
+
 # ── Issue #2047: parenthesized local provider names with ports ────────────
 
 def test_custom_provider_name_with_parenthesized_port_uses_safe_slug():
@@ -966,6 +1060,45 @@ def test_default_provider_models_not_prefixed(monkeypatch):
         returned_ids = {m['id'] for m in groups['Anthropic']}
         assert "claude-sonnet-5.0" in returned_ids
         assert not any(mid.startswith('@anthropic:') for mid in returned_ids), returned_ids
+
+
+def test_provider_config_object_list_catalog_uses_picker_supported_keys_6121(monkeypatch):
+    """Provider allowlists in the live catalog accept id/model/name object keys."""
+    import api.config as _cfg
+    old_cfg = dict(_cfg.cfg)
+    _cfg.cfg['model'] = {
+        'provider': 'myprov',
+        'default': 'by-model-key',
+    }
+    _cfg.cfg['providers'] = {
+        'myprov': {
+            'models': [
+                {'model': 'by-model-key', 'label': 'By Model Key'},
+                {'name': 'by-name-key'},
+                {'id': 'by-id-key', 'label': 'By Id Key'},
+            ],
+        },
+    }
+    try:
+        _cfg._cfg_mtime = _cfg.Path(_cfg._get_config_path()).stat().st_mtime
+    except Exception:
+        _cfg._cfg_mtime = 0.0
+    monkeypatch.setattr(_cfg, "_read_live_provider_model_ids", lambda pid: [])
+    try:
+        result = _cfg.get_available_models()
+    finally:
+        _cfg.cfg.clear()
+        _cfg.cfg.update(old_cfg)
+
+    groups = {group['provider_id']: group['models'] for group in result['groups']}
+    model_rows = groups.get('myprov') or []
+    model_ids = [row['id'] for row in model_rows]
+    assert 'by-model-key' in model_ids
+    assert 'by-name-key' in model_ids
+    assert 'by-id-key' in model_ids
+    labels = {row['id']: row['label'] for row in model_rows}
+    assert labels['by-model-key'] == 'By Model Key'
+    assert labels['by-id-key'] == 'By Id Key'
 
 
 # ── get_available_models(): phantom "Custom" group regression ─────────────

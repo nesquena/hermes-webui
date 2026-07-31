@@ -265,6 +265,18 @@ def remove_worktree_for_session(session, *, force: bool = False) -> dict:
     repo_root = getattr(session, "worktree_repo_root", None)
     if not repo_root:
         raise ValueError("Session missing worktree_repo_root")
+
+    # Unlock the creation-time bookkeeping lock before removing (fail-soft).
+    # The agent locks every worktree it creates (cli._setup_worktree), and git
+    # refuses to remove a locked worktree with a single --force, so without
+    # this every WebUI-created worktree is unremovable.  The dirty/untracked/
+    # unpushed/stream/terminal guards above are the real safety layer, not
+    # git's lock — mirrors the agent's own _cleanup_worktree ordering.
+    try:
+        _run_git(["worktree", "unlock", str(worktree_path)], str(repo_root), timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # already unlocked / never locked — non-fatal
+
     try:
         remove_args = ["worktree", "remove"]
         if force:

@@ -8,7 +8,7 @@ pytest-timeout
 pytest-asyncio
 pytest-shard
 ruff
-mcp
+mcp<2
 # Optional Office parsers — runtime-optional (commented in requirements.txt), but
 # installed here so the workspace Office-preview tests (tests/test_issue540_*.py)
 # run under the documented ./scripts/test.sh entry point. These files

@@ -207,7 +207,22 @@ def _normalize_scopes(raw: Any) -> list[str]:
 
 
 def _normalize_allow_values(raw: Any) -> list[str]:
-    return _normalize_text_list(raw)
+    """Normalize allowlist values, splitting only on commas/newlines.
+
+    Unlike ``_normalize_text_list`` (which also splits on whitespace), this
+    preserves multi-word values such as OIDC group names containing spaces
+    (e.g. ``"Hermes Users"`` stays as one entry).
+
+    RFC 6749 §3.3 requires space-delimited scope strings, so
+    ``_normalize_scopes`` must keep using ``_normalize_text_list`` -- this
+    function is for allow-values only.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        return [value for value in (str(item).strip() for item in raw) if value]
+    text = str(raw).replace("\n", ",")
+    return [part.strip() for part in text.split(",") if part.strip()]
 
 
 def _normalize_text_list(raw: Any) -> list[str]:

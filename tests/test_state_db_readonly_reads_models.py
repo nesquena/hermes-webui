@@ -15,6 +15,7 @@ write-capable handle on the agent DB.
 """
 import sqlite3
 from contextlib import closing
+from pathlib import Path
 
 import api.agent_sessions as agent_sessions
 import api.models as models
@@ -148,6 +149,72 @@ def test_get_state_db_message_keys_before_timestamp_opens_read_only(tmp_path, mo
     _assert_read_only(calls)
 
 
+def test_get_state_db_message_prefix_summary_opens_read_only(tmp_path, monkeypatch):
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    _point_models_at(monkeypatch, db)
+    calls = _record_connects(monkeypatch)
+
+    summary = models.get_state_db_session_message_prefix_summary("sess-1", 1000.5)
+
+    assert summary == {"count": 1, "null_timestamp_count": 0}
+    _assert_read_only(calls)
+
+
+def test_get_state_db_message_prefix_summary_preserves_active_filtering(tmp_path, monkeypatch):
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, timestamp REAL, active INTEGER)"
+    )
+    conn.executemany(
+        "INSERT INTO messages (id, session_id, timestamp, active) VALUES (?, ?, ?, ?)",
+        [
+            (1, "sess-1", 10.0, 1),
+            (2, "sess-1", 20.0, 0),
+            (3, "sess-1", None, None),
+            (4, "sess-1", None, 0),
+            (5, "other", 10.0, 1),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    _point_models_at(monkeypatch, db)
+
+    summary = models.get_state_db_session_message_prefix_summary("sess-1", 30.0)
+
+    assert summary == {"count": 1, "null_timestamp_count": 1}
+
+
+def test_get_state_db_message_prefix_summary_returns_none_for_inconclusive_schema(
+    tmp_path,
+    monkeypatch,
+):
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, content TEXT)")
+    conn.commit()
+    conn.close()
+    _point_models_at(monkeypatch, db)
+
+    assert models.get_state_db_session_message_prefix_summary("sess-1", 1000.5) is None
+
+
+def test_get_state_db_message_prefix_summary_missing_db_creates_no_sqlite_files(
+    tmp_path,
+    monkeypatch,
+):
+    db = tmp_path / "missing" / "state.db"
+    _point_models_at(monkeypatch, db)
+
+    summary = models.get_state_db_session_message_prefix_summary("sess-1", 1000.5)
+
+    assert summary == {"count": 0, "null_timestamp_count": 0}
+    assert not db.exists()
+    assert not Path(f"{db}-wal").exists()
+    assert not Path(f"{db}-shm").exists()
+
+
 def test_get_state_db_session_summary_opens_read_only(tmp_path, monkeypatch):
     db = tmp_path / "state.db"
     _make_state_db(db)
@@ -193,7 +260,12 @@ def test_delete_cli_session_still_opens_writable_connection():
     read-only downgrade would make the delete silently no-op."""
     import inspect
 
-    src = inspect.getsource(models.delete_cli_session)
+    src = "\n".join(
+        (
+            inspect.getsource(models.delete_cli_session),
+            inspect.getsource(models._delete_cli_session_locked),
+        )
+    )
     assert "sqlite3.connect(str(db_path))" in src, (
         "delete_cli_session must keep its writable connection"
     )

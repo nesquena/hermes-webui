@@ -586,7 +586,27 @@ function renderSessionArtifacts(){
     if(normWs && p.startsWith(normWs)) return p.slice(normWs.length);
     return p;
   };
-  root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(displayPath(item.path))}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
+  const splitArtifactDisplayPath = (path) => {
+    const slash = path.lastIndexOf('/');
+    if(slash < 0) return {name: path, head: '', tail: ''};
+    const directory = path.slice(0, slash + 1);
+    const parentSlash = directory.lastIndexOf('/', directory.length - 2);
+    return {
+      name: path.slice(slash + 1),
+      head: directory.slice(0, parentSlash + 1),
+      tail: directory.slice(parentSlash + 1),
+    };
+  };
+  root.innerHTML = items.map(item => {
+    const path = displayPath(item.path);
+    const parts = splitArtifactDisplayPath(path);
+    const directory = (parts.head || parts.tail)
+      ? `<div class="workspace-artifact-directory"><span class="workspace-artifact-directory-head">${esc(parts.head)}</span><span class="workspace-artifact-directory-tail">${esc(parts.tail)}</span></div>`
+      : '';
+    const source = item.source ? esc(item.source) : esc(t('workspace_artifact_source_session') || 'session');
+    const sourceAttrs = item.source ? '' : ' data-i18n="workspace_artifact_source_session"';
+    return `<button type="button" class="workspace-artifact-item" title="${esc(path)}" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div></button>`;
+  }).join('');
 }
 
 async function _workspacePathExists(path){
@@ -718,6 +738,14 @@ async function loadDir(path, opts={}){
       `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path||'.')}`
     );
     if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
+    if(data.workspace_recovered&&data.workspace){
+      S.session.workspace=String(data.workspace);
+      S._dirCache={};
+      _restoreExpandedDirs();
+      if(typeof syncWorkspaceDisplays==='function')syncWorkspaceDisplays();
+      if(typeof syncTerminalButton==='function')syncTerminalButton();
+      showToast(t('workspace_recovered_notice',S.session.workspace),5000,'warning');
+    }
     S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
     // #2673 — refresh Artifacts tab when its source data (the file tree) updates.
     if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();

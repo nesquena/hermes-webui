@@ -73,6 +73,40 @@ Follow that checklist's safety rules:
   in both the `rsync` and `cp -a` paths — `/opt/hermes` may contain subdirectories
   with restricted permissions (e.g. `.playwright/`).
 
+## Before you open a PR — the change guidelines
+
+Read [`docs/GUIDELINES.md`](docs/GUIDELINES.md) in full before non-trivial work. It is the
+distilled set of habits that get a change merged in one review round instead of several. The
+compressed form:
+
+1. **Fix the class, not the instance.** A bug usually has siblings — other call sites, backends,
+   companion endpoints, layouts, exit paths. Find them all and fix the shared chokepoint, or name
+   the ones you left out of scope.
+2. **Trace one authoritative value end-to-end** (`input → normalize → decision → action → persist →
+   cleanup`); the code that *decides* and the code that *acts* must use the same resolved value.
+3. **When you can't confirm something, fail closed and say so.** Never take the permissive branch on
+   uncertainty; never report a failure as success. "Unknown" is not "allowed."
+4. **Enumerate the state-space before editing** — entry point, backend, item count (0/1/many), every
+   lifecycle exit (success/error/cancel/replace/teardown), auth on/off, concurrency, hostile input —
+   and cover each or mark it out of scope. Most redo rounds are one un-considered dimension.
+5. **Assume inputs and check-then-use gaps are adversarial** — validate at the point of use (hold a
+   handle, don't re-resolve a path), scope caches by complete identity, handle crafted input.
+6. **A test must fail before your fix and pass after it.** Assert observable behavior, not a source
+   string or a mock of the thing under test; use multiple items if selection is what's being tested.
+7. **Name the owner of every piece of state and prove it's released on every exit** (success, error,
+   cancel, replace, shrink, teardown) — not just the happy path.
+8. **Fallbacks/defaults are contracts — extend the mechanism, don't copy it.** Editing N parallel
+   blocks identically means you missed a chokepoint (e.g. new copy goes in the `en` locale only).
+9. **The diff is the task and nothing else.** Extras go in the PR description, not the diff; run the
+   affected + neighboring tests before opening.
+10. **A visible control costs attention on every visit** — place it by frequency of use and by where
+    mainstream chat apps put the equivalent, not by where your diff already is; verify with
+    before/after images at desktop and narrow widths.
+
+Show the work in the PR body: the siblings you found, proof the test failed before the fix, the
+verification run, before/after images for visible changes, and an explicit list of what you could
+not verify.
+
 ## Local state and secrets
 
 Hermes WebUI can read and write real agent state, sessions, workspaces,

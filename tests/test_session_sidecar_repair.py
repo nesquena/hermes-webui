@@ -763,9 +763,11 @@ class TestNonEmptyMessagesPendingCleared:
         assert "partial output above was recovered" in error_msgs[0]["content"]
         assert "no agent output was recovered" not in error_msgs[0]["content"]
 
-    def test_journal_recovery_does_not_materialize_reasoning_only_events(self, hermes_home, monkeypatch):
-        """Run-journal repair must not turn hidden reasoning into visible chat
-        transcript content."""
+    def test_journal_recovery_restores_reasoning_only_as_display_metadata(
+        self, hermes_home, monkeypatch,
+    ):
+        """Run-journal repair keeps live Thinking without making it chat prose
+        or provider-facing history."""
         s = _make_session(messages=[{"role": "user", "content": "existing turn"}])
         s.pending_user_message = "Keep going"
         s.pending_started_at = time.time() - 120
@@ -789,16 +791,14 @@ class TestNonEmptyMessagesPendingCleared:
         assert result is True
         contents = [m.get("content", "") for m in s.messages]
         assert not any("private scratchpad text" in c for c in contents)
+        reasoning_msgs = [m for m in s.messages if m.get("reasoning")]
+        assert [m.get("reasoning") for m in reasoning_msgs] == ["private scratchpad text"]
         error_msgs = [m for m in s.messages if m.get("_error")]
         assert len(error_msgs) == 1
-        # Reasoning-only events do not count as visible output, so the marker
-        # arms the lazy-retry hook (stream id is known, journal may have more
-        # events appear on a later read). The legacy "no agent output was
-        # recovered" wording is now reserved for the no-stream-id case.
-        assert error_msgs[0].get("_pending_journal_recovery") is True
-        assert error_msgs[0].get("_journal_retry_stream_id") == "reasoning_only_stream"
-        assert "no agent output was recovered" not in error_msgs[0]["content"]
-        assert "Recovering the partial output" in error_msgs[0]["content"]
+        assert error_msgs[0].get("_pending_journal_recovery") is not True
+        assert "partial output above was recovered" in error_msgs[0]["content"]
+        provider_history = streaming._sanitize_messages_for_api(s.messages)
+        assert "private scratchpad text" not in json.dumps(provider_history)
 
     def test_journal_recovery_keeps_consecutive_tools_on_one_anchor(self, hermes_home, monkeypatch):
         """Consecutive journaled tools without an intervening visible update

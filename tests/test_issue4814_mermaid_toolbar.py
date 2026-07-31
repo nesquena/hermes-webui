@@ -113,6 +113,15 @@ function makeElement(tagName) {
       this.releasedPointerId = pointerId;
       if (this.capturedPointerId === pointerId) this.capturedPointerId = null;
     },
+    _listeners: {},
+    addEventListener(type, handler, _options) {
+      (this._listeners[type] ||= []).push(handler);
+    },
+    removeEventListener(type, handler) {
+      const list = this._listeners[type] || [];
+      const idx = list.indexOf(handler);
+      if (idx >= 0) list.splice(idx, 1);
+    },
     cloneNode() {
       const copy = makeElement(this.tagName);
       copy.className = this.className;

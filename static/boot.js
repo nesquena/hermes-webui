@@ -17,7 +17,7 @@
 async function cancelStream(reason){
   const sid = S.session && S.session.session_id;
   const streamId = S.activeStreamId;
-  if(!streamId) return;
+  if(!streamId) return false;
   // Interrupt provenance: log WHY the active run is being cancelled so operators
   // can tell an explicit Stop / interrupt from any other trigger when they see a
   // SIGINT/exit-code-130 in the backend logs. Only explicit user paths reach
@@ -30,8 +30,10 @@ async function cancelStream(reason){
     console.info('[stream] cancel requested', {reason:_reason, streamId, sessionId:sid});
   }
   let respBody=null;
+  let respOk=false;
   try{
     const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    respOk=!!(r&&r.ok);
     try{respBody=await r.json();}catch(_){}
   }catch(e){
     if(typeof console !== 'undefined' && console.warn){
@@ -50,7 +52,7 @@ async function cancelStream(reason){
   // `cancel` event can clear INFLIGHT, render "Task cancelled", and refresh
   // the sidebar. Only clear locally when the backend says there is no active
   // stream left to settle.
-  if(respBody && respBody.cancelled===false && S.activeStreamId===streamId){
+  if(respOk && respBody && respBody.cancelled===false && S.activeStreamId===streamId){
     S.activeStreamId=null;
     setBusy(false);
     if(typeof setComposerStatus==='function') setComposerStatus('');
@@ -59,20 +61,24 @@ async function cancelStream(reason){
     // distinguish reasons — keep the toast generic and short.
     if(typeof showToast==='function') showToast('Stream is no longer active',2000);
   }
+  return respOk;
 }
 
 async function cancelSessionStream(session){
   const streamId = session&&session.active_stream_id;
   const sid = session&&session.session_id;
-  if(!streamId||!sid) return;
+  if(!streamId||!sid) return false;
   // Explicit sidebar "Stop response" — log provenance for the same reason as
   // cancelStream(). (#5345)
   if(typeof console !== 'undefined' && console.info){
     console.info('[stream] cancel requested', {reason:'sidebar-stop', streamId, sessionId:sid});
   }
+  let respOk=false;
   try{
-    await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    respOk=!!(r&&r.ok);
   }catch(e){/* close local stream; keep UI state honest below */}
+  if(!respOk) return false;
   if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
   session.active_stream_id=null;
   delete INFLIGHT[sid];
@@ -94,6 +100,7 @@ async function cancelSessionStream(session){
     hideClarifyCard(true, 'cancelled');
   }
   if(typeof renderSessionList==='function') renderSessionList();
+  return true;
 }
 
 async function _savedSessionShouldStaySidebarOnly(sid){
@@ -124,6 +131,9 @@ function _rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent){
 }
 function _profileQueryBlocksSavedLocalRestore(profileIntent, urlSession){
   return !!(profileIntent&&profileIntent.hasParam&&profileIntent.valid&&!urlSession);
+}
+function _shouldStartFreshPwaChat(action,urlSession){
+  return action==='new-chat'&&!urlSession;
 }
 async function _applyComposerPrefillOnBoot(prefillIntent){
   if(!prefillIntent||!prefillIntent.hasText) return;
@@ -303,7 +313,10 @@ async function _maybeBindFreshDefaultWorkspaceSession(prefillIntent=null){
   if(_workspacePanelMode!=='browse') return false;
   if(!S._profileDefaultWorkspace) return false;
   try{
-    await newSession(false, {awaitWorkspaceLoad: true});
+    // worktree:false is explicit and load-bearing — this auto-bind runs on
+    // page load, and a config-level worktree default must never leak a fresh
+    // worktree + branch from simply opening the UI (#6022).
+    await newSession(false, {awaitWorkspaceLoad: true, worktree: false});
     return true;
   }catch(e){
     console.warn('[hermes] failed to bind fresh default workspace session', e);
@@ -1409,6 +1422,68 @@ window._hermesTtsSynth=function(id, text, opts){
     });
 };
 
+// ── Session-open hook (for extensions) ────────────────────────────────────
+var _HERMES_SESSION_OPEN_HANDLERS=[];
+window.registerHermesSessionOpenHandler=function(fn){
+  if(typeof fn!=='function') return false;
+  if(_HERMES_SESSION_OPEN_HANDLERS.indexOf(fn)>=0) return false;
+  _HERMES_SESSION_OPEN_HANDLERS.push(fn);
+  return true;
+};
+window._hermesNotifySessionOpen=function(sid, data, opts){
+  opts=opts||{};
+  for(var i=0;i<_HERMES_SESSION_OPEN_HANDLERS.length;i++){
+    try{
+      var result=_HERMES_SESSION_OPEN_HANDLERS[i](sid, data, opts);
+      if(opts.preload===true && result&&result.cancel===true) return {cancel:true};
+    }catch(_){}
+  }
+  return {};
+};
+
+// ── Transcript renderer (for extensions) ───────────────────────────────────
+window.renderTranscript=function(container, messages, opts){
+  if(!container||!Array.isArray(messages)) return container;
+  opts=opts||{};
+  container.innerHTML='';
+  var md=window.renderMd||null;
+  for(var i=0;i<messages.length;i++){
+    var msg=messages[i];
+    if(!msg||!msg.role||msg.role==='tool') continue;
+    var content;
+    if(typeof msg.content==='string'){
+      content=msg.content;
+    }else if(msg.content==null){
+      content='';
+    }else if(Array.isArray(msg.content)){
+      // Multi-part content (OpenAI/Anthropic API style) — concatenate text parts.
+      content=msg.content.map(function(p){return (p&&typeof p.text==='string')?p.text:''}).join('');
+    }else{
+      content=String(msg.content);
+    }
+    if(!content&&opts.skipEmpty) continue;
+    var row=document.createElement('div');
+    row.className='msg-row';
+    row.setAttribute('data-role',msg.role);
+    var body=document.createElement('div');
+    body.className='msg-body';
+    try{
+      if(md){
+        var html=md(content);
+        if(html!=null){body.innerHTML=html}else{body.textContent=content}
+      }else{
+        body.textContent=content;
+      }
+    }catch(_){body.textContent=content}
+    row.appendChild(body);
+    container.appendChild(row);
+  }
+  if(typeof _rehydrateTransparentStreamDom==='function'){
+    try{_rehydrateTransparentStreamDom(container);}catch(_){}
+  }
+  return container;
+};
+
 // ── Turn-based voice mode (#1333) ────────────────────────────────────────
 // Chained flow: listen → send → (agent processes) → TTS response → listen again
 (function(){
@@ -2320,6 +2395,19 @@ document.addEventListener('keydown',async e=>{
       return;
     }
   }
+  // Cmd/Ctrl+/ focuses the message composer without creating a chat.
+  // Match on the '/' CHARACTER (e.key), not the physical key position: on QWERTZ
+  // layouts the physical Slash key produces Ctrl+- (browser zoom-out) and '/' is
+  // typed as Shift+7, so matching the physical code both steals zoom and misses
+  // the real '/' chord. e.key==='/' is layout-correct on every keyboard.
+  if((e.metaKey||e.ctrlKey)&&!e.altKey&&e.key==='/'){
+    const t=e.target;
+    const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
+    if(isText) return;
+    const composer=$('msg');
+    if(composer){e.preventDefault();composer.focus();}
+    return;
+  }
   // Enter on approval card = Allow once (when a button inside the card is focused or
   // card is visible and focus is not on an input/textarea/select)
   if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
@@ -2458,6 +2546,11 @@ document.querySelectorAll('.suggestion').forEach(btn=>{
 function applyEmptyStateSuggestionPref(){
   if(!$('emptyState')) return;
   $('emptyState').classList.toggle('no-suggestions',window._hideEmptyStateSuggestions===true);
+}
+
+function applyEmptyStatePanelPref(){
+  if(!$('emptyState')) return;
+  $('emptyState').classList.toggle('no-welcome',window._hideEmptyStatePanel===true);
 }
 
 window.addEventListener('resize',()=>{
@@ -3146,9 +3239,13 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
     applyEmptyStateSuggestionPref();
+    window._hideEmptyStatePanel=s.hide_empty_state_panel===true;
+    applyEmptyStatePanelPref();
     // #4343: transcript virtualization is EXPERIMENTAL/opt-IN (default OFF).
-    // It caused scroll-up flicker on long sessions, so it's off for everyone
-    // unless explicitly opted in; long transcripts render in full by default.
+    // #4346 Phase B (footer-jitter suppression during virtual-scroll
+    // measurement re-renders) resolved the scroll-up flicker root cause,
+    // but virtualization remains opt-in until battle-tested further.
+    // Users can explicitly enable it via Settings → virtualize_transcript.
     window._virtualizeTranscript=s.virtualize_transcript===true;
     window._showTps=!!s.show_tps;
     window._fadeTextEffect=!!s.fade_text_effect;
@@ -3163,6 +3260,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       ? s.chat_activity_display_mode
       : 'compact_worklog';
     window._transparentStream=window._chatActivityDisplayMode==='transparent_stream';
+    window._transparentEventTimestamps=s.transparent_stream_event_timestamps!==false;
     window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
     window._worklogDetailsExpandedByDefault=!!(
       Object.prototype.hasOwnProperty.call(s,'worklog_details_expanded_default')
@@ -3300,6 +3398,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=false;
     applyEmptyStateSuggestionPref();
+    window._hideEmptyStatePanel=false;
+    applyEmptyStatePanelPref();
     window._virtualizeTranscript=false;  // settings-load failed: default-OFF (experimental/opt-in) (#4343)
     window._showTps=false;
     window._fadeTextEffect=false;
@@ -3311,6 +3411,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._simplifiedToolCalling=true;
     window._chatActivityDisplayMode='compact_worklog';
     window._transparentStream=false;
+    window._transparentEventTimestamps=true;
     window._terminalAutoExpandOnOutput=false;
     window._workspaceTodosTab=false;
     if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
@@ -3481,7 +3582,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   }
   if(typeof fetchReasoningChip==='function'&&(!_profileSwitchCompleted||!_profileSwitchChangedProfile)) fetchReasoningChip();
   // Fetch available models without blocking session restore. The static HTML
-  // options are enough for first paint; the dynamic provider list can settle
+  // options enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
   const _redirectBootModelDropdownIfUnauth=(res)=>{
     if(!res||res.status!==401) return false;
@@ -3578,7 +3679,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
     ? window.HermesPWA.launchAction()
     : null;
-  if(pwaLaunchAction==='new-chat'){
+  if(_shouldStartFreshPwaChat(pwaLaunchAction,urlSession)){
     try{
       await newSession(true);
       // New-chat PWA launches need the empty conversation visible immediately.

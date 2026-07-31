@@ -262,6 +262,29 @@ console.log(_findModelInDropdown('google/gemma-4-27b', sel, 'custom:beta') || ''
         resolved = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
         assert resolved.stdout.strip() == "@custom:beta:google/gemma-4-27b"
 
+    def test_find_model_returns_no_match_for_missing_qualified_same_suffix_sibling(self):
+        import re
+        import subprocess
+
+        src = self._read_js()
+        helper = re.search(r"function _getOptionProviderId\(opt\)\{.*?\n\}", src, re.S)
+        finder = re.search(r"function _findModelInDropdown\(modelId, sel, preferredProviderId\)\{.*?\n\}", src, re.S)
+        assert helper, "_getOptionProviderId() not found in ui.js"
+        assert finder, "_findModelInDropdown() not found in ui.js"
+
+        script = f"""
+{helper.group(0)}
+{finder.group(0)}
+const sel = {{
+  options: [
+    {{ value: 'vendor-b/catalog/deepseek-v4-pro', parentElement: {{ tagName: 'OPTGROUP', dataset: {{ provider: 'custom:beta' }} }} }},
+  ]
+}};
+console.log(_findModelInDropdown('vendor-a/deepseek-v4-pro', sel, 'custom:alpha') || '');
+"""
+        resolved = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+        assert resolved.stdout.strip() == ""
+
 
 class TestResolveModelProviderColonInProviderId(unittest.TestCase):
     """resolve_model_provider() must handle provider_ids containing ':'.

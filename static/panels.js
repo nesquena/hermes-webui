@@ -2526,6 +2526,7 @@ function _kanbanRenderBoard(){
     board.innerHTML = _kanbanEmptyBoardHtml();
     return;
   }
+  board.classList.toggle('kanban-board-consolidated', !_kanbanLanesByProfile);
   const columns = _kanbanVisibleTasks();
   const total = columns.reduce((n, col) => n + (col.tasks || []).length, 0);
   if ($('kanbanSummary')) $('kanbanSummary').textContent = String(t('kanban_visible_tasks')).replace('{0}', total);
@@ -6303,7 +6304,9 @@ async function promptWorkspacePath(){
     const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws)return;
     try{
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      // System-minted session (#6022): worktree:false is explicit so a config
+      // worktree default can't leak a worktree from a workspace prompt.
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
       if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
     if(!S.session)return;
@@ -6339,7 +6342,9 @@ async function switchToWorkspace(path,name){
     const ws=path||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws){showToast(t('no_workspace'));return;}
     try{
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      // System-minted session (#6022): explicit worktree:false — a workspace
+      // switch from a blank page is not deliberate New Chat intent.
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
       if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
     if(!S.session)return;
@@ -6396,6 +6401,10 @@ async function switchToWorkspace(path,name){
     : null;
   try{
     closeWsDropdown();
+    // Invalidate any older /api/list response before the explicit workspace
+    // mutation. Otherwise a delayed recovery response for this same session can
+    // overwrite the user's newer selection and reject this switch's fresh tree.
+    if(typeof bumpWorkspaceTreeGen==='function')bumpWorkspaceTreeGen();
     await api('/api/session/update',{method:'POST',body:JSON.stringify({
       session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
     })});
@@ -6595,8 +6604,8 @@ async function loadProfilesPanel() {
       explainer.innerHTML = `
         <div class="profile-card-header">
           <div style="min-width:0;flex:1">
-            <div class="profile-card-name">Profiles vs workspaces</div>
-            <div class="profile-card-meta">Use profiles for how the agent works; use workspaces for what files it works on.</div>
+            <div class="profile-card-name">${esc(t('profile_concept_title'))}</div>
+            <div class="profile-card-meta">${esc(t('profile_concept_subtitle'))}</div>
           </div>
         </div>`;
       explainer.onclick = () => _renderProfileConceptHelp(data.active || 'default');
@@ -6656,14 +6665,15 @@ function _renderProfileConceptHelp(activeName){
   const body = $('profileDetailBody');
   const empty = $('profileDetailEmpty');
   if (!title || !body) return;
-  title.textContent = 'Profiles vs workspaces';
+  title.textContent = t('profile_concept_title');
   body.innerHTML = `
     <div class="main-view-content">
       <div class="detail-card">
-        <div class="detail-card-title">Use profiles for how; workspaces for what</div>
-        <div class="detail-row"><div class="detail-row-label">Profiles</div><div class="detail-row-value">Agent identity, memory, skills, model/provider config, and connected tools. Create profiles for roles like researcher, writer, marketer, or developer when those roles should carry different context or capabilities.</div></div>
-        <div class="detail-row"><div class="detail-row-label">Workspaces</div><div class="detail-row-value">Project or product folders on disk. Use one workspace per repo/product so chat, terminal, and file browsing point at the right files.</div></div>
-        <div class="detail-row"><div class="detail-row-label">Together</div><div class="detail-row-value">A profile can have a default workspace, but you can still switch workspaces for a session. Profiles answer “who is working?”; workspaces answer “where are they working?”</div></div>
+        <div class="detail-card-title">${esc(t('profile_concept_title'))}</div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('tab_profiles'))}</div><div class="detail-row-value">${esc(t('profile_concept_desc_profiles'))}</div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('tab_workspaces'))}</div><div class="detail-row-value">${esc(t('profile_concept_desc_workspaces'))}</div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('profile_concept_label_together'))}</div><div class="detail-row-value">${esc(t('profile_concept_desc_together'))}</div></div>
+        <div class="detail-row" style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px"><div class="detail-row-label">${esc(t('profile_concept_label_example'))}</div><div class="detail-row-value">${esc(t('profile_concept_example'))}</div></div>
       </div>
     </div>`;
   body.style.display = '';
@@ -7128,7 +7138,7 @@ async function switchToProfile(name) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
-      await newSession(false, {awaitWorkspaceLoad: workspaceVisible});
+      await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
       if (_switchGen !== _profileSwitchGeneration) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.
@@ -8403,6 +8413,7 @@ function _syncStructuredCodeLinesEnabled(){
 function _appearancePayloadFromUi(){
   const worklogDetailsExpanded=!!($('settingsWorklogDetailsExpandedDefault')||{}).checked;
   const chatActivityModeSel=$('settingsChatActivityDisplayMode');
+  const transparentEventTimestamps=$('settingsTransparentEventTimestamps');
   return {
     theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
@@ -8410,6 +8421,7 @@ function _appearancePayloadFromUi(){
     chat_activity_display_mode: chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='hide_all_activity')
       ? chatActivityModeSel.value
       : 'compact_worklog',
+    transparent_stream_event_timestamps: transparentEventTimestamps ? transparentEventTimestamps.checked : true,
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
     auto_scroll_follow: !!($('settingsAutoScrollFollow')||{}).checked,
@@ -8438,7 +8450,20 @@ function _syncChatActivityDisplayModeControl(mode){
   });
   window._chatActivityDisplayMode=next;
   window._transparentStream=next==='transparent_stream';
+  if(typeof _syncTransparentEventTimestampsControl==='function') _syncTransparentEventTimestampsControl(window._transparentEventTimestamps,next);
   if(next==='hide_all_activity'&&typeof window._hideLiveActivityForFinalAnswerOnly==='function') window._hideLiveActivityForFinalAnswerOnly();
+}
+
+function _syncTransparentEventTimestampsControl(enabled, mode){
+  const next=enabled!==false;
+  const activeMode=mode==='transparent_stream'||mode==='hide_all_activity' ? mode : (window._chatActivityDisplayMode||'compact_worklog');
+  const checkbox=$('settingsTransparentEventTimestamps');
+  if(checkbox){
+    checkbox.checked=next;
+    checkbox.disabled=activeMode!=='transparent_stream';
+    checkbox.style.opacity=activeMode==='transparent_stream'?'':'0.5';
+  }
+  window._transparentEventTimestamps=next;
 }
 
 function _pickChatActivityDisplayMode(mode){
@@ -8448,6 +8473,14 @@ function _pickChatActivityDisplayMode(mode){
   _scheduleAppearanceAutosave();
 }
 if(typeof window!=='undefined') window._pickChatActivityDisplayMode=_pickChatActivityDisplayMode;
+
+function _pickTransparentEventTimestamps(enabled){
+  _syncTransparentEventTimestampsControl(enabled,window._chatActivityDisplayMode);
+  if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+  if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+  _scheduleAppearanceAutosave();
+}
+if(typeof window!=='undefined') window._pickTransparentEventTimestamps=_pickTransparentEventTimestamps;
 
 function _setAppearanceAutosaveStatus(state){
   const el=$('settingsAppearanceAutosaveStatus');
@@ -8497,8 +8530,10 @@ async function _autosaveAppearanceSettings(payload){
       window._sessionJumpButtonsEnabled=!!saved.session_jump_buttons;
       if(Object.prototype.hasOwnProperty.call(saved,'chat_activity_display_mode')){
         const beforeMode=window._chatActivityDisplayMode;
+        const beforeTimestamps=window._transparentEventTimestamps!==false;
         _syncChatActivityDisplayModeControl(saved.chat_activity_display_mode);
-        if(window._chatActivityDisplayMode!==beforeMode){
+        _syncTransparentEventTimestampsControl(saved.transparent_stream_event_timestamps, saved.chat_activity_display_mode);
+        if(window._chatActivityDisplayMode!==beforeMode||((window._transparentEventTimestamps!==false)!==beforeTimestamps)){
           if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
           if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
         }
@@ -8611,6 +8646,8 @@ function _preferencesPayloadFromUi(){
   if(showConversationOutlineCb) payload.show_conversation_outline=showConversationOutlineCb.checked;
   const hideSuggestionsCb=$('settingsHideSuggestions');
   if(hideSuggestionsCb) payload.hide_empty_state_suggestions=hideSuggestionsCb.checked;
+  const hideEmptyStatePanelCb=$('settingsHideEmptyStatePanel');
+  if(hideEmptyStatePanelCb) payload.hide_empty_state_panel=hideEmptyStatePanelCb.checked;
   const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
   if(virtualizeTranscriptCb){
     payload.virtualize_transcript=virtualizeTranscriptCb.checked;
@@ -8763,6 +8800,10 @@ async function _autosavePreferencesSettings(payload){
     if(payload&&payload.hide_empty_state_suggestions!==undefined){
       window._hideEmptyStateSuggestions=!!(saved&&saved.hide_empty_state_suggestions);
       if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
+    }
+    if(payload&&payload.hide_empty_state_panel!==undefined){
+      window._hideEmptyStatePanel=!!(saved&&saved.hide_empty_state_panel);
+      if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
     }
     if(payload&&payload.show_conversation_outline!==undefined){
       window._showConversationOutline=!!(saved&&saved.show_conversation_outline);
@@ -8930,10 +8971,17 @@ async function loadSettingsPanel(){
     }
     const worklogDetailsExpandedCb=$('settingsWorklogDetailsExpandedDefault');
     const chatActivityModeSel=$('settingsChatActivityDisplayMode');
+    const transparentEventTimestampsCb=$('settingsTransparentEventTimestamps');
     if(chatActivityModeSel){
       _syncChatActivityDisplayModeControl(settings.chat_activity_display_mode);
+      _syncTransparentEventTimestampsControl(settings.transparent_stream_event_timestamps, settings.chat_activity_display_mode);
       chatActivityModeSel.addEventListener('change',()=>{
         _pickChatActivityDisplayMode(chatActivityModeSel.value);
+      },{once:false});
+    }
+    if(transparentEventTimestampsCb){
+      transparentEventTimestampsCb.addEventListener('change',()=>{
+        _pickTransparentEventTimestamps(transparentEventTimestampsCb.checked);
       },{once:false});
     }
     if(worklogDetailsExpandedCb){
@@ -9159,6 +9207,17 @@ async function loadSettingsPanel(){
       hideSuggestionsCb.addEventListener('change',()=>{
         window._hideEmptyStateSuggestions=hideSuggestionsCb.checked;
         if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
+    const hideEmptyStatePanelCb=$('settingsHideEmptyStatePanel');
+    if(hideEmptyStatePanelCb){
+      hideEmptyStatePanelCb.checked=settings.hide_empty_state_panel===true;
+      window._hideEmptyStatePanel=hideEmptyStatePanelCb.checked;
+      if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
+      hideEmptyStatePanelCb.addEventListener('change',()=>{
+        window._hideEmptyStatePanel=hideEmptyStatePanelCb.checked;
+        if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
         _schedulePreferencesAutosave();
       },{once:false});
     }
@@ -9776,6 +9835,13 @@ function _extensionSidecarCard(sidecars){
     const proxyConsentRequired=proxy.consent_required===true;
     const proxyOriginChanged=proxy.origin_changed===true;
     const proxyPath=(proxy&&proxy.path)||'';
+    // token-v1 posture: 'local_unprotected' = WebUI auth is off, so proxy consent
+    // is grantable by any unauthenticated local caller. Warn the operator to
+    // enable authentication before wiring up a sidecar (design §9.1).
+    const proxyUnprotected=proxy.posture==='local_unprotected';
+    const proxyWarning=proxyUnprotected
+      ?`<div class="extension-sidecar-warning">⚠ WebUI authentication is off. This sidecar's proxy consent can be granted by any local process. Set a password in Settings → Password before using sidecar extensions.</div>`
+      :'';
     const proxyStatus=proxyConsented
       ?'consented'
       :(proxyOriginChanged
@@ -9800,6 +9866,7 @@ function _extensionSidecarCard(sidecars){
         <div><span>Proxy path</span><code>${esc(proxyPath)}</code></div>
       </div>
       <div class="extension-sidecar-actions">${proxyButton}</div>
+      ${proxyWarning}
       <div class="extension-sidecar-runtime" data-sidecar-runtime-index="${index}" hidden></div>
     </div>`;
   }).join('')}</div>`:'<div class="extension-url-empty">No loopback sidecars declared.</div>';
@@ -11789,6 +11856,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._showThinking=body.show_thinking!==false;
   window._simplifiedToolCalling=true;
   _syncChatActivityDisplayModeControl(body.chat_activity_display_mode);
+  _syncTransparentEventTimestampsControl(body.transparent_stream_event_timestamps, body.chat_activity_display_mode);
   window._terminalAutoExpandOnOutput=!!body.terminal_auto_expand_on_output;
   window._workspaceTodosTab=!!body.workspace_todos_tab;
   if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
@@ -12433,6 +12501,7 @@ async function saveSettings(andClose){
     ||(($('settingsChatActivityDisplayMode')||{}).value==='hide_all_activity'))
     ? ($('settingsChatActivityDisplayMode')||{}).value
     : 'compact_worklog';
+  body.transparent_stream_event_timestamps=(($('settingsTransparentEventTimestamps')||{}).checked)!==false;
   body.auto_scroll_follow=!!($('settingsAutoScrollFollow')||{}).checked;
   body.render_user_markdown=!!($('settingsRenderUserMarkdown')||{}).checked;
   body.large_text_paste_as_attachment=!!($('settingsLargeTextPasteAsAttachment')||{}).checked;

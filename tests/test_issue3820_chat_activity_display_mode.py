@@ -86,6 +86,21 @@ def test_chat_activity_display_mode_persists_transparent_stream_hide_all_activit
     assert saved["chat_activity_display_mode"] == "hide_all_activity"
     assert json.loads(settings_path.read_text(encoding="utf-8"))["chat_activity_display_mode"] == "hide_all_activity"
 
+
+def test_transparent_stream_event_timestamps_default_true_and_persist_boolean(monkeypatch, tmp_path):
+    import api.config as config
+
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_FILE", settings_path)
+
+    loaded = config.load_settings()
+    assert loaded["transparent_stream_event_timestamps"] is True
+
+    saved = config.save_settings({"transparent_stream_event_timestamps": False})
+    assert saved["transparent_stream_event_timestamps"] is False
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["transparent_stream_event_timestamps"] is False
+
+
 def test_chat_activity_display_mode_supports_three_values():
     assert "function chatActivityMode()" in UI_JS
     assert "function isTransparentStream()" in UI_JS
@@ -307,7 +322,11 @@ def test_chat_activity_display_mode_settled_hide_all_scene_persists_without_work
     return_index = block.index("return hasWorklogRows;")
 
     assert "const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);" in block
-    assert "const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity';" in block
+    assert "const hasOwnedOutcomes=_anchorSceneHasOwnedOutcomes(scene);" in block
+    assert (
+        "const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity'||hasOwnedOutcomes;"
+        in block
+    )
     assert persist_index < return_index
     assert "return true;" not in block
 
@@ -418,29 +437,42 @@ def test_transparent_stream_live_branch_uses_direct_rows():
 
 def test_settings_ui_exposes_chat_activity_display_mode_selector():
     assert 'id="settingsChatActivityDisplayMode"' in INDEX_HTML
+    assert 'id="settingsTransparentEventTimestamps"' in INDEX_HTML
     assert 'data-chat-activity-mode="compact_worklog"' in INDEX_HTML
     assert 'data-chat-activity-mode="transparent_stream"' in INDEX_HTML
     assert 'data-chat-activity-mode="hide_all_activity"' in INDEX_HTML
+    assert "_pickTransparentEventTimestamps(this.checked)" in INDEX_HTML
     assert 'value="compact_worklog"' in INDEX_HTML
     assert 'value="transparent_stream"' in INDEX_HTML
     assert 'value="hide_all_activity"' in INDEX_HTML
     assert 'data-i18n="settings_label_chat_activity_display_mode"' in INDEX_HTML
+    assert 'data-i18n="settings_label_transparent_stream_event_timestamps"' in INDEX_HTML
+    assert 'data-i18n="settings_desc_transparent_stream_event_timestamps"' in INDEX_HTML
     assert 'settings_option_final_answer_only' in INDEX_HTML
     assert "chat_activity_display_mode" in PANELS_JS
+    assert "transparent_stream_event_timestamps" in PANELS_JS
     assert "settingsChatActivityDisplayMode" in PANELS_JS
     assert "function _syncChatActivityDisplayModeControl" in PANELS_JS
+    assert "function _syncTransparentEventTimestampsControl" in PANELS_JS
     assert "function _pickChatActivityDisplayMode" in PANELS_JS
+    assert "function _pickTransparentEventTimestamps" in PANELS_JS
     assert "body.chat_activity_display_mode" in PANELS_JS
     assert "renderMessages({preserveScroll:true})" in PANELS_JS
     assert "settings_label_chat_activity_display_mode" in I18N_JS
     assert "settings_desc_chat_activity_display_mode" in I18N_JS
+    assert "settings_label_transparent_stream_event_timestamps" in I18N_JS
+    assert "settings_desc_transparent_stream_event_timestamps" in I18N_JS
     assert I18N_JS.count("settings_option_final_answer_only") == I18N_JS.count("settings_option_transparent_stream")
 
 
 def test_chat_activity_display_mode_plumbing_preserves_hide_all_activity():
     assert "s.chat_activity_display_mode==='transparent_stream'||s.chat_activity_display_mode==='hide_all_activity'" in BOOT_JS
+    assert "window._transparentEventTimestamps=s.transparent_stream_event_timestamps!==false;" in BOOT_JS
+    assert "window._transparentEventTimestamps=true;" in BOOT_JS
     assert "chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='hide_all_activity')" in PANELS_JS
     assert "const next=mode==='transparent_stream'||mode==='hide_all_activity' ? mode : 'compact_worklog';" in PANELS_JS
+    assert "if(typeof _syncTransparentEventTimestampsControl==='function') _syncTransparentEventTimestampsControl(window._transparentEventTimestamps,next);" in PANELS_JS
+    assert "window._transparentEventTimestamps=next;" in PANELS_JS
     assert "hide_all_activity" in PANELS_JS
 
 
@@ -490,12 +522,15 @@ def test_appearance_autosave_rerenders_only_when_activity_mode_changes():
     autosave_block = PANELS_JS[start:end]
 
     assert "const beforeMode=window._chatActivityDisplayMode;" in autosave_block
+    assert "const beforeTimestamps=window._transparentEventTimestamps!==false;" in autosave_block
     assert "_syncChatActivityDisplayModeControl(saved.chat_activity_display_mode);" in autosave_block
-    changed_guard = "if(window._chatActivityDisplayMode!==beforeMode){"
+    assert "_syncTransparentEventTimestampsControl(saved.transparent_stream_event_timestamps, saved.chat_activity_display_mode);" in autosave_block
+    changed_guard = "if(window._chatActivityDisplayMode!==beforeMode||((window._transparentEventTimestamps!==false)!==beforeTimestamps)){"
     assert changed_guard in autosave_block
     guarded = autosave_block[autosave_block.index(changed_guard):]
     assert "clearMessageRenderCache()" in guarded
     assert "renderMessages({preserveScroll:true})" in guarded
+    assert PANELS_JS.count("_syncTransparentEventTimestampsControl(settings.transparent_stream_event_timestamps, settings.chat_activity_display_mode);") == 1
 
 
 def test_attach_copy_button_declares_local_button():

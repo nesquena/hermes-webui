@@ -2051,6 +2051,13 @@ function _mountMermaidViewer(svgEl, options = {}) {
     viewport,
     x: 0,
     y: 0,
+    pinching: false,
+    pinchStartDist: 0,
+    pinchStartScale: 1,
+    pinchStartCX: 0,
+    pinchStartCY: 0,
+    pinchStartX: 0,
+    pinchStartY: 0,
   };
   root._mermaidViewer = state;
 
@@ -2195,6 +2202,7 @@ function _mountMermaidViewer(svgEl, options = {}) {
   }
 
   function _onPointerDown(e){
+    if(state.pinching) return;
     if(e.button != null && e.button !== 0) return;
     state.dragging = true;
     state.dragged = false;
@@ -2209,6 +2217,7 @@ function _mountMermaidViewer(svgEl, options = {}) {
   }
 
   function _onPointerMove(e){
+    if(state.pinching) return;
     if(!state.dragging) return;
     const dx = (Number(e.clientX) || 0) - state.dragOriginX;
     const dy = (Number(e.clientY) || 0) - state.dragOriginY;
@@ -2229,6 +2238,7 @@ function _mountMermaidViewer(svgEl, options = {}) {
   }
 
   function _openViewerOnClick(e){
+    if(state.pinching) return;
     if(mode !== 'inline') return;
     if(state.dragged){
       state.dragged = false;
@@ -2239,6 +2249,53 @@ function _mountMermaidViewer(svgEl, options = {}) {
     openLightbox();
   }
 
+  function _touchDist(touches){
+    if(!touches || touches.length < 2) return 0;
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function _onTouchStart(e){
+    if(e.touches.length === 2){
+      state.pinching = true;
+      state.pinchStartDist = _touchDist(e.touches);
+      state.pinchStartScale = state.scale;
+      state.pinchStartX = state.x;
+      state.pinchStartY = state.y;
+      const rect = viewport.getBoundingClientRect();
+      state.pinchStartCX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - (rect.left || 0);
+      state.pinchStartCY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - (rect.top || 0);
+      _endPointerDrag();
+      if(e.preventDefault) e.preventDefault();
+    }
+  }
+
+  function _onTouchMove(e){
+    if(!state.pinching || e.touches.length < 2) return;
+    const rect = viewport.getBoundingClientRect();
+    const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - (rect.left || 0);
+    const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - (rect.top || 0);
+    const currDist = _touchDist(e.touches);
+    if(state.pinchStartDist > 0 && state.pinchStartScale > 0){
+      const rawScale = state.pinchStartScale * (currDist / state.pinchStartDist);
+      const boundedScale = Math.max(_minScale(), Math.min(_MERMAID_VIEWER_MAX_SCALE, rawScale));
+      const ratio = boundedScale / state.pinchStartScale;
+      state.scale = boundedScale;
+      state.x = cx - (state.pinchStartCX - state.pinchStartX) * ratio;
+      state.y = cy - (state.pinchStartCY - state.pinchStartY) * ratio;
+      _applyTransform();
+    }
+    if(e.preventDefault) e.preventDefault();
+  }
+
+  function _onTouchEnd(e){
+    if(e.touches.length < 2 && state.pinching){
+      state.pinching = false;
+      state.dragged = true;
+    }
+  }
+
   viewport.onpointerdown = _onPointerDown;
   viewport.onpointermove = _onPointerMove;
   viewport.onpointerup = _endPointerDrag;
@@ -2246,6 +2303,10 @@ function _mountMermaidViewer(svgEl, options = {}) {
   viewport.onpointerleave = _endPointerDrag;
   viewport.onwheel = _zoomFromWheel;
   viewport.onclick = _openViewerOnClick;
+  viewport.addEventListener('touchstart', _onTouchStart, {passive: false});
+  viewport.addEventListener('touchmove', _onTouchMove, {passive: false});
+  viewport.addEventListener('touchend', _onTouchEnd);
+  viewport.addEventListener('touchcancel', function _onTouchCancel(){ state.pinching = false; });
   root.onclick = e => e.stopPropagation();
   state.fit = _fitViewer;
   state.reset = _resetViewer;
@@ -2530,8 +2591,53 @@ function _mediaPlayerHtml(kind, src, name, extra=''){
 // streamed prose loses its image when the answer settles (#MEDIA-in-stream).
 // `sessionId` is forwarded into /api/media so the same allow-list check applies
 // to streamed references too; falls back to whatever the current session is.
-function _inlineMediaHtmlForRef(ref, sessionId){
+// data:image/* URIs the renderer may embed directly as <img src>. Only raster
+// formats plus base64 SVG (scripts do not execute inside <img>), only safe payload
+// chars, and bounded size — everything else (data:text/html etc.) must
+// keep rendering as inert text so a model-emitted data: URI can never become an
+// executable document.
+const _DATA_IMAGE_RE=/^data:image\/(?:png|jpe?g|gif|webp|avif)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*$/i;
+const _DATA_IMAGE_SVG_RE=/^data:image\/svg\+xml;base64,[a-z0-9+/=]+$/i;
+const _DATA_IMAGE_MAX_LEN=2*1024*1024;
+
+// The streaming renderer calls this ui-owned predicate too. Keep the dangerous
+// SVG form base64-only: URL-encoded XML is a document-shaped payload, not a
+// normal inline image transport.
+function _isSafeDataImageUri(ref){
+  const value=String(ref||'');
+  return value.length<=_DATA_IMAGE_MAX_LEN
+    && (_DATA_IMAGE_RE.test(value)||_DATA_IMAGE_SVG_RE.test(value));
+}
+
+function _dataImageHtml(ref, altText){
+  if(!_isSafeDataImageUri(ref)) return null;
+  return `<img class="msg-media-img" src="${esc(ref)}" alt="${esc(altText||'image')}" loading="lazy">`;
+}
+
+// Markdown image syntax ![alt](url) → HTML. https:// keeps the historical direct
+// <img>; file:// and bare data:image/ URIs route through the same helpers the
+// MEDIA: pipeline uses, so ![x](file:///p.png) renders the artifact card instead
+// of the broken "!<a>" anchor it used to produce, and ![x](data:image/...) stops
+// dumping raw base64 text into the chat.
+function _mdImageHtml(alt, url){
+  if(/^data:/i.test(url)){
+    const img=_dataImageHtml(url, alt);
+    if(img) return img;
+    return esc(`![${alt}](${String(url).slice(0,64)}…)`);
+  }
+  if(/^file:\/\//i.test(url)) return _inlineMediaHtmlForRef(url,undefined,alt);
+  return `<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
+}
+
+function _inlineMediaHtmlForRef(ref, sessionId, altText){
   if(ref==null) return '';
+  // data:image/* → inline <img>; any other data: scheme renders as inert
+  // truncated text (never routed to api/media, never embedded).
+  if(/^data:/i.test(ref)){
+    const img=_dataImageHtml(ref,altText===undefined?'image':altText);
+    if(img) return img;
+    return `<code>${esc(String(ref).slice(0,64))}…</code>`;
+  }
   // Keep this logic self-contained: some tests extract renderMd() alone and
   // execute it in node, without the top-level helper functions from ui.js.
   // Tests look for `new URL(ref)` / `u.pathname` / `api/media?path=` patterns,
@@ -2576,13 +2682,13 @@ function _inlineMediaHtmlForRef(ref, sessionId){
   const localKind=_mediaKindForName(ref);
   // localArtifactCard(...)
   if(localKind==='image'){
-    const safeName=esc(ref.split('/').pop()||'image');
+    const safeName=esc(altText===undefined?(ref.split('/').pop()||'image'):altText);
     const tt=(typeof t==='function')?t:(key=>({media_download:'Download'}[key]||key));
     const dlLabel=esc(tt('media_download'));
     const dlSvg='<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
     return `<span class="msg-artifact-image"><img class="msg-media-img" src="${esc(apiUrl)}" alt="${safeName}" loading="lazy"><a class="msg-artifact-download" href="${esc(apiUrl)}" download="${safeName}" title="${dlLabel}" aria-label="${dlLabel}" onclick="event.stopPropagation()">${dlSvg}</a></span>`;
   }
-  if(_SVG_EXTS.test(ref)) return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${esc(typeof t==='function'?t('media_svg_label'):'svg')}" loading="lazy">`;
+  if(_SVG_EXTS.test(ref)) return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${esc(altText===undefined?(typeof t==='function'?t('media_svg_label'):'svg'):altText)}" loading="lazy">`;
   if(localKind==='audio'||localKind==='video'){
     return _mediaPlayerHtml(localKind,apiUrl+'&inline=1',ref.split('/').pop()||ref);
   }
@@ -2770,6 +2876,49 @@ function _providerFromModelValue(modelId){
   if(value.startsWith('@')&&value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
   return '';
 }
+function _modelPickerOptionIdentity(modelId, providerId){
+  let value=String(modelId||'');
+  const provider=String(providerId||'').trim();
+  if(value.startsWith('@')&&value.includes(':')){
+    const exactPrefix=provider ? `@${provider}:` : '';
+    if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
+      value=value.substring(exactPrefix.length);
+    }else if(value.startsWith('@custom:')){
+      const namedProvider=value.substring('@custom:'.length);
+      const splitAt=namedProvider.indexOf(':');
+      value=splitAt>=0 ? namedProvider.substring(splitAt+1) : namedProvider;
+    }else{
+      value=value.substring(value.indexOf(':')+1);
+    }
+  }
+  return value.replace(/-/g,'.').toLowerCase();
+}
+function _deduplicateModelPickerOptions(sel,selectedValue){
+  if(!sel||!sel.querySelectorAll) return 0;
+  let removed=0;
+  for(const group of sel.querySelectorAll('optgroup')){
+    const options=Array.from(group.children||[]).filter(opt=>opt&&opt.tagName==='OPTION');
+    const byIdentity=new Map();
+    for(const opt of options){
+      const identity=_modelPickerOptionIdentity(opt.value,_getOptionProviderId(opt));
+      if(!identity) continue;
+      if(!byIdentity.has(identity)) byIdentity.set(identity,[]);
+      byIdentity.get(identity).push(opt);
+    }
+    for(const candidates of byIdentity.values()){
+      if(candidates.length<2) continue;
+      const selected=candidates.find(opt=>opt.value===selectedValue);
+      const routable=candidates.find(opt=>String(opt.value||'').startsWith('@'));
+      const survivor=selected||routable||candidates[0];
+      for(const opt of candidates){
+        if(opt===survivor) continue;
+        group.removeChild(opt);
+        removed++;
+      }
+    }
+  }
+  return removed;
+}
 function _providerSkipsModelMismatchWarning(providerId){
   const p=String(providerId||'').toLowerCase();
   return !p||p==='custom'||p.startsWith('custom:')||p==='openrouter';
@@ -2786,7 +2935,18 @@ function _modelStateForSelect(sel, modelId){
   const value=String(modelId||'').trim();
   if(!value) return {model:'',model_provider:null};
   const explicitProvider=_providerFromModelValue(value);
-  if(explicitProvider) return {model:value,model_provider:explicitProvider};
+  if(explicitProvider){
+    const selected=sel&&sel.options
+      ?Array.from(sel.options).find(o=>String(o.value||'')===value)
+      :null;
+    const routedModel=selected&&selected.dataset&&selected.dataset.model;
+    // Read the provider from the matched option's authoritative data-provider
+    // rather than re-parsing the value at its LAST colon: a colon-bearing model
+    // id (e.g. model-a:free) synthesized as @custom:backup:model-a:free would
+    // otherwise mis-parse to provider "custom:backup:model-a" (#6221 re-gate).
+    const routedProvider=selected?String(_getOptionProviderId(selected)||'').trim():'';
+    return {model:routedModel||value,model_provider:routedProvider||explicitProvider};
+  }
   // Resolve the provider from the option whose VALUE matches the requested
   // model — never blindly from sel.selectedOptions[0] (#5567). During a profile
   // /tab switch or a model-list rebuild the dropdown transiently still has the
@@ -3056,9 +3216,14 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
     const pref=String(preferredProviderId||'').toLowerCase();
     if(!pref || !exactProv || exactProv===pref) return modelId;
   }
-  // 1. Normalize: lowercase, strip namespace prefix, replace hyphens→dots.
-  // Also strip @provider: prefix from deduplicated model IDs (#1228, #1313).
-  const norm=s=>s.toLowerCase().replace(/^[^/]+\//,'').replace(/^@([^:]+:)+/,'').replace(/-/g,'.');
+  // 1. Restore lookup keeps the older hierarchy-preserving matcher instead of
+  // the picker-dedup identity, so missing qualified models do not substitute a
+  // different suffix-sharing sibling.
+  const norm=s=>String(s||'')
+    .toLowerCase()
+    .replace(/^@([^:]+:)+/,'')
+    .replace(/^[^/]+\//,'')
+    .replace(/-/g,'.');
   const target=norm(modelId);
   let explicitProvider='';
   const rawModel=String(modelId||'');
@@ -3070,9 +3235,19 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
     const providerMatch=options.find(o=>norm(o.value)===target && _getOptionProviderId(o).toLowerCase()===preferred);
     if(providerMatch) return providerMatch.value;
   }
-  // 2. Normalized match
+  // 2. Normalized match — but ONLY when unambiguous. If the bare id
+  // matches across multiple provider groups AND no provider hint is
+  // available, return null instead of snapping to the first group's
+  // option. This prevents a deliberate non-default pick from reverting
+  // to the default provider on re-render (#6195).
   const exact=opts.find(o=>norm(o)===target);
-  if(exact) return exact;
+  if(exact){
+    const normMatches=options.filter(o=>norm(o.value)===target);
+    if(normMatches.length>1 && !preferred && !explicitProvider && !rawModel.includes('/')){
+      return null;  // ambiguous bare id — caller must inject the correct option
+    }
+    return exact;
+  }
   // If the request is provider-qualified (either explicit @provider:model or
   // a slash-qualified vendor/model id), do NOT fuzzy-match a sibling model
   // once exact/provider-aware lookup failed. Returning null lets the caller
@@ -3143,6 +3318,16 @@ function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
   const resolved=_findModelInDropdown(modelId,sel,preferredProviderId);
   if(resolved){
     sel.value=resolved;
+    const preferredProvider=String(preferredProviderId||'').trim().toLowerCase();
+    if(preferredProvider&&sel.options){
+      // Assigning select.value picks the first duplicate value. Restore the
+      // provider-specific option that the caller matched (#6131).
+      const preferredOption=Array.from(sel.options).find(o=>
+        String(o.value||'')===String(resolved)
+        && String(_getOptionProviderId(o)||'').trim().toLowerCase()===preferredProvider
+      );
+      if(preferredOption) preferredOption.selected=true;
+    }
     if(isRichPickerSelect){
       const resolvedState=typeof _modelStateForSelect==='function'
         ? _modelStateForSelect(sel, resolved)
@@ -3160,19 +3345,34 @@ function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
 }
 function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
-  const applied=_applyModelToDropdown(modelId,sel,preferredProviderId);
-  if(applied) return applied;
-  const value=modelId;
+  if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
+  const requestedProvider=String(preferredProviderId||_providerFromModelValue(modelId)||'').trim();
+  const applied=_applyModelToDropdown(modelId,sel,requestedProvider||null);
+  if(applied){
+    const appliedState=typeof _modelStateForSelect==='function'
+      ?_modelStateForSelect(sel,applied)
+      :{model:applied,model_provider:null};
+    if(!requestedProvider||String(appliedState&&appliedState.model_provider||'').toLowerCase()===requestedProvider.toLowerCase()) return applied;
+  }
+  const explicitPrefix=requestedProvider?`@${requestedProvider}:`:'';
+  const rawModel=String(modelId||'');
+  const bareModel=explicitPrefix&&rawModel.toLowerCase().startsWith(explicitPrefix.toLowerCase())
+    ?rawModel.slice(explicitPrefix.length)
+    :rawModel;
+  const value=requestedProvider?`${explicitPrefix}${bareModel}`:rawModel;
   const opt=document.createElement('option');
-  opt.value=modelId;
+  opt.value=value;
   opt.textContent=typeof getModelLabel==='function'?getModelLabel(modelId):modelId;
   opt.dataset.custom='1';
   const badge=(window._configuredModelBadges||{})[value];
+  const rawBadge=(window._configuredModelBadges||{})[rawModel];
   if(badge&&badge.provider) opt.dataset.provider=badge.provider;
-  const provider=preferredProviderId||(badge&&badge.provider)||_providerFromModelValue(modelId)||'';
+  if(rawBadge&&rawBadge.provider) opt.dataset.provider=rawBadge.provider;
+  if(requestedProvider) opt.dataset.model=bareModel;
+  const provider=requestedProvider||(badge&&badge.provider)||(rawBadge&&rawBadge.provider)||_providerFromModelValue(value)||'';
   if(provider) opt.dataset.provider=provider;
   sel.appendChild(opt);
-  sel.value=modelId;
+  sel.value=value;
   if(sel.id==='modelSelect'){
     if(typeof syncModelChip==='function') syncModelChip();
     _refreshOpenModelDropdown();
@@ -3181,7 +3381,7 @@ function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
     if(typeof syncSettingsModelChip==='function') syncSettingsModelChip();
     _refreshOpenModelDropdown();
   }
-  return modelId;
+  return value;
 }
 function _modelStateFromAppliedDropdown(sel, modelValue){
   const state=(typeof _modelStateForSelect==='function')
@@ -3334,6 +3534,9 @@ async function populateModelDropdown(opts={}){
       }
       sel.appendChild(og);
     }
+    if(typeof _deduplicateModelPickerOptions==='function'){
+      _deduplicateModelPickerOptions(sel,previousSelection&&previousSelection.model||'');
+    }
     _reconcileModelDropdownSelection(sel,data,previousSelection,opts);
     if(typeof syncModelChip==='function') syncModelChip();
     const dd=$('composerModelDropdown');
@@ -3384,32 +3587,47 @@ function _addLiveModelsToSelect(provider, models, sel){
     providerGroup.dataset.provider=provider;
   }
   const existingIds=new Set([...sel.options].map(o=>o.value));
-  // Normalized dedup strips provider/custom prefixes and namespaces (#907, #3478).
-  const _normId=id=>{
-    let s=String(id||'');
-    if(s.startsWith('@')&&s.includes(':')){
-      if(s.startsWith('@custom:')){
-        s=s.substring(s.lastIndexOf(':')+1)||s;
-      }else{
-        s=s.substring(s.indexOf(':')+1);
-      }
-    }
-    s=s.split('/').pop();
-    return s.replace(/-/g,'.').toLowerCase();
-  };
-  const existingNorm=new Set([...sel.options].map(o=>_normId(o.value)));
-  let added=0;
   const _ap=(window._activeProvider||'').toLowerCase();
   const _providerLower=String(provider||'').toLowerCase();
   const _isNamedCustomActiveProvider=_ap.startsWith('custom:');
   const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && _ap!=='openai-codex' && (_providerLower===_ap||_isNamedCustomActiveProvider&&_providerLower===_ap);
+  // Keep existingNorm.has( within the #907 source slice.
+  const optionIdentity=typeof _modelPickerOptionIdentity==='function'
+    ? (modelId,providerId)=>_modelPickerOptionIdentity(modelId,providerId)
+    : (modelId,providerId)=>{
+        let value=String(modelId||'');
+        const provider=String(providerId||'').trim();
+      if(value.startsWith('@')&&value.includes(':')){
+        const exactPrefix=provider ? `@${provider}:` : '';
+        if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
+          value=value.substring(exactPrefix.length);
+        }else if(value.startsWith('@custom:')){
+          const namedProvider=value.substring('@custom:'.length);
+          const splitAt=namedProvider.indexOf(':');
+          value=splitAt>=0 ? namedProvider.substring(splitAt+1) : namedProvider;
+        }else{
+          value=value.substring(value.indexOf(':')+1);
+        }
+      }
+        return value.split('/').pop().replace(/-/g,'.').toLowerCase();
+      };
+  const existingNorm=new Set([...sel.options].map(o=>optionIdentity(o.value,_getOptionProviderId(o))));
+  let added=0;
   for(const m of models){
     let mid=m.id;
     if(_isPortalFetch && !mid.startsWith('@')){
       mid=`@${provider}:${mid}`;
     }
     if(existingIds.has(mid)) continue;
-    if(existingNorm.has(_normId(mid))) continue; // dedup cross-prefix duplicates (#907)
+    const identity=optionIdentity(mid,provider);
+    if(existingNorm.has(identity)){
+      const sameGroup=Array.from(providerGroup.children||[]).find(o=>optionIdentity(o.value,_getOptionProviderId(o))===identity);
+      if(sameGroup){
+        const incomingRoutable=String(mid).startsWith('@');
+        const existingRoutable=String(sameGroup.value||'').startsWith('@');
+        if(!(!existingRoutable&&incomingRoutable)) continue; // let proxy replace catalog twin
+      }
+    }
     const opt=document.createElement('option');
     opt.value=mid;
     opt.textContent=m.label||m.id;
@@ -3421,9 +3639,12 @@ function _addLiveModelsToSelect(provider, models, sel){
       opt.dataset.fast='0';
     }
     providerGroup.appendChild(opt);
+    existingIds.add(mid);
+    existingNorm.add(identity);
     _dynamicModelLabels[mid]=m.label||m.id;
     added++;
   }
+  if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,currentVal);
   const currentState=(currentVal&&typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(sel, currentVal)
     : {model:currentVal||'', model_provider:(S.session&&S.session.model_provider)||null};
@@ -3543,6 +3764,30 @@ function _normalizeConfiguredModelKey(modelId){
   return s.replace(/-/g,'.');
 }
 
+function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
+  const normalized=_normalizeConfiguredModelKey(modelId);
+  const provider=String(badge&&badge.provider||'').toLowerCase();
+  const matchingEntries=(entries||[]).filter(existing=>
+    _normalizeConfiguredModelKey(existing.value)===normalized
+  );
+  if(matchingEntries.some(existing=>{
+    const entryProvider=String(existing.providerId||'').toLowerCase();
+    return !provider||!entryProvider||entryProvider===provider;
+  })) return true;
+  // @provider:model is an equivalent routing spelling only when an existing
+  // picker row belongs to that same provider. This supports named custom
+  // providers (@custom:name:model) without collapsing matching model IDs from
+  // different providers.
+  const rawId=String(modelId||'');
+  const prefix=provider?`@${provider}:`:'';
+  if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
+  const routedId=rawId.slice(prefix.length);
+  return (entries||[]).some(entry=>
+    String(entry.providerId||'').toLowerCase()===provider
+    &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
+  );
+}
+
 function _getConfiguredModelBadge(modelId,badgeMap,providerId){
   const map=badgeMap||window._configuredModelBadges||{};
   if(!modelId||!map) return null;
@@ -3621,6 +3866,35 @@ function syncModelChip(){
   if(mobileAction) mobileAction.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
 }
 
+// Remembers where #composerModelDropdown lives in the composer-footer so the
+// phone path can move it to <body> and put it back exactly. Captured lazily on
+// the first reparent (see _positionModelDropdown phone branch).
+let _modelDropdownHome=null;
+
+// Return the model dropdown into its original .composer-footer slot and clear
+// every inline style the phone path wrote, so the desktop CSS (position:absolute
+// anchored on the relatively-positioned .composer-footer) fully governs again.
+// Safe to call when the element never moved — it just no-ops the reinsert.
+function _restoreModelDropdownHome(){
+  const dd=document.getElementById('composerModelDropdown');
+  if(!dd) return;
+  dd.classList.remove('model-dropdown--floating');
+  dd.style.left='';
+  dd.style.top='';
+  dd.style.bottom='';
+  dd.style.width='';
+  dd.style.maxWidth='';
+  dd.style.maxHeight='';
+  if(_modelDropdownHome&&_modelDropdownHome.parent&&dd.parentNode!==_modelDropdownHome.parent){
+    const ref=_modelDropdownHome.nextSibling;
+    if(ref&&ref.parentNode===_modelDropdownHome.parent){
+      _modelDropdownHome.parent.insertBefore(dd,ref);
+    }else{
+      _modelDropdownHome.parent.appendChild(dd);
+    }
+  }
+}
+
 function _positionModelDropdown(){
   const dd=$('composerModelDropdown');
   const chip=$('composerModelChip');
@@ -3630,9 +3904,62 @@ function _positionModelDropdown(){
   const panel=$('composerMobileConfigPanel');
   const anchor=(panel&&panel.classList.contains('open')&&mobileAction)?mobileAction:(chip&&chip.offsetParent?chip:mobileAction);
   if(!anchor) return;
-  const chipRect=anchor.getBoundingClientRect();
+  const isPhone=typeof window.matchMedia==='function'&&window.matchMedia('(max-width:640px)').matches;
+  if(isPhone){
+    // #6080: .composer-footer sets container-type:inline-size (and a
+    // backdrop-filter under the Geist Contrast skin) — both establish a fixed
+    // containing block, so a position:fixed dropdown left inside the footer
+    // resolves against the FOOTER (bottom of screen) instead of the viewport
+    // and lands below the fold. Reparent to <body> — exactly the working
+    // #profileDropdown idiom — so position:fixed is viewport-relative on ALL
+    // skins, then compute coordinates against the visual viewport.
+    if(!_modelDropdownHome){
+      _modelDropdownHome={parent:dd.parentNode,nextSibling:dd.nextSibling};
+    }
+    if(dd.parentNode!==document.body) document.body.appendChild(dd);
+    dd.classList.add('model-dropdown--floating');
+    const anchorRect=anchor.getBoundingClientRect();
+    const visualViewport=window.visualViewport;
+    const viewportWidth=Math.max(1,Number(visualViewport&&visualViewport.width)||window.innerWidth||1);
+    const viewportHeight=Math.max(1,Number(visualViewport&&visualViewport.height)||window.innerHeight||1);
+    const viewportTop=Math.max(0,Number(visualViewport&&visualViewport.offsetTop)||0);
+    const viewportBottom=viewportTop+viewportHeight;
+    const margin=8;
+    const gap=6;
+    const viewportLeft=Math.max(0,Number(visualViewport&&visualViewport.offsetLeft)||0);
+    const viewportRight=viewportLeft+viewportWidth;
+    const titlebar=document.querySelector('.app-titlebar');
+    const titlebarBottom=titlebar&&typeof titlebar.getBoundingClientRect==='function'
+      ? Number(titlebar.getBoundingClientRect().bottom)||0
+      : 0;
+    const contentTop=Math.max(viewportTop+margin,titlebarBottom+margin);
+    const menuWidth=Math.max(1,viewportWidth-margin*2);
+    const left=Math.max(viewportLeft+margin,Math.min(anchorRect.left,viewportRight-menuWidth-margin));
+    dd.style.left=`${left}px`;
+    dd.style.width=`${menuWidth}px`;
+    dd.style.maxWidth=`${menuWidth}px`;
+    dd.style.bottom='auto';
+    const menuHeight=Math.max(dd.scrollHeight,dd.offsetHeight);
+    const aboveSpace=Math.max(0,anchorRect.top-contentTop-gap-margin);
+    const belowSpace=Math.max(0,viewportBottom-anchorRect.bottom-gap-margin);
+    const openAbove=aboveSpace>=Math.min(menuHeight,belowSpace)||aboveSpace>=belowSpace;
+    const availableHeight=Math.max(1,openAbove?aboveSpace:belowSpace);
+    dd.style.maxHeight=`${availableHeight}px`;
+    const visibleHeight=Math.min(menuHeight||availableHeight,availableHeight);
+    const top=openAbove
+      ? anchorRect.top-gap-visibleHeight
+      : anchorRect.bottom+gap;
+    dd.style.top=`${Math.max(contentTop,Math.min(top,viewportBottom-margin-visibleHeight))}px`;
+    return;
+  }
+  // Desktop (>640px): keep the current master behaviour — an absolutely
+  // positioned .composer-footer child. Restore the element into the footer (in
+  // case a prior phone open moved it to <body>) and clear the phone inline
+  // styles so the desktop CSS anchor is byte-for-byte identical to master.
+  _restoreModelDropdownHome();
+  const anchorRect=anchor.getBoundingClientRect();
   const footerRect=footer.getBoundingClientRect();
-  let left=chipRect.left-footerRect.left;
+  let left=anchorRect.left-footerRect.left;
   const maxLeft=Math.max(0, footer.clientWidth-dd.offsetWidth);
   left=Math.max(0, Math.min(left, maxLeft));
   dd.style.left=`${left}px`;
@@ -3801,6 +4128,7 @@ function renderModelDropdown(){
   const dd=$(opts.dropdownId||'composerModelDropdown');
   const sel=$(opts.selectId||'modelSelect');
   if(!dd||!sel) return;
+  if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
   // Whether the search input should auto-grab focus on (re-)render. Default true
   // preserves the composer picker's behavior exactly; the settings picker passes
   // false on coarse-pointer devices so opening it doesn't pop the mobile keyboard.
@@ -3904,9 +4232,8 @@ function renderModelDropdown(){
       _groupMeta.get(groupKey).modelCount++;
     }
   }
-  const _existingConfiguredKeys=new Set(_modelData.map(existing=>_normalizeConfiguredModelKey(existing.value)));
   for(const [modelId,badge] of Object.entries(_badgeMap)){
-    if(_existingConfiguredKeys.has(_normalizeConfiguredModelKey(modelId))) continue;
+    if(_isEquivalentConfiguredModelEntry(modelId,badge,_modelData)) continue;
     _modelData.push({
       value:modelId,
       name:esc(getModelLabel(modelId)),
@@ -3914,7 +4241,6 @@ function renderModelDropdown(){
       group:'',
       badge,
     });
-    _existingConfiguredKeys.add(_normalizeConfiguredModelKey(modelId));
   }
   // Create search input FIRST before filterModels definition
   const _scopeNote=document.createElement('div');
@@ -4438,6 +4764,10 @@ function closeModelDropdown(){
   if(dd) dd.classList.remove('open');
   if(chip) chip.classList.remove('active');
   if(mobileAction) mobileAction.classList.remove('active');
+  // If the phone path reparented the menu onto <body>, put it back in the
+  // footer and clear the fixed-position inline styles so the DOM returns to its
+  // baseline shape and the next desktop open anchors correctly (#6080).
+  if(typeof _restoreModelDropdownHome==='function') _restoreModelDropdownHome();
 }
 
 function closeSettingsModelDropdown(){
@@ -4559,6 +4889,26 @@ window.addEventListener('resize',()=>{
   }
 });
 
+// visualViewport resize/scroll fire on mobile when the on-screen keyboard opens
+// or the URL bar collapses/expands — the phone dropdown is fixed to the visual
+// viewport, so it must be re-measured against the new offsets. Coalesce with rAF
+// so a burst of scroll/resize events triggers at most one reposition per frame.
+let _modelDropdownRepositionScheduled=false;
+function _repositionOpenModelDropdown(){
+  const dd=$('composerModelDropdown');
+  if(!(dd&&dd.classList.contains('open'))||_modelDropdownRepositionScheduled) return;
+  _modelDropdownRepositionScheduled=true;
+  requestAnimationFrame(()=>{
+    _modelDropdownRepositionScheduled=false;
+    const openDd=$('composerModelDropdown');
+    if(openDd&&openDd.classList.contains('open')) _positionModelDropdown();
+  });
+}
+if(window.visualViewport){
+  window.visualViewport.addEventListener('resize',_repositionOpenModelDropdown);
+  window.visualViewport.addEventListener('scroll',_repositionOpenModelDropdown);
+}
+
 // ── Fit-based composer footer collapse ──────────────────────────────────────
 // Stage classes on .composer-footer:
 //   (none) full labels · .cf-icons icon chips · .cf-icons.cf-burger hamburger.
@@ -4640,6 +4990,10 @@ if(document.readyState==='loading'){
 // ── Reasoning effort chip ────────────────────────────────────────────────────
 let _currentReasoningEffort=null;
 let _currentReasoningEffortsSupported=null;
+// Whether the model accepts the thinking on/off toggle when supported_efforts
+// is empty (GLM-4.5–5.1 on native zai). Undefined = unknown, treated as true
+// so the chip stays visible by default (prior behavior).
+let _currentReasoningToggleSupported=undefined;
 let _profileTransitionReasoningContext=null;
 
 function _normalizeReasoningEffort(eff){
@@ -4691,7 +5045,14 @@ function _applyReasoningOptions(supportedEfforts){
   const supported=new Set(Array.isArray(supportedEfforts)?supportedEfforts:[]);
   dd.querySelectorAll('.reasoning-option').forEach(function(opt){
     const effort=opt.dataset.effort;
-    if(effort==='none'){
+    // 'none' (turn thinking off) and '' (Default = clear override, provider
+    // default = thinking on) are meta-options outside the effort ladder. They
+    // are always shown so a thinking-toggle-only model (GLM-4.5–5.1 on native
+    // zai, where the ladder is empty) still has an operable two-state control:
+    // Default (on) + None (off). Without the Default option the toggle is
+    // one-way off-only — the user can disable thinking but cannot re-enable it.
+    // (#6219 round-3)
+    if(effort==='none'||effort===''){
       opt.style.display='';
       return;
     }
@@ -4710,6 +5071,15 @@ function _applyReasoningChip(eff){
   if(meta&&Array.isArray(meta.supported_efforts)){
     _currentReasoningEffortsSupported=meta.supported_efforts;
   }
+  // supports_thinking_toggle: the model accepts the thinking on/off toggle even
+  // when the effort ladder is empty (GLM-4.5–5.1 on native zai accept
+  // `thinking: {"type": ...}` but NOT `reasoning_effort`). Without honoring this
+  // flag, returning an empty supported_efforts hides the entire chip and
+  // silently regresses the working thinking on/off control for those models.
+  // Default true preserves prior behavior when the field is absent.
+  if(meta&&typeof meta.supports_thinking_toggle==='boolean'){
+    _currentReasoningToggleSupported=meta.supports_thinking_toggle;
+  }
   const wrap=$('composerReasoningWrap');
   const label=$('composerReasoningLabel');
   const chip=$('composerReasoningChip');
@@ -4719,9 +5089,15 @@ function _applyReasoningChip(eff){
   const supportedEfforts=(typeof _currentReasoningEffortsSupported==='undefined')
     ?null
     :_currentReasoningEffortsSupported;
-  const supports=Array.isArray(supportedEfforts)
+  const toggleSupported=(typeof _currentReasoningToggleSupported==='undefined')
+    ?true
+    :_currentReasoningToggleSupported;
+  const hasEffortLadder=Array.isArray(supportedEfforts)
     ?supportedEfforts.length>0
     :true;
+  // Show the chip if there is an effort ladder OR a thinking toggle is still
+  // available. Only hide when the model supports neither.
+  const supports=hasEffortLadder||toggleSupported;
   if(!supports){
     wrap.style.display='none';
     if(mobileAction) mobileAction.style.display='none';
@@ -4774,7 +5150,7 @@ function fetchReasoningChip(keyOverride){
     // routine syncs retry after a genuine transient failure.
     if(seq!==_reasoningFetchSeq) return;
     _lastReasoningFetchKey=null;
-    _applyReasoningChip('', {supported_efforts:[]});
+    _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
   });
 }
 
@@ -4782,9 +5158,10 @@ function refreshProfileTransitionReasoningChip(model, provider){
   _profileTransitionReasoningContext={profile:(S&&S.activeProfile)||'default',model,provider};
   _currentReasoningEffort=null;
   _currentReasoningEffortsSupported=null;
+  _currentReasoningToggleSupported=undefined;
   _lastReasoningFetchKey=null;
   ++_reasoningFetchSeq;
-  _applyReasoningChip('', {supported_efforts:[]});
+  _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
   const params=new URLSearchParams();
   if(model) params.set('model',model);
   if(provider) params.set('provider',provider);
@@ -4879,12 +5256,19 @@ document.addEventListener('click',function(e){
   if(e.target.closest('.reasoning-option')){
     const opt=e.target.closest('.reasoning-option');
     const effort=opt&&opt.dataset.effort;
-    if(effort){
+    // NOTE: effort may be the empty string for the "Default" option (clears
+    // the override). Check option presence, not truthiness — `if(effort)` would
+    // silently ignore the Default click and leave the toggle one-way off-only.
+    // (#6219 round-3)
+    if(opt){
       const payload=Object.assign({effort:effort},_reasoningEffortContext());
       api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
         .then(function(st){
+          // For Default (effort=''), the returned reasoning_effort is '' (clear)
+          // — display 'Default' rather than an empty toast.
+          const display=(st&&st.reasoning_effort)||effort||'Default';
           _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
-          showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
+          showToast('🧠 Reasoning effort set to '+display);
         })
         .catch(function(){showToast('🧠 Failed to set effort');});
       closeReasoningDropdown();
@@ -5961,6 +6345,7 @@ function _transparentEventTimestampSeconds(row, opts){
 function _syncTransparentEventTimestamp(row, header, opts){
   if(!row||!header) return null;
   opts=opts||{};
+  const showEventTimestamp=!(typeof window!=='undefined'&&window._transparentEventTimestamps===false);
   const live=opts.live===true||row.getAttribute&&(
     row.getAttribute('data-live-tid')==='1'||
     row.getAttribute('data-live-thinking')==='1'||
@@ -5994,6 +6379,12 @@ function _syncTransparentEventTimestamp(row, header, opts){
     return null;
   }
   const source=explicitTs||toolTs||attrTs?'event':'live';
+  row.setAttribute('data-event-at',String(ts));
+  row.setAttribute('data-event-at-source',source);
+  if(!showEventTimestamp){
+    if(timeEl) timeEl.remove();
+    return null;
+  }
   if(!timeEl){
     timeEl=document.createElement('span');
     timeEl.className='transparent-event-time';
@@ -6006,8 +6397,6 @@ function _syncTransparentEventTimestamp(row, header, opts){
   if(fullLabel) timeEl.setAttribute('title',fullLabel); else timeEl.removeAttribute('title');
   timeEl.setAttribute('data-event-at',String(ts));
   timeEl.setAttribute('data-event-at-source',source);
-  row.setAttribute('data-event-at',String(ts));
-  row.setAttribute('data-event-at-source',source);
   const anchor=header.querySelector('.transparent-event-status,.thinking-card-btn-row,.tool-card-toggle,.thinking-card-toggle');
   if(timeEl.parentNode!==header){
     if(anchor&&anchor.parentNode===header) header.insertBefore(timeEl,anchor);
@@ -6679,6 +7068,17 @@ function _formatGatewayModelLabel(modelId,labelText,routing){
   const via=_gatewayRoutingLabel(routing);
   return via?`${base} ${via}`:base;
 }
+function _usedModelTurnChipLabel(msg){
+  if(!msg)return'';
+  // Gateway turns own their model label via _formatGatewayModelLabel (which
+  // falls back to msg._usedModel when routing omits used_model), so suppress
+  // the additive chip whenever routing metadata is present — not only when
+  // routing.used_model is set — to guarantee one model label per turn.
+  if(msg._gatewayRouting)return'';
+  const usedModel=String(msg._usedModel||'').trim();
+  if(!usedModel)return'';
+  return _compactComposerModelChipLabel(usedModel,getModelLabel(usedModel));
+}
 function _gatewayRoutingFailoverText(routing){
   if(!routing||!routing.has_failover)return'';
   const attempts=Array.isArray(routing.routing)?routing.routing:[];
@@ -6977,7 +7377,7 @@ function renderMd(raw){
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
     // is not consumed by the [label](url) link regex.
-    t=t.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g,(_,alt,url)=>`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+    t=t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
@@ -7119,7 +7519,7 @@ function renderMd(raw){
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
-  s=s.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g,(_,alt,url)=>`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
@@ -7209,7 +7609,11 @@ function renderMd(raw){
     const raw=_safeAttrValue(v);
     const compact=raw.replace(/[\u0000-\u001f\u007f\s]+/g,'').toLowerCase();
     if(!compact) return false;
-    if(/^(javascript|data|vbscript):/i.test(compact)) return false;
+    // data:image/* is permitted for <img> only, validated by the shared strict
+    // predicate. Every other
+    // data: scheme stays blocked for both anchors and images.
+    if(/^data:/i.test(compact)) return !!(img && typeof _isSafeDataImageUri==='function' && _isSafeDataImageUri(raw));
+    if(/^(javascript|vbscript):/i.test(compact)) return false;
     if(/^https?:\/\//i.test(raw)) return true;
     if(/^(mailto:|tel:|message:)/i.test(raw)) return true;
     if(img && /^api\//i.test(raw)) return true;
@@ -7546,7 +7950,7 @@ async function handleComposerPrimaryAction(){
   const action=typeof getComposerPrimaryAction==='function'?getComposerPrimaryAction():'send';
   if(action==='disabled') return;
   if(action==='stop'){
-    if(typeof cancelStream==='function') await cancelStream('composer-stop');
+    if(typeof cancelStream==='function' && !await cancelStream('composer-stop')) showToast(t('cancel_failed'),null,'error');
     return;
   }
   await send();
@@ -8614,6 +9018,7 @@ function _compactInflightState(state){
     lastAssistantText:state.lastAssistantText||'',
     lastReasoningText:state.lastReasoningText||'',
     lastRunJournalSeq:state.lastRunJournalSeq||0,
+    lastRunJournalEventId:state.lastRunJournalEventId||'',
     journalReplayFromStart:!!state.journalReplayFromStart,
     currentActivityBurstId:state.currentActivityBurstId||0,
     currentLiveSegmentSeq:state.currentLiveSegmentSeq||0,
@@ -9202,9 +9607,11 @@ async function refreshSession() {
     S.messages = data.session.messages || [];
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
-    const pendingMsg=getPendingSessionMessage(data.session,S.messages);
-    if(pendingMsg) S.messages.push(pendingMsg);
-    S.activeStreamId=data.session.active_stream_id||null;
+    if (typeof _mergePendingSessionMessage !== 'function') {
+      throw new Error('Pending-session merge helper unavailable');
+    }
+    _mergePendingSessionMessage(data.session, S.messages);
+    S.activeStreamId = data.session.active_stream_id || null;
 
     syncTopbar(); _renderMessagesWithScrollSnapshot();
     showToast('Conversation refreshed');
@@ -10705,7 +11112,7 @@ function _transparentToolSummary(tc){
   // with only {workdir} or an unknown tool with {mode:"dry-run"}) must yield an
   // EMPTY collapsed preview rather than dumping a raw arg snippet — that keeps the
   // collapsed row quiet and consistent with the no-args case (#4658 review).
-  const target=typeof _toolVisibleTargetLabel==='function'?_toolVisibleTargetLabel(tc,{limit:160}):'';
+  const target=typeof _toolVisibleTargetLabel==='function'?_toolVisibleTargetLabel(tc,{limit:160,rangeFirst:true}):'';
   if(target) return target;
   return '';
 }
@@ -11394,13 +11801,40 @@ function _applyTransparentRowFading(turn){
     row.setAttribute('data-transparent-fade',String(step));
   }
 }
+// Resolve the assistant message that carries a transparent turn's settled
+// metadata (duration / used model / TTFT / usage). A tool-using turn renders
+// multiple assistant segments — earlier activity segment(s) then the final
+// answer — and the metadata is stamped only on the LAST assistant message
+// (see api/streaming.py finalization). `turn.querySelector('.assistant-segment')`
+// returns the FIRST segment, which has no metadata, so the footer (model chip
+// included) would render empty exactly on tool turns (#6068 gate round 2).
+// Scan segments last→first for the final metadata-bearing assistant message,
+// falling back to the last assistant segment when none carries metadata yet.
+function _transparentTurnMetaMessage(turn){
+  if(!turn)return null;
+  const segs=turn.querySelectorAll('.assistant-segment[data-msg-idx]');
+  let fallback=null;
+  for(let si=segs.length-1;si>=0;si--){
+    const mi=segs[si].getAttribute('data-msg-idx');
+    if(mi==null)continue;
+    const candidate=S.messages[Number(mi)];
+    if(!candidate||candidate.role!=='assistant')continue;
+    if(!fallback)fallback=candidate;
+    if(candidate._turnDuration!=null||candidate._usedModel||candidate._firstTokenMs!=null||candidate._turnUsage)return candidate;
+  }
+  return fallback;
+}
 // ── Transparent turn footer (elapsed · tokens · TTFT · status) ───────────
 // Mirrors the live run-status line for settled turns in transparent
 // mode. Shows duration, first-token time, token usage, and final status.
 // Only rendered for turns that have transparent event rows.
-function _transparentTurnFooterHtml(durationText, ttftText, tokensText, statusText){
+function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText, modelTitle){
   const parts=[];
   if(durationText) parts.push(`<span class="lf-time">${esc(durationText)}</span>`);
+  if(modelText){
+    const titleAttr=(modelTitle&&modelTitle!==modelText)?` title="${esc(modelTitle)}"`:'';
+    parts.push(`<span class="lf-model"${titleAttr}>${esc(modelText)}</span>`);
+  }
   if(ttftText) parts.push(`<span class="lf-ttft" title="${esc(t('first_token_time')||'Time to first token')}">TTFT ${esc(ttftText)}</span>`);
   if(tokensText) parts.push(`<span class="lf-tokens">${esc(tokensText)}</span>`);
   if(statusText) parts.push(`<span class="lf-status">${esc(statusText)}</span>`);
@@ -11419,10 +11853,12 @@ function _renderTransparentTurnFooter(turn, opts){
     return;
   }
   const durationText=opts&&opts.durationText||'';
+  const modelText=opts&&opts.modelText||'';
+  const modelTitle=opts&&opts.modelTitle||'';
   const ttftText=opts&&opts.ttftText||'';
   const tokensText=opts&&opts.tokensText||'';
   const statusText=opts&&opts.statusText||(t('done')||'Done');
-  const html=_transparentTurnFooterHtml(durationText, ttftText, tokensText, statusText);
+  const html=_transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText, modelTitle);
   let footer=turn.querySelector('.transparent-turn-footer');
   if(!html){
     if(footer) footer.remove();
@@ -11953,6 +12389,7 @@ function _anchorSceneToolCallFromRow(row, opts){
     )||'',
     done:settled?true:(tool.done!==null&&tool.done!==undefined?tool.done:(row.status!=='running'&&row.status!=='pending')),
     is_error:!!(tool.is_error||payload.is_error||row.status==='error'||row.status==='failed'),
+    is_diff:!!(tool.is_diff||payload.is_diff||payload.isDiff),
     duration:tool.duration||payload.duration||payload.duration_seconds,
     started_at:firstValidTimestampSeconds(tool.started_at, payload.started_at, rowTs),
     created_at:firstValidTimestampSeconds(tool.created_at, payload.created_at, rowTs),
@@ -11995,7 +12432,9 @@ function _anchorSceneNodeForRow(row, opts){
     // renderMd path below, which stays the source of truth for the final DOM.
     const proseKey=row.local_id||row.row_id||'';
     if(!settled && proseKey && typeof window.__anchorProseIncrementalNode==='function'){
-      const inc=window.__anchorProseIncrementalNode(proseKey,text);
+      const inc=window.__anchorProseIncrementalNode(proseKey,text,{
+        finalize:String(row.status||'').toLowerCase()==='completed',
+      });
       // Route the incremental node through the shared row-decoration block below
       // (data-anchor-scene-row / -row-id / -row-role / -source-event-type) instead
       // of returning early — otherwise live incremental prose rows lose the
@@ -12051,6 +12490,7 @@ function _anchorSceneNodeForRow(row, opts){
   if(!node) return null;
   node.setAttribute('data-anchor-scene-row','1');
   node.setAttribute('data-anchor-row-id',String(row.row_id||row.local_id||''));
+  if(row.local_id) node.setAttribute('data-anchor-local-id',String(row.local_id));
   node.setAttribute('data-anchor-row-role',String(row.role||'activity'));
   node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
   return node;
@@ -12120,6 +12560,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
   if(settled) node.setAttribute('data-anchor-settled-scene-row','1');
   if(live) node.setAttribute('data-anchor-live-scene-row','1');
   node.setAttribute('data-anchor-row-id',String(row.row_id||row.local_id||''));
+  if(row.local_id) node.setAttribute('data-anchor-local-id',String(row.local_id));
   node.setAttribute('data-anchor-row-role',String(row.role||'activity'));
   node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
   if(opts&&opts.streamId) node.setAttribute('data-anchor-stream-id',String(opts.streamId));
@@ -12311,6 +12752,81 @@ function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
     },
   };
 }
+function _resetMismatchedLiveAssistantTurnForSession(turn, sessionId){
+  const sid=String(sessionId||'');
+  if(!turn||!sid||!turn.dataset) return false;
+  const existingSid=String(turn.dataset.sessionId||'');
+  if(!existingSid||existingSid===sid) return false;
+  const blocks=typeof _assistantTurnBlocks==='function' ? _assistantTurnBlocks(turn) : turn;
+  if(blocks){
+    try{
+      blocks.innerHTML='';
+    }catch(_){
+      while(blocks.firstChild) blocks.removeChild(blocks.firstChild);
+    }
+  }
+  turn.dataset.sessionId=sid;
+  return true;
+}
+function _liveAnchorReasoningRowForFallback(turn, opts){
+  opts=opts||{};
+  const blocks=typeof _assistantTurnBlocks==='function' ? _assistantTurnBlocks(turn) : turn;
+  if(!turn||!blocks||!blocks.querySelectorAll) return null;
+  const streamId=String(opts.streamId||S.activeStreamId||'');
+  const sessionId=String(opts.sessionId||(S.session&&S.session.session_id)||'');
+  const localId=String(opts.anchorReasoningLocalId||opts.localId||'').trim();
+  if(!localId) return null;
+  const rows=blocks.querySelectorAll(
+    '[data-anchor-scene-row="1"][data-anchor-local-id]'
+  );
+  for(const row of Array.from(rows)){
+    const anchorLocalId=String(row.getAttribute&&row.getAttribute('data-anchor-local-id')||'');
+    if(anchorLocalId!==localId) continue;
+    const rowRole=String(row.getAttribute&&row.getAttribute('data-anchor-row-role')||'');
+    const rowSource=String(row.getAttribute&&row.getAttribute('data-anchor-source-event-type')||'');
+    if(rowRole!=='thinking'&&rowSource!=='reasoning') continue;
+    const rowStreamId=String(row.getAttribute&&row.getAttribute('data-anchor-stream-id')||'');
+    if(rowStreamId&&streamId&&rowStreamId!==streamId) continue;
+    const rowSessionId=String(row.getAttribute&&row.getAttribute('data-session-id')||'');
+    if(rowSessionId&&sessionId&&rowSessionId!==sessionId) continue;
+    return row;
+  }
+  return null;
+}
+function _updateLiveAnchorReasoningRowForFallback(turn, text, opts){
+  const clean=_sanitizeThinkingDisplayText(text);
+  if(!clean||window._showThinking===false) return false;
+  const row=_liveAnchorReasoningRowForFallback(turn, opts);
+  if(!row) return false;
+  if(row.classList&&row.classList.contains('wl-reason')){
+    if(typeof _renderWorklogReasonInto==='function') _renderWorklogReasonInto(row, clean);
+    else row.textContent=clean;
+    const group=row.closest&&row.closest('.tool-worklog-group,.tool-call-group,.live-worklog');
+    if(group&&typeof _syncToolCallGroupSummary==='function') _syncToolCallGroupSummary(group);
+  }else if(row.classList&&row.classList.contains('transparent-event-row')){
+    _renderThinkingInto(row, clean);
+    const eventAt=row.getAttribute&&row.getAttribute('data-event-at');
+    const nextTs=typeof _firstValidTimestampSeconds==='function'
+      ? _firstValidTimestampSeconds(opts&&opts.ts, opts&&opts.timestamp, opts&&opts.created_at, eventAt)
+      : null;
+    if(typeof _decorateTransparentEventRow==='function'){
+      _decorateTransparentEventRow(row,{
+        type:'thinking',
+        text:clean,
+        preview:clean,
+        ts:nextTs||undefined,
+        live:true,
+        segmentSeq:opts&&opts.segmentSeq,
+        burstId:opts&&opts.burstId,
+      });
+    }
+  }else{
+    _renderThinkingInto(row, clean);
+  }
+  if(turn&&typeof _syncTransparentEventControls==='function') _syncTransparentEventControls(turn);
+  if(typeof scrollIfPinned==='function') scrollIfPinned();
+  return true;
+}
 function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
   const requestedMode=opts.mode;
@@ -12327,6 +12843,12 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   const knownMode=(m)=>m==='compact_worklog'||m==='transparent_stream'||m==='hide_all_activity';
   const sceneMode=knownMode(activeMode)?activeMode:(knownMode(requestedMode)?requestedMode:activeMode);
   if(sceneMode==='hide_all_activity') return false;
+  const existingTurn=$('liveAssistantTurn');
+  const requestedSessionId=String(opts.sessionId||'');
+  const existingTurnSessionId=String(existingTurn&&existingTurn.dataset&&existingTurn.dataset.sessionId||'');
+  if(existingTurn&&requestedSessionId&&existingTurnSessionId&&existingTurnSessionId!==requestedSessionId){
+    if(!_resetMismatchedLiveAssistantTurnForSession(existingTurn, requestedSessionId)) return false;
+  }
   if(sceneMode==='transparent_stream'){
     return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);
   }
@@ -14267,6 +14789,226 @@ function _toolArgsSnapshot(args, limit){
   return out;
 }
 
+function _idLinkedHistoricalMessageText(message){
+  if(!message||typeof message!=='object') return '';
+  const content=message.content;
+  if(typeof content==='string') return content;
+  if(!Array.isArray(content)) return '';
+  return content.filter(part=>part&&typeof part==='object'&&part.type==='text').map(part=>{
+    if(!part||typeof part!=='object') return '';
+    return String(part.text||part.content||'');
+  }).join('\n');
+}
+
+function _idLinkedHistoricalMessageHasVisibleText(message){
+  return _idLinkedHistoricalMessageText(message).trim()!=='';
+}
+
+function _idLinkedHistoricalMessageRef(message, rawIdx){
+  if(message&&typeof message==='object'){
+    for(const key of ['message_id','id','local_id']){
+      const value=message[key];
+      if(typeof value==='string'&&value.trim()) return value.trim();
+      if(typeof value==='number'&&Number.isFinite(value)) return String(value);
+    }
+  }
+  return `raw_idx:${rawIdx}`;
+}
+
+function _idLinkedHistoricalToolArguments(toolCall){
+  if(!toolCall||typeof toolCall!=='object') return null;
+  const fn=toolCall.function;
+  if(!fn||typeof fn!=='object'||Array.isArray(fn)) return null;
+  const raw=fn.arguments;
+  if(raw===undefined||raw===null||raw==='') return null;
+  if(raw&&typeof raw==='object'&&!Array.isArray(raw)) return raw;
+  if(typeof raw!=='string') return null;
+  try{
+    const parsed=JSON.parse(raw);
+    return parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:null;
+  }catch(e){
+    return null;
+  }
+}
+
+function _idLinkedHistoricalToolResultRaw(message){
+  if(!message||typeof message!=='object') return null;
+  const content=message.content;
+  return typeof content==='string'?content:null;
+}
+
+function _idLinkedHistoricalRedactSnippet(value){
+  let text=String(value||'');
+  if(!text) return '';
+  if(typeof _redactToolTargetLabel==='function'){
+    try{text=_redactToolTargetLabel(text);}
+    catch(e){}
+  }
+  return text;
+}
+
+function _idLinkedHistoricalHasVisibleSidecar(message){
+  if(!message||typeof message!=='object') return false;
+  const visibleKeys=['attachments','_attachments','_statusCard','status_card','statusCard','card','cards','artifact','artifacts','files','images','media'];
+  for(const key of visibleKeys){
+    if(!Object.prototype.hasOwnProperty.call(message,key)) continue;
+    const value=message[key];
+    if(value===undefined||value===null||value===false) continue;
+    if(Array.isArray(value)&&value.length===0) continue;
+    if(typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===0) continue;
+    return true;
+  }
+  return false;
+}
+
+// Claim legacy settled ownership only when the transcript itself proves a
+// complete, user-bounded declaration/result/final-answer chain.
+function _idLinkedHistoricalTurnScene(messages, turnStart, turnEnd, options){
+  const list=Array.isArray(messages)?messages:[];
+  const start=Math.max(0,Number(turnStart)||0);
+  const end=Math.min(list.length,Math.max(start,Number(turnEnd)||0));
+  const opts=options&&typeof options==='object'?options:{};
+  const sessionId=String(opts.sessionId||opts.session_id||'').trim();
+  const api=(typeof window!=='undefined')?window.HermesAssistantTurnAnchors:null;
+  if(!sessionId||!api||typeof api.projectAssistantTurnAnchorHistoricalTranscriptScene!=='function') return null;
+
+  const declarations=[];
+  const declarationIds=new Set();
+  const declarationRefs=[];
+  const visibleAssistantIndexes=[];
+  const assistantIndexes=[];
+  const resultsById=new Map();
+  for(let rawIdx=start;rawIdx<end;rawIdx++){
+    const message=list[rawIdx];
+    if(!message||typeof message!=='object') continue;
+    const role=message.role;
+    if(role==='user'&&rawIdx===start) continue;
+    if(message._anchor_activity_scene) return null;
+    if(role==='assistant'){
+      assistantIndexes.push(rawIdx);
+      const hasVisibleText=_idLinkedHistoricalMessageHasVisibleText(message);
+      const reasoningText=_assistantReasoningPayloadText(message);
+      if(hasVisibleText) visibleAssistantIndexes.push(rawIdx);
+      if(reasoningText) return null;
+      if(_idLinkedHistoricalHasVisibleSidecar(message)) return null;
+      if(Array.isArray(message._partial_tool_calls)&&message._partial_tool_calls.length) return null;
+      if(Array.isArray(message.content)&&message.content.some(part=>part&&typeof part==='object'&&part.type==='tool_use')) return null;
+      const toolCalls=Array.isArray(message.tool_calls)?message.tool_calls:[];
+      if(toolCalls.length&&hasVisibleText) return null;
+      if(!toolCalls.length){
+        if(hasVisibleText) continue;
+        return null;
+      }
+      if(message.content!==undefined&&message.content!==null&&message.content!=='') return null;
+      const messageRef=_idLinkedHistoricalMessageRef(message,rawIdx);
+      if(!declarationRefs.includes(messageRef)) declarationRefs.push(messageRef);
+      for(const toolCall of toolCalls){
+        const callId=String(toolCall&&toolCall.id||'').trim();
+        const fn=toolCall&&toolCall.function;
+        const name=String(fn&&fn.name||'').trim();
+        const args=_idLinkedHistoricalToolArguments(toolCall);
+        if(!callId||!name||args===null||declarationIds.has(callId)) return null;
+        declarationIds.add(callId);
+        declarations.push({callId,name,args,rawIdx,messageRef});
+      }
+      continue;
+    }
+    if(role!=='tool') return null;
+    const callId=String(message.tool_call_id||'').trim();
+    if(!callId||!declarationIds.has(callId)) return null;
+    const matches=resultsById.get(callId)||[];
+    matches.push({message,rawIdx});
+    resultsById.set(callId,matches);
+  }
+
+  if(!declarations.length||visibleAssistantIndexes.length!==1) return null;
+  const ownerIndex=visibleAssistantIndexes[0];
+  if(ownerIndex!==assistantIndexes[assistantIndexes.length-1]) return null;
+  const owner=list[ownerIndex];
+  if(Array.isArray(owner.tool_calls)&&owner.tool_calls.length) return null;
+  const ownerRef=_idLinkedHistoricalMessageRef(owner,ownerIndex);
+  for(const declaration of declarations){
+    const matches=resultsById.get(declaration.callId)||[];
+    if(matches.length!==1||matches[0].rawIdx<=declaration.rawIdx||matches[0].rawIdx>=ownerIndex) return null;
+  }
+  if(resultsById.size!==declarations.length) return null;
+
+  const sourceRefs=declarationRefs.concat(ownerRef).filter((value,index,array)=>array.indexOf(value)===index);
+  const turnId=['historical',sessionId,declarationRefs[0],ownerRef].join(':');
+  const activityEvents=[];
+  for(let index=0;index<declarations.length;index++){
+    const declaration=declarations[index];
+    const resultEntry=resultsById.get(declaration.callId)[0];
+    const args=_toolArgsSnapshot(declaration.args);
+    const resultRaw=_idLinkedHistoricalToolResultRaw(resultEntry.message);
+    if(resultRaw===null) return null;
+    const resultSnippet=_idLinkedHistoricalRedactSnippet(_cliToolResultSnippet(resultRaw));
+    const patchSnippet=_cliPatchSnippetFromArgs(declaration.name,args);
+    const isDiff=_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet);
+    const snippet=_idLinkedHistoricalRedactSnippet(_cliToolCardSnippet(resultSnippet,patchSnippet));
+    const status=String(resultEntry.message.status||'').trim().toLowerCase();
+    const isError=resultEntry.message.is_error===true||status==='error'||status==='failed'||status==='failure';
+    activityEvents.push({
+      source_type:'tool_complete',
+      seq:index+1,
+      local_id:`historical:${declaration.messageRef}:tool:${declaration.callId}`,
+      payload:{
+        id:declaration.callId,
+        tid:declaration.callId,
+        tool_call_id:declaration.callId,
+        name:declaration.name,
+        args,
+        command:String(args.command||args.cmd||''),
+        snippet,
+        done:true,
+        is_error:isError,
+        is_diff:isDiff,
+        assistant_msg_idx:declaration.rawIdx,
+      },
+    });
+  }
+  let scene;
+  try{
+    scene=api.projectAssistantTurnAnchorHistoricalTranscriptScene({
+      session_id:sessionId,
+      turn_id:turnId,
+      local_id:ownerRef,
+      source_message_refs:sourceRefs,
+      activity_events:activityEvents,
+      settled_message:{role:'assistant',id:ownerRef,content:_idLinkedHistoricalMessageText(owner)},
+    },{mode:opts.mode||'compact_worklog'});
+  }catch(e){
+    return null;
+  }
+  if(!scene||scene.version!=='activity_scene_v1'||scene.activity_rows.length!==declarations.length) return null;
+  return {ownerIndex,scene};
+}
+
+function _hydrateIdLinkedHistoricalToolScenes(messages, options){
+  const list=Array.isArray(messages)?messages:[];
+  let turnStart=-1;
+  let hydrated=0;
+  const hydrateTurn=(turnEnd)=>{
+    if(turnStart<0||turnEnd<=turnStart+1) return;
+    let hydratedTurn;
+    try{hydratedTurn=_idLinkedHistoricalTurnScene(list,turnStart,turnEnd,options);}
+    catch(e){return;}
+    if(!hydratedTurn) return;
+    const owner=list[hydratedTurn.ownerIndex];
+    try{owner._anchor_activity_scene=hydratedTurn.scene;}
+    catch(e){return;}
+    if(owner._anchor_activity_scene===hydratedTurn.scene) hydrated+=1;
+  };
+  for(let rawIdx=0;rawIdx<list.length;rawIdx++){
+    const message=list[rawIdx];
+    if(!message||message.role!=='user') continue;
+    hydrateTurn(rawIdx);
+    turnStart=rawIdx;
+  }
+  hydrateTurn(list.length);
+  return hydrated;
+}
+
 function _captureMessageScrollSnapshot(){
   const el=$('messages');
   if(!el) return null;
@@ -14647,7 +15389,13 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   }
 }
 function _renderMessagesWithScrollSnapshot(options){
-  const scrollSnapshot=_captureMessageScrollSnapshot();
+  // Accept an optional pre-captured scroll snapshot via _prescrollSnapshot.
+  // When provided, it is used INSTEAD of capturing a fresh one from the current
+  // DOM state — essential for the STREAM_DONE collapse render: the caller has
+  // already captured the snapshot from the LIVE DOM (before keep-open was armed),
+  // and re-capturing from the intermediate expanded-worklog state would capture
+  // stale anchors that no longer exist after the worklog collapses. (#6385)
+  const scrollSnapshot=(options&&options._prescrollSnapshot)||_captureMessageScrollSnapshot();
   renderMessages({...(options||{}),preserveScroll:true});
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
 }
@@ -14900,6 +15648,71 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
   return true;
 }
 
+// #6345: parse the synthetic wakeup body back into display fields. Mirrors the
+// two structured api/background_process.format_wakeup_prompt shapes (pinned by
+// tests/test_background_process_wakeup_format.py); other event kinds return
+// null and keep the raw-notice fallback.
+function _parseProcessWakeupBody(text){
+  const s=String(text||'');
+  // Header groups are single-line by grammar; the output group captures the
+  // rest verbatim (leading indentation / trailing blank lines preserved). The
+  // watch suppression note is intentionally NOT split out of the output — real
+  // process output can contain the identical text, so stripping it would drop
+  // legitimate content (#6350 review finding 2). It rides along in `output`.
+  let m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) completed \(exit_code=([^)\n]*)\)\.\nCommand: ([^\n]*)\nOutput:\n([\s\S]*)\]$/);
+  if(m) return {type:'completion',taskId:m[1],exitCode:m[2],command:m[3],output:m[4],pattern:null};
+  m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) matched watch pattern "(.*)"\.\nCommand: ([^\n]*)\nMatched output:\n([\s\S]*)\]$/);
+  if(m) return {type:'watch_match',taskId:m[1],pattern:m[2],command:m[3],output:m[4],exitCode:null};
+  return null;
+}
+// Server-stamped _wakeup_meta (authoritative when present) merged over the
+// client parse; the output section only ever comes from the parse because the
+// meta deliberately carries header fields only.
+function _processWakeupInfo(m, text){
+  const parsed=_parseProcessWakeupBody(text);
+  const meta=(m&&m._wakeup_meta&&typeof m._wakeup_meta==='object')?m._wakeup_meta:null;
+  if(!parsed&&!meta) return null;
+  const pick=(metaKey,parsedKey)=>{
+    if(meta&&meta[metaKey]!=null) return meta[metaKey];
+    return parsed?parsed[parsedKey]:null;
+  };
+  return {
+    type:String(pick('type','type')||''),
+    taskId:String(pick('task_id','taskId')||''),
+    command:String(pick('command','command')||''),
+    exitCode:pick('exit_code','exitCode'),
+    pattern:pick('pattern','pattern'),
+    output:parsed?parsed.output:null,
+  };
+}
+function _processWakeupCardHtml(info, rawText, extras){
+  const isWatch=info.type==='watch_match';
+  const exitStr=info.exitCode==null?'':String(info.exitCode);
+  // Signal-killed processes report negative exit codes (subprocess returncode).
+  const exitKnown=/^-?\d+$/.test(exitStr);
+  const exitOk=exitStr==='0';
+  let chip;
+  if(isWatch){
+    chip=`<span class="process-wakeup-chip watch" title="${esc(t('process_wakeup_matched'))}">${li('eye',11)}<code title="${esc(String(info.pattern||''))}">${esc(String(info.pattern||''))}</code></span>`;
+  }else{
+    const cls=exitOk?'ok':(exitKnown?'fail':'neutral');
+    const icon=exitOk?li('check',11):(exitKnown?li('x',11):'');
+    chip=`<span class="process-wakeup-chip ${cls}">${icon}<span>exit ${esc(exitStr||'?')}</span></span>`;
+  }
+  const cmdHtml=info.command?`<code class="process-wakeup-cmd" title="${esc(info.command)}">${esc(info.command)}</code>`:'';
+  // Preserve output byte-for-byte for the <pre>; trim ONLY for the
+  // empty/non-empty decision so leading indentation and trailing blank lines
+  // survive (#6350 review finding 1).
+  const outRaw=info.output!=null?String(info.output):String(rawText||'');
+  const outHtml=outRaw.trim()?`<pre class="process-wakeup-text">${esc(outRaw)}</pre>`:'';
+  const cmdRow=info.command?`<div class="process-wakeup-cmd-row"><code>${esc(info.command)}</code></div>`:'';
+  // The collapsed watch chip truncates the pattern; surface the full,
+  // wrapping value in the expanded detail so touch/keyboard users can read it
+  // without relying on a hover tooltip (#6350 review finding 4).
+  const patternRow=(isWatch&&info.pattern)?`<div class="process-wakeup-pattern-row"><span class="process-wakeup-detail-key">${esc(t('process_wakeup_matched'))}</span><code>${esc(String(info.pattern))}</code></div>`:'';
+  return `<details class="process-wakeup-card"><summary class="process-wakeup-summary"><span class="process-wakeup-toggle">${li('chevron-right',12)}</span><span class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></span>${cmdHtml}${chip}${extras.timeHtml||''}</summary><div class="process-wakeup-detail">${extras.filesHtml||''}${patternRow}${cmdRow}<div class="msg-body process-wakeup-body">${outHtml}</div>${extras.footHtml||''}</div></details>`;
+}
+
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
   const preserveScroll=!!(options&&options.preserveScroll);
@@ -14910,6 +15723,10 @@ function renderMessages(options){
   const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
+  if(!S.busy&&Array.isArray(S.messages)&&typeof _hydrateIdLinkedHistoricalToolScenes==='function'){
+    const activityMode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
+    _hydrateIdLinkedHistoricalToolScenes(S.messages,{sessionId:sid,mode:activityMode});
+  }
   const msgCount=S.messages.length;
   // During session switch, S.messages is intentionally cleared while the full
   // message fetch is still in flight. Other async updates can still call
@@ -15404,8 +16221,22 @@ function renderMessages(options){
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const processText=String(rowDisplayContent||'').trim();
       const processFootHtml=`<div class="msg-foot">${timeHtml}<span class="msg-actions">${copyBtn}</span></div>`;
-      const processTextHtml=processText?`<pre class="process-wakeup-text">${esc(processText)}</pre>`:'';
-      const nextRowHtml=`<div class="process-wakeup-notice"><div class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></div>${filesHtml}<div class="msg-body process-wakeup-body">${processTextHtml}</div>${processFootHtml}</div>`;
+      // #6345: structured completions/watch-matches render as a collapsed
+      // summary card; anything unparseable keeps the raw notice below so the
+      // fallback is never worse than the old full-text dump.
+      const wakeupInfo=_processWakeupInfo(m, processText);
+      let noticeClass='process-wakeup-notice';
+      let noticeInnerHtml;
+      if(wakeupInfo){
+        noticeClass+=' process-wakeup-notice-card';
+        const exitStr=wakeupInfo.exitCode==null?'':String(wakeupInfo.exitCode);
+        if(wakeupInfo.type==='completion'&&/^-?\d+$/.test(exitStr)&&exitStr!=='0') noticeClass+=' process-wakeup-fail';
+        noticeInnerHtml=_processWakeupCardHtml(wakeupInfo, processText, {timeHtml, filesHtml, footHtml:`<div class="msg-foot"><span class="msg-actions">${copyBtn}</span></div>`});
+      }else{
+        const processTextHtml=processText?`<pre class="process-wakeup-text">${esc(processText)}</pre>`:'';
+        noticeInnerHtml=`<div class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></div>${filesHtml}<div class="msg-body process-wakeup-body">${processTextHtml}</div>${processFootHtml}`;
+      }
+      const nextRowHtml=`<div class="${noticeClass}">${noticeInnerHtml}</div>`;
       if(row){
         row.className='msg-row process-wakeup-row';
         row.id=_userMessageDomId(rawIdx);
@@ -15414,9 +16245,23 @@ function renderMessages(options){
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='process_wakeup';
         delete row.dataset.editing;
-        if(row.dataset.rawText!==processText||row.innerHTML!==nextRowHtml){
+        // Compare against the HTML we last SET (expando), not live innerHTML:
+        // a user-expanded <details> serializes an open attribute into
+        // innerHTML, which would force a rebuild-and-collapse on every
+        // streaming rerender. The expando comparison is
+        // serialization-independent while still rebuilding when the markup
+        // genuinely changes (locale/timestamp format); open state is
+        // user-driven, so it is captured and restored across rebuilds.
+        if(row.dataset.rawText!==processText||row._wakeupRenderedHtml!==nextRowHtml){
+          const _priorCard=row.querySelector&&row.querySelector('details.process-wakeup-card');
+          const _wasOpen=!!(_priorCard&&_priorCard.open);
           row.dataset.rawText=processText;
+          row._wakeupRenderedHtml=nextRowHtml;
           row.innerHTML=nextRowHtml;
+          if(_wasOpen){
+            const _card=row.querySelector('details.process-wakeup-card');
+            if(_card) _card.open=true;
+          }
         }
       }else{
         row=document.createElement('div');
@@ -15427,6 +16272,7 @@ function renderMessages(options){
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='process_wakeup';
         row.dataset.rawText=processText;
+        row._wakeupRenderedHtml=nextRowHtml;
         row.innerHTML=nextRowHtml;
       }
       inner.appendChild(row);
@@ -16149,7 +16995,7 @@ function renderMessages(options){
       const msg=S.messages[mi]||{};
       if(msg.role!=='assistant') continue;
       const routing=msg._gatewayRouting||null;
-      const gatewayText=_formatGatewayModelLabel(S.session&&S.session.model||'', '', routing);
+      const gatewayText=_formatGatewayModelLabel(String(msg._usedModel||'').trim()||(S.session&&S.session.model)||'', '', routing);
       const failoverText=_gatewayRoutingFailoverText(routing);
       const modelWarningText=_gatewayModelWarningText(routing);
       const hasTurnUsage=!!msg._turnUsage;
@@ -16158,12 +17004,13 @@ function renderMessages(options){
       // Worklog above the final answer.
       const compactWorklogForMessage=isCompactWorklogMode()&&(toolCallAssistantIdxs.has(mi)||assistantThinking.has(mi));
       const durationText=compactWorklogForMessage?'':_formatTurnDuration(msg._turnDuration);
-      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText) continue;
+      const usedModelText=_usedModelTurnChipLabel(msg);
+      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!usedModelText) continue;
       const seg=assistantSegments.get(mi);
       const row=seg?seg.closest('.assistant-turn'):null;
       const footerRows=row?row.querySelectorAll('.msg-foot'):[];
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
-      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline')) continue;
+      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-used-model-inline')) continue;
       const fragments=[];
       if(modelWarningText){
         const warning=document.createElement('span');
@@ -16188,6 +17035,23 @@ function renderMessages(options){
         duration.className='msg-duration-inline';
         duration.textContent=`Done in ${durationText}`;
         fragments.push(duration);
+      }
+      // The transparent turn footer owns the model label (.lf-model) whenever
+      // the turn has transparent event rows — skip the generic chip there so
+      // exactly one model label renders per turn. Model sits after duration to
+      // match the transparent footer order (elapsed · model · …).
+      const _transparentFooterOwnsModel=usedModelText&&isTransparentStream()&&row&&(()=>{
+        const blocks=_assistantTurnBlocks(row);
+        return !!(blocks&&blocks.querySelector(':scope > .transparent-event-row'));
+      })();
+      if(usedModelText&&!_transparentFooterOwnsModel){
+        const usedModel=document.createElement('span');
+        usedModel.className='msg-used-model-inline';
+        usedModel.textContent=usedModelText;
+        // Preserve the full (uncompacted) model id on hover where available.
+        const usedModelFull=String(msg._usedModel||'').trim();
+        if(usedModelFull&&usedModelFull!==usedModelText) usedModel.title=usedModelFull;
+        fragments.push(usedModel);
       }
       if(window._showTokenUsage&&hasTurnUsage){
         const usage=document.createElement('span');
@@ -16236,26 +17100,31 @@ function renderMessages(options){
       }
       _applyTransparentRowFading(turn);
       if(hasTransparentRows){
-        // Find the corresponding message to read duration/usage.
-        const seg=turn.querySelector('.assistant-segment');
+        // Read turn metadata from the final metadata-bearing assistant segment,
+        // not querySelector's first match — a tool turn's activity segment
+        // precedes the answer, and the metadata lives on the last message
+        // (#6068 gate round 2: multi-segment turns lost the model label).
+        const msg=_transparentTurnMetaMessage(turn);
         let durationText='';
+        let modelText='';
+        let modelTitle='';
         let ttftText='';
         let tokensText='';
-        if(seg){
-          const mi=seg.getAttribute('data-msg-idx');
-          if(mi!=null){
-            const msg=S.messages[Number(mi)]||{};
-            if(msg._turnDuration!=null) durationText=_formatTurnDuration(msg._turnDuration);
-            if(msg._firstTokenMs!=null) ttftText=_formatFirstToken(msg._firstTokenMs);
-            if(msg._turnUsage){
-              const inTok=msg._turnUsage.input_tokens||0;
-              const outTok=msg._turnUsage.output_tokens||0;
-              tokensText=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
-            }
+        if(msg){
+          if(msg._turnDuration!=null) durationText=_formatTurnDuration(msg._turnDuration);
+          modelText=_usedModelTurnChipLabel(msg);
+          if(modelText) modelTitle=String(msg._usedModel||'').trim();
+          if(msg._firstTokenMs!=null) ttftText=_formatFirstToken(msg._firstTokenMs);
+          if(msg._turnUsage){
+            const inTok=msg._turnUsage.input_tokens||0;
+            const outTok=msg._turnUsage.output_tokens||0;
+            tokensText=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
           }
         }
         _renderTransparentTurnFooter(turn,{
           durationText,
+          modelText,
+          modelTitle,
           ttftText,
           tokensText,
           statusText: t('done')||'Done',
@@ -16605,6 +17474,20 @@ function _toolTargetLabel(tc){
   else raw=a.cmd||a.command||a.path||a.file_path||a.file||a.uri||a.url||a.query||a.pattern||a.dir||a.task||a.name||'';
   return _redactToolTargetLabel(_decodeToolLabelEntities(String(raw).split('\n')[0].trim()));
 }
+function _toolReadRangeLabel(tc){
+  const name=String(tc&&tc.name||'').toLowerCase().replace(/[^a-z0-9]+/g,'_');
+  if(name!=='read_file') return '';
+  const args=tc&&tc.args||{};
+  const offset=args.offset;
+  if(!Number.isSafeInteger(offset)||offset<=0) return '';
+  const limit=args.limit;
+  if(limit===undefined) return `L${offset}`;
+  if(!Number.isSafeInteger(limit)||limit<=0) return '';
+  if(limit===1) return `L${offset}`;
+  const span=limit-1;
+  if(offset>Number.MAX_SAFE_INTEGER-span) return '';
+  return `L${offset}-${offset+span}`;
+}
 function _toolFullCommandLabel(tc){
   // Full (multi-line) shell command for the EXPANDED detail lead. Mirrors the
   // shell raw-extraction in _toolTargetLabel but WITHOUT the .split('\n')[0]
@@ -16619,7 +17502,12 @@ function _toolVisibleTargetLabel(tc, opts){
   const target=_toolTargetLabel(tc);
   if(!target) return '';
   const kind=_toolActionKind(tc);
-  if(kind==='read'||kind==='write') return _shortToolLabel(_toolPathBasename(target)||target, opts.limit||112);
+  if(kind==='read'||kind==='write'){
+    let text=_toolPathBasename(target)||target;
+    const range=kind==='read'?_toolReadRangeLabel(tc):'';
+    if(range) text=opts.rangeFirst?`${range} · ${text}`:`${text} · ${range}`;
+    return _shortToolLabel(text, opts.limit||112);
+  }
   if(kind==='skill'){
     const suffix=_toolI18n('tool_target_skill_suffix', 'skill');
     const text=target.toLowerCase().endsWith(String(suffix).toLowerCase())?target:`${target} ${suffix}`;
@@ -17393,14 +18281,17 @@ function _findLiveAssistantAnchorForSegment(inner, segmentSeq){
 }
 
 function clearLiveToolCards(){
+  const preserveDom=!!(arguments[0]&&arguments[0].preserveDom);
   if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
-  const inner=_assistantTurnBlocks($('liveAssistantTurn'));
-  if(inner) inner.querySelectorAll('.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]:not(.transparent-event-row),[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
+  if(!preserveDom){
+    const inner=_assistantTurnBlocks($('liveAssistantTurn'));
+    if(inner) inner.querySelectorAll('.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]:not(.transparent-event-row),[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
+  }
   // Reset the per-turn user expand intent so the next turn starts at the
   // default collapsed state (#1298).
   if(typeof _clearLiveActivityUserIntent==='function') _clearLiveActivityUserIntent();
-  // Legacy #liveToolCards container cleanup — kept for safety in case any
-  // leftover cards were inserted there before this refactor took effect.
+  // Legacy #liveToolCards container cleanup (sibling to the settled-rendered
+  // subtree). Always clear/hide it to avoid leaking stale fallback content.
   const container=$('liveToolCards');
   if(container){container.innerHTML='';container.style.display='none';}
 }
@@ -18404,9 +19295,19 @@ function appendThinking(text='', options){
   // without this check they would pollute the new session's DOM.
   options=options||{};
   const allowPendingPlaceholder=!!(options&&options.pending===true);
+  const anchorRenderFallback=!!(options&&options.anchorRenderFallback===true);
   if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()) return;
   if(!S.session||(!S.activeStreamId&&!allowPendingPlaceholder)) return;
-  if(!allowPendingPlaceholder&&isLiveAnchorActivitySceneOwner(S.activeStreamId)){
+  if(options.sessionId&&String(options.sessionId)!==String(S.session.session_id||'')) return;
+  if(options.streamId&&String(options.streamId)!==String(S.activeStreamId||'')) return;
+  const existingLiveTurn=$('liveAssistantTurn');
+  if(anchorRenderFallback&&existingLiveTurn&&existingLiveTurn.dataset&&
+      existingLiveTurn.dataset.sessionId&&
+      String(existingLiveTurn.dataset.sessionId)!==String(S.session.session_id||'')){
+    if(!_resetMismatchedLiveAssistantTurnForSession(existingLiveTurn, S.session.session_id)) return;
+  }
+  if(anchorRenderFallback&&existingLiveTurn&&_updateLiveAnchorReasoningRowForFallback(existingLiveTurn,text,options)) return;
+  if(!allowPendingPlaceholder&&!anchorRenderFallback&&isLiveAnchorActivitySceneOwner(S.activeStreamId)){
     _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id);
     return;
   }
@@ -19451,9 +20352,9 @@ function _showFileContextMenu(e, item){
     dlItem.onmouseleave=()=>dlItem.style.background='';
     dlItem.onclick=()=>{
       menu.remove();
-      const url='/api/folder/download?session_id='+encodeURIComponent(S.session.session_id)
+      const rel='/api/folder/download?session_id='+encodeURIComponent(S.session.session_id)
               + '&path='+encodeURIComponent(item.path||'');
-      window.location.href=url;
+      window.location.href=new URL(rel.slice(1), document.baseURI||location.href).href;
     };
     menu.appendChild(dlItem);
   }
@@ -19535,7 +20436,9 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
     const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws) return;
     try{
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      // System-minted session (#6022): explicit worktree:false — creating a
+      // file from a blank page must not inherit the config worktree default.
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
       if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
@@ -19566,7 +20469,9 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
     const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws) return;
     try{
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      // System-minted session (#6022): explicit worktree:false — creating a
+      // folder from a blank page must not inherit the config worktree default.
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
       if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }

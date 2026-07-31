@@ -34,6 +34,11 @@ from contextlib import closing
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
+from api.agent_runtime import (
+    AgentRuntimeChangedError,
+    ensure_agent_runtime_current,
+    require_ai_agent_class,
+)
 from api.agent_sessions import (
     MESSAGING_SOURCES,
     _looks_like_default_cli_title,
@@ -2804,8 +2809,6 @@ from api.config import (
     unregister_stream_owner,
     CHAT_LOCK,
     _get_session_agent_lock,
-    SESSION_AGENT_LOCKS,
-    SESSION_AGENT_LOCKS_LOCK,
     CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
     load_settings,
     persisted_speech_settings_keys,
@@ -2818,7 +2821,9 @@ from api.config import (
     set_reasoning_display,
     set_reasoning_effort,
     create_stream_channel,
+    get_config,
     get_webui_session_save_mode,
+    get_config_snapshot,
     STREAM_GOAL_RELATED,
     PENDING_GOAL_CONTINUATION,
     _get_config_path,
@@ -3085,6 +3090,80 @@ def _truncate_journal_snapshot_value(value, *, limit: int = 120):
     return value
 
 
+def _run_journal_snapshot_recovery_args(payload: dict | None):
+    if not isinstance(payload, dict):
+        return {}
+    args = payload.get("args")
+    return bound_run_journal_snapshot_args(args)
+
+
+def _run_journal_snapshot_arg_detail_score(value) -> int:
+    if value in (None, "", [], {}):
+        return 0
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, dict):
+        return sum(
+            len(str(key)) + _run_journal_snapshot_arg_detail_score(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return sum(_run_journal_snapshot_arg_detail_score(item) for item in value)
+    return 1
+
+
+def _run_journal_snapshot_merge_args(existing, incoming):
+    if not incoming:
+        return existing, False
+    if not isinstance(existing, dict) or not existing:
+        return incoming, True
+    if not isinstance(incoming, dict):
+        return existing, False
+    merged = copy.deepcopy(existing)
+    changed = False
+    for key, value in incoming.items():
+        current = merged.get(key)
+        if key not in merged or (
+            _run_journal_snapshot_arg_detail_score(value)
+            > _run_journal_snapshot_arg_detail_score(current)
+        ):
+            merged[key] = value
+            changed = True
+    return merged, changed
+
+
+def _run_journal_envelope_run_id_result(event: dict) -> tuple[str | None, bool]:
+    raw_run_id = event.get("run_id")
+    if raw_run_id is None:
+        return None, False
+    if not isinstance(raw_run_id, str):
+        return None, True
+    run_id = raw_run_id.strip()
+    if not run_id:
+        return None, True
+    raw_event_id = event.get("event_id")
+    event_id = str(raw_event_id or "").strip()
+    if event_id:
+        event_run_id, event_seq = _shared_parse_run_journal_event_id(event_id)
+        if event_run_id and event_seq is not None and event_run_id != run_id:
+            return None, True
+    return run_id, False
+
+
+def _run_journal_snapshot_event_id_for_run(
+    event: dict,
+    run_id: str,
+    event_seq: int,
+) -> str | None:
+    raw_event_id = event.get("event_id")
+    event_id = str(raw_event_id or "").strip()
+    if event_id:
+        event_run_id, parsed_seq = _shared_parse_run_journal_event_id(event_id)
+        if event_run_id == run_id and parsed_seq is not None:
+            return event_id
+    return f"{run_id}:{event_seq}" if event_seq else None
+
+
 def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
@@ -3105,6 +3184,22 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     events = [event for event in (journal.get("events") or []) if isinstance(event, dict)]
     if not events:
         return None
+    event_run_ids: set[str] = set()
+    malformed_envelope_run_id = False
+    for event in events:
+        event_run_id, event_run_id_malformed = _run_journal_envelope_run_id_result(event)
+        if event_run_id is not None:
+            event_run_ids.add(event_run_id)
+        if event_run_id_malformed:
+            malformed_envelope_run_id = True
+    # The event envelope is the durable identity authority. Older summaries
+    # are keyed by the transport id, so only use that fallback when the journal
+    # does not provide one unambiguous run id.
+    run_id = (
+        next(iter(event_run_ids))
+        if not malformed_envelope_run_id and len(event_run_ids) == 1
+        else str(summary.get("run_id") or stream_id).strip()
+    )
 
     assistant_text = ""
     reasoning_text = ""
@@ -3141,6 +3236,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             call_id = _run_journal_snapshot_tool_id(call)
             if (tool_id and call_id == tool_id) or (not tool_id and name and call.get("name") == name):
                 call["done"] = True
+                merged_args, args_changed = _run_journal_snapshot_merge_args(
+                    call.get("args"),
+                    _run_journal_snapshot_recovery_args(payload),
+                )
+                if args_changed:
+                    call["args"] = merged_args
                 if payload.get("preview") is not None:
                     call["snippet"] = str(payload.get("preview") or "")
                     call["preview"] = call.get("preview") or call["snippet"]
@@ -3156,7 +3257,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "name": name,
             "preview": str(payload.get("preview") or ""),
             "snippet": str(payload.get("preview") or ""),
-            "args": _truncate_journal_snapshot_value(payload.get("args") or {}),
+            "args": _run_journal_snapshot_recovery_args(payload),
             "done": True,
             "_live": True,
             "_journal_snapshot": True,
@@ -3226,7 +3327,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             call = {
                 "name": name,
                 "preview": str(payload.get("preview") or ""),
-                "args": _truncate_journal_snapshot_value(payload.get("args") or {}),
+                "args": _run_journal_snapshot_recovery_args(payload),
                 "done": False,
                 "_live": True,
                 "_journal_snapshot": True,
@@ -3293,7 +3394,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "source_event_type": "token",
             "event_id": None,
             "local_id": local_id,
-            "run_id": stream_id,
+            "run_id": run_id,
             "stream_id": stream_id,
             "seq": None,
             "status": status,
@@ -3301,7 +3402,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "identity": {
                 "event_id": None,
                 "local_id": local_id,
-                "run_id": stream_id,
+                "run_id": run_id,
                 "stream_id": stream_id,
                 "seq": None,
             },
@@ -3336,7 +3437,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "source_event_type": "reasoning",
             "event_id": None,
             "local_id": local_id,
-            "run_id": stream_id,
+            "run_id": run_id,
             "stream_id": stream_id,
             "seq": None,
             "status": status,
@@ -3344,7 +3445,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "identity": {
                 "event_id": None,
                 "local_id": local_id,
-                "run_id": stream_id,
+                "run_id": run_id,
                 "stream_id": stream_id,
                 "seq": None,
             },
@@ -3413,7 +3514,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "source_event_type": "tool_complete" if call.get("done") else "tool",
             "event_id": None,
             "local_id": tool_id or row_id,
-            "run_id": stream_id,
+            "run_id": run_id,
             "stream_id": stream_id,
             "seq": None,
             "status": status,
@@ -3421,7 +3522,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "identity": {
                 "event_id": None,
                 "local_id": tool_id or row_id,
-                "run_id": stream_id,
+                "run_id": run_id,
                 "stream_id": stream_id,
                 "seq": None,
             },
@@ -3535,7 +3636,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "source_event_type": "runtime_journal_snapshot",
                 "event_id": None,
                 "local_id": f"lifecycle:{stream_id}:running",
-                "run_id": stream_id,
+                "run_id": run_id,
                 "stream_id": stream_id,
                 "seq": None,
                 "status": "running",
@@ -3543,7 +3644,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "identity": {
                     "event_id": None,
                     "local_id": f"lifecycle:{stream_id}:running",
-                    "run_id": stream_id,
+                    "run_id": run_id,
                     "stream_id": stream_id,
                     "seq": None,
                 },
@@ -3573,9 +3674,11 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         event_last_seq = 0
     if event_last_seq >= summary_last_seq:
         last_seq = event_last_seq
-        last_event_id = events[-1].get("event_id") or (
-            f"{stream_id}:{event_last_seq}" if event_last_seq else summary.get("last_event_id")
-        )
+        last_event_id = _run_journal_snapshot_event_id_for_run(
+            events[-1],
+            run_id,
+            event_last_seq,
+        ) or summary.get("last_event_id")
     else:
         last_seq = summary_last_seq
         last_event_id = summary.get("last_event_id") or events[-1].get("event_id")
@@ -3603,7 +3706,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "identity": {
                 "session_id": session_id,
                 "stream_id": stream_id,
-                "run_id": stream_id,
+                "run_id": run_id,
                 "source_message_refs": [],
             },
             "lifecycle": {
@@ -4462,7 +4565,17 @@ def _anchor_scene_row_has_live_identity(row) -> bool:
     values = [row.get("row_id"), row.get("local_id"), row.get("event_id")]
     identity = row.get("identity") if isinstance(row.get("identity"), dict) else {}
     values.extend([identity.get("local_id"), identity.get("event_id")])
-    return any(str(value or "").startswith("live-") for value in values)
+    if any(str(value or "").startswith("live-") for value in values):
+        return True
+    group = row.get("group") if isinstance(row.get("group"), dict) else {}
+    has_stream_owner = bool(
+        row.get("stream_id")
+        or row.get("run_id")
+        or identity.get("stream_id")
+        or identity.get("run_id")
+    )
+    has_assistant_message_index = group.get("assistant_msg_idx") is not None
+    return has_stream_owner and not has_assistant_message_index
 
 
 def _anchor_scene_settle_live_running_row(row, *, has_settled_thinking: bool):
@@ -4479,6 +4592,14 @@ def _anchor_scene_settle_live_running_row(row, *, has_settled_thinking: bool):
         return None
     next_row = copy.deepcopy(row)
     next_row["status"] = "completed"
+    payload = next_row.get("payload")
+    if isinstance(payload, dict):
+        payload["status"] = "completed"
+        if role == "tool":
+            payload["done"] = True
+    tool = next_row.get("tool")
+    if role == "tool" and isinstance(tool, dict):
+        tool["done"] = True
     return next_row
 
 
@@ -5442,6 +5563,7 @@ def _extension_sidecar_proxy_request_headers(handler) -> dict[str, str]:
             lower in blocked_headers
             or lower in {"authorization", "cookie", "content-length", "host", "origin", "referer"}
             or lower.startswith("x-csrf")
+            or lower.startswith("x-hermes-")
         ):
             continue
         headers[str(name)] = str(value)
@@ -5455,7 +5577,11 @@ def _send_extension_sidecar_proxy_response(handler, status: int, body: bytes, he
     if headers and hasattr(headers, "items"):
         for name, value in headers.items():
             lower = str(name).lower()
-            if lower in blocked_headers or lower in {"content-length", "set-cookie"}:
+            if (
+                lower in blocked_headers
+                or lower in {"content-length", "set-cookie"}
+                or lower.startswith("x-hermes-")
+            ):
                 continue
             if lower == "content-type":
                 sent_content_type = True
@@ -5552,10 +5678,17 @@ def _handle_extension_sidecar_proxy(
             proxy_path,
             query=parsed.query,
         )
+        proxied_headers = _extension_sidecar_proxy_request_headers(handler)
+        # token-v1: inject the per-extension shared secret core minted. The
+        # inbound x-hermes-* strip above guarantees the client cannot have
+        # forged this header.
+        _auth_token = target.get("auth_token")
+        if _auth_token:
+            proxied_headers["X-Hermes-Sidecar-Token"] = _auth_token
         request = Request(
             target["upstream_url"],
             data=request_body,
-            headers=_extension_sidecar_proxy_request_headers(handler),
+            headers=proxied_headers,
             method=method,
         )
         opener = _extension_sidecar_proxy_same_origin_opener(target["origin"])
@@ -7574,6 +7707,39 @@ def _rescale_threshold_tokens_for_context_window(
     return max(1, int(threshold * new_window / old_window))
 
 
+def _worktree_default_from_config(profile: str | None) -> bool:
+    """Return the agent's config-level ``worktree:`` default for *profile*.
+
+    The agent CLI honors ``worktree: true`` in config.yaml for every session
+    it creates (``use_worktree = worktree or w or CLI_CONFIG.get("worktree",
+    False)``).  /api/session/new consults this only when the request body has
+    no explicit ``worktree`` key, so both entry points to the same repo agree
+    on isolation (#6022).  Explicit body values always win.
+
+    Profile-aware on purpose: the WebUI serves multiple profiles from one
+    process, and a user with ``worktree: true`` in one profile but not another
+    expects per-profile behavior.  ``get_config_for_profile_home`` handles the
+    ambient/common case via the mtime-tracked cache and reads a diverging
+    profile's config.yaml directly off disk (see #3294).
+    """
+    try:
+        if profile:
+            from api.profiles import get_hermes_home_for_profile
+
+            cfg_dict = get_config_for_profile_home(get_hermes_home_for_profile(profile))
+        else:
+            cfg_dict = get_config_for_profile_home(None)
+        # Strict boolean: only a real YAML `true` opts in.  Any other shape
+        # ("true", 1, [], {}, null, ...) is malformed for this key and must
+        # fall to the safe no-worktree default rather than truthiness-coerce
+        # into minting worktrees.
+        return (cfg_dict or {}).get("worktree", False) is True
+    except Exception:
+        # Config resolution must never break session creation.
+        logger.warning("failed to read worktree config default", exc_info=True)
+        return False
+
+
 def _session_model_state_from_request(
     model: str | None,
     requested_provider: str | None,
@@ -8408,6 +8574,74 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
 
 
 _LIMITED_TOOL_CONTENT_MAX_CHARS = 4096
+# Server-side ceiling on the ?msg_limit= tail-window size. A client could
+# otherwise request msg_limit=1000000 and force the server to assemble and
+# serialize an unbounded message payload (the frontend's own pagination grows
+# by ~30 at a time, with one outline-jump path asking for 9999). The ceiling is
+# generous — far above any legitimate visible-row window — so real pagination is
+# unaffected; it only caps the pathological/oversized request. When the request
+# exceeds the ceiling the response is silently clamped and _messages_truncated
+# is set (the existing truncation signal already covers "more rows exist").
+_MAX_MSG_LIMIT = 500
+
+
+def _parse_msg_limit(raw):
+    """Parse and clamp the ``?msg_limit=`` query value.
+
+    Returns a positive int clamped to ``[1, _MAX_MSG_LIMIT]``, or ``None`` when
+    the value is absent/empty/malformed (the bare no-``msg_limit`` path, which
+    intentionally returns the full transcript for callers that need it).
+    Extracted from the handler so the clamp expression has direct test coverage.
+    """
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return max(1, min(value, _MAX_MSG_LIMIT))
+
+
+# If a sidecar JSON file exceeds this threshold, the display-path tail
+# optimization fires regardless of message count.  Sessions with few messages
+# but large tool outputs (multi-MB JSON) should not force a full-scan merge.
+_SIDECAR_BYTE_TAIL_THRESHOLD = 500_000  # 500 KB
+# Defensive row backstop for the GET /api/session display path's state.db read.
+# This is NOT a semantic window (the display window counts visible rows
+# post-reconciliation via _message_window_for_display); it is a safety net so a
+# pathological/huge state.db cannot materialize unbounded rows into memory on the
+# display path. Legitimate sessions stay far below this; the compressed-session
+# case where _state_db_since_timestamp_for_limited_display bails (and would
+# otherwise full-scan) is the main beneficiary. Generous on purpose: no real
+# conversation approaches it, and the existing since_timestamp optimization
+# already handles the common tail-load case. The full-history model-context
+# callers (reconciliation, new-turn context) do NOT use this cap.
+_STATE_DB_DISPLAY_ROW_BACKSTOP = 50000
+
+
+def _state_db_backstop_limit_for_display(session, msg_before) -> int | None:
+    """Return the row backstop to apply to the display path's state.db read, or
+    ``None`` for an uncapped (full-history) read.
+
+    The backstop is a defensive net against a pathological/huge state.db, NOT a
+    semantic window. It is applied ONLY on provably-safe reads where no
+    ``truncation_boundary`` prefix is required for the merge:
+    ``merge_session_messages_append_only`` needs the rows at/around the session's
+    ``truncation_boundary`` to reconcile correctly, and a newest-N-only SQL cap
+    would drop those boundary rows for a >N-row session and corrupt the merge
+    (silently losing the preserved prefix). So this mirrors the same conditions
+    ``_state_db_since_timestamp_for_limited_display`` uses to decide a read is
+    boundary-free: not ``msg_before`` paging, and no ``truncation_watermark`` /
+    ``truncation_boundary``. Extracted for direct test coverage.
+    """
+    has_boundary_prefix = (
+        msg_before is not None
+        or getattr(session, "truncation_watermark", None) not in (None, "")
+        or getattr(session, "truncation_boundary", None) not in (None, "")
+    )
+    return None if has_boundary_prefix else _STATE_DB_DISPLAY_ROW_BACKSTOP
+
+
 _LIMITED_TOOL_CONTENT_NOTICE = (
     "\n\n[Tool output truncated in paginated session response; "
     "load the full transcript to inspect the complete result.]"
@@ -8491,6 +8725,16 @@ def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, 
     )
 
 
+def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
+    """Check if the sidecar JSON file for ``session_id`` exceeds ``threshold_bytes``."""
+    from api.config import SESSION_DIR
+    try:
+        p = SESSION_DIR / f"{session_id}.json"
+        return os.path.isfile(p) and os.path.getsize(p) > threshold_bytes
+    except Exception:
+        return False
+
+
 def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before=None):
     """Return (timestamp floor, sidecar messages) for bounded state.db tail reads.
 
@@ -8521,9 +8765,29 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         return None, sidecar_messages
     raw_budget = max(300, limit * 10)
     if len(sidecar_messages) <= raw_budget:
-        return None, sidecar_messages
+        _sid = getattr(session, "session_id", "") or ""
+        if not _sid or not _sidecar_file_exceeds_threshold(_sid, _SIDECAR_BYTE_TAIL_THRESHOLD):
+            return None, sidecar_messages
 
     floor = min(sidecar_timestamps[-raw_budget:])
+    sidecar_before_count = sum(1 for ts in sidecar_timestamps if ts < floor)
+    prefix_summary = get_state_db_session_message_prefix_summary(
+        getattr(session, "session_id", None),
+        floor,
+        profile=getattr(session, "profile", None) or None,
+    )
+    if prefix_summary is None:
+        return None, sidecar_messages
+    try:
+        state_before_count = int(prefix_summary["count"])
+        null_timestamp_count = int(prefix_summary["null_timestamp_count"])
+    except (KeyError, TypeError, ValueError):
+        return None, sidecar_messages
+    if null_timestamp_count or state_before_count != sidecar_before_count:
+        return None, sidecar_messages
+    if sidecar_before_count == 0:
+        return floor, sidecar_messages
+
     sidecar_before_keys = [
         _session_message_visible_key(msg)
         for msg, ts in zip(sidecar_messages, sidecar_timestamps, strict=True)
@@ -9123,8 +9387,11 @@ def _keep_latest_messaging_session_per_source(
 from api.models import (
     Session,
     get_session,
+    get_session_for_scan,
     find_compression_recovery_session,
     get_session_for_file_ops,
+    persist_recovered_workspace_binding,
+    WorkspaceBindingPersistenceError,
     new_session,
     all_sessions,
     title_from,
@@ -9137,6 +9404,7 @@ from api.models import (
     get_cli_sessions,
     get_cli_session_messages,
     get_state_db_session_messages,
+    get_state_db_session_message_prefix_summary,
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
@@ -9362,6 +9630,7 @@ from api.workspace import (
     safe_resolve_ws,
     raw_authorized_escape_target,
     resolve_trusted_workspace,
+    resolve_implicit_workspace_with_recovery,
     open_anchored_fd,
     open_anchored_create_fd,
     open_anchored_write_fd,
@@ -9397,11 +9666,13 @@ from api.streaming import (
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
+    bound_run_journal_snapshot_args,
     find_run_summary,
     read_run_events,
     read_session_run_events,
     session_journal_fingerprint,
     stale_interrupted_event,
+    SSE_RELAY_CLOSE_EVENTS,
 )
 from api.todo_state import attach_todo_state
 from api.providers import (
@@ -9446,8 +9717,15 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     _approval_sse_notify_locked,
     _approval_sse_notify,
     _GATEWAY_MIRROR_FLAG,
-    _gateway_mirrored_pending_run_id,
+    _GATEWAY_MIRROR_TOKEN,
+    _gateway_mirror_entry_token,
+    claim_gateway_approval_relay_owner,
+    gateway_pending_mirror,
+    release_gateway_approval_relay_owner,
+    retire_gateway_pending_mirror,
     reconcile_gateway_pending_mirror_locked,
+    resolve_gateway_pending_local,
+    resolve_gateway_pending_local_no_run_mirror,
     submit_gateway_pending_mirror,
     submit_pending,
 )
@@ -9476,6 +9754,7 @@ def _session_attention_summary(session_id: str) -> dict | None:
     """Return sidebar attention metadata for pending approval/clarify work."""
     approval_count = 0
     with _lock:
+        reconcile_gateway_pending_mirror_locked(session_id)
         queue_list = _pending.get(session_id)
         if isinstance(queue_list, list):
             approval_count = len(queue_list)
@@ -9580,8 +9859,28 @@ def _sidebar_session_response_item(session: dict, *, redact_enabled: bool | None
     }
     if isinstance(item.get("title"), str):
         item["title"] = _redact_text(item["title"], _enabled=redact_enabled)
+    _redact_sidebar_title_fields(item, redact_enabled)
     item["attention"] = _session_attention_summary(str(item.get("session_id") or ""))
     return item
+
+
+def _redact_sidebar_title_fields(item: dict, redact_enabled: bool | None = None) -> None:
+    """Redact every user-content-derived title field on a sidebar/search row in place.
+
+    `title` is redacted by the callers directly (they special-case it), but
+    `display_title`, `_state_db_title`, and `parent_title` can ALSO carry raw
+    user-message-derived text — e.g. #6056 derives a delegated subagent's
+    `display_title` from its first user message, and `parent_title` copies a
+    parent session's (possibly derived) title. Without this a credential-shaped
+    value in a delegated goal would surface in the sidebar / search results even
+    with `api_redact_enabled=True`. Shared by `_sidebar_session_response_item`
+    (`/api/sessions`) and every `/api/sessions/search` response branch so the two
+    endpoints can never drift on which fields get redacted.
+    """
+    for field in ("display_title", "_state_db_title", "parent_title"):
+        value = item.get(field)
+        if isinstance(value, str):
+            item[field] = _redact_text(value, _enabled=redact_enabled)
 
 
 # ── Login page locale strings ─────────────────────────────────────────────────
@@ -12286,11 +12585,13 @@ def handle_get(handler, parsed) -> bool:
         # transcript rows. Hidden tool-result rows do not consume the budget;
         # they are included only when they sit inside the selected window and
         # are bounded before serialization. Older rows load on-demand.
-        _msg_limit = query.get("msg_limit", [None])[0]
-        try:
-            msg_limit = max(1, int(_msg_limit)) if _msg_limit else None
-        except (ValueError, TypeError):
-            msg_limit = None
+        # Clamp to _MAX_MSG_LIMIT so an oversized request (e.g. msg_limit=9999
+        # from an outline jump, or a hostile value) can't force an unbounded
+        # payload; the existing _messages_truncated signal covers the clamped
+        # case (the client sees there are more rows than returned). Parsing +
+        # clamping live in _parse_msg_limit so the expression has direct test
+        # coverage; None means the bare no-msg_limit path (full transcript).
+        msg_limit = _parse_msg_limit(query.get("msg_limit", [None])[0])
         # ?msg_before=N — 0-based index into the full message array.
         # Returns messages before this index (for scroll-to-top lazy loading).
         # Combined with msg_limit for paging.
@@ -12351,6 +12652,14 @@ def handle_get(handler, parsed) -> bool:
                 _state_db_reader_kwargs = {"profile": _session_profile}
                 if state_db_since_timestamp is not None:
                     _state_db_reader_kwargs["since_timestamp"] = state_db_since_timestamp
+                # Apply the display-path row backstop ONLY on provably-safe
+                # reads where no truncation_boundary prefix is required for the
+                # merge — see _state_db_backstop_limit_for_display. Compressed
+                # sessions and msg_before paging need their full prefix rows for
+                # correct reconciliation, so those stay uncapped.
+                _backstop = _state_db_backstop_limit_for_display(s, msg_before)
+                if _backstop is not None:
+                    _state_db_reader_kwargs["limit"] = _backstop
                 state_db_messages = get_state_db_session_messages(
                     sid,
                     **_state_db_reader_kwargs,
@@ -12617,6 +12926,7 @@ def handle_get(handler, parsed) -> bool:
             _truncated = load_messages and msg_limit is not None and _messages_offset > 0
             raw["_messages_truncated"] = _truncated
             raw["_messages_offset"] = _messages_offset
+            raw["_msg_limit_max"] = _MAX_MSG_LIMIT
             _t4 = _time.monotonic()
             if _diag: _diag.stage("t4_after_compact_and_merge")
             if effective_model:
@@ -13066,6 +13376,39 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "stream_id required")
         if not _stream_id_visible_to_request_profile(handler, stream_id):
             return True
+        gateway_stop_blocked = False
+        try:
+            from api.gateway_chat import (
+                GATEWAY_RUN_ID_WAIT_TIMEOUT,
+                stop_gateway_run,
+                wait_for_gateway_run_id,
+            )
+
+            structured_gateway, run_id = wait_for_gateway_run_id(stream_id, GATEWAY_RUN_ID_WAIT_TIMEOUT)
+            if not run_id and structured_gateway:
+                gateway_stop_blocked = True
+            if run_id:
+                if stop_gateway_run(run_id):
+                    owner_sid = stream_owner_session_id(stream_id)
+                    if owner_sid:
+                        retire_gateway_pending_mirror(owner_sid, run_id=run_id)
+                else:
+                    gateway_stop_blocked = True
+        except Exception:
+            logger.debug("Failed to stop gateway run during chat cancellation", exc_info=True)
+            gateway_stop_blocked = True
+        if gateway_stop_blocked:
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "cancelled": False,
+                    "stream_id": stream_id,
+                    "error": "Gateway stop failed",
+                },
+                status=502,
+            )
+
         from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
 
         if runtime_adapter_enabled():
@@ -13670,7 +14013,12 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/updates/check":
         settings = load_settings()
         if not settings.get("check_for_updates", True):
-            return j(handler, {"disabled": True})
+            force = bool(body.get("force", False)) if isinstance(body, dict) else False
+            if force:
+                # Manual force-check bypasses auto-check toggle (#6082)
+                pass
+            else:
+                return j(handler, {"disabled": True})
         include_agent_updates = not bool(settings.get("ignore_agent_updates"))
         force = bool(body.get("force", False))
         # Allow the client to pass the channel explicitly in the POST body. This
@@ -13684,7 +14032,17 @@ def handle_post(handler, parsed) -> bool:
             channel = settings.get("update_channel")
         from api.updates import check_for_updates
 
-        return j(handler, check_for_updates(force=force, include_agent=include_agent_updates, channel=channel))
+        logger.info("checking for updates (force=%s, include_agent=%s, channel=%s)", force, include_agent_updates, channel)
+        # Defensive-only guard: wrap check_for_updates() for consistent
+        # exception protection across all route handlers. Does NOT fix #6086
+        # (root cause is likely signal/process-group reaping, per maintainer analysis).
+        try:
+            payload = check_for_updates(force=force, include_agent=include_agent_updates, channel=channel)
+        except Exception:
+            logger.exception("update check failed unexpectedly (defensive guard caught exception)")
+            return bad(handler, "Update check failed, see server log for details", status=500)
+        logger.info("update check completed")
+        return j(handler, payload)
 
     if parsed.path == "/api/extensions/toggle":
         from api.extensions import ExtensionToggleError, set_extension_user_enabled
@@ -13877,10 +14235,26 @@ def handle_post(handler, parsed) -> bool:
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
         worktree_info = None
-        worktree_requested = (
-            body.get("worktree") is True
-            or str(body.get("worktree")).strip().lower() in {"1", "true", "yes", "on"}
-        )
+        worktree_skipped = None
+        # Three-value worktree model (#6022): an explicit body value always
+        # wins; an ABSENT key falls back to the agent's config-level
+        # ``worktree:`` default so WebUI sessions and CLI sessions agree on
+        # isolation for the same repo.  Clients that must never create a
+        # worktree (e.g. the boot-time auto-bind) send ``worktree: false``
+        # explicitly.
+        raw_worktree = body.get("worktree")
+        # Presence-based, not truthiness-based: a client that sends the key at
+        # all (even ``worktree: null``) has spoken explicitly and never falls
+        # through to the config default.  ``null`` parses as non-true below,
+        # i.e. an explicit opt-out — only a genuinely ABSENT key inherits.
+        worktree_explicit = "worktree" in body
+        if worktree_explicit:
+            worktree_requested = (
+                raw_worktree is True
+                or str(raw_worktree).strip().lower() in {"1", "true", "yes", "on"}
+            )
+        else:
+            worktree_requested = _worktree_default_from_config(body.get("profile") or None)
         if worktree_requested:
             try:
                 from api.worktrees import create_worktree_for_workspace
@@ -13890,7 +14264,15 @@ def handle_post(handler, parsed) -> bool:
                 worktree_info = create_worktree_for_workspace(base_workspace)
                 workspace = worktree_info["path"]
             except (TypeError, ValueError) as e:
-                return bad(handler, str(e), status=400)
+                # Explicit requests keep the hard failure.  A config-default
+                # request on a non-git workspace (create_worktree_for_workspace
+                # raises ValueError) degrades to a plain session instead —
+                # otherwise `worktree: true` in config.yaml would 400 every
+                # session in every non-git directory.
+                if worktree_explicit:
+                    return bad(handler, str(e), status=400)
+                worktree_info = None
+                worktree_skipped = str(e)
             except Exception as e:
                 logger.exception("failed to create worktree-backed session")
                 return bad(handler, f"Failed to create worktree: {e}", status=500)
@@ -13973,7 +14355,12 @@ def handle_post(handler, parsed) -> bool:
                 profile=getattr(s, "profile", None),
                 session_id=getattr(s, "session_id", None),
             )
-        return j(handler, {"session": s.compact() | {"messages": s.messages}})
+        payload = {"session": s.compact() | {"messages": s.messages}}
+        if worktree_skipped:
+            # Config-default worktree was skipped (non-git workspace); tell the
+            # client the session is plain so the UI doesn't assume isolation.
+            payload["worktree_skipped"] = worktree_skipped
+        return j(handler, payload)
 
     if parsed.path == "/api/session/compression-recovery/start":
         return _handle_session_compression_recovery_start(handler, body)
@@ -14186,7 +14573,6 @@ def handle_post(handler, parsed) -> bool:
         import api.routes as _routes
         _routes.get_session = _models.get_session
         _routes.Session = _models.Session
-        _routes.compact = _models.compact
         return j(handler, {"status": "ok", "reloaded": "api.models"})
 
     if parsed.path == "/api/sessions/cleanup":
@@ -14512,36 +14898,44 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
-        # Delete from WebUI session store
-        with LOCK:
-            SESSIONS.pop(sid, None)
-        # Evict cached agent so turn count doesn't leak into a recycled session
+        # Serialize with recovery, but bound contention so a browser timeout
+        # cannot be followed by a delayed server-side delete.
+        session_lock = _get_session_agent_lock(sid)
+        if not session_lock.acquire(timeout=5):
+            return bad(handler, "Session busy, try again", 503)
+        try:
+            with LOCK:
+                SESSIONS.pop(sid, None)
+            try:
+                p = (SESSION_DIR / f"{sid}.json").resolve()
+                p.relative_to(SESSION_DIR.resolve())
+            except Exception:
+                return bad(handler, "Invalid session_id", 400)
+            sidecar_deleted = False
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                logger.debug("Failed to unlink session file %s", p)
+            sidecar_deleted = not p.exists()
+            try:
+                prune_session_from_index(sid)
+            except Exception:
+                logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
+            try:
+                p.with_suffix('.json.bak').unlink(missing_ok=True)
+            except Exception:
+                logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+            if sidecar_deleted and not is_messaging_session:
+                try:
+                    _record_webui_deleted_session_tombstone(sid)
+                except Exception:
+                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+        finally:
+            session_lock.release()
+        # Evict outside the mutation lock: lifecycle commit may perform provider
+        # I/O and must not hold a per-session Session lock.
         from api.config import _evict_session_agent
         _evict_session_agent(sid)
-        try:
-            p = (SESSION_DIR / f"{sid}.json").resolve()
-            p.relative_to(SESSION_DIR.resolve())
-        except Exception:
-            return bad(handler, "Invalid session_id", 400)
-        sidecar_deleted = False
-        try:
-            p.unlink(missing_ok=True)
-        except Exception:
-            logger.debug("Failed to unlink session file %s", p)
-        sidecar_deleted = not p.exists()
-        try:
-            p.with_suffix('.json.bak').unlink(missing_ok=True)
-        except Exception:
-            logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-        try:
-            prune_session_from_index(sid)
-        except Exception:
-            logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
-        if sidecar_deleted and not is_messaging_session:
-            try:
-                _record_webui_deleted_session_tombstone(sid)
-            except Exception:
-                logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         try:
             from api.upload import _session_attachment_dir
 
@@ -14565,10 +14959,8 @@ def handle_post(handler, parsed) -> bool:
             delete_run_journal(sid)
         except Exception:
             logger.debug("Failed to delete run journal for deleted session %s", sid)
-        # Prune the per-session agent lock so deleted sessions don't leak
-        # Lock entries in SESSION_AGENT_LOCKS forever.
-        with SESSION_AGENT_LOCKS_LOCK:
-            SESSION_AGENT_LOCKS.pop(sid, None)
+        # The weak lock registry releases this entry automatically after all
+        # holders and waiters drop their strong references.
         # Prune the completion-dedup entry too. The reaper sweeps it once the
         # completion is delivered (drained from PENDING); a session deleted
         # while a completion is still pending would otherwise keep its entry.
@@ -14585,15 +14977,24 @@ def handle_post(handler, parsed) -> bool:
             logger.debug("Failed to close workspace terminal for deleted session %s", sid)
         # Also delete from CLI state.db for CLI sessions shown in sidebar,
         # but never erase external messaging channel memory via WebUI delete.
+        state_db_cleanup_failed = False
         if not is_messaging_session:
             try:
                 from api.models import delete_cli_session
 
-                delete_cli_session(sid)
+                state_db_cleanup_failed = not delete_cli_session(sid)
             except Exception:
-                logger.debug("Failed to delete CLI session %s", sid)
+                state_db_cleanup_failed = True
+                logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
-        return j(handler, {"ok": True, **worktree_retained})
+        return j(
+            handler,
+            {
+                "ok": True,
+                "state_db_cleanup_failed": state_db_cleanup_failed,
+                **worktree_retained,
+            },
+        )
 
     if parsed.path == "/api/session/clear":
         try:
@@ -15954,6 +16355,7 @@ def handle_post(handler, parsed) -> bool:
                     "api_key": _main_api_key,
                 }
 
+                ensure_agent_runtime_current()
                 try:
                     from agent.auxiliary_client import get_text_auxiliary_client
 
@@ -15974,7 +16376,7 @@ def handle_post(handler, parsed) -> bool:
                 except Exception as _e:
                     logger.debug("update summary auxiliary model failed; falling back to main model: %s", _e)
 
-                from run_agent import AIAgent
+                AIAgent = require_ai_agent_class()
 
                 agent = AIAgent(
                     model=_main_model,
@@ -16490,12 +16892,21 @@ def _handle_sessions_search(handler, parsed):
         depth = max(0, int(qs.get("depth", ["5"])[0]))
     except (ValueError, TypeError):
         depth = 5
+    # Read the redaction setting ONCE for the whole response (mirrors the
+    # /api/sessions read-once optimization, #4662) and thread it through every
+    # branch + the shared title-field redactor so search rows redact the same
+    # fields as the sidebar list.
+    try:
+        _search_redact_enabled = bool(load_settings().get("api_redact_enabled", True))
+    except Exception:
+        _search_redact_enabled = True  # fail safe: redact when settings unreadable
     if not q:
         safe_sessions = []
         for s in sessions:
             item = dict(s)
             if isinstance(item.get("title"), str):
-                item["title"] = _redact_text(item["title"])
+                item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
+            _redact_sidebar_title_fields(item, _search_redact_enabled)
             safe_sessions.append(item)
         return j(handler, {
             "sessions": safe_sessions,
@@ -16508,12 +16919,18 @@ def _handle_sessions_search(handler, parsed):
         if title_match:
             item = dict(s, match_type="title")
             if isinstance(item.get("title"), str):
-                item["title"] = _redact_text(item["title"])
+                item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
+            _redact_sidebar_title_fields(item, _search_redact_enabled)
             results.append(item)
             continue
         if content_search:
             try:
-                sess = get_session(s["session_id"])
+                # Scan accessor, not get_session(): a content search walks every
+                # session, and routing that through the LRU would evict the
+                # user's working set on every keystroke-debounced search.
+                sess = get_session_for_scan(s["session_id"])
+                if sess is None:
+                    continue
                 msgs = sess.messages[:depth] if depth else sess.messages
                 for m in msgs:
                     c = _session_search_message_text(m)
@@ -16521,9 +16938,10 @@ def _handle_sessions_search(handler, parsed):
                         item = dict(s, match_type="content")
                         preview = _session_search_preview(c, q)
                         if preview:
-                            item["match_preview"] = _redact_text(preview)
+                            item["match_preview"] = _redact_text(preview, _enabled=_search_redact_enabled)
                         if isinstance(item.get("title"), str):
-                            item["title"] = _redact_text(item["title"])
+                            item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
+                        _redact_sidebar_title_fields(item, _search_redact_enabled)
                         results.append(item)
                         break
             except (KeyError, Exception):
@@ -16542,8 +16960,10 @@ def _handle_list_dir(handler, parsed):
     sid = qs.get("session_id", [""])[0]
     if not sid:
         return bad(handler, "session_id is required")
+    webui_session = None
     try:
         s = get_session(sid)
+        webui_session = s
         workspace = s.workspace
     except KeyError:
         # Fallback for CLI sessions not loaded in WebUI memory
@@ -16559,6 +16979,22 @@ def _handle_list_dir(handler, parsed):
         except Exception:
             return bad(handler, "Session not found", 404)
     try:
+        if webui_session is None:
+            workspace = resolve_trusted_workspace(workspace)
+            recovered = False
+        else:
+            stored_workspace = workspace
+            workspace, recovered = resolve_implicit_workspace_with_recovery(
+                stored_workspace,
+                get_last_workspace,
+            )
+            if recovered:
+                persisted = persist_recovered_workspace_binding(
+                    webui_session,
+                    workspace,
+                    expected_workspace=stored_workspace,
+                )
+                workspace = Path(persisted.workspace)
         rel_path = qs.get("path", ["."])[0]
         entries = list_dir(Path(workspace), rel_path)
         return j(
@@ -16567,8 +17003,12 @@ def _handle_list_dir(handler, parsed):
                 "entries": entries,
                 "signature": dir_signature(Path(workspace), rel_path, entries),
                 "path": rel_path,
+                "workspace": str(workspace),
+                "workspace_recovered": recovered,
             },
         )
+    except WorkspaceBindingPersistenceError as e:
+        return bad(handler, _sanitize_error(e), 500)
     except (FileNotFoundError, ValueError) as e:
         return bad(handler, _sanitize_error(e), 404)
 
@@ -17060,7 +17500,7 @@ def _stream_runner_run_events(handler, run_id: str, cursor: str | None = None) -
                 event = _runner_event_name(entry)
                 _sse_with_id(handler, event, _runner_event_payload(entry), _runner_event_id(run_id, entry))
                 emitted = True
-                if event in ("stream_end", "error", "cancel"):
+                if event in SSE_RELAY_CLOSE_EVENTS:
                     terminal = True
             next_cursor = getattr(event_stream, "cursor", None)
             if next_cursor not in (None, ""):
@@ -17154,7 +17594,7 @@ def _handle_sse_stream(handler, parsed):
                 _sse_with_id(handler, event, data, event_id)
             else:
                 _sse(handler, event, data)
-            if event in ("stream_end", "error", "cancel"):
+            if event in SSE_RELAY_CLOSE_EVENTS:
                 break
     except _CLIENT_DISCONNECT_ERRORS:
         pass
@@ -17292,7 +17732,7 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
                     queued_event_id = STREAM_LAST_EVENT_ID.get(active_stream_id)
                 event_id = queued_event_id or STREAM_LAST_EVENT_ID.get(active_stream_id)
                 event_seq = _run_journal_same_run_seq(event_id, active_stream_id)
-                _is_terminal = event in ("stream_end", "error", "cancel")
+                _is_terminal = event in SSE_RELAY_CLOSE_EVENTS
                 _already_sent = (
                     (replay_cutoff_seq is not None and event_seq is not None and event_seq <= replay_cutoff_seq)
                     or (event_id and event_id in sent_event_ids)
@@ -17449,34 +17889,61 @@ def _handle_terminal_output(handler, parsed):
     sid = qs.get("session_id", [""])[0]
     if not sid:
         return bad(handler, "session_id required")
-    from api.terminal import get_terminal
-    term = get_terminal(sid)
-    if term is None:
+    from api.terminal import attach_terminal
+    # EventSource automatically returns the last received SSE id on transport
+    # reconnect. Seed only newer backlog entries in that case so already-rendered
+    # terminal bytes (including ANSI cursor controls) are not written twice. A
+    # genuinely new viewer has no cursor and receives the full bounded backlog.
+    after_seq = None
+    last_event_id = str(handler.headers.get("Last-Event-ID", "") or "").strip()
+    if last_event_id:
+        try:
+            after_seq = max(0, int(last_event_id))
+        except ValueError:
+            pass
+    # Look up and subscribe in one atomic step. A separate `get_terminal()` then
+    # `term.subscribe()` leaves a window in which the idle reaper can claim and
+    # tear the terminal down, leaving this stream attached to a corpse after we
+    # already committed a 200. Attaching atomically means we either hold a live
+    # viewer (which makes the terminal un-reapable) or learn it is gone in time
+    # to answer 404.
+    attached = attach_terminal(sid, after_seq=after_seq)
+    if attached is None:
         return j(handler, {"error": "terminal not running"}, status=404)
+    term, output = attached
 
-    handler.send_response(200)
-    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
-    handler.send_header("Cache-Control", "no-cache")
-    handler.send_header("X-Accel-Buffering", "no")
-    handler.send_header("Connection", "close")
-    end_sse_headers(handler)
-    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
+    # The subscription is live from here on, so EVERY exit path — including a
+    # failure while writing the response headers — must unsubscribe. Writing
+    # headers to a client that already dropped raises BrokenPipeError, and if
+    # that escaped before the try block the queue would stay in
+    # `_subscribers` forever, pinning `unwatched_since` at None and making the
+    # terminal permanently unreapable: the exact fd/thread leak this reaper
+    # exists to prevent. Hence the try starts immediately after the attach.
     try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("X-Accel-Buffering", "no")
+        handler.send_header("Connection", "close")
+        end_sse_headers(handler)
+        _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
         while True:
             try:
-                event, data = term.output.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+                event_seq, event, data = output.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
                 handler.wfile.write(b": terminal heartbeat\n\n")
                 handler.wfile.flush()
-                if term.closed.is_set() and term.output.empty():
+                if term.closed.is_set() and output.empty():
                     _sse(handler, "terminal_closed", {"exit_code": term.proc.poll()})
                     break
                 continue
-            _sse(handler, event, data)
+            _sse_with_id(handler, event, data, event_id=event_seq)
             if event in ("terminal_closed", "terminal_error"):
                 break
     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
         pass
+    finally:
+        term.unsubscribe(output)
     return True
 
 
@@ -20316,6 +20783,9 @@ def _handle_btw(handler, body):
         require(body, "question")
     except ValueError as e:
         return bad(handler, str(e))
+    stale_response = _agent_runtime_barrier_response(runner_local_owned=False)
+    if stale_response is not None:
+        return j(handler, stale_response, status=409)
     if _session_is_subagent_view_only(str(body.get("session_id") or "")):
         return bad(handler, "Subagent sessions are view-only and cannot be used for /btw from WebUI", 400)
     try:
@@ -20375,6 +20845,9 @@ def _handle_background(handler, body):
         require(body, "prompt")
     except ValueError as e:
         return bad(handler, str(e))
+    stale_response = _agent_runtime_barrier_response(runner_local_owned=False)
+    if stale_response is not None:
+        return j(handler, stale_response, status=409)
     try:
         s = get_session(body["session_id"])
     except KeyError:
@@ -20474,10 +20947,15 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
             if latest_text == msg_text:
                 return
     user_msg = {"role": "user", "content": msg}
-    if source and source != "webui":
-        user_msg["_source"] = source
+    from api.process_event_utils import build_active_turn_token, stamp_message_source
+
+    stamp_message_source(
+        user_msg,
+        source,
+        active_turn_token=build_active_turn_token(getattr(s, "active_stream_id", None), started_at),
+    )
     if isinstance(started_at, (int, float)) and started_at > 0:
-        user_msg["timestamp"] = int(started_at)
+        user_msg["timestamp"] = float(started_at)
     if attachments:
         user_msg["attachments"] = list(attachments)
     s.messages.append(user_msg)
@@ -20661,6 +21139,31 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
     return None
 
 
+def _agent_runtime_barrier_response(
+    *,
+    runner_local_owned: bool = False,
+    external_runtime_owned: bool | None = None,
+) -> dict | None:
+    """Return the typed stale-runtime response for local in-process turns."""
+    if external_runtime_owned is True:
+        return None
+    if runner_local_owned and webui_gateway_chat_enabled(get_config()):
+        return None
+    from api.runtime_adapter import runtime_adapter_runner_enabled
+
+    if runner_local_owned and runtime_adapter_runner_enabled():
+        return None
+    try:
+        ensure_agent_runtime_current()
+    except AgentRuntimeChangedError as exc:
+        return {
+            "error": str(exc),
+            "type": "agent_runtime_stale",
+            "retryable": True,
+        }
+    return None
+
+
 def _start_chat_stream_for_session(
     s,
     *,
@@ -20674,8 +21177,18 @@ def _start_chat_stream_for_session(
     goal_related: bool = False,
     source: str = "webui",
     moa_config=None,
+    external_runtime_owned: bool | None = None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
+    if external_runtime_owned is None:
+        external_runtime_owned = webui_gateway_chat_enabled(get_config())
+    backend_is_gateway = bool(external_runtime_owned)
+    stale_response = _agent_runtime_barrier_response(
+        external_runtime_owned=backend_is_gateway,
+    )
+    if stale_response is not None:
+        stale_response["_status"] = 409
+        return stale_response
     attachments = attachments or []
     # Prevent duplicate runs in the same session while a stream is still active.
     # This commonly happens after page refresh/reconnect races and can produce
@@ -20794,18 +21307,31 @@ def _start_chat_stream_for_session(
     if goal_related:
         STREAM_GOAL_RELATED[stream_id] = True
     diag.stage("worker_thread_start") if diag else None
-    backend_is_gateway = webui_gateway_chat_enabled(get_config())
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
+    if backend_is_gateway:
+        from api.gateway_chat import _mark_gateway_run_starting
+        _mark_gateway_run_starting(stream_id)
     thr = threading.Thread(
         target=worker_target,
         args=(s.session_id, msg, model, workspace, stream_id, attachments),
         kwargs=worker_kwargs,
         daemon=True,
     )
-    thr.start()
+    try:
+        thr.start()
+    except Exception:
+        if backend_is_gateway:
+            try:
+                from api.gateway_chat import _finish_gateway_run_starting
+                _finish_gateway_run_starting(stream_id)
+                from api.gateway_chat import _clear_gateway_run_starting
+                _clear_gateway_run_starting(stream_id)
+            except Exception:
+                logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+        raise
     response = {
         "stream_id": stream_id,
         "session_id": s.session_id,
@@ -20885,6 +21411,7 @@ def _start_run(
     route: str,
     diag=None,
     moa_config=None,
+    gateway_chat_enabled: bool | None = None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -20925,6 +21452,7 @@ def _start_run(
                 diag=diag,
                 source=request.source or source,
                 moa_config=moa_config,
+                external_runtime_owned=gateway_chat_enabled,
             )
 
         def _legacy_adapter_factory():
@@ -20965,6 +21493,7 @@ def _start_run(
         diag=diag,
         source=source,
         moa_config=moa_config,
+        external_runtime_owned=gateway_chat_enabled,
     )
 
 
@@ -21058,6 +21587,10 @@ def start_session_turn(
     msg = str(message or "").strip()
     if not msg:
         return {"error": "message is required", "_status": 400}
+    stale_response = _agent_runtime_barrier_response(runner_local_owned=True)
+    if stale_response is not None:
+        stale_response["_status"] = 409
+        return stale_response
     turn_source = str(source or "process_wakeup").strip() or "process_wakeup"
     try:
         s = get_session(session_id)
@@ -21066,6 +21599,8 @@ def start_session_turn(
 
     try:
         workspace = _resolve_chat_workspace_with_recovery(s, None)
+    except WorkspaceBindingPersistenceError as e:
+        return {"error": str(e), "_status": 500}
     except ValueError as e:
         return {"error": str(e), "_status": 400}
 
@@ -21534,6 +22069,7 @@ def _handle_goal_command(handler, body):
             model_provider=model_provider,
             normalized_model=normalized_model,
             goal_related=True,
+            external_runtime_owned=webui_gateway_chat_enabled(get_config()),
         )
         status = int(stream_response.pop("_status", 200) or 200)
         payload.update(stream_response)
@@ -21552,6 +22088,12 @@ def _handle_chat_start(handler, body, diag=None):
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        # Reject a stale local Agent runtime before materialising, claiming, or
+        # mutating any session state. Gateway-backed turns run in the gateway's
+        # process and do not depend on this WebUI process's imported checkout.
+        stale_response = _agent_runtime_barrier_response(runner_local_owned=True)
+        if stale_response is not None:
+            return j(handler, stale_response, status=409)
         diag.stage("get_session") if diag else None
         try:
             s = _get_or_materialize_session(body["session_id"], refresh_cli_messages=True)
@@ -21668,6 +22210,8 @@ def _handle_chat_start(handler, body, diag=None):
         diag.stage("resolve_workspace") if diag else None
         try:
             workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
+        except WorkspaceBindingPersistenceError as e:
+            return bad(handler, str(e), 500)
         except ValueError as e:
             return bad(handler, str(e))
         requested_model = body.get("model") or s.model
@@ -21679,7 +22223,8 @@ def _handle_chat_start(handler, body, diag=None):
         _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
         explicit_model_pick = bool(body.get("explicit_model_pick"))
         moa_config = None
-        gateway_chat_enabled = webui_gateway_chat_enabled(get_config())
+        config_snapshot = get_config_snapshot()
+        gateway_chat_enabled = webui_gateway_chat_enabled(config_snapshot)
         if body.get("moa_config"):
             if gateway_chat_enabled:
                 return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
@@ -21726,9 +22271,25 @@ def _handle_chat_start(handler, body, diag=None):
             explicit_model_pick=explicit_model_pick,
             profile_provider=catalog_profile_provider,
         )
-        if model_provider == "moa" and moa_config is None:
-            if webui_gateway_chat_enabled(get_config()):
+        if model_provider == "moa" and gateway_chat_enabled:
+            from api.config import get_effective_default_model
+
+            model_config = config_snapshot.get("model") if isinstance(config_snapshot, dict) else None
+            configured_default, configured_default_provider, configured_default_is_moa = (
+                _moa_fast_path_model_state(get_effective_default_model(config_snapshot))
+            )
+            configured_provider = _clean_session_model_provider(
+                model_config.get("provider") if isinstance(model_config, dict) else None
+            )
+            if configured_provider is None and configured_default_is_moa:
+                configured_provider = configured_default_provider
+            if (
+                configured_provider != "moa"
+                or model != configured_default
+                or explicit_model_pick
+            ):
                 return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
+        elif model_provider == "moa" and moa_config is None:
             from api.commands import resolve_moa_config
 
             try:
@@ -21749,6 +22310,7 @@ def _handle_chat_start(handler, body, diag=None):
             "source": "webui",
             "route": "/api/chat/start",
             "diag": diag,
+            "gateway_chat_enabled": gateway_chat_enabled,
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
@@ -21800,19 +22362,21 @@ def _handle_chat_start(handler, body, diag=None):
 def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
     """Recover stale implicit session workspaces without hiding explicit errors."""
     explicit = requested_workspace not in (None, "")
-    candidate = requested_workspace if explicit else getattr(s, "workspace", None)
-    try:
-        return str(resolve_trusted_workspace(candidate))
-    except ValueError:
-        if explicit:
-            raise
-    fallback = str(resolve_trusted_workspace(get_last_workspace()))
-    s.workspace = fallback
-    try:
-        s.save()
-    except Exception:
-        pass
-    return fallback
+    if explicit:
+        return str(resolve_trusted_workspace(requested_workspace))
+    stored_workspace = getattr(s, "workspace", None)
+    workspace, recovered = resolve_implicit_workspace_with_recovery(
+        stored_workspace,
+        get_last_workspace,
+    )
+    if not recovered:
+        return str(workspace)
+    persisted = persist_recovered_workspace_binding(
+        s,
+        workspace,
+        expected_workspace=stored_workspace,
+    )
+    return str(persisted.workspace)
 
 
 def _normalize_chat_attachments(raw_attachments):
@@ -21847,6 +22411,9 @@ def _normalize_chat_attachments(raw_attachments):
 
 def _handle_chat_sync(handler, body):
     """Fallback synchronous chat endpoint (POST /api/chat). Not used by frontend."""
+    stale_response = _agent_runtime_barrier_response(runner_local_owned=False)
+    if stale_response is not None:
+        return j(handler, stale_response, status=409)
     if _session_is_subagent_view_only(str(body.get("session_id") or "")):
         return bad(handler, "Subagent sessions are view-only and cannot be written from WebUI", 400)
     s = get_session(body["session_id"])
@@ -21882,7 +22449,7 @@ def _handle_chat_sync(handler, body):
         os.environ["HERMES_EXEC_ASK"] = "1"
         os.environ["HERMES_SESSION_KEY"] = s.session_id
     try:
-        from run_agent import AIAgent
+        AIAgent = require_ai_agent_class()
 
         with CHAT_LOCK:
             from api.config import (
@@ -21940,6 +22507,7 @@ def _handle_chat_sync(handler, body):
                 _restore_display_reasoning_metadata,
                 _restore_reasoning_metadata,
                 _sanitize_messages_for_api,
+                _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
                 _workspace_context_prefix,
             )
@@ -22017,6 +22585,7 @@ def _handle_chat_sync(handler, body):
             msg,
             source=getattr(s, "pending_user_source", None) or "webui",
         )
+        _compact_session_image_parts_for_persistence(s)
         # Only auto-generate title when still default; preserves user renames
         if s.title == "Untitled":
             s.title = title_from(s.messages, s.title)
@@ -22513,6 +23082,7 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
             "base_url": _main_base_url,
             "api_key": _main_api_key,
         }
+        ensure_agent_runtime_current()
         try:
             from agent.auxiliary_client import get_text_auxiliary_client
 
@@ -22529,7 +23099,7 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
         except Exception as _e:
             logger.debug("git commit message auxiliary model failed; falling back to main model: %s", _e)
 
-        from run_agent import AIAgent
+        AIAgent = require_ai_agent_class()
 
         agent = AIAgent(
             model=_main_model,
@@ -22575,6 +23145,12 @@ def _handle_git_commit_message(handler, body):
         return bad(handler, str(e))
     except GitWorkspaceError as e:
         return _git_bad(handler, e)
+    except AgentRuntimeChangedError as e:
+        return j(handler, {
+            "error": str(e),
+            "type": "agent_runtime_stale",
+            "retryable": True,
+        }, status=409)
     except Exception as e:
         logger.exception("git commit message generation failed")
         return bad(handler, _sanitize_error(e), 500)
@@ -22606,6 +23182,12 @@ def _handle_git_commit_message_selected(handler, body):
         return bad(handler, str(e))
     except GitWorkspaceError as e:
         return _git_bad(handler, e)
+    except AgentRuntimeChangedError as e:
+        return j(handler, {
+            "error": str(e),
+            "type": "agent_runtime_stale",
+            "retryable": True,
+        }, status=409)
     except Exception as e:
         logger.exception("selected git commit message generation failed")
         return bad(handler, _sanitize_error(e), 500)
@@ -23291,7 +23873,7 @@ def _handle_workspace_reorder(handler, body):
     return j(handler, {"ok": True, "workspaces": reordered})
 
 
-def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
+def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: str = "") -> bool:
     """Resolve an approval through the existing callback path.
 
     Slice 3b keeps the RuntimeAdapter as a protocol translator: it delegates to
@@ -23302,17 +23884,31 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     pending = None
     found_target = False
     gateway_keys = []
+    local_gateway_approval_id = ""
+    gateway_head_matches_target = False
     with _lock:
         reconcile_gateway_pending_mirror_locked(sid)
         queue = _pending.get(sid)
         if isinstance(queue, list):
             if approval_id:
-                # Find and remove the specific entry by approval_id.
+                # Prefer a local exact-id match over a mirrored one, so a
+                # preceding remote mirror cannot consume the user's local choice.
+                preferred_index = None
+                fallback_index = None
                 for i, entry in enumerate(queue):
-                    if entry.get("approval_id") == approval_id:
-                        pending = queue.pop(i)
-                        found_target = True
+                    if entry.get("approval_id") != approval_id:
+                        continue
+                    if run_id and str(entry.get("run_id") or "").strip() != run_id:
+                        continue
+                    if not entry.get(_GATEWAY_MIRROR_FLAG) or not str(entry.get("run_id") or "").strip():
+                        preferred_index = i
                         break
+                    if fallback_index is None:
+                        fallback_index = i
+                match_index = preferred_index if preferred_index is not None else fallback_index
+                if match_index is not None:
+                    pending = queue.pop(match_index)
+                    found_target = True
                 else:
                     # A stale explicit id must not accidentally approve the
                     # oldest queued command; duplicate/stale responses are
@@ -23325,7 +23921,13 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
                 _pending.pop(sid, None)
         elif queue:
             # Legacy single-dict value.
-            if not approval_id or queue.get("approval_id") == approval_id:
+            if (
+                not approval_id
+                or (
+                    queue.get("approval_id") == approval_id
+                    and (not run_id or str(queue.get("run_id") or "").strip() == run_id)
+                )
+            ):
                 pending = _pending.pop(sid, None)
                 found_target = pending is not None
         # When no _pending entry found AND no explicit approval_id was
@@ -23348,21 +23950,40 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
                 # idempotent over the session key set so the outcome is
                 # the same regardless of which entry wins the race.
                 found_target = True
+        elif approval_id:
+            gw_queue = _gateway_queues.get(sid)
+            if gw_queue and len(gw_queue) > 0:
+                gw_entry = gw_queue[0]
+                gw_data = getattr(gw_entry, "data", None) or {}
+                gw_approval_id = str(gw_data.get("approval_id") or "").strip()
+                gw_run_id = str(gw_data.get("run_id") or "").strip()
+                gateway_head_matches_target = bool(
+                    run_id and gw_approval_id == approval_id and gw_run_id == run_id
+                )
+                if gw_approval_id == approval_id and (not run_id or gw_run_id == run_id):
+                    local_gateway_approval_id = approval_id
+                elif not run_id and found_target and pending:
+                    pending_token = str(pending.get(_GATEWAY_MIRROR_TOKEN) or "").strip()
+                    gateway_token = str(gw_data.get("_webui_mirror_token") or "").strip()
+                    if pending_token and pending_token == gateway_token:
+                        gw_data["approval_id"] = approval_id
+                        local_gateway_approval_id = approval_id
         # Notify SSE subscribers of the new head (or empty state) so the UI
         # surfaces any trailing approvals that were queued behind this one
         # without waiting for the next submit_pending. Without this, a parallel
         # tool-call scenario (#527) would leave the second approval invisible
         # in the SSE path until the next event ever fired (the agent thread
         # would be parked indefinitely from the user's perspective).
-        if isinstance(_pending.get(sid), list) and _pending[sid]:
-            _approval_sse_notify_locked(sid, _pending[sid][0], len(_pending[sid]))
-        else:
-            _approval_sse_notify_locked(sid, None, 0)
+        if not local_gateway_approval_id:
+            if isinstance(_pending.get(sid), list) and _pending[sid]:
+                _approval_sse_notify_locked(sid, _pending[sid][0], len(_pending[sid]))
+            else:
+                _approval_sse_notify_locked(sid, None, 0)
 
     # Collect keys from both _pending and _gateway_queues
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
     all_keys = [k for k in keys_from_pending if k] + [k for k in gateway_keys if k]
-    if choice in ("once", "session"):
+    if choice == "session":
         for k in all_keys:
             approve_session(sid, k)
     elif choice == "always":
@@ -23370,15 +23991,27 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
             approve_session(sid, k)
             approve_permanent(k)
         save_permanent_allowlist(_permanent_approved)
+    # choice == "once": no persistence — approval lasts this single call only.
+    # resolve_gateway_approval() below unblocks the parked agent thread for
+    # every choice, so "once" still lets the current tool run; we just must not
+    # call approve_session() here, or the next matching guarded call would find
+    # the pattern already session-approved and skip its approval card (#6017).
     # Unblock the agent thread waiting in the gateway approval queue.
     # This is the primary signal when streaming is active — the agent
     # thread is parked in entry.event.wait() and needs to be woken up.
     gateway_resolved = 0
-    if found_target or not approval_id:
+    local_gateway_resolved = 0
+    if approval_id and found_target and not run_id and local_gateway_approval_id:
+        local_gateway_resolved, _head, _total = resolve_gateway_pending_local(
+            sid, local_gateway_approval_id, choice
+        )
+    elif approval_id and found_target and run_id and gateway_head_matches_target:
+        gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
+    elif not approval_id:
         gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
     # Keep the historical no-id response path truthy for old clients/tests while
     # making stale explicit ids bounded as not-active for Slice 3b.
-    resolved = bool(pending) or bool(gateway_resolved) or not bool(approval_id)
+    resolved = bool(pending) or bool(gateway_resolved) or bool(local_gateway_resolved) or not bool(approval_id)
     if resolved:
         publish_session_list_changed("attention_resolved")
     return resolved
@@ -23387,6 +24020,10 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
 _GATEWAY_APPROVAL_RELAY_UNAVAILABLE = (
     "Gateway approval could not be relayed because the active run is unavailable. "
     "Reopen the session or retry after it reconnects."
+)
+_GATEWAY_APPROVAL_RELAY_IN_PROGRESS = (
+    "Another approval response for this Gateway run is already in progress. "
+    "Wait for it to finish, then retry if the card is still visible."
 )
 
 
@@ -23403,11 +24040,11 @@ def _gateway_pending_approval_without_run_id(sid: str, approval_id: str) -> bool
         if approval_id:
             for entry in entries:
                 if isinstance(entry, dict) and entry.get("approval_id") == approval_id:
-                    return bool(entry.get(_GATEWAY_MIRROR_FLAG))
+                    return bool(entry.get(_GATEWAY_MIRROR_FLAG)) and not str(entry.get("run_id") or "").strip()
             return False
         if not entries or not isinstance(entries[0], dict):
             return False
-        return bool(entries[0].get(_GATEWAY_MIRROR_FLAG))
+        return bool(entries[0].get(_GATEWAY_MIRROR_FLAG)) and not str(entries[0].get("run_id") or "").strip()
 
 
 def _session_has_pending_approval(sid: str) -> bool:
@@ -23450,36 +24087,76 @@ def _handle_approval_respond(handler, body):
             _gateway_api_key,
             webui_gateway_chat_enabled,
         )
-        from api.config import get_config as _get_config
+        from api.config import get_config as _get_config, gateway_supports_approval_identity_v1
+        from api.route_approvals import _GATEWAY_AGENT_IDENTITY_V1
         s = get_session(sid)
-        _run_id = None
+        _candidate_run_id = None
         if s is not None:
             active_sid = getattr(s, "active_stream_id", None)
             if active_sid:
-                _run_id = _STREAM_RUN_IDS.get(active_sid)
-            if not _run_id and approval_id:
-                _run_id = _gateway_mirrored_pending_run_id(sid, approval_id)
-        if _run_id:
-            if not approval_id:
-                return bad(handler, "approval_id is required for gateway approvals")
-            from api.runner_client import HttpRunnerClient, RunnerClientError
-            _cfg = _get_config()
-            _base = _gateway_base_url(_cfg)
-            _key = _gateway_api_key()
-            try:
-                HttpRunnerClient(base_url=_base, api_key=_key).respond_approval(_run_id, approval_id, choice)
-            except (RunnerClientError, ValueError) as exc:
-                return j(handler, {"ok": False, "choice": choice, "relayed": True, "error": str(exc)}, status=502)
-            # The outbound relay only resumes the remote run; the local mirror
-            # still needs the same cleanup path so the parked entry, mirrored
-            # card, and agent signal all settle here too.
-            _resolve_approval_legacy(sid, approval_id, choice)
-            return j(handler, {"ok": True, "choice": choice, "relayed": True})
-        # Only a still-mirrored gateway approval with a missing run should 409;
-        # stale or empty gateway clicks fall through to local resolution.
-        if webui_gateway_chat_enabled(_get_config()) and _gateway_pending_approval_without_run_id(
-            sid, approval_id
-        ):
+                _candidate_run_id = _STREAM_RUN_IDS.get(active_sid)
+        local_match = False
+        run_backed_gateway_matches = 0
+        same_run_stale_without_token = False
+        with _lock:
+            queue = _pending.get(sid)
+            entries = queue if isinstance(queue, list) else [queue] if queue else []
+            if approval_id:
+                local_match = any(
+                    isinstance(entry, dict)
+                    and entry.get("approval_id") == approval_id
+                    and (
+                        not entry.get(_GATEWAY_MIRROR_FLAG)
+                        or not str(entry.get("run_id") or "").strip()
+                    )
+                    for entry in entries
+                )
+                run_backed_gateway_matches = sum(
+                    1
+                    for entry in entries
+                    if isinstance(entry, dict)
+                    and entry.get("approval_id") == approval_id
+                    and entry.get(_GATEWAY_MIRROR_FLAG)
+                    and str(entry.get("run_id") or "").strip()
+                )
+                gateway_queue = _gateway_queues.get(sid) or []
+                live_head_data = getattr(gateway_queue[0], "data", None) or {} if gateway_queue else {}
+                live_head_run_id = str(live_head_data.get("run_id") or "").strip()
+                live_head_token = (
+                    _gateway_mirror_entry_token(gateway_queue[0])
+                    if gateway_queue and live_head_data
+                    else None
+                )
+                live_head_approval_id = str(live_head_data.get("approval_id") or "").strip()
+                if not live_head_approval_id and live_head_token and live_head_run_id:
+                    live_head_approval_id = f"gwrun:{live_head_run_id}:{live_head_token}"
+                stale_same_run_id = _candidate_run_id or live_head_run_id
+                if (
+                    stale_same_run_id
+                    and live_head_run_id == stale_same_run_id
+                    and live_head_approval_id
+                    and live_head_approval_id != approval_id
+                ):
+                    same_run_stale_without_token = any(
+                        isinstance(entry, dict)
+                        and entry.get("approval_id") == approval_id
+                        and entry.get(_GATEWAY_MIRROR_FLAG)
+                        and str(entry.get("run_id") or "").strip() == stale_same_run_id
+                        and not str(entry.get(_GATEWAY_MIRROR_TOKEN) or "").strip()
+                        for entry in entries
+                    )
+            else:
+                local_match = any(
+                    isinstance(entry, dict)
+                    and (
+                        not entry.get(_GATEWAY_MIRROR_FLAG)
+                        or not str(entry.get("run_id") or "").strip()
+                    )
+                    for entry in entries
+                )
+        if local_match:
+            _candidate_run_id = None
+        if approval_id and not local_match and same_run_stale_without_token:
             return j(
                 handler,
                 {
@@ -23491,6 +24168,111 @@ def _handle_approval_respond(handler, body):
                 },
                 status=409,
             )
+        matched_mirror = (
+            gateway_pending_mirror(sid, approval_id=approval_id, run_id=_candidate_run_id)
+            if approval_id and not local_match
+            else None
+        )
+        _run_id = matched_mirror["run_id"] if matched_mirror else None
+        if not matched_mirror and approval_id:
+            if local_match:
+                _candidate_run_id = None
+            elif run_backed_gateway_matches > 1 and not _candidate_run_id:
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "choice": choice,
+                        "relayed": False,
+                        "code": "gateway_run_unavailable",
+                        "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+                    },
+                    status=409,
+                )
+        if _run_id:
+            from api.runner_client import HttpRunnerClient, RunnerClientError
+            _cfg = _get_config()
+            _base = _gateway_base_url(_cfg)
+            _key = _gateway_api_key()
+            claimed_approval_id = str(matched_mirror.get("approval_id") or "").strip()
+            if not claim_gateway_approval_relay_owner(sid, _run_id, claimed_approval_id):
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "choice": choice,
+                        "relayed": False,
+                        "code": "gateway_approval_in_progress",
+                        "error": _GATEWAY_APPROVAL_RELAY_IN_PROGRESS,
+                    },
+                    status=409,
+                )
+            try:
+                current_mirror = gateway_pending_mirror(
+                    sid,
+                    approval_id=claimed_approval_id,
+                    run_id=_run_id,
+                )
+                if not current_mirror:
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "choice": choice,
+                            "relayed": False,
+                            "code": "gateway_run_unavailable",
+                            "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+                        },
+                        status=409,
+                    )
+                identity_v1 = bool(current_mirror.get(_GATEWAY_AGENT_IDENTITY_V1)) and gateway_supports_approval_identity_v1(_base, _key)
+                if not identity_v1:
+                    run_head = gateway_pending_mirror(sid, run_id=_run_id)
+                    if not run_head or str(run_head.get("approval_id") or "").strip() != claimed_approval_id:
+                        return j(
+                            handler,
+                            {
+                                "ok": False,
+                                "choice": choice,
+                                "relayed": False,
+                                "code": "gateway_run_unavailable",
+                                "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+                            },
+                            status=409,
+                        )
+                matched_mirror = current_mirror
+                try:
+                    HttpRunnerClient(base_url=_base, api_key=_key).respond_approval(
+                        _run_id, matched_mirror["approval_id"] if identity_v1 else "", choice
+                    )
+                except (RunnerClientError, ValueError) as exc:
+                    return j(handler, {"ok": False, "choice": choice, "relayed": True, "error": str(exc)}, status=502)
+                # The outbound relay only resumes the remote run; the local mirror
+                # still needs the same cleanup path so the parked entry, mirrored
+                # card, and agent signal all settle here too.
+                cleanup_approval_id = matched_mirror["approval_id"]
+                _resolve_approval_legacy(sid, cleanup_approval_id, choice, run_id=_run_id)
+                retire_gateway_pending_mirror(sid, approval_id=cleanup_approval_id, run_id=_run_id)
+                return j(handler, {"ok": True, "choice": choice, "relayed": True})
+            finally:
+                release_gateway_approval_relay_owner(sid, _run_id, claimed_approval_id)
+        if _candidate_run_id:
+            return j(handler, {"ok": False, "choice": choice, "relayed": False,
+                               "code": "gateway_run_unavailable",
+                               "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE}, status=409)
+        # A no-run mirror is local visibility state only. Resolve it only while
+        # the exact parked producer still exists; otherwise keep the card live
+        # and fail closed instead of claiming success.
+        if webui_gateway_chat_enabled(_get_config()):
+            handled_no_run_mirror, resolved_count, _, _ = resolve_gateway_pending_local_no_run_mirror(
+                sid, approval_id, choice
+            )
+            if handled_no_run_mirror and resolved_count == 1:
+                return j(handler, {"ok": True, "choice": choice, "local_retired": True})
+            if handled_no_run_mirror:
+                return j(handler, {"ok": False, "choice": choice, "relayed": False,
+                                   "code": "gateway_run_unavailable",
+                                   "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE}, status=409)
     except Exception:
         pass  # fall through to local approval path
 
@@ -23625,6 +24407,10 @@ def _manual_compression_status_payload(job):
         payload["ok"] = False
         payload["error"] = job.get("error") or "Compression failed"
         payload["error_status"] = int(job.get("error_status") or 400)
+        if job.get("error_type"):
+            payload["type"] = job["error_type"]
+        if job.get("retryable") is not None:
+            payload["retryable"] = bool(job["retryable"])
     elif status == "cancelled":
         payload["ok"] = False
         payload["error"] = job.get("error") or "Compression cancelled"
@@ -23659,6 +24445,8 @@ def _run_manual_compression_job(sid, body):
                         "status": "error",
                         "error": str((payload or {}).get("error") or "Compression failed"),
                         "error_status": status,
+                        "error_type": (payload or {}).get("type"),
+                        "retryable": (payload or {}).get("retryable"),
                         "updated_at": now,
                     }
                 )
@@ -23668,6 +24456,21 @@ def _run_manual_compression_job(sid, body):
                         "status": "done",
                         "result": payload,
                         "updated_at": now,
+                    }
+                )
+    except AgentRuntimeChangedError as exc:
+        logger.warning("Manual compression worker found stale Agent runtime for session %s", sid)
+        with _MANUAL_COMPRESSION_JOBS_LOCK:
+            job = _MANUAL_COMPRESSION_JOBS.get(sid)
+            if job:
+                job.update(
+                    {
+                        "status": "error",
+                        "error": str(exc),
+                        "error_status": 409,
+                        "error_type": "agent_runtime_stale",
+                        "retryable": True,
+                        "updated_at": time.time(),
                     }
                 )
     except Exception as exc:
@@ -23706,6 +24509,34 @@ def _handle_session_compress_start(handler, body):
     if focus_topic:
         job_body["focus_topic"] = focus_topic
 
+    # Repeated start requests observe an existing running job and do not admit
+    # new Agent work, so preserve that idempotent read even if the checkout has
+    # since changed. Do not hold the job lock while running Git subprocesses.
+    now = time.time()
+    with _MANUAL_COMPRESSION_JOBS_LOCK:
+        _manual_compression_cleanup_locked(now)
+        existing = _MANUAL_COMPRESSION_JOBS.get(sid)
+        if existing:
+            existing_payload = _manual_compression_status_payload(existing)
+            if existing_payload.get("status") == "running":
+                return j(handler, existing_payload)
+
+    # Reject a stale local Agent runtime before creating the asynchronous job.
+    try:
+        ensure_agent_runtime_current()
+    except AgentRuntimeChangedError as exc:
+        return j(
+            handler,
+            {
+                "error": str(exc),
+                "type": "agent_runtime_stale",
+                "retryable": True,
+            },
+            status=409,
+        )
+
+    # Another start request may have admitted a job while the runtime check ran.
+    # Re-check under the lock so only one worker is created.
     now = time.time()
     with _MANUAL_COMPRESSION_JOBS_LOCK:
         _manual_compression_cleanup_locked(now)
@@ -23921,10 +24752,11 @@ def _handle_session_compress(handler, body):
                     focus_topic,
                 )
 
+        ensure_agent_runtime_current()
         import api.config as _cfg
         from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
         import hermes_cli.runtime_provider as _runtime_provider
-        import run_agent as _run_agent
+        AIAgent = require_ai_agent_class()
 
         resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(
             _cfg.model_with_provider_context(s.model, getattr(s, "model_provider", None))
@@ -23967,7 +24799,7 @@ def _handle_session_compress(handler, body):
         )
         approx_tokens = _estimate_messages_tokens_rough(original_messages)
 
-        agent = _run_agent.AIAgent(
+        agent = AIAgent(
             model=resolved_model,
             provider=resolved_provider,
             base_url=resolved_base_url,
@@ -24062,6 +24894,12 @@ def _handle_session_compress(handler, body):
                 "focus_topic": focus_topic,
             },
         )
+    except AgentRuntimeChangedError as e:
+        return j(handler, {
+            "error": str(e),
+            "type": "agent_runtime_stale",
+            "retryable": True,
+        }, status=409)
     except Exception as e:
         logger.warning("Manual session compression failed: %s", e)
         return bad(handler, f"Compression failed: {_sanitize_error(e)}")
@@ -24519,7 +25357,17 @@ def _handle_handoff_summary(handler, body):
             if getattr(agent, "api_mode", "") == "codex_responses":
                 codex_kwargs = agent._build_api_kwargs(api_messages)
                 codex_kwargs.pop("tools", None)
-                codex_kwargs["max_output_tokens"] = max_tokens
+                codex_provider = str(getattr(agent, "provider", "") or "").strip().lower()
+                codex_base_url = str(getattr(agent, "base_url", "") or "").strip().lower()
+                is_chatgpt_codex = (
+                    codex_provider == "openai-codex"
+                    or (
+                        urlsplit(codex_base_url).hostname == "chatgpt.com"
+                        and "/backend-api/codex" in codex_base_url
+                    )
+                )
+                if not is_chatgpt_codex:
+                    codex_kwargs["max_output_tokens"] = max_tokens
                 resp = agent._run_codex_stream(codex_kwargs)
                 assistant_message, _ = agent._normalize_codex_response(resp)
                 result["text"] = str((assistant_message.content or "") if assistant_message else "").strip()
@@ -24571,10 +25419,11 @@ def _handle_handoff_summary(handler, body):
 
         # Call LLM for summary.
     try:
+        ensure_agent_runtime_current()
         import api.config as _cfg
         from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
         import hermes_cli.runtime_provider as _runtime_provider
-        import run_agent as _run_agent
+        AIAgent = require_ai_agent_class()
 
         # Try to resolve model from an existing session, fall back to default.
         resolved_model = None
@@ -24630,7 +25479,7 @@ def _handle_handoff_summary(handler, body):
                 "fallback": True,
             })
 
-        agent = _run_agent.AIAgent(
+        agent = AIAgent(
             model=resolved_model,
             provider=resolved_provider,
             base_url=resolved_base_url,
@@ -24710,6 +25559,12 @@ def _handle_handoff_summary(handler, body):
             "rounds": rounds,
             "fallback": fallback,
         })
+    except AgentRuntimeChangedError as e:
+        return j(handler, {
+            "error": str(e),
+            "type": "agent_runtime_stale",
+            "retryable": True,
+        }, status=409)
     except Exception as e:
         logger.warning("Handoff summary generation failed: %s", e)
         summary_text = _fallback_handoff_summary(msgs)
@@ -25262,9 +26117,6 @@ def _handle_session_import(handler, body):
     publish_session_list_changed("session_import")
     return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
 
-
-# ── MCP Server helpers ──
-from api.config import get_config, _save_yaml_config_file, _get_config_path, reload_config
 
 def _mask_secrets(obj):
     """Mask sensitive values in env vars and headers."""

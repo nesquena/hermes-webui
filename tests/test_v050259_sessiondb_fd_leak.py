@@ -1,18 +1,25 @@
-"""Regression tests for v0.50.259 — SessionDB FD leak fixes from PR #1421
-plus Opus pre-release advisor follow-up extending the fix to LRU eviction.
+"""Regression tests for SessionDB FD-leak fixes (PR #1421) plus the
+subagent shared-handle race (close-under-live-subagents).
 
-The bug: `_run_agent_streaming` created a new `SessionDB` per request and
+History
+-------
+PR #1421: `_run_agent_streaming` created a new `SessionDB` per request and
 replaced the cached agent's `_session_db` without closing the old one.
 After ~73 messages on a long-lived agent, leaked FDs exhausted the 256 FD
-default limit causing `EMFILE` crashes.
+default limit causing `EMFILE` crashes. Fix: close the previous handle
+when it is safe to replace it.
 
-Fix path 1 (PR #1421 by @wali-reheman): close `agent._session_db` before
-replacing it on the cached-agent reuse path.
+Follow-up (this change): always-close-before-replace is *not* safe when
+background subagents still hold a reference to the same SessionDB object
+(delegate_tool copies ``parent._session_db`` by ref). A server-side wakeup
+/ new turn for the parent session was closing the shared handle mid-child-
+run, producing:
 
-Fix path 2 (this PR Opus follow-up): same shape on the LRU eviction path.
-When `SESSION_AGENT_CACHE.popitem(last=False)` evicts an old agent, its
-`_session_db` is dropped on the floor and only released when GC eventually
-finalizes the agent — which on a long-running server may be never.
+    Session DB append_message failed: 'NoneType' object has no attribute 'execute'
+
+Policy now (``_adopt_session_db_for_cached_agent``):
+- existing handle still open → keep it, close the unused *new* handle
+- existing handle missing/closed → adopt the new handle (close dead one)
 """
 
 from __future__ import annotations
@@ -25,38 +32,56 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 
 
-# ── 1: source-level pin: cached-agent-reuse path closes _session_db ─────────
+# ── 1: source-level pin: cached-agent reuse uses the adopt helper ──────────
 
 
-def test_cached_agent_reuse_closes_old_session_db():
-    """The cached-agent reuse path in `_run_agent_streaming` MUST close the
-    old `_session_db` before replacing it. Without this, every streaming
-    request leaks a SessionDB connection (3 FDs once WAL is active)."""
+def test_cached_agent_reuse_uses_adopt_helper():
+    """Cached-agent reuse must go through `_adopt_session_db_for_cached_agent`
+    so a still-open SessionDB is reused (subagent-safe) and only a dead handle
+    is closed+replaced (still EMFILE-safe)."""
     src = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
 
-    # Find the cached-agent reuse block (where callbacks are refreshed).
-    # The replacement of agent._session_db must be preceded by a close().
     reuse_idx = src.find("Refresh per-turn callbacks")
     assert reuse_idx != -1, "cached-agent reuse block missing"
     block = src[reuse_idx : reuse_idx + 2500]
 
-    # Must close before replace.
-    assert "agent._session_db.close()" in block, (
-        "cached-agent reuse path must call agent._session_db.close() before "
-        "replacing it. Without this, FDs leak on every streaming request "
-        "and the server EMFILE-crashes after ~73 messages. See PR #1421."
+    assert "_adopt_session_db_for_cached_agent" in block, (
+        "cached-agent reuse path must call _adopt_session_db_for_cached_agent "
+        "instead of unconditionally closing agent._session_db. Unconditional "
+        "close breaks background subagents that share the handle by reference."
     )
-    # And the close must come BEFORE the replacement (lexically).
-    close_idx = block.find("agent._session_db.close()")
-    replace_idx = block.find("agent._session_db = _session_db")
-    assert close_idx != -1 and replace_idx != -1
-    assert close_idx < replace_idx, (
-        "close() must lexically precede the assignment so the old connection "
-        "is released before the reference is rebound."
+    assert "agent._session_db = _session_db" in block, (
+        "reuse path must still assign the adopted SessionDB onto the agent"
+    )
+    # The old unconditional-close pattern must not remain in the reuse block.
+    assert "agent._session_db.close()" not in block, (
+        "unconditional agent._session_db.close() in the reuse path is the "
+        "subagent race; close is now owned by _adopt_session_db_for_cached_agent"
     )
 
 
-# ── 2: source-level pin: LRU eviction path also closes _session_db ──────────
+def test_adopt_and_is_open_helpers_exist():
+    src = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
+    assert "def _session_db_is_open(" in src
+    assert "def _adopt_session_db_for_cached_agent(" in src
+    # self-heal path must also refuse to close a still-open handle
+    replace_idx = src.find("def _replace_session_db_in_kwargs")
+    assert replace_idx != -1
+    block = src[replace_idx : replace_idx + 1200]
+    assert "_session_db_is_open" in block, (
+        "_replace_session_db_in_kwargs must guard on _session_db_is_open so "
+        "credential self-heal cannot close a handle live subagents share"
+    )
+    # adopt helper must log failed closes (not bare `pass`) so EMFILE pressure
+    # from a failed close is diagnosable — matches _replace_session_db_in_kwargs.
+    adopt_idx = src.find("def _adopt_session_db_for_cached_agent")
+    assert adopt_idx != -1
+    adopt_block = src[adopt_idx : adopt_idx + 1800]
+    assert 'Failed to close unused session_db handle in adopt helper' in adopt_block
+    assert "logger.debug" in adopt_block
+
+
+# ── 2: source-level pin: LRU eviction path still closes _session_db ────────
 
 
 def test_lru_eviction_closes_evicted_agent_session_db():
@@ -66,27 +91,21 @@ def test_lru_eviction_closes_evicted_agent_session_db():
     on GC finalization which may never run on a long-lived server.
 
     Fix: capture the evicted entry, close its agent's `_session_db` before
-    dropping the reference.
+    dropping the reference. (Eviction is a true session boundary — no live
+    subagents are expected to still be writing into that agent.)
     """
     src = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
 
-    # The eviction site uses popitem(last=False). The evicted entry must be
-    # captured (not discarded with `_`) and the agent's _session_db closed.
     eviction_idx = src.find("Evicted LRU agent from cache")
     assert eviction_idx != -1, "LRU eviction debug log missing"
-    # Look in a window around the eviction.
     block = src[max(0, eviction_idx - 1500) : eviction_idx + 200]
 
-    # Negative pattern: the old `evicted_sid, _ = ...` discard form must NOT
-    # be present — that's the bug shape.
     assert "evicted_sid, _ = SESSION_AGENT_CACHE.popitem" not in block, (
-        "LRU eviction must capture the evicted entry so the agent\'s "
+        "LRU eviction must capture the evicted entry so the agent's "
         "_session_db can be closed. The `evicted_sid, _ = ...` discard form "
         "is the original bug shape."
     )
 
-    # Positive pattern: eviction must call the lifecycle helper, and the helper
-    # must close the evicted agent's SessionDB after provider teardown.
     assert "_close_evicted_agent_at_session_boundary(_evicted_sid, _evicted_agent)" in block, (
         "LRU eviction must route the evicted agent through the session-boundary "
         "close helper."
@@ -104,16 +123,7 @@ def test_lru_eviction_closes_evicted_agent_session_db():
 
 
 def test_session_db_close_is_idempotent():
-    """`SessionDB.close()` must be safe to call multiple times. The fix
-    relies on this — if a future code path closes the same `_session_db`
-    after we've swapped it, the second close is a benign no-op.
-
-    Skipped when hermes_state is not on the import path (e.g. on the GH
-    Actions runner that only has the WebUI repo, not the agent repo).
-    The source-level pin in test_cached_agent_reuse_closes_old_session_db
-    catches revert of the close() call; this test only adds runtime
-    confirmation when both repos are co-located.
-    """
+    """`SessionDB.close()` must be safe to call multiple times."""
     import importlib.util
     if importlib.util.find_spec("hermes_state") is None:
         pytest.skip("hermes_state not on import path (CI-only — agent repo not present)")
@@ -123,65 +133,123 @@ def test_session_db_close_is_idempotent():
     with tempfile.TemporaryDirectory() as tmpd:
         db_path = Path(tmpd) / "test.db"
         db = SessionDB(db_path=db_path)
-        # Force connection open by issuing a query.
         with db._lock:
             db._conn.execute("SELECT 1")
-        # First close
         db.close()
         assert db._conn is None
-        # Second close — must not raise.
         db.close()
         assert db._conn is None
-        # Third close — still safe.
         db.close()
 
 
-# ── 4: behavioral: cached-agent reuse with mock agent ───────────────────────
+# ── 4: behavioral: adopt helper keeps open handles, closes dead ones ───────
 
 
-def test_cached_agent_reuse_calls_close_on_old_session_db():
-    """End-to-end: simulate the cached-agent reuse code path with a mock
-    agent and verify the mock SessionDB.close() is called when _session_db
-    is replaced. Pins the runtime behavior, not just the source pattern."""
-    import sys
-    sys.path.insert(0, str(REPO))
+class _MockSessionDB:
+    def __init__(self, name, open_=True):
+        self.name = name
+        self.close_calls = 0
+        # Mirror SessionDB: open → _conn is truthy; closed → _conn is None.
+        self._conn = object() if open_ else None
 
-    class MockSessionDB:
-        def __init__(self, name):
-            self.name = name
-            self.close_calls = 0
-        def close(self):
-            self.close_calls += 1
+    def close(self):
+        self.close_calls += 1
+        self._conn = None
 
-    class MockAgent:
-        def __init__(self, db):
-            self._session_db = db
-            self.stream_delta_callback = None
-            self.tool_progress_callback = None
-            self._api_call_count = 0
-            self._interrupted = False
-            self._interrupt_message = None
 
-    # Simulate the inner block of the cached-agent reuse path. We replicate
-    # the pattern manually rather than importing _run_agent_streaming
-    # directly because that function has many other side effects.
-    old_db = MockSessionDB("old")
-    new_db = MockSessionDB("new")
-    agent = MockAgent(old_db)
+class _MockAgent:
+    def __init__(self, db):
+        self._session_db = db
+        self.stream_delta_callback = None
+        self.tool_progress_callback = None
+        self._api_call_count = 0
+        self._interrupted = False
+        self._interrupt_message = None
 
-    # Mirror the production code path:
-    if hasattr(agent, "_session_db") and agent._session_db is not None:
-        try:
-            agent._session_db.close()
-        except Exception:
-            pass
-    agent._session_db = new_db
 
-    assert old_db.close_calls == 1, (
-        "old SessionDB must be closed exactly once when replaced on cached agent"
-    )
-    assert new_db.close_calls == 0, "new SessionDB should not be closed"
+def _import_adopt_helpers():
+    """Import the production helpers.
+
+    No source-slicing / exec fallback: that path breaks as soon as the helpers
+    reference module-level names (e.g. ``logger.debug``) or another def is
+    inserted between the markers. Prefer a real import; skip the behavioral
+    suite when the package cannot be imported (CI without full deps).
+    Source-level pins above still catch reverts without importing streaming.
+    """
+    try:
+        from api.streaming import (  # type: ignore
+            _adopt_session_db_for_cached_agent,
+            _session_db_is_open,
+        )
+    except Exception as exc:
+        pytest.skip(f"api.streaming helpers not importable: {exc}")
+    return _session_db_is_open, _adopt_session_db_for_cached_agent
+
+
+def test_adopt_reuses_open_session_db_and_closes_new():
+    """Live (open) existing handle must be kept; unused new handle closed.
+
+    This is the subagent-safe path: children hold a reference to `old_db`.
+    """
+    _is_open, adopt = _import_adopt_helpers()
+    old_db = _MockSessionDB("old", open_=True)
+    new_db = _MockSessionDB("new", open_=True)
+    agent = _MockAgent(old_db)
+
+    result = adopt(agent, new_db)
+
+    assert result is old_db
+    assert agent._session_db is old_db
+    assert old_db.close_calls == 0, "must not close the live shared handle"
+    assert new_db.close_calls == 1, "unused per-request handle must be closed (FD leak)"
+    assert _is_open(old_db) is True
+    assert _is_open(new_db) is False
+
+
+def test_adopt_replaces_closed_session_db():
+    """Dead existing handle is closed (idempotent) and replaced with the new one."""
+    _is_open, adopt = _import_adopt_helpers()
+    old_db = _MockSessionDB("old", open_=False)
+    new_db = _MockSessionDB("new", open_=True)
+    agent = _MockAgent(old_db)
+
+    result = adopt(agent, new_db)
+
+    assert result is new_db
     assert agent._session_db is new_db
+    assert old_db.close_calls == 1
+    assert new_db.close_calls == 0
+
+
+def test_adopt_handles_missing_existing():
+    _is_open, adopt = _import_adopt_helpers()
+    new_db = _MockSessionDB("new", open_=True)
+    agent = _MockAgent(None)
+    agent._session_db = None
+
+    result = adopt(agent, new_db)
+
+    assert result is new_db
+    assert agent._session_db is new_db
+    assert new_db.close_calls == 0
+
+
+def test_cached_agent_reuse_calls_adopt_semantics():
+    """End-to-end mirror of the production reuse block using the real helper."""
+    _is_open, adopt = _import_adopt_helpers()
+    old_db = _MockSessionDB("old", open_=True)
+    new_db = _MockSessionDB("new", open_=True)
+    agent = _MockAgent(old_db)
+    _session_db = new_db
+
+    # Mirror production:
+    if _session_db is not None:
+        _session_db = adopt(agent, _session_db)
+        agent._session_db = _session_db
+
+    assert agent._session_db is old_db
+    assert old_db.close_calls == 0
+    assert new_db.close_calls == 1
 
 
 # ── 5: behavioral: LRU eviction with mock agents ────────────────────────────
@@ -192,24 +260,12 @@ def test_lru_eviction_closes_evicted_session_db():
     SessionDB.close() is called."""
     import collections
 
-    class MockSessionDB:
-        def __init__(self, name):
-            self.name = name
-            self.close_calls = 0
-        def close(self):
-            self.close_calls += 1
-
-    class MockAgent:
-        def __init__(self, db):
-            self._session_db = db
-
     cache = collections.OrderedDict()
-    db1, db2, db3 = MockSessionDB("a"), MockSessionDB("b"), MockSessionDB("c")
-    cache["sid-a"] = (MockAgent(db1), "sig1")
-    cache["sid-b"] = (MockAgent(db2), "sig2")
-    cache["sid-c"] = (MockAgent(db3), "sig3")
+    db1, db2, db3 = _MockSessionDB("a"), _MockSessionDB("b"), _MockSessionDB("c")
+    cache["sid-a"] = (_MockAgent(db1), "sig1")
+    cache["sid-b"] = (_MockAgent(db2), "sig2")
+    cache["sid-c"] = (_MockAgent(db3), "sig3")
 
-    # Mirror the production eviction path with MAX=2:
     MAX = 2
     while len(cache) > MAX:
         evicted_sid, evicted_entry = cache.popitem(last=False)
@@ -220,8 +276,59 @@ def test_lru_eviction_closes_evicted_session_db():
         except Exception:
             pass
 
-    # First-inserted entry (sid-a) was evicted.
     assert "sid-a" not in cache
     assert db1.close_calls == 1, "evicted agent's SessionDB must be closed exactly once"
     assert db2.close_calls == 0, "remaining agents' SessionDBs must not be touched"
     assert db3.close_calls == 0
+
+
+# ── 6: self-heal path must not reuse a CLOSED handle when the rebuild fails ──
+
+
+def _import_replace_helper():
+    """Import the real credential-self-heal SessionDB replacer."""
+    try:
+        from api.streaming import _replace_session_db_in_kwargs  # type: ignore
+    except Exception as exc:
+        pytest.skip(f"api.streaming not importable: {exc}")
+    return _replace_session_db_in_kwargs
+
+
+def test_replace_degrades_to_none_when_rebuild_fails_and_old_is_closed(monkeypatch):
+    """Credential self-heal regression (Codex gate finding on PR #6143).
+
+    When ``_build_session_db_for_stream`` returns None (rebuild failed) AND the
+    prior handle is already CLOSED, ``_replace_session_db_in_kwargs`` must leave
+    ``agent_kwargs['session_db'] = None`` — as master did — so the rebuilt agent
+    lazily reinitialises. Retaining the closed handle (the pre-fix behaviour)
+    makes every persist/search fail with
+    ``'NoneType' object has no attribute 'execute'`` while the chat continues.
+    """
+    import api.streaming as streaming
+
+    _replace = _import_replace_helper()
+    monkeypatch.setattr(streaming, "_build_session_db_for_stream", lambda _p: None)
+
+    old_db = _MockSessionDB("old", open_=False)  # already closed
+    kwargs = {"session_db": old_db}
+    result = _replace(kwargs, "/tmp/does-not-matter.db")
+
+    assert result is None, "must not hand back a closed handle when rebuild fails"
+    assert kwargs["session_db"] is None, "kwargs must degrade to None (clean lazy reinit)"
+
+
+def test_replace_keeps_open_handle_when_rebuild_fails(monkeypatch):
+    """Inverse: a still-OPEN prior handle (held by live subagents) is retained
+    when the rebuild fails — do not orphan a live shared connection."""
+    import api.streaming as streaming
+
+    _replace = _import_replace_helper()
+    monkeypatch.setattr(streaming, "_build_session_db_for_stream", lambda _p: None)
+
+    old_db = _MockSessionDB("old", open_=True)  # still live (subagents hold it)
+    kwargs = {"session_db": old_db}
+    result = _replace(kwargs, "/tmp/does-not-matter.db")
+
+    assert result is old_db, "a live handle must be kept when the rebuild fails"
+    assert kwargs["session_db"] is old_db
+    assert old_db.close_calls == 0, "must not close a live shared handle"

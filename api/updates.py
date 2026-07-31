@@ -24,7 +24,9 @@ from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlparse
 
+from api.agent_health import get_active_profile_gateway_running_pid
 from api.gateway_restart import restart_active_profile_gateway
+from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,7 @@ _cache_lock = threading.Lock()
 _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
+_AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
 _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
@@ -453,7 +456,7 @@ def _describe_git_version(path: Path, *, timeout=5, dirty_timeout=1) -> str | No
 
 
 def _detect_webui_version() -> str:
-    """Detect the running WebUI version from git or a baked-in fallback file.
+    """Detect the running WebUI version from git or installed fallback files.
 
     Resolution order:
       1. ``git describe --tags --always --dirty`` — works in any git checkout.
@@ -463,7 +466,9 @@ def _detect_webui_version() -> str:
       2. ``api/_version.py`` — a fallback written by the Docker / CI release
          workflow when ``.git`` is not present in the image.  Expected to define
          ``__version__ = 'vX.Y.Z'``.
-      3. ``'unknown'`` — last resort; displayed as-is in the settings badge.
+      3. ``api/_scm_version.py`` — setuptools-scm output in an installed wheel.
+         Its PEP 440 value is normalized to the channel-neutral ``v...`` form.
+      4. ``'unknown'`` — last resort; displayed as-is in the settings badge.
     """
     # Timeout capped at 3s: git describe on a healthy local repo is <50ms;
     # a 10s stall on import (NFS-mounted .git, broken git binary) is unacceptable.
@@ -486,6 +491,16 @@ def _detect_webui_version() -> str:
                 return m.group(1)
         except Exception:
             pass
+
+    # Installed-wheel fallback: setuptools-scm writes a generated module that
+    # is separate from the Docker/Nix-owned _version.py contract above.
+    try:
+        from api._scm_version import __version__ as scm_version
+        scm_version = str(scm_version).strip()
+        if scm_version:
+            return scm_version if scm_version.startswith(('v', 'exp-v')) else f'v{scm_version}'
+    except Exception:
+        pass
 
     return 'unknown'
 
@@ -1814,11 +1829,62 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
         - ok is False when restart did not complete and callers must abort success.
         - restart_payload contains helper status fields for response shaping.
     """
-    restart_result = restart_active_profile_gateway()
+    target_profile = str(get_active_profile_name() or "default").strip() or "default"
+    gateway_pid_before_restart = get_active_profile_gateway_running_pid(profile=target_profile)
+    restart_result = restart_active_profile_gateway(profile=target_profile)
     status = str(restart_result.get("status") or "")
     if status in {"completed", "in_progress"}:
         return True, restart_result
-    return False, restart_result
+    if status != "failed":
+        return False, restart_result
+
+    # launchd can briefly fail to spawn the replacement gateway while it is
+    # rotating the supervised process (#6045). Retry exactly once after a
+    # bounded delay so an already-applied Agent update is not reported as a
+    # complete failure because of that transient process handoff.
+    time.sleep(_AGENT_GATEWAY_RESTART_RETRY_DELAY_S)
+    retry_result = restart_active_profile_gateway(profile=target_profile)
+    retry_status = str(retry_result.get("status") or "")
+    if retry_status in {"completed", "in_progress"}:
+        return True, {
+            **retry_result,
+            "retry_attempted": True,
+            "initial_failure": restart_result.get("message"),
+        }
+    if retry_status != "failed":
+        return False, {
+            **retry_result,
+            "retry_attempted": True,
+            "initial_failure": restart_result.get("message"),
+        }
+
+    # A restart command can still exit non-zero after launchd has recovered the
+    # service. Only accept that recovery when the confirmed local PID changed;
+    # a merely-alive old gateway has not loaded the updated Agent checkout.
+    time.sleep(_AGENT_GATEWAY_RESTART_RETRY_DELAY_S)
+    gateway_pid_after_retry = get_active_profile_gateway_running_pid(profile=target_profile)
+    if (
+        gateway_pid_before_restart is not None
+        and gateway_pid_after_retry is not None
+        and gateway_pid_after_retry != gateway_pid_before_restart
+    ):
+        return True, {
+            "status": "completed",
+            "message": "Gateway service recovered after a transient restart failure",
+            "retry_attempted": True,
+            "process_replaced": True,
+            "initial_failure": restart_result.get("message"),
+            "retry_failure": retry_result.get("message"),
+        }
+
+    initial_message = str(restart_result.get("message") or "Restart failed")
+    retry_message = str(retry_result.get("message") or "retry did not complete")
+    return False, {
+        **retry_result,
+        "message": f"{initial_message}; recovery retry did not complete: {retry_message}",
+        "retry_attempted": True,
+        "initial_failure": restart_result.get("message"),
+    }
 
 
 def _agent_gateway_restart_failure_message(target: str, restart_result: dict) -> str:
