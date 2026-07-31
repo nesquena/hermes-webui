@@ -339,7 +339,8 @@ def test_cache_render_seeds_streaming_transition_state_for_visible_spinners():
     render_block = SESSIONS_JS[render_idx:SESSIONS_JS.find("const hasUnread=", render_idx)]
 
     assert "if (!s || !s.session_id || !isStreaming) return;" in remember_block
-    assert "_sessionStreamingById.set(_sidebarRuntimeKey(s), true);" in remember_block
+    assert "const runtimeKey=typeof _sidebarRuntimeKey==='function'" in remember_block
+    assert "_sessionStreamingById.set(runtimeKey, true);" in remember_block
     assert "const ownStreaming=_isSessionEffectivelyStreaming(s)" in render_block
     assert "_rememberRenderedStreamingState(s, ownStreaming);" in render_block, (
         "renderSessionListFromCache can display a spinner from local INFLIGHT "

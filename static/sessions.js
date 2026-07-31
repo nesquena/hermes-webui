@@ -533,9 +533,15 @@ function _markSessionCompletionUnreadIfBackground(sid, messageCount = null, meta
   let count = Number.isFinite(messageCount) ? Number(messageCount) : NaN;
   if (!Number.isFinite(count)) {
     const runtimeKey=typeof _sidebarRuntimeKey==='function'?_sidebarRuntimeKey(sid):sid;
+    const sessionId=typeof _sidebarRuntimeSessionId==='function'
+      ?_sidebarRuntimeSessionId(sid):sid;
+    const snapshotRows=Array.isArray(_allSessions)?_allSessions:[];
     const snapshot = _sessionListSnapshotById.get(runtimeKey)
-      || (_allSessions || []).find(s => _sidebarSessionMatchesActiveSession(s,sid,
-        _buildSidebarLineageIndex(_allSessions,[])))
+      || snapshotRows.find(s => s && s.session_id===sessionId
+        && (typeof _sidebarSessionMatchesActiveSession!=='function'
+          || (typeof _buildSidebarLineageIndex==='function'
+            &&_sidebarSessionMatchesActiveSession(s,sessionId,
+              _buildSidebarLineageIndex(snapshotRows,[])))))
       || null;
     count = Number(snapshot && snapshot.message_count) || 0;
   }
@@ -964,7 +970,10 @@ function _sidebarRuntimeRowForSid(sid, preferredRow=null){
 
 function _sidebarStateKey(sid, row=null){
   const normalized=String(sid||'').trim();
-  const scoped=_sidebarRuntimeKey(row||normalized,normalized);
+  const scoped=typeof _sidebarRuntimeKey==='function'
+    ?_sidebarRuntimeKey(row||normalized,normalized)
+    :(typeof _sidebarRuntimeIdentityKey==='function'
+      ?_sidebarRuntimeIdentityKey(row||normalized,normalized):normalized);
   return {key:scoped||normalized, legacy:normalized};
 }
 
@@ -1093,18 +1102,19 @@ function _isSessionActivelyViewedForList(sid, row = null) {
 
 function _isSessionLocallyStreaming(s) {
   if (!s || !s.session_id) return false;
-  const isSameSession=typeof S!=='undefined'&&S&&S.session&&s.session_id===S.session.session_id;
+  const isActive = S.session && s.session_id === S.session.session_id;
   const isScopedMatch=typeof _sidebarSessionMatchesActiveSession==='function'
     &&typeof _buildSidebarLineageIndex==='function'
     &&typeof S!=='undefined'&&S&&S.session
     &&_sidebarSessionMatchesActiveSession(s,S.session.session_id,
       _buildSidebarLineageIndex([s,S.session],[]));
-  const isActive=isSameSession&&(typeof _sidebarSessionMatchesActiveSession!=='function'||isScopedMatch);
+  const scopedActive=isActive&&(typeof _sidebarSessionMatchesActiveSession!=='function'||isScopedMatch);
   // For the active session, rely on S.busy to indicate an ongoing stream.
   // INFLIGHT entries for non-active sessions are artifacts of interrupted
   // streams (page refresh, network disconnect, gateway restart) where
   // `delete INFLIGHT[sid]` was never reached — they should NOT cause the
   // sidebar spinner to appear on completed sessions. (#2066)
+  if (isActive && typeof _sidebarSessionMatchesActiveSession==='function'&&!isScopedMatch) return false;
   return isActive && Boolean(S.busy);
 }
 
@@ -1153,7 +1163,10 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
     S.session.active_stream_id=null;
     S.session.pending_user_message=null;
   }
-  const runtimeKey=_sidebarRuntimeKey(serverRow||S.session,sid);
+  const runtimeKey=typeof _sidebarRuntimeKey==='function'
+    ?_sidebarRuntimeKey(serverRow||S.session,sid)
+    :(typeof _sidebarRuntimeIdentityKey==='function'
+      ?_sidebarRuntimeIdentityKey(serverRow||S.session,sid):sid);
   _sessionStreamingById.set(runtimeKey, false);
   _forgetObservedStreamingSession(serverRow||sid);
   if (typeof hideApprovalCard==='function') hideApprovalCard(true);
@@ -1247,13 +1260,6 @@ function _purgeStaleInflightEntries() {
       continue;
     }
     if (!sessionsById.has(sid)) {
-      const candidates=sessionsById.get(sid)||[];
-      const candidateIndex=typeof _buildSidebarLineageIndex==='function'
-        ?_buildSidebarLineageIndex([
-          ...candidates,
-          ...(typeof S!=='undefined'&&S&&S.session?[S.session]:[])
-        ],[]):null;
-      const knownSession=candidates.find(item=>_sidebarSessionMatchesActiveSession(item,sid,candidateIndex))||null;
       const knownSource = sourceForRuntimeSid(sid);
       if (currentSidebarSource && (!knownSource || knownSource !== currentSidebarSource)) {
         continue;
@@ -1270,7 +1276,8 @@ function _purgeStaleInflightEntries() {
         ...candidates,
         ...(typeof S!=='undefined'&&S&&S.session?[S.session]:[])
       ],[]):null;
-    const s=candidates.find(item=>_sidebarSessionMatchesActiveSession(item,sid,candidateIndex))||null;
+    const s=candidates.find(item=>typeof _sidebarSessionMatchesActiveSession!=='function'
+      ||_sidebarSessionMatchesActiveSession(item,sid,candidateIndex))||null;
     if(!s) continue;
     if (!s.is_streaming) {
       // Session exists but is not streaming — purge it.
@@ -1314,14 +1321,21 @@ function _rememberSessionListSource(s, sid = null, allowScopeFallback = true) {
     && typeof _sessionListSourceById !== 'undefined'
     && _sessionListSourceById
     && typeof _sessionListSourceById.set === 'function') {
-  _sessionListSourceById.set(_sidebarRuntimeKey(s||resolvedSid,resolvedSid), source);
+  const runtimeKey=typeof _sidebarRuntimeKey==='function'
+    ?_sidebarRuntimeKey(s||resolvedSid,resolvedSid)
+    :(typeof _sidebarRuntimeIdentityKey==='function'
+      ?_sidebarRuntimeIdentityKey(s||resolvedSid,resolvedSid):resolvedSid);
+  _sessionListSourceById.set(runtimeKey, source);
   }
 }
 
 function _rememberRenderedStreamingState(s, isStreaming) {
   if (!s || !s.session_id || !isStreaming) return;
   if (typeof _rememberSessionListSource === 'function') _rememberSessionListSource(s);
-  _sessionStreamingById.set(_sidebarRuntimeKey(s), true);
+  const runtimeKey=typeof _sidebarRuntimeKey==='function'
+    ?_sidebarRuntimeKey(s)
+    :(typeof _sidebarRuntimeIdentityKey==='function'?_sidebarRuntimeIdentityKey(s):s.session_id);
+  _sessionStreamingById.set(runtimeKey, true);
   _rememberObservedStreamingSession(s);
 }
 
@@ -1469,7 +1483,9 @@ function _renderRuntimeJournalAnchorActivityScene(activeStreamId, sid){
 function _rememberRenderedSessionSnapshot(s) {
   if (!s || !s.session_id) return;
   if (typeof _rememberSessionListSource === 'function') _rememberSessionListSource(s);
-  const key=_sidebarRuntimeKey(s);
+  const key=typeof _sidebarRuntimeKey==='function'
+    ?_sidebarRuntimeKey(s)
+    :(typeof _sidebarRuntimeIdentityKey==='function'?_sidebarRuntimeIdentityKey(s):s.session_id);
   const previous = _sessionListSnapshotById.get(key);
   if (previous) return;
   _sessionListSnapshotById.set(key, {
@@ -4421,10 +4437,13 @@ function _sessionDeleteDescription(session){
 }
 function _optimisticallyArchiveSessionInList(sid, archived, row = null){
   if(!sid||!Array.isArray(_allSessions)) return;
-  const targetKey=_sidebarRuntimeKey(row||sid,sid);
+  const runtimeKeyFor=(item,id)=>typeof _sidebarRuntimeKey==='function'
+    ?_sidebarRuntimeKey(item||id,id)
+    :(typeof _sidebarRuntimeIdentityKey==='function'?_sidebarRuntimeIdentityKey(item||id,id):id);
+  const targetKey=runtimeKeyFor(row,sid);
   let changed=false;
   _allSessions=_allSessions.map(s=>{
-    if(!s||_sidebarRuntimeKey(s,sid)!==targetKey) return s;
+    if(!s||runtimeKeyFor(s,sid)!==targetKey) return s;
     changed=true;
     return {...s,archived:!!archived};
   });
@@ -4432,9 +4451,12 @@ function _optimisticallyArchiveSessionInList(sid, archived, row = null){
 }
 function _optimisticallyRemoveSessionFromList(sid, row = null){
   if(!sid||!Array.isArray(_allSessions)) return;
-  const targetKey=_sidebarRuntimeKey(row||sid,sid);
+  const runtimeKeyFor=(item,id)=>typeof _sidebarRuntimeKey==='function'
+    ?_sidebarRuntimeKey(item||id,id)
+    :(typeof _sidebarRuntimeIdentityKey==='function'?_sidebarRuntimeIdentityKey(item||id,id):id);
+  const targetKey=runtimeKeyFor(row,sid);
   const before=_allSessions.length;
-  _allSessions=_allSessions.filter(s=>!s||_sidebarRuntimeKey(s,sid)!==targetKey);
+  _allSessions=_allSessions.filter(s=>!s||runtimeKeyFor(s,sid)!==targetKey);
   if(_selectedSessions&&_selectedSessions.has(sid)) _selectedSessions.delete(sid);
   if(typeof _dropStaleOptimisticSessionRow==='function') _dropStaleOptimisticSessionRow(sid);
   if(_allSessions.length!==before) renderSessionListFromCache();
@@ -5543,7 +5565,9 @@ function _isOptimisticFirstTurnSessionRow(s){
     s.has_pending_user_message||
     s.pending_started_at||
     _isSessionLocallyStreaming(s)||
-    _sessionStreamingById.get(_sidebarRuntimeKey(s))===true
+    _sessionStreamingById.get(typeof _sidebarRuntimeKey==='function'
+      ?_sidebarRuntimeKey(s)
+      :(typeof _sidebarRuntimeIdentityKey==='function'?_sidebarRuntimeIdentityKey(s):s.session_id))===true
   );
 }
 
@@ -5570,7 +5594,9 @@ function _dropStaleOptimisticSessionRow(sid){
     if(typeof clearInflightState==='function') clearInflightState(sid);
   }
   if(typeof _sessionStreamingById!=='undefined'&&_sessionStreamingById&&typeof _sessionStreamingById.set==='function'){
-    _sessionStreamingById.set(_sidebarRuntimeKey(sid),false);
+    _sessionStreamingById.set(typeof _sidebarRuntimeKey==='function'
+      ?_sidebarRuntimeKey(sid)
+      :(typeof _sidebarRuntimeIdentityKey==='function'?_sidebarRuntimeIdentityKey(sid):sid),false);
   }
   if(typeof _forgetObservedStreamingSession==='function') _forgetObservedStreamingSession(sid);
 }
@@ -5578,11 +5604,15 @@ function _dropStaleOptimisticSessionRow(sid){
 function _mergeOptimisticFirstTurnSessions(fetchedSessions){
   const merged=Array.isArray(fetchedSessions)?[...fetchedSessions]:[];
   const byKey=new Map();
-  merged.forEach((s,idx)=>{if(s&&s.session_id) byKey.set(_sidebarRuntimeKey(s),idx);});
+  const runtimeKeyFor=(item,id=null)=>typeof _sidebarRuntimeKey==='function'
+    ?_sidebarRuntimeKey(item||id,id)
+    :(typeof _sidebarRuntimeIdentityKey==='function'
+      ?_sidebarRuntimeIdentityKey(item||id,id):String(id||(item&&item.session_id)||''));
+  merged.forEach((s,idx)=>{if(s&&s.session_id) byKey.set(runtimeKeyFor(s),idx);});
   for(const local of Array.isArray(_allSessions)?_allSessions:[]){
     if(!_isOptimisticFirstTurnSessionRow(local)) continue;
     const sid=local.session_id;
-    const key=_sidebarRuntimeKey(local);
+    const key=runtimeKeyFor(local);
     const idx=byKey.has(key)?byKey.get(key):-1;
     if(idx>=0){
       const fetched=merged[idx]||{};
@@ -5742,7 +5772,10 @@ function _applySessionListPayload(sessData, projData, opts){
   }
   const serverSessions=_optimisticallyRemovedSessionIds.size
     ? (sessData.sessions||[]).filter(s=>s
-      &&!_optimisticallyRemovedSessionIds.has(_sidebarRuntimeKey(s,s.session_id))
+      &&!_optimisticallyRemovedSessionIds.has(typeof _sidebarRuntimeKey==='function'
+        ?_sidebarRuntimeKey(s,s.session_id)
+        :(typeof _sidebarRuntimeIdentityKey==='function'
+          ?_sidebarRuntimeIdentityKey(s,s.session_id):s.session_id))
       &&!_optimisticallyRemovedSessionIds.has(s.session_id))
     : (sessData.sessions||[]);
   _sidebarReferenceSessions = Array.isArray(sessData.sidebar_reference_sessions)
@@ -7665,10 +7698,15 @@ function _sessionRowsWithActiveEphemeralSession(rows){
   rows=Array.isArray(rows)?rows:[];
   if(!S.session||!S.session.session_id) return rows;
   const sid=S.session.session_id;
-  const lineageIndex=_buildSidebarLineageIndex(
-    [...rows, S.session],
-    typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
-  if(rows.some(s=>_sidebarSessionMatchesActiveSession(s,sid,lineageIndex))) return rows;
+  const lineageIndex=typeof _buildSidebarLineageIndex==='function'
+    ?_buildSidebarLineageIndex(
+      [...rows, S.session],
+      typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[])
+    :null;
+  const hasSessionId=rows.some(s=>s&&s.session_id===sid);
+  const hasScopedActiveRow=lineageIndex&&typeof _sidebarSessionMatchesActiveSession==='function'
+    &&rows.some(s=>_sidebarSessionMatchesActiveSession(s,sid,lineageIndex));
+  if(hasScopedActiveRow||(!lineageIndex&&hasSessionId)) return rows;
   const nowSec=Math.floor(Date.now()/1000);
   const activeRow={
     ...S.session,
@@ -7732,7 +7770,10 @@ function clearOptimisticSessionStreaming(sid){
       [...(_allSessions||[]), ...(S.session?[S.session]:[])],
       typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
     const activeRow=(_allSessions||[]).find(s=>_sidebarSessionMatchesActiveSession(s,sid,lineageIndex));
-    _sessionStreamingById.set(_sidebarRuntimeKey(activeRow||sid,sid),false);
+    _sessionStreamingById.set(typeof _sidebarRuntimeKey==='function'
+      ?_sidebarRuntimeKey(activeRow||sid,sid)
+      :(typeof _sidebarRuntimeIdentityKey==='function'
+        ?_sidebarRuntimeIdentityKey(activeRow||sid,sid):sid),false);
   }
   if(typeof _forgetObservedStreamingSession==='function') _forgetObservedStreamingSession(sid);
   renderSessionListFromCache();
@@ -9534,7 +9575,10 @@ async function deleteSession(sid, beforeDelete=null){
   const reflowPositions=_captureSessionReflowPositions();
   const beforeDeleteHold=beforeDelete?Promise.resolve().then(beforeDelete):null;
   const previousSessions=_allSessions;
-  const optimisticSessionKey=_sidebarRuntimeKey(session||sid,sid);
+  const optimisticSessionKey=typeof _sidebarRuntimeKey==='function'
+    ?_sidebarRuntimeKey(session||sid,sid)
+    :(typeof _sidebarRuntimeIdentityKey==='function'
+      ?_sidebarRuntimeIdentityKey(session||sid,sid):sid);
   let optimisticRendered=false;
   const deleteRequest=api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})}).then(response=>{
     _clearHandoffStorageForSession(sid);
