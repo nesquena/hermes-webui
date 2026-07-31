@@ -1419,6 +1419,16 @@ async function send(){
   }
   let _slashDisplayTextOverride=null;
   let _pendingMoaConfig=null;
+  const _slashOwnerIsCurrent=(sid)=>!!(
+    sid && (typeof _isSessionCurrentPane==='function'
+      ? _isSessionCurrentPane(sid)
+      : !!(S.session&&S.session.session_id===sid))
+  );
+  const _ensureSlashOwner=async()=>{
+    if(!S.session){await newSession();await renderSessionList();}
+    const sid=S.session&&S.session.session_id;
+    return _slashOwnerIsCurrent(sid) ? sid : null;
+  };
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -1431,7 +1441,8 @@ async function send(){
     if(_cmd){
       let _pushedUser=false;
       if(!_cmd.noEcho){
-        if(!S.session){await newSession();await renderSessionList();}
+        const _echoSid=await _ensureSlashOwner();
+        if(!_echoSid)return;
         if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         _pushedUser=true;
@@ -1450,8 +1461,8 @@ async function send(){
     }
     if(_parsedCmd&&!_cmd){
       if(_parsedCmd.name==='pet'){
-        if(!S.session){await newSession();await renderSessionList();}
-        const _asyncCommandSid=S.session&&S.session.session_id;
+        const _asyncCommandSid=await _ensureSlashOwner();
+        if(!_asyncCommandSid)return;
         if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _petOutput=null;
@@ -1462,7 +1473,7 @@ async function send(){
         }catch(e){
           _petOutput={handled:false,message:`Desktop Companion command error: ${e&&e.message||e}`};
         }
-        if(!S.session||S.session.session_id!==_asyncCommandSid)return;
+        if(!_slashOwnerIsCurrent(_asyncCommandSid))return;
         if(_petOutput&&_petOutput.message){
           if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'assistant',content:String(_petOutput.message),_ts:Date.now()/1000});
@@ -1479,13 +1490,14 @@ async function send(){
         if(typeof renderSessionList==='function') await renderSessionList();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
-      const _asyncCommandSid=S.session&&S.session.session_id;
+      const _metadataSid=S.session&&S.session.session_id;
       const _agentCmd=typeof getAgentCommandMetadata==='function'
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
-      if(!S.session||S.session.session_id!==_asyncCommandSid)return;
+      if(_metadataSid&&!_slashOwnerIsCurrent(_metadataSid))return;
       if(_agentCmd&&_agentCmd.cli_only){
-        if(!S.session){await newSession();await renderSessionList();}
+        const _cliOnlySid=await _ensureSlashOwner();
+        if(!_cliOnlySid)return;
         if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
@@ -1495,7 +1507,8 @@ async function send(){
       }
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
-        if(!S.session){await newSession();await renderSessionList();}
+        const _agentCommandSid=await _ensureSlashOwner();
+        if(!_agentCommandSid)return;
         if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _agentOutput='(no output)';
@@ -1506,14 +1519,15 @@ async function send(){
         }catch(e){
           _agentOutput=`Agent command error: ${e&&e.message||e}`;
         }
-        if(!S.session||S.session.session_id!==_asyncCommandSid)return;
+        if(!_slashOwnerIsCurrent(_agentCommandSid))return;
         if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
-        if(!S.session){await newSession();await renderSessionList();}
+        const _pluginCommandSid=await _ensureSlashOwner();
+        if(!_pluginCommandSid)return;
         if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _pluginOutput='(no output)';
@@ -1524,7 +1538,7 @@ async function send(){
         }catch(e){
           _pluginOutput=`Plugin command error: ${e&&e.message||e}`;
         }
-        if(!S.session||S.session.session_id!==_asyncCommandSid)return;
+        if(!_slashOwnerIsCurrent(_pluginCommandSid))return;
         if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'assistant',content:String(_pluginOutput||'(no output)'),_ts:Date.now()/1000});
         renderMessages();
@@ -1532,11 +1546,12 @@ async function send(){
       }
       if(_agentCmdName==='moa'){
         const _moaArgs=(text.split(/\s+/).slice(1).join(' ')||'').trim();
-        if(!S.session){await newSession();await renderSessionList();}
+        const _moaCommandSid=await _ensureSlashOwner();
+        if(!_moaCommandSid)return;
         if(!_moaArgs){
           let _moaUsage='/moa <prompt>';
           try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
-          if(!S.session||S.session.session_id!==_asyncCommandSid)return;
+          if(!_slashOwnerIsCurrent(_moaCommandSid))return;
           if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
@@ -1545,12 +1560,12 @@ async function send(){
         }
         try{
           await api('/api/commands/moa/resolve');
-          if(!S.session||S.session.session_id!==_asyncCommandSid)return;
+          if(!_slashOwnerIsCurrent(_moaCommandSid))return;
           _slashDisplayTextOverride=text;
           text=_moaArgs;
           _pendingMoaConfig=true;
         }catch(_e){
-          if(!S.session||S.session.session_id!==_asyncCommandSid)return;
+          if(!_slashOwnerIsCurrent(_moaCommandSid))return;
           if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
@@ -1561,20 +1576,22 @@ async function send(){
       const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'
         ? await getBundleCommandMetadata(_parsedCmd.name)
         : null;
-      if(!S.session||S.session.session_id!==_asyncCommandSid)return;
+      const _bundleMetadataSid=_metadataSid||S.session&&S.session.session_id;
+      if(_bundleMetadataSid&&!_slashOwnerIsCurrent(_bundleMetadataSid))return;
       if(_bundleCmd){
         try{
           const _bundleResolved=typeof resolveBundleCommand==='function'
             ? await resolveBundleCommand(text,_bundleCmd)
             : null;
-          if(!S.session||S.session.session_id!==_asyncCommandSid)return;
+          if(_bundleMetadataSid&&!_slashOwnerIsCurrent(_bundleMetadataSid))return;
           const _bundleMessage=String(_bundleResolved&&_bundleResolved.message||'').trim();
           if(!_bundleMessage) throw new Error('Bundle command runtime returned no invocation text.');
           _slashDisplayTextOverride=text;
           text=_bundleMessage;
         }catch(e){
-          if(!S.session||S.session.session_id!==_asyncCommandSid)return;
-          if(!S.session){await newSession();await renderSessionList();}
+          if(_bundleMetadataSid&&!_slashOwnerIsCurrent(_bundleMetadataSid))return;
+          const _bundleErrorSid=await _ensureSlashOwner();
+          if(!_bundleErrorSid)return;
           if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
@@ -7080,7 +7097,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
 }
 
-function transcript(sessionInput, messagesInput){
+function transcript(){
+  const sessionInput = arguments.length > 0 ? arguments[0] : null;
+  const messagesInput = arguments.length > 1 ? arguments[1] : null;
   const session = sessionInput || S.session || {};
   const messages = Array.isArray(messagesInput) ? messagesInput : (S.messages || []);
   const lines=[`# Hermes session ${session.session_id||''}`,``,
@@ -9044,11 +9063,23 @@ function hideBackgroundBadge(taskId){
 function startBackgroundPolling(parentSid, taskId, prompt){
   if(_bgPollTimers[taskId]) return;
   async function _poll(){
+    const requestSid=parentSid;
+    const requestGeneration=typeof _messagesGeneration==='number' ? _messagesGeneration : null;
     try{
       const r=await api('/api/background/status?session_id='+encodeURIComponent(parentSid));
       if(r&&r.results){
         for(const res of r.results){
           if(res.task_id===taskId){
+            const ownerCurrent=typeof _isSessionCurrentPane==='function'
+              ? _isSessionCurrentPane(requestSid)
+              : !!(S.session&&S.session.session_id===requestSid);
+            const generationCurrent=requestGeneration===null
+              || typeof _messagesGeneration!=='number'
+              || _messagesGeneration===requestGeneration;
+            if(!ownerCurrent||!generationCurrent){
+              _bgPollTimers[taskId]=setTimeout(_poll,3000);
+              return;
+            }
             hideBackgroundBadge(taskId);
             delete _bgPollTimers[taskId];
             const msg={role:'assistant',content:`**${t('bg_label')}** ${prompt.slice(0,80)}\n\n${res.answer||t('bg_no_answer')}`,'_background':true,_ts:Date.now()/1000};
