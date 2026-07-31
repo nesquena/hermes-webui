@@ -30,16 +30,23 @@ class TestAsciiSlugFromName:
         """A pure Chinese name produces a deterministic hash-based slug."""
         slug = config._ascii_slug_from_name("我的提供商")
         assert slug.startswith("provider-"), f"Expected hash fallback, got {slug!r}"
-        assert len(slug) == len("provider-") + 8, (
-            f"Expected 'provider-' + 8 hex chars, got {slug!r}"
+        assert len(slug) == len("provider-") + 12, (
+            f"Expected 'provider-' + 12 hex chars, got {slug!r}"
         )
         # Must be deterministic
         assert config._ascii_slug_from_name("我的提供商") == slug
 
     def test_cjk_with_ascii_mixed(self):
-        """Mixed CJK + ASCII: ASCII part is preserved, CJK is stripped."""
+        """Mixed CJK + ASCII: ASCII part preserved, hash prevents collision."""
         slug = config._ascii_slug_from_name("我的Proxy服务器")
-        assert slug == "proxy", f"Expected 'proxy', got {slug!r}"
+        assert slug.startswith("proxy-"), f"Expected 'proxy-<hash>', got {slug!r}"
+        assert len(slug) == len("proxy-") + 12, (
+            f"Expected 'proxy-' + 12 hex chars, got {slug!r}"
+        )
+        # Must be deterministic
+        assert config._ascii_slug_from_name("我的Proxy服务器") == slug
+        # Must not collide with pure ASCII "Proxy"
+        assert config._ascii_slug_from_name("Proxy") != slug
 
     def test_empty_name_returns_empty(self):
         """Empty or whitespace-only name returns empty string."""

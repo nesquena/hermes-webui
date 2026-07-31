@@ -1371,12 +1371,15 @@ def _ascii_slug_from_name(name: object) -> str:
     # ASCII-only slug
     slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
     slug = re.sub(r"-{2,}", "-", slug)
-    if slug:
+    # Keep legacy IDs unchanged for ASCII-only names. Names containing
+    # non-ASCII characters append a deterministic hash so that mixed-script
+    # names (e.g. "我的Proxy服务器") cannot collide with their ASCII
+    # projection ("Proxy").
+    has_non_ascii = any(ord(char) > 127 for char in raw)
+    if slug and not has_non_ascii:
         return slug
-    # Fallback: deterministic hash of Unicode-normalised name
-    normalized = unicodedata.normalize("NFC", raw)
-    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:8]
-    return "provider-" + digest
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+    return f"{slug}-{digest}" if slug else f"provider-{digest}"
 
 
 def _custom_provider_slug_from_name(name: object) -> str:

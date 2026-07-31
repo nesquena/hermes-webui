@@ -6530,10 +6530,10 @@ def _custom_provider_slug_for_context(name: object) -> str:
         raw = unicodedata.normalize("NFC", raw)
         slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
         slug = re.sub(r"-{2,}", "-", slug)
-        if not slug:
-            normalized = unicodedata.normalize("NFC", raw)
-            digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:8]
-            slug = "provider-" + digest
+        has_non_ascii = any(ord(char) > 127 for char in raw)
+        if not slug or has_non_ascii:
+            digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+            slug = f"{slug}-{digest}" if slug else f"provider-{digest}"
         return f"custom:{slug}" if slug else ""
 
 
