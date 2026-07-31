@@ -40,6 +40,33 @@ def _new_session_function() -> str:
     return SESSIONS_JS[start:end]
 
 
+def _wait_for_new_session_navigation_function() -> str:
+    start = SESSIONS_JS.find("async function _waitForNewSessionNavigationSettlement(")
+    end = SESSIONS_JS.find("\nconst _newSessionPendingText", start)
+    assert start != -1 and end != -1, "new-session navigation wait helper not found"
+    return SESSIONS_JS[start:end]
+
+
+def _load_session_function() -> str:
+    start = SESSIONS_JS.find("async function loadSession(")
+    end = SESSIONS_JS.find("\n\n// ── Handoff hint logic", start)
+    assert start != -1 and end != -1, "loadSession function not found"
+    return SESSIONS_JS[start:end]
+
+
+def _open_sidebar_session_function() -> str:
+    start = SESSIONS_JS.find("async function _openSidebarSession(")
+    end = SESSIONS_JS.find("\n\nfunction _isReadOnlySession", start)
+    assert start != -1 and end != -1, "_openSidebarSession function not found"
+    return SESSIONS_JS[start:end]
+
+
+def _restore_composer_draft_function() -> str:
+    return _function(
+        SESSIONS_JS, "_restoreComposerDraft", "\n\n// Clear the saved draft"
+    )
+
+
 def _composer_draft_helpers() -> str:
     start = SESSIONS_JS.find("// ── Composer draft persistence")
     end = SESSIONS_JS.find("const SESSION_VIEWED_COUNTS_KEY", start)
@@ -439,6 +466,271 @@ def _run_new_session_harness(
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)
+
+
+def _run_new_session_load_interleave_harness(
+    *, fail_create: bool, clarify_block: bool = False
+) -> dict:
+    """Run production newSession/loadSession with a controllable create promise."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+
+    script = textwrap.dedent(
+        f"""
+        const assert = require('assert');
+        {_composer_authority_helpers()}
+        {_set_new_session_pending_function()}
+        {_restore_composer_draft_function()}
+        {_wait_for_new_session_navigation_function()}
+        {_new_session_function()}
+        {_load_session_function()}
+        {_open_sidebar_session_function()}
+
+        let _newSessionInFlight = null;
+        let _loadingSessionId = null;
+        let _loadSessionGeneration = 0;
+        let _sessionSourceFilter = 'webui';
+        let _activeProject = null;
+        const NO_PROJECT_FILTER = '__none__';
+        let _messagesTruncated = false;
+        let _oldestIdx = 0;
+        let _loadingOlder = false;
+        let _pendingCarryForwardSnapshot = null;
+        let _messageUserUnpinned = false;
+        let _scrollPinned = true;
+        const INFLIGHT = {{}};
+
+        function deferred() {{
+          let resolve;
+          let reject;
+          const promise = new Promise((res, rej) => {{ resolve = res; reject = rej; }});
+          return {{promise, resolve, reject}};
+        }}
+        async function spinUntil(predicate) {{
+          for(let i=0;i<200;i++){{
+            if(predicate()) return;
+            await Promise.resolve();
+          }}
+          throw new Error('timed out waiting for controlled schedule');
+        }}
+
+        const create = deferred();
+        const metadata = deferred();
+        const messages = deferred();
+        const apiCalls = [];
+        const saves = [];
+        const focusEvents = [];
+        const sidebarProfileCalls = [];
+        const sourceFile = {{name:'source-a.txt',size:1,type:'text/plain'}};
+        const controls = {{}};
+        const msg = controls.msg = {{
+          value:'draft A', disabled:false,
+          focus(){{
+            focusEvents.push({{
+              sid:S.session&&S.session.session_id,
+              disabled:this.disabled===true,
+              reasons:this._composerDisabledReasons
+                ? [...this._composerDisabledReasons].sort()
+                : [],
+            }});
+          }},
+          setSelectionRange(){{}}, dispatchEvent(){{}},
+        }};
+        for(const id of [
+          'fileInput','btnAttach','btnSavedPrompts','btnMic','btnVoiceMode',
+          'btnNewChat','btnTitlebarNewChat'
+        ]) controls[id]={{disabled:false,setAttribute(){{}}}};
+        controls.composerStatus={{textContent:''}};
+        controls.modelSelect={{value:''}};
+        controls.msgInner={{innerHTML:''}};
+        const $ = id => controls[id] || null;
+        const document = {{
+          getElementById:id=>controls[id]||null,
+          createElement(){{return {{dataset:{{}},appendChild(){{}}}};}},
+          querySelectorAll(){{return [];}}
+        }};
+        const S = {{
+          session:{{
+            session_id:'session-a',profile:'default',workspace:'/workspace-a',
+            message_count:1,composer_draft:{{text:'draft A',files:[]}}
+          }},
+          messages:[{{role:'user',content:'A'}}],pendingFiles:[sourceFile],toolCalls:[],
+          activeProfile:'default',activeProfileIsDefault:true,
+          _profileSwitchWorkspace:null,_profileDefaultWorkspace:null,
+          _pendingSessionToolsets:null,busy:false,activeStreamId:null,lastUsage:{{}},
+        }};
+        const window={{_defaultModel:null}};
+        const localStorage={{setItem(){{}},getItem(){{return null;}},removeItem(){{}}}};
+        const history={{replaceState(){{}}}};
+
+        function api(path) {{
+          apiCalls.push(String(path));
+          if(path==='/api/session/new') return create.promise;
+          if(path==='/api/session?session_id=session-b&messages=0&resolve_model=0'){{
+            return metadata.promise;
+          }}
+          if(path==='/controlled/messages/session-b') return messages.promise;
+          throw new Error(`unexpected API call: ${{path}}`);
+        }}
+        function _saveComposerDraftNow(sid,text,files,profile){{
+          saves.push({{sid,text,files:[...(files||[])].map(file=>file.name),profile:profile||null}});
+          return Promise.resolve();
+        }}
+        async function _ensureMessagesLoaded(sid){{
+          const data=await api(`/controlled/messages/${{sid}}`);
+          S.messages=data.session.messages||[];
+          S.toolCalls=data.session.tool_calls||[];
+        }}
+        function _composerDraftHasPayload(text,files){{return !!(text||(files&&files.length));}}
+        function _isComposerDraftRestoreSuppressed(){{return false;}}
+        function _clearComposerDraftRestoreSuppression(){{}}
+        function _restoreComposerPendingFiles(){{S.pendingFiles=[];}}
+        function _newSessionPendingText(){{return 'Starting';}}
+        function setComposerStatus(text){{controls.composerStatus.textContent=text;}}
+        function showToast(){{}}
+        function updateQueueBadge(){{}}
+        function clearLiveToolCards(){{}}
+        function autoResize(){{}}
+        function renderTray(){{}}
+        function updateSendBtn(){{}}
+        function _rememberNewChatDraftSession(){{}}
+        function _setActiveSessionUrl(){{}}
+        function startSessionStream(){{}}
+        function _setSessionViewedCount(){{}}
+        function setStatus(){{}}
+        function syncTopbar(){{}}
+        function renderMessages(){{}}
+        function loadDir(){{return Promise.resolve();}}
+        function refreshSessionList(){{return Promise.resolve();}}
+        function _rearmActiveSessionStream(){{}}
+        function stopApprovalPolling(){{}}
+        function hideApprovalCard(){{}}
+        function stopSessionStream(){{}}
+        let _yoloEnabled=false;
+        function _updateYoloPill(){{}}
+        function stopClarifyPolling(){{}}
+        function hideClarifyCard(){{}}
+        function _clearSameSessionForceReloadHint(){{}}
+        function closeOtherLiveStreams(){{}}
+        function _clearEmptyComposerModelOverride(){{}}
+        function _hydrateTodosFromSession(){{}}
+        function _resolveSessionModelForDisplaySoon(){{}}
+        function _applyPendingSessionModelForSession(){{}}
+        function _acknowledgeSessionVisit(){{}}
+        function _serverLiveSnapshotInflight(){{return null;}}
+        function _selectLiveRecoveryInflight(){{return null;}}
+        function _mergePendingSessionMessage(){{return false;}}
+        function startApprovalPolling(){{}}
+        function _deferWorkspaceRefreshForSession(){{}}
+        function _renderPendingPromptsForActiveSession(){{}}
+        function renderSessionArtifacts(){{}}
+        function _isMessagingSession(){{return false;}}
+        function _hideHandoffHint(){{}}
+        function _sessionVisitHasUnreadState(){{return false;}}
+        function _clearDeferredActiveSessionExternalRefresh(){{}}
+        function _isExternalSession(){{return false;}}
+        function _ensureSidebarSessionProfile(session){{
+          sidebarProfileCalls.push(session&&session.session_id);
+          return Promise.resolve(false);
+        }}
+        function renderSessionListFromCache(){{}}
+
+        const createdSession={{
+          session_id:'new-session',profile:'default',workspace:'/workspace-new',
+          messages:[],composer_draft:{{text:'',files:[]}},message_count:0,
+        }};
+        const sessionB={{
+          session_id:'session-b',profile:'default',workspace:'/workspace-b',
+          messages:[],composer_draft:{{text:'draft B',files:[]}},message_count:1,
+          active_stream_id:null,
+        }};
+
+        (async()=>{{
+          let newError=null;
+          const creating=newSession().catch(error=>{{newError=error.message;}});
+          await spinUntil(()=>apiCalls.includes('/api/session/new'));
+          const loading=_openSidebarSession(sessionB);
+          for(let i=0;i<12;i++) await Promise.resolve();
+          const loadStartedBeforeCreateSettled=apiCalls.includes(
+            '/api/session?session_id=session-b&messages=0&resolve_model=0'
+          );
+          const sidebarProfileStartedBeforeCreateSettled=sidebarProfileCalls.length>0;
+
+          if(loadStartedBeforeCreateSettled){{
+            metadata.resolve({{session:sessionB}});
+            await spinUntil(()=>apiCalls.includes('/controlled/messages/session-b'));
+            messages.resolve({{session:{{...sessionB,messages:[{{role:'assistant',content:'B'}}]}}}});
+            await loading;
+          }}
+
+          if({str(clarify_block).lower()}){{
+            _composerControlSetDisabledReason(msg,'clarify',true);
+          }}
+          if({str(fail_create).lower()}) create.reject(new Error('create failed'));
+          else create.resolve({{session:createdSession}});
+          await creating;
+
+          if(!loadStartedBeforeCreateSettled){{
+            await spinUntil(()=>apiCalls.includes(
+              '/api/session?session_id=session-b&messages=0&resolve_model=0'
+            ));
+            metadata.resolve({{session:sessionB}});
+            await spinUntil(()=>apiCalls.includes('/controlled/messages/session-b'));
+            messages.resolve({{session:{{...sessionB,messages:[{{role:'assistant',content:'B'}}]}}}});
+            await loading;
+          }}
+
+          process.stdout.write(JSON.stringify({{
+            newError,loadStartedBeforeCreateSettled,sidebarProfileStartedBeforeCreateSettled,
+            activeSid:S.session&&S.session.session_id,
+            text:msg.value,files:S.pendingFiles.map(file=>file.name),
+            disabled:msg.disabled===true,
+            reasons:msg._composerDisabledReasons?[...msg._composerDisabledReasons].sort():[],
+            focusEvents,apiCalls,saves,
+          }}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = subprocess.run(
+        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+@pytest.mark.parametrize("fail_create", [False, True])
+def test_sidebar_navigation_waits_for_new_session_settlement(fail_create):
+    result = _run_new_session_load_interleave_harness(fail_create=fail_create)
+
+    assert result["loadStartedBeforeCreateSettled"] is False, (
+        "loadSession must not start switching composer ownership while New Chat owns it"
+    )
+    assert result["sidebarProfileStartedBeforeCreateSettled"] is False, (
+        "the sidebar wrapper must wait before profile/import navigation side effects"
+    )
+    assert result["activeSid"] == "session-b"
+    assert result["text"] == "draft B"
+    assert result["files"] == []
+    assert result["newError"] == ("create failed" if fail_create else None)
+
+
+def test_failed_create_focuses_restored_owner_after_new_session_reason_is_released():
+    result = _run_new_session_load_interleave_harness(fail_create=True)
+
+    assert result["focusEvents"] == [
+        {"sid": "session-a", "disabled": False, "reasons": []}
+    ]
+
+
+def test_failed_create_does_not_focus_when_clarify_reason_still_disables_composer():
+    result = _run_new_session_load_interleave_harness(
+        fail_create=True, clarify_block=True
+    )
+
+    assert result["focusEvents"] == []
+    assert result["disabled"] is True
+    assert result["reasons"] == ["clarify"]
 
 
 def test_pending_files_follow_their_session_owner_across_new_session_boundary():
@@ -1136,6 +1428,62 @@ def test_aborted_create_preserves_voice_final_and_interleaved_saved_prompt():
     assert result["text"] == "source draft final\n\nsaved prompt\n\n"
 
 
+def test_abort_after_owner_change_persists_source_without_mutating_visible_composer():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const sourceFile={{name:'source.txt'}};
+        const visibleFile={{name:'visible.txt'}};
+        const msg={{value:'source draft'}};
+        const S={{
+          session:{{session_id:'session-a',profile:'default'}},
+          activeProfile:'default',pendingFiles:[sourceFile]
+        }};
+        const $=id=>id==='msg'?msg:null;
+        const saves=[];
+        function _saveComposerDraftNow(sid,text,files,profile){{
+          saves.push({{sid,text,files:files.map(file=>file.name),profile}});
+          return Promise.resolve();
+        }}
+        function renderTray(){{throw new Error('hidden abort must not render');}}
+        function autoResize(){{throw new Error('hidden abort must not resize');}}
+        function updateSendBtn(){{throw new Error('hidden abort must not repaint send');}}
+        {authority}
+
+        const token=_beginComposerOwnershipTransition('session-a','default');
+        _composerSetText('source draft plus late input','late input');
+        S.session={{session_id:'session-b',profile:'default'}};
+        msg.value='visible B';
+        S.pendingFiles=[visibleFile];
+        const restoredVisible=_abortComposerOwnershipTransition(token);
+        Promise.resolve().then(()=>Promise.resolve()).then(()=>{{
+          process.stdout.write(JSON.stringify({{
+            restoredVisible,text:msg.value,
+            files:S.pendingFiles.map(file=>file.name),saves,
+          }}));
+        }});
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert json.loads(proc.stdout) == {
+        "restoredVisible": False,
+        "text": "visible B",
+        "files": ["visible.txt"],
+        "saves": [
+            {
+                "sid": "session-a",
+                "text": "source draft plus late input",
+                "files": ["source.txt"],
+                "profile": "default",
+            }
+        ],
+    }
+
+
 def test_failed_handoff_replays_full_source_form_not_destination_delta():
     node = shutil.which("node")
     if not node:
@@ -1144,7 +1492,10 @@ def test_failed_handoff_replays_full_source_form_not_destination_delta():
     script = textwrap.dedent(
         f"""
         const msg={{value:'source draft'}};
-        const S={{pendingFiles:[]}};
+        const S={{
+          session:{{session_id:'old-session',profile:'default'}},
+          activeProfile:'default',pendingFiles:[]
+        }};
         const $=id=>id==='msg'?msg:null;
         {authority}
         const token=_beginComposerOwnershipTransition('old-session','default');

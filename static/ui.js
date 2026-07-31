@@ -39,6 +39,15 @@ function _composerProfilesMatch(left,right){
   const b=String(right||'default').trim()||'default';
   return a===b;
 }
+function _composerOwnerIsVisible(sid,profile){
+  const visible=S.session||null;
+  const visibleSid=visible&&visible.session_id||null;
+  if(!sid)return !visibleSid;
+  const visibleProfile=String(
+    (visible&&visible.profile)||S.activeProfile||'default'
+  ).trim()||'default';
+  return visibleSid===sid&&_composerProfilesMatch(profile,visibleProfile);
+}
 function _rememberComposerOwnerState(sid,profile,state,generation){
   if(!sid||!state)return null;
   const snapshot={
@@ -426,6 +435,17 @@ function _persistComposerTransitionSource(token){
     }catch(_){}
   }
 }
+function _persistComposerTransitionAbort(token){
+  const state=token&&token.abortState;
+  if(!token||!token.sourceSid||!state||!state.revision)return;
+  if(typeof _saveComposerDraftNow==='function'){
+    try{
+      Promise.resolve(_saveComposerDraftNow(
+        token.sourceSid,state.text,[...state.files],token.sourceProfile
+      )).catch(()=>{});
+    }catch(_){}
+  }
+}
 function _drainComposerOwnershipTransition(token,aborted=false){
   if(!token||_composerOwnershipTransition!==token)return false;
   _rememberComposerSettledOwners(token.generation,{
@@ -435,17 +455,19 @@ function _drainComposerOwnershipTransition(token,aborted=false){
   });
   _composerOwnershipTransition=null;
   if(aborted){
-    _composerSetText(token.abortState.text);
-    _composerReplaceFiles(token.abortState.files);
+    const restoredVisible=_composerOwnerIsVisible(token.sourceSid,token.sourceProfile);
+    token.abortRestoredVisible=restoredVisible;
     _rememberComposerOwnerState(token.sourceSid,token.sourceProfile,{
       text:token.abortState.text,files:token.abortState.files,
       revision:token.abortState.revision,
     },token.generation);
-    const input=$('msg');
-    if(typeof renderTray==='function')renderTray();
-    if(typeof autoResize==='function')autoResize();
-    if(typeof updateSendBtn==='function')updateSendBtn();
-    if(input&&input.disabled!==true&&typeof input.focus==='function')input.focus();
+    if(restoredVisible){
+      _composerSetText(token.abortState.text);
+      _composerReplaceFiles(token.abortState.files);
+      if(typeof renderTray==='function')renderTray();
+      if(typeof autoResize==='function')autoResize();
+      if(typeof updateSendBtn==='function')updateSendBtn();
+    }
   }else{
     if(token.destinationSlots.size)_composerSetText(token.destinationText);
     for(const mutation of token.mutations){
@@ -461,10 +483,13 @@ function _drainComposerOwnershipTransition(token,aborted=false){
       revision:token.revision,
     },token.generation);
   }
-  _persistComposerTransitionSource(token);
+  if(aborted)_persistComposerTransitionAbort(token);
+  else _persistComposerTransitionSource(token);
   return true;
 }
-function _abortComposerOwnershipTransition(token){return _drainComposerOwnershipTransition(token,true);}
+function _abortComposerOwnershipTransition(token){
+  return !!(_drainComposerOwnershipTransition(token,true)&&token.abortRestoredVisible);
+}
 const OFFLINE_RECHECK_MS=2500;
 const OFFLINE_HEALTH_TIMEOUT_MS=10000;
 const OFFLINE_FETCH_FAILURES_BEFORE_BANNER=2;

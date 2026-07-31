@@ -1402,6 +1402,14 @@ function _markPollingCompletionUnreadTransitions(sessions) {
 }
 
 let _newSessionInFlight=null;
+async function _waitForNewSessionNavigationSettlement(){
+  const pending=_newSessionInFlight;
+  if(!pending)return;
+  // A sidebar/direct load requested during New Chat must start only after that
+  // ownership transaction settles. Rejection still releases the navigation:
+  // the user's requested target remains valid even when creation failed.
+  try{await pending;}catch(_){}
+}
 const _newSessionPendingText=()=>t('new_session_creating')||'Creating new conversation…';
 const _emptyComposerModelOverrideHost=typeof window!=='undefined'?window:globalThis;
 
@@ -1525,6 +1533,9 @@ async function newSession(flash, options={}){
     return _newSessionInFlight;
   }
   _setNewSessionPending(true);
+  let focusRestoredComposerAfterAbort=false;
+  let restoredComposerOwnerSid=null;
+  let restoredComposerOwnerProfile=null;
   _newSessionInFlight=(async()=>{
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
@@ -1653,13 +1664,23 @@ async function newSession(flash, options={}){
       }
     }catch(error){
       if(composerTransition&&typeof _abortComposerOwnershipTransition==='function'){
-        _abortComposerOwnershipTransition(composerTransition);
+        const restoredVisible=_abortComposerOwnershipTransition(composerTransition);
+        focusRestoredComposerAfterAbort=restoredVisible||focusRestoredComposerAfterAbort;
+        if(restoredVisible){
+          restoredComposerOwnerSid=composerTransition.sourceSid;
+          restoredComposerOwnerProfile=composerTransition.sourceProfile;
+        }
       }
       throw error;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)}).catch(error=>{
       if(composerTransition&&typeof _abortComposerOwnershipTransition==='function'){
-        _abortComposerOwnershipTransition(composerTransition);
+        const restoredVisible=_abortComposerOwnershipTransition(composerTransition);
+        focusRestoredComposerAfterAbort=restoredVisible||focusRestoredComposerAfterAbort;
+        if(restoredVisible){
+          restoredComposerOwnerSid=composerTransition.sourceSid;
+          restoredComposerOwnerProfile=composerTransition.sourceProfile;
+        }
       }
       throw error;
     });
@@ -1776,6 +1797,15 @@ async function newSession(flash, options={}){
   }finally{
     _newSessionInFlight=null;
     _setNewSessionPending(false);
+    if(focusRestoredComposerAfterAbort
+      &&typeof _composerOwnerIsVisible==='function'
+      &&_composerOwnerIsVisible(
+        restoredComposerOwnerSid,
+        restoredComposerOwnerProfile
+      )){
+      const input=$('msg');
+      if(input&&input.disabled!==true&&typeof input.focus==='function')input.focus();
+    }
   }
 }
 
@@ -1884,6 +1914,9 @@ async function loadSession(sid){
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
     const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
     if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
+  }
+  if(typeof _waitForNewSessionNavigationSettlement==='function'){
+    await _waitForNewSessionNavigationSettlement();
   }
   // Extension pre-open hook — fires once per sidebar click, not on every call.
   // _openSidebarSession passes _preloadNotified:true so the hook isn't re-fired
@@ -2674,6 +2707,9 @@ async function _ensureSidebarSessionProfile(session){
 
 async function _openSidebarSession(session, loadOpts={}){
   if(!session||!session.session_id) return;
+  if(typeof _waitForNewSessionNavigationSettlement==='function'){
+    await _waitForNewSessionNavigationSettlement();
+  }
   // Extension pre-open hook — before any side-effects (external import, profile switching).
   // Handler returns {cancel:true} to prevent the open.
   if(!loadOpts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
