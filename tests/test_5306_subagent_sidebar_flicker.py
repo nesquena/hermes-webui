@@ -89,11 +89,18 @@ eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
 eval(extractFunc('_sessionProfileScope'));
 eval(extractFunc('_sidebarLineageSourceBucket'));
-eval(extractFunc('_buildSidebarLineageProjectResolver'));
-eval(extractFunc('_sidebarLineageScopeKey'));
-eval(extractFunc('_sidebarScopedIdentityKey'));
+eval(extractFunc('_isReadOnlySession'));
+eval(extractFunc('_buildSidebarLineageIndex'));
+function _buildSidebarLineageProjectResolver(s,r){{
+  const index=_buildSidebarLineageIndex(s,r);
+  const resolver=row=>index.projectFor(row);
+  Object.assign(resolver,index); resolver._index=index; return resolver;
+}}
+function _sidebarLineageScopeKey(s){{return _buildSidebarLineageIndex([s],[]).scopeKey(s);}}
+function _sidebarScopedIdentityKey(s,id){{return _buildSidebarLineageIndex([s],[]).identityKey(s,id);}}
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_sessionDisplayTitle'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 eval(extractFunc('_sessionAttentionState'));
@@ -212,7 +219,7 @@ global._sessionSourceFilter = 'webui';
 // child has no project_id and inherits the parent's effective project.
 const allMatched = [
   { session_id:'proj_parent', title:'Parent WebUI', session_source:'webui', raw_source:'webui', source_tag:'webui', message_count:5, project_id:'projX', updated_at:100, last_message_at:100 },
-  { session_id:'subagent_child', title:'Subagent Session', parent_session_id:'proj_parent', relationship_type:'child_session', raw_source:'subagent', source_tag:'subagent', session_source:'other', _parent_lineage_root_id:'proj_parent', _cross_surface_child_session:true, message_count:3, updated_at:101, last_message_at:101 },
+      { session_id:'subagent_child', title:'Subagent Session', parent_session_id:'proj_parent', relationship_type:'child_session', read_only:true, raw_source:'subagent', source_tag:'subagent', session_source:'other', _parent_lineage_root_id:'proj_parent', _cross_surface_child_session:true, message_count:3, updated_at:101, last_message_at:101 },
 ];
 const effectiveProject = _buildSidebarLineageProjectResolver(allMatched, []);
 const part = _partitionSidebarSessionRows(allMatched, null, effectiveProject);
@@ -241,7 +248,7 @@ global._showArchived = false;
 global._sessionSourceFilter = 'webui';
 const parentA = { session_id:'parent', profile:'work', profile_scope:'work', project_id:'projA', session_source:'webui', message_count:3 };
 const parentOtherProfile = { session_id:'parent', profile:'other', profile_scope:'other', project_id:'projB', session_source:'webui', message_count:3 };
-const child = { session_id:'child', profile:'work', profile_scope:'work', parent_session_id:'parent', _parent_lineage_root_id:'parent', relationship_type:'child_session', session_source:'other', raw_source:'subagent', _cross_surface_child_session:true, message_count:2 };
+    const child = { session_id:'child', profile:'work', profile_scope:'work', parent_session_id:'parent', _parent_lineage_root_id:'parent', relationship_type:'child_session', read_only:true, session_source:'other', raw_source:'subagent', _cross_surface_child_session:true, message_count:2 };
 const projectBSiblingFork = { session_id:'forkB', profile:'work', profile_scope:'work', parent_session_id:'parent', session_source:'fork', project_id:'projB', message_count:3 };
 const uniqueResolver = _buildSidebarLineageProjectResolver([parentA, parentOtherProfile, child, projectBSiblingFork], []);
 const uniquePart = _partitionSidebarSessionRows([parentA, parentOtherProfile, child, projectBSiblingFork], null, uniqueResolver);
@@ -253,7 +260,7 @@ console.log(JSON.stringify({
   sibling: uniqueResolver(projectBSiblingFork),
   uniqueRaw: uniquePart.sessionsRaw.map(s=>s.session_id),
   uniqueChildren: (uniqueRows.find(r=>r.session_id==='parent')||{})._child_sessions?.map(s=>s.session_id)||[],
-  ambiguous: ambiguousResolver(child),
+      ambiguous: ambiguousResolver.ownership(child),
 }));
 """
     out = json.loads(_run_node(source))
@@ -261,7 +268,7 @@ console.log(JSON.stringify({
     assert out["sibling"] == "projB"
     assert out["uniqueRaw"] == ["parent", "child"]
     assert out["uniqueChildren"] == ["child"]
-    assert out["ambiguous"] is None
+    assert out["ambiguous"]["status"] == "ambiguous"
 
 
 def test_cyclic_project_lineage_fails_closed_but_diamonds_and_self_roots_resolve():
@@ -272,32 +279,32 @@ global._activeProject = 'projA';
 global._showArchived = false;
 global._sessionSourceFilter = 'webui';
 const cyclicParent = { session_id:'cyclic_parent', profile_scope:'work', project_id:'projA', parent_session_id:'cyclic_child', session_source:'webui', message_count:3 };
-const cyclicChild = { session_id:'cyclic_child', profile_scope:'work', parent_session_id:'cyclic_parent', relationship_type:'child_session', session_source:'webui', message_count:2 };
+    const cyclicChild = { session_id:'cyclic_child', profile_scope:'work', parent_session_id:'cyclic_parent', relationship_type:'child_session', read_only:true, session_source:'webui', message_count:2 };
 const diamondRoot = { session_id:'diamond_root', profile_scope:'work', project_id:'projA', session_source:'webui', message_count:3 };
-const diamondLeft = { session_id:'diamond_left', profile_scope:'work', parent_session_id:'diamond_root', session_source:'webui', message_count:2 };
-const diamondRight = { session_id:'diamond_right', profile_scope:'work', parent_session_id:'diamond_root', session_source:'webui', message_count:2 };
-const diamondTip = { session_id:'diamond_tip', profile_scope:'work', parent_session_id:'diamond_left', _parent_lineage_tip_id:'diamond_right', session_source:'webui', message_count:2 };
+    const diamondLeft = { session_id:'diamond_left', profile_scope:'work', parent_session_id:'diamond_root', relationship_type:'child_session', read_only:true, session_source:'webui', message_count:2 };
+    const diamondRight = { session_id:'diamond_right', profile_scope:'work', parent_session_id:'diamond_root', relationship_type:'child_session', read_only:true, session_source:'webui', message_count:2 };
+    const diamondTip = { session_id:'diamond_tip', profile_scope:'work', parent_session_id:'diamond_left', _parent_lineage_tip_id:'diamond_right', relationship_type:'child_session', read_only:true, session_source:'webui', message_count:2 };
 const selfRoot = { session_id:'self_root', profile_scope:'work', project_id:'projA', _lineage_root_id:'self_root', session_source:'webui', message_count:3 };
-const selfRootChild = { session_id:'self_root_child', profile_scope:'work', parent_session_id:'self_root', session_source:'webui', message_count:2 };
+    const selfRootChild = { session_id:'self_root_child', profile_scope:'work', parent_session_id:'self_root', relationship_type:'child_session', read_only:true, session_source:'webui', message_count:2 };
 const raw = [cyclicParent, cyclicChild, diamondRoot, diamondLeft, diamondRight, diamondTip, selfRoot, selfRootChild];
 const effectiveProject = _buildSidebarLineageProjectResolver(raw, []);
 const part = _partitionSidebarSessionRows(raw, null, effectiveProject);
 const rows = _renderSidebarRowsFromRawSessions(part.sessionsRaw, [], {isCli:false, project:'projA'}, effectiveProject);
 const parent = rows.find(r=>r.session_id==='cyclic_parent') || {};
 console.log(JSON.stringify({
-  cyclicProject: effectiveProject(cyclicChild),
+      cyclicProject: ((x)=>({status:x.status,project:x.project}))(effectiveProject.ownership(cyclicChild)),
   projARaw: part.sessionsRaw.map(s=>s.session_id),
   cyclicChildren: (parent._child_sessions||[]).map(s=>s.session_id),
-  diamondProject: effectiveProject(diamondTip),
-  selfRootProject: effectiveProject(selfRootChild),
+      diamondProject: ((x)=>({status:x.status,project:x.project}))(effectiveProject.ownership(diamondTip)),
+      selfRootProject: ((x)=>({status:x.status,project:x.project}))(effectiveProject.ownership(selfRootChild)),
 }));
 """
     out = json.loads(_run_node(source))
-    assert out["cyclicProject"] is None
+    assert out["cyclicProject"]["status"] == "cyclic"
     assert "cyclic_child" not in out["projARaw"]
     assert out["cyclicChildren"] == []
-    assert out["diamondProject"] == "projA"
-    assert out["selfRootProject"] == "projA"
+    assert out["diamondProject"]["project"] == "projA"
+    assert out["selfRootProject"]["project"] == "projA"
 
 
 def test_5305_missing_parent_delegate_child_is_suppressed_not_orphaned():

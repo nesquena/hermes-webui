@@ -315,7 +315,7 @@ def test_branch_fork_sessions_do_not_collapse_into_parent_lineage():
     block = fn.group(0)
     assert "if(s.session_source==='fork') return null;" in block, \
         "Fork guard must remain in _sessionLineageKey to prevent compression-lineage merging"
-    assert block.index("if(s.session_source==='fork') return null;") < block.index('return s.parent_session_id || null')
+    assert "return raw&&(lineageIndex?lineageIndex.identityKey(s,raw):raw);" in block
 
 
 def test_branch_fork_sessions_nest_under_parent():
@@ -342,9 +342,9 @@ def test_branch_fork_sessions_nest_under_parent():
         "Fork resolution must accept a scope-keyed durable lineage authority"
     assert "function _sessionProfileScope(session){" in src, \
         "Fork resolution must use the shared canonical profile-scope helper"
-    assert "function _sidebarLineageScopeKey(session, fallbackIsCli){" in src, \
-        "Fork resolution must use one shared scope-key helper"
-    assert "function _sidebarScopedIdentityKey(session, identity, fallbackIsCli){" in src, \
+    assert "function _buildSidebarLineageIndex(sessions, referenceSessions){" in src, \
+        "Fork resolution must use the render-local lineage index"
+    assert "const scopeKeyForSession=(session)=>index.scopeKey(session);" in block, \
         "Fork attachment identity maps must use scoped keys"
     assert "const sessionIdsFor=(session)=>{" in block, \
         "Fork resolution must resolve the durable lineage authority per row"
@@ -357,8 +357,8 @@ def test_branch_fork_sessions_nest_under_parent():
     render_block = render_fn.group(0)
     assert "_allSessions" in render_block and "durableLineageIdsByScope" in render_block, \
         "Sidebar render must build fork authority from the durable session cache"
-    assert "_sidebarLineageScopeKey(" in render_block, \
-        "Sidebar render must build durable scope from the shared canonical helper"
+    assert "lineageIndex" in render_block, \
+        "Sidebar render must build durable scope from the shared lineage index"
     assert "session.profile_scope" in src, \
         "Sidebar scope must prefer the server-provided canonical profile identity"
     assert "lineageScope&&lineageScope.profile&&session.profile&&session.profile!==lineageScope.profile" not in render_block, \
