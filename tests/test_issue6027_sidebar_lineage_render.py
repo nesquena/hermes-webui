@@ -159,6 +159,28 @@ console.log(JSON.stringify({delegate:index.ownership(delegate),
     assert result["collapsed"] == ["tipA", "tipB"]
 
 
+def test_duplicate_delegate_ids_keep_distinct_parent_project_context():
+    result = _run_node(_harness("""
+const parentA = {session_id:'parent-a', profile_scope:'work', project_id:'projA'};
+const parentB = {session_id:'parent-b', profile_scope:'work', project_id:'projB'};
+const childA = {session_id:'child', profile_scope:'work', relationship_type:'child_session',
+  read_only:true, parent_session_id:'parent-a'};
+const childB = {session_id:'child', profile_scope:'work', relationship_type:'child_session',
+  read_only:true, parent_session_id:'parent-b'};
+global._allSessions = [parentA, parentB, childA, childB];
+const index = _buildSidebarLineageIndex(global._allSessions, []);
+console.log(JSON.stringify({
+  projectA:index.projectFor(childA),
+  projectB:index.projectFor(childB),
+  runtimeA:_sidebarRuntimeIdentityKey(childA),
+  runtimeB:_sidebarRuntimeIdentityKey(childB),
+}));
+"""))
+    assert result["projectA"] == "projA"
+    assert result["projectB"] == "projB"
+    assert result["runtimeA"] != result["runtimeB"]
+
+
 def test_active_session_matching_uses_scoped_lineage_identity():
     result = _run_node(_harness("""
 global.S = {session:{session_id:'same', profile_scope:'work', project_id:'projA'}};
