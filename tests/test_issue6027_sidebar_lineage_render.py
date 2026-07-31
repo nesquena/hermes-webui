@@ -53,6 +53,7 @@ eval(extractFunc('_buildSidebarLineageIndex'));
 eval(extractFunc('_sidebarActiveSessionIdentityKey'));
 eval(extractFunc('_sidebarIdentityMatchesActiveSession'));
 eval(extractFunc('_sidebarSessionMatchesActiveSession'));
+eval(extractFunc('_sidebarRuntimeIdentityKey'));
 eval(extractFunc('_sessionLineageContainsSession'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
@@ -163,6 +164,22 @@ const index = _buildSidebarLineageIndex([rowA, rowB], []);
 console.log(JSON.stringify({same:_sessionLineageContainsSession(rowA, 'same', index), other:_sessionLineageContainsSession(rowB, 'same', index)}));
 """))
     assert result == {"same": True, "other": False}
+
+
+def test_runtime_state_keys_keep_duplicate_session_ids_scoped():
+    result = _run_node(_harness("""
+const rowA = {session_id:'same', profile_scope:'work', project_id:'projA'};
+const rowB = {session_id:'same', profile_scope:'work', project_id:'projB'};
+global._allSessions = [rowA, rowB];
+global.S = {session: rowA};
+console.log(JSON.stringify({
+  a:_sidebarRuntimeIdentityKey(rowA),
+  b:_sidebarRuntimeIdentityKey(rowB),
+  active:_sidebarRuntimeIdentityKey('same'),
+}));
+"""))
+    assert result["a"] != result["b"]
+    assert result["active"] == result["a"]
 
 
 def test_compression_parent_lookup_stays_within_profile_scope():
