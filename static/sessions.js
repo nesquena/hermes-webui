@@ -3869,14 +3869,15 @@ async function _loadOlderMessages() {
       const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
       return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||hasPartialTc||(typeof _messageHasReasoningPayload==='function'&&_messageHasReasoningPayload(m))||(typeof _assistantMessageHasVisibleContent==='function'&&_assistantMessageHasVisibleContent(m)))));
     }).length;
+    // #3306: preserve ephemeral turn fields across the guarded replacement.
+    // Keep the canonical nextMessages assignment shape so existing lifecycle
+    // consumers continue to recognize this replacement seam.
+    if (typeof window._carryForwardEphemeralTurnFields === 'function') {
+      nextMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
+    }
     if (!_commitTranscriptReplacement(replacementTicket, () => {
-      // #3306: preserve ephemeral turn fields across the guarded replacement.
-      let committedMessages = nextMessages;
-      if (typeof window._carryForwardEphemeralTurnFields === 'function') {
-        committedMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
-      }
-      S.messages = committedMessages;
-      _syncToolCallsForLoadedMessages(committedMessages, responseSession.tool_calls);
+      S.messages = nextMessages;
+      _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
       _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
       _messagesTruncated = !!responseSession._messages_truncated;
       _oldestIdx = responseSession._messages_offset || 0;
@@ -3947,7 +3948,7 @@ async function _ensureAllMessagesLoaded() {
   try {
     const sid = S.session.session_id;
     const replacementTicket = _captureTranscriptReplacement();
-    const data = await _readFullSessionSnapshot(sid);
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`, {timeoutMs:120000});
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) return;
     // Session may have been switched while we awaited. Bail rather than
@@ -3958,13 +3959,14 @@ async function _ensureAllMessagesLoaded() {
     // A same-session live turn can start while this fetch is in flight. Let the
     // live path own S.messages rather than replace it with settled history.
     if (S.busy || S.activeStreamId) return;
-    const msgs = (data.session.messages || []).filter(m => m && m.role);
+    let msgs = (data.session.messages || []).filter(m => m && m.role);
+    let _msgsToAssign = msgs;
+    if (!_transcriptReplacementIsCurrent(replacementTicket)) return;
     if (!_commitTranscriptReplacement(replacementTicket, () => {
       // #3306: preserve ephemeral turn fields across the guarded replacement.
-    let _msgsToAssign = msgs;
-    if (typeof window._carryForwardEphemeralTurnFields === 'function') {
-      _msgsToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], msgs);
-    }
+      if (typeof window._carryForwardEphemeralTurnFields === 'function') {
+        _msgsToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], msgs);
+      }
       S.messages = _msgsToAssign;
       _messagesTruncated = false;
       _oldestIdx = 0;

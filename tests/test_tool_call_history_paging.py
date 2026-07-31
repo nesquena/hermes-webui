@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,8 +16,18 @@ def test_sessions_js_resyncs_tool_calls_after_history_window_replacement():
     """
     assert "function _syncToolCallsForLoadedMessages(messages, sessionToolCalls)" in SESSIONS_JS
     assert "_syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);" in SESSIONS_JS
-    assert "S.messages = nextMessages;\n    _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);" in SESSIONS_JS
-    assert "S.messages = _msgsToAssign;\n    _messagesTruncated = false;\n    _oldestIdx = 0;\n    _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);" in SESSIONS_JS
+    assert re.search(
+        r"S\.messages\s*=\s*nextMessages;\s+"
+        r"_syncToolCallsForLoadedMessages\(nextMessages, responseSession\.tool_calls\);",
+        SESSIONS_JS,
+    )
+    assert re.search(
+        r"S\.messages\s*=\s*_msgsToAssign;\s+"
+        r"_messagesTruncated\s*=\s*false;\s+"
+        r"_oldestIdx\s*=\s*0;\s+"
+        r"_syncToolCallsForLoadedMessages\(msgs, data\.session\.tool_calls\);",
+        SESSIONS_JS,
+    )
 
 
 def test_sessions_js_clears_session_tool_calls_when_messages_have_own_metadata():

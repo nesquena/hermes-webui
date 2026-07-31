@@ -931,7 +931,7 @@ async function resumeManualCompressionForSession(sid){
   try{
     const statusTicket=typeof _captureTranscriptReplacement==='function'
       ? _captureTranscriptReplacement()
-      : {sessionId:sid,generation:_messagesGeneration,used:false};
+      : {sessionId:sid,generation:typeof _messagesGeneration==='number'?_messagesGeneration:0,used:false};
     ownerGeneration=statusTicket.generation;
     const status=await api(`/api/session/compress/status?session_id=${encodeURIComponent(sid)}`);
     if(!status||status.status!=='running') return;
@@ -955,7 +955,7 @@ async function resumeManualCompressionForSession(sid){
     renderMessages();
     const pollTicket=typeof _captureTranscriptReplacement==='function'
       ? _captureTranscriptReplacement()
-      : {sessionId:sid,generation:_messagesGeneration,used:false};
+      : {sessionId:sid,generation:typeof _messagesGeneration==='number'?_messagesGeneration:0,used:false};
     const done=await _pollManualCompressionResult(sid);
     if(!S.session||S.session.session_id!==sid||!_transcriptReplacementIsCurrent(pollTicket)) return;
     await _applyManualCompressionResult(done, status.focus_topic||'', visibleCount, status.focus_topic?`/compress ${status.focus_topic}`:'/compress', pollTicket);
@@ -1000,7 +1000,7 @@ async function _runManualCompression(focusTopic){
     const sid=S.session.session_id;
     const preflightTicket=typeof _captureTranscriptReplacement==='function'
       ? _captureTranscriptReplacement()
-      : {sessionId:sid,generation:_messagesGeneration,used:false};
+      : {sessionId:sid,generation:typeof _messagesGeneration==='number'?_messagesGeneration:0,used:false};
     ownerGeneration=preflightTicket.generation;
     // Preflight: verify the viewed session still exists before compressing.
     // This avoids a confusing "not found" toast when the UI is stale.
@@ -1053,7 +1053,7 @@ async function _runManualCompression(focusTopic){
     renderMessages();
     const runTicket=typeof _captureTranscriptReplacement==='function'
       ? _captureTranscriptReplacement()
-      : {sessionId:sid,generation:_messagesGeneration,used:false};
+      : {sessionId:sid,generation:typeof _messagesGeneration==='number'?_messagesGeneration:0,used:false};
     ownerGeneration=runTicket.generation;
     const started=await api('/api/session/compress/start',{method:'POST',body:JSON.stringify(body)});
     if(started&&started.status==='error'){
