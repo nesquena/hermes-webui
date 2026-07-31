@@ -1432,6 +1432,7 @@ async function send(){
       let _pushedUser=false;
       if(!_cmd.noEcho){
         if(!S.session){await newSession();await renderSessionList();}
+        if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         _pushedUser=true;
         renderMessages();
@@ -1450,6 +1451,7 @@ async function send(){
     if(_parsedCmd&&!_cmd){
       if(_parsedCmd.name==='pet'){
         if(!S.session){await newSession();await renderSessionList();}
+        if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _petOutput=null;
         try{
@@ -1460,6 +1462,7 @@ async function send(){
           _petOutput={handled:false,message:`Desktop Companion command error: ${e&&e.message||e}`};
         }
         if(_petOutput&&_petOutput.message){
+          if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
           S.messages.push({role:'assistant',content:String(_petOutput.message),_ts:Date.now()/1000});
         }
         renderMessages();
@@ -1479,7 +1482,9 @@ async function send(){
         : null;
       if(_agentCmd&&_agentCmd.cli_only){
         if(!S.session){await newSession();await renderSessionList();}
+        if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
@@ -1487,6 +1492,7 @@ async function send(){
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
         if(!S.session){await newSession();await renderSessionList();}
+        if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _agentOutput='(no output)';
         try{
@@ -1496,12 +1502,14 @@ async function send(){
         }catch(e){
           _agentOutput=`Agent command error: ${e&&e.message||e}`;
         }
+        if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
         S.messages.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
         if(!S.session){await newSession();await renderSessionList();}
+        if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _pluginOutput='(no output)';
         try{
@@ -1511,6 +1519,7 @@ async function send(){
         }catch(e){
           _pluginOutput=`Plugin command error: ${e&&e.message||e}`;
         }
+        if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
         S.messages.push({role:'assistant',content:String(_pluginOutput||'(no output)'),_ts:Date.now()/1000});
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
@@ -1521,7 +1530,9 @@ async function send(){
         if(!_moaArgs){
           let _moaUsage='/moa <prompt>';
           try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
+          if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
           S.messages.push({role:'assistant',content:_moaUsage,_ts:Date.now()/1000});
           renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
         }
@@ -1531,7 +1542,9 @@ async function send(){
           text=_moaArgs;
           _pendingMoaConfig=true;
         }catch(_e){
+          if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
           S.messages.push({role:'assistant',content:'MoA unavailable: '+(_e&&_e.message||_e),_ts:Date.now()/1000});
           renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
         }
@@ -1550,7 +1563,9 @@ async function send(){
           text=_bundleMessage;
         }catch(e){
           if(!S.session){await newSession();await renderSessionList();}
+          if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
           S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
           renderMessages();
           $('msg').value='';autoResize();hideCmdDropdown();return;

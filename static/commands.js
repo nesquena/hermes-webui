@@ -862,8 +862,8 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
     if(data.session.session_id&&data.session.session_id!==currentSid){
       await loadSession(data.session.session_id);
     }else{
+      if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
       S.session=data.session;
-      if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
       S.messages=data.session.messages||[];
       S.toolCalls=data.session.tool_calls||[];
       clearLiveToolCards();
@@ -904,6 +904,7 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
 async function resumeManualCompressionForSession(sid){
   if(!sid) return;
   try{
+    if(S.session&&S.session.session_id===sid&&typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
     const status=await api(`/api/session/compress/status?session_id=${encodeURIComponent(sid)}`);
     if(!status||status.status!=='running') return;
     const visibleMessages=_manualCompressionVisibleMessages();
@@ -958,6 +959,7 @@ async function _runManualCompression(focusTopic){
   let visibleCount=0;
   try{
     const sid=S.session.session_id;
+    if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
     // Preflight: verify the viewed session still exists before compressing.
     // This avoids a confusing "not found" toast when the UI is stale.
     try{
@@ -966,7 +968,7 @@ async function _runManualCompression(focusTopic){
         throw new Error('session no longer available');
       }
       S.session=live.session;
-      if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
+      if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
       S.messages=live.session.messages||[];
       S.toolCalls=live.session.tool_calls||[];
       if(typeof _messagesTruncated!=='undefined') _messagesTruncated=false;
@@ -1235,6 +1237,7 @@ async function cmdGoal(args){
   if(!S.session){await newSession();await renderSessionList();}
   if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return;}
   const activeSid=S.session.session_id;
+  if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
   try{
     const r=await api('/api/goal',{method:'POST',body:JSON.stringify({
       session_id:activeSid,
@@ -1256,7 +1259,6 @@ async function cmdGoal(args){
       return raw;
     })();
     if(msg){
-      if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
       S.messages.push({role:'assistant',content:msg,_ts:Date.now()/1000,_goalStatus:true,_transient:true});
       renderMessages({preserveScroll:true});
       showToast(msg.split('\n')[0],2600);
@@ -1264,7 +1266,6 @@ async function cmdGoal(args){
     if(!r||!r.stream_id)return;
     S.toolCalls=[];
     if(typeof clearLiveToolCards==='function')clearLiveToolCards();
-    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
     appendThinking();setBusy(true);
     setComposerStatus(t('goal_working_toward'));
     S.activeStreamId=r.stream_id;

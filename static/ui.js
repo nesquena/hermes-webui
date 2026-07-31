@@ -9597,10 +9597,13 @@ async function refreshSession() {
   if (window._restartingForUpdate) { location.reload(); return; }
   dismissReconnect();
   if (!S.session) return;
+  const refreshSid=S.session.session_id;
+  if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
   try {
-    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
+    const data = await api(`/api/session?session_id=${encodeURIComponent(refreshSid)}`);
+    if(!S.session||S.session.session_id!==refreshSid) return;
+    if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();
     S.session = data.session;
-    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
     S.messages = data.session.messages || [];
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
