@@ -430,8 +430,10 @@ else
     # `egg_info` build step, however, touches `hermes_agent.egg-info/` inside the
     # source tree even under PEP 517 build isolation, which `EROFS`-fails on a
     # `:ro` mount and (under `set -e`) kills startup of every multi-container
-    # deploy. Stage the source into a writable tmpfs copy so the build can write
-    # its metadata side-by-side without touching the underlying mount.
+    # deploy. Stage the source into a writable runtime copy so editable install
+    # metadata can be written without touching the underlying mount. Hermes
+    # intentionally refuses wheel builds, so this stable source path must remain
+    # for as long as the virtual environment exists.
     #
     # The copy excludes any pre-baked `*.egg-info` / `build` / `dist` artifacts
     # to avoid the timestamp-update path setuptools takes when one is present,
@@ -445,7 +447,7 @@ else
     # with "Permission denied" even though `_stage_src` itself was created
     # writable by hermeswebui. Re-add owner-write on the staged tree after the
     # copy so the build dir is genuinely writable, not just owned by us.
-    _stage_src="/tmp/hermes-agent-build"
+    _stage_src="/app/hermes-agent-runtime"
     rm -rf "$_stage_src"
     mkdir -p "$_stage_src"
     if command -v rsync >/dev/null 2>&1; then
@@ -466,9 +468,10 @@ else
     fi
     chmod -R u+w "$_stage_src" \
       || error_exit "Failed to make staged hermes-agent source writable (rsync/cp preserved :ro mount perms)"
-    uv pip install "$_stage_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org \
+    uv pip install -e "$_stage_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org \
       || error_exit "Failed to install hermes-agent's requirements"
-    rm -rf "$_stage_src"
+    uv pip install "mautrix[encryption]" asyncpg aiosqlite Markdown aiohttp-socks --trusted-host pypi.org --trusted-host files.pythonhosted.org \
+      || error_exit "Failed to install Matrix/E2EE requirements"
   else
     echo ""
     echo "!! WARNING: hermes-agent source not found."

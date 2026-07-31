@@ -12392,6 +12392,12 @@ def handle_get(handler, parsed) -> bool:
             bad(handler, str(exc), status=400)
         return True
 
+    # ── Channels (profile-scoped) ──
+    if parsed.path == "/api/channels/matrix":
+        from api.channels import get_matrix_channel
+
+        return j(handler, get_matrix_channel())
+
     # ── Providers (GET) ──
     if parsed.path == "/api/providers":
         # Apply the active per-request profile's env so provider auth probes
@@ -14006,6 +14012,29 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return True
+
+    if parsed.path == "/api/channels/matrix":
+        from api.channels import save_matrix_channel
+
+        try:
+            return j(handler, save_matrix_channel(body))
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+
+    if parsed.path == "/api/channels/matrix/clear":
+        from api.channels import clear_matrix_channel
+
+        return j(handler, clear_matrix_channel())
+
+    if parsed.path == "/api/channels/matrix/restart":
+        from api.channels import restart_matrix_gateway
+
+        try:
+            result = restart_matrix_gateway()
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        status = 200 if result.get("status") == "running" else 409
+        return j(handler, result, status=status)
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)

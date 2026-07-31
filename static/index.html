@@ -383,6 +383,10 @@
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 2v6"/><path d="M15 2v6"/><path d="M7 8h10v4a5 5 0 0 1-10 0V8z"/><path d="M12 17v5"/></svg>
             <span data-i18n="settings_tab_extensions">Extensions</span>
           </button>
+          <button type="button" class="side-menu-item" data-settings-section="channels" onclick="switchSettingsSection('channels',{fromSidebarItem:true})">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 12h8"/><path d="M12 8v8"/><circle cx="12" cy="12" r="9"/></svg>
+            <span>Channels</span>
+          </button>
           <button type="button" class="side-menu-item" data-settings-section="system" onclick="switchSettingsSection('system',{fromSidebarItem:true})">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
             <span data-i18n="settings_tab_system">System</span>
@@ -1538,6 +1542,74 @@
               </div>
             </div>
           </div>
+          <div class="settings-pane" id="settingsPaneChannels">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Channels</div>
+                <div class="settings-section-meta">Messaging accounts are isolated to the active Hermes profile.</div>
+              </div>
+            </div>
+            <div class="settings-field" style="border:1px solid var(--border2);border-radius:10px;padding:14px">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px">
+                <div>
+                  <label style="font-size:15px;font-weight:650">Matrix</label>
+                  <div style="font-size:11px;color:var(--muted);margin-top:3px">Matrix channel for <strong id="matrixProfileName">active profile</strong></div>
+                </div>
+                <span id="matrixChannelStatus" class="detail-badge">Not configured</span>
+              </div>
+              <form id="matrixChannelForm" onsubmit="saveMatrixChannel(event)" autocomplete="off">
+                <div class="settings-field">
+                  <label for="matrixHomeserver">Homeserver URL</label>
+                  <input id="matrixHomeserver" type="url" placeholder="https://matrix.example.org" required autocomplete="off" style="width:100%">
+                </div>
+                <div class="settings-field">
+                  <label for="matrixUserId">Matrix user ID</label>
+                  <input id="matrixUserId" type="text" placeholder="@maverick:example.org" required autocomplete="off" style="width:100%">
+                </div>
+                <div class="settings-field">
+                  <label for="matrixAuthMethod">Authentication</label>
+                  <select id="matrixAuthMethod" onchange="syncMatrixAuthFields()" style="width:100%">
+                    <option value="access_token">Access token (recommended)</option>
+                    <option value="password">Password</option>
+                  </select>
+                </div>
+                <div class="settings-field" id="matrixAccessTokenField">
+                  <label for="matrixAccessToken">Access token</label>
+                  <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Leave blank to keep the saved token. It is never returned to the browser.</div>
+                  <input id="matrixAccessToken" type="password" placeholder="Not configured" autocomplete="new-password" style="width:100%">
+                </div>
+                <div class="settings-field" id="matrixPasswordField" style="display:none">
+                  <label for="matrixPassword">Password</label>
+                  <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Leave blank to keep the saved password. Prefer an access token for long-lived service accounts.</div>
+                  <input id="matrixPassword" type="password" placeholder="Not configured" autocomplete="new-password" style="width:100%">
+                </div>
+                <div class="settings-field">
+                  <label for="matrixAllowedUsers">Allowed users</label>
+                  <div style="font-size:11px;color:var(--muted);margin-bottom:6px">One full Matrix ID per line. At least one is required.</div>
+                  <textarea id="matrixAllowedUsers" rows="3" placeholder="@tyler:example.org&#10;@kendal:example.org" required style="width:100%;resize:vertical"></textarea>
+                </div>
+                <div class="settings-field">
+                  <label for="matrixAllowedRooms">Allowed rooms (optional)</label>
+                  <div style="font-size:11px;color:var(--muted);margin-bottom:6px">One internal room ID per line, such as !abc:example.org. Leave blank to permit DMs and rooms from allowed users.</div>
+                  <textarea id="matrixAllowedRooms" rows="2" placeholder="!family:example.org" style="width:100%;resize:vertical"></textarea>
+                </div>
+                <div class="settings-field">
+                  <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="matrixRequireMention" type="checkbox" checked><span>Require mention in shared rooms</span></label>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px">
+                  <div class="settings-field"><label for="matrixSessionScope">Session scope</label><select id="matrixSessionScope" style="width:100%"><option value="room">Room</option><option value="thread">Thread</option><option value="auto">Auto</option></select></div>
+                  <div class="settings-field"><label for="matrixE2eeMode">Encryption</label><select id="matrixE2eeMode" style="width:100%"><option value="required">Required</option><option value="optional">Optional</option><option value="off">Off</option></select></div>
+                </div>
+                <div class="settings-field"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="matrixAutoThread" type="checkbox"><span>Automatically create/use threads</span></label></div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+                  <button class="sm-btn" id="matrixSaveBtn" type="submit">Save</button>
+                  <button class="sm-btn" id="matrixRestartBtn" type="button" onclick="saveAndRestartMatrixGateway()">Save &amp; Restart Gateway</button>
+                  <button class="sm-btn" id="matrixClearBtn" type="button" onclick="clearMatrixChannel()" style="color:var(--error,#e05)">Disconnect</button>
+                </div>
+                <div id="matrixChannelMessage" aria-live="polite" style="font-size:12px;color:var(--muted);margin-top:10px"></div>
+              </form>
+            </div>
+          </div>
           <div class="settings-pane" id="settingsPaneSystem">
             <div class="settings-section-head">
               <div>
@@ -1773,6 +1845,7 @@
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/extension_settings.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/channels.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/outline.js?v=__WEBUI_VERSION__" defer></script>
