@@ -106,7 +106,7 @@ def test_served_sidebar_lineage_fixture_has_stable_grouping(tmp_path):
             page.screenshot(path=str(screenshot_dir / "webui-PR-TARGET-6027-after.png"), full_page=True)
             browser.close()
         assert not errors, errors
-        assert result["count"] == 2
+        assert result["count"] == 2, result
         assert result["childCount"] == 2, result
         assert any("Renamed root" in row for row in result["narrow"]["rows"])
         assert any("Writable fork" in row for row in result["narrow"]["rows"])
