@@ -1361,7 +1361,7 @@ def _custom_provider_slug_from_name(name: object) -> str:
     # Keep name-derived custom provider slugs out of the @provider:model colon
     # grammar. Endpoint-derived slugs may still be custom:<host>:<port>, but a
     # friendly name like "Local (127.0.0.1:15721)" should not preserve ':'.
-    slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
+    slug = re.sub(r"[^\w._-]+", "-", raw, flags=re.UNICODE).strip("-")
     slug = re.sub(r"-{2,}", "-", slug)
     if not slug:
         return ""
