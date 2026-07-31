@@ -529,6 +529,12 @@ function _isSidebarCollapsed(){
 function _syncSidebarAria(){
   // Mirror the open/collapsed state on the active rail button via aria-expanded
   // so screen readers announce the toggle. Open=true, collapsed=false.
+  // Clear the others first: only one panel owns the sidebar, but this used to set
+  // aria-expanded on the newly-active button without unsetting the previous one,
+  // so chat -> kanban -> skills left three buttons claiming aria-expanded=true
+  // and a screen reader announced three open disclosures.
+  document.querySelectorAll('.rail .rail-btn.nav-tab[data-panel][aria-expanded]')
+    .forEach(function(btn){ btn.setAttribute('aria-expanded','false'); });
   const active=document.querySelector('.rail .rail-btn.nav-tab.active[data-panel]');
   if(active)active.setAttribute('aria-expanded',!_isSidebarCollapsed());
 }
