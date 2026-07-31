@@ -191,6 +191,15 @@ def _count_user_turns(row: dict) -> int:
     user_turns = row.get("actual_user_message_count")
     if user_turns is None:
         user_turns = row.get("user_message_count")
+    if user_turns is None and "actual_user_message_count" in row:
+        # Only for rows from the state.db projection, which is the one producer
+        # that reports NULL when a schema shape cannot separate user turns from
+        # total messages. Keyed on the column's presence, not its value, so a
+        # sidecar or ``_index.json`` row carrying neither key is untouched and
+        # still falls through to the message scan below. This heuristic only
+        # asks whether the row has any user activity at all, where a coarse
+        # overcount is harmless; a displayed count is a different claim.
+        user_turns = row.get("actual_message_count")
     if user_turns is None:
         messages = row.get("messages") or []
         if isinstance(messages, list):
@@ -617,7 +626,12 @@ def read_importable_agent_session_rows(
             if 'role' in message_cols:
                 user_message_count_expr = "COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END)"
             else:
-                user_message_count_expr = f"COUNT(m.{count_col})"
+                # No role column, so user turns are not separable from the total.
+                # Report NULL rather than the total: consumers that only need a
+                # coarse liveness signal fall back to ``actual_message_count``,
+                # while anything displaying the number as a user-turn count must
+                # be able to tell "unknown" from "every message was a user turn".
+                user_message_count_expr = "NULL"
             last_activity_expr = "MAX(m.timestamp)" if messages_has_timestamp else "NULL"
             join_clause = "LEFT JOIN messages m ON m.session_id = s.id"
             group_by_clause = "GROUP BY s.id"
@@ -625,7 +639,8 @@ def read_importable_agent_session_rows(
             # No usable messages table: use the denormalized per-session counts
             # and ``started_at`` so the rows still surface in the sidebar.
             actual_count_expr = "s.message_count"
-            user_message_count_expr = "s.message_count"
+            # Denormalized total only; it does not separate user turns either.
+            user_message_count_expr = "NULL"
             last_activity_expr = "NULL"
             join_clause = ""
             group_by_clause = ""
