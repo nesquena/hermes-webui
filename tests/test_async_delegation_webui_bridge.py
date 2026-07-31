@@ -126,6 +126,24 @@ def _install_fake_durable_delivery_api(monkeypatch):
     fake_pkg = sys.modules.get("tools") or types.ModuleType("tools")
     monkeypatch.setitem(sys.modules, "tools", fake_pkg)
     monkeypatch.setitem(sys.modules, "tools.async_delegation", fake_mod)
+    monkeypatch.setattr(fake_pkg, "async_delegation", fake_mod, raising=False)
+    return calls
+
+
+def _install_fake_legacy_delivery_api(monkeypatch):
+    """Install a pre-durable-core surface with only compatibility markers."""
+    calls = {"mark": [], "legacy": []}
+    fake_mod = types.ModuleType("tools.async_delegation")
+    fake_mod.mark_completion_delivered = (  # type: ignore[reportAttributeAccessIssue]
+        lambda delegation_id: calls["mark"].append(delegation_id) or True
+    )
+    fake_mod.mark_async_delegation_consumed = (  # type: ignore[reportAttributeAccessIssue]
+        lambda delegation_id: calls["legacy"].append(delegation_id)
+    )
+    fake_pkg = sys.modules.get("tools") or types.ModuleType("tools")
+    monkeypatch.setitem(sys.modules, "tools", fake_pkg)
+    monkeypatch.setitem(sys.modules, "tools.async_delegation", fake_mod)
+    monkeypatch.setattr(fake_pkg, "async_delegation", fake_mod, raising=False)
     return calls
 
 
@@ -347,6 +365,41 @@ def test_background_active_turn_does_not_consume_durable_delivery_attempts(monke
         assert peu.async_delivery_retry_timer_count() == 1
         assert cfg.DEFERRED_PROCESS_WAKEUPS == {}
         assert cfg.BG_TASK_COMPLETE_EVENTS_SEEN == {}
+    finally:
+        _reset_wakeup_state()
+
+
+def test_background_busy_legacy_completion_retries_until_session_is_idle(monkeypatch):
+    """A pre-durable core must not discard a completion after one busy retry."""
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_legacy_delivery_api(monkeypatch)
+    cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "webui-session-1"
+    busy = {"active": True}
+    accepted: list[tuple[str, str]] = []
+
+    def _accept(session_id, prompt, *, evt, claim, **_kwargs):
+        accepted.append((session_id, prompt))
+        bp._record_async_delegation_accepted(evt, session_id=session_id, claim=claim)
+
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 0.01)
+    monkeypatch.setattr(bp, "_session_has_active_turn", lambda _session_id: busy["active"])
+    monkeypatch.setattr(bp, "_start_async_delegation_wakeup_turn", _accept)
+    monkeypatch.setattr(bp, "_emit_bg_task_complete_events_coalesced", lambda *_args: 1)
+    evt = _async_delegation_event()
+
+    try:
+        bp._process_one(evt)
+        first_retry = registry.completion_queue.get(timeout=1)
+        bp._process_one(first_retry)
+        second_retry = registry.completion_queue.get(timeout=1)
+
+        busy["active"] = False
+        bp._process_one(second_retry)
+
+        assert accepted and accepted[0][0] == "webui-session-1"
+        assert delivery == {"mark": ["deleg_test123"], "legacy": []}
+        assert registry.completion_queue.empty()
     finally:
         _reset_wakeup_state()
 
