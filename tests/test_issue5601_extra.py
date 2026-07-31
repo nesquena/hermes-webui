@@ -62,19 +62,29 @@ def test_cancel_during_backoff(monkeypatch, tmp_path):
     ev = threading.Event()
     config.CANCEL_FLAGS["stream_cancel_backoff"] = ev
 
-    # Monkeypatch _get_ai_agent to return our test agent class
-    with mock.patch.object(streaming, "_get_ai_agent", return_value=CancelDuringBackoffAgent):
-        t = _run_stream_in_thread(session, "stream_cancel_backoff", CancelDuringBackoffAgent, workspace=str(tmp_path))
+    # Simulate cancellation during backoff by making wait() return True
+    def _always_true(timeout=None):
+        return True
+    ev.wait = _always_true
 
-        # Wait briefly for the first provider call to complete and the worker to enter backoff
-        time.sleep(0.05)
-        # Simulate a cancel during backoff
-        ev.set()
-
-        t.join(timeout=5)
+    # Monkeypatch dependencies and run synchronously like other tests
+    with mock.patch.object(streaming, "get_session", return_value=session), \
+         mock.patch.object(streaming, "_get_ai_agent", return_value=CancelDuringBackoffAgent), \
+         mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
+         mock.patch("api.config.get_config", return_value={}), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
+        fake_queue = streaming._run_agent_streaming(
+            session_id=session.session_id,
+            msg_text=session.pending_user_message,
+            model="test-model",
+            workspace=str(tmp_path),
+            stream_id="stream_cancel_backoff",
+        )
 
     # Agent should only have run once (no retry after cancel)
     assert CancelDuringBackoffAgent.runs == 1
+    events = [(e[0], e[1]) for e in list(fake_queue.queue)]
+    assert any(ev_name == "cancel" for ev_name, _ in events)
 
 
 def test_none_result_is_handled(monkeypatch, tmp_path):
@@ -97,7 +107,11 @@ def test_none_result_is_handled(monkeypatch, tmp_path):
     session = _prepare_session("none_result", "stream_none_result", pending_user_message="hi")
     config.CANCEL_FLAGS["stream_none_result"] = threading.Event()
 
-    with mock.patch.object(streaming, "_get_ai_agent", return_value=NoneFirstAgent):
+    with mock.patch.object(streaming, "get_session", return_value=session), \
+         mock.patch.object(streaming, "_get_ai_agent", return_value=NoneFirstAgent), \
+         mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
+         mock.patch("api.config.get_config", return_value={}), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
         fake_queue = streaming._run_agent_streaming(
             session_id=session.session_id,
             msg_text=session.pending_user_message,
