@@ -5384,6 +5384,7 @@ let _sessionTouchGen=0; // generation token — bumped on profile/filter changes
 let _touchScrollFallbackRaf=0;
 let _touchBatchToken=0; // monotonic token for token-owned microtask work
 let _touchContinuousBatchScheduled=false;
+let _touchScrollHandler=null; // owner-qualified scroll listener for event-driven batch trigger
 // Canonical render state saved by renderSessionListFromCache after the initial
 // touch render. Contains the ordered flat session rows, group metadata, the
 // _renderOneSession closure, and the active session ID — everything needed to
@@ -5399,6 +5400,10 @@ let _touchRenderState=null;
 function _invalidateTouchRender(){
   if(_touchSentinelObserver){_touchSentinelObserver.disconnect();_touchSentinelObserver=null;}
   if(_touchScrollFallbackRaf){cancelAnimationFrame(_touchScrollFallbackRaf);_touchScrollFallbackRaf=0;}
+  if(_touchScrollHandler&&_sessionTouchListEl){
+    try{_sessionTouchListEl.removeEventListener('scroll',_touchScrollHandler,{passive:true});}catch(_){}
+  }
+  _touchScrollHandler=null;
   _touchRenderState=null;
   _sessionTouchListEl=null;
   _sessionTouchLoadedCount=0;
@@ -5815,39 +5820,74 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid,
   }
   _ensureTouchSentinelObserver(list);
   if(loaded<total&&_touchSentinelObserver) _touchSentinelObserver.observe(sentinel);
-  // Scroll-based batch trigger: runs ALWAYS (not just when IO is absent) as
-  // a complement to the IntersectionObserver. The IO can stall after one
-  // append — the sentinel stays intersecting but no new transition fires.
-  // This scroll listener catches that case: when the user scrolls near the
-  // bottom, it triggers a batch. The continuous-batch microtask (scheduled
-  // after each successful append) handles the case where the user is already
-  // at the bottom and the list needs to keep loading without a new scroll.
-  // Stops rescheduling when all rows are loaded or generation changes.
+  // Event-driven batch trigger: a passive scroll listener on the list arms
+  // ONE coalesced RAF per scroll burst. The IntersectionObserver can stall
+  // after one append (sentinel stays intersecting, no new transition fires),
+  // so the scroll listener catches that case. Unlike the prior RAF poll, this
+  // does NOT reschedule itself while idle — zero CPU/battery cost when the
+  // user is not scrolling. The continuous-batch microtask (scheduled after
+  // each successful append) handles the already-at-bottom case.
   const fallbackGen=_sessionTouchGen;
-  _touchScrollFallbackRaf=requestAnimationFrame(function check(){
-    if(_sessionTouchGen!==fallbackGen){_touchScrollFallbackRaf=0;return;} // generation changed — stop, zero handle
-    if(!_sessionTouchListEl||_sessionTouchListEl!==list){_touchScrollFallbackRaf=0;return;} // list replaced — zero handle
-    const el=_sessionTouchListEl;
-    const t=_sessionTouchTotalCount||0;
-    const l=_sessionTouchLoadedCount||0;
-    if(l>=t){_touchScrollFallbackRaf=0;return;} // all rows loaded — stop, zero handle
-    const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<200;
-    if(nearBottom&&!_touchBatchPending&&!_touchContinuousBatchScheduled){
-      // Token-owned: same guard as the observer path.
-      const token=++_touchBatchToken;
-      _touchBatchPending=true;
-      const capturedGen=fallbackGen;
-      Promise.resolve().then(()=>{
-        if(capturedGen!==_sessionTouchGen){
-          if(token===_touchBatchToken) _touchBatchPending=false;
-          return;
-        }
-        try{_appendTouchBatch();}
-        finally{ if(token===_touchBatchToken) _touchBatchPending=false; }
-      });
-    }
-    _touchScrollFallbackRaf=requestAnimationFrame(check);
-  });
+  const scrollHandler=function(){
+    if(_sessionTouchGen!==fallbackGen){_touchScrollFallbackRaf=0;return;}
+    if(!_sessionTouchListEl||_sessionTouchListEl!==list){_touchScrollFallbackRaf=0;return;}
+    // Already-armed RAF coalesces scroll bursts — skip if pending.
+    if(_touchScrollFallbackRaf) return;
+    _touchScrollFallbackRaf=requestAnimationFrame(function(){
+      _touchScrollFallbackRaf=0; // clear handle — one-shot, no reschedule
+      if(_sessionTouchGen!==fallbackGen) return;
+      if(!_sessionTouchListEl||_sessionTouchListEl!==list) return;
+      const el=_sessionTouchListEl;
+      const t=_sessionTouchTotalCount||0;
+      const l=_sessionTouchLoadedCount||0;
+      if(l>=t) return;
+      const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<200;
+      if(nearBottom&&!_touchBatchPending&&!_touchContinuousBatchScheduled){
+        const token=++_touchBatchToken;
+        _touchBatchPending=true;
+        const capturedGen=fallbackGen;
+        Promise.resolve().then(()=>{
+          if(capturedGen!==_sessionTouchGen){
+            if(token===_touchBatchToken) _touchBatchPending=false;
+            return;
+          }
+          try{_appendTouchBatch();}
+          finally{ if(token===_touchBatchToken) _touchBatchPending=false; }
+        });
+      }
+    });
+  };
+  _touchScrollHandler=scrollHandler;
+  try{list.addEventListener('scroll',scrollHandler,{passive:true});}catch(_){}
+  // If the sentinel is already intersecting on setup (e.g. short list or the
+  // user is already at the bottom), arm one initial RAF to check — but do NOT
+  // reschedule. The continuous-batch chain from _appendTouchBatch handles
+  // subsequent appends.
+  if(loaded<total){
+    _touchScrollFallbackRaf=requestAnimationFrame(function(){
+      _touchScrollFallbackRaf=0;
+      if(_sessionTouchGen!==fallbackGen) return;
+      if(!_sessionTouchListEl||_sessionTouchListEl!==list) return;
+      const el=_sessionTouchListEl;
+      const t=_sessionTouchTotalCount||0;
+      const l=_sessionTouchLoadedCount||0;
+      if(l>=t) return;
+      const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<200;
+      if(nearBottom&&!_touchBatchPending&&!_touchContinuousBatchScheduled){
+        const token=++_touchBatchToken;
+        _touchBatchPending=true;
+        const capturedGen=fallbackGen;
+        Promise.resolve().then(()=>{
+          if(capturedGen!==_sessionTouchGen){
+            if(token===_touchBatchToken) _touchBatchPending=false;
+            return;
+          }
+          try{_appendTouchBatch();}
+          finally{ if(token===_touchBatchToken) _touchBatchPending=false; }
+        });
+      }
+    });
+  }
 }
 
 function _schedulePendingSessionListApply(){

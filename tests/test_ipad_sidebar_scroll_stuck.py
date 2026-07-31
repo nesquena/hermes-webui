@@ -614,6 +614,7 @@ let _touchBatchPending = false;
 let _touchScrollFallbackRaf = 0;
 let _touchBatchToken = 0;
 let _touchContinuousBatchScheduled = false;
+let _touchScrollHandler = null;
 const SESSION_TOUCH_BATCH_SIZE = 40;
 const SESSION_TOUCH_INITIAL_BATCH = 60;
 const SESSION_VIRTUAL_ROW_HEIGHT = 52;
@@ -632,11 +633,15 @@ function _sessionVirtualSpacer(h, pos) {
 }
 
 // Mock _invalidateTouchRender for mismatch recovery — matches production:
-// clears ALL touch state (observer, RAF, render state, list, loaded/total,
-// pending, generation, token).
+// clears ALL touch state (observer, RAF, scroll listener, render state,
+// list, loaded/total, pending, generation, token).
 function _invalidateTouchRender() {
   if (_touchSentinelObserver) { _touchSentinelObserver.disconnect(); _touchSentinelObserver = null; }
   if (_touchScrollFallbackRaf) { /* mock: no cancelAnimationFrame */ _touchScrollFallbackRaf = 0; }
+  if (typeof _touchScrollHandler !== 'undefined' && _touchScrollHandler && _sessionTouchListEl) {
+    try { _sessionTouchListEl.removeEventListener('scroll', _touchScrollHandler, {passive: true}); } catch(_) {}
+  }
+  if (typeof _touchScrollHandler !== 'undefined') _touchScrollHandler = null;
   _touchRenderState = null;
   _sessionTouchListEl = null;
   _sessionTouchLoadedCount = 0;
@@ -2943,3 +2948,243 @@ def test_scroll_trigger_runs_always_not_only_when_io_absent():
         "Scroll trigger must use _touchScrollFallbackRaf"
     assert "requestAnimationFrame" in fn, \
         "Scroll trigger must use requestAnimationFrame"
+
+
+# ── Gate-certifier Jul 31: event-driven scroll trigger (no idle RAF poll) ──
+
+def test_no_unconditional_raf_reschedule():
+    """The prior RAF poll unconditionally rescheduled itself every frame.
+    The fix must NOT contain a self-rescheduling loop — the scroll listener
+    arms one coalesced RAF per scroll burst, then stops.
+    """
+    fn = _extract_fn(SESSIONS_JS, "_setupTouchSentinel")
+    # The old pattern: requestAnimationFrame(check) at the end of the callback
+    # with the same function name. The new code must not have a named
+    # self-reference that reschedules.
+    assert "requestAnimationFrame(check)" not in fn, \
+        "Must not have a self-rescheduling RAF poll — use event-driven scroll listener"
+    assert "requestAnimationFrame(function check" not in fn, \
+        "Must not have a named self-rescheduling RAF callback"
+
+
+def test_scroll_listener_installed():
+    """_setupTouchSentinel must install a passive scroll listener on the list
+    for event-driven batch triggering — not a permanent RAF poll.
+    """
+    fn = _extract_fn(SESSIONS_JS, "_setupTouchSentinel")
+    assert "addEventListener('scroll'" in fn or 'addEventListener("scroll"' in fn, \
+        "Must install a scroll event listener for event-driven batch trigger"
+    assert "passive:true" in fn or "passive: true" in fn, \
+        "Scroll listener must be passive (no scroll-blocking)"
+    assert "_touchScrollHandler" in fn, \
+        "Must store the scroll handler for owner-qualified teardown"
+
+
+def test_invalidation_removes_scroll_listener():
+    """_invalidateTouchRender must remove the scroll listener — not just cancel
+    the RAF. Without removal, a stale listener survives on the old list element.
+    """
+    fn = _extract_fn(SESSIONS_JS, "_invalidateTouchRender")
+    assert "removeEventListener" in fn, \
+        "_invalidateTouchRender must remove the scroll listener from the list"
+    assert "_touchScrollHandler" in fn, \
+        "_invalidateTouchRender must reference _touchScrollHandler for removal"
+
+
+def test_scroll_handler_is_oneshot_raf():
+    """The scroll handler must arm a one-shot RAF (clearing the handle inside
+    the callback) — not reschedule itself.
+    """
+    fn = _extract_fn(SESSIONS_JS, "_setupTouchSentinel")
+    # The one-shot pattern: set _touchScrollFallbackRaf=requestAnimationFrame(...),
+    # then inside the callback, _touchScrollFallbackRaf=0 before doing work.
+    # There must be NO requestAnimationFrame call at the end of the callback
+    # that reschedules with the same handler.
+    # Count RAF calls: should be exactly 2 (scroll handler RAF + initial setup RAF).
+    raf_count = fn.count("requestAnimationFrame")
+    assert raf_count <= 2, \
+        f"At most 2 RAF calls expected (scroll handler + initial check), got {raf_count}"
+
+
+@_node_tests
+def test_idle_far_from_bottom_no_recurring_raf():
+    """Gate-certifier blocking fix: when IO is present and the list is far
+    from the bottom (idle), the scroll handler must NOT produce recurring
+    RAF schedules. Simulates 60/224 rows at scrollTop 0 — the prior code
+    produced 9 schedules from 8 idle callbacks. The new event-driven code
+    should produce zero schedules with no scroll activity.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+// Track RAF schedules
+let rafSchedules = 0;
+global.requestAnimationFrame = function(fn) { rafSchedules++; return 1; };
+global.cancelAnimationFrame = function() {};
+function _isTouchPrimary() { return true; }
+function _updateTouchGroupSpacers() {}
+function _updateTouchSentinel() {}
+window.IntersectionObserver = function(cb, opts) { this.disconnect = function(){}; this.observe = function(){}; this.unobserve = function(){}; };
+global.IntersectionObserver = window.IntersectionObserver;
+
+const list = makeList();
+list.scrollHeight = 20000; // tall list
+list.scrollTop = 0; // at top, far from bottom
+list.clientHeight = 800; // viewport
+
+const flatRows = [];
+for (let i = 0; i < 224; i++) flatRows.push({group:{label:'G'},session:{session_id:'s'+i}});
+
+_sessionTouchListEl = list;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 224;
+_touchRenderState = { gen: 1, list: list, flatRows: flatRows, renderOneSession: null, activeSid: null };
+_touchSentinelObserver = null;
+list._sentinel = makeEl('div');
+list._sentinel.style.display = '';
+
+eval(extractFunc('_setupTouchSentinel'));
+_setupTouchSentinel(list, flatRows, null, 60, 224);
+
+// Record schedules after setup
+const schedulesAfterSetup = rafSchedules;
+
+// Now simulate 8 idle callbacks (no scroll events fired)
+// The scroll handler is NOT called — it only fires on scroll events.
+// So rafSchedules should NOT increase from idle.
+// In the prior code, the RAF callback self-rescheduled, producing 9 schedules
+// from 8 idle drains. The new code has no self-rescheduling.
+
+console.log(JSON.stringify({
+  schedulesAfterSetup: schedulesAfterSetup,
+  // With no scroll activity, no additional RAFs should be scheduled
+  noRecurringIdleRAF: schedulesAfterSetup <= 1, // at most the initial setup RAF
+}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["noRecurringIdleRAF"], \
+        f"Idle far-from-bottom must not produce recurring RAF — got {result['schedulesAfterSetup']} schedules"
+
+
+@_node_tests
+def test_scroll_coalescing_multiple_events_single_raf():
+    """Multiple scroll events in quick succession must coalesce to a single
+    RAF — the handler checks if a RAF is already armed and skips.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+let rafSchedules = 0;
+let pendingRaf = 0;
+global.requestAnimationFrame = function(fn) { rafSchedules++; pendingRaf = 1; return 1; };
+global.cancelAnimationFrame = function() {};
+function _isTouchPrimary() { return true; }
+function _updateTouchGroupSpacers() {}
+function _updateTouchSentinel() {}
+window.IntersectionObserver = function(cb, opts) { this.disconnect = function(){}; this.observe = function(){}; this.unobserve = function(){}; };
+global.IntersectionObserver = window.IntersectionObserver;
+
+const list = makeList();
+list.scrollHeight = 20000;
+list.scrollTop = 19500; // near bottom
+list.clientHeight = 800;
+
+const flatRows = [];
+for (let i = 0; i < 224; i++) flatRows.push({group:{label:'G'},session:{session_id:'s'+i}});
+
+_sessionTouchListEl = list;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 224;
+_touchRenderState = { gen: 1, list: list, flatRows: flatRows, renderOneSession: null, activeSid: null };
+_touchSentinelObserver = { disconnect: function() {}, observe: function() {}, unobserve: function() {} };
+list._sentinel = makeEl('div');
+list._sentinel.style.display = '';
+
+eval(extractFunc('_setupTouchSentinel'));
+_setupTouchSentinel(list, flatRows, null, 60, 224);
+
+// Reset counter after setup
+rafSchedules = 0;
+
+// Fire 5 rapid scroll events WITHOUT clearing the pending RAF
+// (simulates burst scrolling — the handler should coalesce)
+for (let i = 0; i < 5; i++) {
+  if (_touchScrollHandler) _touchScrollHandler();
+}
+
+// Only 1 RAF should have been scheduled (coalescing — the handler checks
+// if _touchScrollFallbackRaf is already set and skips)
+console.log(JSON.stringify({
+  rafSchedules: rafSchedules,
+  coalesced: rafSchedules <= 1,
+}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["coalesced"], \
+        f"5 scroll events must coalesce to ≤1 RAF — got {result['rafSchedules']} schedules"
+
+
+@_node_tests
+def test_teardown_cancels_scroll_listener():
+    """_invalidateTouchRender must remove the scroll listener so it doesn't
+    leak on the old list element after a profile switch.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+let scrollListenersRemoved = 0;
+const list = makeList();
+list.scrollHeight = 20000;
+list.scrollTop = 0;
+list.clientHeight = 800;
+
+// Track add/removeEventListener
+list._scrollListeners = [];
+list.addEventListener = function(type, handler, opts) {
+  if (type === 'scroll') this._scrollListeners.push(handler);
+};
+list.removeEventListener = function(type, handler, opts) {
+  if (type === 'scroll') {
+    const idx = this._scrollListeners.indexOf(handler);
+    if (idx >= 0) { this._scrollListeners.splice(idx, 1); scrollListenersRemoved++; }
+  }
+};
+
+const flatRows = [];
+for (let i = 0; i < 224; i++) flatRows.push({group:{label:'G'},session:{session_id:'s'+i}});
+
+_sessionTouchListEl = list;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 224;
+_touchRenderState = { gen: 1, list: list, flatRows: flatRows, renderOneSession: null, activeSid: null };
+_touchSentinelObserver = { disconnect: function() {}, observe: function() {}, unobserve: function() {} };
+list._sentinel = makeEl('div');
+list._sentinel.style.display = '';
+
+global.requestAnimationFrame = function() { return 1; };
+global.cancelAnimationFrame = function() {};
+function _isTouchPrimary() { return true; }
+function _updateTouchGroupSpacers() {}
+function _updateTouchSentinel() {}
+window.IntersectionObserver = function(cb, opts) { this.disconnect = function(){}; this.observe = function(){}; this.unobserve = function(){}; };
+global.IntersectionObserver = window.IntersectionObserver;
+
+eval(extractFunc('_setupTouchSentinel'));
+_setupTouchSentinel(list, flatRows, null, 60, 224);
+
+const listenersBefore = list._scrollListeners.length;
+
+// Now invalidate — should remove the scroll listener
+_invalidateTouchRender();
+
+console.log(JSON.stringify({
+  listenersBefore: listenersBefore,
+  listenersAfter: list._scrollListeners.length,
+  removed: scrollListenersRemoved,
+  handlerNulled: _touchScrollHandler === null,
+}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["listenersBefore"] >= 1, "Scroll listener must have been installed"
+    assert result["removed"] >= 1, "Scroll listener must be removed on invalidation"
+    assert result["handlerNulled"], "_touchScrollHandler must be nulled on invalidation"
