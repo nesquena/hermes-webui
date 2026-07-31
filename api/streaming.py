@@ -8194,10 +8194,6 @@ def _run_agent_streaming(
             # the agent runs, not around the entire turn. This ensures we don't
             # replay an entire logical turn when the provider fails silently.
             
-            # Make the provider call (agent.run_conversation) - this should NOT be
-            # wrapped in retry logic since retries happen at provider level
-            result = agent.run_conversation(**_run_conversation_kwargs)
-
             # ── Provider-call boundary retry (WebUI-level hardening) ──
             # Detect silent provider failures using a turn-aware predicate and
             # retry only the provider call. Flush reasoning after each provider
