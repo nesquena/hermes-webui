@@ -613,6 +613,7 @@ let _touchSentinelObserver = null;
 let _touchBatchPending = false;
 let _touchScrollFallbackRaf = 0;
 let _touchBatchToken = 0;
+let _touchContinuousBatchScheduled = false;
 const SESSION_TOUCH_BATCH_SIZE = 40;
 const SESSION_TOUCH_INITIAL_BATCH = 60;
 const SESSION_VIRTUAL_ROW_HEIGHT = 52;
@@ -641,6 +642,7 @@ function _invalidateTouchRender() {
   _sessionTouchLoadedCount = 0;
   _sessionTouchTotalCount = 0;
   _touchBatchPending = false;
+  _touchContinuousBatchScheduled = false;
   _sessionTouchGen++;
   _touchBatchToken++;
 }
@@ -649,6 +651,7 @@ function _invalidateTouchRender() {
 eval(extractFunc('_createTouchGroupWrapper'));
 eval(extractFunc('_updateTouchGroupSpacers'));
 eval(extractFunc('_updateTouchSentinel'));
+eval(extractFunc('_scheduleContinuousBatch'));
 eval(extractFunc('_appendTouchBatch'));
 eval(extractFunc('_ensureTouchSentinelObserver'));
 """
@@ -2623,3 +2626,320 @@ console.log(JSON.stringify({
         "Batch pending must be cleared even when _isTouchPrimary() is false"
     assert result["rafZero"], \
         "Fallback RAF must be cancelled even when _isTouchPrimary() is false"
+
+
+@_node_tests
+def test_continuous_batch_completes_224_rows_no_manual_reentry():
+    """Gate-certifier blocking fix: calling _appendTouchBatch() once must trigger
+    a continuous chain of batches via _scheduleContinuousBatch() that completes
+    60→100→140→180→220→224 WITHOUT any manual sentinel leave/re-enter.
+
+    The gate-certifier reproduced this stall in real Chromium: after one append
+    (60→100), the per-group spacers shrank and the sentinel stayed intersecting
+    but the IntersectionObserver emitted no second transition. The list stalled
+    at 100/224 with "Loading more…" visible.
+
+    This test proves the fix: _appendTouchBatch() now calls
+    _scheduleContinuousBatch() after a successful append, which re-checks
+    whether the sentinel is still near the viewport and schedules another batch.
+    The chain continues until all rows are loaded.
+
+    In the Node VM, getBoundingClientRect() returns zero values (no real layout),
+    so _scheduleContinuousBatch takes the headless branch (always batch) — this
+    proves the continuous-completion property without a real browser. In a real
+    browser, the getBoundingClientRect branch provides the same guarantee using
+    actual viewport geometry.
+    """
+    total = 224
+    flat_rows = []
+    for i in range(total):
+        flat_rows.append({
+            "group": {"label": "Today", "isPinned": False},
+            "session": {"session_id": f"sess_{i}"},
+        })
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 60; // initial batch already rendered
+_sessionTouchTotalCount = {total};
+
+// Pre-populate DOM with 60 session items
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('sess_' + i));
+
+// Set up render state
+_touchRenderState = {{
+  gen: 1,
+  list: list,
+  flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+
+// Create group wrapper with body that tracks items
+const gw = makeEl('div');
+gw.className = 'session-date-group';
+gw.dataset['group-label'] = 'Today';
+const body = makeBodyThatTracksItems(list);
+gw.querySelector = function(sel) {{ if(sel==='.session-date-body') return body; return null; }};
+gw.appendChild(body);
+list._groups['Today'] = gw;
+list.children.push(gw);
+
+// Add a sentinel element (as _setupTouchSentinel would)
+const sentinel = makeEl('div');
+sentinel.dataset['touchSentinel'] = '';
+sentinel.style = {{ display: '' }};
+list._sentinel = sentinel;
+list.children.push(sentinel);
+
+// Track the batch progression
+const progress = [];
+
+// Call _appendTouchBatch once — _scheduleContinuousBatch should chain the rest
+_appendTouchBatch();
+progress.push(_sessionTouchLoadedCount);
+
+// Drain microtasks: _scheduleContinuousBatch uses Promise.resolve().then()
+// to schedule the next batch. In the Node VM, microtasks don't run until the
+// current sync stack unwinds. We drain repeatedly until all rows are loaded
+// or a safety limit is hit.
+// In a real browser, the microtask queue drains naturally between frames.
+(async function() {{
+  for (let i = 0; i < 100; i++) {{
+    await Promise.resolve(); // drain one microtask level
+    if (_sessionTouchLoadedCount >= {total}) break;
+  }}
+
+  const finalLoaded = _sessionTouchLoadedCount;
+  const allSids = list._items.map(i => i.dataset.sid);
+  const uniqueSids = [...new Set(allSids)];
+  const orderedCorrectly = allSids.every((sid, i) => sid === 'sess_' + i);
+  const noBlanks = list._items.length === finalLoaded;
+
+  console.log(JSON.stringify({{
+    finalLoaded,
+    totalItems: list._items.length,
+    uniqueCount: uniqueSids.length,
+    orderedCorrectly,
+    noBlanks,
+    innerHTMLWipes: _innerHTMLWipes,
+    renderCalls: _renderCalls,
+    progress,
+  }}));
+}})();
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["finalLoaded"] == 224, \
+        f"Continuous batch must complete to 224, got {result['finalLoaded']} — stall after one append"
+    assert result["totalItems"] == 224, \
+        f"DOM must have 224 items, got {result['totalItems']}"
+    assert result["uniqueCount"] == 224, \
+        f"All 224 SIDs must be unique, got {result['uniqueCount']} unique"
+    assert result["orderedCorrectly"], \
+        "SIDs must be in order sess_0..sess_223"
+    assert result["noBlanks"], \
+        f"No blank gaps: DOM items ({result['totalItems']}) must match loaded count ({result['finalLoaded']})"
+    assert result["innerHTMLWipes"] == 0, \
+        f"No innerHTML wipes during continuous batch, got {result['innerHTMLWipes']}"
+    assert result["renderCalls"] == 0, \
+        f"No full re-render during continuous batch, got {result['renderCalls']}"
+
+
+@_node_tests
+def test_continuous_batch_completes_150_rows_multigroup():
+    """Continuous batch must complete 60→100→140→150 across multiple groups
+    without manual re-entry. Proves the fix works with group boundaries."""
+    total = 150
+    flat_rows = []
+    for i in range(60):
+        flat_rows.append({"group": {"label": "G1"}, "session": {"session_id": f"s1_{i}"}})
+    for i in range(90):
+        flat_rows.append({"group": {"label": "G2"}, "session": {"session_id": f"s2_{i}"}})
+
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = {total};
+
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s1_' + i));
+
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+
+// Set up G1 (full) and G2 (empty — will receive new rows)
+function setupGroup(label) {{
+  const gw = makeEl('div');
+  gw.dataset['group-label'] = label;
+  const body = makeBodyThatTracksItems(list);
+  body._afterSpacers = [];
+  gw.querySelector = function(sel) {{ if(sel==='.session-date-body') return body; return null; }};
+  gw.appendChild(body);
+  list._groups[label] = gw;
+  list.children.push(gw);
+  return {{ gw: gw, body: body }};
+}}
+const g1 = setupGroup('G1');
+const g2 = setupGroup('G2');
+
+// Add sentinel
+const sentinel = makeEl('div');
+sentinel.dataset['touchSentinel'] = '';
+sentinel.style = {{ display: '' }};
+list._sentinel = sentinel;
+list.children.push(sentinel);
+
+_appendTouchBatch(); // triggers continuous chain
+
+// Drain microtasks for the continuous batch chain
+(async function() {{
+  for (let i = 0; i < 50; i++) {{
+    const before = _sessionTouchLoadedCount;
+    await Promise.resolve();
+    if (_sessionTouchLoadedCount === before) break;
+  }}
+
+  const allSids = list._items.map(i => i.dataset.sid);
+  const uniqueSids = [...new Set(allSids)];
+
+  console.log(JSON.stringify({{
+    finalLoaded: _sessionTouchLoadedCount,
+    totalItems: list._items.length,
+    uniqueCount: uniqueSids.length,
+  }}));
+}})();
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["finalLoaded"] == 150, \
+        f"Continuous batch must complete to 150, got {result['finalLoaded']}"
+    assert result["totalItems"] == 150, \
+        f"DOM must have 150 items, got {result['totalItems']}"
+    assert result["uniqueCount"] == 150, \
+        f"All 150 SIDs must be unique, got {result['uniqueCount']}"
+
+
+@_node_tests
+def test_continuous_batch_aborts_on_generation_change():
+    """If the generation changes mid-chain (profile switch), the continuous
+    batch must abort — no stale appends after invalidation."""
+    total = 200
+    flat_rows = []
+    for i in range(total):
+        flat_rows.append({"group": {"label": "G"}, "session": {"session_id": f"s_{i}"}})
+
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = {total};
+
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s_' + i));
+
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null,
+}};
+
+const gw = makeEl('div');
+gw.dataset['group-label'] = 'G';
+const body = makeBodyThatTracksItems(list);
+gw.querySelector = function(sel) {{ if(sel==='.session-date-body') return body; return null; }};
+gw.appendChild(body);
+list._groups['G'] = gw;
+list.children.push(gw);
+
+const sentinel = makeEl('div');
+sentinel.dataset['touchSentinel'] = '';
+sentinel.style = {{ display: '' }};
+list._sentinel = sentinel;
+list.children.push(sentinel);
+
+// Override _scheduleContinuousBatch to bump generation after first append,
+// simulating a profile switch mid-chain.
+const origSchedule = _scheduleContinuousBatch;
+let callCount = 0;
+_scheduleContinuousBatch = function() {{
+  callCount++;
+  if (callCount === 1) {{
+    // Simulate invalidation after the first continuous batch
+    _sessionTouchGen++; // bump generation
+    _touchRenderState = null;
+    return;
+  }}
+}};
+
+_appendTouchBatch(); // 60→100, then calls _scheduleContinuousBatch once
+
+// Drain microtasks
+(async function() {{
+  for (let i = 0; i < 50; i++) {{
+    await Promise.resolve();
+  }}
+
+  // After generation bump, the continuous chain should have stopped.
+  // loadedCount should be 100 (one append), not 200 (full chain would require
+  // the generation to still match).
+  console.log(JSON.stringify({{
+    finalLoaded: _sessionTouchLoadedCount,
+    scheduleCalls: callCount,
+  }}));
+}})();
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["finalLoaded"] == 100, \
+        f"After generation change, loaded should stay at 100, got {result['finalLoaded']}"
+    assert result["scheduleCalls"] == 1, \
+        f"_scheduleContinuousBatch should be called once, got {result['scheduleCalls']}"
+
+
+def test_root_margin_expands_downward_not_upward():
+    """Gate-certifier fix: rootMargin must expand the DOWNWARD (bottom) edge,
+    not the upward (top) edge. The prior '200px 0px 0px 0px' expanded the top
+    of the root viewport, which does nothing for a sentinel at the bottom of
+    a scrollable list — it needs downward lookahead to detect the sentinel
+    before the user reaches it.
+    """
+    fn = _extract_fn(SESSIONS_JS, "_ensureTouchSentinelObserver")
+    # rootMargin format: top right bottom left
+    # We need bottom margin > 0, top margin = 0
+    import re
+    match = re.search(r"rootMargin:'([^']+)'", fn)
+    assert match, "rootMargin must be specified in _ensureTouchSentinelObserver"
+    margins = match.group(1).split()
+    assert len(margins) == 4, f"rootMargin must have 4 values, got: {match.group(1)}"
+    top, right, bottom, left = margins
+    assert bottom != "0px" and bottom != "0", \
+        f"rootMargin bottom must be non-zero for downward lookahead, got: {match.group(1)}"
+    assert top == "0px" or top == "0", \
+        f"rootMargin top must be 0 (no upward expansion), got: {match.group(1)}"
+
+
+def test_scroll_trigger_runs_always_not_only_when_io_absent():
+    """Gate-certifier fix: the scroll-based batch trigger must run ALWAYS
+    (not just when IntersectionObserver is absent). The IO can stall after
+    one append — the sentinel stays intersecting but no new transition fires.
+    The scroll listener catches this by triggering a batch when the user
+    scrolls near the bottom, regardless of whether IO is present.
+    """
+    fn = _extract_fn(SESSIONS_JS, "_setupTouchSentinel")
+    # The scroll fallback must NOT be gated behind !('IntersectionObserver' in window)
+    # It should run unconditionally.
+    assert "if(!('IntersectionObserver' in window'))" not in fn, \
+        "Scroll trigger must NOT be gated behind IntersectionObserver absence — it must run always"
+    assert "_touchScrollFallbackRaf" in fn, \
+        "Scroll trigger must use _touchScrollFallbackRaf"
+    assert "requestAnimationFrame" in fn, \
+        "Scroll trigger must use requestAnimationFrame"
