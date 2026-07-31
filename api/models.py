@@ -7590,6 +7590,13 @@ def _load_cli_sessions_uncached(
             'end_reason': row.get('end_reason'),
             'actual_message_count': row.get('actual_message_count'),
             'user_message_count': row.get('actual_user_message_count'),
+            # Kept beside the renamed copy so `_count_user_turns` can still tell
+            # "this row came from the state.db projection and reported unknown"
+            # from "this row never had the column". Internal, like
+            # `actual_message_count`: `_SIDEBAR_SESSION_RESPONSE_FIELDS` drops it
+            # from `/api/sessions`, though the sessions SSE snapshot sends these
+            # rows unfiltered, so it rides along there as that key already does.
+            'actual_user_message_count': row.get('actual_user_message_count'),
             '_lineage_root_id': row.get('_lineage_root_id'),
             '_lineage_tip_id': row.get('_lineage_tip_id'),
             '_compression_segment_count': row.get('_compression_segment_count'),
@@ -7662,6 +7669,8 @@ def _load_cli_sessions_uncached(
                     'end_reason': row.get('end_reason'),
                     'actual_message_count': row.get('actual_message_count'),
                     'user_message_count': row.get('actual_user_message_count'),
+                    # Internal provenance key; see the note on the first projection.
+                    'actual_user_message_count': row.get('actual_user_message_count'),
                     '_lineage_root_id': row.get('_lineage_root_id'),
                     '_lineage_tip_id': row.get('_lineage_tip_id'),
                     '_compression_segment_count': row.get('_compression_segment_count'),
@@ -7728,6 +7737,8 @@ def _load_cli_sessions_uncached(
                     'end_reason': row.get('end_reason'),
                     'actual_message_count': row.get('actual_message_count'),
                     'user_message_count': row.get('actual_user_message_count'),
+                    # Internal provenance key; see the note on the first projection.
+                    'actual_user_message_count': row.get('actual_user_message_count'),
                     '_lineage_root_id': row.get('_lineage_root_id'),
                     '_lineage_tip_id': row.get('_lineage_tip_id'),
                     '_compression_segment_count': row.get('_compression_segment_count'),
