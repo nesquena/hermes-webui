@@ -16,7 +16,7 @@ def test_new_session_reuses_inflight_request_before_posting_again():
         "newSession() must return the existing create promise so rapid clicks do "
         "not enqueue multiple /api/session/new requests"
     )
-    assert "_newSessionInFlight=(async()=>" in src
+    assert "_newSessionInFlight=_runContextTransition(" in src
     assert "_newSessionInFlight=null;" in src
 
 

@@ -42,9 +42,9 @@ def _new_session_function() -> str:
 
 
 def _wait_for_new_session_navigation_function() -> str:
-    start = SESSIONS_JS.find("async function _waitForNewSessionNavigationSettlement(")
+    start = SESSIONS_JS.find("let _contextTransitionGeneration=0;")
     end = SESSIONS_JS.find("\nconst _newSessionPendingText", start)
-    assert start != -1 and end != -1, "new-session navigation wait helper not found"
+    assert start != -1 and end != -1, "context-transition helper block not found"
     return SESSIONS_JS[start:end]
 
 
@@ -140,9 +140,9 @@ def _run_review_race_harness(schedule: str) -> dict:
         const assert = require('assert');
         {_composer_authority_helpers()}
         {_review_race_production_helpers()}
+        {_wait_for_new_session_navigation_function()}
         {_new_session_function()}
 
-        let _newSessionInFlight = null;
         let _sessionSourceFilter = 'webui';
         let _activeProject = null;
         const NO_PROJECT_FILTER = '__none__';
@@ -383,9 +383,9 @@ def _run_new_session_harness(
         const assert = require('assert');
         {authority_source}
         {add_files_source}
+        {_wait_for_new_session_navigation_function()}
         {function_source}
 
-        let _newSessionInFlight = null;
         let _sessionSourceFilter = 'webui';
         let _activeProject = null;
         const NO_PROJECT_FILTER = '__none__';
@@ -530,7 +530,13 @@ def _run_blank_page_settlement_harness(entry: str, *, reject_pending: bool) -> d
           return {{promise,resolve,reject}};
         }}
         const pending=deferred();
-        let _newSessionInFlight=pending.promise.finally(()=>{{_newSessionInFlight=null;}});
+        const heldIntent=_claimContextTransition('held-new-session');
+        _newSessionInFlight=(async()=>{{
+          await heldIntent.previous;
+          try{{return await pending.promise;}}
+          finally{{_newSessionInFlight=null;heldIntent.release();}}
+        }})();
+        _newSessionInFlight.catch(()=>{{}});
         let newSessionCalls=0;
         const apiCalls=[];
         const S={{
@@ -624,6 +630,394 @@ def test_blank_page_callers_resume_safely_after_new_session_settlement(
     assert result["blankMintInFlight"] is False
 
 
+def _run_existing_session_workspace_interleave_harness(*, reject_create: bool) -> dict:
+    """Compose real New Chat and workspace switching around held API responses."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+
+    script = textwrap.dedent(
+        f"""
+        const assert = require('assert');
+        {_composer_authority_helpers()}
+        {_wait_for_new_session_navigation_function()}
+        {_new_session_function()}
+        {_blank_page_mint_function("switchToWorkspace")}
+
+        function deferred(){{
+          let resolve,reject;
+          const promise=new Promise((res,rej)=>{{resolve=res;reject=rej;}});
+          return {{promise,resolve,reject}};
+        }}
+        async function spinUntil(predicate){{
+          for(let i=0;i<200;i++){{
+            if(predicate())return;
+            await Promise.resolve();
+          }}
+          throw new Error('timed out waiting for controlled schedule');
+        }}
+
+        let _sessionSourceFilter='webui';
+        let _activeProject=null;
+        const NO_PROJECT_FILTER='__none__';
+        let _messagesTruncated=false;
+        let _oldestIdx=0;
+        const create=deferred();
+        const update=deferred();
+        const apiCalls=[];
+        const updateBodies=[];
+        const backend={{'source-session':'/workspace-a'}};
+        const msg={{value:'source draft',focus(){{}}}};
+        const elements={{
+          msg,
+          btnNewChat:{{disabled:false,setAttribute(){{}}}},
+          btnTitlebarNewChat:{{disabled:false,setAttribute(){{}}}},
+          composerStatus:{{textContent:''}},
+          modelSelect:{{value:''}},
+        }};
+        const $=id=>elements[id]||null;
+        const S={{
+          session:{{
+            session_id:'source-session',profile:'default',workspace:'/workspace-a',
+            message_count:1,composer_draft:{{text:'source draft',files:[]}},
+          }},
+          messages:[{{role:'user',content:'A'}}],pendingFiles:[],toolCalls:[],
+          activeProfile:'default',_profileSwitchWorkspace:null,
+          _profileDefaultWorkspace:'/workspace-a',_pendingSessionToolsets:null,
+          busy:false,activeStreamId:null,_dirCache:{{}},currentDir:'.',
+        }};
+        const window={{_defaultModel:null,_newChatOnWorkspaceSwitch:false}};
+        const localStorage={{setItem(){{}},getItem(){{return null;}},removeItem(){{}}}};
+        const document={{createElement(){{return {{dataset:{{}}}};}}}};
+
+        function api(path,options){{
+          apiCalls.push(path);
+          if(path==='/api/session/new')return create.promise;
+          if(path==='/api/session/update'){{
+            const body=JSON.parse(options.body);
+            updateBodies.push(body);
+            return update.promise.then(()=>{{backend[body.session_id]=body.workspace;return {{}};}});
+          }}
+          throw new Error(`unexpected API call: ${{path}}`);
+        }}
+        function _setNewSessionPending(){{}}
+        function _newSessionPendingText(){{return 'Starting';}}
+        function showToast(){{}}
+        function setComposerStatus(){{}}
+        function updateQueueBadge(){{}}
+        function clearLiveToolCards(){{}}
+        function _saveComposerDraftNow(){{return Promise.resolve();}}
+        function _restoreComposerDraft(draft){{msg.value=(draft&&draft.text)||'';S.pendingFiles=[];}}
+        function _hydrateTodosFromSession(){{}}
+        function _rememberNewChatDraftSession(){{}}
+        function _setActiveSessionUrl(){{}}
+        function startSessionStream(){{}}
+        function _setSessionViewedCount(){{}}
+        function autoResize(){{}}
+        function renderTray(){{}}
+        function updateSendBtn(){{}}
+        function setStatus(){{}}
+        function syncTopbar(){{}}
+        function renderMessages(){{}}
+        function loadDir(){{return Promise.resolve();}}
+        function refreshSessionList(){{return Promise.resolve();}}
+        function closeWsDropdown(){{}}
+        function bumpWorkspaceTreeGen(){{}}
+        function t(key){{return key;}}
+        function getWorkspaceFriendlyName(path){{return path;}}
+        let _currentPanel='chat';
+
+        (async()=>{{
+          const creating=newSession(false);
+          await spinUntil(()=>apiCalls.includes('/api/session/new'));
+          const switching=switchToWorkspace('/workspace-b','Workspace B');
+          for(let i=0;i<20;i++)await Promise.resolve();
+          const updateStartedBeforeCreateSettled=updateBodies.length>0;
+
+          let creationError=null;
+          if({str(reject_create).lower()}){{
+            create.reject(new Error('create failed'));
+            try{{await creating;}}catch(error){{creationError=error.message;}}
+          }}else{{
+            backend['new-session']='/workspace-a';
+            create.resolve({{session:{{
+              session_id:'new-session',profile:'default',workspace:'/workspace-a',
+              messages:[],composer_draft:{{text:'',files:[]}},message_count:0,
+            }}}});
+            await creating;
+          }}
+          await spinUntil(()=>updateBodies.length===1);
+          update.resolve();
+          await switching;
+
+          process.stdout.write(JSON.stringify({{
+            updateStartedBeforeCreateSettled,
+            updateBodies,
+            creationError,
+            activeSid:S.session&&S.session.session_id,
+            clientWorkspace:S.session&&S.session.workspace,
+            backend,
+            newSessionInFlight:_newSessionInFlight!==null,
+          }}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = subprocess.run(
+        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+@pytest.mark.parametrize("reject_create", [False, True])
+def test_existing_session_workspace_waits_for_new_chat_owner_before_update(
+    reject_create,
+):
+    result = _run_existing_session_workspace_interleave_harness(
+        reject_create=reject_create
+    )
+
+    assert result["updateStartedBeforeCreateSettled"] is False
+    expected_sid = "source-session" if reject_create else "new-session"
+    assert [body["session_id"] for body in result["updateBodies"]] == [expected_sid]
+    assert result["creationError"] == ("create failed" if reject_create else None)
+    assert result["activeSid"] == expected_sid
+    assert result["clientWorkspace"] == "/workspace-b"
+    assert result["backend"][expected_sid] == "/workspace-b"
+    other_sid = "new-session" if reject_create else "source-session"
+    assert result["backend"].get(other_sid) in (None, "/workspace-a")
+    assert result["newSessionInFlight"] is False
+
+
+def _run_workspace_opt_in_new_chat_harness() -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    script = textwrap.dedent(
+        f"""
+        {_wait_for_new_session_navigation_function()}
+        {_new_session_function()}
+        {_blank_page_mint_function("switchToWorkspace")}
+        let _activeProject=null;const NO_PROJECT_FILTER='__none__';let _sessionSourceFilter='webui';let _messagesTruncated=false;let _oldestIdx=0;
+        const apiCalls=[];let newBody=null;
+        const S={{session:{{session_id:'source-session',profile:'default',workspace:'/workspace-a',message_count:1}},messages:[{{role:'user',content:'A'}}],pendingFiles:[],toolCalls:[],activeProfile:'default',_profileDefaultWorkspace:'/workspace-a',_profileSwitchWorkspace:null,_pendingSessionToolsets:null,busy:false,activeStreamId:null,currentDir:'.',_dirCache:{{}}}};
+        const window={{_defaultModel:null,_newChatOnWorkspaceSwitch:true}};
+        const elements={{msg:{{value:'',focus(){{}}}},btnNewChat:{{disabled:false,setAttribute(){{}}}},btnTitlebarNewChat:{{disabled:false,setAttribute(){{}}}},composerStatus:{{textContent:''}},modelSelect:{{value:''}}}};const $=id=>elements[id]||null;
+        const localStorage={{setItem(){{}},getItem(){{return null;}},removeItem(){{}}}};const document={{createElement(){{return {{dataset:{{}}}};}}}};
+        function api(path,options){{
+          apiCalls.push(path);
+          if(path!=='/api/session/new')throw new Error(`unexpected ${{path}}`);
+          newBody=JSON.parse(options.body);
+          return Promise.resolve({{session:{{session_id:'new-session',profile:'default',workspace:newBody.workspace,messages:[],composer_draft:{{text:'',files:[]}},message_count:0}}}});
+        }}
+        function _setNewSessionPending(){{}} function _newSessionPendingText(){{return 'Starting';}}
+        function showToast(){{}} function setComposerStatus(){{}} function updateQueueBadge(){{}}
+        function clearLiveToolCards(){{}} function _saveComposerDraftNow(){{return Promise.resolve();}}
+        function _restoreComposerDraft(){{S.pendingFiles=[];}} function _hydrateTodosFromSession(){{}}
+        function _rememberNewChatDraftSession(){{}} function _setActiveSessionUrl(){{}}
+        function startSessionStream(){{}} function _setSessionViewedCount(){{}} function autoResize(){{}}
+        function renderTray(){{}} function updateSendBtn(){{}} function setStatus(){{}}
+        function syncTopbar(){{}} function renderMessages(){{}} function loadDir(){{return Promise.resolve();}}
+        function refreshSessionList(){{return Promise.resolve();}} function closeWsDropdown(){{}}
+        function bumpWorkspaceTreeGen(){{}} function t(k){{return k;}} function getWorkspaceFriendlyName(p){{return p;}}
+        let _currentPanel='chat';
+        (async()=>{{
+          await switchToWorkspace('/workspace-b','B');
+          await _waitForContextTransitionSettlement();
+          process.stdout.write(JSON.stringify({{apiCalls,newBody,activeSid:S.session.session_id,workspace:S.session.workspace,newSessionInFlight:_newSessionInFlight!==null}}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc=subprocess.run([node,"-e",script],cwd=ROOT,text=True,capture_output=True,timeout=30)
+    assert proc.returncode==0,proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+def test_opt_in_workspace_switch_joins_canonical_new_session_transaction():
+    result = _run_workspace_opt_in_new_chat_harness()
+    assert result["apiCalls"] == ["/api/session/new"]
+    assert result["newBody"]["workspace"] == "/workspace-b"
+    assert result["newBody"]["prev_session_id"] == "source-session"
+    assert result["activeSid"] == "new-session"
+    assert result["workspace"] == "/workspace-b"
+    assert result["newSessionInFlight"] is False
+
+
+
+def _run_double_workspace_context_harness() -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    script = textwrap.dedent(
+        f"""
+        {_wait_for_new_session_navigation_function()}
+        {_blank_page_mint_function("switchToWorkspace")}
+        function deferred(){{let resolve;const promise=new Promise(r=>{{resolve=r;}});return {{promise,resolve}};}}
+        async function spinUntil(predicate){{for(let i=0;i<200;i++){{if(predicate())return;await Promise.resolve();}}throw new Error('timeout');}}
+        const updates=[];const backend={{'source-session':'/workspace-a'}};
+        const S={{session:{{session_id:'source-session',profile:'default',workspace:'/workspace-a'}},messages:[],busy:false,currentDir:'.',_dirCache:{{}},_profileSwitchWorkspace:null}};
+        const window={{_newChatOnWorkspaceSwitch:false}};
+        const elements={{composerWsDropdown:null}};const $=id=>elements[id]||null;
+        function api(path,options){{
+          if(path!=='/api/session/update')throw new Error(`unexpected ${{path}}`);
+          const body=JSON.parse(options.body);const d=deferred();updates.push({{body,d}});
+          return d.promise.then(()=>{{backend[body.session_id]=body.workspace;return {{}};}});
+        }}
+        function closeWsDropdown(){{}} function bumpWorkspaceTreeGen(){{}} function loadDir(){{return Promise.resolve();}}
+        function syncTopbar(){{}} function showToast(){{}} function setStatus(){{}} function t(k){{return k;}}
+        function getWorkspaceFriendlyName(p){{return p;}} function renderMessages(){{}}
+        (async()=>{{
+          const first=switchToWorkspace('/workspace-b','B');
+          await spinUntil(()=>updates.length===1);
+          const second=switchToWorkspace('/workspace-c','C');
+          for(let i=0;i<20;i++)await Promise.resolve();
+          const beforeFirstSettle=updates.map(x=>x.body.workspace);
+          updates[0].d.resolve();
+          await spinUntil(()=>updates.length===2);
+          const betweenSettles=updates.map(x=>x.body.workspace);
+          updates[1].d.resolve();
+          await Promise.all([first,second]);
+          process.stdout.write(JSON.stringify({{beforeFirstSettle,betweenSettles,finalWorkspace:S.session.workspace,backend,updates:updates.map(x=>x.body)}}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc=subprocess.run([node,"-e",script],cwd=ROOT,text=True,capture_output=True,timeout=30)
+    assert proc.returncode==0,proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+def test_two_workspace_intents_are_serialized_and_latest_wins():
+    result = _run_double_workspace_context_harness()
+    assert result["beforeFirstSettle"] == ["/workspace-b"]
+    assert result["betweenSettles"] == ["/workspace-b", "/workspace-c"]
+    assert result["finalWorkspace"] == "/workspace-c"
+    assert [item["workspace"] for item in result["updates"]] == [
+        "/workspace-b", "/workspace-c"
+    ]
+    assert result["backend"]["source-session"] == "/workspace-c"
+
+
+def _run_profile_double_context_harness() -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    script = textwrap.dedent(
+        f"""
+        {_wait_for_new_session_navigation_function()}
+        {_switch_to_profile_function()}
+        function deferred(){{let resolve;const promise=new Promise(r=>{{resolve=r;}});return {{promise,resolve}};}}
+        async function spinUntil(predicate){{for(let i=0;i<200;i++){{if(predicate())return;await Promise.resolve();}}throw new Error('timeout');}}
+        const switches=[];const S={{session:{{session_id:'source-session',profile:'default',workspace:'/workspace-a'}},messages:[],activeProfile:'default',activeProfileIsDefault:true,_pendingSessionToolsets:null}};
+        let _profileSwitchGeneration=0;let _profileSwitchOpeningExistingSession=false;let _workspacePanelMode='closed';
+        let _renamingSid=null;let _skillsData=null;let _workspaceList=null;let _sessionListSkeletonActive=false;
+        const window={{}};const localStorage={{removeItem(){{}}}};
+        const elements={{profileChip:{{classList:{{add(){{}},remove(){{}}}},disabled:false}},profileChipLabel:{{textContent:'default'}},titlebarProfileBtn:{{classList:{{add(){{}},remove(){{}}}},disabled:false}},titlebarProfileLabel:{{textContent:'default'}}}};
+        const $=id=>elements[id]||null;
+        function api(path,options){{
+          if(path!=='/api/profile/switch')throw new Error(`unexpected ${{path}}`);
+          const name=JSON.parse(options.body).name;const d=deferred();switches.push({{name,d}});
+          return d.promise;
+        }}
+        function closeSessionActionMenu(){{}} function _invalidateSessionListRenders(){{}}
+        function _setProfileSwitchListEmbargo(){{}} function showSessionListSkeleton(){{}}
+        function bumpWorkspaceTreeGen(){{}} function t(k){{return k;}} function startGatewaySSE(){{}}
+        function applyBotName(){{}} function _clearPersistedModelState(){{}}
+        function refreshProfileTransitionReasoningChip(){{}} function animateNextSessionListRefresh(){{}}
+        function renderSessionList(){{return Promise.resolve();}} function _openProfileSwitchSessionBrowser(){{}}
+        function syncTopbar(){{}} function clearWorkspaceTreeSkeleton(){{}}
+        function showToast(){{}} function _profileSwitchPanelLoad(){{return Promise.resolve();}}
+        function _refreshProfileSwitchBackground(){{}} function renderSessionListFromCache(){{}}
+        (async()=>{{
+          const first=switchToProfile('beta');
+          await spinUntil(()=>switches.length===1);
+          const second=switchToProfile('gamma');
+          for(let i=0;i<20;i++)await Promise.resolve();
+          const beforeFirstSettle=switches.map(x=>x.name);
+          switches[0].d.resolve({{active:'beta',is_default:false,default_model:null,default_workspace:null}});
+          await spinUntil(()=>switches.length===2);
+          const betweenSettles=switches.map(x=>x.name);
+          switches[1].d.resolve({{active:'gamma',is_default:false,default_model:null,default_workspace:null}});
+          await Promise.all([first,second]);
+          process.stdout.write(JSON.stringify({{beforeFirstSettle,betweenSettles,finalProfile:S.activeProfile,switches:switches.map(x=>x.name)}}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc=subprocess.run([node,"-e",script],cwd=ROOT,text=True,capture_output=True,timeout=30)
+    assert proc.returncode==0,proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+def test_two_profile_intents_are_serialized_and_latest_wins():
+    result = _run_profile_double_context_harness()
+    assert result["beforeFirstSettle"] == ["beta"]
+    assert result["betweenSettles"] == ["beta", "gamma"]
+    assert result["finalProfile"] == "gamma"
+    assert result["switches"] == ["beta", "gamma"]
+
+
+def _run_stale_context_repaint_harness(entry: str) -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    calls = {
+        "promptWorkspacePath": "promptWorkspacePath()",
+        "promptNewFile": "promptNewFile('.')",
+        "promptNewFolder": "promptNewFolder('.')",
+    }
+    prompt_value = "/workspace-added" if entry == "promptWorkspacePath" else "created-item"
+    response = (
+        "{workspaces:[{path:'/workspace-added',name:'Added'}]}"
+        if entry == "promptWorkspacePath"
+        else "{}"
+    )
+    script = textwrap.dedent(
+        f"""
+        {_wait_for_new_session_navigation_function()}
+        {_blank_page_mint_function(entry)}
+        function deferred(){{let resolve;const promise=new Promise(r=>{{resolve=r;}});return {{promise,resolve}};}}
+        async function spinUntil(predicate){{for(let i=0;i<200;i++){{if(predicate())return;await Promise.resolve();}}throw new Error('timeout');}}
+        const held=deferred();let apiCall=null;const toasts=[];const statuses=[];const loads=[];const opens=[];const switches=[];let confirms=0;
+        let _workspaceList=[];
+        const S={{session:{{session_id:'source-session',profile:'default',workspace:'/workspace-a'}},messages:[],activeProfile:'default',_profileDefaultWorkspace:'/workspace-a',currentDir:'.',_dirCache:{{}},busy:false}};
+        function api(path,options){{apiCall={{path,body:options&&options.body?JSON.parse(options.body):{{}}}};return held.promise;}}
+        function showPromptDialog(){{return Promise.resolve('{prompt_value}');}}
+        function showConfirmDialog(){{confirms+=1;return Promise.resolve(false);}}
+        function showToast(...args){{toasts.push(args.join(' '));}} function setStatus(value){{statuses.push(value);}}
+        function t(k){{return k;}} function _workspacePathIsReadOnly(){{return false;}}
+        function _workspaceCreateTargetLabel(v){{return v;}} function _workspaceJoinTargetPath(d,n){{return d==='.'?n:`${{d}}/${{n}}`;}}
+        function loadDir(path){{loads.push(path);return Promise.resolve();}} function openFile(path){{opens.push(path);}}
+        function renderWorkspacesPanel(){{}} function getWorkspaceFriendlyName(p){{return p;}}
+        async function switchToWorkspace(path,name){{switches.push([path,name]);}}
+        (async()=>{{
+          const action={calls[entry]};
+          await spinUntil(()=>apiCall!==null);
+          S.session={{session_id:'replacement-session',profile:'default',workspace:'/workspace-z'}};
+          held.resolve({response});
+          await action;
+          process.stdout.write(JSON.stringify({{apiCall,toasts,statuses,loads,opens,switches,confirms,activeSid:S.session.session_id,workspaceList:_workspaceList}}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc=subprocess.run([node,"-e",script],cwd=ROOT,text=True,capture_output=True,timeout=30)
+    assert proc.returncode==0,proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+@pytest.mark.parametrize("entry", ["promptWorkspacePath", "promptNewFile", "promptNewFolder"])
+def test_stale_context_response_never_repaints_replacement_owner(entry):
+    result = _run_stale_context_repaint_harness(entry)
+    assert result["activeSid"] == "replacement-session"
+    assert result["toasts"] == []
+    assert result["statuses"] == []
+    assert result["loads"] == []
+    assert result["opens"] == []
+    assert result["switches"] == []
+    assert result["confirms"] == 0
+    assert result["workspaceList"] == []
+    if entry != "promptWorkspacePath":
+        assert result["apiCall"]["body"]["session_id"] == "source-session"
+
+
 def _run_profile_switch_settlement_harness(*, reject_pending: bool) -> dict:
     """Run real switchToProfile through success/failure settlement to completion."""
     node = shutil.which("node")
@@ -641,7 +1035,13 @@ def _run_profile_switch_settlement_harness(*, reject_pending: bool) -> dict:
           return {{promise,resolve,reject}};
         }}
         const pending=deferred();
-        let _newSessionInFlight=pending.promise.finally(()=>{{_newSessionInFlight=null;}});
+        const heldIntent=_claimContextTransition('held-new-session');
+        _newSessionInFlight=(async()=>{{
+          await heldIntent.previous;
+          try{{return await pending.promise;}}
+          finally{{_newSessionInFlight=null;heldIntent.release();}}
+        }})();
+        _newSessionInFlight.catch(()=>{{}});
         let _profileSwitchGeneration=0;
         let _profileSwitchOpeningExistingSession=false;
         let _workspacePanelMode='closed';
@@ -775,7 +1175,6 @@ def _run_new_session_load_interleave_harness(
         {_load_session_function()}
         {_open_sidebar_session_function()}
 
-        let _newSessionInFlight = null;
         let _loadingSessionId = null;
         let _loadSessionGeneration = 0;
         let _sessionSourceFilter = 'webui';

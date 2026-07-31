@@ -104,7 +104,7 @@ class TestPromptNewFileNoSession:
             "promptNewFile must read S._profileDefaultWorkspace to auto-create "
             "a session when called on the blank new-chat page"
         )
-        assert '_ensureBlankPageSession(ws)' in fn, (
+        assert '_ensureBlankPageSession(ws,intent)' in fn, (
             "promptNewFile must use the serialized blank-page session helper "
             "when S.session is null"
         )
@@ -117,7 +117,7 @@ class TestPromptNewFileNoSession:
         assert '_profileDefaultWorkspace' in fn, (
             "promptNewFolder must read S._profileDefaultWorkspace for auto-create path"
         )
-        assert '_ensureBlankPageSession(ws)' in fn, (
+        assert '_ensureBlankPageSession(ws,intent)' in fn, (
             "promptNewFolder must use the serialized blank-page session helper"
         )
 
@@ -144,7 +144,7 @@ class TestWorkspaceSwitcherBlankPage:
         assert '_profileDefaultWorkspace' in fn or '_ensureBlankPageSession' in fn, (
             "switchToWorkspace must auto-create session on blank page (Opus Q6 fix)"
         )
-        assert '_ensureBlankPageSession(ws)' in fn, (
+        assert '_ensureBlankPageSession(ws,intent)' in fn, (
             "switchToWorkspace must use the serialized blank-page session helper"
         )
 
@@ -156,7 +156,7 @@ class TestWorkspaceSwitcherBlankPage:
         assert "t('workspace_busy_switch')" in fn, (
             "switchToWorkspace must keep the busy-session workspace switch toast"
         )
-        blank_create = fn.index("_ensureBlankPageSession(ws)")
+        blank_create = fn.index("_ensureBlankPageSession(ws,intent)")
         busy_guard = fn.index('if(S.busy)')
         update_call = fn.index("api('/api/session/update'")
         assert blank_create < busy_guard < update_call, (
@@ -166,10 +166,10 @@ class TestWorkspaceSwitcherBlankPage:
 
     def test_prompt_workspace_path_auto_creates_session(self):
         src = read('static/panels.js')
-        m = re.search(r'async function promptWorkspacePath\(\)\{.*?\n\}', src, re.DOTALL)
+        m = re.search(r'async function promptWorkspacePath\([^)]*\)\{.*?\n\}', src, re.DOTALL)
         assert m, "promptWorkspacePath not found"
         fn = m.group(0)
-        assert '_ensureBlankPageSession(ws)' in fn, (
+        assert '_ensureBlankPageSession(ws,intent)' in fn, (
             "promptWorkspacePath must use the serialized blank-page session helper"
         )
 
@@ -232,7 +232,7 @@ class TestNewChatOnWorkspaceSwitchOptIn:
         assert 'S.messages.length>0' in fn, (
             "the new-chat branch must only fire when the current conversation has messages"
         )
-        assert 'newSession(false)' in fn, (
+        assert 'newSession(false,{contextTransition:intent})' in src, (
             "the new-chat branch must call newSession() to start the fresh chat"
         )
         # The branch must run BEFORE the in-place /api/session/update mutation.

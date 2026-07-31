@@ -9,6 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_JS = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
@@ -46,6 +47,12 @@ def _run_node(script: str) -> dict:
         [NODE, "-e", script], capture_output=True, text=True, check=True
     )
     return json.loads(result.stdout)
+
+
+def _context_transition_helpers() -> str:
+    start = SESSIONS_JS.index("let _contextTransitionGeneration=0;")
+    end = SESSIONS_JS.index("\nconst _newSessionPendingText", start)
+    return SESSIONS_JS[start:end]
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required")
@@ -95,6 +102,7 @@ function _refreshGitBadge(){{}}
 def test_explicit_workspace_switch_invalidates_an_inflight_recovery_response():
     load_dir = _extract_async_function(WORKSPACE_JS, "loadDir")
     switch_workspace = _extract_async_function(PANELS_JS, "switchToWorkspace")
+    context_helpers = _context_transition_helpers()
     script = f"""
 const events=[];
 const window={{_newChatOnWorkspaceSwitch:false}};
@@ -134,6 +142,7 @@ function setStatus(message){{events.push(['status',message]);}}
 function getWorkspaceFriendlyName(path){{return path;}}
 function $(id){{return null;}}
 let _currentPanel='workspace';
+{context_helpers}
 {load_dir}
 {switch_workspace}
 (async()=>{{

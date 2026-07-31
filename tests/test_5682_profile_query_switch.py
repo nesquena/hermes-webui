@@ -708,6 +708,13 @@ var _currentReasoningEffortsSupported = ['low', 'high'];
 var _profileTransitionReasoningContext = null;
 var _lastReasoningFetchKey = null;
 var _reasoningFetchSeq = 0;
+function extractContextTransitionHelpers(src) {{
+  const start = src.indexOf('let _contextTransitionGeneration=0;');
+  const end = src.indexOf('\\nconst _newSessionPendingText', start);
+  if (start < 0 || end < 0) throw new Error('context transition helpers not found');
+  return src.slice(start, end);
+}}
+eval(extractContextTransitionHelpers(sessionsSrc));
 eval(extractFunc(uiSrc, '_normalizeReasoningEffort'));
 eval(extractFunc(uiSrc, '_formatReasoningEffortLabel'));
 eval(extractFunc(uiSrc, '_reasoningEffortContext'));

@@ -1401,37 +1401,86 @@ function _markPollingCompletionUnreadTransitions(sessions) {
   }
 }
 
-let _newSessionInFlight=null;
-async function _waitForNewSessionNavigationSettlement(){
-  const pending=_newSessionInFlight;
-  if(!pending)return;
-  // A sidebar/direct load requested during New Chat must start only after that
-  // ownership transaction settles. Rejection still releases the navigation:
-  // the user's requested target remains valid even when creation failed.
+let _contextTransitionGeneration=0;
+let _contextTransitionTail=Promise.resolve();
+const _CONTEXT_TRANSITION_INTENT=Symbol('context-transition-intent');
+
+function _claimContextTransition(kind){
+  const previous=_contextTransitionTail.catch(()=>{});
+  let release;
+  const settled=new Promise(resolve=>{release=resolve;});
+  const intent={
+    marker:_CONTEXT_TRANSITION_INTENT,
+    kind:String(kind||'context'),
+    generation:++_contextTransitionGeneration,
+    previous,
+    release,
+  };
+  _contextTransitionTail=previous.then(()=>settled);
+  return intent;
+}
+
+async function _runContextTransition(kind,existingIntent,callback){
+  if(existingIntent&&existingIntent.marker===_CONTEXT_TRANSITION_INTENT){
+    return callback(existingIntent);
+  }
+  const intent=_claimContextTransition(kind);
+  await intent.previous;
+  try{return await callback(intent);}
+  finally{intent.release();}
+}
+
+async function _waitForContextTransitionSettlement(){
+  const pending=_contextTransitionTail;
   try{await pending;}catch(_){}
 }
+
+// Kept as a compatibility entry point for sidebar/direct-session navigation.
+async function _waitForNewSessionNavigationSettlement(){
+  await _waitForContextTransitionSettlement();
+}
+
+function _captureContextTransitionOwner(){
+  const session=S.session||null;
+  return {
+    session,
+    sid:session&&session.session_id?String(session.session_id):null,
+    profile:String((session&&session.profile)||S.activeProfile||'default'),
+    workspace:session&&session.workspace?String(session.workspace):null,
+  };
+}
+
+function _contextTransitionOwnerIsCurrent(owner){
+  if(!owner||!owner.session||!owner.sid)return false;
+  return S.session===owner.session
+    &&String(S.session.session_id||'')===owner.sid
+    &&String((S.session&&S.session.profile)||S.activeProfile||'default')===owner.profile;
+}
+
+let _newSessionInFlight=null;
 let _blankPageSessionInFlight=null;
-async function _ensureBlankPageSession(workspace){
-  await _waitForNewSessionNavigationSettlement();
-  if(S.session)return S.session;
-  if(_blankPageSessionInFlight)return _blankPageSessionInFlight;
-  const targetWorkspace=String(
-    workspace||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||''
-  ).trim();
-  if(!targetWorkspace)return null;
-  _blankPageSessionInFlight=(async()=>{
-    // Reuse the canonical ownership transaction instead of assigning S.session
-    // from a parallel /api/session/new completion. This also inherits its
-    // generation, abort, disabled-reason, draft/file, and focus guarantees.
-    // These system-minted context sessions must not inherit toolsets staged on
-    // the empty composer; deliberate New Chat remains the only consumer.
-    S._pendingSessionToolsets=null;
-    S._profileSwitchWorkspace=targetWorkspace;
-    await newSession(false,{worktree:false});
-    return S.session||null;
-  })();
-  try{return await _blankPageSessionInFlight;}
-  finally{_blankPageSessionInFlight=null;}
+async function _ensureBlankPageSession(workspace,contextIntent){
+  return _runContextTransition('blank-page-session',contextIntent,async intent=>{
+    if(S.session)return S.session;
+    if(_blankPageSessionInFlight)return _blankPageSessionInFlight;
+    const targetWorkspace=String(
+      workspace||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||''
+    ).trim();
+    if(!targetWorkspace)return null;
+    _blankPageSessionInFlight=(async()=>{
+      // Reuse the canonical ownership transaction instead of assigning S.session
+      // from a parallel /api/session/new completion. This also inherits its
+      // generation, abort, disabled-reason, draft/file, and focus guarantees.
+      // These system-minted context sessions must not inherit toolsets staged on
+      // the empty composer; deliberate New Chat remains the only consumer.
+      S._pendingSessionToolsets=null;
+      S._profileSwitchWorkspace=targetWorkspace;
+      await newSession(false,{worktree:false,contextTransition:intent});
+      return S.session||null;
+    })();
+    try{return await _blankPageSessionInFlight;}
+    finally{_blankPageSessionInFlight=null;}
+  });
 }
 const _newSessionPendingText=()=>t('new_session_creating')||'Creating new conversation…';
 const _emptyComposerModelOverrideHost=typeof window!=='undefined'?window:globalThis;
@@ -1555,11 +1604,14 @@ async function newSession(flash, options={}){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
     return _newSessionInFlight;
   }
-  _setNewSessionPending(true);
   let focusRestoredComposerAfterAbort=false;
   let restoredComposerOwnerSid=null;
   let restoredComposerOwnerProfile=null;
-  _newSessionInFlight=(async()=>{
+  const existingContextIntent=options&&options.contextTransition;
+  _newSessionInFlight=_runContextTransition(
+    'new-session',existingContextIntent,async contextIntent=>{
+    _setNewSessionPending(true);
+    try{
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -1814,22 +1866,21 @@ async function newSession(flash, options={}){
     }
     // Refresh sidebar to include the newly created session (#3874).
     if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session')).catch(()=>{})}
-  })();
-  try{
-    return await _newSessionInFlight;
-  }finally{
-    _newSessionInFlight=null;
-    _setNewSessionPending(false);
-    if(focusRestoredComposerAfterAbort
-      &&typeof _composerOwnerIsVisible==='function'
-      &&_composerOwnerIsVisible(
-        restoredComposerOwnerSid,
-        restoredComposerOwnerProfile
-      )){
-      const input=$('msg');
-      if(input&&input.disabled!==true&&typeof input.focus==='function')input.focus();
+    }finally{
+      _newSessionInFlight=null;
+      _setNewSessionPending(false);
+      if(focusRestoredComposerAfterAbort
+        &&typeof _composerOwnerIsVisible==='function'
+        &&_composerOwnerIsVisible(
+          restoredComposerOwnerSid,
+          restoredComposerOwnerProfile
+        )){
+        const input=$('msg');
+        if(input&&input.disabled!==true&&typeof input.focus==='function')input.focus();
+      }
     }
-  }
+  });
+  return await _newSessionInFlight;
 }
 
 /**

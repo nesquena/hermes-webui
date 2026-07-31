@@ -20854,80 +20854,102 @@ async function deleteWorkspaceFile(relPath, name){
 }
 
 async function promptNewFile(targetDir = S.currentDir || '.'){
-  if(!S.session){
-    const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
-    if(!ws) return;
+  const requestedTarget=arguments[0];
+  const contextIntent=arguments[1];
+  return _runContextTransition('file-create',contextIntent,async intent=>{
+    targetDir=requestedTarget||S.currentDir||'.';
+    if(!S.session){
+      const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
+      if(!ws) return;
+      try{
+        await _ensureBlankPageSession(ws,intent);
+      }catch(e){setStatus(t('create_failed')+e.message);return;}
+    }
+    if(!S.session)return;
+    if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(targetDir)){
+      showToast(t('external_link_read_only'), 2000);
+      return;
+    }
+    const targetLabel=_workspaceCreateTargetLabel(targetDir);
+    const name=await showPromptDialog({
+      title:t('new_file_prompt_title', targetLabel),
+      placeholder:'filename.txt',
+      confirmLabel:t('create')
+    });
+    if(!name||!name.trim()) return;
+    const owner=_captureContextTransitionOwner();
+    if(!_contextTransitionOwnerIsCurrent(owner))return;
+    const relPath=_workspaceJoinTargetPath(targetDir,name);
+    const refreshDir=S.currentDir;
     try{
-      await _ensureBlankPageSession(ws);
-    }catch(e){setStatus(t('create_failed')+e.message);return;}
-  }
-  if(!S.session)return;
-  if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(targetDir)){
-    showToast(t('external_link_read_only'), 2000);
-    return;
-  }
-  const targetLabel=_workspaceCreateTargetLabel(targetDir);
-  const name=await showPromptDialog({
-    title:t('new_file_prompt_title', targetLabel),
-    placeholder:'filename.txt',
-    confirmLabel:t('create')
+      await api('/api/file/create',{method:'POST',body:JSON.stringify({session_id:owner.sid,path:relPath,content:''})});
+      if(!_contextTransitionOwnerIsCurrent(owner))return;
+      showToast(t('created')+name.trim());
+      delete S._dirCache[targetDir || '.'];
+      await loadDir(refreshDir);
+      if(!_contextTransitionOwnerIsCurrent(owner))return;
+      openFile(relPath);
+    }catch(e){if(_contextTransitionOwnerIsCurrent(owner))setStatus(t('create_failed')+e.message);}
   });
-  if(!name||!name.trim()) return;
-  const relPath=_workspaceJoinTargetPath(targetDir,name);
-  try{
-    await api('/api/file/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath,content:''})});
-    showToast(t('created')+name.trim());
-    delete S._dirCache[targetDir || '.'];
-    await loadDir(S.currentDir);
-    openFile(relPath);
-  }catch(e){setStatus(t('create_failed')+e.message);}
 }
 
 async function promptNewFolder(targetDir = S.currentDir || '.'){
-  if(!S.session){
-    const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
-    if(!ws) return;
-    try{
-      await _ensureBlankPageSession(ws);
-    }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
-  }
-  if(!S.session)return;
-  if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(targetDir)){
-    showToast(t('external_link_read_only'), 2000);
-    return;
-  }
-  const targetLabel=_workspaceCreateTargetLabel(targetDir);
-  const name=await showPromptDialog({
-    title:t('new_folder_prompt_title', targetLabel),
-    placeholder:'folder-name',
-    confirmLabel:t('create')
-  });
-  if(!name||!name.trim()) return;
-  const relPath=_workspaceJoinTargetPath(targetDir,name);
-  try{
-    await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath})});
-    showToast(t('folder_created')+name.trim());
-    delete S._dirCache[targetDir || '.'];
-    await loadDir(S.currentDir);
-    const absPath=S.session.workspace?(targetDir==='.'?`${S.session.workspace}/${name.trim()}`:`${S.session.workspace}/${targetDir}/${name.trim()}`):null;
-    if(absPath){
-      const addAsSpace=await showConfirmDialog({
-        title:t('folder_add_as_space_title'),
-        message:t('folder_add_as_space_msg'),
-        confirmLabel:t('folder_add_as_space_btn'),
-        cancelLabel:t('status_no'),
-        focusCancel:true
-      });
-      if(addAsSpace){
-        try{
-          const data=await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path:absPath})});
-          if(typeof _workspaceList!=='undefined')_workspaceList=data.workspaces||_workspaceList||[];
-          if(typeof renderWorkspacesPanel==='function')renderWorkspacesPanel(_workspaceList);
-          showToast(t('workspace_added'));
-        }catch(e2){setStatus((t('error_prefix')||'Error: ')+e2.message);}
-      }
+  const requestedTarget=arguments[0];
+  const contextIntent=arguments[1];
+  return _runContextTransition('folder-create',contextIntent,async intent=>{
+    targetDir=requestedTarget||S.currentDir||'.';
+    if(!S.session){
+      const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
+      if(!ws) return;
+      try{
+        await _ensureBlankPageSession(ws,intent);
+      }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
     }
-  }catch(e){setStatus(t('folder_create_failed')+e.message);}
+    if(!S.session)return;
+    if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(targetDir)){
+      showToast(t('external_link_read_only'), 2000);
+      return;
+    }
+    const targetLabel=_workspaceCreateTargetLabel(targetDir);
+    const name=await showPromptDialog({
+      title:t('new_folder_prompt_title', targetLabel),
+      placeholder:'folder-name',
+      confirmLabel:t('create')
+    });
+    if(!name||!name.trim()) return;
+    const owner=_captureContextTransitionOwner();
+    if(!_contextTransitionOwnerIsCurrent(owner))return;
+    const relPath=_workspaceJoinTargetPath(targetDir,name);
+    const refreshDir=S.currentDir;
+    try{
+      await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:owner.sid,path:relPath})});
+      if(!_contextTransitionOwnerIsCurrent(owner))return;
+      showToast(t('folder_created')+name.trim());
+      delete S._dirCache[targetDir || '.'];
+      await loadDir(refreshDir);
+      if(!_contextTransitionOwnerIsCurrent(owner))return;
+      const absPath=owner.workspace?(targetDir==='.'?`${owner.workspace}/${name.trim()}`:`${owner.workspace}/${targetDir}/${name.trim()}`):null;
+      if(absPath){
+        const addAsSpace=await showConfirmDialog({
+          title:t('folder_add_as_space_title'),
+          message:t('folder_add_as_space_msg'),
+          confirmLabel:t('folder_add_as_space_btn'),
+          cancelLabel:t('status_no'),
+          focusCancel:true
+        });
+        if(!_contextTransitionOwnerIsCurrent(owner))return;
+        if(addAsSpace){
+          try{
+            const data=await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path:absPath})});
+            if(!_contextTransitionOwnerIsCurrent(owner))return;
+            if(typeof _workspaceList!=='undefined')_workspaceList=data.workspaces||_workspaceList||[];
+            if(typeof renderWorkspacesPanel==='function')renderWorkspacesPanel(_workspaceList);
+            showToast(t('workspace_added'));
+          }catch(e2){if(_contextTransitionOwnerIsCurrent(owner))setStatus((t('error_prefix')||'Error: ')+e2.message);}
+        }
+      }
+    }catch(e){if(_contextTransitionOwnerIsCurrent(owner))setStatus(t('folder_create_failed')+e.message);}
+  });
 }
 
 function _syncComposerFiles(){
