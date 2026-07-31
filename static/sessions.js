@@ -1630,6 +1630,7 @@ async function _switchProfileForSessionLoad(profile){
   const name=String(profile||'').trim();
   if(!name) throw new Error('missing profile');
   if(name===S.activeProfile) return;
+  if(typeof invalidateChannelsForProfileSwitch==='function') invalidateChannelsForProfileSwitch();
   if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
@@ -1637,6 +1638,7 @@ async function _switchProfileForSessionLoad(profile){
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
     S.activeProfile=data.active||name;
     S.activeProfileIsDefault=!!data.is_default;
+    if(typeof loadChannelsPanel==='function') loadChannelsPanel();
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
     }
