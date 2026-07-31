@@ -2099,16 +2099,129 @@ def _restore_stash_after_pull_failure(
     )
 
 
+def _find_agent_executable(agent_dir: Path):
+    """Return the hermes executable inside the agent venv, or None.
+
+    Checks the standard venv and .venv layouts on both Windows and Unix.
+    Called from _apply_agent_update_inner to locate the official updater.
+    Defined at hermes_cli/main.py:9531 (git grep "def _cmd_update_impl").
+    """
+    for candidate in (
+        agent_dir / 'venv' / 'Scripts' / 'hermes.exe',
+        agent_dir / 'venv' / 'bin' / 'hermes',
+        agent_dir / '.venv' / 'Scripts' / 'hermes.exe',
+        agent_dir / '.venv' / 'bin' / 'hermes',
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _apply_agent_update_inner():
+    """Delegate the Agent update to the official hermes update entry point.
+
+    Called from _apply_update_inner when target='agent', under _apply_lock.
+    Invokes ``hermes update --yes`` as a subprocess so the complete official
+    transaction (dependency install, build, migration, skill sync, cron
+    repair, rollback) runs exactly once.  Never falls back to a local git
+    sequence when the official entry point is unavailable.
+    """
+    agent_dir = Path(_AGENT_DIR) if _AGENT_DIR is not None else None
+    if agent_dir is None or not (agent_dir / '.git').exists():
+        return {'ok': False, 'message': 'Not a git repository'}
+
+    agent_exe = _find_agent_executable(agent_dir)
+    if agent_exe is None:
+        return {
+            'ok': False,
+            'message': (
+                'The Hermes Agent updater executable was not found in the '
+                'Agent venv. Reinstall the Agent to restore it. '
+                'No fallback to a local git sequence is attempted.'
+            ),
+        }
+
+    try:
+        # --yes suppresses every interactive prompt (stash restore:
+        # hermes_cli/main.py:9772; config migration: 10308).  --gateway is
+        # intentionally omitted: it writes a .update_exit_code marker into
+        # HERMES_HOME that only a real gateway's update watcher should produce,
+        # and it skips SIGHUP protection during a long transaction.
+        # 1800 s matches a realistic cold dependency sync on a slow machine;
+        # the Agent's own guards own the per-step timeouts inside.
+        proc = subprocess.run(
+            [str(agent_exe), 'update', '--yes'],
+            capture_output=True,
+            text=True,
+            timeout=1800,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            'ok': False,
+            'message': (
+                'Agent update subprocess exceeded 1800 s. The install state '
+                'is indeterminate; the update may still be running in a '
+                'background process. Do not restart manually until the Agent '
+                'process has fully exited.'
+            ),
+            'target': 'agent',
+        }
+    except OSError as exc:
+        return {
+            'ok': False,
+            'message': f'Agent updater could not be launched: {exc}',
+            'target': 'agent',
+        }
+
+    combined = ((proc.stdout or '') + (proc.stderr or '')).strip()
+    if proc.returncode != 0:
+        detail = combined[:500] if combined else '(no output from updater)'
+        return {
+            'ok': False,
+            'message': f'Agent update failed: {detail}',
+            'target': 'agent',
+        }
+
+    # The Agent's subprocess already restarted all gateways before it exited
+    # (hermes_cli/main.py:10462).  This issues a confirmatory restart of the
+    # active-profile gateway via `hermes gateway restart` so WebUI can observe
+    # the restart outcome and gate success on it.  It is a second restart for
+    # the active profile — not a passive health probe — and a failed result
+    # here means the active-profile gateway did not come back up cleanly.
+    gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
+    if not gateway_ok:
+        return {
+            'ok': False,
+            'message': _agent_gateway_restart_failure_message('agent', gateway_result),
+            'target': 'agent',
+            'gateway_restart': gateway_result.get('status'),
+        }
+
+    # Invalidate the update-check cache so a subsequent check reflects the
+    # installed version rather than the pre-update state.
+    with _cache_lock:
+        _update_cache['checked_at'] = 0
+
+    # Schedule WebUI self-restart. The 2 s delay guarantees the HTTP response
+    # has been flushed to the client before os.execv() replaces this process.
+    _schedule_restart()
+
+    return {
+        'ok': True,
+        'message': 'agent updated successfully',
+        'target': 'agent',
+        'restart_scheduled': True,
+        'gateway_restart': gateway_result.get('status'),
+    }
+
+
 def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
     """Inner implementation of apply_update, called under _apply_lock."""
     channel = _normalize_channel(channel)
+    if target == 'agent':
+        return _apply_agent_update_inner()
     if target == 'webui':
         path = REPO_ROOT
-    elif target == 'agent':
-        path = _AGENT_DIR
-        # Channel is WebUI-only — the Agent always uses the default channel
-        # regardless of the user's WebUI selection (see check_for_updates).
-        channel = DEFAULT_UPDATE_CHANNEL
     else:
         return {'ok': False, 'message': f'Unknown target: {target}'}
 
@@ -2336,15 +2449,6 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
             with _cache_lock:
                 _update_cache['checked_at'] = 0
 
-            if target == 'agent':
-                gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
-                if not gateway_ok:
-                    return {
-                        'ok': False,
-                        'message': _agent_gateway_restart_failure_message(target, gateway_result),
-                        'target': target,
-                        'gateway_restart': gateway_result.get('status'),
-                    }
             _schedule_restart()
             response = {
                 'ok': True,
@@ -2360,23 +2464,11 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                 'restart_scheduled': True,
                 'stash_conflict': True,
             }
-            if target == 'agent':
-                response['gateway_restart'] = gateway_result.get('status')
             return response
 
     # Invalidate cache
     with _cache_lock:
         _update_cache['checked_at'] = 0
-
-    if target == 'agent':
-        gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
-        if not gateway_ok:
-            return {
-                'ok': False,
-                'message': _agent_gateway_restart_failure_message(target, gateway_result),
-                'target': target,
-                'gateway_restart': gateway_result.get('status'),
-            }
 
     # Schedule a self-restart so the updated code is loaded fresh.  A plain
     # git pull leaves stale Python modules in sys.modules — agent imports that
@@ -2397,12 +2489,9 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
             'entry may still be present because git stash drop failed.'
         )
 
-    response = {
+    return {
         'ok': True,
         'message': message,
         'target': target,
         'restart_scheduled': True,
     }
-    if target == 'agent':
-        response['gateway_restart'] = gateway_result.get('status')
-    return response

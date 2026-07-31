@@ -1388,3 +1388,335 @@ def test_apply_update_pull_lock_no_stash_when_clean(tmp_path, monkeypatch):
     # No stash pop on a clean pull-lock path.
     assert not any(c[0] == 'stash' for c in git_calls)
 
+
+# ---------------------------------------------------------------------------
+# PR #6617 — official Agent updater delegation
+# ---------------------------------------------------------------------------
+
+import subprocess as _subprocess
+import sys as _sys
+from pathlib import Path as _Path
+
+
+def _agent_tmp(tmp_path):
+    """Create a minimal fake agent directory with a .git marker."""
+    agent_dir = tmp_path / 'agent'
+    (agent_dir / '.git').mkdir(parents=True)
+    return agent_dir
+
+
+def _make_hermes_exe(agent_dir):
+    """Create a fake hermes executable at the platform-appropriate venv path."""
+    if _sys.platform == 'win32':
+        exe = agent_dir / 'venv' / 'Scripts' / 'hermes.exe'
+    else:
+        exe = agent_dir / 'venv' / 'bin' / 'hermes'
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_text('fake')
+    return exe
+
+
+def _fake_proc(returncode=0, stdout='Updated successfully.\n', stderr=''):
+    m = MagicMock()
+    m.returncode = returncode
+    m.stdout = stdout
+    m.stderr = stderr
+    return m
+
+
+def test_agent_delegation_invokes_official_entry_point(tmp_path, monkeypatch):
+    """The agent target must invoke the official hermes updater once with
+    --gateway and --yes; no local git fetch/pull/stash must run.
+
+    Base: the old code ran its own git sequence.
+    Head: subprocess.run is called once with 'update', '--gateway', '--yes'.
+    """
+    agent_dir = _agent_tmp(tmp_path)
+    _make_hermes_exe(agent_dir)
+
+    subprocess_calls = []
+
+    def fake_subprocess_run(cmd, **kwargs):
+        subprocess_calls.append(list(cmd))
+        return _fake_proc()
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates.subprocess, 'run', fake_subprocess_run)
+    monkeypatch.setattr(
+        updates, '_ensure_gateway_restart_for_agent_update',
+        lambda: (True, {'status': 'completed'}),
+    )
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['ok'] is True, result
+    assert len(subprocess_calls) == 1, (
+        f'Expected exactly one subprocess call; got {subprocess_calls!r}'
+    )
+    cmd = subprocess_calls[0]
+    assert 'update' in cmd, f'update subcommand missing from {cmd!r}'
+    assert '--yes' in cmd, f'--yes missing from {cmd!r}'
+    assert '--gateway' not in cmd, (
+        '--gateway must not be passed: it writes .update_exit_code into '
+        'HERMES_HOME (gateway-watcher state) and skips SIGHUP protection'
+    )
+
+
+def test_agent_update_failure_propagates(tmp_path, monkeypatch):
+    """Install, build, and migration failures must propagate; no success response.
+
+    Base: the old git sequence returned ok=True even on partial failure.
+    Head: the Agent's non-zero exit code maps to ok=False with the failure reason.
+    """
+    agent_dir = _agent_tmp(tmp_path)
+    _make_hermes_exe(agent_dir)
+
+    failure_reasons = [
+        ('dependency install failed: pip error', 1),
+        ('build step failed: make error', 2),
+        ('migration aborted: schema conflict', 1),
+    ]
+
+    for reason_text, rc in failure_reasons:
+        monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+        _t, _rc = reason_text, rc
+        monkeypatch.setattr(
+            updates.subprocess, 'run',
+            lambda cmd, **kw: _fake_proc(returncode=_rc, stdout=_t, stderr=''),
+        )
+        # Gateway restart must NOT be called when the updater itself failed.
+        gateway_called = []
+        monkeypatch.setattr(
+            updates, '_ensure_gateway_restart_for_agent_update',
+            lambda: gateway_called.append(1) or (True, {'status': 'completed'}),
+        )
+        monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+
+        result = updates._apply_update_inner('agent')
+
+        assert result['ok'] is False, (
+            f'Expected ok=False for {reason_text!r}; got {result!r}'
+        )
+        assert reason_text[:50] in result['message'], (
+            f'Failure reason not propagated: {result["message"]!r}'
+        )
+        assert gateway_called == [], (
+            'Gateway restart must not run when the Agent updater failed'
+        )
+
+
+def test_response_before_replacement_ordering(tmp_path, monkeypatch):
+    """The current process must complete its response before replacement fires.
+
+    _schedule_restart() is called after the function returns its dict, so
+    os.execv() fires only after the HTTP layer has flushed the response.
+    Head assertion: _schedule_restart is called exactly once, and the function
+    returns before the restart daemon thread would fire (the 2 s delay is
+    mocked away here; what matters is that _schedule_restart is invoked).
+    """
+    agent_dir = _agent_tmp(tmp_path)
+    _make_hermes_exe(agent_dir)
+
+    restart_calls = []
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(
+        updates.subprocess, 'run',
+        lambda cmd, **kw: _fake_proc(),
+    )
+    monkeypatch.setattr(
+        updates, '_ensure_gateway_restart_for_agent_update',
+        lambda: (True, {'status': 'completed'}),
+    )
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: restart_calls.append(1))
+
+    result = updates._apply_update_inner('agent')
+
+    # The function must have returned a dict (response) before the restart fires.
+    assert isinstance(result, dict), 'function must return a response dict'
+    assert result['ok'] is True, result
+    assert result.get('restart_scheduled') is True
+    assert restart_calls == [1], (
+        '_schedule_restart must be called exactly once on success'
+    )
+
+
+def test_post_restart_health_gate(tmp_path, monkeypatch):
+    """Success must not be reported unless the post-restart health check passes.
+
+    When _ensure_gateway_restart_for_agent_update returns ok=False, the
+    response must carry ok=False and surface the health failure reason.
+    """
+    agent_dir = _agent_tmp(tmp_path)
+    _make_hermes_exe(agent_dir)
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(
+        updates.subprocess, 'run',
+        lambda cmd, **kw: _fake_proc(),
+    )
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+
+    # Healthy replacement — expect success.
+    monkeypatch.setattr(
+        updates, '_ensure_gateway_restart_for_agent_update',
+        lambda: (True, {'status': 'completed'}),
+    )
+    ok_result = updates._apply_update_inner('agent')
+    assert ok_result['ok'] is True, ok_result
+
+    # Unhealthy replacement — expect failure surfaced, not swallowed.
+    monkeypatch.setattr(
+        updates, '_ensure_gateway_restart_for_agent_update',
+        lambda: (False, {'status': 'failed', 'message': 'gateway did not start'}),
+    )
+    fail_result = updates._apply_update_inner('agent')
+    assert fail_result['ok'] is False, fail_result
+    assert 'gateway' in fail_result['message'].lower(), (
+        f'Health failure reason not in message: {fail_result["message"]!r}'
+    )
+
+
+@pytest.mark.parametrize('scenario,setup,expected_ok,expected_msg_fragment', [
+    (
+        'agent_success_healthy',
+        {'agent_rc': 0, 'gateway_ok': True, 'gateway_status': 'completed'},
+        True,
+        'updated successfully',
+    ),
+    (
+        'agent_success_unhealthy',
+        {'agent_rc': 0, 'gateway_ok': False, 'gateway_status': 'failed'},
+        False,
+        'gateway',
+    ),
+    (
+        'agent_install_failed',
+        {'agent_rc': 1, 'agent_stdout': 'dependency install failed', 'gateway_ok': None},
+        False,
+        'dependency install failed',
+    ),
+    (
+        'agent_exe_unavailable',
+        {'agent_exe': False, 'gateway_ok': None},
+        False,
+        'not found',
+    ),
+    (
+        'webui_existing_sequence',
+        {'target': 'webui', 'git_ok': True},
+        True,
+        'updated successfully',
+    ),
+])
+def test_update_target_matrix(scenario, setup, expected_ok, expected_msg_fragment,
+                               tmp_path, monkeypatch):
+    """Every target/outcome row in the Fault Scope matrix resolves to its
+    declared banner result."""
+    target = setup.get('target', 'agent')
+
+    if target == 'agent':
+        agent_dir = _agent_tmp(tmp_path)
+        if setup.get('agent_exe', True):
+            _make_hermes_exe(agent_dir)
+
+        monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+
+        if setup.get('agent_exe', True):
+            _rc = setup.get('agent_rc', 0)
+            _out = setup.get('agent_stdout', 'Updated successfully.\n')
+            monkeypatch.setattr(
+                updates.subprocess, 'run',
+                lambda cmd, **kw: _fake_proc(returncode=_rc, stdout=_out),
+            )
+
+        gateway_ok = setup.get('gateway_ok')
+        if gateway_ok is not None:
+            _gok = gateway_ok
+            _gstatus = setup.get('gateway_status', 'completed')
+            monkeypatch.setattr(
+                updates, '_ensure_gateway_restart_for_agent_update',
+                lambda: (_gok, {'status': _gstatus,
+                                'message': 'restart error' if not _gok else ''}),
+            )
+
+        monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+        result = updates._apply_update_inner('agent')
+
+    else:
+        # webui: wire up the minimal git stubs for a clean fast-forward pull.
+        webui_dir = tmp_path / 'webui'
+        (webui_dir / '.git').mkdir(parents=True)
+        monkeypatch.setattr(updates, 'REPO_ROOT', webui_dir)
+
+        def _webui_git(args, cwd, timeout=10):
+            if args[0] == 'fetch':
+                return '', True
+            if args[0] == 'status':
+                return '', True
+            if args[0] == 'pull':
+                return 'Already up to date.', True
+            return '', True
+
+        monkeypatch.setattr(updates, '_run_git', _webui_git)
+        monkeypatch.setattr(
+            updates, '_select_apply_compare_ref',
+            lambda path, channel='stable', target=None: 'origin/main',
+        )
+        monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+        result = updates._apply_update_inner('webui')
+
+    assert result['ok'] is expected_ok, (
+        f'Scenario {scenario!r}: expected ok={expected_ok}, got {result!r}'
+    )
+    assert expected_msg_fragment.lower() in result['message'].lower(), (
+        f'Scenario {scenario!r}: {expected_msg_fragment!r} not in {result["message"]!r}'
+    )
+
+
+def test_webui_target_unchanged(tmp_path, monkeypatch):
+    """A target='webui' request must not enter the Agent delegation path.
+
+    The agent executable and subprocess.run are not touched; the webui git
+    sequence runs as before.
+    """
+    webui_dir = tmp_path / 'webui'
+    (webui_dir / '.git').mkdir(parents=True)
+    monkeypatch.setattr(updates, 'REPO_ROOT', webui_dir)
+
+    agent_delegation_entered = []
+
+    def spy_subprocess_run(cmd, **kwargs):
+        # subprocess.run called from the agent delegation path would pass
+        # 'update' and '--gateway'; flag it as unexpected here.
+        if '--gateway' in cmd:
+            agent_delegation_entered.append(cmd)
+        return _fake_proc()
+
+    monkeypatch.setattr(updates.subprocess, 'run', spy_subprocess_run)
+
+    def _webui_git(args, cwd, timeout=10):
+        if args[0] == 'fetch':
+            return '', True
+        if args[0] == 'status':
+            return '', True
+        if args[0] == 'pull':
+            return 'Already up to date.', True
+        return '', True
+
+    monkeypatch.setattr(updates, '_run_git', _webui_git)
+    monkeypatch.setattr(
+        updates, '_select_apply_compare_ref',
+        lambda path, channel='stable', target=None: 'origin/main',
+    )
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+
+    result = updates._apply_update_inner('webui')
+
+    assert result['ok'] is True, result
+    assert agent_delegation_entered == [], (
+        'webui target must not invoke the agent delegation path; '
+        f'unexpected subprocess calls: {agent_delegation_entered!r}'
+    )
+
