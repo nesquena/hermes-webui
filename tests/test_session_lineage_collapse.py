@@ -2202,7 +2202,7 @@ function api(path) {{
 eval(extractFunc('_lineageReportCacheKey'));
 eval(extractFunc('_fetchLineageReportForRow'));
 (async()=>{{
-  const row = {{session_id:'tip', _lineage_key:'root'}};
+  const row = {{session_id:'tip', profile_scope:'work', _lineage_key:'root'}};
   const [first, second] = await Promise.all([
     _fetchLineageReportForRow(row, 'root'),
     _fetchLineageReportForRow(row, 'root'),
@@ -2217,7 +2217,7 @@ eval(extractFunc('_fetchLineageReportForRow'));
 """
     result = json.loads(_run_node(source))
     assert result == {
-        "calls": ["/api/session/lineage/report?session_id=tip"],
+        "calls": ["/api/session/lineage/report?session_id=tip&profile=work"],
         "cached": True,
         "same": True,
     }

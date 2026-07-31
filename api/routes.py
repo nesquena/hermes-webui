@@ -2600,8 +2600,19 @@ def _hidden_archived_sidebar_reference_sessions(
     `_attachChildSessionsToSidebarRows()` can suppress its visible child rows
     instead of rendering them as orphan top-level conversations (#4293).
     """
+    def scope_key(row: dict) -> tuple[str, str, str]:
+        source = "cli" if _is_cli_session_for_settings(row) else "webui"
+        profile = _session_list_cache_profile_scope(
+            row.get("profile_scope") or row.get("profile")
+        )
+        project = row.get("project_id")
+        return source, profile, "" if project is None else str(project)
+
+    def identity_key(row: dict, session_id: str) -> tuple[str, str, str, str]:
+        return (*scope_key(row), str(session_id))
+
     archived_by_id = {
-        str(row.get("session_id")): row
+        identity_key(row, row.get("session_id")): row
         for row in archived_rows
         if isinstance(row, dict) and row.get("archived") and row.get("session_id")
     }
@@ -2609,9 +2620,9 @@ def _hidden_archived_sidebar_reference_sessions(
         return []
 
     references: list[dict] = []
-    added: set[str] = set()
+    added: set[tuple[str, str, str, str]] = set()
     visible_ids = {
-        str(row.get("session_id"))
+        identity_key(row, row.get("session_id"))
         for row in visible_rows
         if isinstance(row, dict) and row.get("session_id")
     }
@@ -2623,14 +2634,15 @@ def _hidden_archived_sidebar_reference_sessions(
         seen: set[str] = set()
         while parent_id and parent_id not in seen:
             seen.add(parent_id)
-            if parent_id in visible_ids:
+            parent_key = identity_key(row, parent_id)
+            if parent_key in visible_ids:
                 break
-            parent = archived_by_id.get(parent_id)
+            parent = archived_by_id.get(parent_key)
             if not parent:
                 break
-            if parent_id not in added:
+            if parent_key not in added:
                 references.append(parent)
-                added.add(parent_id)
+                added.add(parent_key)
             parent_id = str(parent.get("parent_session_id") or "").strip()
 
     return references
@@ -9398,6 +9410,7 @@ from api.models import (
     _write_session_index,
     SESSION_INDEX_FILE,
     _active_state_db_path,
+    _agent_state_db_path,
     load_projects,
     save_projects,
     import_cli_session,
@@ -13066,10 +13079,13 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"session": redact_session_data(sess)})
 
     if parsed.path == "/api/session/lineage/report":
-        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        query = parse_qs(parsed.query)
+        sid = query.get("session_id", [""])[0]
         if not sid:
             return bad(handler, "session_id required", 400)
-        report = read_session_lineage_report(_active_state_db_path(), sid)
+        profile = query.get("profile", [""])[0].strip() or None
+        state_db_path = _agent_state_db_path(profile=profile) if profile else _active_state_db_path()
+        report = read_session_lineage_report(state_db_path, sid)
         if not report.get("found"):
             return bad(handler, "Session not found", 404)
         return j(handler, report)
