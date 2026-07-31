@@ -8684,8 +8684,9 @@ function _preferencesPayloadFromUi(){
   if(syncCb) payload.sync_to_insights=syncCb.checked;
   const updateCb=$('settingsCheckUpdates');
   if(updateCb) payload.check_for_updates=updateCb.checked;
-  const updateChannelSel=$('settingsUpdateChannel');
-  if(updateChannelSel) payload.update_channel=updateChannelSel.value;
+  // update_channel is NOT included here — it has its own dedicated write path
+  // (_saveUpdateChannelFromSelector) so a stale tab's generic autosave cannot
+  // overwrite a newer channel selection made in another tab. (#6612)
   const ignoreAgentUpdatesCb=$('settingsIgnoreAgentUpdates');
   if(ignoreAgentUpdatesCb) payload.ignore_agent_updates=ignoreAgentUpdatesCb.checked;
   const whatsNewSummaryCb=$('settingsWhatsNewSummary');
@@ -8867,6 +8868,58 @@ function _retryPreferencesAutosave(){
   const payload=_settingsPreferencesAutosaveRetryPayload||_preferencesPayloadFromUi();
   _setPreferencesAutosaveStatus('saving');
   _autosavePreferencesSettings(payload);
+}
+
+let _channelSaveSeq=0;
+// Last server-confirmed update_channel value. Seeded at panel hydration so the
+// failure-revert path always has a known-good value. _confirmedUpdateChannel is
+// the only reliable "previous" value: by the time a change event fires the
+// browser has already applied the picked option to the <select>, so
+// channelSel.value inside the handler IS the new value, not the old one.
+let _confirmedUpdateChannel=null;
+
+async function _saveUpdateChannelFromSelector(channelSel){
+  // #6612: dedicated write path for update_channel so the generic preferences
+  // autosave payload never carries this field. A stale tab toggling an unrelated
+  // preference must not overwrite a newer channel selection from another tab.
+  if(!channelSel) return;
+  const val=channelSel.value==='experimental'?'experimental':'stable';
+  const seq=++_channelSaveSeq;
+  if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus('saving');
+  try{
+    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify({update_channel:val})});
+    // Discard a stale response: a newer in-flight write already owns the selector
+    // and the server state. Without this guard, two rapid selections (Experimental
+    // then Stable) can leave the selector on the first response while the server
+    // holds the second.
+    if(seq!==_channelSaveSeq) return;
+    // Re-sync the selector from the server response. Defensive fallback to
+    // 'stable' guards against a malformed response with no update_channel key.
+    const confirmed=(saved&&(saved.update_channel==='experimental'||saved.update_channel==='stable'))
+      ?saved.update_channel:'stable';
+    _confirmedUpdateChannel=confirmed;
+    channelSel.value=confirmed;
+    if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus('saved');
+    // Run the update check and badge sync against the confirmed server value,
+    // not the optimistic pre-save value.
+    if(typeof checkUpdatesNow==='function'){
+      try{checkUpdatesNow(confirmed);}catch(_){}
+    }
+    if(typeof _syncUpdateChannelBadge==='function') _syncUpdateChannelBadge(confirmed);
+  }catch(e){
+    console.warn('[settings] update_channel save failed',e);
+    // Revert selector and badge to the last server-confirmed value so both
+    // controls agree with what the server actually holds. Do not call
+    // _setPreferencesAutosaveStatus('failed'): its retry button replays the
+    // generic preferences payload, which by design no longer contains
+    // update_channel (#6612). Clear the saving indicator instead.
+    if(seq===_channelSaveSeq){
+      const revertTo=_confirmedUpdateChannel||'stable';
+      channelSel.value=revertTo;
+      if(typeof _syncUpdateChannelBadge==='function') _syncUpdateChannelBadge(revertTo);
+    }
+    if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus(null);
+  }
 }
 
 function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
@@ -9318,19 +9371,13 @@ async function loadSettingsPanel(){
     const updateChannelSel=$('settingsUpdateChannel');
     if(updateChannelSel){
       updateChannelSel.value=settings.update_channel==='experimental'?'experimental':'stable';
+      _confirmedUpdateChannel=updateChannelSel.value; // #6612: seed revert baseline
       updateChannelSel.addEventListener('change',function(){
-        // Persist the channel, then invalidate the cached update check and
-        // re-check so the banner reflects the newly-selected channel. Changing
-        // the channel changes WHAT is offered, never WHAT is installed — the
-        // update banner still gates the actual apply behind "Update Now".
-        _schedulePreferencesAutosave();
-        if(typeof checkUpdatesNow==='function'){
-          // Pass the just-selected channel EXPLICITLY so the re-check cannot race
-          // the debounced autosave PUT and answer for the previous channel.
-          const _picked=updateChannelSel.value;
-          setTimeout(function(){try{checkUpdatesNow(_picked);}catch(e){}},400);
-        }
-        if(typeof _syncUpdateChannelBadge==='function') _syncUpdateChannelBadge(updateChannelSel.value);
+        // #6612: use the dedicated channel writer so generic preference autosaves
+        // from a stale tab cannot overwrite a newer explicit channel selection.
+        // Update check, badge sync, and failure status are handled inside
+        // _saveUpdateChannelFromSelector after the POST is confirmed.
+        _saveUpdateChannelFromSelector(updateChannelSel);
       },{once:false});
     }
     const ignoreAgentUpdatesCb=$('settingsIgnoreAgentUpdates');
