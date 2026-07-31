@@ -3657,6 +3657,7 @@ function _commitTranscriptReplacement(ticket, commit) {
   if (!_transcriptReplacementIsCurrent(ticket) || ticket.used) return false;
   ticket.used = true;
   _bumpMessagesGeneration();
+  ticket.committedGeneration = _messagesGeneration;
   commit();
   return true;
 }
