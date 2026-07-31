@@ -406,7 +406,12 @@ class Handler(BaseHTTPRequestHandler):
             _is_csp_report_post = (
                 parsed.path == "/api/csp-report" and self.command == "POST"
             )
-            if not _is_csp_report_post and not check_auth(self, parsed): return
+            if not _is_csp_report_post and not check_auth(self, parsed):
+                # Authentication can reject an unsafe request before its body is
+                # consumed.  Reusing that HTTP/1.1 connection would make the
+                # unread body prefix the next request line.
+                self.close_connection = True
+                return
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)

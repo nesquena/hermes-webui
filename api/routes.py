@@ -5686,6 +5686,9 @@ def _csrf_rejection_error(handler) -> str:
 def _check_csrf(handler) -> bool:
     """Reject cross-origin or tokenless authenticated browser unsafe requests."""
     if not _check_same_origin_browser_request(handler):
+        # CSRF checks run before read_body().  Close rather than reusing an
+        # HTTP/1.1 connection whose unread body would corrupt the next request.
+        handler.close_connection = True
         return False
     if not _is_browser_unsafe_request(handler):
         return True  # non-browser clients (curl, MCP, agent) have no Origin/Referer
@@ -5698,6 +5701,7 @@ def _check_csrf(handler) -> bool:
     submitted = handler.headers.get(CSRF_HEADER_NAME) or handler.headers.get("X-CSRF-Token")
     if verify_csrf_token(cookie_val or "", submitted or ""):
         return True
+    handler.close_connection = True
     return _set_csrf_failure_reason(handler, "token_mismatch")
 
 
