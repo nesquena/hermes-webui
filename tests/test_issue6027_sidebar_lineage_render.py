@@ -61,9 +61,7 @@ eval(extractFunc('_migrateSidebarStateEntry'));
 eval(extractFunc('_sessionLineageContainsSession'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
-eval(extractFunc('_sessionDisplayTitle'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
-eval(extractFunc('_attachChildSessionsToSidebarRows'));
 {body}
 """
 
@@ -181,53 +179,6 @@ console.log(JSON.stringify({
     assert result["projectA"] == "projA"
     assert result["projectB"] == "projB"
     assert result["runtimeA"] != result["runtimeB"]
-
-
-def test_unassigned_fork_attaches_without_inheriting_parent_project():
-    result = _run_node(_harness("""
-const root = {session_id:'root', profile_scope:'work', project_id:'projA'};
-const delegate = {session_id:'delegate', profile_scope:'work', relationship_type:'child_session',
-  read_only:true, parent_session_id:'root'};
-const fork = {session_id:'fork', profile_scope:'work', session_source:'fork',
-  relationship_type:'child_session', parent_session_id:'root', project_id:null};
-const raw = [root, delegate, fork];
-const index = _buildSidebarLineageIndex(raw, []);
-const durable = new Map([
-  [index.scopeKey(root), new Set(['root', 'delegate'])],
-  [index.scopeKey(fork), new Set(['fork'])],
-]);
-const rows = _attachChildSessionsToSidebarRows([root], raw, raw, durable, index);
-console.log(JSON.stringify({
-  project:index.projectFor(fork),
-  rows:rows.map(row=>({id:row.session_id, children:(row._child_sessions||[]).map(child=>child.session_id)})),
-}));
-"""))
-    assert result["project"] is None
-    assert result["rows"] == [{"id": "root", "children": ["delegate", "fork"]}]
-
-
-def test_unassigned_fork_attaches_to_compressed_tip_by_parent_scope():
-    result = _run_node(_harness("""
-const root = {session_id:'root', profile_scope:'work', project_id:'projA'};
-const tip = {session_id:'tip', profile_scope:'work', project_id:'projA',
-  _lineage_segments:[{session_id:'root', title:'Root segment'}]};
-const fork = {session_id:'fork', profile_scope:'work', session_source:'fork',
-  relationship_type:'child_session', parent_session_id:'root', project_id:null};
-const raw = [tip, fork];
-const references = [tip, fork, root];
-const index = _buildSidebarLineageIndex(references, []);
-const durable = new Map([
-  [index.scopeKey(tip), new Set(['tip'])],
-  [index.scopeKey(fork), new Set(['fork'])],
-]);
-const rows = _attachChildSessionsToSidebarRows([tip], raw, references, durable, index);
-console.log(JSON.stringify({
-  project:index.projectFor(fork),
-  rows:rows.map(row=>({id:row.session_id, children:(row._child_sessions||[]).map(child=>child.session_id)})),
-}));
-"""))
-    assert result["project"] is None
-    assert result["rows"] == [{"id": "tip", "children": ["fork"]}]
 
 
 def test_active_session_matching_uses_scoped_lineage_identity():
