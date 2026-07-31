@@ -1612,6 +1612,11 @@ function _highlightQuestionRow(row){
 async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
   const container=$('messages');
   if(!container||typeof questionRawIdx!=='number'||questionRawIdx<0) return;
+  const clampTargetScrollTop=(scrollTop)=>{
+    const maxTop=Math.max(0,container.scrollHeight-container.clientHeight);
+    const n=Number(scrollTop);
+    return Math.max(0,Math.min(Number.isFinite(n)?n:container.scrollTop,maxTop));
+  };
   const scrollToTarget=()=>{
     const hasAssistant=typeof assistantRawIdx==='number'&&assistantRawIdx>=0;
     if(hasAssistant){
@@ -1634,14 +1639,18 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
     _highlightQuestionRow(row);
     return true;
   };
+  // Cancel load-time bottom settling before any visible or virtualized target
+  // path can return. The jump owner keeps every native smooth-scroll frame out
+  // of the manual-reader listener, then reconciles against the final geometry.
+  _cancelBottomSettle();
+  _beginMessageJumpScroll(container);
   if(scrollToTarget()) return;
   const visWithIdx=_getVisibleMessagesWithIdx();
   const visibleIdx=_messageVisibleIndexForRawIdx(questionRawIdx, visWithIdx);
   if(visibleIdx>=0){
-    _scrollPinned=false;
-    _messageUserUnpinned=true;
     _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-    container.scrollTop=_messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container);
+    const virtualTarget=clampTargetScrollTop(_messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container));
+    container.scrollTop=virtualTarget;
     _messageVirtualWindowKey='';
     renderMessages({ preserveScroll:true });
     requestAnimationFrame(()=>{
@@ -5668,6 +5677,72 @@ let _programmaticScroll=false;
 let _programmaticScrollSetAt=0;
 let _programmaticScrollResetTimer=0;
 function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollResetTimer);_programmaticScrollResetTimer=setTimeout(()=>{_programmaticScroll=false;},ms||80);}
+let _messageJumpScrollGeneration=0;
+let _messageJumpScrollOwner=null;
+let _messageJumpScrollSettleTimer=0;
+function _messageJumpSessionId(){
+  if(typeof currentSid!=='undefined'&&currentSid) return String(currentSid);
+  if(typeof S!=='undefined'&&S.session&&S.session.session_id) return String(S.session.session_id);
+  return '';
+}
+function _scheduleMessageJumpScrollReconcile(generation,ms){
+  if(!_messageJumpScrollOwner||_messageJumpScrollOwner.generation!==generation) return;
+  clearTimeout(_messageJumpScrollSettleTimer);
+  _messageJumpScrollSettleTimer=setTimeout(()=>_finishMessageJumpScroll(generation),ms||220);
+}
+function _beginMessageJumpScroll(container){
+  const previous=_messageJumpScrollOwner;
+  const preserved=previous?previous.preserved:{
+    scrollPinned:_scrollPinned,
+    messageUserUnpinned:_messageUserUnpinned,
+    nearBottomCount:_nearBottomCount,
+  };
+  clearTimeout(_messageJumpScrollSettleTimer);
+  const generation=++_messageJumpScrollGeneration;
+  _messageJumpScrollOwner={generation,container,sessionId:_messageJumpSessionId(),preserved};
+  _programmaticScroll=true;
+  _programmaticScrollSetAt=performance.now();
+  _scheduleMessageJumpScrollReconcile(generation,300);
+  return generation;
+}
+function _finishMessageJumpScroll(generation){
+  const owner=_messageJumpScrollOwner;
+  if(!owner||owner.generation!==generation) return;
+  if(owner.sessionId!==_messageJumpSessionId()){
+    _cancelMessageJumpScroll();
+    return;
+  }
+  clearTimeout(_messageJumpScrollSettleTimer);
+  _messageJumpScrollSettleTimer=0;
+  const container=owner.container;
+  const maxTop=Math.max(0,container.scrollHeight-container.clientHeight);
+  const top=Math.max(0,Math.min(Number(container.scrollTop)||0,maxTop));
+  const bottomDistance=maxTop-top;
+  if(bottomDistance>80){
+    _scrollPinned=false;
+    _messageUserUnpinned=true;
+    _nearBottomCount=0;
+  }else{
+    _scrollPinned=owner.preserved.scrollPinned;
+    _messageUserUnpinned=owner.preserved.messageUserUnpinned;
+    _nearBottomCount=owner.preserved.nearBottomCount;
+  }
+  _lastScrollTop=container.scrollTop;
+  _lastMessageClientHeight=container.clientHeight;
+  _messageJumpScrollOwner=null;
+  _programmaticScroll=false;
+  if(typeof _syncScrollToBottomCue==='function'){
+    _syncScrollToBottomCue(!_scrollPinned&&bottomDistance>80,{newMessage:_newMessageCueVisible});
+  }
+  if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
+}
+function _cancelMessageJumpScroll(){
+  ++_messageJumpScrollGeneration;
+  clearTimeout(_messageJumpScrollSettleTimer);
+  _messageJumpScrollSettleTimer=0;
+  _messageJumpScrollOwner=null;
+  _programmaticScroll=false;
+}
 let _nearBottomCount=0;
 let _lastScrollTop=null;
 let _lastMessageClientHeight=null;   // #4702: track scroller height to ignore iOS portrait toolbar-settle reflows (a clientHeight increase fires a scroll event with decreased scrollTop that is NOT a user scroll)
@@ -5710,7 +5785,7 @@ let _lastMessageRenderAt=-Infinity;
 function _recentMessageRenderArtifactWindow(ms){
   return performance.now()-_lastMessageRenderAt<(ms||1400);
 }
-function _cancelBottomSettle(){ _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); clearTimeout(_settleFinalTimer); cancelAnimationFrame(_settleRAF); }
+function _cancelBottomSettle(){ _cancelMessageJumpScroll(); _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); clearTimeout(_settleFinalTimer); cancelAnimationFrame(_settleRAF); }
 function _markMessageTouchScrollIntent(active=true){
   _messageTouchScrollActive=!!active;
   _lastMessageTouchScrollIntentMs=performance.now();
@@ -5770,12 +5845,12 @@ function _recordNonMessageScrollIntent(e){
   // gentle scroll-up. This does NOT unpin on its own — only the <-30 branch and
   // the scroll listener's movedUp branch flip _messageUserUnpinned.
   if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY!==0)){
+    if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
     const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
     if(bottomDistance>120) _lastMessageScrollIntentMs=performance.now();
   }
   if(typeof e.deltaY==='number'&&e.deltaY<0) _lastMessageWheelIntentMs=performance.now();
   if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)){
-    _cancelBottomSettle();
     if(e.type==='touchmove') _markMessageTouchScrollIntent(true);
     if(typeof e.deltaY==='number'&&e.deltaY< -30){
       _messageUserUnpinned=true;
@@ -5854,6 +5929,7 @@ if(typeof document!=='undefined'){
 // prevent the new chat's first scroll comparing against the previous chat's
 // scrollTop (Opus stage-302 SHOULD-FIX, #1731 follow-up).
 function _resetScrollDirectionTracker(){
+  _cancelMessageJumpScroll();
   _clearNewMessageScrollCue();
   _lastScrollTop=null;
   _lastMessageClientHeight=null;
@@ -5966,7 +6042,10 @@ if(typeof window!=='undefined'){
   const el=document.getElementById('messages');
   if(!el) return;
   el.addEventListener('pointerdown',(e)=>{
-    if(e.target===el&&e.offsetX>=el.clientWidth) _scrollbarDragActive=true;
+    if(e.target===el&&e.offsetX>=el.clientWidth){
+      if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
+      _scrollbarDragActive=true;
+    }
   },{passive:true});
   window.addEventListener('pointerup',()=>{
     if(!_scrollbarDragActive) return;
@@ -6011,6 +6090,7 @@ if(typeof window!=='undefined'){
     // Count only when the message pane itself is the scroll target: it is focused,
     // contains the focus, or the pointer is over it (keyboard scroll w/o focus).
     if(a===el||el.contains(a)||el.matches(':hover')){
+      if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
       const now=performance.now();
       _lastMessageKeyScrollIntentMs=now;
       const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
@@ -6020,6 +6100,10 @@ if(typeof window!=='undefined'){
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
     _scheduleMessageVirtualizedRender();
+    if(_messageJumpScrollOwner){
+      _scheduleMessageJumpScrollReconcile(_messageJumpScrollOwner.generation);
+      return;
+    }
     if(_programmaticScroll&&(performance.now()-_programmaticScrollSetAt)>150) _programmaticScroll=false;
     if(_programmaticScroll) return;
     _markMessageVirtualScrollActive();
