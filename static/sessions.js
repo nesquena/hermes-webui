@@ -7396,36 +7396,11 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     }
     return sessionIdsInList;
   };
-  const baseIdentityKey=(session, identity)=>{
-    const source=typeof _sidebarLineageSourceBucket==='function'
-      ?_sidebarLineageSourceBucket(session):'webui';
-    const profile=typeof _sessionProfileScope==='function'
-      ?_sessionProfileScope(session):'default';
-    return `${source}\u0000${profile}\u0000${String(identity||'')}`;
-  };
   const rawSessionsById=new Map();
-  const rawSessionsByBaseId=new Map();
   for(const session of referenceSessions){
     const key=session&&session.session_id&&scopedIdentityKey(session, session.session_id);
     if(key&&!rawSessionsById.has(key)) rawSessionsById.set(key, session);
-    const baseKey=session&&session.session_id&&baseIdentityKey(session, session.session_id);
-    if(baseKey){
-      if(!rawSessionsByBaseId.has(baseKey)) rawSessionsByBaseId.set(baseKey,[]);
-      rawSessionsByBaseId.get(baseKey).push(session);
-    }
   }
-  const parentRowFor=(child, parentSid)=>{
-    if(!child||!parentSid) return null;
-    const scopedParent=rawSessionsById.get(scopedIdentityKey(child,parentSid));
-    if(scopedParent) return scopedParent;
-    if(child.session_source!=='fork'||index.projectFor(child)!==null) return null;
-    const candidates=rawSessionsByBaseId.get(baseIdentityKey(child,parentSid))||[];
-    return candidates.length===1?candidates[0]:null;
-  };
-  const forkHasVisibleParent=(session)=>{
-    if(!session||session.session_source!=='fork'||!session.parent_session_id) return false;
-    return !!parentRowFor(session,session.parent_session_id);
-  };
   const cleanSidebarRow=(s)=>{
     const row={...s};
     // Child-session decoration is render-derived.  Drop stale copies so an
@@ -7441,8 +7416,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     return row;
   };
   const rows=(collapsedRows||[])
-    .filter(s=>!_isChildSession(s)&&((s&&s.pinned)
-      ||(!_isForkWithResolvableParent(s, sessionIdsFor(s))&&!forkHasVisibleParent(s))))
+    .filter(s=>!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsFor(s))))
     .map(cleanSidebarRow);
   const isChildStreaming=(childRow)=>typeof _isSessionEffectivelyStreaming==='function'
     ? _isSessionEffectivelyStreaming(childRow)
@@ -7482,11 +7456,9 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     if(attachDepthCache.has(sessionKey)) return attachDepthCache.get(sessionKey);
     if(seen.has(sessionKey)) return 0;
     seen.add(sessionKey);
-    const parent=session.parent_session_id&&parentRowFor(session, session.parent_session_id);
+    const parent=session.parent_session_id&&rawSessionsById.get(scopedIdentityKey(session, session.parent_session_id));
     let depth=0;
-    if(parent&&(_isChildSession(session)
-      ||((_isForkWithResolvableParent(session, sessionIdsFor(session))||forkHasVisibleParent(session))
-        &&!(session&&session.pinned)))){
+    if(parent&&(_isChildSession(session)||(_isForkWithResolvableParent(session, sessionIdsFor(session))&&!(session&&session.pinned)))){
       depth=1+attachDepthFor(parent, seen);
     }
     attachDepthCache.set(sessionKey, depth);
@@ -7518,7 +7490,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       if(hiddenArchivedChildTree.has(parentKey)) return true;
       if(seen.has(parentSid)) break;
       seen.add(parentSid);
-      const rawParent=parentRowFor(current, parentSid);
+      const rawParent=rawSessionsById.get(scopedIdentityKey(current, parentSid));
       if(!rawParent) break;
       if(rawParent.archived) return true;
       current=rawParent;
@@ -7542,20 +7514,14 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     const childSidKey=child&&child.session_id&&scopedIdentityKey(child, child.session_id);
     const childRenderable=!!(childSidKey&&renderableChildIds.has(childSidKey));
     if(childSidKey&&visibleBySid.has(childSidKey)) continue;
-    const isForkChild=(_isForkWithResolvableParent(child, sessionIdsFor(child))
-      ||forkHasVisibleParent(child))&&!(child&&child.pinned);
+    const isForkChild=_isForkWithResolvableParent(child, sessionIdsFor(child))&&!(child&&child.pinned);
     const childLineageKey=child&&(child._lineage_root_id||child.lineage_root_id||child.parent_session_id);
     const isHiddenLineageReferenceChild=!!(child&&child.archived&&child.parent_session_id&&!child.pinned&&!childRenderable);
     if(!_isChildSession(child)&&!isForkChild&&!isHiddenLineageReferenceChild) continue;
     const parentSid=child.parent_session_id;
     let parentRow=parentSid&&visibleBySid.get(scopedIdentityKey(child, parentSid));
-    if(!parentRow){
-      const parent=parentSid&&parentRowFor(child, parentSid);
-      parentRow=parent&&visibleBySid.get(scopedIdentityKey(parent,parent.session_id));
-    }
     let parentSegment=null;
-    const parentForSegment=parentSid&&parentRowFor(child, parentSid);
-    const parentSegmentKey=parentSid&&scopedIdentityKey(parentForSegment||child, parentSid);
+    const parentSegmentKey=parentSid&&scopedIdentityKey(child, parentSid);
     if(!parentRow&&parentSegmentKey&&visibleBySegmentSid.has(parentSegmentKey)){
       const resolved=visibleBySegmentSid.get(parentSegmentKey);
       parentRow=resolved.row;

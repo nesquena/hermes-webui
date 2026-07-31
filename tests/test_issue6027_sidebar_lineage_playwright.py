@@ -107,7 +107,7 @@ def test_served_sidebar_lineage_fixture_has_stable_grouping(tmp_path):
             browser.close()
         assert not errors, errors
         assert result["count"] == 2, result
-        assert result["childCount"] == 2, result
+        assert result["childCount"] == 1, result
         assert any("Renamed root" in row for row in result["narrow"]["rows"])
         assert any("Writable fork" in row for row in result["narrow"]["rows"])
         assert any("Delegated child" in row for row in result["narrow"]["children"])
