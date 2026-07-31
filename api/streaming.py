@@ -9555,7 +9555,7 @@ def _run_agent_streaming(
                 ),
                 task_id=session_id,
                 persist_user_message=msg_text,
-                persist_user_timestamp=getattr(s, 'pending_started_at', None),
+                # persist_user_timestamp=getattr(s, 'pending_started_at', None),
             )
             # Only pass moa_config when a /moa override is actually active, so a
             # normal send never trips a TypeError on an older hermes-agent whose
@@ -10039,7 +10039,7 @@ def _run_agent_streaming(
                                     ),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
-                                    persist_user_timestamp=getattr(s, 'pending_started_at', None),
+                                    # persist_user_timestamp=getattr(s, 'pending_started_at', None),
                                 )
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
@@ -11263,7 +11263,7 @@ def _run_agent_streaming(
                             ),
                             task_id=session_id,
                             persist_user_message=msg_text,
-                            persist_user_timestamp=getattr(s, 'pending_started_at', None),
+                            # persist_user_timestamp=getattr(s, 'pending_started_at', None),
                         )
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config

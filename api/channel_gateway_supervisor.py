@@ -121,10 +121,10 @@ def start_profile_gateway(profile: str, *, require_enabled: bool = False) -> dic
         if require_enabled and not _env_enabled(home):
             return _public_status(profile, "stopped", False)
         home.mkdir(parents=True, exist_ok=True)
-        # Hermes 0.15.x selects a profile through HERMES_HOME; it does not
-        # accept a global --profile flag. The child environment below is the
-        # profile boundary.
-        cmd = [_resolve_hermes_command(), "gateway", "run"]
+        cmd = [_resolve_hermes_command()]
+        if cli_profile is not None:
+            cmd.extend(["--profile", cli_profile])
+        cmd.extend(["gateway", "run", "--external-supervisor"])
         env = _profile_child_env(home)
 
         log_path = home / "gateway-webui.log"
