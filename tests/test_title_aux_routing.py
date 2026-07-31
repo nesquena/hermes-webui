@@ -7,7 +7,6 @@ Covers:
   - _aux_title_timeout rejects zero, negative, and non-numeric values
 """
 import os
-from contextlib import contextmanager
 from pathlib import Path
 import sys
 import types
@@ -16,100 +15,71 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
-_MISSING = object()
-
-
-@contextmanager
-def _auxiliary_client_modules():
-    """Temporarily provide the hermes-agent modules needed by these tests."""
-    previous_agent = sys.modules.get('agent', _MISSING)
-    previous_auxiliary_client = sys.modules.get('agent.auxiliary_client', _MISSING)
-    previous_attribute = (
-        getattr(previous_agent, 'auxiliary_client', _MISSING)
-        if previous_agent is not _MISSING
-        else _MISSING
-    )
-
-    agent_stub = types.ModuleType('agent')
-    auxiliary_client_stub = types.ModuleType('agent.auxiliary_client')
-    agent_stub.auxiliary_client = auxiliary_client_stub
-    sys.modules['agent'] = agent_stub
-    sys.modules['agent.auxiliary_client'] = auxiliary_client_stub
-
-    try:
-        yield
-    finally:
-        if previous_agent is _MISSING:
-            sys.modules.pop('agent', None)
-        else:
-            sys.modules['agent'] = previous_agent
-
-        if previous_auxiliary_client is _MISSING:
-            sys.modules.pop('agent.auxiliary_client', None)
-        else:
-            sys.modules['agent.auxiliary_client'] = previous_auxiliary_client
-
-        if previous_agent is not _MISSING:
-            if previous_attribute is _MISSING:
-                vars(previous_agent).pop('auxiliary_client', None)
-            else:
-                previous_agent.auxiliary_client = previous_attribute
+from tests._aux_client_helpers import auxiliary_client_modules, patch_tg_config
 
 
 @pytest.fixture(autouse=True)
 def _install_auxiliary_client_modules():
-    # The real package lives in hermes-agent, which is not installed here.
-    with _auxiliary_client_modules():
+    """Scope the synthetic hermes-agent modules to each test (#6630)."""
+    with auxiliary_client_modules():
         yield
 
 
 def _patch_tg_config(config_dict):
     """Return a patch context manager that makes _get_auxiliary_task_config return config_dict."""
-    return patch('agent.auxiliary_client._get_auxiliary_task_config', return_value=config_dict, create=True)
+    return patch_tg_config(config_dict)
 
 
-class TestAuxiliaryClientModuleIsolation(unittest.TestCase):
-    def test_existing_modules_are_restored_exactly(self):
-        previous_agent = types.ModuleType('agent')
-        previous_auxiliary_client = types.ModuleType('agent.auxiliary_client')
-        previous_agent.auxiliary_client = previous_auxiliary_client
-        sys.modules['agent'] = previous_agent
-        sys.modules['agent.auxiliary_client'] = previous_auxiliary_client
+class TestAuxiliaryClientModuleRestore(unittest.TestCase):
+    """Restoration properties the #6630 fix depends on.
 
-        with _auxiliary_client_modules():
-            self.assertIsNot(sys.modules['agent'], previous_agent)
-            self.assertIsNot(sys.modules['agent.auxiliary_client'], previous_auxiliary_client)
+    These drive the helper directly. The fixture boundary itself is proved by
+    the cross-file run in the PR description: running this file before
+    tests/test_issue4685_post_compression_context_metering.py used to fail that
+    file's agent.context_compressor import and no longer does.
+    """
 
-        self.assertIs(sys.modules['agent'], previous_agent)
-        self.assertIs(sys.modules['agent.auxiliary_client'], previous_auxiliary_client)
-        self.assertIs(previous_agent.auxiliary_client, previous_auxiliary_client)
+    def test_prior_modules_restored_by_identity(self):
+        prior_agent = types.ModuleType("agent")
+        prior_aux = types.ModuleType("agent.auxiliary_client")
+        prior_agent.auxiliary_client = prior_aux
+        with patch.dict(sys.modules, {"agent": prior_agent, "agent.auxiliary_client": prior_aux}):
+            with auxiliary_client_modules():
+                self.assertIsNot(sys.modules["agent"], prior_agent)
+                self.assertIsNot(sys.modules["agent.auxiliary_client"], prior_aux)
+            self.assertIs(sys.modules["agent"], prior_agent)
+            self.assertIs(sys.modules["agent.auxiliary_client"], prior_aux)
+            self.assertIs(prior_agent.auxiliary_client, prior_aux)
 
-    def test_absent_modules_are_removed_after_context(self):
-        sys.modules.pop('agent', None)
-        sys.modules.pop('agent.auxiliary_client', None)
+    def test_absent_keys_removed(self):
+        with patch.dict(sys.modules):
+            sys.modules.pop("agent", None)
+            sys.modules.pop("agent.auxiliary_client", None)
+            with auxiliary_client_modules():
+                self.assertIn("agent", sys.modules)
+                self.assertIn("agent.auxiliary_client", sys.modules)
+            self.assertNotIn("agent", sys.modules)
+            self.assertNotIn("agent.auxiliary_client", sys.modules)
 
-        with _auxiliary_client_modules():
-            self.assertIn('agent', sys.modules)
-            self.assertIn('agent.auxiliary_client', sys.modules)
+    def test_prior_none_value_preserved(self):
+        """A present-but-None entry is not an absent entry."""
+        with patch.dict(sys.modules, {"agent": None, "agent.auxiliary_client": None}):
+            with auxiliary_client_modules():
+                self.assertIsNotNone(sys.modules["agent"])
+            self.assertIn("agent", sys.modules)
+            self.assertIsNone(sys.modules["agent"])
+            self.assertIsNone(sys.modules["agent.auxiliary_client"])
 
-        self.assertNotIn('agent', sys.modules)
-        self.assertNotIn('agent.auxiliary_client', sys.modules)
-
-    def test_existing_modules_are_restored_after_exception(self):
-        previous_agent = types.ModuleType('agent')
-        previous_auxiliary_client = types.ModuleType('agent.auxiliary_client')
-        previous_agent.auxiliary_client = previous_auxiliary_client
-        sys.modules['agent'] = previous_agent
-        sys.modules['agent.auxiliary_client'] = previous_auxiliary_client
-
-        with self.assertRaisesRegex(RuntimeError, 'fixture failure'):
-            with _auxiliary_client_modules():
-                raise RuntimeError('fixture failure')
-
-        self.assertIs(sys.modules['agent'], previous_agent)
-        self.assertIs(sys.modules['agent.auxiliary_client'], previous_auxiliary_client)
-        self.assertIs(previous_agent.auxiliary_client, previous_auxiliary_client)
+    def test_restored_after_exception(self):
+        prior_agent = types.ModuleType("agent")
+        prior_aux = types.ModuleType("agent.auxiliary_client")
+        prior_agent.auxiliary_client = prior_aux
+        with patch.dict(sys.modules, {"agent": prior_agent, "agent.auxiliary_client": prior_aux}):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                with auxiliary_client_modules():
+                    raise RuntimeError("boom")
+            self.assertIs(sys.modules["agent"], prior_agent)
+            self.assertIs(sys.modules["agent.auxiliary_client"], prior_aux)
 
 
 class TestAuxTitleConfigured(unittest.TestCase):
