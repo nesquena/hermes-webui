@@ -330,3 +330,164 @@ def test_unreadable_config_keeps_rejection(monkeypatch):
 
     assert title is None
     assert status == "llm_language_mismatch_aux"
+
+
+# ── pin-aware validation: drift from the PINNED language is still drift ─────
+#
+# Re-gate finding on dcef44db: skipping validation whenever a language was
+# pinned took drift protection away from pinned installs. An English pin
+# accepted CJK output, and a Japanese pin accepted Cyrillic output. A pin
+# that resolves to a `_script_counts` bucket now retargets the script check
+# at the configured language instead of switching it off.
+#
+# The Japanese-pin/CJK-accepted half of the matrix is already covered by the
+# two `accepts_pinned_cross_script_title` tests above.
+
+
+def test_resolve_pinned_title_script_mapping():
+    from api.streaming import _resolve_pinned_title_script
+
+    assert _resolve_pinned_title_script("English") == "latin"
+    assert _resolve_pinned_title_script("  japanese  ") == "cjk"
+    assert _resolve_pinned_title_script("Deutsch") == "latin"
+    assert _resolve_pinned_title_script("Brazilian Portuguese") == "latin"
+    assert _resolve_pinned_title_script("ru") == "cyrillic"
+    # Diacritics fold onto the ASCII keys.
+    assert _resolve_pinned_title_script("Français") == "latin"
+    assert _resolve_pinned_title_script("Español") == "latin"
+    # Unknown names and blank stay unresolved -> conversation-based fallback.
+    assert _resolve_pinned_title_script("Klingon") == ""
+    assert _resolve_pinned_title_script("") == ""
+    # Thai has no _script_counts bucket, so it is unresolvable ON PURPOSE:
+    # script validation cannot see Thai text at all.
+    assert _resolve_pinned_title_script("Thai") == ""
+    # Native-script endonyms are also unresolved by design: the mapping keys
+    # must stay ASCII because api/streaming.py is English-only
+    # (test_title_generation_source_has_no_cjk_literals). Such pins keep the
+    # conversation-based fallback.
+    assert _resolve_pinned_title_script("日本語") == ""  # "Japanese" written natively
+
+
+def test_agent_route_rejects_cjk_under_english_pin(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "English"})
+    monkeypatch.setattr(streaming, "generate_title_raw_via_agent", _fake_transport("修正方法", []))
+
+    title, status, _ = streaming._generate_llm_session_title_for_agent(
+        object(), "How do I fix this error?", "Do it like this."
+    )
+
+    assert title is None
+    assert status == "llm_language_mismatch"
+
+
+def test_aux_route_rejects_cjk_under_english_pin(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "English"})
+    monkeypatch.setattr(streaming, "generate_title_raw_via_aux", _fake_transport("修正方法", []))
+
+    title, status, _ = streaming._generate_llm_session_title_via_aux(
+        "How do I fix this error?", "Do it like this."
+    )
+
+    assert title is None
+    assert status == "llm_language_mismatch_aux"
+
+
+def test_agent_route_rejects_cyrillic_under_japanese_pin(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "Japanese"})
+    monkeypatch.setattr(streaming, "generate_title_raw_via_agent", _fake_transport("Исправление ошибки", []))
+
+    title, status, _ = streaming._generate_llm_session_title_for_agent(
+        object(), "How do I fix this error?", "Do it like this."
+    )
+
+    assert title is None
+    assert status == "llm_language_mismatch"
+
+
+def test_aux_route_rejects_cyrillic_under_japanese_pin(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "Japanese"})
+    monkeypatch.setattr(streaming, "generate_title_raw_via_aux", _fake_transport("Исправление ошибки", []))
+
+    title, status, _ = streaming._generate_llm_session_title_via_aux(
+        "How do I fix this error?", "Do it like this."
+    )
+
+    assert title is None
+    assert status == "llm_language_mismatch_aux"
+
+
+def test_aux_route_rejects_latin_under_japanese_pin(monkeypatch):
+    """A model that ignores the pin and titles in the conversation language is
+    still drift; rejection falls back to the deterministic topic title."""
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "Japanese"})
+    monkeypatch.setattr(streaming, "generate_title_raw_via_aux", _fake_transport("Fix Method Guide", []))
+
+    title, status, _ = streaming._generate_llm_session_title_via_aux(
+        "How do I fix this error?", "Do it like this."
+    )
+
+    assert title is None
+    assert status == "llm_language_mismatch_aux"
+
+
+def test_pinned_mode_keeps_trivial_echo_rejection(monkeypatch):
+    """The pin gates only language validation; the echo/CoT sanitizer still
+    runs first on both transports (#6529)."""
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "English"})
+    monkeypatch.setattr(streaming, "generate_title_raw_via_agent", _fake_transport("Done", []))
+    monkeypatch.setattr(streaming, "generate_title_raw_via_aux", _fake_transport("pong", []))
+
+    agent_title, agent_status, _ = streaming._generate_llm_session_title_for_agent(
+        object(), "How do I fix this error?", "Do it like this."
+    )
+    aux_title, aux_status, _ = streaming._generate_llm_session_title_via_aux(
+        "How do I fix this error?", "Do it like this."
+    )
+
+    assert agent_title is None and agent_status == "llm_invalid"
+    assert aux_title is None and aux_status == "llm_invalid_aux"
+
+
+def test_unresolvable_pin_falls_back_to_conversation_check(monkeypatch):
+    """A pin that resolves to no script bucket cannot be validated against, so
+    the #3293 conversation-based check applies unchanged."""
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "Klingon"})
+    monkeypatch.setattr(streaming, "generate_title_raw_via_aux", _fake_transport("修正方法", []))
+
+    title, status, _ = streaming._generate_llm_session_title_via_aux(
+        "How do I fix this error?", "Do it like this."
+    )
+
+    assert title is None
+    assert status == "llm_language_mismatch_aux"
+
+
+def test_english_pin_overrides_legacy_german_heuristic(monkeypatch):
+    """With a resolvable pin the conversation-based check (including the
+    legacy German→English marker heuristic) must not fire: an English title
+    for a German conversation is exactly what an English pin requested."""
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "English"})
+    monkeypatch.setattr(streaming, "generate_title_raw_via_agent", _fake_transport("Old Image Display Issue", []))
+
+    title, status, _ = streaming._generate_llm_session_title_for_agent(
+        object(), "Warum werden alte Bilder angezeigt?", "Weil der Cache veraltet ist."
+    )
+
+    assert title == "Old Image Display Issue"
+    assert status == "llm_stub"
