@@ -18512,10 +18512,14 @@ async function regenerateResponse(btn) {
       session_id: initialSid,
       keep_count: absoluteKeepCount
     })});
+    // Revalidate: api() is an async boundary.
+    if(!S.session || S.session.session_id !== initialSid) return;
     S.messages = S.messages.slice(0, absoluteKeepCount);
     renderMessages();
     $('msg').value = lastUserText;
-    await send();
+    // Pass the captured turn identity so send() reuses the existing user row
+    // at absoluteIdx instead of appending a second optimistic one (#6611).
+    await send({ _regenIdentity: { absoluteIdx: absoluteKeepCount - 1, sessionId: initialSid } });
   } catch(e) { setStatus(t('regen_failed') + e.message); }
 }
 

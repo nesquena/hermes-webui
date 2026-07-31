@@ -1323,6 +1323,7 @@ async function send(){
   try{
   const options=arguments[0]||{};
   const literalSlash=!!(options&&options.literalSlash);
+  const _regenId = options._regenIdentity || null;
   let text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length&&!_pendingSelections.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   // Don't send while an inline message edit is active
@@ -1638,12 +1639,29 @@ async function send(){
   // upload window. _composerDraftClearPromise / _submittedDraftFilesForClear are
   // set there; nothing to re-declare here.
   const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
-  const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000,_pending:true};
+  let userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000,_pending:true};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
   try{
-    S.messages.push(userMsg);renderMessages();setBusy(true);
+    // #6611: reuse the captured user row at absoluteIdx instead of appending a second one.
+    const _localRegenIdx = _regenId
+      && typeof _regenId.absoluteIdx === 'number'
+      && S.session
+      && S.session.session_id === _regenId.sessionId
+      ? _regenId.absoluteIdx - (typeof _oldestIdx !== 'undefined' ? _oldestIdx : 0)
+      : -1;
+    if(_localRegenIdx >= 0
+       && _localRegenIdx < S.messages.length
+       && S.messages[_localRegenIdx]
+       && S.messages[_localRegenIdx].role === 'user') {
+      const _prior = S.messages[_localRegenIdx];
+      userMsg = Object.assign({}, _prior, {content: userMsg.content, _pending: true, _ts: userMsg._ts});
+      S.messages[_localRegenIdx] = userMsg;
+    } else {
+      S.messages.push(userMsg);
+    }
+    renderMessages();setBusy(true);
     if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
     if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
     else appendThinking('',{pending:true});

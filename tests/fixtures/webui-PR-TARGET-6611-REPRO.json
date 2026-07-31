@@ -1,0 +1,43 @@
+{
+  "source": "https://github.com/nesquena/hermes-webui/issues/6611",
+  "reporter": "b3nw via Discord #report-bugs, 2026-07-28, WebUI exp-v0.52.153-dirty-a9b7cc19 Experimental",
+  "symptom": "you get the same prompt text multiple times even though you're only actually executing the prompt a single time",
+  "transcript": [
+    { "role": "user", "content": "same prompt" },
+    { "role": "assistant", "content": "provider failed", "_error": true }
+  ],
+  "regenerate_on_assistant_index": 1,
+  "observed_base_result": {
+    "keep_count": 1,
+    "messages": [
+      { "role": "user", "content": "same prompt" },
+      { "role": "user", "content": "same prompt", "_pending": true }
+    ]
+  },
+  "expected_head_result": {
+    "messages_user_row_count": 1,
+    "note": "one logical user turn for the regenerated exchange, optimistically, after settlement, and after hard reload"
+  },
+  "earlier_identical_prompt_transcript": [
+    { "role": "user", "content": "same prompt" },
+    { "role": "assistant", "content": "first answer" },
+    { "role": "user", "content": "same prompt" },
+    { "role": "assistant", "content": "provider failed", "_error": true }
+  ],
+  "attachment_transcript": [
+    { "role": "user", "content": "describe this", "attachments": [{ "id": "att-1", "name": "shot.png", "mime": "image/png" }] },
+    { "role": "assistant", "content": "provider failed", "_error": true }
+  ],
+  "paged_session": {
+    "_messages_offset": 40,
+    "note": "regenerate must key on _oldestIdx + assistantIdx, not the visible row index"
+  },
+  "acceptance_criteria": [
+    "Regenerate explicitly reuses/replaces the selected exchange's logical user turn and sends the prompt once, preserving attachments and relevant message metadata.",
+    "No duplicate user bubble appears optimistically, after settlement, or after hard reload.",
+    "Regenerating a response in a truncated/partially-loaded session uses the correct absolute message index.",
+    "Earlier identical prompts in conversation history remain untouched.",
+    "A session switch during the async truncate cannot apply the regeneration to the newly visible session.",
+    "Add a browser/VM regression covering an errored assistant row and asserting one user row after regeneration."
+  ]
+}
