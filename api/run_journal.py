@@ -484,14 +484,32 @@ def read_run_events(
     }
 
 
+def select_authoritative_terminal_event(events: Iterable[dict]) -> dict | None:
+    """Return the terminal event that owns the run's settled outcome.
+
+    ``stream_end`` is transport closure, so a preceding semantic terminal event
+    (done, cancel, or error) remains authoritative. Among semantic terminal
+    events, the latest journal row wins.
+    """
+    terminal_events = [
+        event
+        for event in events
+        if isinstance(event, dict) and event.get("terminal")
+    ]
+    return next(
+        (
+            event
+            for event in reversed(terminal_events)
+            if event.get("event") != "stream_end"
+        ),
+        terminal_events[-1] if terminal_events else None,
+    )
+
+
 def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -> dict:
     ordered = [event for event in events if isinstance(event, dict)]
     last = ordered[-1] if ordered else None
-    terminal_events = [event for event in ordered if event.get("terminal")]
-    terminal = next(
-        (event for event in reversed(terminal_events) if event.get("event") != "stream_end"),
-        terminal_events[-1] if terminal_events else None,
-    )
+    terminal = select_authoritative_terminal_event(ordered)
     status = terminal.get("terminal_state") if terminal else ("running" if ordered else "unknown")
     return {
         "session_id": str(session_id),

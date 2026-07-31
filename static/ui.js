@@ -961,6 +961,7 @@ function _captureMessageViewportAnchor(){
         // anchor's topOffset is stale and realigning to it would yank a still reader
         // backward (issue #5637).
         scrollHeightAtCapture:container.scrollHeight,
+        inputGeneration:typeof _messageScrollInputGeneration==='number' ? _messageScrollInputGeneration : 0,
       };
     }
   }
@@ -5680,6 +5681,9 @@ let _lastMessageClientHeight=null;   // #4702: track scroller height to ignore i
 // window after load as suppressed.
 let _lastNonMessageScrollIntentMs=-Infinity;
 let _messageUserUnpinned=false;
+// A monotonic ownership token lets delayed restores distinguish reader input
+// that happened after a snapshot from input that merely happened recently.
+let _messageScrollInputGeneration=0;
 let _bottomSettleToken=0;
 let _settleRAF=0;
 let _settleRO=null;
@@ -5763,6 +5767,9 @@ function _recordNonMessageScrollIntent(e){
   const target=e&&e.target;
   if(!el||!target) return;
   if(!el.contains(target)){ _lastNonMessageScrollIntentMs=performance.now(); return; }
+  if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY!==0)){
+    if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
+  }
   // #4970: record ANY upward message-pane wheel motion as recent wheel intent,
   // including gentle low-delta trackpad wheels (e.g. deltaY:-5) that never reach
   // the decisive -30 sticky-unpin threshold below. The post-render artifact
@@ -5966,7 +5973,10 @@ if(typeof window!=='undefined'){
   const el=document.getElementById('messages');
   if(!el) return;
   el.addEventListener('pointerdown',(e)=>{
-    if(e.target===el&&e.offsetX>=el.clientWidth) _scrollbarDragActive=true;
+    if(e.target===el&&e.offsetX>=el.clientWidth){
+      _scrollbarDragActive=true;
+      if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
+    }
   },{passive:true});
   window.addEventListener('pointerup',()=>{
     if(!_scrollbarDragActive) return;
@@ -6012,6 +6022,7 @@ if(typeof window!=='undefined'){
     // contains the focus, or the pointer is over it (keyboard scroll w/o focus).
     if(a===el||el.contains(a)||el.matches(':hover')){
       const now=performance.now();
+      if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
       _lastMessageKeyScrollIntentMs=now;
       const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
       if(bottomDistance>120) _lastMessageScrollIntentMs=now;
@@ -12714,6 +12725,23 @@ function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
     },
   };
 }
+function _restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot, scrollRebuildGuard){
+  if(!scrollSnapshot) return;
+  const hasHeightGuard=!!(scrollRebuildGuard&&scrollRebuildGuard.release);
+  // Pinned renders have no height guard to release, but still need the same
+  // queued ownership check: a reader can provide real input before the frame
+  // settles, and that input must win over the captured tail position.
+  if(!hasHeightGuard&&scrollSnapshot.pinned!==true) return;
+  requestAnimationFrame(()=>{
+    if(hasHeightGuard) scrollRebuildGuard.release();
+    // Only re-restore the unpinned snapshot if the reader is STILL unpinned at
+    // rAF time. If they re-pinned between guard-engage and this frame, the
+    // stale re-restore would yank them back off the bottom (Opus gate finding).
+    if(scrollSnapshot.pinned===true||_messageUserUnpinned){
+      _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+    }
+  });
+}
 function _resetMismatchedLiveAssistantTurnForSession(turn, sessionId){
   const sid=String(sessionId||'');
   if(!turn||!sid||!turn.dataset) return false;
@@ -12863,15 +12891,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   _dedupeLiveProcessedWorklogAnchors(turn);
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
-  if(scrollRebuildGuard&&scrollRebuildGuard.release){
-    requestAnimationFrame(()=>{
-      scrollRebuildGuard.release();
-      // Only re-restore the unpinned snapshot if the reader is STILL unpinned at
-      // rAF time. If they re-pinned between guard-engage and this frame, the
-      // stale re-restore would yank them back off the bottom (Opus gate finding).
-      if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
-    });
-  }
+  _restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
 }
@@ -12977,12 +12997,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(renderedRows.length) _syncTransparentEventControls(turn);
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
-  if(scrollRebuildGuard&&scrollRebuildGuard.release){
-    requestAnimationFrame(()=>{
-      scrollRebuildGuard.release();
-      if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
-    });
-  }
+  _restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return !!renderedRows.length;
 }
@@ -14985,9 +15000,40 @@ function _captureMessageScrollSnapshot(){
     top:el.scrollTop,
     bottom,
     scrollHeight:el.scrollHeight,
+    inputGeneration:typeof _messageScrollInputGeneration==='number' ? _messageScrollInputGeneration : 0,
     pinned:readerAwayFromBottom?false:_shouldFollowMessagesOnDomReplace(),
     userUnpinned:readerAwayFromBottom?true:_messageUserUnpinned,
   };
+}
+function _messageScrollSnapshotInputChanged(snapshot){
+  if(!snapshot) return false;
+  const captured=Number(snapshot.inputGeneration);
+  const current=typeof _messageScrollInputGeneration==='number' ? _messageScrollInputGeneration : captured;
+  return Number.isFinite(captured)&&Number.isFinite(current)&&current!==captured;
+}
+function _abandonMessageScrollSnapshot(){
+  const el=$('messages');
+  if(!el){
+    _messageUserUnpinned=true;
+    _scrollPinned=false;
+    _nearBottomCount=0;
+    return;
+  }
+  _lastScrollTop=el.scrollTop||0;
+  _lastMessageClientHeight=el.clientHeight||0;
+  // A generation mismatch abandons only the stale snapshot write. Reconcile
+  // ownership from the live viewport so a reader who moved down to the true
+  // bottom is immediately re-pinned instead of being stranded sticky-unpinned.
+  const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
+  if(bottomDistance<=80){
+    _messageUserUnpinned=false;
+    _scrollPinned=true;
+    _nearBottomCount=2;
+  }else{
+    _messageUserUnpinned=true;
+    _scrollPinned=false;
+    _nearBottomCount=0;
+  }
 }
 function _restorePinnedMessageScrollSnapshot(snapshot){
   const el=$('messages');
@@ -15015,6 +15061,10 @@ function _restoreMessageScrollSnapshot(snapshot){
   // activity rebuilds can remount an older top-of-viewport anchor and yank a
   // pinned streaming transcript upward. Semantic anchors remain for manual
   // unpinned reading positions below.
+  if(typeof _messageScrollSnapshotInputChanged==='function'&&_messageScrollSnapshotInputChanged(snapshot)){
+    if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
+    return;
+  }
   if(_restorePinnedMessageScrollSnapshot(snapshot)) return;
   let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
     ? _restoreMessageViewportAnchor(snapshot.anchor,0)
@@ -15233,7 +15283,14 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   // Same-frame live DOM updates (tool/worklog/activity rows) are the hot path for
   // streaming. Pinned followers must stay tail-relative here too; restoring the
   // semantic viewport anchor is only safe for explicitly unpinned readers.
+  if(typeof _messageScrollSnapshotInputChanged==='function'&&_messageScrollSnapshotInputChanged(snapshot)){
+    if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
+    return;
+  }
   if(_restorePinnedMessageScrollSnapshot(snapshot)) return;
+  // A delayed rAF restore must not overwrite a position the reader changed
+  // after capture. Recent-intent timestamps are lossy; the generation is
+  // monotonic and therefore preserves snapshot ownership exactly.
   let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
     ? _restoreMessageViewportAnchor(snapshot.anchor,0)
     : false;
@@ -15245,6 +15302,10 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   if(!restoredViaAnchor){
     const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
     const bottom=Number(snapshot.bottom);
+    // Mobile/touch viewports have native overflow anchoring to hold an
+    // unpinned reader across a rebuild. Desktop deliberately disables that
+    // browser behavior, so it must continue into the explicit fallback below.
+    const _fbTouchHold=(typeof _isTouchLikeMessageViewport==='function' && _isTouchLikeMessageViewport(el));
     // #5637: when the reader has scrolled UP into history (userUnpinned) and the
     // semantic anchor restore failed, do NOT snap scrollTop to the captured
     // ABSOLUTE snapshot.top. During streaming, the live activity-scene refresh
@@ -15254,7 +15315,7 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
     // untouched lets the browser's own scroll anchoring hold the reader's
     // position. Pinned / near-bottom readers still get the tail-relative restore
     // below (that path is correct and must run).
-    if(snapshot.userUnpinned===true&&snapshot.pinned!==true){
+    if(snapshot.userUnpinned===true&&snapshot.pinned!==true&&_fbTouchHold){
       _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
       _messageUserUnpinned=true;
       _scrollPinned=false;
@@ -15285,7 +15346,6 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
     const _grewSinceSnap=Number.isFinite(_snapSH)&&_snapSH>0&&(el.scrollHeight-_snapSH)>4;
     const _fbActiveIntent=(typeof _recentMessageScrollIntent==='function' && _recentMessageScrollIntent())
       || (typeof _recentMessageTouchScrollIntent==='function' && _recentMessageTouchScrollIntent());
-    const _fbTouchHold=(typeof _isTouchLikeMessageViewport==='function' && _isTouchLikeMessageViewport(el));
     if(_fbTouchHold && snapshot.pinned!==true && _grewSinceSnap && !_fbActiveIntent
        && Math.abs((Math.max(0,Math.min(target,maxTop)))-el.scrollTop)>8){
       _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
