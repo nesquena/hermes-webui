@@ -54,8 +54,8 @@ def test_render_uses_single_pass_partition_helper():
 def test_partition_helper_applies_message_source_project_and_archive_gates():
     block = _partition_block()
 
-    assert "function _sidebarRowHasVisibleMessages(s, activeSidForSidebar)" in SESSIONS_JS
-    assert "_sidebarRowHasVisibleMessages(s, activeSidForSidebar)" in block
+    assert "function _sidebarRowHasVisibleMessages(s, activeSidForSidebar, lineageIndex)" in SESSIONS_JS
+    assert "_sidebarRowHasVisibleMessages(s, activeSidForSidebar, lineageIndex)" in block
     assert "if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0)" in block
     assert "const showCliOnly=_sessionSourceFilter==='cli';" in block
     assert "if(!_showArchived&&s.archived) continue;" in block
