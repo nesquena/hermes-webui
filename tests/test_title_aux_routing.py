@@ -7,24 +7,109 @@ Covers:
   - _aux_title_timeout rejects zero, negative, and non-numeric values
 """
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import sys
 import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-# Stub agent.auxiliary_client so it is importable in the test environment
-# (the real package lives in hermes-agent, which is not installed here).
-_agent_stub = types.ModuleType('agent')
-_aux_stub = types.ModuleType('agent.auxiliary_client')
-sys.modules.setdefault('agent', _agent_stub)
-sys.modules.setdefault('agent.auxiliary_client', _aux_stub)
-_agent_stub.auxiliary_client = _aux_stub
+import pytest
+
+
+_MISSING = object()
+
+
+@contextmanager
+def _auxiliary_client_modules():
+    """Temporarily provide the hermes-agent modules needed by these tests."""
+    previous_agent = sys.modules.get('agent', _MISSING)
+    previous_auxiliary_client = sys.modules.get('agent.auxiliary_client', _MISSING)
+    previous_attribute = (
+        getattr(previous_agent, 'auxiliary_client', _MISSING)
+        if previous_agent is not _MISSING
+        else _MISSING
+    )
+
+    agent_stub = types.ModuleType('agent')
+    auxiliary_client_stub = types.ModuleType('agent.auxiliary_client')
+    agent_stub.auxiliary_client = auxiliary_client_stub
+    sys.modules['agent'] = agent_stub
+    sys.modules['agent.auxiliary_client'] = auxiliary_client_stub
+
+    try:
+        yield
+    finally:
+        if previous_agent is _MISSING:
+            sys.modules.pop('agent', None)
+        else:
+            sys.modules['agent'] = previous_agent
+
+        if previous_auxiliary_client is _MISSING:
+            sys.modules.pop('agent.auxiliary_client', None)
+        else:
+            sys.modules['agent.auxiliary_client'] = previous_auxiliary_client
+
+        if previous_agent is not _MISSING:
+            if previous_attribute is _MISSING:
+                vars(previous_agent).pop('auxiliary_client', None)
+            else:
+                previous_agent.auxiliary_client = previous_attribute
+
+
+@pytest.fixture(autouse=True)
+def _install_auxiliary_client_modules():
+    # The real package lives in hermes-agent, which is not installed here.
+    with _auxiliary_client_modules():
+        yield
 
 
 def _patch_tg_config(config_dict):
     """Return a patch context manager that makes _get_auxiliary_task_config return config_dict."""
     return patch('agent.auxiliary_client._get_auxiliary_task_config', return_value=config_dict, create=True)
+
+
+class TestAuxiliaryClientModuleIsolation(unittest.TestCase):
+    def test_existing_modules_are_restored_exactly(self):
+        previous_agent = types.ModuleType('agent')
+        previous_auxiliary_client = types.ModuleType('agent.auxiliary_client')
+        previous_agent.auxiliary_client = previous_auxiliary_client
+        sys.modules['agent'] = previous_agent
+        sys.modules['agent.auxiliary_client'] = previous_auxiliary_client
+
+        with _auxiliary_client_modules():
+            self.assertIsNot(sys.modules['agent'], previous_agent)
+            self.assertIsNot(sys.modules['agent.auxiliary_client'], previous_auxiliary_client)
+
+        self.assertIs(sys.modules['agent'], previous_agent)
+        self.assertIs(sys.modules['agent.auxiliary_client'], previous_auxiliary_client)
+        self.assertIs(previous_agent.auxiliary_client, previous_auxiliary_client)
+
+    def test_absent_modules_are_removed_after_context(self):
+        sys.modules.pop('agent', None)
+        sys.modules.pop('agent.auxiliary_client', None)
+
+        with _auxiliary_client_modules():
+            self.assertIn('agent', sys.modules)
+            self.assertIn('agent.auxiliary_client', sys.modules)
+
+        self.assertNotIn('agent', sys.modules)
+        self.assertNotIn('agent.auxiliary_client', sys.modules)
+
+    def test_existing_modules_are_restored_after_exception(self):
+        previous_agent = types.ModuleType('agent')
+        previous_auxiliary_client = types.ModuleType('agent.auxiliary_client')
+        previous_agent.auxiliary_client = previous_auxiliary_client
+        sys.modules['agent'] = previous_agent
+        sys.modules['agent.auxiliary_client'] = previous_auxiliary_client
+
+        with self.assertRaisesRegex(RuntimeError, 'fixture failure'):
+            with _auxiliary_client_modules():
+                raise RuntimeError('fixture failure')
+
+        self.assertIs(sys.modules['agent'], previous_agent)
+        self.assertIs(sys.modules['agent.auxiliary_client'], previous_auxiliary_client)
+        self.assertIs(previous_agent.auxiliary_client, previous_auxiliary_client)
 
 
 class TestAuxTitleConfigured(unittest.TestCase):
