@@ -735,3 +735,114 @@ def test_chat_start_persists_raw_skill_command_and_expands_model_context():
     assert expansion in str(context_user_rows[-1].get("content") or ""), (
         "model context must carry the expanded skill payload for the next turn"
     )
+
+
+def test_sync_chat_rewrites_model_context_with_resolved_skill():
+    """RAW/agent-only split on the synchronous /api/chat path: the model sees
+    the resolved skill payload and the next-turn context keeps it, while the
+    persisted display row stays the raw command (round-3 re-gate)."""
+    import io
+
+    import api.routes as routes
+
+    raw_command = "/llm-wiki list active pages"
+    expansion = (
+        '[IMPORTANT: The user has invoked the "llm-wiki" skill, indicating they '
+        "want you to follow its instructions. The full skill content is loaded below.]\n"
+        "# llm-wiki\n\nfull skill body... (+500 lines)\n"
+        "The user has provided the following instruction alongside the skill "
+        "invocation: list active pages"
+    )
+
+    captured = {}
+
+    class EchoAgent:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run_conversation(self, **kwargs):
+            captured.update(kwargs)
+            history = list(kwargs.get("conversation_history") or [])
+            return {
+                "messages": history
+                + [
+                    {"role": "user", "content": kwargs["persist_user_message"]},
+                    {"role": "assistant", "content": "Here is the wiki summary."},
+                ]
+            }
+
+        def interrupt(self, _message):
+            pass
+
+    from api.models import new_session
+
+    s = new_session(workspace="/tmp", model="gpt-test")
+    s.save()
+    handler = mock.MagicMock()
+    handler.wfile = io.BytesIO()
+
+    fake_runtime_module = ModuleType("hermes_cli.runtime_provider")
+    runtime_payload = {
+        "provider": "openai",
+        "base_url": None,
+        "api_mode": "chat_completions",
+        "command": None,
+        "args": [],
+        "credential_pool": None,
+    }
+    runtime_payload["api_" + "key"] = "***"
+    fake_runtime_module.__dict__["resolve_runtime_provider"] = mock.Mock(return_value=runtime_payload)
+    fake_hermes_cli = ModuleType("hermes_cli")
+    fake_hermes_cli.__dict__["runtime_provider"] = fake_runtime_module
+    fake_hermes_state = ModuleType("hermes_state")
+    fake_hermes_state.__dict__["SessionDB"] = mock.Mock(return_value=None)
+    injected = {
+        "hermes_cli": fake_hermes_cli,
+        "hermes_cli.runtime_provider": fake_runtime_module,
+        "hermes_state": fake_hermes_state,
+    }
+    saved = {k: sys.modules.get(k, _MISSING) for k in injected}
+    sys.modules.update(injected)
+    try:
+        with mock.patch.object(routes, "_agent_runtime_barrier_response", return_value=None), \
+             mock.patch.object(routes, "_session_is_subagent_view_only", return_value=False), \
+             mock.patch.object(routes, "require_ai_agent_class", return_value=EchoAgent), \
+             mock.patch("api.config.resolve_model_provider", return_value=("gpt-test", "openai", None)), \
+             mock.patch.object(routes, "_read_profile_model_config", return_value=(None, None, None)), \
+             mock.patch.object(routes, "_resolve_compatible_session_model_state", return_value=("gpt-test", "openai", False)), \
+             mock.patch.object(routes, "resolve_trusted_workspace", return_value=Path("/tmp")), \
+             mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
+            body = {
+                "session_id": s.session_id,
+                "message": raw_command,
+                "agent_message": expansion,
+                "workspace": "/tmp",
+            }
+            routes._handle_chat_sync(handler, body)
+    finally:
+        for k, v in saved.items():
+            if v is _MISSING:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+    # The model saw the expansion; the persisted user row stayed raw.
+    assert captured.get("persist_user_message") == raw_command
+    assert expansion in captured.get("user_message", "")
+
+    from api.models import get_session as _get_session
+
+    reloaded = _get_session(s.session_id)
+    user_rows = [m for m in reloaded.messages if isinstance(m, dict) and m.get("role") == "user"]
+    assert user_rows, "expected a persisted user row"
+    assert user_rows[-1].get("content") == raw_command, (
+        "sync path must persist the RAW slash command"
+    )
+    context_user_rows = [
+        m for m in reloaded.context_messages
+        if isinstance(m, dict) and m.get("role") == "user"
+    ]
+    assert context_user_rows, "expected a context user row"
+    assert expansion in str(context_user_rows[-1].get("content") or ""), (
+        "sync path must keep the expanded skill payload for the next turn"
+    )

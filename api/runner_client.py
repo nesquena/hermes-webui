@@ -57,6 +57,7 @@ class HttpRunnerClient:
         return self._post("/v1/runs", {
             "session_id": request.session_id,
             "message": request.message,
+            "agent_message": getattr(request, "agent_message", None),
             "attachments": list(request.attachments or []),
             "workspace": request.workspace,
             "profile": request.profile,

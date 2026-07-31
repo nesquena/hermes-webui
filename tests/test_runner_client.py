@@ -78,6 +78,7 @@ def test_runner_client_start_run_posts_explicit_boundary_payload(monkeypatch):
     assert captured["body"] == {
         "session_id": "s1",
         "message": "hello",
+        "agent_message": None,
         "attachments": [{"path": "/tmp/a.png", "mime": "image/png"}],
         "workspace": "/workspace",
         "profile": "default",
@@ -87,6 +88,34 @@ def test_runner_client_start_run_posts_explicit_boundary_payload(monkeypatch):
         "source": "webui",
         "metadata": {"route": "/api/chat/start"},
     }
+
+
+def test_runner_client_start_run_carries_resolved_agent_message(monkeypatch):
+    """RAW/agent-only split: the runner-local payload must give the model the
+    resolved skill payload in a dedicated field while `message` stays raw
+    (round-3 re-gate)."""
+    captured = {}
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeResponse({"run_id": "run-1", "stream_id": "run-1", "status": "running"})
+
+    _patch_opener(monkeypatch, fake_urlopen)
+    client = HttpRunnerClient(base_url="http://runner.local/")
+
+    client.start_run(
+        StartRunRequest(
+            session_id="s1",
+            message="/llm-wiki list pages",
+            agent_message="[IMPORTANT: The user has invoked the llm-wiki skill...]\nfull body",
+            workspace="/workspace",
+        )
+    )
+
+    assert captured["body"]["message"] == "/llm-wiki list pages"
+    assert captured["body"]["agent_message"] == (
+        "[IMPORTANT: The user has invoked the llm-wiki skill...]\nfull body"
+    )
 
 
 def test_runner_client_maps_observe_status_and_controls(monkeypatch):

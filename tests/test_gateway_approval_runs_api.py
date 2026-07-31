@@ -3540,3 +3540,152 @@ def test_gateway_chat_completions_path_unchanged():
     assert not apperrors, f"No apperror expected for a normal response, got: {apperrors}"
     tokens = [e for e in events if isinstance(e, tuple) and e[0] == "token"]
     assert tokens, "Expected at least one token event"
+
+
+# ---------------------------------------------------------------------------
+# RAW/agent-only split across alternate backends (round-3 re-gate)
+# ---------------------------------------------------------------------------
+
+
+def test_gateway_runs_api_body_carries_resolved_skill():
+    """RAW/agent-only split: the gateway Runs API body must give the model the
+    resolved skill payload, not the raw slash command (round-3 re-gate)."""
+    from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT
+    from api.gateway_chat import _STREAM_RUN_IDS, _run_gateway_runs_api_streaming
+
+    requests = []
+    stream_id = "stream-runs-resolved-skill"
+
+    class _JsonResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+        def read(self, *args):
+            return json.dumps(self.payload).encode("utf-8")
+
+    class _SseResponse:
+        def __init__(self, lines):
+            self._lines = lines
+
+        def __iter__(self):
+            return iter(self._lines)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+    def fake_urlopen(req, *, timeout=None):
+        requests.append(req)
+        if req.full_url.endswith("/v1/runs"):
+            return _JsonResponse({"run_id": "run-abc"})
+        return _SseResponse([b'data: {"event":"run.completed","output":"done","usage":{}}\n\n'])
+
+    class _FakeSession:
+        context_messages = []
+
+    raw = "/llm-wiki list pages"
+    expansion = "[IMPORTANT: The user has invoked the llm-wiki skill...]\nfull skill body"
+
+    try:
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            _run_gateway_runs_api_streaming(
+                session_id="sess-resolved",
+                msg_text=raw,
+                model="test-model",
+                workspace="/tmp",
+                stream_id=stream_id,
+                base_url="http://gw:8642",
+                api_key="secret",
+                prefill_messages=[{"role": "system", "content": "sys"}],
+                body_extras={},
+                put_gateway_event=lambda event, data: None,
+                cancel_event=threading.Event(),
+                session=_FakeSession(),
+                agent_message=expansion,
+            )
+    finally:
+        STREAM_PARTIAL_TEXT.pop(stream_id, None)
+        STREAM_REASONING_TEXT.pop(stream_id, None)
+        _STREAM_RUN_IDS.pop(stream_id, None)
+
+    run_body = json.loads(requests[0].data.decode("utf-8"))
+    assert run_body["input"] == expansion
+    assert raw not in run_body["input"]
+
+
+def test_gateway_chat_completions_body_carries_resolved_skill():
+    """RAW/agent-only split: the gateway chat/completions body must give the
+    model the resolved skill payload while the persisted row stays raw."""
+    from api.config import STREAMS, STREAMS_LOCK
+    from api.gateway_chat import _run_gateway_chat_streaming
+
+    captured = {}
+    events = []
+    q = MagicMock()
+    q.put_nowait = lambda item: events.append(item)
+    stream_id = "stream-completions-resolved-skill"
+
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+
+    sse_body = (
+        b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'
+        b"data: [DONE]\n\n"
+    )
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        resp = MagicMock()
+        resp.__iter__ = lambda s: iter(sse_body.split(b"\n"))
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda s, *a: None
+        return resp
+
+    mock_session = MagicMock()
+    mock_session.active_stream_id = stream_id
+    mock_session.workspace = "/tmp"
+    mock_session.model = "test"
+    mock_session.model_provider = None
+    mock_session.profile = None
+    mock_session.context_messages = []
+    mock_session.messages = []
+    mock_session.pending_user_source = "webui"
+    mock_session.process_wakeup_pause = {}
+
+    raw = "/llm-wiki list pages"
+    expansion = "[IMPORTANT: The user has invoked the llm-wiki skill...]\nfull skill body"
+
+    try:
+        with patch("api.gateway_chat.get_session", return_value=mock_session), \
+             patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
+             patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            _run_gateway_chat_streaming(
+                session_id="sess-resolved",
+                msg_text=raw,
+                model="test",
+                workspace="/tmp",
+                stream_id=stream_id,
+                agent_message=expansion,
+            )
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+
+    user_msg = captured["body"]["messages"][-1]
+    assert user_msg["role"] == "user"
+    assert user_msg["content"] == expansion
+    # The persisted display row stays raw (the writeback merged msg_text).
+    saved_context = mock_session.context_messages
+    assert isinstance(saved_context, list) and saved_context
+    context_user_rows = [m for m in saved_context if m.get("role") == "user"]
+    assert context_user_rows
+    assert context_user_rows[-1]["content"] == expansion
