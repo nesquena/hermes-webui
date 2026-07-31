@@ -374,6 +374,15 @@ function invalidateSlashSkillCaches(){
   _skillCommandCache=[];
   _skillCommandCacheReady=false;
   _skillCommandLoadPromise=null;
+  // Slash command metadata is profile-scoped: a profile switch must never
+  // keep profile A's skill/agent/bundle command list authoritative in
+  // profile B (#5896 gate-fail #7).
+  _bundleCommandCache=[];
+  _bundleCommandLoadPromise=null;
+  _bundleCommandCacheReady=false;
+  _agentCommandCache=null;
+  _agentCommandCachePromise=null;
+  _agentCommandCacheReady=false;
 }
 
 function _getSlashSubArgOptions(spec){
@@ -2059,8 +2068,14 @@ async function loadSkillCommands(force=false){
       const deduped=new Map();
       for(const skill of (data&&data.skills)||[]){const entry=_buildSkillCommandEntry(skill);if(entry&&!deduped.has(entry.name))deduped.set(entry.name,entry);}
       _skillCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));
-    }catch(_){_skillCommandCache=[];}
-    finally{_skillCommandCacheReady=true;_skillCommandLoadPromise=null;}
+      _skillCommandCacheReady=true;
+    }catch(_){
+      // Failed cache loads must remain retryable (#5896 gate-fail #6): keep
+      // _skillCommandCacheReady false so the next lookup retries instead of
+      // serving a stale empty list.
+      _skillCommandCache=[];
+    }
+    finally{_skillCommandLoadPromise=null;}
     return _skillCommandCache;
   })();
   return _skillCommandLoadPromise;

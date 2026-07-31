@@ -1418,6 +1418,7 @@ async function send(){
     return;
   }
   let _slashDisplayTextOverride=null;
+  let _skillAgentMessage=null;
   let _pendingMoaConfig=null;
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
@@ -1557,17 +1558,27 @@ async function send(){
         }
       }
       // ── Skill commands: `/skill-name [args]` resolved server-side ──
+      // The RAW slash command stays the user-visible/persisted message; the
+      // server-side expansion travels separately (agent_message) so the model
+      // sees the skill content without corrupting the transcript (#5896 re-gate).
+      // Match the cached skill by normalized slug (`/my_skill` == `my-skill`),
+      // mirroring the Agent contract's `_` → `-` normalization.
       if(!_bundleCmd && !_agentCmd && _parsedCmd && typeof loadSkillCommands==='function'){
         try {
           const _skillCache = await loadSkillCommands();
-          if(Array.isArray(_skillCache) && _skillCache.find(s => s.name === _parsedCmd.name)){
+          const _slug = typeof _skillCommandSlug==='function'
+            ? _skillCommandSlug(_parsedCmd.name)
+            : String(_parsedCmd.name||'').toLowerCase();
+          if(Array.isArray(_skillCache) && _slug && _skillCache.find(s => s.name === _slug)){
+            // First-message skill sends must resolve against a real session so
+            // ${HERMES_SESSION_ID} templates correctly (#5896 gate-fail #3).
+            if(!S.session){await newSession();await renderSessionList();}
             const _resolved = typeof resolveSkillCommand==='function'
               ? await resolveSkillCommand(text, S.session && S.session.session_id)
               : null;
             const _skillMessage = String(_resolved&&_resolved.message||'').trim();
             if(_skillMessage){
-              _slashDisplayTextOverride = text;
-              text = _skillMessage;
+              _skillAgentMessage = _skillMessage;
             }
           }
         } catch(_e){
@@ -1774,7 +1785,8 @@ async function send(){
       profile:S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
-      moa_config:_pendingMoaConfig?true:undefined
+      moa_config:_pendingMoaConfig?true:undefined,
+      agent_message:_skillAgentMessage||undefined
     })});
     _pendingMoaConfig=null;
     postStartData = startData;

@@ -1783,6 +1783,41 @@ def _settle_result_messages(
     return result_messages
 
 
+def _rewrite_context_user_turn(session, expanded_text: str, msg_text: str) -> None:
+    """Keep the model context on the expanded skill payload after a RAW split.
+
+    The RAW/agent-only split (#5896) persists the raw ``/skill …`` command as the
+    visible user row (``persist_user_message``) while feeding the full expansion
+    to the model via ``user_message``. Because the agent persists the RAW text,
+    ``result_messages`` — and therefore ``session.context_messages`` after the
+    settle — carry RAW. Rewrite the CURRENT turn's user row in the context (as a
+    deep copy, so the display rows in ``session.messages`` are untouched) with the
+    expansion, so the skill content survives into the next turn's
+    ``conversation_history`` (gate-fail #5).
+    """
+    if not expanded_text or not msg_text:
+        return
+    context = list(getattr(session, "context_messages", None) or [])
+    idx = None
+    for i in range(len(context) - 1, -1, -1):
+        m = context[i]
+        if (
+            isinstance(m, dict)
+            and m.get("role") == "user"
+            and _looks_like_current_user_turn(m, msg_text)
+        ):
+            idx = i
+            break
+    if idx is None:
+        return
+    rewritten = copy.deepcopy(context[idx])
+    if not isinstance(rewritten, dict):
+        return
+    rewritten["content"] = expanded_text
+    context[idx] = rewritten
+    session.context_messages = context
+
+
 def _current_turn_already_has_visible_assistant_answer(messages, *, active_turn_identity=None):
     """Return True only when the token-owned current turn already has visible assistant prose."""
     if not isinstance(active_turn_identity, dict) or not active_turn_identity.get('token'):
@@ -7617,6 +7652,7 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    agent_message=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -9536,9 +9572,10 @@ def _run_agent_streaming(
                 session_id,
                 pending_async_acceptances=_pending_async_acceptances,
             )
-            _agent_msg_text = msg_text
+            _model_msg_text = agent_message or msg_text
+            _agent_msg_text = _model_msg_text
             if _process_notifications:
-                _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
+                _agent_msg_text = "\n\n".join([*_process_notifications, _model_msg_text]).strip()
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             _run_conversation_kwargs = dict(
@@ -9575,10 +9612,10 @@ def _run_agent_streaming(
                         _process_notifications.remove(_notification)
                     except ValueError:
                         pass
-                _agent_msg_text = msg_text
+                _agent_msg_text = _model_msg_text
                 if _process_notifications:
                     _agent_msg_text = "\n\n".join(
-                        [*_process_notifications, msg_text]
+                        [*_process_notifications, _model_msg_text]
                     ).strip()
                 user_message = _build_native_multimodal_message(
                     workspace_ctx,
@@ -9735,6 +9772,11 @@ def _run_agent_streaming(
                         _turn_pending_source,
                         _active_turn_identity,
                     )
+                    if agent_message:
+                        # RAW/agent-only split: display/persisted rows already
+                        # carry the RAW command; keep the model context on the
+                        # expansion so skill content survives across turns.
+                        _rewrite_context_user_turn(s, agent_message, msg_text)
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
                 # in the raw response text; this must be removed before the content is
@@ -10083,6 +10125,8 @@ def _run_agent_streaming(
                                     _turn_pending_source,
                                     _active_turn_identity,
                                 )
+                                if agent_message:
+                                    _rewrite_context_user_turn(s, agent_message, msg_text)
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
                                 _assistant_added = True  # prevent re-entering guard
@@ -11299,6 +11343,8 @@ def _run_agent_streaming(
                                     _turn_pending_source,
                                     _active_turn_identity,
                                 )
+                                if agent_message:
+                                    _rewrite_context_user_turn(s, agent_message, msg_text)
                                 s.save()
                         logger.info('[webui] self-heal (except path): retry succeeded')
                         return  # skip error emission

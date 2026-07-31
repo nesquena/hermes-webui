@@ -1,13 +1,17 @@
 """Tests for the /api/commands/skills/resolve endpoint and frontend wiring."""
 
+import queue
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import ModuleType
+from unittest import mock
 
 import sys
 import pytest
 
 import api.commands as commands
+
+_MISSING = object()
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
@@ -72,9 +76,11 @@ def test_skill_dispatch_checks_loadSkillCommands():
     idx = MESSAGES_JS.find("// ── Skill commands:")
     body = MESSAGES_JS[idx:]
     assert "loadSkillCommands()" in body
-    assert "_parsedCmd.name" in body
-    assert "_slashDisplayTextOverride = text" in body
-    assert "text = _skillMessage" in body
+    assert "_skillCommandSlug(_parsedCmd.name)" in body
+    # RAW/agent-only split: the expansion is carried separately, never by
+    # mutating the outbound `text` (the persisted message stays `/skill …`).
+    assert "_skillAgentMessage = _skillMessage" in body
+    assert "text = _skillMessage" not in body
 
 
 def test_skill_dispatch_skips_when_bundle_or_agent_cmd_matched():
@@ -101,6 +107,71 @@ def test_skill_dispatch_passes_session_id():
     idx = MESSAGES_JS.find("// ── Skill commands:")
     body = MESSAGES_JS[idx:]
     assert "resolveSkillCommand(text, S.session && S.session.session_id)" in body
+
+
+def test_skill_dispatch_normalizes_underscores_to_slug():
+    """`/my_skill` must match the cached `my-skill` entry, mirroring the Agent
+    contract's `_` → `-` normalization (gate-fail #4)."""
+    idx = MESSAGES_JS.find("// ── Skill commands:")
+    body = MESSAGES_JS[idx:]
+    assert "_skillCommandSlug(_parsedCmd.name)" in body
+    assert "s.name === _slug" in body
+
+
+def test_skill_dispatch_creates_session_before_resolve():
+    """First-message skill sends must create a session before resolving so
+    ${HERMES_SESSION_ID} templates correctly (gate-fail #3)."""
+    idx = MESSAGES_JS.find("// ── Skill commands:")
+    body = MESSAGES_JS[idx:]
+    assert "if(!S.session){await newSession();await renderSessionList();}" in body
+
+
+def test_skill_dispatch_keeps_raw_message_out_of_model_mutation():
+    """The skill intercept must never replace the outbound `text` with the
+    expansion — the RAW `/skill …` command is the persisted/displayed message
+    and the expansion travels separately as `agent_message`."""
+    idx = MESSAGES_JS.find("// ── Skill commands:")
+    body = MESSAGES_JS[idx:]
+    assert "text = _skillMessage" not in body
+    assert "_skillAgentMessage = _skillMessage" in body
+
+
+def test_chat_start_post_carries_agent_message_separately():
+    """The /api/chat/start POST must keep `message` as the RAW command and
+    carry the expansion in a separate agent-only `agent_message` field."""
+    post_idx = MESSAGES_JS.find("const startData=await api('/api/chat/start'")
+    assert post_idx != -1, "chat/start POST body not found"
+    body = MESSAGES_JS[post_idx:]
+    assert "message:msgText" in body
+    assert "agent_message:_skillAgentMessage||undefined" in body
+
+
+def test_profile_switch_invalidates_slash_command_caches():
+    """Profile A's skill/agent/bundle command lists must never remain
+    authoritative in profile B (gate-fail #7): switchToProfile must drop the
+    cached lists and invalidateSlashSkillCaches must reset all three."""
+    panels_src = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    switch_idx = panels_src.find("async function switchToProfile(")
+    assert switch_idx != -1, "switchToProfile not found"
+    switch_body = panels_src[switch_idx:]
+    assert "window.invalidateSlashSkillCaches" in switch_body
+    assert "_bundleCommandCacheReady=false" in COMMANDS_JS
+    assert "_agentCommandCacheReady=false" in COMMANDS_JS
+
+
+def test_skill_cache_failure_remains_retryable():
+    """Failed /api/skills loads must not mark the cache ready, so the next
+    send-path lookup retries instead of serving a stale empty list
+    (gate-fail #6)."""
+    assert "_skillCommandCacheReady=true" in COMMANDS_JS
+    cache_body = COMMANDS_JS[COMMANDS_JS.find("async function loadSkillCommands"):]
+    cache_body = cache_body[:cache_body.find("\nasync function ")]
+    assert "catch(_){" in cache_body
+    # The success path sets the ready flag inside try; the catch path must not.
+    try_idx = cache_body.find("_skillCommandCacheReady=true;")
+    catch_idx = cache_body.find("catch(_){")
+    assert try_idx != -1 and catch_idx != -1
+    assert try_idx < catch_idx, "ready flag must be set on success only"
 
 
 # ── Static source-code assertions (Python backend) ─────────────────────────
@@ -473,32 +544,194 @@ def test_resolve_stacked_skills_route_unchanged():
     assert "resolve_skill_command" in ROUTES_PY
 
 
-# ── Static source-code assertions (ui.js — skill message truncation) ────────
+# ── Behavioral: RAW/agent-only split preserves the slash command ────────────
 
 
-UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+def test_chat_start_persists_raw_skill_command_and_expands_model_context():
+    """Driving a /<skill> turn through _run_agent_streaming must persist the RAW
+    `/skill …` command as the visible user row while the model sees (and the
+    next-turn context carries) the expanded skill payload.
 
+    Regression for the #5896 re-gate CORE: before the RAW/agent-only split the
+    expanded skill body replaced the raw command in the persisted transcript
+    (`raw_preserved=False` on settle/reload).
+    """
+    import api.streaming as streaming
 
-def test_condense_skill_message_function_defined():
-    """_condenseSkillMessage() must exist in ui.js."""
-    assert "function _condenseSkillMessage(text)" in UI_JS
+    raw_command = "/llm-wiki list active pages"
+    expansion = (
+        '[IMPORTANT: The user has invoked the "llm-wiki" skill, indicating they '
+        "want you to follow its instructions. The full skill content is loaded below.]\n"
+        "# llm-wiki\n\nfull skill body... (+500 lines)\n"
+        "The user has provided the following instruction alongside the skill "
+        "invocation: list active pages"
+    )
 
+    class FakeSession:
+        def __init__(self):
+            self.session_id = "skills_resolve_raw_preserved"
+            self.title = "Untitled"
+            self.workspace = "/tmp"
+            self.model = "gpt-test"
+            self.model_provider = None
+            self.profile = None
+            self.personality = None
+            self.messages = []
+            self.context_messages = []
+            self.input_tokens = 0
+            self.output_tokens = 0
+            self.estimated_cost = 0
+            self.cache_read_tokens = 0
+            self.cache_write_tokens = 0
+            self.tool_calls = []
+            self.gateway_routing = None
+            self.gateway_routing_history = []
+            self.active_stream_id = ""
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.context_length = 0
+            self.threshold_tokens = 0
+            self.last_prompt_tokens = 0
+            self.llm_title_generated = True
 
-def test_condense_skill_message_called_in_render():
-    """_condenseSkillMessage() must be called when rendering a user message,
-    wrapping the existing _stripAttachedFilesMarkerForDisplay call."""
-    assert "_condenseSkillMessage(_stripAttachedFilesMarkerForDisplay" in UI_JS
+        def save(self, *args, **kwargs):
+            pass
 
+        def compact(self):
+            return {
+                "session_id": self.session_id,
+                "title": self.title,
+                "workspace": self.workspace,
+                "model": self.model,
+                "model_provider": self.model_provider,
+                "profile": self.profile,
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "estimated_cost": self.estimated_cost,
+                "cache_read_tokens": self.cache_read_tokens,
+                "cache_write_tokens": self.cache_write_tokens,
+                "personality": self.personality,
+            }
 
-def test_condense_skill_message_activates_on_invocation_pattern():
-    """_condenseSkillMessage must gate on the activation note prefix."""
-    assert "_SKILL_PREFIX" in UI_JS
-    assert "!text.startsWith(_SKILL_PREFIX)" in UI_JS
+    captured = {}
 
+    class EchoAgent:
+        def __init__(
+            self,
+            model=None,
+            provider=None,
+            base_url=None,
+            platform=None,
+            quiet_mode=False,
+            enabled_toolsets=None,
+            session_id=None,
+            session_db=None,
+            **_kwargs,
+        ):
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = 0
+            self.session_cache_read_tokens = 0
+            self.session_cache_write_tokens = 0
+            self.reasoning_config = None
+            self.ephemeral_system_prompt = None
+            self._last_error = None
 
-def test_condense_skill_message_truncation_logic_present():
-    """The truncation constants and (+N more ...) rendering must exist."""
-    assert "_SKILL_PREFIX" in UI_JS
-    assert "_SINGLE_INSTRUCTION" in UI_JS
-    assert "_BUNDLE_INSTRUCTION" in UI_JS
-    assert "+hidden+' more '+noun" in UI_JS
+        def run_conversation(self, **kwargs):
+            captured.update(kwargs)
+            history = list(kwargs.get("conversation_history") or [])
+            return {
+                "messages": history
+                + [
+                    {"role": "user", "content": kwargs["persist_user_message"]},
+                    {"role": "assistant", "content": "Here is the wiki summary."},
+                ]
+            }
+
+        def interrupt(self, _message):
+            pass
+
+    fake_session = FakeSession()
+    fake_stream_id = "stream_skills_resolve_raw"
+    fake_session.active_stream_id = fake_stream_id
+    fake_queue = queue.Queue()
+    fake_runtime_module = ModuleType("hermes_cli.runtime_provider")
+    runtime_payload = {
+        "provider": "openai",
+        "base_url": None,
+        "api_mode": "chat_completions",
+        "command": None,
+        "args": [],
+        "credential_pool": None,
+    }
+    runtime_payload["api_" + "key"] = "***"
+    fake_runtime_module.__dict__["resolve_runtime_provider"] = mock.Mock(return_value=runtime_payload)
+    fake_hermes_cli = ModuleType("hermes_cli")
+    fake_hermes_cli.__dict__["runtime_provider"] = fake_runtime_module
+    fake_hermes_state = ModuleType("hermes_state")
+    fake_hermes_state.__dict__["SessionDB"] = mock.Mock(return_value=None)
+    injected = {
+        "hermes_cli": fake_hermes_cli,
+        "hermes_cli.runtime_provider": fake_runtime_module,
+        "hermes_state": fake_hermes_state,
+    }
+    saved = {k: sys.modules.get(k, _MISSING) for k in injected}
+    sys.modules.update(injected)
+    try:
+        with mock.patch.object(streaming, "get_session", return_value=fake_session), \
+             mock.patch.object(streaming, "_get_ai_agent", return_value=EchoAgent), \
+             mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-test", "openai", None)), \
+             mock.patch("api.config.get_config", return_value={}), \
+             mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
+            streaming.STREAMS[fake_stream_id] = fake_queue
+            try:
+                streaming._run_agent_streaming(
+                    session_id=fake_session.session_id,
+                    msg_text=raw_command,
+                    model="gpt-test",
+                    workspace="/tmp",
+                    stream_id=fake_stream_id,
+                    attachments=None,
+                    agent_message=expansion,
+                )
+            finally:
+                streaming.STREAMS.pop(fake_stream_id, None)
+    finally:
+        for k, v in saved.items():
+            if v is _MISSING:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+    # The model saw the expansion (prefixed by the workspace tag), while the
+    # persisted user row stays the RAW command.
+    assert captured.get("persist_user_message") == raw_command, (
+        "persist_user_message must be the RAW slash command, got "
+        f"{captured.get('persist_user_message')!r}"
+    )
+    assert expansion in captured.get("user_message", ""), (
+        "the model must see the expanded skill payload"
+    )
+
+    user_rows = [m for m in fake_session.messages if isinstance(m, dict) and m.get("role") == "user"]
+    assert user_rows, "expected a persisted user row"
+    assert user_rows[-1].get("content") == raw_command, (
+        "persisted user message must be the RAW slash command, got "
+        f"{str(user_rows[-1].get('content'))[:200]!r}"
+    )
+    assert all(expansion not in str(m.get("content") or "") for m in user_rows), (
+        "expanded skill body must never leak into the visible transcript"
+    )
+
+    # The model context keeps the expansion so the skill content survives into
+    # the next turn (gate-fail #5).
+    context_user_rows = [
+        m for m in fake_session.context_messages
+        if isinstance(m, dict) and m.get("role") == "user"
+    ]
+    assert context_user_rows, "expected a context user row"
+    assert expansion in str(context_user_rows[-1].get("content") or ""), (
+        "model context must carry the expanded skill payload for the next turn"
+    )
