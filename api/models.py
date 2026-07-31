@@ -5380,11 +5380,11 @@ def _active_state_db_path() -> Path:
     return hermes_home / 'state.db'
 
 
-def _agent_state_db_path(*, profile=None) -> Path | None:
+def _agent_state_db_path(*, profile=None, fallback_to_active=True) -> Path | None:
     """Return agent ``state.db`` for *profile*, or ``None`` when unavailable."""
     if isinstance(profile, str) and profile:
         db_path = _get_profile_home(profile) / 'state.db'
-        if not db_path.exists():
+        if not db_path.exists() and fallback_to_active:
             db_path = _active_state_db_path()
     else:
         db_path = _active_state_db_path()

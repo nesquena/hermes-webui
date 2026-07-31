@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from unittest.mock import patch
 
 import api.agent_sessions as agent_sessions
+import api.models as models
 import api.routes as routes
 
 
@@ -265,8 +266,9 @@ def test_lineage_report_endpoint_selects_requested_profile_state_db(tmp_path):
 
         handler = SimpleNamespace()
         parsed = urlparse("/api/session/lineage/report?session_id=same-id&profile=work")
-        def profile_state_db_path(*, profile):
+        def profile_state_db_path(*, profile, fallback_to_active):
             requested_profiles.append(profile)
+            assert fallback_to_active is False
             return profile_db
 
         with patch.object(routes, "_active_state_db_path", return_value=active_db), \
@@ -281,6 +283,40 @@ def test_lineage_report_endpoint_selects_requested_profile_state_db(tmp_path):
     finally:
         active.close()
         profile.close()
+
+
+def test_requested_profile_lineage_report_fails_closed_without_profile_state_db(tmp_path):
+    active_db = tmp_path / "active" / "state.db"
+    active_db.parent.mkdir()
+    active_db.touch()
+    missing_profile_home = tmp_path / "missing-profile"
+
+    with patch.object(models, "_get_profile_home", return_value=missing_profile_home), \
+        patch.object(models, "_active_state_db_path", return_value=active_db):
+        assert models._agent_state_db_path(profile="missing", fallback_to_active=False) is None
+
+    captured = {}
+    requested_profiles = []
+
+    def fake_bad(handler, message, status=400):
+        captured["status"] = status
+        captured["message"] = message
+        return {"error": message}
+
+    def missing_profile_state_db_path(*, profile, fallback_to_active):
+        requested_profiles.append((profile, fallback_to_active))
+        return None
+
+    handler = SimpleNamespace()
+    parsed = urlparse("/api/session/lineage/report?session_id=same-id&profile=missing")
+    with patch.object(routes, "_agent_state_db_path", side_effect=missing_profile_state_db_path), \
+        patch.object(routes, "bad", side_effect=fake_bad), \
+        patch.object(routes, "read_session_lineage_report") as read_report:
+        routes.handle_get(handler, parsed)
+
+    assert requested_profiles == [("missing", False)]
+    assert captured == {"status": 404, "message": "Session not found"}
+    read_report.assert_not_called()
 
 
 def test_lineage_report_endpoint_returns_404_for_unknown_session(tmp_path):

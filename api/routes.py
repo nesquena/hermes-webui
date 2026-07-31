@@ -13084,7 +13084,12 @@ def handle_get(handler, parsed) -> bool:
         if not sid:
             return bad(handler, "session_id required", 400)
         profile = query.get("profile", [""])[0].strip() or None
-        state_db_path = _agent_state_db_path(profile=profile) if profile else _active_state_db_path()
+        state_db_path = (
+            _agent_state_db_path(profile=profile, fallback_to_active=False)
+            if profile else _active_state_db_path()
+        )
+        if state_db_path is None:
+            return bad(handler, "Session not found", 404)
         report = read_session_lineage_report(state_db_path, sid)
         if not report.get("found"):
             return bad(handler, "Session not found", 404)
