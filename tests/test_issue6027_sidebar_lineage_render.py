@@ -14,7 +14,13 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 def _run_node(body: str):
     result = subprocess.run(
-        [NODE], input=body, cwd=ROOT, capture_output=True, text=True, timeout=30
+        [NODE],
+        input=body,
+        cwd=ROOT,
+        capture_output=True,
+        encoding="utf-8",
+        text=True,
+        timeout=30,
     )
     if result.returncode:
         raise RuntimeError(result.stderr)
@@ -40,29 +46,13 @@ eval(extractFunc('_sessionProfileScope'));
 eval(extractFunc('_sidebarLineageSourceBucket'));
 eval(extractFunc('_isReadOnlySession'));
 eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_authoritativeLineageTipId'));
-if(src.includes('function _buildSidebarLineageIndex(')) {{
-  eval(extractFunc('_buildSidebarLineageIndex'));
-}} else {{
-  eval(extractFunc('_buildSidebarLineageProjectResolver'));
-  eval(extractFunc('_sidebarLineageScopeKey'));
-  eval(extractFunc('_sidebarScopedIdentityKey'));
-}}
+eval(extractFunc('_buildSidebarLineageIndex'));
 eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
-if(!src.includes('function _buildSidebarLineageIndex(')) {{
-  const _legacyProjectResolver=_buildSidebarLineageProjectResolver;
-    globalThis._buildSidebarLineageIndex = function(rows, refs) {{
-    const resolver=_legacyProjectResolver(rows, refs);
-    const projectFor=row=>resolver(row);
-    const scopeKey=row=>_sidebarLineageScopeKey(row, undefined, resolver);
-    const identityKey=(row,id)=>_sidebarScopedIdentityKey(row,id,undefined,resolver);
-    return {{projectFor,scopeKey,identityKey,isLinkable:()=>true,
-      ownership:row=>({{status:projectFor(row)===null?'resolved_null':'resolved_project',project:projectFor(row)}}),
-      stats:{{nodeVisits:0,edgeVisits:0}}}};
-    }};
-}}
 {body}
 """
 
@@ -139,3 +129,44 @@ console.log(JSON.stringify({root:index.ownership(root), missing:index.ownership(
     assert result["root"]["status"] == "resolved_null"
     assert result["missing"]["status"] == "missing"
     assert result["rootKey"] != result["missingKey"]
+
+
+def test_compression_parent_lookup_stays_within_profile_scope():
+    result = _run_node(_harness("""
+const parentA = {session_id:'parent', profile_scope:'A', project_id:'projA',
+  pre_compression_snapshot:true, updated_at:10};
+const tipA = {session_id:'tipA', profile_scope:'A', parent_session_id:'parent',
+  project_id:'projA', updated_at:20};
+const parentB = {session_id:'parent', profile_scope:'B', project_id:'projB',
+  pre_compression_snapshot:true, updated_at:30};
+const rows = [parentA, tipA, parentB];
+const index = _buildSidebarLineageIndex(rows, []);
+const collapsed = _collapseSessionLineageForSidebar(rows, index);
+console.log(JSON.stringify(collapsed.map(row => ({
+  id: row.session_id, profile: row.profile_scope, count: row._lineage_collapsed_count || 1
+}))));
+"""))
+    assert result == [
+        {"id": "tipA", "profile": "A", "count": 2},
+        {"id": "parent", "profile": "B", "count": 1},
+    ]
+
+
+def test_attachment_accepts_the_collapsed_index_identity_without_rescoping():
+    result = _run_node(_harness("""
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const root = {session_id:'root', profile_scope:'work', project_id:'projA',
+  _lineage_root_id:'root', _lineage_tip_id:'tip'};
+const tip = {session_id:'tip', profile_scope:'work', project_id:'projA',
+  _lineage_root_id:'root', _lineage_tip_id:'tip'};
+const child = {session_id:'child', profile_scope:'work', relationship_type:'child_session',
+  read_only:true, parent_session_id:'tip', _parent_lineage_root_id:'root'};
+const raw = [root, tip, child];
+const index = _buildSidebarLineageIndex(raw, []);
+const collapsed = _collapseSessionLineageForSidebar(raw, index);
+const attached = _attachChildSessionsToSidebarRows(collapsed, raw, [], undefined, index);
+console.log(JSON.stringify(attached.map(row => ({
+  id: row.session_id, children: (row._child_sessions || []).map(item => item.session_id)
+}))));
+"""))
+    assert result == [{"id": "tip", "children": ["child"]}]

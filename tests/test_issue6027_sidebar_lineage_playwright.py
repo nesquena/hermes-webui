@@ -1,9 +1,9 @@
 """Served production-path proof for the issue-shaped sidebar fixture."""
 
 import os
+import socket
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -13,12 +13,19 @@ import pytest
 sync_api = pytest.importorskip("playwright.sync_api", reason="playwright not installed")
 
 ROOT = Path(__file__).parents[1]
-PORT = 8799
 
 
-def _healthy():
+def _free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _healthy(process, port):
+    if process.poll() is not None:
+        return False
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/health", timeout=1) as response:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as response:
             return response.status == 200
     except OSError:
         return False
@@ -27,10 +34,13 @@ def _healthy():
 def test_served_sidebar_lineage_fixture_has_stable_grouping(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
+    port = _free_port()
+    screenshot_dir = Path(os.environ.get("HERMES_6027_SCREENSHOT_DIR", str(tmp_path)))
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.update({
         "BROWSER": "echo",
-        "HERMES_WEBUI_PORT": str(PORT),
+        "HERMES_WEBUI_PORT": str(port),
         "HERMES_WEBUI_HOST": "127.0.0.1",
         "HERMES_HOME": str(state),
         "HERMES_WEBUI_STATE_DIR": str(state),
@@ -49,9 +59,9 @@ def test_served_sidebar_lineage_fixture_has_stable_grouping(tmp_path):
         )
     try:
         deadline = time.time() + 30
-        while time.time() < deadline and not _healthy():
+        while time.time() < deadline and not _healthy(process, port):
             time.sleep(0.25)
-        if not _healthy():
+        if not _healthy(process, port):
             pytest.fail(f"isolated server did not become healthy; log={log_path}")
         errors = []
         with sync_api.sync_playwright() as playwright:
@@ -61,9 +71,9 @@ def test_served_sidebar_lineage_fixture_has_stable_grouping(tmp_path):
             page = browser.new_page(viewport={"width": 1024, "height": 600}, device_scale_factor=2)
             page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
             page.on("pageerror", lambda error: errors.append(str(error)))
-            page.goto(f"http://127.0.0.1:{PORT}/#sessions", wait_until="domcontentloaded")
+            page.goto(f"http://127.0.0.1:{port}/#sessions", wait_until="domcontentloaded")
             page.wait_for_selector("#sessionList, body", timeout=10000)
-            page.screenshot(path=str(tmp_path / "6027-before.png"), full_page=True)
+            page.screenshot(path=str(screenshot_dir / "webui-PR-TARGET-6027-before.png"), full_page=True)
             result = page.evaluate("""
               () => {
                 const root = {session_id:'root', title:'Renamed root', profile_scope:'work',
@@ -81,7 +91,7 @@ def test_served_sidebar_lineage_fixture_has_stable_grouping(tmp_path):
                   hasError: !!document.querySelector('.session-load-error')};
               }
             """)
-            page.screenshot(path=str(tmp_path / "6027-after.png"), full_page=True)
+            page.screenshot(path=str(screenshot_dir / "webui-PR-TARGET-6027-after.png"), full_page=True)
             browser.close()
         assert not errors, errors
         assert result["count"] == 2
