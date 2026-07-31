@@ -7562,7 +7562,8 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       parentRow=parent&&visibleBySid.get(scopedIdentityKey(parent,parent.session_id));
     }
     let parentSegment=null;
-    const parentSegmentKey=parentSid&&scopedIdentityKey(child, parentSid);
+    const parentForSegment=parentSid&&parentRowFor(child, parentSid);
+    const parentSegmentKey=parentSid&&scopedIdentityKey(parentForSegment||child, parentSid);
     if(!parentRow&&parentSegmentKey&&visibleBySegmentSid.has(parentSegmentKey)){
       const resolved=visibleBySegmentSid.get(parentSegmentKey);
       parentRow=resolved.row;
