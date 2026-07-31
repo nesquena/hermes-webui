@@ -685,6 +685,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _gatewayRoutingFailoverText() {{ return ''; }}
         function _gatewayModelWarningText() {{ return ''; }}
         function _usedModelTurnChipLabel() {{ return ''; }}
+        function _reasoningEffortChipLabel() {{ return ''; }}
         function _formatTurnDuration() {{ return ''; }}
         function _loadedCompactionMarkerRawIdxs() {{ return []; }}
         function _selectCompactionCardPlacements() {{
