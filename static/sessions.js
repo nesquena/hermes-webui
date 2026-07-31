@@ -3695,6 +3695,9 @@ function _bumpMessagesGeneration() {
   _messagesGeneration = (_messagesGeneration + 1) | 0;
   return _messagesGeneration;
 }
+function _claimTranscriptWrite() {
+  return _bumpMessagesGeneration();
+}
 
 async function _loadOlderMessages() {
   if (_loadingOlder || !_messagesTruncated) return;

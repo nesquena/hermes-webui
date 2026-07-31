@@ -351,11 +351,15 @@ function _bumpMessagesGeneration() {{
   bumpCalls += 1;
   _messagesGeneration = (_messagesGeneration + 1) % 2147483647;
 }}
+function _claimTranscriptWrite() {{
+  return _bumpMessagesGeneration();
+}}
 function _syncToolCallsForLoadedMessages(_messages, toolCalls) {{
   syncCalls += 1;
   S.toolCalls = Array.isArray(toolCalls) ? toolCalls.map((tc) => ({{ ...tc }})) : [];
 }}
 let resolveFullLoad = null;
+let resolveGoal = null;
 function $(id) {{
   if (id === 'modelSelect') return {{ value: 'goal-model' }};
   return null;
@@ -396,11 +400,9 @@ async function api(url) {{
     }});
   }}
   if (url === '/api/goal') {{
-    return {{
-      message: 'Goal status',
-      stream_id: 'goal-1',
-      pending_started_at: 123,
-    }};
+    return await new Promise((resolve) => {{
+      resolveGoal = resolve;
+    }});
   }}
   throw new Error('Unexpected API call: ' + String(url));
 }}
@@ -409,7 +411,17 @@ eval(cmdGoalSrc);
 (async () => {{
   const ensurePromise = _ensureAllMessagesLoaded();
   if ({str(goal_turn_during_fetch).lower()}) {{
-    await cmdGoal('ship it');
+    const goalPromise = cmdGoal('ship it');
+    await Promise.resolve();
+    const goalClaimedBeforeResponse = bumpCalls > 0;
+    if (typeof resolveGoal !== 'function') throw new Error('goal request was not started');
+    resolveGoal({{
+      message: 'Goal status',
+      stream_id: 'goal-1',
+      pending_started_at: 123,
+    }});
+    await goalPromise;
+    if (!goalClaimedBeforeResponse) throw new Error('goal did not claim transcript generation before its request');
   }}
   if (typeof resolveFullLoad !== 'function') throw new Error('full-history load was not requested');
   resolveFullLoad({{
@@ -595,6 +607,10 @@ def test_ensure_all_messages_loaded_still_hydrates_when_generation_is_stable():
 
 
 def test_messages_generation_wiring_covers_full_load_live_turn_claims_and_same_session_replacements():
+    assert "function _claimTranscriptWrite()" in SESSIONS_JS
+    assert "const activeSid=S.session.session_id;\n  if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();" in COMMANDS_JS
+    assert "const sid=S.session.session_id;\n    if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();" in COMMANDS_JS
+    assert "const refreshSid=S.session.session_id;\n  if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();" in UI_JS
     assert "const startGeneration = _messagesGeneration;" in SESSIONS_JS
     assert "if (_messagesGeneration !== startGeneration) return;" in SESSIONS_JS
     assert "_bumpMessagesGeneration();\n  S.messages = msgs;" in SESSIONS_JS
@@ -604,12 +620,11 @@ def test_messages_generation_wiring_covers_full_load_live_turn_claims_and_same_s
     assert "if(streamId&&typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n  S.activeStreamId = streamId;" in MESSAGES_JS
     assert "S.busy = true;\n    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n    S.activeStreamId = streamId;" in MESSAGES_JS
     assert "S.busy = true;\n        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n        S.activeStreamId = streamId;" in MESSAGES_JS
-    assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n      S.messages.push({role:'assistant',content:msg,_ts:Date.now()/1000,_goalStatus:true,_transient:true});" in COMMANDS_JS
-    assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n    appendThinking();setBusy(true);" in COMMANDS_JS
-    assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n      S.messages=data.session.messages||[];" in COMMANDS_JS
-    assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n      S.messages=live.session.messages||[];" in COMMANDS_JS
+    assert "if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();\n  try{\n    const r=await api('/api/goal'" in COMMANDS_JS
+    assert "if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();\n      S.session=data.session;\n      S.messages=data.session.messages||[];" in COMMANDS_JS
+    assert "S.session=live.session;\n      if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();\n      S.messages=live.session.messages||[];" in COMMANDS_JS
     assert "if(data&&data.session){if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();S.messages=data.session.messages||[];" in COMMANDS_JS
-    assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n    S.messages = data.session.messages || [];" in UI_JS
+    assert "if(typeof _claimTranscriptWrite==='function') _claimTranscriptWrite();\n    S.session = data.session;\n    S.messages = data.session.messages || [];" in UI_JS
     assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n    S.messages = [];" in PANELS_JS
 
 
