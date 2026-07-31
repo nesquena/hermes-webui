@@ -779,3 +779,114 @@ def test_non_auth_seeded_replayed_assistant_does_not_satisfy_current_turn(tmp_pa
     assert apperrors, "expected apperror for seeded replay silent failure"
     assert apperrors[-1]["type"] == "no_response"
     assert not any(event == "done" for event, _ in events)
+
+
+def _build_agent_retry_streams_then_fails(*, second_error: bool):
+    """First run fails silently; the RETRY streams a token, then fails in-band.
+
+    The token streamed DURING the retry is the crux: ``_heal_ok`` includes
+    ``or _token_sent``, so the retry counts as success even though it came
+    back with an explicit ``error`` payload (or a terminal ``failed`` status)
+    and no new assistant message. Neither run raises: run_conversation
+    reports these failures in-band.
+    """
+    class RetryStreamsThenFailsAgent(MockAgent):
+        runs = 0
+
+        def run_conversation(self, **kwargs):
+            type(self).runs += 1
+            history = list(kwargs.get("conversation_history") or [])
+            if type(self).runs == 1:
+                return {
+                    "messages": history,
+                    "error": _auth_failure_error_payload(),
+                }
+            if self.stream_delta_callback is not None:
+                self.stream_delta_callback("Visible retry text before failure")
+            if second_error:
+                return {
+                    "status": "ok",
+                    "messages": history,
+                    "error": "provider failed on retry",
+                }
+            return {"status": "failed", "messages": history}
+
+    return RetryStreamsThenFailsAgent
+
+
+def _run_stream_with_heal(monkeypatch, session, stream_id, agent_cls, *, workspace):
+    heal_rt = {
+        "provider": "test-provider",
+        "api_key": "fresh-key",
+        "base_url": None,
+    }
+    fake_queue = queue.Queue()
+    streaming.STREAMS[stream_id] = fake_queue
+    config.STREAM_PARTIAL_TEXT[stream_id] = ""
+
+    with mock.patch.object(streaming, "get_session", return_value=session), \
+         mock.patch.object(streaming, "_get_ai_agent", return_value=agent_cls), \
+         mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
+         mock.patch("api.config.get_config", return_value={}), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+         mock.patch.object(streaming, "_attempt_credential_self_heal", return_value=heal_rt):
+        streaming._run_agent_streaming(
+            session_id=session.session_id,
+            msg_text=session.pending_user_message,
+            model="test-model",
+            workspace=workspace,
+            stream_id=stream_id,
+        )
+    return fake_queue
+
+
+def test_auth_retry_streamed_answer_with_explicit_error_still_errors(tmp_path, monkeypatch):
+    """A heal retry that streams a token but returns ``error`` must still error.
+
+    ``_heal_ok`` includes ``or _token_sent``: once the retry streamed a single
+    visible token, it is treated as a success even though it came back with an
+    explicit error payload and no assistant message. The failed result is then
+    settled and persisted and the apperror emission skipped — the user sees a
+    silently swallowed failure (and the streamed fragment as the "answer").
+    """
+    session = _prepare_session(
+        "auth_retry_err", "stream_auth_retry_err",
+        pending_user_message="Please retry then fail explicitly",
+    )
+    agent_cls = _build_agent_retry_streams_then_fails(second_error=True)
+
+    fake_queue = _run_stream_with_heal(
+        monkeypatch, session, "stream_auth_retry_err", agent_cls, workspace=str(tmp_path)
+    )
+
+    saved = Session.load("auth_retry_err")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    apperrors = [payload for event, payload in events if event == "apperror"]
+    assert apperrors, "expected apperror for explicit retry failure"
+    assert not any(event == "done" for event, _ in events)
+    assert saved.messages[-1].get("_error") is True
+    assert saved.messages[-1]["content"] != "Visible retry text before failure"
+
+
+def test_auth_retry_streamed_terminal_failure_without_answer_still_errors(tmp_path, monkeypatch):
+    """Same crux, terminal variant: retry streams a token, ends ``failed``."""
+    session = _prepare_session(
+        "auth_retry_term", "stream_auth_retry_term",
+        pending_user_message="Please retry then fail terminally",
+    )
+    agent_cls = _build_agent_retry_streams_then_fails(second_error=False)
+
+    fake_queue = _run_stream_with_heal(
+        monkeypatch, session, "stream_auth_retry_term", agent_cls, workspace=str(tmp_path)
+    )
+
+    saved = Session.load("auth_retry_term")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    assert any(event == "apperror" for event, _ in events), (
+        "expected apperror for a terminal-failure retry with no answer"
+    )
+    assert not any(event == "done" for event, _ in events)
