@@ -8705,6 +8705,33 @@ def get_sessions_cache_max(config_data: dict | None = None) -> int:
 # dict mode, which reads no file and takes no lock, so the value is right before
 # the first eviction pass instead of after it.
 _LAST_APPLIED_SESSIONS_CACHE_MAX: int = get_sessions_cache_max(cfg)
+
+# Entry count alone cannot bound resident memory when a handful of transcripts
+# are tens of MiB each (#6351). Use serialized sidecar bytes as a stable,
+# allocation-free weight; Python object overhead makes this a conservative floor,
+# not an exact RSS measurement. No env fallback is added for this non-secret knob.
+DEFAULT_SESSIONS_CACHE_MAX_BYTES = 128 * 1024 * 1024
+
+
+def get_sessions_cache_max_bytes(config_data: dict | None = None) -> int:
+    """Return the serialized-byte budget for resident full Session objects.
+
+    ``webui.sessions_cache_max_mb`` uses MiB despite the familiar ``mb`` config
+    spelling. Missing, invalid, or below-1 values fall back to the bounded
+    default so a typo cannot silently disable the memory backstop.
+    """
+    active_cfg = config_data if isinstance(config_data, dict) else get_config()
+    webui_cfg = active_cfg.get("webui", {}) if isinstance(active_cfg, dict) else {}
+    raw = webui_cfg.get("sessions_cache_max_mb") if isinstance(webui_cfg, dict) else None
+    try:
+        value_mib = int(raw) if raw is not None else None
+    except (TypeError, ValueError, OverflowError):
+        value_mib = None
+    if value_mib is not None and value_mib >= 1:
+        return value_mib * 1024 * 1024
+    return DEFAULT_SESSIONS_CACHE_MAX_BYTES
+
+
 CHAT_LOCK = threading.Lock()
 
 
