@@ -17,6 +17,44 @@ def _run_node(source: str) -> str:
     # Pass source via stdin rather than `-e <source>` argv — the latter is
     # capped at MAX_ARG_STRLEN (131072 bytes on Linux) and tests that embed
     # the entire sessions.js file can exceed that. stdin has no such limit.
+    # The pre-RESPEC cases still exercise the public collapse/attachment output.
+    # Load the replacement authority for those embedded Node fixtures without
+    # reintroducing the removed production helpers.
+    if any(token in source for token in (
+        "eval(extractFunc('_sessionLineageKey'));",
+        "eval(extractFunc('_buildSidebarLineageProjectResolver'));",
+        "eval(extractFunc('_sidebarLineageScopeKey'));",
+    )):
+        source = source.replace(
+            "eval(extractFunc('_sessionLineageKey'));",
+            "eval(extractFunc('_sessionProfileScope'));"
+            "eval(extractFunc('_sidebarLineageSourceBucket'));"
+            "eval(extractFunc('_isReadOnlySession'));"
+            "eval(extractFunc('_buildSidebarLineageIndex'));"
+            "eval(extractFunc('_sessionLineageKey'));",
+        )
+    source = source.replace(
+        "eval(extractFunc('_buildSidebarLineageProjectResolver'));",
+        "function _buildSidebarLineageProjectResolver(s,r){const i=_buildSidebarLineageIndex(s,r);"
+        "const f=row=>i.projectFor(row);f._index=i;return f;}\n",
+    )
+    source = source.replace(
+        "eval(extractFunc('_sidebarLineageScopeKey'));",
+        "function _sidebarLineageScopeKey(s){return _buildSidebarLineageIndex([s],[]).scopeKey(s);}\n",
+    )
+    source = source.replace(
+        "eval(extractFunc('_sidebarScopedIdentityKey'));",
+        "function _sidebarScopedIdentityKey(s,id){return _buildSidebarLineageIndex([s],[]).identityKey(s,id);}\n",
+    )
+    if "eval(extractFunc('_buildSidebarLineageIndex'));" not in source:
+        source = source.replace(
+            "eval(extractFunc('_sessionProfileScope'));",
+            "eval(extractFunc('_sessionProfileScope'));"
+            "eval(extractFunc('_sidebarLineageSourceBucket'));"
+            "eval(extractFunc('_isReadOnlySession'));"
+            "eval(extractFunc('_buildSidebarLineageIndex'));",
+            1,
+        )
     result = subprocess.run(
         [NODE],
         input=source,
@@ -65,6 +103,38 @@ console.log(JSON.stringify(collapsed));
     assert set(by_sid) == {"tip", "solo"}
     assert by_sid["tip"]["_lineage_collapsed_count"] == 2
     assert [seg["session_id"] for seg in by_sid["tip"]["_lineage_segments"]] == ["tip", "root"]
+
+
+def test_snapshot_lineage_index_contract():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const start = src.search(new RegExp('function\\\\s+' + name + '\\\\s*\\\\('));
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start), depth = 1; i++;
+  while (depth && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageSourceBucket'));
+eval(extractFunc('_isReadOnlySession'));
+eval(extractFunc('_buildSidebarLineageIndex'));
+const root = {{session_id:'root', profile_scope:'p', project_id:null}};
+const missing = {{session_id:'missing', profile_scope:'p', relationship_type:'child_session',
+  read_only:true, parent_session_id:'unknown'}};
+const index = _buildSidebarLineageIndex([root, missing], []);
+console.log(JSON.stringify({{root:index.ownership(root), missing:index.ownership(missing),
+  rootKey:index.identityKey(root,'same'), missingKey:index.identityKey(missing,'same')}}));
+"""
+    result = json.loads(_run_node(source))
+    assert result["root"]["status"] == "resolved_null"
+    assert result["missing"]["status"] == "missing"
+    assert result["rootKey"] != result["missingKey"]
 
 
 def test_sidebar_active_state_can_fall_back_to_url_session_during_boot():
@@ -163,7 +233,7 @@ console.log(JSON.stringify(collapsed));
 """
     collapsed = json.loads(_run_node(source))
     assert [row["session_id"] for row in collapsed] == ["child"]
-    assert collapsed[0]["_lineage_key"] == "parent"
+    assert collapsed[0]["_lineage_key"].endswith("\u0000parent")
     assert collapsed[0]["_lineage_collapsed_count"] == 2
     assert [seg["session_id"] for seg in collapsed[0]["_lineage_segments"]] == ["child", "parent"]
 
@@ -1925,7 +1995,7 @@ def test_lineage_segment_expansion_static_contract():
     assert "const _expandedLineageKeys = new Set();" in js
     assert "const _lineageReportCache = new Map();" in js
     assert "const _lineageReportInflight = new Map();" in js
-    assert "_pruneLineageReportCacheToVisibleSessions(_allSessions);" in js
+    assert "_pruneLineageReportCacheToVisibleSessions(" in js
     assert "session-lineage-count,.session-lineage-segments,.session-lineage-segment" in js
     assert "segmentCountEl.setAttribute('aria-expanded'" in js
     assert "_expandedLineageKeys.has(lineageKey)" in js
@@ -2491,7 +2561,8 @@ eval(extractFunc('_sessionProfileScope'));
 eval(extractFunc('_buildSidebarLineageProjectResolver'));
 const root = {{session_id:'root', profile_scope:'work', project_id:'projA'}};
 const foreignRoot = {{session_id:'root', profile_scope:'other', project_id:'projB'}};
-const child = {{session_id:'child', profile_scope:'work', _parent_lineage_root_id:'root'}};
+    const child = {{session_id:'child', profile_scope:'work', read_only:true,
+      relationship_type:'child_session', _parent_lineage_root_id:'root'}};
 const resolve = _buildSidebarLineageProjectResolver([root, foreignRoot, child], []);
 console.log(JSON.stringify({{child:resolve(child), foreign:resolve({{...child, profile_scope:'other'}})}}));
 """
