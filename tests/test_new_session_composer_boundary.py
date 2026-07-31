@@ -14,6 +14,7 @@ SESSIONS_JS = ROOT.joinpath("static", "sessions.js").read_text(encoding="utf-8")
 UI_JS = ROOT.joinpath("static", "ui.js").read_text(encoding="utf-8")
 BOOT_JS = ROOT.joinpath("static", "boot.js").read_text(encoding="utf-8")
 MESSAGES_JS = ROOT.joinpath("static", "messages.js").read_text(encoding="utf-8")
+PANELS_JS = ROOT.joinpath("static", "panels.js").read_text(encoding="utf-8")
 
 
 def _function(source: str, name: str, next_marker: str) -> str:
@@ -45,6 +46,44 @@ def _wait_for_new_session_navigation_function() -> str:
     end = SESSIONS_JS.find("\nconst _newSessionPendingText", start)
     assert start != -1 and end != -1, "new-session navigation wait helper not found"
     return SESSIONS_JS[start:end]
+
+
+def _async_function(source: str, name: str, next_marker: str) -> str:
+    start = source.find(f"async function {name}(")
+    end = source.find(next_marker, start)
+    assert start != -1 and end != -1, f"{name} function not found"
+    return source[start:end].strip()
+
+
+def _blank_page_mint_function(name: str) -> str:
+    sources = {
+        "promptWorkspacePath": (
+            PANELS_JS,
+            "\n\nasync function switchToWorkspace(",
+        ),
+        "switchToWorkspace": (
+            PANELS_JS,
+            "\n\n// ── Profile panel + dropdown",
+        ),
+        "promptNewFile": (
+            UI_JS,
+            "\n\nasync function promptNewFolder(",
+        ),
+        "promptNewFolder": (
+            UI_JS,
+            "\n\nfunction _syncComposerFiles(",
+        ),
+    }
+    source, marker = sources[name]
+    return _async_function(source, name, marker)
+
+
+def _switch_to_profile_function() -> str:
+    return _async_function(
+        PANELS_JS,
+        "switchToProfile",
+        "\n\nfunction openProfileCreate(",
+    )
 
 
 def _load_session_function() -> str:
@@ -466,6 +505,255 @@ def _run_new_session_harness(
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)
+
+
+def _run_blank_page_settlement_harness(entry: str, *, reject_pending: bool) -> dict:
+    """Settle the held New Chat, then let the real blank-page caller continue."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+
+    calls = {
+        "promptWorkspacePath": "promptWorkspacePath()",
+        "switchToWorkspace": "switchToWorkspace('/workspace-b', 'Workspace B')",
+        "promptNewFile": "promptNewFile('.')",
+        "promptNewFolder": "promptNewFolder('.')",
+    }
+    script = textwrap.dedent(
+        f"""
+        {_wait_for_new_session_navigation_function()}
+        {_blank_page_mint_function(entry)}
+
+        function deferred(){{
+          let resolve,reject;
+          const promise=new Promise((res,rej)=>{{resolve=res;reject=rej;}});
+          return {{promise,resolve,reject}};
+        }}
+        const pending=deferred();
+        let _newSessionInFlight=pending.promise.finally(()=>{{_newSessionInFlight=null;}});
+        let newSessionCalls=0;
+        const apiCalls=[];
+        const S={{
+          session:null,messages:[],pendingFiles:[],activeProfile:'default',
+          _profileDefaultWorkspace:'/workspace-a',_profileSwitchWorkspace:null,
+          _pendingSessionToolsets:['tools'],currentDir:'.',busy:false,_dirCache:{{}},
+        }};
+        const window={{_newChatOnWorkspaceSwitch:false}};
+        function t(key){{return key;}}
+        function showToast(){{}}
+        function setStatus(){{}}
+        function syncTopbar(){{}}
+        function renderMessages(){{}}
+        function renderSessionList(){{return Promise.resolve();}}
+        function showPromptDialog(){{return Promise.resolve(null);}}
+        function _workspacePathIsReadOnly(){{return false;}}
+        function _workspaceCreateTargetLabel(value){{return value;}}
+        function _workspaceJoinTargetPath(dir,name){{return `${{dir}}/${{name}}`;}}
+        function closeWsDropdown(){{}}
+        function bumpWorkspaceTreeGen(){{}}
+        function loadDir(){{return Promise.resolve();}}
+        function getWorkspaceFriendlyName(path){{return path;}}
+        let _currentPanel='chat';
+        async function newSession(){{
+          newSessionCalls+=1;
+          S.session={{
+            session_id:'recovery-session',profile:S.activeProfile,
+            workspace:S._profileSwitchWorkspace||S._profileDefaultWorkspace,
+            messages:[],composer_draft:{{text:'',files:[]}},message_count:0,
+          }};
+          S.messages=[];
+          S._profileSwitchWorkspace=null;
+          return S.session;
+        }}
+        function api(path,options){{
+          apiCalls.push(path);
+          if(path==='/api/session/update')return Promise.resolve({{}});
+          throw new Error(`unexpected API call: ${{path}}`);
+        }}
+
+        (async()=>{{
+          const action=Promise.resolve({calls[entry]});
+          for(let i=0;i<20;i++)await Promise.resolve();
+          const before=[...apiCalls];
+          if({str(reject_pending).lower()})pending.reject(new Error('create failed'));
+          else{{
+            S.session={{
+              session_id:'settled-session',profile:'default',workspace:'/workspace-a',
+              messages:[],composer_draft:{{text:'',files:[]}},message_count:0,
+            }};
+            pending.resolve();
+          }}
+          await action;
+          process.stdout.write(JSON.stringify({{
+            before,apiCalls,newSessionCalls,
+            activeSid:S.session&&S.session.session_id,
+            activeProfile:S.session&&S.session.profile,
+            workspace:S.session&&S.session.workspace,
+            newSessionInFlight:_newSessionInFlight!==null,
+            blankMintInFlight:_blankPageSessionInFlight!==null,
+          }}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = subprocess.run(
+        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    ["promptWorkspacePath", "switchToWorkspace", "promptNewFile", "promptNewFolder"],
+)
+@pytest.mark.parametrize("reject_pending", [False, True])
+def test_blank_page_callers_resume_safely_after_new_session_settlement(
+    entry, reject_pending
+):
+    result = _run_blank_page_settlement_harness(
+        entry, reject_pending=reject_pending
+    )
+    assert result["before"] == []
+    assert "/api/session/new" not in result["apiCalls"]
+    assert result["newSessionCalls"] == (1 if reject_pending else 0)
+    assert result["activeSid"] == (
+        "recovery-session" if reject_pending else "settled-session"
+    )
+    assert result["activeProfile"] == "default"
+    assert result["newSessionInFlight"] is False
+    assert result["blankMintInFlight"] is False
+
+
+def _run_profile_switch_settlement_harness(*, reject_pending: bool) -> dict:
+    """Run real switchToProfile through success/failure settlement to completion."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+
+    script = textwrap.dedent(
+        f"""
+        {_wait_for_new_session_navigation_function()}
+        {_switch_to_profile_function()}
+
+        function deferred(){{
+          let resolve,reject;
+          const promise=new Promise((res,rej)=>{{resolve=res;reject=rej;}});
+          return {{promise,resolve,reject}};
+        }}
+        const pending=deferred();
+        let _newSessionInFlight=pending.promise.finally(()=>{{_newSessionInFlight=null;}});
+        let _profileSwitchGeneration=0;
+        let _profileSwitchOpeningExistingSession=false;
+        let _workspacePanelMode='closed';
+        let _renamingSid=null;
+        let _skillsData=null;
+        let _workspaceList=null;
+        let _sessionListSkeletonActive=false;
+        const apiCalls=[];
+        const toasts=[];
+        let newSessionCalls=0;
+        const S={{
+          session:{{session_id:'source-session',profile:'default',workspace:'/workspace-a'}},
+          messages:[{{role:'user',content:'A'}}],activeProfile:'default',
+          activeProfileIsDefault:true,_pendingSessionToolsets:['tools'],
+        }};
+        const window={{}};
+        const localStorage={{removeItem(){{}}}};
+        const elements={{
+          profileChip:{{classList:{{add(){{}},remove(){{}}}},disabled:false}},
+          profileChipLabel:{{textContent:'default'}},
+          titlebarProfileBtn:{{classList:{{add(){{}},remove(){{}}}},disabled:false}},
+          titlebarProfileLabel:{{textContent:'default'}},
+        }};
+        const $=id=>elements[id]||null;
+        function closeSessionActionMenu(){{}}
+        function _invalidateSessionListRenders(){{}}
+        function _setProfileSwitchListEmbargo(){{}}
+        function showSessionListSkeleton(){{}}
+        function bumpWorkspaceTreeGen(){{}}
+        function t(key){{return key;}}
+        function startGatewaySSE(){{}}
+        function applyBotName(){{}}
+        function _clearPersistedModelState(){{}}
+        function refreshProfileTransitionReasoningChip(){{}}
+        function animateNextSessionListRefresh(){{}}
+        function renderSessionList(){{return Promise.resolve();}}
+        function _openProfileSwitchSessionBrowser(){{}}
+        function syncTopbar(){{}}
+        function clearWorkspaceTreeSkeleton(){{}}
+        function showToast(...args){{toasts.push(args.map(String).join(' '));}}
+        function _profileSwitchPanelLoad(){{return Promise.resolve();}}
+        function _refreshProfileSwitchBackground(){{}}
+        function renderSessionListFromCache(){{}}
+        async function newSession(){{
+          newSessionCalls+=1;
+          S.session={{
+            session_id:'profile-session',profile:S.activeProfile,
+            workspace:'/workspace-a',messages:[],message_count:0,
+          }};
+          S.messages=[];
+          return S.session;
+        }}
+        function api(path){{
+          apiCalls.push(path);
+          if(path==='/api/profile/switch')return Promise.resolve({{
+            active:'beta',is_default:false,default_model:null,default_workspace:null,
+          }});
+          throw new Error(`unexpected API call: ${{path}}`);
+        }}
+
+        (async()=>{{
+          const switching=switchToProfile('beta');
+          for(let i=0;i<20;i++)await Promise.resolve();
+          const before={{
+            apiCalls:[...apiCalls],generation:_profileSwitchGeneration,
+            pending:S._pendingSessionToolsets,
+          }};
+          if({str(reject_pending).lower()})pending.reject(new Error('create failed'));
+          else{{
+            S.session={{
+              session_id:'settled-session',profile:'default',workspace:'/workspace-a',
+              messages:[],message_count:0,
+            }};
+            S.messages=[];
+            pending.resolve();
+          }}
+          const switched=await switching;
+          process.stdout.write(JSON.stringify({{
+            before,switched,apiCalls,generation:_profileSwitchGeneration,
+            activeProfile:S.activeProfile,sessionProfile:S.session&&S.session.profile,
+            activeSid:S.session&&S.session.session_id,
+            newSessionInFlight:_newSessionInFlight!==null,toasts,newSessionCalls,
+          }}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = subprocess.run(
+        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+@pytest.mark.parametrize("reject_pending", [False, True])
+def test_profile_switch_resumes_with_consistent_profile_session_ownership(
+    reject_pending,
+):
+    result = _run_profile_switch_settlement_harness(
+        reject_pending=reject_pending
+    )
+    assert result["before"] == {
+        "apiCalls": [], "generation": 0, "pending": ["tools"]
+    }
+    assert result["switched"] is True
+    assert result["apiCalls"] == ["/api/profile/switch"]
+    assert result["generation"] == 1
+    assert result["activeProfile"] == "beta"
+    assert result["sessionProfile"] == "beta"
+    assert result["activeSid"] == "profile-session"
+    assert result["newSessionCalls"] == 1
+    assert result["toasts"] == ["profile_switched_new_conversation"]
+    assert result["newSessionInFlight"] is False
 
 
 def _run_new_session_load_interleave_harness(

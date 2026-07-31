@@ -700,6 +700,7 @@ global.t = value => value;
 global.assistantDisplayName = () => 'Hermes';
 global._profileSwitchPanelLoad = async () => {{}};
 global._refreshProfileSwitchBackground = () => {{}};
+global._waitForNewSessionNavigationSettlement = async () => {{}};
 var _profileSwitchGeneration = 0;
 var _skillsData = null, _workspaceList = null;
 var _currentReasoningEffort = 'low';

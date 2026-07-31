@@ -6304,10 +6304,7 @@ async function promptWorkspacePath(){
     const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws)return;
     try{
-      // System-minted session (#6022): worktree:false is explicit so a config
-      // worktree default can't leak a worktree from a workspace prompt.
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+      await _ensureBlankPageSession(ws);
     }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
     if(!S.session)return;
   }
@@ -6342,10 +6339,7 @@ async function switchToWorkspace(path,name){
     const ws=path||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws){showToast(t('no_workspace'));return;}
     try{
-      // System-minted session (#6022): explicit worktree:false — a workspace
-      // switch from a blank page is not deliberate New Chat intent.
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+      await _ensureBlankPageSession(ws);
     }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
     if(!S.session)return;
   }
@@ -6907,6 +6901,7 @@ function _openProfileSwitchSessionBrowser(){
 }
 
 async function switchToProfile(name) {
+  await _waitForNewSessionNavigationSettlement();
   // ── #4671 profile-switch loading-skeleton — FOUR-GUARD CONTRACT ───────────────
   // The skeleton must never be clobbered by the OLD profile's content and must never
   // strand. Four interacting pieces of state cooperate; an edit touching one without

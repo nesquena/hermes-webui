@@ -1410,6 +1410,29 @@ async function _waitForNewSessionNavigationSettlement(){
   // the user's requested target remains valid even when creation failed.
   try{await pending;}catch(_){}
 }
+let _blankPageSessionInFlight=null;
+async function _ensureBlankPageSession(workspace){
+  await _waitForNewSessionNavigationSettlement();
+  if(S.session)return S.session;
+  if(_blankPageSessionInFlight)return _blankPageSessionInFlight;
+  const targetWorkspace=String(
+    workspace||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||''
+  ).trim();
+  if(!targetWorkspace)return null;
+  _blankPageSessionInFlight=(async()=>{
+    // Reuse the canonical ownership transaction instead of assigning S.session
+    // from a parallel /api/session/new completion. This also inherits its
+    // generation, abort, disabled-reason, draft/file, and focus guarantees.
+    // These system-minted context sessions must not inherit toolsets staged on
+    // the empty composer; deliberate New Chat remains the only consumer.
+    S._pendingSessionToolsets=null;
+    S._profileSwitchWorkspace=targetWorkspace;
+    await newSession(false,{worktree:false});
+    return S.session||null;
+  })();
+  try{return await _blankPageSessionInFlight;}
+  finally{_blankPageSessionInFlight=null;}
+}
 const _newSessionPendingText=()=>t('new_session_creating')||'Creating new conversation…';
 const _emptyComposerModelOverrideHost=typeof window!=='undefined'?window:globalThis;
 
