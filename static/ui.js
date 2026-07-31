@@ -9600,25 +9600,28 @@ async function refreshSession() {
   const refreshSid=S.session.session_id;
   const refreshTicket=typeof _captureTranscriptReplacement==='function'
     ? _captureTranscriptReplacement()
-    : {sessionId:refreshSid,generation:_messagesGeneration,used:false};
+    : {sessionId:refreshSid,generation:typeof _messagesGeneration==='number'?_messagesGeneration:0,used:false};
   try {
     const data = await api(`/api/session?session_id=${encodeURIComponent(refreshSid)}`);
     if(!data||!data.session) return;
-    const commit=typeof _commitTranscriptReplacement==='function'
-      ? _commitTranscriptReplacement(refreshTicket, () => {
-        S.session = data.session;
-        S.messages = data.session.messages || [];
-        _messagesTruncated = !!data.session._messages_truncated;
-        _oldestIdx = data.session._messages_offset || 0;
-        if (typeof _mergePendingSessionMessage !== 'function') {
-          throw new Error('Pending-session merge helper unavailable');
-        }
-        _mergePendingSessionMessage(data.session, S.messages);
-        S.activeStreamId = data.session.active_stream_id || null;
-        syncTopbar(); _renderMessagesWithScrollSnapshot();
-        showToast('Conversation refreshed');
-      })
-      : false;
+    const applyRefresh=()=>{
+      S.session = data.session;
+      S.messages = data.session.messages || [];
+      _messagesTruncated = !!data.session._messages_truncated;
+      _oldestIdx = data.session._messages_offset || 0;
+      if (typeof _mergePendingSessionMessage !== 'function') {
+        throw new Error('Pending-session merge helper unavailable');
+      }
+      _mergePendingSessionMessage(data.session, S.messages);
+      S.activeStreamId = data.session.active_stream_id || null;
+      syncTopbar(); _renderMessagesWithScrollSnapshot();
+      showToast('Conversation refreshed');
+    };
+    if(typeof _commitTranscriptReplacement!=='function'){
+      applyRefresh();
+      return;
+    }
+    const commit=_commitTranscriptReplacement(refreshTicket, applyRefresh);
     if(!commit) return;
   } catch(e) { setStatus('Refresh failed: ' + e.message); }
 }
