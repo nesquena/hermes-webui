@@ -631,3 +631,107 @@ def test_read_jsonl_tail_handles_file_deleted_during_boundary_scan(tmp_path, mon
     summary = run_journal.latest_run_summary("s1", "r1", session_dir=tmp_path)
     # Must return a dict (safe summary), not raise.
     assert isinstance(summary, dict)
+
+
+def test_blank_line_before_oversized_partial_done_recovers_preceding_event(tmp_path, monkeypatch):
+    """Regression (reviewer round 7): a blank line between a valid event and a
+    crash-truncated oversized boundary record defeated recovery — the single
+    preceding-line scan found only the blank line, json.loads("") failed, and
+    the function returned None instead of continuing back to the valid event.
+    The fix loops backward across blank/malformed/non-dict lines until finding
+    a valid event, so a shape like ``token\\n\\n<oversized partial done>`` recovers
+    the token event (seq=1) and emits the recovery apperror."""
+    import json as _json
+    from api.run_journal import (
+        _SESSION_REPLAY_MAX_BYTES,
+        _run_path,
+        _read_jsonl,
+        _summary_from_events,
+        stale_interrupted_event,
+    )
+
+    session_id = "session_1"
+    run_id = "run_blank_before_oversized"
+    writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "hi"})  # seq=1, valid event
+
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    cap = _SESSION_REPLAY_MAX_BYTES
+
+    # Append a BLANK LINE, then an oversized crash-truncated done.
+    # Shape: token\n\n<oversized partial done with no closing brace/newline>
+    token_line = _json.dumps(
+        {"version": 1, "event_id": f"{run_id}:1", "seq": 1,
+         "event": "token", "type": "token", "terminal": False,
+         "payload": {"text": "hi"}}
+    )
+    oversized_partial = (
+        '{"version":1,"event_id":"' + run_id + ':2","seq":2,'
+        '"event":"done","type":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"t":"'
+        + "X" * (cap + 1000)
+    )  # no closing brace/newline — crash mid-write
+
+    with path.open("wb") as fh:
+        fh.write((token_line + "\n").encode("utf-8"))
+        fh.write(b"\n")  # BLANK LINE (the gap)
+        fh.write(oversized_partial.encode("utf-8"))
+
+    # Both tail readers must recover the token event (seq=1), not return
+    # last_seq=0 (the bug: they hit the blank line and stopped).
+    tail_summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    find_summary = find_run_summary(run_id, session_dir=tmp_path)
+
+    # Authoritative full read (the baseline: must match this).
+    full_events, _ = _read_jsonl(path)
+    authoritative = _summary_from_events(session_id, run_id, full_events)
+
+    # Both tail readers must agree with the full reader.
+    assert tail_summary["last_seq"] == 1, (
+        f"latest_run_summary returned last_seq={tail_summary['last_seq']} "
+        f"(expected 1) — the blank line defeated recovery"
+    )
+    assert tail_summary["event_count"] == 1, (
+        f"latest_run_summary returned event_count={tail_summary['event_count']} "
+        f"(expected 1) — the blank line defeated recovery"
+    )
+    assert tail_summary["terminal"] is False, (
+        f"latest_run_summary marked terminal={tail_summary['terminal']} "
+        f"(expected False) — the crash-truncated boundary must not fabricate terminal"
+    )
+
+    assert find_summary is not None, (
+        "find_run_summary returned None (expected dict with last_seq=1)"
+    )
+    assert find_summary["last_seq"] == 1, (
+        f"find_run_summary returned last_seq={find_summary['last_seq']} "
+        f"(expected 1) — the blank line defeated recovery"
+    )
+    assert find_summary["event_count"] == 1, (
+        f"find_run_summary returned event_count={find_summary['event_count']} "
+        f"(expected 1) — the blank line defeated recovery"
+    )
+    assert find_summary["terminal"] is False, (
+        f"find_run_summary marked terminal={find_summary['terminal']} "
+        f"(expected False)"
+    )
+
+    # Both tail readers must MATCH the authoritative full reader.
+    assert tail_summary["last_seq"] == authoritative["last_seq"], (
+        f"tail last_seq={tail_summary['last_seq']} but authoritative="
+        f"{authoritative['last_seq']}"
+    )
+    assert find_summary["last_seq"] == authoritative["last_seq"], (
+        f"find last_seq={find_summary['last_seq']} but authoritative="
+        f"{authoritative['last_seq']}"
+    )
+
+    # The recovery apperror must be emitted (stale_interrupted_event returns it).
+    monkeypatch.setattr("api.run_journal._default_session_dir", lambda: tmp_path)
+    recovery = stale_interrupted_event(session_id, run_id)
+    assert recovery is not None, (
+        "stale_interrupted_event returned None (expected apperror recovery event)"
+    )
+    assert recovery["event"] == "apperror", (
+        f"recovery event type={recovery['event']} (expected apperror)"
+    )
