@@ -91,12 +91,13 @@ def _insert_state_row(conn, sid, *, title=None, parent=None, ended_at=None, end_
     conn.commit()
 
 
-def _save_webui_session(sid, *, title, updated_at):
+def _save_webui_session(sid, *, title, updated_at, **metadata):
     session = Session(
         session_id=sid,
         title=title,
         messages=[{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}],
         updated_at=updated_at,
+        **metadata,
     )
     session.save(touch_updated_at=False)
     return session
@@ -129,6 +130,57 @@ def test_all_sessions_exposes_state_db_lineage_metadata_for_webui_json_sessions(
         assert rows["lineage_api_tip"].get("_lineage_root_id") == "lineage_api_root"
         assert rows["lineage_api_tip"].get("_compression_segment_count") == 2
         assert "_lineage_root_id" not in rows["lineage_api_root"]
+    finally:
+        conn.close()
+
+
+def test_state_db_webui_override_preserves_compressed_fork(_isolate):
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("fork_parent", title="Parent", updated_at=t0)
+        _save_webui_session(
+            "fork_root", title="Fork", updated_at=t0 + 10,
+            parent_session_id="fork_parent", session_source="fork",
+            pre_compression_snapshot=True,
+        )
+        _save_webui_session(
+            "fork_tip", title="Fork", updated_at=t0 + 30,
+            parent_session_id="fork_root", session_source="fork",
+        )
+        _insert_state_row(conn, "fork_parent", started_at=t0)
+        _insert_state_row(
+            conn, "fork_root", started_at=t0 + 10,
+            ended_at=t0 + 15, end_reason="compression",
+        )
+        _insert_state_row(
+            conn, "fork_mid", parent="fork_root", started_at=t0 + 16,
+            ended_at=t0 + 25, end_reason="compression",
+        )
+        _insert_state_row(conn, "fork_tip", parent="fork_mid", started_at=t0 + 26)
+
+        visible = [
+            row for row in all_sessions(include_lineage_metadata=False)
+            if row["session_id"] in {"fork_root", "fork_tip"}
+        ]
+        assert [row["session_id"] for row in visible] == ["fork_tip"]
+        tip = visible[0]
+        assert tip["session_source"] == "fork"
+        assert tip["relationship_type"] == "child_session"
+        assert tip["parent_session_id"] == "fork_parent"
+        assert tip["_lineage_root_id"] == "fork_root"
+        assert tip["_lineage_tip_id"] == "fork_tip"
+
+        state_tip = models.read_session_lineage_metadata(
+            _isolate, ["fork_tip"]
+        )["fork_tip"]
+        state_tip["source_tag"] = state_tip["session_source"] = "webui"
+        detail = routes._reconcile_session_detail_source_flags(
+            Session.load_metadata_only("fork_tip").compact(), state_tip
+        )
+        assert detail["session_source"] == "fork"
+        assert detail["parent_session_id"] == "fork_parent"
+        assert detail["_lineage_root_id"] == "fork_root"
     finally:
         conn.close()
 
