@@ -200,16 +200,12 @@ def _provider_assignment_in_new_session() -> str:
             || (_bareModel ? (window._activeProvider || (S.session && S.session.model_provider)) : null)
             || null;
 
-    Both lines live in the same 4000-char slice of newSession()'s
-    function body, so the helper can read them as a single contract
-    unit. Anchors on the ``=`` of the assignment (not a prose mention
-    in a comment) and on the guard declaration so future comments
-    referencing ``reqBody.model_provider`` cannot confuse it.
+    The helper first extracts the full ``newSession()`` function body, then
+    anchors on the assignment's ``=`` (not a prose mention in a comment) and
+    on the guard declaration. This keeps the test stable when unrelated setup
+    is inserted earlier in the function.
     """
-    src = _read("static/sessions.js")
-    idx = src.find("async function newSession(flash, options={}){")
-    assert idx != -1, "newSession() must be defined in static/sessions.js"
-    body = src[idx : idx + 7000]
+    body = _new_session_body()
     guard_start = body.find("const _bareModel")
     assert guard_start != -1, (
         "newSession() must declare a 'const _bareModel' guard for the "

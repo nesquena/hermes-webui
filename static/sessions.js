@@ -1457,7 +1457,25 @@ function _contextTransitionOwnerIsCurrent(owner){
     &&String((S.session&&S.session.profile)||S.activeProfile||'default')===owner.profile;
 }
 
+function _captureWorkspaceRepaintBoundary(){
+  return {
+    owner:_captureContextTransitionOwner(),
+    directory:String(S.currentDir||'.'),
+    treeGeneration:typeof _wsTreeGen==='number'?_wsTreeGen:null,
+  };
+}
+
+function _workspaceRepaintBoundaryIsCurrent(boundary){
+  if(!boundary||!_contextTransitionOwnerIsCurrent(boundary.owner))return false;
+  if(String(S.currentDir||'.')!==boundary.directory)return false;
+  if(boundary.treeGeneration!==null){
+    if(typeof _wsTreeGen!=='number'||_wsTreeGen!==boundary.treeGeneration)return false;
+  }
+  return true;
+}
+
 let _newSessionInFlight=null;
+let _newSessionRequest=null;
 let _blankPageSessionInFlight=null;
 async function _ensureBlankPageSession(workspace,contextIntent){
   return _runContextTransition('blank-page-session',contextIntent,async intent=>{
@@ -1600,16 +1618,41 @@ function _setNewSessionPending(pending){
 }
 
 async function newSession(flash, options={}){
-  if(_newSessionInFlight){
+  const existingContextIntent=options&&options.contextTransition;
+  if(_newSessionRequest){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
-    return _newSessionInFlight;
+    // A direct New Chat can already be queued behind the context intent that
+    // later discovers it also needs a new session (for example profile switch
+    // A followed by New Chat B). Joining B from A would deadlock: B waits for A
+    // to release the coordinator while A waits for B. Let the current owning
+    // intent start the one shared request; B will observe the same result when
+    // its queued coordinator slot is eventually released.
+    if(existingContextIntent&&!_newSessionRequest.started){
+      Promise.resolve(_newSessionRequest.start(existingContextIntent)).catch(()=>{});
+    }
+    return await _newSessionRequest.promise;
   }
+  let resolveRequest;
+  let rejectRequest;
+  const request={
+    started:false,
+    start:null,
+    promise:new Promise((resolve,reject)=>{
+      resolveRequest=resolve;
+      rejectRequest=reject;
+    }),
+  };
+  request.resolve=resolveRequest;
+  request.reject=rejectRequest;
+  _newSessionRequest=request;
+  _newSessionInFlight=request.promise;
   let focusRestoredComposerAfterAbort=false;
   let restoredComposerOwnerSid=null;
   let restoredComposerOwnerProfile=null;
-  const existingContextIntent=options&&options.contextTransition;
-  _newSessionInFlight=_runContextTransition(
-    'new-session',existingContextIntent,async contextIntent=>{
+  request.start=async contextIntent=>{
+    if(request.started)return request.promise;
+    request.started=true;
+    try{
     _setNewSessionPending(true);
     try{
     // Starting a brand-new chat must not carry named context blocks selected in
@@ -1867,7 +1910,6 @@ async function newSession(flash, options={}){
     // Refresh sidebar to include the newly created session (#3874).
     if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session')).catch(()=>{})}
     }finally{
-      _newSessionInFlight=null;
       _setNewSessionPending(false);
       if(focusRestoredComposerAfterAbort
         &&typeof _composerOwnerIsVisible==='function'
@@ -1879,8 +1921,25 @@ async function newSession(flash, options={}){
         if(input&&input.disabled!==true&&typeof input.focus==='function')input.focus();
       }
     }
-  });
-  return await _newSessionInFlight;
+    request.resolve();
+    return;
+    }catch(error){
+      request.reject(error);
+      throw error;
+    }finally{
+      if(_newSessionRequest===request){
+        _newSessionRequest=null;
+        _newSessionInFlight=null;
+      }
+    }
+  };
+  // Keep coordinator settlement separate from the shared result promise. The
+  // result may be started by an earlier owning intent to break an A→B→A wait
+  // cycle, while this queued slot still releases normally afterward.
+  Promise.resolve(
+    _runContextTransition('new-session',existingContextIntent,request.start)
+  ).catch(()=>{});
+  return await request.promise;
 }
 
 /**

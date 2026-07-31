@@ -20877,19 +20877,20 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
       confirmLabel:t('create')
     });
     if(!name||!name.trim()) return;
-    const owner=_captureContextTransitionOwner();
-    if(!_contextTransitionOwnerIsCurrent(owner))return;
+    const repaintBoundary=_captureWorkspaceRepaintBoundary();
+    const owner=repaintBoundary.owner;
+    if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
     const relPath=_workspaceJoinTargetPath(targetDir,name);
     const refreshDir=S.currentDir;
     try{
       await api('/api/file/create',{method:'POST',body:JSON.stringify({session_id:owner.sid,path:relPath,content:''})});
-      if(!_contextTransitionOwnerIsCurrent(owner))return;
+      if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
       showToast(t('created')+name.trim());
       delete S._dirCache[targetDir || '.'];
       await loadDir(refreshDir);
-      if(!_contextTransitionOwnerIsCurrent(owner))return;
+      if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
       openFile(relPath);
-    }catch(e){if(_contextTransitionOwnerIsCurrent(owner))setStatus(t('create_failed')+e.message);}
+    }catch(e){if(_workspaceRepaintBoundaryIsCurrent(repaintBoundary))setStatus(t('create_failed')+e.message);}
   });
 }
 
@@ -20917,17 +20918,18 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       confirmLabel:t('create')
     });
     if(!name||!name.trim()) return;
-    const owner=_captureContextTransitionOwner();
-    if(!_contextTransitionOwnerIsCurrent(owner))return;
+    const repaintBoundary=_captureWorkspaceRepaintBoundary();
+    const owner=repaintBoundary.owner;
+    if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
     const relPath=_workspaceJoinTargetPath(targetDir,name);
     const refreshDir=S.currentDir;
     try{
       await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:owner.sid,path:relPath})});
-      if(!_contextTransitionOwnerIsCurrent(owner))return;
+      if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
       showToast(t('folder_created')+name.trim());
       delete S._dirCache[targetDir || '.'];
       await loadDir(refreshDir);
-      if(!_contextTransitionOwnerIsCurrent(owner))return;
+      if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
       const absPath=owner.workspace?(targetDir==='.'?`${owner.workspace}/${name.trim()}`:`${owner.workspace}/${targetDir}/${name.trim()}`):null;
       if(absPath){
         const addAsSpace=await showConfirmDialog({
@@ -20937,18 +20939,18 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
           cancelLabel:t('status_no'),
           focusCancel:true
         });
-        if(!_contextTransitionOwnerIsCurrent(owner))return;
+        if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
         if(addAsSpace){
           try{
             const data=await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path:absPath})});
-            if(!_contextTransitionOwnerIsCurrent(owner))return;
+            if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
             if(typeof _workspaceList!=='undefined')_workspaceList=data.workspaces||_workspaceList||[];
             if(typeof renderWorkspacesPanel==='function')renderWorkspacesPanel(_workspaceList);
             showToast(t('workspace_added'));
-          }catch(e2){if(_contextTransitionOwnerIsCurrent(owner))setStatus((t('error_prefix')||'Error: ')+e2.message);}
+          }catch(e2){if(_workspaceRepaintBoundaryIsCurrent(repaintBoundary))setStatus((t('error_prefix')||'Error: ')+e2.message);}
         }
       }
-    }catch(e){if(_contextTransitionOwnerIsCurrent(owner))setStatus(t('folder_create_failed')+e.message);}
+    }catch(e){if(_workspaceRepaintBoundaryIsCurrent(repaintBoundary))setStatus(t('folder_create_failed')+e.message);}
   });
 }
 
