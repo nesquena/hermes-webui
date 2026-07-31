@@ -2611,11 +2611,18 @@ def _hidden_archived_sidebar_reference_sessions(
     def identity_key(row: dict, session_id: str) -> tuple[str, str, str, str]:
         return (*scope_key(row), str(session_id))
 
+    def base_identity_key(row: dict, session_id: str) -> tuple[str, str, str]:
+        source, profile, _project = scope_key(row)
+        return source, profile, str(session_id)
+
     archived_by_id = {
         identity_key(row, row.get("session_id")): row
         for row in archived_rows
         if isinstance(row, dict) and row.get("archived") and row.get("session_id")
     }
+    archived_by_base: dict[tuple[str, str, str], list[tuple[tuple[str, str, str, str], dict]]] = {}
+    for key, row in archived_by_id.items():
+        archived_by_base.setdefault(base_identity_key(row, row.get("session_id")), []).append((key, row))
     if not archived_by_id:
         return []
 
@@ -2630,20 +2637,30 @@ def _hidden_archived_sidebar_reference_sessions(
     for row in visible_rows:
         if not isinstance(row, dict):
             continue
-        parent_id = str(row.get("parent_session_id") or "").strip()
-        seen: set[str] = set()
-        while parent_id and parent_id not in seen:
-            seen.add(parent_id)
-            parent_key = identity_key(row, parent_id)
-            if parent_key in visible_ids:
-                break
-            parent = archived_by_id.get(parent_key)
-            if not parent:
-                break
-            if parent_key not in added:
-                references.append(parent)
-                added.add(parent_key)
-            parent_id = str(parent.get("parent_session_id") or "").strip()
+        pending = [(row, str(row.get("parent_session_id") or "").strip())]
+        visited: set[tuple[str, str, str, str]] = set()
+        while pending:
+            scope_row, parent_id = pending.pop(0)
+            if not parent_id:
+                continue
+            if scope_row.get("project_id") is None:
+                parent_candidates = archived_by_base.get(base_identity_key(scope_row, parent_id), [])
+            else:
+                parent_key = identity_key(scope_row, parent_id)
+                parent_candidates = (
+                    [(parent_key, archived_by_id[parent_key])]
+                    if parent_key in archived_by_id else []
+                )
+            for parent_key, parent in parent_candidates:
+                if parent_key in visited:
+                    continue
+                visited.add(parent_key)
+                if parent_key in visible_ids:
+                    continue
+                if parent_key not in added:
+                    references.append(parent)
+                    added.add(parent_key)
+                pending.append((parent, str(parent.get("parent_session_id") or "").strip()))
 
     return references
 
@@ -13084,6 +13101,10 @@ def handle_get(handler, parsed) -> bool:
         if not sid:
             return bad(handler, "session_id required", 400)
         profile = query.get("profile", [""])[0].strip() or None
+        if profile:
+            from api.profiles import _PROFILE_ID_RE
+            if not _PROFILE_ID_RE.fullmatch(profile):
+                return bad(handler, "invalid profile", 400)
         state_db_path = (
             _agent_state_db_path(profile=profile, fallback_to_active=False)
             if profile else _active_state_db_path()

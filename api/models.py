@@ -5833,28 +5833,42 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
         candidates = sessions[:_cap]
     else:
         candidates = sessions
-    try:
-        metadata = read_session_lineage_metadata(
-            _active_state_db_path(),
-            {str(s.get('session_id')) for s in candidates if s.get('session_id')},
-        )
-    except Exception:
-        return
-    _apply_sidebar_state_db_override_metadata(sessions, metadata)
-    for session in sessions:
-        sid = session.get('session_id')
-        if sid in metadata:
-            entry = dict(metadata[sid])
-            for key in (
-                '_state_db_title',
-                '_state_db_source',
-                '_state_db_source_tag',
-                '_state_db_raw_source',
-                '_state_db_session_source',
-                '_state_db_source_label',
-            ):
-                entry.pop(key, None)
-            session.update(entry)
+    candidates_by_profile: dict[str | None, list[dict]] = {}
+    for session in candidates:
+        raw_profile = session.get('profile_scope') or session.get('profile')
+        profile = str(raw_profile).strip() if raw_profile else None
+        candidates_by_profile.setdefault(profile, []).append(session)
+
+    for profile, profile_candidates in candidates_by_profile.items():
+        try:
+            state_db_path = (
+                _active_state_db_path()
+                if profile is None
+                else _agent_state_db_path(profile=profile, fallback_to_active=False)
+            )
+            if state_db_path is None:
+                continue
+            metadata = read_session_lineage_metadata(
+                state_db_path,
+                {str(s.get('session_id')) for s in profile_candidates if s.get('session_id')},
+            )
+        except Exception:
+            continue
+        _apply_sidebar_state_db_override_metadata(profile_candidates, metadata)
+        for session in profile_candidates:
+            sid = session.get('session_id')
+            if sid in metadata:
+                entry = dict(metadata[sid])
+                for key in (
+                    '_state_db_title',
+                    '_state_db_source',
+                    '_state_db_source_tag',
+                    '_state_db_raw_source',
+                    '_state_db_session_source',
+                    '_state_db_source_label',
+                ):
+                    entry.pop(key, None)
+                session.update(entry)
 
 
 def _diag_stage(diag, name: str) -> None:

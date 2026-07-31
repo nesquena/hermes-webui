@@ -319,6 +319,26 @@ def test_requested_profile_lineage_report_fails_closed_without_profile_state_db(
     read_report.assert_not_called()
 
 
+def test_lineage_report_endpoint_rejects_invalid_profile_before_db_resolution():
+    captured = {}
+
+    def fake_bad(handler, message, status=400):
+        captured["status"] = status
+        captured["message"] = message
+        return {"error": message}
+
+    handler = SimpleNamespace()
+    parsed = urlparse("/api/session/lineage/report?session_id=same-id&profile=../outside")
+    with patch.object(routes, "_agent_state_db_path") as resolve_db, \
+        patch.object(routes, "bad", side_effect=fake_bad), \
+        patch.object(routes, "read_session_lineage_report") as read_report:
+        routes.handle_get(handler, parsed)
+
+    assert captured == {"status": 400, "message": "invalid profile"}
+    resolve_db.assert_not_called()
+    read_report.assert_not_called()
+
+
 def test_lineage_report_endpoint_returns_404_for_unknown_session(tmp_path):
     conn = _ensure_state_db(tmp_path / "state.db")
     conn.close()

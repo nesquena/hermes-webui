@@ -6879,11 +6879,24 @@ function _sessionLineageKey(s, sessionIdsInList, sessionsById, lineageIndex){
   return raw&&scopedIdentity(s,raw);
 }
 
-function _sessionLineageContainsSession(s, sid){
+function _sessionLineageContainsSession(s, sid, lineageIndex){
   if(!s||!sid) return false;
-  if(s.session_id===sid) return true;
-  if(Array.isArray(s._lineage_segments)&&s._lineage_segments.some(seg=>seg&&seg.session_id===sid)) return true;
-  if(Array.isArray(s._child_sessions)&&s._child_sessions.some(child=>child&&child.session_id===sid)) return true;
+  const activeSession=typeof S!=='undefined'&&S&&S.session&&S.session.session_id===sid?S.session:null;
+  const hasActiveScope=!!(activeSession&&(
+    activeSession.profile_scope||activeSession.profile||
+    activeSession.project_id!==undefined||activeSession.session_source||
+    activeSession.source_tag||activeSession.raw_source
+  ));
+  const activeKey=hasActiveScope&&lineageIndex
+    ?lineageIndex.identityKey(activeSession,sid):null;
+  const matches=(candidate)=>{
+    if(!candidate||candidate.session_id!==sid) return false;
+    if(!activeKey||!lineageIndex) return true;
+    return lineageIndex.identityKey(candidate,sid)===activeKey;
+  };
+  if(matches(s)) return true;
+  if(Array.isArray(s._lineage_segments)&&s._lineage_segments.some(matches)) return true;
+  if(Array.isArray(s._child_sessions)&&s._child_sessions.some(matches)) return true;
   return false;
 }
 
@@ -6909,7 +6922,7 @@ function _resolveSessionIdFromSidebarLineage(sid, lineageIndex){
     );
     if(!lineageLike) continue;
     const key=_sidebarLineageKeyForRow(row,index);
-    if(key===sid||row.parent_session_id===sid||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid)){
+    if(key===sid||row.parent_session_id===sid||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid,index)){
       candidates.push(row);
     }
   }
@@ -8132,7 +8145,7 @@ function renderSessionListFromCache(){
     }
   }
   _ensureSessionVirtualScrollHandler(list);
-  const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
+  const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar,lineageIndex));
   const shouldAnchorActive=activeSidForSidebar&&activeIndex>=0&&(
     list.dataset.sessionVirtualActiveAnchor!==activeSidForSidebar||
     list.dataset.sessionVirtualFilter!==q
@@ -8262,7 +8275,7 @@ function renderSessionListFromCache(){
 
   function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');
-    const isActive=_sessionLineageContainsSession(s,activeSidForSidebar);
+    const isActive=_sessionLineageContainsSession(s,activeSidForSidebar,lineageIndex);
     const ownStreaming=_isSessionEffectivelyStreaming(s);
     const isStreaming=ownStreaming||!!s._child_session_streaming;
     _rememberRenderedStreamingState(s, ownStreaming);
