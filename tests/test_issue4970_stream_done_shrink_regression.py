@@ -235,6 +235,7 @@ def test_in_place_settled_worklog_collapse_defers_rows_without_full_rebuild():
     assert "data-anchor-stream-id" in body
     assert "_deferredWorklogRowsFromGroup(group)" in body
     assert "_captureWorklogDetailDisclosureState(group)" in body
+    assert "_worklogDetailsExpandedDefault()&&savedDisclosure!=='closed'" in body
     assert "group._deferredWorklogRows=rows" in body
     assert "group._deferredWorklogDisclosure=detailDisclosure&&detailDisclosure.size" in body
     assert "data-worklog-rows-deferred" in body
@@ -357,7 +358,7 @@ def test_in_place_collapse_preserves_detail_disclosure_for_deferred_materialize(
           }};
         }}
         function $(id) {{ return id === 'msgInner' ? inner : null; }}
-        function _readActivityDisclosureState() {{ return null; }}
+        function _readActivityDisclosureState() {{ return detailState; }}
         function _deferredWorklogRowsFromGroup(group) {{ assert.strictEqual(group, activeGroup); return rows; }}
         function _anchorSceneHasErroredTerminalState() {{ return false; }}
         function _syncToolCallGroupSummary(group) {{ assert.strictEqual(group, activeGroup); syncCount += 1; }}
@@ -374,10 +375,12 @@ def test_in_place_collapse_preserves_detail_disclosure_for_deferred_materialize(
         }}
         function requestAnimationFrame(callback) {{ callback(); }}
         let detailState = null;
+        let defaultExpanded = false;
         function _captureWorklogDetailDisclosureState(group) {{
           capturedGroup = group;
           return detailState;
         }}
+        function _worklogDetailsExpandedDefault() {{ return defaultExpanded; }}
         {collapse}
         {materialize}
 
@@ -407,6 +410,23 @@ def test_in_place_collapse_preserves_detail_disclosure_for_deferred_materialize(
         assert.strictEqual(restoredState, null);
         assert.strictEqual(renderedRows, rows);
         assert.strictEqual(syncCount, 2);
+
+        removedRows = false;
+        activeGroup = makeGroup();
+        detailState = null;
+        defaultExpanded = true;
+        assert.strictEqual(_collapseJustSettledWorklogInPlace('stream-1'), true);
+        assert.strictEqual(activeGroup._deferredWorklogRows, null);
+        assert.strictEqual(activeGroup.classList.contains('open'), true);
+        assert.strictEqual(activeGroup.classList.contains('tool-call-group-collapsed'), false);
+        assert.strictEqual(removedRows, false);
+
+        activeGroup = makeGroup();
+        detailState = 'closed';
+        assert.strictEqual(_collapseJustSettledWorklogInPlace('stream-1'), true);
+        assert.strictEqual(activeGroup._deferredWorklogRows, rows);
+        assert.strictEqual(activeGroup.classList.contains('tool-call-group-collapsed'), true);
+        assert.strictEqual(removedRows, true);
         console.log(JSON.stringify({{ok: true}}));
     """)
     res = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=30)

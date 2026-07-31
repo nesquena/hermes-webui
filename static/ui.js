@@ -13672,7 +13672,10 @@ function _collapseJustSettledWorklogInPlace(streamId){
   const message=match&&S.messages&&S.messages[Number(match[1])];
   const errored=!!(message&&message._anchor_activity_scene&&
     _anchorSceneHasErroredTerminalState(message._anchor_activity_scene));
-  if(!(savedDisclosure==='open'||(errored&&savedDisclosure!=='closed'))){
+  const keepOpen=savedDisclosure==='open'
+    || (errored&&savedDisclosure!=='closed')
+    || (_worklogDetailsExpandedDefault()&&savedDisclosure!=='closed');
+  if(!keepOpen){
     const detailDisclosure=typeof _captureWorklogDetailDisclosureState==='function'
       ? _captureWorklogDetailDisclosureState(group)
       : null;
