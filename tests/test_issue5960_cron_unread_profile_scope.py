@@ -702,6 +702,7 @@ function _syncSessionAttentionSoundState(){{}}
 function _pruneLineageReportCacheToVisibleSessions(){{}}
 function _requestedSessionSidebarSource(){{ return 'webui'; }}
 function _sessionListExcludeHiddenEnabled(){{ return false; }}
+function _buildSidebarLineageIndex(){{ return {{}}; }}
 function startStreamingPoll(){{}}
 function stopStreamingPoll(){{}}
 function ensureSessionTimeRefreshPoll(){{}}
@@ -824,6 +825,7 @@ function _syncSessionAttentionSoundState(){{}}
 function _pruneLineageReportCacheToVisibleSessions(){{}}
 function _requestedSessionSidebarSource(){{ return 'webui'; }}
 function _sessionListExcludeHiddenEnabled(){{ return false; }}
+function _buildSidebarLineageIndex(){{ return {{}}; }}
 function startStreamingPoll(){{}}
 function stopStreamingPoll(){{}}
 function ensureSessionTimeRefreshPoll(){{}}

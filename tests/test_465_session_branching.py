@@ -315,7 +315,7 @@ def test_branch_fork_sessions_do_not_collapse_into_parent_lineage():
     block = fn.group(0)
     assert "if(s.session_source==='fork') return null;" in block, \
         "Fork guard must remain in _sessionLineageKey to prevent compression-lineage merging"
-    assert "return raw&&(lineageIndex?lineageIndex.identityKey(s,raw):raw);" in block
+    assert "return raw&&scopedIdentity(s,raw);" in block
 
 
 def test_branch_fork_sessions_nest_under_parent():
