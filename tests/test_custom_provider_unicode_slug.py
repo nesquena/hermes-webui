@@ -88,6 +88,36 @@ class TestAsciiSlugFromName:
         slug = config._ascii_slug_from_name("a   b")
         assert slug == "a-b", f"Expected 'a-b', got {slug!r}"
 
+    def test_ascii_only_names_never_change(self):
+        """Regression: pure-ASCII provider IDs must not change for legacy compat."""
+        assert config._ascii_slug_from_name("Proxy") == "proxy"
+        assert config._ascii_slug_from_name("My-Proxy") == "my-proxy"
+        assert config._ascii_slug_from_name("Test123") == "test123"
+
+    def test_mixed_script_no_collision_with_ascii_projection(self):
+        """Names with CJK + ASCII must not collide with their ASCII projection."""
+        slug_mixed = config._ascii_slug_from_name("我的Proxy服务器")
+        slug_ascii = config._ascii_slug_from_name("Proxy")
+        assert slug_mixed != slug_ascii, (
+            f"Mixed-script name must not collide with ASCII projection: "
+            f"{slug_mixed!r} == {slug_ascii!r}"
+        )
+
+    def test_two_cjk_names_with_different_ascii_projections(self):
+        """Two CJK names with different ASCII projections must not collide.
+
+        Example: '东京-1' and '大阪-1' both strip to '1' in ASCII-only mode;
+        the hash suffix must distinguish them.
+        """
+        slug_a = config._ascii_slug_from_name("东京-1")
+        slug_b = config._ascii_slug_from_name("大阪-1")
+        assert slug_a != slug_b, (
+            f"Distinct CJK names with same ASCII projection must differ: "
+            f"{slug_a!r} == {slug_b!r}"
+        )
+        assert slug_a.startswith("1-"), f"Expected '1-<hash>', got {slug_a!r}"
+        assert slug_b.startswith("1-"), f"Expected '1-<hash>', got {slug_b!r}"
+
 
 # ── Integration: _custom_provider_slug_from_name ──────────────────────────────
 
@@ -108,6 +138,22 @@ class TestCustomProviderSlugFromName:
 
     def test_empty_name_returns_empty(self):
         assert config._custom_provider_slug_from_name("") == ""
+
+    def test_mixed_cjk_ascii_no_collision(self):
+        """Mixed CJK+ASCII provider name must not collide with ASCII-only name."""
+        slug_mixed = config._custom_provider_slug_from_name("我的Proxy服务器")
+        slug_ascii = config._custom_provider_slug_from_name("Proxy")
+        assert slug_mixed != slug_ascii, (
+            f"Full slug collision: {slug_mixed!r} == {slug_ascii!r}"
+        )
+
+    def test_two_cjk_ascii_names_no_collision(self):
+        """Two CJK names with same ASCII projection must produce distinct slugs."""
+        slug_a = config._custom_provider_slug_from_name("东京-1")
+        slug_b = config._custom_provider_slug_from_name("大阪-1")
+        assert slug_a != slug_b, (
+            f"Full slug collision: {slug_a!r} == {slug_b!r}"
+        )
 
 
 # ── API-key environment name consistency ──────────────────────────────────────
@@ -134,6 +180,22 @@ class TestApiKeyEnvName:
     def test_ascii_provider_env_name(self):
         pid = config._custom_provider_slug_from_name("My-Proxy")
         assert config._api_key_env_name(pid) == "CUSTOM_MY_PROXY_API_KEY"
+
+    def test_mixed_cjk_ascii_distinct_env_names(self):
+        """Mixed CJK+ASCII and ASCII-only provider → distinct env names."""
+        pid_mixed = config._custom_provider_slug_from_name("我的Proxy服务器")
+        pid_ascii = config._custom_provider_slug_from_name("Proxy")
+        assert config._api_key_env_name(pid_mixed) != config._api_key_env_name(pid_ascii), (
+            "Credential env names must differ for distinct providers"
+        )
+
+    def test_two_cjk_ascii_distinct_env_names(self):
+        """Two CJK names with same ASCII projection → distinct env names."""
+        pid_a = config._custom_provider_slug_from_name("东京-1")
+        pid_b = config._custom_provider_slug_from_name("大阪-1")
+        assert config._api_key_env_name(pid_a) != config._api_key_env_name(pid_b), (
+            "Credential env names must differ for distinct providers"
+        )
 
 
 # ── Route fallback parity ─────────────────────────────────────────────────────
@@ -163,3 +225,23 @@ class TestRouteFallbackParity:
         from api.routes import _custom_provider_slug_for_context
 
         assert config._custom_provider_slug_from_name("") == _custom_provider_slug_for_context("") == ""
+
+    def test_fallback_no_collision_mixed_cjk_ascii(self):
+        """Route fallback must not collide mixed CJK+ASCII with ASCII-only."""
+        from api.routes import _custom_provider_slug_for_context
+
+        slug_mixed = _custom_provider_slug_for_context("我的Proxy服务器")
+        slug_ascii = _custom_provider_slug_for_context("Proxy")
+        assert slug_mixed != slug_ascii, (
+            f"Route fallback collision: {slug_mixed!r} == {slug_ascii!r}"
+        )
+
+    def test_fallback_no_collision_two_cjk_ascii(self):
+        """Route fallback must not collide two CJK names with same ASCII projection."""
+        from api.routes import _custom_provider_slug_for_context
+
+        slug_a = _custom_provider_slug_for_context("东京-1")
+        slug_b = _custom_provider_slug_for_context("大阪-1")
+        assert slug_a != slug_b, (
+            f"Route fallback collision: {slug_a!r} == {slug_b!r}"
+        )
