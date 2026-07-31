@@ -12,6 +12,13 @@ restore: it snapshots the mapping and puts it back on exit, so a key that was
 absent is deleted, a key that was present is restored by identity, and a key
 holding ``None`` stays ``None``. ``tests/test_4413_seed_provider_models.py``
 already stubs ``sys.modules`` this way, including the ``None`` case.
+
+One constraint that comes with it: ``patch.dict`` restores by clearing the
+mapping and replacing it wholesale, so any module first imported inside the
+scope is evicted on exit and re-imported later as a new object. That is
+harmless for these suites, which import everything they touch at collection
+time, but it is the thing to check before reusing this helper around code
+that imports lazily.
 """
 from __future__ import annotations
 
