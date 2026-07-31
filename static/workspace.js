@@ -526,7 +526,7 @@ async function refreshOpenPreviewIfMutated(){
   await openFile(_previewCurrentPath, { bustCache: true });
 }
 
-function collectSessionArtifacts(){
+function collectSessionArtifacts(messagesInput, toolCallsInput){
   const items = [];
   const seen = new Set();
   const push = (path, source) => {
@@ -536,12 +536,14 @@ function collectSessionArtifacts(){
   };
   // Source 1: session-level tool call summaries (may be empty when messages
   // carry their own tool metadata — see _syncToolCallsForLoadedMessages).
-  for(const tc of (S.toolCalls || [])){
+  const toolCalls = Array.isArray(toolCallsInput) ? toolCallsInput : (S.toolCalls || []);
+  const messages = Array.isArray(messagesInput) ? messagesInput : (S.messages || []);
+  for(const tc of toolCalls){
     for(const a of _artifactCandidatesFromToolCall(tc)) push(a.path, a.kind || tc.name || 'tool');
   }
   // Source 2 & 3: message-level data — both text-mined diffs and structured
   // tool_calls / tool_use content blocks that survive the S.toolCalls clear.
-  for(const msg of (S.messages || [])){
+  for(const msg of messages){
     if(!msg) continue;
     const text = msg.content || msg.text || msg.message || '';
     // Text-mined diff/patch fences (existing path).
@@ -579,14 +581,15 @@ function renderSessionArtifacts(){
   const count = $('workspaceArtifactsCount');
   if(!root) return;
   const sid = S.session && S.session.session_id;
+  const startGeneration = typeof _messagesGeneration === 'number' ? _messagesGeneration : null;
   const artifactsVisible = typeof _workspaceArtifactsTabIsActive==='function' && _workspaceArtifactsTabIsActive();
   const hasTruncatedHistory = !!(
     sid &&
     typeof _messagesTruncated !== 'undefined' &&
     _messagesTruncated
   );
-  const _renderNow = () => {
-    const items = collectSessionArtifacts();
+  const _renderNow = (messagesInput, toolCallsInput) => {
+    const items = collectSessionArtifacts(messagesInput, toolCallsInput);
     if(count) count.textContent = String(items.length);
     if(!S.session){
       root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
@@ -629,7 +632,7 @@ function renderSessionArtifacts(){
     sid &&
     artifactsVisible &&
     !(S.busy || S.activeStreamId) &&
-    typeof _ensureAllMessagesLoaded === 'function' &&
+    typeof _readFullSessionSnapshot === 'function' &&
     typeof _messagesTruncated !== 'undefined' &&
     _messagesTruncated
   );
@@ -641,11 +644,15 @@ function renderSessionArtifacts(){
     _renderNow();
     return;
   }
-  return Promise.resolve(_ensureAllMessagesLoaded()).then(() => {
+  return Promise.resolve(_readFullSessionSnapshot(sid)).then((snapshot) => {
     if(root.isConnected === false) return;
-    if(!S.session || S.session.session_id !== sid || _messagesTruncated || S.busy || S.activeStreamId) return;
+    if(!S.session || S.session.session_id !== sid || S.busy || S.activeStreamId) return;
     if(!(typeof _workspaceArtifactsTabIsActive==='function'&&_workspaceArtifactsTabIsActive())) return;
-    _renderNow();
+    if(!snapshot || (startGeneration !== null && _messagesGeneration !== startGeneration)){
+      _renderNow();
+      return;
+    }
+    _renderNow(snapshot.messages, snapshot.toolCalls);
   }).catch(e => {
     console.warn('renderSessionArtifacts full-load failed:',e);
     if(root.isConnected === false) return;
