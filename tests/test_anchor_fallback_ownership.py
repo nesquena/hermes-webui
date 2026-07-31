@@ -691,6 +691,13 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           return true;
         }}
 
+        // Stub the wipe-guard helpers so eval'd renderMessages doesn't ReferenceError
+        // (these helpers live at module scope in ui.js and aren't included when we
+        // eval just the renderMessages source). The stubs mirror the tokenized
+        // ownership contract but reduce to a no-op on the fake DOM used here.
+        function _pinWipeMinHeight(inner,h){{ if(!inner||!inner.style||!inner.dataset||!(h>0)) return null; inner.dataset.wipeGuardToken='1'; inner.style.minHeight=Math.round(h)+'px'; return '1'; }}
+        function _releaseWipeMinHeight(inner,t){{ if(!inner||!inner.style||!inner.dataset||!t) return; if(inner.dataset.wipeGuardToken!==String(t)) return; inner.style.minHeight=inner.dataset.wipeGuardPrevMinHeight||''; delete inner.dataset.wipeGuardToken; }}
+
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
         eval({json.dumps(render_source)});
