@@ -11985,6 +11985,7 @@ async function checkUpdatesNow(channelOverride){
       const noGitParts=[];
       if(data.webui&&data.webui.no_git&&!data.webui.manual_update) noGitParts.push('WebUI');
       if(data.agent&&data.agent.no_git&&!data.agent.ignored) noGitParts.push('Agent');
+      const {hasDirty:_hasDirty}=_updateDirtyState(data);
       if(parts.length){
         let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
         if(manualInstruction) txt+=' · '+manualInstruction;
@@ -11994,6 +11995,12 @@ async function checkUpdatesNow(channelOverride){
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
       } else if(errorParts.length){
         if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
+        // Stale-check payloads can carry dirty:true; still surface the recovery affordance.
+        if(_hasDirty&&typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+      } else if(_hasDirty){
+        // Dirty-recovery takes priority over the no-git informational note (#4085 branch ordering).
+        if(status){status.textContent=t('settings_local_changes_detected');status.style.color='var(--accent)';}
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
       } else if(noGitParts.length){
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
       } else {

@@ -9903,6 +9903,16 @@ function _renderUpdateWhatsNewLinks(data){
   }
   _appendUpdateDiffLinks(container,targets,"What's new: ");
 }
+// Single source of truth for recoverable-dirty detection.  A target is
+// "recoverably dirty" when it has local modifications that a force-reset can
+// clean: git checkouts only; manual/no-git installs are excluded because they
+// have no tracked history to reset to.  boot.js and panels.js call this
+// instead of repeating the predicate inline.
+function _updateDirtyState(data){
+  const webuiDirty=!!(data&&data.webui&&data.webui.dirty&&!data.webui.no_git&&!data.webui.manual_update);
+  const agentDirty=!!(data&&data.agent&&data.agent.dirty&&!data.agent.no_git);
+  return {webuiDirty,agentDirty,hasDirty:webuiDirty||agentDirty,dirtyTarget:webuiDirty?'webui':(agentDirty?'agent':'')};
+}
 function _showUpdateBanner(data){
   const parts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
@@ -9910,6 +9920,7 @@ function _showUpdateBanner(data){
   if(webuiPart) parts.push(webuiPart);
   if(agentPart) parts.push(agentPart);
   window._updateData=data;
+  const {webuiDirty,agentDirty,hasDirty,dirtyTarget}=_updateDirtyState(data);
   const btnApply=$('btnApplyUpdate');
   if(btnApply){
     const webuiManual=!!(data&&data.webui&&data.webui.manual_update&&data.webui.behind>0);
@@ -9919,13 +9930,25 @@ function _showUpdateBanner(data){
     btnApply.disabled=!hasApplyTargets;
     btnApply.style.display=hasApplyTargets?'':'none';
     if(webuiManual){
-      const forceBtn=$('btnForceUpdate');
-      if(forceBtn){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
       const clearLockBtn=$('btnClearUpdateLock');
       if(clearLockBtn){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
+      // Manual WebUI blocks its own clean path but must not suppress a dirty agent.
+      const forceBtn=$('btnForceUpdate');
+      if(agentDirty){
+        if(forceBtn){forceBtn.style.display='inline-block';forceBtn.disabled=false;forceBtn.dataset.target='agent';}
+      } else {
+        if(forceBtn){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
+      }
+    } else if(hasDirty){
+      const forceBtn=$('btnForceUpdate');
+      if(forceBtn){forceBtn.style.display='inline-block';forceBtn.disabled=false;forceBtn.dataset.target=dirtyTarget;}
+    } else {
+      // Clean state (not manual, not dirty): reset any stale force affordance
+      const forceBtn=$('btnForceUpdate');
+      if(forceBtn){forceBtn.style.display='none';forceBtn.dataset.target='';}
     }
   }
-  if(!parts.length){
+  if(!parts.length&&!hasDirty){
     _renderUpdateWhatsNewLinks(data);
     const staleBanner=$('updateBanner');
     if(staleBanner) staleBanner.classList.remove('visible');
@@ -9934,7 +9957,13 @@ function _showUpdateBanner(data){
   const msg=$('updateMsg');
   if(msg){
     const manualInstruction=_formatManualUpdateInstruction(data&&data.webui);
-    msg.textContent='\u2B06 '+parts.join(', ')+' available'+(manualInstruction?' · '+manualInstruction:'');
+    let baseMsg=parts.length?('\u2B06 '+parts.join(', ')+' available'+(manualInstruction?' \u00B7 '+manualInstruction:'')):'';
+    if(hasDirty){
+      const dirtyLabel=dirtyTarget==='webui'?'WebUI':'Agent';
+      const dirtyNote=_i18nUpdateText('settings_local_changes_detected','Local changes detected')+' in '+dirtyLabel+(parts.length?'':'. Use "Force update" to restore a clean install')+'.';
+      baseMsg=baseMsg?(baseMsg+' \u00B7 '+dirtyNote):('\u26A0\uFE0F '+dirtyNote);
+    }
+    msg.textContent=baseMsg;
   }
   const banner=$('updateBanner');
   if(banner) banner.classList.add('visible');
@@ -10193,8 +10222,13 @@ async function _readHealthServerIdentity() {
   }
 }
 async function forceUpdate(btn){
+  if(window._updateApplyInFlight) return;
   const target=btn&&btn.dataset.target;
   if(!target) return;
+  // Capture channel before the dialog: a concurrent recheck can replace _updateData while the
+  // dialog is open, which would otherwise submit a different channel than the one the user saw.
+  const _ch=window._updateData?.[target]?.channel;
+  const channel=(_ch==='stable'||_ch==='experimental')?_ch:undefined;
   const confirmed=await showConfirmDialog({
     title:'Force update '+target+'?',
     message:'This will discard all local changes and delete untracked files in the '+target+' repo, then reset to the latest remote version. This cannot be undone.',
@@ -10203,24 +10237,45 @@ async function forceUpdate(btn){
     focusCancel:true,
   });
   if(!confirmed) return;
+  window._updateApplyInFlight=true;
   btn.disabled=true;btn.textContent='Force updating\u2026';
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';}
   try{
     const baselineServerIdentity = await _readHealthServerIdentity();
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000});
+    const body=channel?{target,channel}:{target};
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(body),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';
+      window._updateApplyInFlight=false;
       return;
     }
-    showToast('Force update applied — restarting…');
+    if(res.up_to_date){
+      // No compare ref on this channel (e.g. stable HEAD already past latest stable tag):
+      // the backend did not touch the tree. Show as informational in the banner message area,
+      // not as an error. Hide the force button — pressing again would produce the same outcome.
+      const infoMsg=res.message||'No remote update to reset to on this channel — local changes remain unchanged. Switch to Experimental or update manually.';
+      const bannerMsg=$('updateMsg');
+      if(bannerMsg) bannerMsg.textContent='ℹ️ '+infoMsg;
+      const bannerEl=$('updateBanner');
+      if(bannerEl) bannerEl.classList.add('visible');
+      const forceBtn=$('btnForceUpdate');
+      if(forceBtn){forceBtn.style.display='none';forceBtn.dataset.target='';}
+      btn.disabled=true;btn.textContent='Force update';
+      window._updateApplyInFlight=false;
+      return;
+    }
+    showToast('Force update applied \u2014 restarting\u2026');
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
     _waitForServerThenReload({baselineServerIdentity});
+    // _updateApplyInFlight intentionally stays true: the page will reload, and clearing
+    // it here would open a double-submit window while _waitForServerThenReload is pending.
   }catch(e){
     if(errEl){errEl.textContent='Force update failed: '+e.message;errEl.style.display='block';}
     btn.disabled=false;btn.textContent='Force update';
+    window._updateApplyInFlight=false;
   }
 }
 
