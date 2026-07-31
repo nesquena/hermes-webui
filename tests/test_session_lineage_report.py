@@ -247,6 +247,42 @@ def test_lineage_report_endpoint_is_read_only_and_uses_active_state_db(tmp_path)
         conn.close()
 
 
+def test_lineage_report_endpoint_selects_requested_profile_state_db(tmp_path):
+    active_db = tmp_path / "active.db"
+    profile_db = tmp_path / "work.db"
+    active = _ensure_state_db(active_db)
+    profile = _ensure_state_db(profile_db)
+    try:
+        _insert_state_row(active, "same-id", started_at=time.time() - 10)
+        _insert_state_row(profile, "same-id", started_at=time.time() - 100)
+        captured = {}
+        requested_profiles = []
+
+        def fake_j(handler, data, status=200, **_kwargs):
+            captured["status"] = status
+            captured["data"] = data
+            return data
+
+        handler = SimpleNamespace()
+        parsed = urlparse("/api/session/lineage/report?session_id=same-id&profile=work")
+        def profile_state_db_path(*, profile):
+            requested_profiles.append(profile)
+            return profile_db
+
+        with patch.object(routes, "_active_state_db_path", return_value=active_db), \
+            patch.object(routes, "_agent_state_db_path", side_effect=profile_state_db_path), \
+            patch.object(routes, "j", side_effect=fake_j):
+            routes.handle_get(handler, parsed)
+
+        assert captured["status"] == 200
+        assert requested_profiles == ["work"]
+        assert captured["data"]["session_id"] == "same-id"
+        assert captured["data"]["tip_session_id"] == "same-id"
+    finally:
+        active.close()
+        profile.close()
+
+
 def test_lineage_report_endpoint_returns_404_for_unknown_session(tmp_path):
     conn = _ensure_state_db(tmp_path / "state.db")
     conn.close()

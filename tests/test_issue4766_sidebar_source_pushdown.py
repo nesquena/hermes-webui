@@ -199,6 +199,48 @@ def test_sidebar_source_webui_includes_hidden_archived_parent_reference(monkeypa
     assert body["sidebar_reference_sessions"][0]["_sidebar_reference_only"] is True
 
 
+def test_hidden_archived_reference_identity_includes_profile_and_project():
+    visible = [
+        {
+            "session_id": "child",
+            "profile": "work",
+            "profile_scope": "work",
+            "project_id": "projA",
+            "parent_session_id": "parent",
+        },
+        {
+            "session_id": "child",
+            "profile": "work",
+            "profile_scope": "work",
+            "project_id": "projB",
+            "parent_session_id": "parent",
+        },
+    ]
+    archived = [
+        {
+            "session_id": "parent",
+            "profile": "work",
+            "profile_scope": "work",
+            "project_id": "projA",
+            "archived": True,
+        },
+        {
+            "session_id": "parent",
+            "profile": "work",
+            "profile_scope": "work",
+            "project_id": "projB",
+            "archived": True,
+        },
+    ]
+
+    references = routes._hidden_archived_sidebar_reference_sessions(visible, archived)
+
+    assert [(row["profile_scope"], row["project_id"]) for row in references] == [
+        ("work", "projA"),
+        ("work", "projB"),
+    ]
+
+
 def test_sidebar_source_cli_excludes_webui_rows(monkeypatch):
     rows = _session_rows(webui_count=30, cli_count=20)
     _install_common_monkeypatches(monkeypatch, rows)
@@ -455,6 +497,10 @@ def test_apply_payload_and_tab_count_helpers_cover_old_and_new_payloads():
     apply_fn = _extract_function(src, "_applySessionListPayload")
     count_fn = _extract_function(src, "_sessionSourceTabCount")
     clear_fn = _extract_function(src, "_clearSessionSourceTabCounts")
+    profile_fn = _extract_function(src, "_sessionProfileScope")
+    source_fn = _extract_function(src, "_sidebarLineageSourceBucket")
+    readonly_fn = _extract_function(src, "_isReadOnlySession")
+    index_fn = _extract_function(src, "_buildSidebarLineageIndex")
     script = f"""
 global.window = {{ _showCliSessions: true }};
 global._otherProfileCount = 0;
@@ -477,10 +523,14 @@ global._lastSessionListRenderSig = null;
 global._activeProject = null;
 global.NO_PROJECT_FILTER = '__none__';
 global._showAllProfiles = false;
-global._sessionSourceFilter = 'webui';
+        global._sessionSourceFilter = 'webui';
 global._renamingSid = null;
 global._sessionActionMenu = null;
-global.S = {{ activeProfile: 'default' }};
+        global.S = {{ activeProfile: 'default' }};
+        {profile_fn}
+        {source_fn}
+        {readonly_fn}
+        {index_fn}
 global._reconcileActiveSessionIdleStateFromList = rows => rows;
 global._mergeOptimisticFirstTurnSessions = rows => rows;
 global._sessionListRenderSignature = () => '';

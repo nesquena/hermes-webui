@@ -7036,8 +7036,10 @@ function _fetchLineageReportForRow(s,lineageKey){
   if(_lineageReportCache.has(key)) return Promise.resolve(_lineageReportCache.get(key));
   if(_lineageReportInflight.has(key)) return _lineageReportInflight.get(key);
   const generation=_lineageReportCacheGeneration;
+  const profile=s&&String(s.profile_scope||s.profile||'').trim();
+  const profileQuery=profile?'&profile='+encodeURIComponent(profile):'';
   let request;
-  request=api('/api/session/lineage/report?session_id='+encodeURIComponent(s.session_id))
+  request=api('/api/session/lineage/report?session_id='+encodeURIComponent(s.session_id)+profileQuery)
     .then(report=>{
       if(generation===_lineageReportCacheGeneration&&_lineageReportInflight.get(key)===request){
         _lineageReportCache.set(key,(report&&report.found!==false)?report:{error:true});
