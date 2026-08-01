@@ -23,7 +23,6 @@ import sys
 import threading
 import time
 import traceback
-import unicodedata
 import urllib.error
 import urllib.request
 import uuid
