@@ -62,6 +62,7 @@ def test_list_recovery_updates_authoritative_workspace_and_visible_controls():
 const events=[];
 const S={{session:{{session_id:'sid-1',workspace:'/deleted'}},_dirCache:{{old:true}}}};
 let _wsTreeGen=0;
+let _wsNavigationGen=0;
 function bumpWorkspaceTreeGen(){{_wsTreeGen+=1;return _wsTreeGen;}}
 function _restoreExpandedDirs(){{events.push(['restore',S.session.workspace]);}}
 function _workspaceRouteForPath(){{return '';}}
@@ -111,6 +112,7 @@ const S={{
   messages:[],busy:false,_dirCache:{{}},_expandedDirs:new Set()
 }};
 let _wsTreeGen=0;
+let _wsNavigationGen=0;
 let listCalls=0;
 let resolveOldList;
 const oldList=new Promise(resolve=>{{resolveOldList=resolve;}});

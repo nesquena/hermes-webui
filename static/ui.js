@@ -20887,8 +20887,8 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
       if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
       showToast(t('created')+name.trim());
       delete S._dirCache[targetDir || '.'];
-      await loadDir(refreshDir);
-      if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
+      const refreshCommitted=await loadDir(refreshDir);
+      if(!refreshCommitted||!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
       openFile(relPath);
     }catch(e){if(_workspaceRepaintBoundaryIsCurrent(repaintBoundary))setStatus(t('create_failed')+e.message);}
   });
@@ -20928,8 +20928,8 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
       showToast(t('folder_created')+name.trim());
       delete S._dirCache[targetDir || '.'];
-      await loadDir(refreshDir);
-      if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
+      const refreshCommitted=await loadDir(refreshDir);
+      if(!refreshCommitted||!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
       const absPath=owner.workspace?(targetDir==='.'?`${owner.workspace}/${name.trim()}`:`${owner.workspace}/${targetDir}/${name.trim()}`):null;
       if(absPath){
         const addAsSpace=await showConfirmDialog({

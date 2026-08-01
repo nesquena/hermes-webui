@@ -15,6 +15,7 @@ UI_JS = ROOT.joinpath("static", "ui.js").read_text(encoding="utf-8")
 BOOT_JS = ROOT.joinpath("static", "boot.js").read_text(encoding="utf-8")
 MESSAGES_JS = ROOT.joinpath("static", "messages.js").read_text(encoding="utf-8")
 PANELS_JS = ROOT.joinpath("static", "panels.js").read_text(encoding="utf-8")
+WORKSPACE_JS = ROOT.joinpath("static", "workspace.js").read_text(encoding="utf-8")
 
 
 def _function(source: str, name: str, next_marker: str) -> str:
@@ -83,6 +84,14 @@ def _switch_to_profile_function() -> str:
         PANELS_JS,
         "switchToProfile",
         "\n\nfunction openProfileCreate(",
+    )
+
+
+def _load_dir_function() -> str:
+    return _async_function(
+        WORKSPACE_JS,
+        "loadDir",
+        "\n\nfunction refreshWorkspacePanel(",
     )
 
 
@@ -1038,6 +1047,105 @@ def test_file_create_completion_never_repaints_newer_workspace_state(
     assert result["loads"] == [], "the completed request must not reload the old directory"
     assert result["opens"] == [], "the completed request must not open into the new directory"
     assert result["confirms"] == 0, "a stale folder completion must not ask a follow-up"
+
+
+def _run_held_directory_reload_harness(entry: str, response_order: str) -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    calls = {
+        "promptNewFile": "promptNewFile('.')",
+        "promptNewFolder": "promptNewFolder('.')",
+    }
+    script = textwrap.dedent(
+        f"""
+        {_wait_for_new_session_navigation_function()}
+        {_blank_page_mint_function(entry)}
+        {_load_dir_function()}
+        function deferred(){{let resolve;const promise=new Promise(r=>{{resolve=r;}});return {{promise,resolve}};}}
+        async function spinUntil(predicate){{for(let i=0;i<200;i++){{if(predicate())return;await Promise.resolve();}}throw new Error('timeout');}}
+        const listA=deferred();const listB=deferred();const listRequests=[];const projections=[];const opens=[];let confirms=0;let _wsTreeGen=0;let _wsNavigationGen=0;
+        const S={{session:{{session_id:'source-session',profile:'default',workspace:'/workspace-a'}},messages:[],activeProfile:'default',_profileDefaultWorkspace:'/workspace-a',currentDir:'A',entries:[],_dirCache:{{}},_expandedDirs:new Set(),busy:false}};
+        function api(path,options){{
+          if(path==='/api/file/create'||path==='/api/file/create-dir')return Promise.resolve({{}});
+          const requested=new URL(path,'http://localhost').searchParams.get('path');
+          listRequests.push(requested);
+          if(requested==='A')return listA.promise;
+          if(requested==='B')return listB.promise;
+          throw new Error(`unexpected API path: ${{path}}`);
+        }}
+        function showPromptDialog(){{return Promise.resolve('created-item');}}
+        function showConfirmDialog(){{confirms+=1;return Promise.resolve(false);}}
+        function showToast(){{}} function setStatus(value){{throw new Error(value);}}
+        function t(k){{return k;}} function _workspacePathIsReadOnly(){{return false;}}
+        function _workspaceCreateTargetLabel(v){{return v;}} function _workspaceJoinTargetPath(d,n){{return d==='.'?n:`${{d}}/${{n}}`;}}
+        function _workspaceRouteForPath(){{return null;}} function _restoreExpandedDirs(){{}}
+        function renderBreadcrumb(){{projections.push(`breadcrumb:${{S.currentDir}}:${{S.entries.map(x=>x.name).join(',')}}`);}}
+        function renderFileTree(){{projections.push(`tree:${{S.currentDir}}:${{S.entries.map(x=>x.name).join(',')}}`);}}
+        function renderSessionArtifacts(){{projections.push(`artifacts:${{S.currentDir}}:${{S.entries.map(x=>x.name).join(',')}}`);}}
+        function clearPreview(){{projections.push(`preview:${{S.currentDir}}`);}}
+        function refreshOpenPreviewIfMutated(){{return Promise.resolve();}} function _refreshGitBadge(){{}}
+        function _workspaceEscapeGrantForPath(){{return null;}} function openFile(path){{opens.push(path);}}
+        function renderWorkspacesPanel(){{}} let _workspaceList=[];
+        (async()=>{{
+          const action={calls[entry]};
+          await spinUntil(()=>listRequests.includes('A'));
+          if('{response_order}'==='current'){{
+            listA.resolve({{entries:[{{name:'from-A'}}]}});
+            await action;
+            process.stdout.write(JSON.stringify({{currentDir:S.currentDir,entries:S.entries.map(x=>x.name),projections,opens,confirms}}));
+            return;
+          }}
+          const navigationB=loadDir('B');
+          await spinUntil(()=>S.currentDir==='B');
+          if('{response_order}'==='A-then-B'){{
+            listA.resolve({{entries:[{{name:'from-A'}}]}});
+            await Promise.resolve();await Promise.resolve();
+            listB.resolve({{entries:[{{name:'from-B'}}]}});
+          }}else{{
+            listB.resolve({{entries:[{{name:'from-B'}}]}});
+            await navigationB;
+            listA.resolve({{entries:[{{name:'from-A'}}]}});
+          }}
+          await Promise.all([action,navigationB]);
+          process.stdout.write(JSON.stringify({{currentDir:S.currentDir,entries:S.entries.map(x=>x.name),projections,opens,confirms}}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = subprocess.run(
+        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+@pytest.mark.parametrize("entry", ["promptNewFile", "promptNewFolder"])
+@pytest.mark.parametrize("response_order", ["A-then-B", "B-then-A"])
+def test_held_create_reload_cannot_overwrite_newer_directory(entry, response_order):
+    result = _run_held_directory_reload_harness(entry, response_order)
+    assert result["currentDir"] == "B"
+    assert result["entries"] == ["from-B"]
+    assert not any("from-A" in projection for projection in result["projections"])
+    assert result["opens"] == []
+    assert result["confirms"] == 0
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected_opens", "expected_confirms"),
+    [
+        ("promptNewFile", ["created-item"], 0),
+        ("promptNewFolder", [], 1),
+    ],
+)
+def test_current_create_reload_commits_and_runs_follow_up(
+    entry, expected_opens, expected_confirms
+):
+    result = _run_held_directory_reload_harness(entry, "current")
+    assert result["currentDir"] == "A"
+    assert result["entries"] == ["from-A"]
+    assert any("from-A" in projection for projection in result["projections"])
+    assert result["opens"] == expected_opens
+    assert result["confirms"] == expected_confirms
 
 
 def test_profile_owned_new_chat_cannot_deadlock_with_a_queued_new_chat():
