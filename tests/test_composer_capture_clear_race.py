@@ -137,10 +137,12 @@ def _run_reentrant_guard_in_node(composer_value: str):
         // Minimal in-flight state: a send is already running for sid-1.
         let _sendInProgress = true;
         let _sendInProgressSid = 'sid-1';
+        let _sendInProgressContext = null;
         const S = { session: { session_id: 'sid-1' }, pendingFiles: [], activeProfile: 'default' };
 
         // Stubs the guard branch touches.
         function _chatPayloadModelState(){ return { model: 'm', model_provider: 'p' }; }
+        function _sendSessionSnapshot(){ return { session_id: 'sid-1', profile: 'default' }; }
         function queueSessionMessage(sid, payload){ queued.push({ sid, payload }); }
         function _clearComposerAfterQueuedSelectionSend(){ state.input.value = ''; }
         function _clearComposerDraft(){}

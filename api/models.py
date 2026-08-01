@@ -1800,6 +1800,8 @@ class Session:
             self.raw_source,
             self.session_source,
         )
+        if is_cron_session(self.session_id, next((source for source in source_values if source), None)):
+            return False
         if any(
             normalize_agent_session_source(source).get('session_source')
             in {'cron', 'background', 'webhook', 'subagent'}

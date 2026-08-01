@@ -76,7 +76,7 @@ def test_malformed_oversized_and_raw_values_are_dropped():
 
 
 def test_path_shaped_skill_identifiers_match_agent_lookup_guards():
-    for value in ("C:/private", r"C:\private", "foo/../bar", "../outside"):
+    for value in ("C:/private", r"C:\private", "foo/../bar", "../outside", "./foo", "foo/./bar"):
         assert normalize_skill_provenance({value: 1}) == {}
 
 
@@ -85,6 +85,7 @@ def test_opaque_skill_identifiers_preserve_agent_names_and_reject_qualified_path
         "中文 技能": 1,
         "category/analysis skill": 2,
         "plugin:分析助手": 1,
+        "p:one-character-namespace": 1,
     }
     assert normalize_skill_provenance(valid) == valid
 
@@ -96,6 +97,30 @@ def test_opaque_skill_identifiers_preserve_agent_names_and_reject_qualified_path
         "function_result": 1,
     }
     assert normalize_skill_provenance(rejected) == {}
+
+
+def test_linked_file_fetch_survives_skill_metadata_failure(monkeypatch, tmp_path):
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    linked_file = skill_dir / "references" / "api.md"
+    linked_file.parent.mkdir()
+    linked_file.write_text("linked file", encoding="utf-8")
+    response = {}
+
+    monkeypatch.setattr(routes, "_active_skills_dir", lambda: tmp_path)
+    monkeypatch.setattr(routes, "_active_skill_search_dirs", lambda _directory: [tmp_path])
+    monkeypatch.setattr(routes, "_find_skill_in_dirs", lambda *_args: (skill_dir, skill_dir / "SKILL.md"))
+    monkeypatch.setattr(routes, "_skill_view_from_file", lambda *_args: (_ for _ in ()).throw(UnicodeError("bad metadata")))
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **kwargs: response.update(payload) or True)
+
+    assert routes.handle_get(
+        _RouteHandler("GET"),
+        SimpleNamespace(
+            path="/api/skills/content",
+            query=urlencode({"name": "skill", "file": "references/api.md"}),
+        ),
+    ) is True
+    assert response == {"content": "linked file", "path": "references/api.md"}
 
 
 def test_bundle_resolver_preserves_its_existing_loaded_skills_response(monkeypatch):
@@ -195,7 +220,7 @@ def test_bundle_route_records_session_and_separates_session_errors(monkeypatch):
         lambda _handler, message, status=400: errors.update(message=message, status=status) or True,
     )
     assert routes.handle_post(handler, parsed) is True
-    assert errors == {"message": "Session not found", "status": 404}
+    assert errors == {}
 
 
 def test_provenance_writer_saves_only_after_locked_session_recheck(monkeypatch):
@@ -237,7 +262,7 @@ def test_session_lineage_variants_preserve_or_reject_provenance():
 
 def test_cron_webhook_and_read_only_variants_reject_writes():
     ordinary = Session(session_id="cron_issue6593")
-    assert ordinary.record_server_skill_names(["client"]) is True
+    assert ordinary.record_server_skill_names(["client"]) is False
 
     variants = [
         {"source_tag": "cron"},

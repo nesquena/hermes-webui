@@ -1356,7 +1356,6 @@ async function send(){
   const _sendOwnerChanged=()=>!!_sendOwnerSid&&String(S&&S.session&&S.session.session_id||'').trim()!==_sendOwnerSid;
   const _abortIfSendOwnerChanged=()=>{
     if(!_sendOwnerChanged())return false;
-    _clearStaleSend(_sendOwnerSid);
     return true;
   };
   if(_sendOwnerSid){
@@ -1623,7 +1622,7 @@ async function send(){
   if(!S.session){await newSession();await renderSessionList();_adoptSendOwner();}
   if(_abortIfSendOwnerChanged())return;
 
-  const activeSid=_sendOwnerSid||S.session.session_id;
+  const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
   _sendInProgressContext=_sendSessionSnapshot(activeSid);
   if(!_sendInProgressContext)return;
@@ -1790,7 +1789,7 @@ async function send(){
   let modelStateForPostStart;
   let explicitPickForPostStart;
   try{
-    const _modelState={model:_chatSession.model,model_provider:_chatSession.model_provider};
+    const _modelState=_chatPayloadModelState();
     modelStateForPostStart=_modelState;
     const _pendingPick=(typeof _readPendingSessionModel==='function')
       ? _readPendingSessionModel(activeSid)
@@ -1822,10 +1821,8 @@ async function send(){
     explicitPickForPostStart=_explicitPick;
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:_chatSession.session_id,message:msgText,
-      // S.session.model remains authoritative; the helper only resolves a
-      // matching provider fallback for the same outgoing model.
-      model:_chatSession.model,workspace:_chatSession.workspace,
-      model_provider:_chatSession.model_provider,
+      model:_modelState.model,workspace:_chatSession.workspace,
+      model_provider:_modelState.model_provider,
       profile:_chatSession.profile,
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,

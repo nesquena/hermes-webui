@@ -13652,15 +13652,16 @@ def handle_get(handler, parsed) -> bool:
                 return bad(handler, "Invalid file path", 400)
             if not target.exists() or not target.is_file():
                 return bad(handler, "File not found", 404)
-            resolved = _skill_view_from_file(skill_dir, _skill_md)
+            try:
+                resolved = _skill_view_from_file(skill_dir, _skill_md)
+            except Exception:
+                resolved = None
             if isinstance(resolved, dict) and resolved.get("success") is True:
                 recorded = _record_session_skill_provenance(
                     qs.get("session_id", [""])[0],
                     handler,
                     resolved.get("name"),
                 )
-                if qs.get("session_id", [""])[0] and recorded is None:
-                    return bad(handler, "Session not found", 404)
             return j(
                 handler,
                 {"content": target.read_text(encoding="utf-8"), "path": file_path},
@@ -13674,8 +13675,6 @@ def handle_get(handler, parsed) -> bool:
                 handler,
                 data.get("name"),
             )
-            if qs.get("session_id", [""])[0] and recorded is None:
-                return bad(handler, "Session not found", 404)
         return j(handler, data)
 
     # ── Memory API (GET) ──
@@ -15550,8 +15549,6 @@ def handle_post(handler, parsed) -> bool:
                 handler,
                 result.get("loaded_skills"),
             )
-            if recorded is None:
-                return bad(handler, "Session not found", 404)
         return j(handler, result)
 
     if parsed.path == "/api/commands/exec":

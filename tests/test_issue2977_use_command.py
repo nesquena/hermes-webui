@@ -138,6 +138,9 @@ def test_send_payload_keeps_session_context_atomic_across_awaits():
     assert "uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid" in src
     assert src.count("if(!_sendSessionSnapshot(activeSid)){_clearStaleSend(activeSid);return;}") >= 2
     assert "session_id:_chatSession.session_id" in src
+    assert "const _modelState=_chatPayloadModelState();" in src
+    assert "model:_modelState.model" in src
+    assert "model_provider:_modelState.model_provider" in src
     assert "workspace:_chatSession.workspace" in src
     assert "profile:_chatSession.profile" in src
     assert "staleError.code='SESSION_CHANGED'" in src

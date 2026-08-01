@@ -8887,13 +8887,6 @@ def _run_agent_streaming(
 
             def on_tool_complete(tool_call_id, name, args, function_result):
                 try:
-                    _record_streaming_skill_provenance(
-                        s,
-                        session_id,
-                        name,
-                        function_result,
-                        ephemeral=ephemeral,
-                    )
                     _record_live_tool_complete(tool_call_id, name, function_result)
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
@@ -8942,6 +8935,16 @@ def _run_agent_streaming(
                     put('metering', _tool_stats)
                 except Exception:
                     logger.debug('Failed to update live prompt estimate on tool completion', exc_info=True)
+                try:
+                    _record_streaming_skill_provenance(
+                        s,
+                        getattr(s, 'session_id', None) or session_id,
+                        name,
+                        function_result,
+                        ephemeral=ephemeral,
+                    )
+                except Exception:
+                    logger.debug('Failed to persist streaming skill provenance', exc_info=True)
 
             _AIAgent = _get_ai_agent()
             if _AIAgent is None:

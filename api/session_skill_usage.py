@@ -31,7 +31,7 @@ _RAW_TOOL_INTERNAL_IDENTIFIERS = frozenset({
 
 
 def _has_path_component(value: str, component: str) -> bool:
-    return component in PurePosixPath(value).parts or component in PureWindowsPath(value).parts
+    return any(part == component for part in re.split(r"[/\\\\]", value))
 
 
 def _has_qualified_path(name: str) -> bool:
@@ -66,7 +66,6 @@ def normalize_skill_identifier(value) -> str | None:
     if (
         PurePosixPath(name).is_absolute()
         or PureWindowsPath(name).is_absolute()
-        or PureWindowsPath(name).drive
         or _has_path_component(name, "..")
         or _has_path_component(name, ".")
         or _has_qualified_path(name)
