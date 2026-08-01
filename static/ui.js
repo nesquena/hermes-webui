@@ -9475,6 +9475,19 @@ function restoreLiveTurnHtmlForSession(sid){
   if(typeof _rehydrateTransparentStreamDom==='function') _rehydrateTransparentStreamDom(restored);
   if(typeof normalizeLiveActivityGroupPlacement==='function') normalizeLiveActivityGroupPlacement(restored);
   if(typeof _dedupeLiveProcessedWorklogAnchors==='function') _dedupeLiveProcessedWorklogAnchors(restored);
+  // Silent-turn suppression must also cover restored live turns: an inflight
+  // snapshot whose accumulated assistant text is the [[SILENT]] sentinel (or a
+  // streaming prefix of it) is re-injected into the DOM here, bypassing both
+  // the persisted-message filter (_computeSilentTurnHiddenIdxs) and the
+  // per-token streaming hook that sets data-silent-pending. Without this, a
+  // wakeup turn observed through session sync (api_server) re-displays the
+  // sentinel on every live-turn restore until the turn fully settles.
+  if(typeof _syncSilentLiveTurnSuppression==='function'){
+    const _restoredSilentText=Array.from(restored.querySelectorAll('[data-live-assistant="1"]'))
+      .map(seg=>{const body=seg.querySelector('.msg-body')||seg;return String(body.textContent||'');})
+      .join('');
+    if(_restoredSilentText) _syncSilentLiveTurnSuppression(_restoredSilentText);
+  }
   const liveGroup=restored.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
   if(liveGroup&&typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(liveGroup);
   if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
