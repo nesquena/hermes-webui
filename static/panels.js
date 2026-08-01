@@ -8739,9 +8739,25 @@ function _speechPreferencesPayloadFromUi(){
   return payload;
 }
 
-function _setPreferencesAutosaveStatus(state){
+// Ownership token for the shared preferences autosave status slot. Prevents
+// the channel writer from clearing or overwriting a 'failed'+Retry state the
+// generic preferences autosave set; that Retry button has exactly one call
+// site and becomes unreachable if another writer replaces the node.
+let _preferencesAutosaveStatusOwner=null;
+
+function _setPreferencesAutosaveStatus(state,owner){
+  owner=owner||'preferences';
   const el=$('settingsPreferencesAutosaveStatus');
   if(!el) return;
+  // Guard: if the slot shows 'failed' from a different writer, do not overwrite.
+  // The DOM class is the source of truth; an external clear would remove
+  // 'is-failed' and unblock writes without needing an extra variable.
+  if(_preferencesAutosaveStatusOwner&&
+     _preferencesAutosaveStatusOwner!==owner&&
+     el.classList.contains('is-failed')){
+    return;
+  }
+  _preferencesAutosaveStatusOwner=state?owner:null;
   el.className='settings-autosave-status';
   if(!state){
     el.textContent='';
@@ -8885,7 +8901,7 @@ async function _saveUpdateChannelFromSelector(channelSel){
   if(!channelSel) return;
   const val=channelSel.value==='experimental'?'experimental':'stable';
   const seq=++_channelSaveSeq;
-  if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus('saving');
+  if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus('saving','channel');
   try{
     const saved=await api('/api/settings',{method:'POST',body:JSON.stringify({update_channel:val})});
     // Discard a stale response: a newer in-flight write already owns the selector
@@ -8893,13 +8909,16 @@ async function _saveUpdateChannelFromSelector(channelSel){
     // then Stable) can leave the selector on the first response while the server
     // holds the second.
     if(seq!==_channelSaveSeq) return;
-    // Re-sync the selector from the server response. Defensive fallback to
-    // 'stable' guards against a malformed response with no update_channel key.
+    // Re-sync the selector from the server response. Fall back to val (the value
+    // sent in the POST body) rather than a literal 'stable': api() resolves
+    // without throwing on a 401 redirect (returns undefined) and on a non-JSON
+    // 200 body (returns a string), both of which land in this branch. 'stable'
+    // is the one fallback guaranteed wrong when the user picked 'experimental'.
     const confirmed=(saved&&(saved.update_channel==='experimental'||saved.update_channel==='stable'))
-      ?saved.update_channel:'stable';
+      ?saved.update_channel:val;
     _confirmedUpdateChannel=confirmed;
     channelSel.value=confirmed;
-    if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus('saved');
+    if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus('saved','channel');
     // Run the update check and badge sync against the confirmed server value,
     // not the optimistic pre-save value.
     if(typeof checkUpdatesNow==='function'){
@@ -8909,16 +8928,19 @@ async function _saveUpdateChannelFromSelector(channelSel){
   }catch(e){
     console.warn('[settings] update_channel save failed',e);
     // Revert selector and badge to the last server-confirmed value so both
-    // controls agree with what the server actually holds. Do not call
-    // _setPreferencesAutosaveStatus('failed'): its retry button replays the
-    // generic preferences payload, which by design no longer contains
-    // update_channel (#6612). Clear the saving indicator instead.
+    // controls agree with what the server actually holds. Status clear and
+    // revert are both inside the seq guard so a superseded in-flight failure
+    // does not clear status that a newer write or the generic autosave owns.
     if(seq===_channelSaveSeq){
       const revertTo=_confirmedUpdateChannel||'stable';
       channelSel.value=revertTo;
       if(typeof _syncUpdateChannelBadge==='function') _syncUpdateChannelBadge(revertTo);
+      // Do not call _setPreferencesAutosaveStatus('failed','channel'): its retry
+      // button replays _retryPreferencesAutosave(), which cannot contain
+      // update_channel (#6612). Clear the saving indicator instead; the selector
+      // snap-back is the user's signal.
+      if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus(null,'channel');
     }
-    if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus(null);
   }
 }
 
