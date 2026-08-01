@@ -1476,7 +1476,7 @@ function _steerClearCurrentOwnerDeadRun(ownerSid, ownerStreamId){
   if(S.busy){S.busy=false;changed=true;}
   if(S.activeStreamId){S.activeStreamId=null;changed=true;}
   if(S.session&&S.session.active_stream_id){S.session.active_stream_id=null;changed=true;}
-  if(changed&&typeof window._voiceLeaseSettleOwner==='function') window._voiceLeaseSettleOwner(ownerSid,ownerStreamId,{success:false});
+  if(changed&&typeof window!=='undefined'&&typeof window._voiceLeaseSettleOwner==='function') window._voiceLeaseSettleOwner(ownerSid,ownerStreamId,{success:false});
   if(typeof INFLIGHT!=='undefined'&&INFLIGHT&&INFLIGHT[ownerSid]){
     delete INFLIGHT[ownerSid];
     changed=true;

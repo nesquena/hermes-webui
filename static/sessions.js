@@ -1378,6 +1378,7 @@ function _setNewSessionPending(pending){
 }
 
 async function newSession(flash, options={}){
+  // Preserve #2518 provenance for the model-provider fallback below.
   if(_newSessionInFlight){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
     return _newSessionInFlight;
@@ -1385,7 +1386,7 @@ async function newSession(flash, options={}){
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
     const preserveVoiceSubmission=!S.session;
-    if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false,preserveSubmission:preserveVoiceSubmission});
+    if(typeof window!=='undefined'&&typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false,preserveSubmission:preserveVoiceSubmission});
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -1488,10 +1489,10 @@ async function newSession(flash, options={}){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;S.messages=data.session.messages||[];
-    if(typeof _sendInProgress==='undefined'||!_sendInProgress){
-      if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
-    }
     S._pendingSessionToolsets=null;
+    if(typeof _sendInProgress==='undefined'||!_sendInProgress){
+      if(typeof window!=='undefined'&&typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+    }
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
@@ -1638,7 +1639,7 @@ async function _switchProfileForSessionLoad(profile){
   if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
-  if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
+  if(typeof window!=='undefined'&&typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
   try{
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
     S.activeProfile=data.active||name;
@@ -1669,7 +1670,7 @@ async function _switchProfileForSessionLoad(profile){
     _sessionListSkeletonActive=false;
     if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
     if(typeof _sendInProgress==='undefined'||!_sendInProgress){
-      if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+      if(typeof window!=='undefined'&&typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
     }
     throw switchErr;
   }
@@ -1719,7 +1720,7 @@ async function loadSession(sid){
     }
     return;
   }
-  if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
+  if(typeof window!=='undefined'&&typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
@@ -1965,13 +1966,13 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
+  S._pendingSessionToolsets=null;
   if(typeof _sendInProgress==='undefined'||!_sendInProgress){
-    if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+    if(typeof window!=='undefined'&&typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
   }
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
-  S._pendingSessionToolsets=null;
   if(typeof populateModelDropdown==='function'){
     const modelRefreshSid=sid;
     const isActiveModelRefreshSession=()=>!!(S.session&&S.session.session_id===modelRefreshSid);

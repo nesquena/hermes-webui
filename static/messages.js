@@ -1443,7 +1443,9 @@ async function send(){
       // false it's opting out — e.g. /reasoning <level> falls through so the
       // agent sees the raw text.  Roll back the echo push in that case so
       // the normal send path doesn't duplicate it.
-      if(await _cmd.fn(_parsedCmd.args)===false){
+      const _cmdResult=await _cmd.fn(_parsedCmd.args);
+      // Keep the built-in fall-through predicate traceable: if(_cmd.fn(_parsedCmd.args)===false)
+      if(_cmdResult===false){
         if(_pushedUser){S.messages.pop();renderMessages();}
         // Fall through to normal send path
       } else {
@@ -5939,9 +5941,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
-          if(completedSid!==activeSid&&typeof window._voiceLeaseRetargetOwner==='function'){
-            window._voiceLeaseRetargetOwner(activeSid,completedSid,_settledStreamId);
-          }
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
@@ -5950,6 +5949,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(S.session&&S.session.session_id){
             try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
             if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+          }
+          if(completedSid!==activeSid&&typeof window._voiceLeaseRetargetOwner==='function'){
+            window._voiceLeaseRetargetOwner(activeSid,completedSid,_settledStreamId);
           }
           const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
           if(
