@@ -1353,24 +1353,18 @@ def _is_known_model_provider(provider_id: str) -> bool:
     return False
 
 
-def _ascii_slug_from_name(name: object) -> str:
+def _slug_from_name(name: object) -> str:
     """Return a slug derived from a provider display name.
 
-    Only ``:`` and whitespace are replaced with ``-``; all other characters
-    (including non-ASCII such as CJK) are preserved so the slug matches
-    the Hermes agent's ``_normalize_custom_pool_name`` convention
-    (``name.strip().lower().replace(" ", "-")``).
+    Only literal ASCII spaces are replaced with ``-``; all other characters
+    (including non-ASCII such as CJK, colons, and hyphens) are preserved
+    so the slug matches the Hermes agent's ``_normalize_custom_pool_name``
+    convention exactly (``name.strip().lower().replace(" ", "-")``).
     """
     raw = str(name or "").strip().lower()
     if not raw:
         return ""
-    # Normalize to NFC so composed/decomposed forms are equivalent
-    raw = unicodedata.normalize("NFC", raw)
-    # Replace only colon and whitespace with hyphens
-    slug = re.sub(r"[:\s]+", "-", raw).strip("-")
-    slug = re.sub(r"-{2,}", "-", slug)
-    if not slug:
-        return ""
+    slug = raw.replace(" ", "-")
     return slug
 
 
@@ -1383,7 +1377,7 @@ def _custom_provider_slug_from_name(name: object) -> str:
     # Keep name-derived custom provider slugs out of the @provider:model colon
     # grammar. Endpoint-derived slugs may still be custom:<host>:<port>, but a
     # friendly name like "Local (127.0.0.1:15721)" should not preserve ':'.
-    slug = _ascii_slug_from_name(raw)
+    slug = _slug_from_name(raw)
     if not slug:
         return ""
     return "custom:" + slug
@@ -3062,8 +3056,8 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
         name = str(entry.get("name") or "").strip()
         if not name:
             continue
-        # Canonical comparison with _ascii_slug_from_name (handles Unicode).
-        canonical = _ascii_slug_from_name(name)
+        # Canonical comparison with _slug_from_name (handles Unicode).
+        canonical = _slug_from_name(name)
         if canonical == raw_slug:
             base_url = str(entry.get("base_url") or "").strip() or None
             api_key = _resolve_key(entry.get("api_key"), entry.get("key_env"), pid)

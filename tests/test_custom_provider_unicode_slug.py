@@ -1,10 +1,10 @@
 """
 Tests for Unicode-aware custom provider slug generation (PR #6646).
 
-The slug contract: preserve the provider display name as-is, only
-replacing ``:`` and whitespace with ``-``.  This matches the Hermes
-agent's ``_normalize_custom_pool_name`` convention
-(``name.strip().lower().replace(" ", "-")``).
+The slug contract: mirror the Hermes agent's ``_normalize_custom_pool_name``
+convention exactly (``name.strip().lower().replace(" ", "-")``).
+Only literal ASCII spaces are replaced with ``-``; all other characters
+(including colons, hyphens, and Unicode) are preserved as-is.
 All slug paths (config.py, routes.py fallback) must be consistent.
 """
 
@@ -13,86 +13,107 @@ import unicodedata
 import api.config as config
 
 
-# ── Unit tests for _ascii_slug_from_name ──────────────────────────────────────
+# ── Unit tests for _slug_from_name ────────────────────────────────────────────
 
-class TestAsciiSlugFromName:
-    """Direct unit tests for _ascii_slug_from_name."""
+class TestSlugFromName:
+    """Direct unit tests for _slug_from_name."""
 
     def test_ascii_name_preserved(self):
         """ASCII names produce the expected kebab slug."""
-        assert config._ascii_slug_from_name("My Provider") == "my-provider"
+        assert config._slug_from_name("My Provider") == "my-provider"
 
     def test_ascii_with_punctuation(self):
-        """Colons and whitespace are replaced with hyphens."""
-        slug = config._ascii_slug_from_name("Local (127.0.0.1:15721)")
-        assert slug == "local-(127.0.0.1-15721)"
+        """Spaces are replaced with hyphens; colons and parens are preserved."""
+        slug = config._slug_from_name("Local (127.0.0.1:15721)")
+        assert slug == "local-(127.0.0.1:15721)", (
+            f"Expected 'local-(127.0.0.1:15721)', got {slug!r}"
+        )
 
     def test_pure_cjk_name_preserved(self):
         """A pure Chinese name is preserved as-is (matches Hermes convention)."""
-        slug = config._ascii_slug_from_name("我的提供商")
+        slug = config._slug_from_name("我的提供商")
         assert slug == "我的提供商", f"Expected preserved CJK, got {slug!r}"
         # Must be deterministic
-        assert config._ascii_slug_from_name("我的提供商") == slug
+        assert config._slug_from_name("我的提供商") == slug
 
     def test_cjk_with_ascii_mixed(self):
-        """Mixed CJK + ASCII: all characters preserved, only :/space replaced."""
-        slug = config._ascii_slug_from_name("我的Proxy服务器")
+        """Mixed CJK + ASCII: all characters preserved, only spaces replaced."""
+        slug = config._slug_from_name("我的Proxy服务器")
         assert slug == "我的proxy服务器", f"Expected preserved mixed, got {slug!r}"
-        assert config._ascii_slug_from_name("我的Proxy服务器") == slug
+        assert config._slug_from_name("我的Proxy服务器") == slug
 
     def test_empty_name_returns_empty(self):
         """Empty or whitespace-only name returns empty string."""
-        assert config._ascii_slug_from_name("") == ""
-        assert config._ascii_slug_from_name("   ") == ""
+        assert config._slug_from_name("") == ""
+        assert config._slug_from_name("   ") == ""
 
     def test_two_distinct_cjk_names_produce_different_slugs(self):
         """Two different pure-CJK names must not collide."""
-        slug_a = config._ascii_slug_from_name("我的提供商")
-        slug_b = config._ascii_slug_from_name("另一个名字")
+        slug_a = config._slug_from_name("我的提供商")
+        slug_b = config._slug_from_name("另一个名字")
         assert slug_a != slug_b, (
             f"Distinct CJK names must produce different slugs, got {slug_a!r} == {slug_b!r}"
         )
 
     def test_cjk_punctuation_handled(self):
         """CJK punctuation (full-width) is preserved."""
-        slug = config._ascii_slug_from_name("测试·提供商")
+        slug = config._slug_from_name("测试·提供商")
         assert slug == "测试·提供商", (
             f"Expected preserved CJK with punctuation, got {slug!r}"
         )
 
-    def test_canonically_equivalent_names_produce_same_slug(self):
-        """NFC normalization ensures composed/decomposed forms collide."""
+    # ── Agent contract parity vectors ─────────────────────────────────────────
+    # The agent only does: name.strip().lower().replace(" ", "-")
+    # Every test below verifies the WebUI produces the same key the agent would.
+
+    def test_literal_space_replaced(self):
+        """Single space → single hyphen."""
+        assert config._slug_from_name("a b") == "a-b"
+
+    def test_repeated_spaces_become_multiple_hyphens(self):
+        """Multiple spaces → multiple hyphens (agent uses literal replace)."""
+        assert config._slug_from_name("a   b") == "a---b"
+
+    def test_colon_preserved(self):
+        """Colons are preserved (agent does not replace them)."""
+        assert config._slug_from_name("a:b") == "a:b"
+        assert config._slug_from_name("my:provider") == "my:provider"
+
+    def test_tab_not_replaced(self):
+        """Tabs are preserved (agent only replaces literal ASCII space)."""
+        slug = config._slug_from_name("a\tb")
+        assert slug == "a\tb", f"Expected preserved tab, got {slug!r}"
+
+    def test_edge_hyphens_preserved(self):
+        """Leading/trailing hyphens are preserved (agent does not strip them)."""
+        assert config._slug_from_name("---hello---") == "---hello---"
+
+    def test_composed_decomposed_unicode_distinct(self):
+        """Composed and decomposed forms are distinct (agent does not normalize)."""
         composed = "caf\u00e9"
         decomposed = unicodedata.normalize("NFD", "caf\u00e9")
         assert composed != decomposed, "precondition: forms differ"
-        assert config._ascii_slug_from_name(composed) == config._ascii_slug_from_name(decomposed), (
-            "NFC-normalised names must produce the same slug"
+        slug_c = config._slug_from_name(composed)
+        slug_d = config._slug_from_name(decomposed)
+        assert slug_c != slug_d, (
+            f"Composed/decomposed forms must produce different slugs: "
+            f"{slug_c!r} vs {slug_d!r}"
         )
 
-    def test_leading_trailing_hyphens_stripped(self):
-        """Leading/trailing hyphens from punctuation replacement are stripped."""
-        slug = config._ascii_slug_from_name("---hello---")
-        assert slug == "hello", f"Expected 'hello', got {slug!r}"
-
-    def test_consecutive_hyphens_collapsed(self):
-        """Multiple consecutive hyphens are collapsed to one."""
-        slug = config._ascii_slug_from_name("a   b")
-        assert slug == "a-b", f"Expected 'a-b', got {slug!r}"
+    def test_all_unicode_name_preserved(self):
+        """All-Unicode name is preserved exactly."""
+        slug = config._slug_from_name("日本語プロバイダ")
+        assert slug == "日本語プロバイダ", f"Expected preserved, got {slug!r}"
 
     def test_ascii_only_names_preserved(self):
         """Pure-ASCII provider IDs preserved as before."""
-        assert config._ascii_slug_from_name("Proxy") == "proxy"
-        assert config._ascii_slug_from_name("My-Proxy") == "my-proxy"
-        assert config._ascii_slug_from_name("Test123") == "test123"
-
-    def test_colon_replaced_with_hyphen(self):
-        """Colons are replaced with hyphens."""
-        assert config._ascii_slug_from_name("a:b") == "a-b"
-        assert config._ascii_slug_from_name("my:provider") == "my-provider"
+        assert config._slug_from_name("Proxy") == "proxy"
+        assert config._slug_from_name("My-Proxy") == "my-proxy"
+        assert config._slug_from_name("Test123") == "test123"
 
     def test_real_world_cjk_name(self):
         """Real-world CJK provider name '基元律动' preserved."""
-        slug = config._ascii_slug_from_name("基元律动")
+        slug = config._slug_from_name("基元律动")
         assert slug == "基元律动", f"Expected '基元律动', got {slug!r}"
 
 
