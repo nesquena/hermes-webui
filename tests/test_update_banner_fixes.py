@@ -471,8 +471,6 @@ class TestScheduleRestart:
 
         # Monkeypatch os.execv inside the module's thread closure
         import os as _os
-        original_execv = _os.execv
-
         monkeypatch.setattr(sys, 'platform', 'linux')
         monkeypatch.setattr(upd, '_wait_until_restart_safe', lambda *a, **k: {'restart_blocked': False})
         monkeypatch.setattr(_os, 'execv', fake_execv)
@@ -1702,8 +1700,8 @@ class TestUpdateSummaryRouteModelSelection:
         captured = {}
         profile_home = tmp_path / 'profiles' / 'work'
         fake_skill_module = types.ModuleType('tools.skills_tool')
-        setattr(fake_skill_module, 'HERMES_HOME', 'default-home')
-        setattr(fake_skill_module, 'SKILLS_DIR', 'default-home/skills')
+        fake_skill_module.HERMES_HOME = 'default-home'
+        fake_skill_module.SKILLS_DIR = 'default-home/skills'
         monkeypatch.setitem(sys.modules, 'tools.skills_tool', fake_skill_module)
 
         monkeypatch.setattr(profiles, 'get_hermes_home_for_profile', lambda profile: profile_home)
@@ -1762,8 +1760,8 @@ class TestUpdateSummaryRouteModelSelection:
                 'HERMES_TEST_PROFILE_ENV': os.environ.get('HERMES_TEST_PROFILE_ENV'),
                 'THREAD_HERMES_HOME': thread_env.get('HERMES_HOME'),
                 'THREAD_HERMES_TEST_PROFILE_ENV': thread_env.get('HERMES_TEST_PROFILE_ENV'),
-                'SKILL_MODULE_HOME': getattr(fake_skill_module, 'HERMES_HOME'),
-                'SKILL_MODULE_DIR': getattr(fake_skill_module, 'SKILLS_DIR'),
+                'SKILL_MODULE_HOME': fake_skill_module.HERMES_HOME,
+                'SKILL_MODULE_DIR': fake_skill_module.SKILLS_DIR,
             }
             captured['aux_task'] = task
             captured['main_runtime'] = dict(main_runtime or {})
