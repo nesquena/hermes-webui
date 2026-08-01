@@ -16,25 +16,6 @@ from api.workspace import (
 )
 
 
-@pytest.fixture(scope="session", autouse=True)
-def test_server():
-    """Pure unit tests; no running server needed."""
-
-
-@pytest.fixture(autouse=True)
-def cleanup_test_sessions():
-    """No-op override: these unit tests create no server sessions to clean up."""
-    yield []
-
-
-@pytest.fixture(autouse=True)
-def _block_popen(monkeypatch):
-    """Prevent accidental server spawns inside workspace unit tests."""
-    def _raise(*args, **kwargs):
-        raise RuntimeError("subprocess.Popen not permitted; stub it with monkeypatch")
-    monkeypatch.setattr("subprocess.Popen", _raise)
-
-
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 def _make_files(directory, count, prefix="f"):

@@ -20,23 +20,6 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.fixture(scope="session", autouse=True)
-def test_server():
-    """Pure browser-harness tests using page.set_content; no running server needed."""
-
-
-@pytest.fixture(autouse=True)
-def cleanup_test_sessions():
-    """No-op override: these unit tests create no server sessions to clean up."""
-    yield []
-
-
-@pytest.fixture(autouse=True)
-def _block_popen(monkeypatch):
-    """Prevent accidental server spawns inside workspace unit tests."""
-    def _raise(*args, **kwargs):
-        raise RuntimeError("subprocess.Popen not permitted; stub it with monkeypatch")
-    monkeypatch.setattr("subprocess.Popen", _raise)
 sys.path.insert(0, str(ROOT / "tests"))
 from _layout_helpers import assert_layout_sane, assert_no_raw_i18n_keys
 
