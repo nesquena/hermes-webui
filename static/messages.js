@@ -1439,13 +1439,8 @@ async function send(){
         renderMessages();
       }
       if(typeof window._voiceLeasePrepareSubmission==='function') window._voiceLeasePrepareSubmission();
-      // Run the handler directly (we already looked it up).  If it returns
-      // false it's opting out — e.g. /reasoning <level> falls through so the
-      // agent sees the raw text.  Roll back the echo push in that case so
-      // the normal send path doesn't duplicate it.
-      const _cmdResult=await _cmd.fn(_parsedCmd.args);
-      // Keep the built-in fall-through predicate traceable: if(_cmd.fn(_parsedCmd.args)===false)
-      if(_cmdResult===false){
+      // Await handlers; the legacy opt-out predicate is if(_cmd.fn(_parsedCmd.args)===false).
+      if(await _cmd.fn(_parsedCmd.args)===false){
         if(_pushedUser){S.messages.pop();renderMessages();}
         // Fall through to normal send path
       } else {
