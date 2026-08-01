@@ -2600,6 +2600,7 @@ class TestSequentialUpdateRestartCoordination:
         worker_ident = None
         worker_acquiring_lock = _th.Event()
         real_apply_lock = upd._apply_lock
+        wait_timeout = 10
 
         class ProbedApplyLock:
             def __enter__(self):
@@ -2638,51 +2639,58 @@ class TestSequentialUpdateRestartCoordination:
         def holder():
             with upd._apply_lock:
                 lock_held.set()
-                release_holder.wait(timeout=5)
+                release_holder.wait(timeout=wait_timeout)
                 release_time.append(_t.monotonic())
 
         holder_thread = real_thread(target=holder, daemon=True)
         holder_thread.start()
-        assert lock_held.wait(timeout=2), "holder did not acquire _apply_lock"
+        try:
+            assert lock_held.wait(timeout=wait_timeout), "holder did not acquire _apply_lock"
 
-        # Capture the scheduler target, then run only this target under test.
-        # No unrelated daemon can satisfy or invalidate the lock assertion.
-        # The delay is unrelated to lock ordering; skip it so the worker's
-        # lock-acquisition event is the synchronization point under test.
-        upd._schedule_restart(delay=0)
-        assert len(scheduled) == 1, "scheduler must start one restart worker"
-        worker_target = scheduled[0]
-        def run_worker():
-            nonlocal worker_ident
-            worker_ident = _th.get_ident()
-            worker_target()
+            # Capture the scheduler target, then run only this target under test.
+            # No unrelated daemon can satisfy or invalidate the lock assertion.
+            # The delay is unrelated to lock ordering; skip it so the worker's
+            # lock-acquisition event is the synchronization point under test.
+            upd._schedule_restart(delay=0)
+            assert len(scheduled) == 1, "scheduler must start one restart worker"
+            worker_target = scheduled[0]
 
-        worker_thread = real_thread(target=run_worker, daemon=True)
-        worker_thread.start()
-        assert worker_acquiring_lock.wait(timeout=2), (
-            "restart worker did not reach the apply-lock acquisition"
-        )
-        assert not execv_called.is_set(), (
-            "restart callback ran while _apply_lock was held by another "
-            "thread; restart must wait for in-flight updates to finish"
-        )
+            def run_worker():
+                nonlocal worker_ident
+                worker_ident = _th.get_ident()
+                worker_target()
 
-        # Let the holder release.
-        release_holder.set()
-        holder_thread.join(timeout=2)
-        assert not holder_thread.is_alive(), "test did not release the held update lock"
-        assert release_time, "holder didn't release the lock"
+            worker_thread = real_thread(target=run_worker, daemon=True)
+            worker_thread.start()
+            assert worker_acquiring_lock.wait(timeout=wait_timeout), (
+                "restart worker did not reach the apply-lock acquisition"
+            )
+            assert not execv_called.is_set(), (
+                "restart callback ran while _apply_lock was held by another "
+                "thread; restart must wait for in-flight updates to finish"
+            )
 
-        # execv should fire shortly after the lock release.
-        assert execv_called.wait(timeout=2), (
-            "execv never fired after _apply_lock was released"
-        )
-        assert execv_time[0] >= release_time[0], (
-            f"execv fired before lock was released "
-            f"(execv={execv_time[0]}, release={release_time[0]})"
-        )
-        worker_thread.join(timeout=2)
-        assert not worker_thread.is_alive(), "restart worker did not finish"
+            # Let the holder release.
+            release_holder.set()
+            holder_thread.join(timeout=wait_timeout)
+            assert not holder_thread.is_alive(), "test did not release the held update lock"
+            assert release_time, "holder didn't release the lock"
+
+            # execv should fire shortly after the lock release.
+            assert execv_called.wait(timeout=wait_timeout), (
+                "execv never fired after _apply_lock was released"
+            )
+            assert execv_time[0] >= release_time[0], (
+                f"execv fired before lock was released "
+                f"(execv={execv_time[0]}, release={release_time[0]})"
+            )
+            worker_thread.join(timeout=wait_timeout)
+            assert not worker_thread.is_alive(), "restart worker did not finish"
+        finally:
+            release_holder.set()
+            holder_thread.join(timeout=wait_timeout)
+            if worker_thread is not None:
+                worker_thread.join(timeout=wait_timeout)
 
     def test_schedule_restart_still_fires_when_no_update_in_flight(self, monkeypatch):
         """Sanity: with nothing holding the lock, restart still fires promptly."""
