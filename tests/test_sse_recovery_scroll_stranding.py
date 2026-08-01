@@ -161,3 +161,33 @@ def test_sticky_follow_invariant_unpinned_within_1200_is_not_refollowed():
     # Scrolled far away (not near bottom), pinned flag irrelevant → not re-followed.
     assert run(near_bottom=False, unpinned=False) is False
     assert run(near_bottom=False, unpinned=True) is False
+
+
+def test_cancel_handler_avoids_sync_scrollheight_layout():
+    """#6653: the synchronous cancel SSE handler must NOT read #messages.scrollHeight
+    via _isMessagePaneNearBottom inside the EventSource callback.
+
+    On a long transcript (450+ messages) that geometry read forces a full
+    synchronous layout in WKWebView, pegging the WebContent process at 100% CPU
+    and freezing the native macOS app. Cancellation must use the cached follower
+    state (_scrollPinned) plus the sticky-unpin flag (_messageUserUnpinned)
+    instead of a forced layout, in both the embedded-snapshot and fallback paths.
+    """
+    src = MESSAGES_JS
+    start = src.index("source.addEventListener('cancel',")
+    end = src.index("for(const _runJournalEventName of", start)
+    block = src[start:end]
+    assert "_isMessagePaneNearBottom" not in block, (
+        "cancel handler must not force a synchronous scrollHeight layout via "
+        "_isMessagePaneNearBottom (#6653)"
+    )
+    assert "_scrollPinned" in block, (
+        "cancel handler must use the cached _scrollPinned follower state (#6653)"
+    )
+    assert "_messageUserUnpinned" in block, (
+        "cancel handler must keep the sticky-unpin guard _messageUserUnpinned (#6653)"
+    )
+    assert "_wasFollowingAtCancel" in block and "_wasFollowingAtCancelFb" in block, (
+        "both cancel follow-intent guards (embedded-snapshot and fallback) must "
+        "be present in the cancel handler (#6653)"
+    )

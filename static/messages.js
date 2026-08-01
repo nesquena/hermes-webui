@@ -6718,8 +6718,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // the bottom (where the cancellation notice renders), not be stranded at a
         // stale mid-stream scrollTop by preserveScroll's restore path. Same
         // jump-on-recovery class as the Connection-interrupted path below.
-        const _wasFollowingAtCancel=((typeof _isMessagePaneNearBottom==='function')
-            ? _isMessagePaneNearBottom(1200)
+        const _wasFollowingAtCancel=((typeof _scrollPinned!=='undefined')
+            ? _scrollPinned
             : true)
           && !((typeof _isMessageReaderUnpinned==='function')
             ? _isMessageReaderUnpinned()
@@ -6751,8 +6751,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }catch(_){
           // Fallback to local cancel message if API fails
           if(S.session&&S.session.session_id===activeSid){
-            const _wasFollowingAtCancelFb=((typeof _isMessagePaneNearBottom==='function')
-                ? _isMessagePaneNearBottom(1200)
+            const _wasFollowingAtCancelFb=((typeof _scrollPinned!=='undefined')
+                ? _scrollPinned
                 : true)
               && !((typeof _isMessageReaderUnpinned==='function')
                 ? _isMessageReaderUnpinned()
