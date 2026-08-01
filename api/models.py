@@ -4336,6 +4336,31 @@ def _cached_session_lags_disk(cached) -> bool:
     if disk_count is not None:
         if disk_count > cached_count:
             return True
+        if disk_count < cached_count:
+            # External transcript shrink (e.g. a session squash/truncate applied
+            # outside this process): the growth check above can never fire for a
+            # SMALLER disk transcript, so without this guard an inactive cached
+            # session keeps serving the stale pre-shrink object until LRU
+            # eviction or an in-process mutation. In-process shrinks
+            # (edit/undo/truncate) mutate this same cached object before saving,
+            # so a strictly newer disk updated_at can only come from an external
+            # writer. Active/pending sessions are left untouched — in-flight
+            # state must win over any concurrent external rewrite.
+            if not getattr(cached, 'active_stream_id', None) and not getattr(cached, 'pending_user_message', None):
+                disk_meta_quick = _persisted_session_meta_prefix(sid)
+                disk_updated = None
+                if isinstance(disk_meta_quick, dict):
+                    try:
+                        disk_updated = float(disk_meta_quick.get('updated_at') or 0) or None
+                    except (TypeError, ValueError):
+                        disk_updated = None
+                if disk_updated is not None:
+                    try:
+                        cached_updated = float(getattr(cached, 'updated_at', 0) or 0)
+                    except (TypeError, ValueError):
+                        cached_updated = 0.0
+                    if disk_updated > cached_updated:
+                        return True
         # Disk is at most as far as cache. Even when counts match, anchor scene
         # records can advance independently (api/routes.py saves a session
         # with `s.save(touch_updated_at=False, skip_index=True)` after editing
