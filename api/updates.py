@@ -1934,6 +1934,11 @@ def apply_force_update(target: str, channel=None) -> dict:
             path = _AGENT_DIR
             # Channel is WebUI-only — the Agent always uses the default channel.
             channel = DEFAULT_UPDATE_CHANNEL
+            # Force-update intentionally does NOT delegate to `hermes update
+            # --yes`.  The official updater refuses diverged or conflict
+            # checkouts and cannot recover from them, which is the only reason
+            # the user reaches this path.  git fetch + reset --hard is the
+            # correct recovery tool here.
         else:
             return {'ok': False, 'message': f'Unknown target: {target}'}
 
@@ -2182,6 +2187,11 @@ def _apply_agent_update_inner():
             'target': 'agent',
         }
 
+    # Invalidate before the gateway gate so any early-return path below still
+    # reflects the newly-installed version rather than the pre-update state.
+    with _cache_lock:
+        _update_cache['checked_at'] = 0
+
     # The Agent's subprocess already restarted all gateways before it exited
     # (hermes_cli/main.py:10462).  This issues a confirmatory restart of the
     # active-profile gateway via `hermes gateway restart` so WebUI can observe
@@ -2197,10 +2207,20 @@ def _apply_agent_update_inner():
             'gateway_restart': gateway_result.get('status'),
         }
 
-    # Invalidate the update-check cache so a subsequent check reflects the
-    # installed version rather than the pre-update state.
-    with _cache_lock:
-        _update_cache['checked_at'] = 0
+    # `in_progress` means the restart command was accepted but the gateway has
+    # not yet confirmed healthy — treat it as a failure so the client can retry
+    # rather than reporting success before the gateway is back up.
+    if gateway_result.get('status') == 'in_progress':
+        return {
+            'ok': False,
+            'message': (
+                'Gateway restart acknowledged but did not complete within the '
+                'observed window. The Agent install succeeded; the gateway may '
+                'still be coming up. Check gateway status and retry if needed.'
+            ),
+            'target': 'agent',
+            'gateway_restart': 'in_progress',
+        }
 
     # Schedule WebUI self-restart. The 2 s delay guarantees the HTTP response
     # has been flushed to the client before os.execv() replaces this process.

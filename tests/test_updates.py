@@ -9,6 +9,28 @@ import pytest
 import api.updates as updates
 
 
+@pytest.fixture(autouse=True)
+def _block_real_subprocess_and_restart(monkeypatch):
+    """Default-fail guard: subprocess.run, subprocess.Popen, and
+    _schedule_restart raise AssertionError if reached without an explicit
+    per-test stub.
+
+    Tests that need these provide their own monkeypatch.setattr or patch()
+    override, which takes precedence because it is applied after this fixture.
+    """
+    def _blocked(name):
+        def _raise(*args, **kwargs):
+            raise AssertionError(
+                f'{name} reached without a test-level stub; '
+                'add monkeypatch.setattr or patch() before calling the SUT'
+            )
+        return _raise
+
+    monkeypatch.setattr(updates.subprocess, 'run', _blocked('subprocess.run'))
+    monkeypatch.setattr(updates.subprocess, 'Popen', _blocked('subprocess.Popen'))
+    monkeypatch.setattr(updates, '_schedule_restart', _blocked('_schedule_restart'))
+
+
 def _fake_git_for_release_fetch_failure(args, cwd, timeout=10):
     if args == ['diff-index', '--quiet', 'HEAD', '--']:
         return '', True  # clean tree
@@ -1106,6 +1128,7 @@ def test_apply_force_update_no_longer_touches_locks(tmp_path, monkeypatch):
         updates, '_restart_blocker_snapshot',
         lambda: {'restart_blocked': False, 'active_streams': 0, 'active_runs': 0}
     )
+    monkeypatch.setattr(updates, '_schedule_restart', lambda delay=2.0: None)
 
     updates.apply_force_update('webui')
     assert lock.exists(), (
@@ -1212,6 +1235,7 @@ def test_apply_clear_lock_with_no_lock_runs_normal_update(tmp_path, monkeypatch)
         updates, '_select_apply_compare_ref',
         lambda path, channel='stable', target=None: 'origin/main'
     )
+    monkeypatch.setattr(updates, '_schedule_restart', lambda delay=2.0: None)
     result = updates.apply_clear_lock('webui')
     assert result['ok'] is True, result
     assert result['lock_recovery']['action'] == 'no-lock-found'
@@ -1393,9 +1417,7 @@ def test_apply_update_pull_lock_no_stash_when_clean(tmp_path, monkeypatch):
 # PR #6617 — official Agent updater delegation
 # ---------------------------------------------------------------------------
 
-import subprocess as _subprocess
 import sys as _sys
-from pathlib import Path as _Path
 
 
 def _agent_tmp(tmp_path):
@@ -1426,10 +1448,12 @@ def _fake_proc(returncode=0, stdout='Updated successfully.\n', stderr=''):
 
 def test_agent_delegation_invokes_official_entry_point(tmp_path, monkeypatch):
     """The agent target must invoke the official hermes updater once with
-    --gateway and --yes; no local git fetch/pull/stash must run.
+    update --yes; no local git fetch/pull/stash must run.
 
     Base: the old code ran its own git sequence.
-    Head: subprocess.run is called once with 'update', '--gateway', '--yes'.
+    Head: subprocess.run is called once with 'update' and '--yes'; '--gateway'
+    must not appear (it writes .update_exit_code into HERMES_HOME and skips
+    SIGHUP protection).
     """
     agent_dir = _agent_tmp(tmp_path)
     _make_hermes_exe(agent_dir)
@@ -1478,18 +1502,26 @@ def test_agent_update_failure_propagates(tmp_path, monkeypatch):
         ('migration aborted: schema conflict', 1),
     ]
 
+    def _make_run(rc, out):
+        # bind rc and out as parameters so the lambda does not close over a
+        # loop variable (Ruff B023)
+        return lambda cmd, **kw: _fake_proc(returncode=rc, stdout=out, stderr='')
+
+    def _make_gateway_spy(called):
+        # bind called as a parameter for the same reason
+        return lambda: called.append(1) or (True, {'status': 'completed'})
+
     for reason_text, rc in failure_reasons:
         monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
-        _t, _rc = reason_text, rc
         monkeypatch.setattr(
             updates.subprocess, 'run',
-            lambda cmd, **kw: _fake_proc(returncode=_rc, stdout=_t, stderr=''),
+            _make_run(rc, reason_text),
         )
         # Gateway restart must NOT be called when the updater itself failed.
         gateway_called = []
         monkeypatch.setattr(
             updates, '_ensure_gateway_restart_for_agent_update',
-            lambda: gateway_called.append(1) or (True, {'status': 'completed'}),
+            _make_gateway_spy(gateway_called),
         )
         monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
 
@@ -1507,13 +1539,14 @@ def test_agent_update_failure_propagates(tmp_path, monkeypatch):
 
 
 def test_response_before_replacement_ordering(tmp_path, monkeypatch):
-    """The current process must complete its response before replacement fires.
+    """The response dict is returned before _schedule_restart is called.
 
-    _schedule_restart() is called after the function returns its dict, so
-    os.execv() fires only after the HTTP layer has flushed the response.
-    Head assertion: _schedule_restart is called exactly once, and the function
-    returns before the restart daemon thread would fire (the 2 s delay is
-    mocked away here; what matters is that _schedule_restart is invoked).
+    This proves the ordering contract: _schedule_restart() is invoked after
+    the function builds and returns its dict, so the HTTP layer can flush the
+    response before os.execv() replaces the process.  The real 2 s daemon
+    delay is mocked away; what this test verifies is that _schedule_restart is
+    called exactly once on success and that the caller already holds a response
+    dict by the time that call is made.
     """
     agent_dir = _agent_tmp(tmp_path)
     _make_hermes_exe(agent_dir)
@@ -1577,6 +1610,18 @@ def test_post_restart_health_gate(tmp_path, monkeypatch):
         f'Health failure reason not in message: {fail_result["message"]!r}'
     )
 
+    # in_progress must NOT be treated as success: the gateway has not confirmed
+    # healthy, so reporting ok=True would be premature.
+    monkeypatch.setattr(
+        updates, '_ensure_gateway_restart_for_agent_update',
+        lambda: (True, {'status': 'in_progress'}),
+    )
+    in_progress_result = updates._apply_update_inner('agent')
+    assert in_progress_result['ok'] is False, (
+        f'in_progress must not report success; got {in_progress_result!r}'
+    )
+    assert in_progress_result.get('gateway_restart') == 'in_progress'
+
 
 @pytest.mark.parametrize('scenario,setup,expected_ok,expected_msg_fragment', [
     (
@@ -1612,8 +1657,8 @@ def test_post_restart_health_gate(tmp_path, monkeypatch):
 ])
 def test_update_target_matrix(scenario, setup, expected_ok, expected_msg_fragment,
                                tmp_path, monkeypatch):
-    """Every target/outcome row in the Fault Scope matrix resolves to its
-    declared banner result."""
+    """Each update target and outcome combination resolves to its expected
+    result: success only on a healthy replacement, failure otherwise."""
     target = setup.get('target', 'agent')
 
     if target == 'agent':
@@ -1678,8 +1723,8 @@ def test_update_target_matrix(scenario, setup, expected_ok, expected_msg_fragmen
 def test_webui_target_unchanged(tmp_path, monkeypatch):
     """A target='webui' request must not enter the Agent delegation path.
 
-    The agent executable and subprocess.run are not touched; the webui git
-    sequence runs as before.
+    Spy directly on _apply_agent_update_inner so the test is not tied to any
+    specific subprocess argv; any entry into that function is a failure.
     """
     webui_dir = tmp_path / 'webui'
     (webui_dir / '.git').mkdir(parents=True)
@@ -1687,14 +1732,11 @@ def test_webui_target_unchanged(tmp_path, monkeypatch):
 
     agent_delegation_entered = []
 
-    def spy_subprocess_run(cmd, **kwargs):
-        # subprocess.run called from the agent delegation path would pass
-        # 'update' and '--gateway'; flag it as unexpected here.
-        if '--gateway' in cmd:
-            agent_delegation_entered.append(cmd)
-        return _fake_proc()
+    def spy_agent_delegation():
+        agent_delegation_entered.append(1)
+        return {'ok': False, 'message': 'spy: agent delegation must not be called'}
 
-    monkeypatch.setattr(updates.subprocess, 'run', spy_subprocess_run)
+    monkeypatch.setattr(updates, '_apply_agent_update_inner', spy_agent_delegation)
 
     def _webui_git(args, cwd, timeout=10):
         if args[0] == 'fetch':
@@ -1717,6 +1759,77 @@ def test_webui_target_unchanged(tmp_path, monkeypatch):
     assert result['ok'] is True, result
     assert agent_delegation_entered == [], (
         'webui target must not invoke the agent delegation path; '
-        f'unexpected subprocess calls: {agent_delegation_entered!r}'
+        f'spy entry count: {len(agent_delegation_entered)}'
+    )
+
+
+def test_exe_discovery_dotcenv_layout(tmp_path, monkeypatch):
+    """_find_agent_executable must locate hermes in the .venv layout.
+
+    The host-platform layout (venv/) is covered by _make_hermes_exe in other
+    tests.  This test covers the alternate .venv/ prefix on both platforms.
+    """
+    agent_dir = _agent_tmp(tmp_path)
+
+    if _sys.platform == 'win32':
+        exe = agent_dir / '.venv' / 'Scripts' / 'hermes.exe'
+    else:
+        exe = agent_dir / '.venv' / 'bin' / 'hermes'
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_text('fake')
+
+    found = updates._find_agent_executable(agent_dir)
+    assert found == exe, (
+        f'Expected .venv-layout exe {exe}; got {found!r}'
+    )
+
+
+def test_agent_update_timeout_propagates(tmp_path, monkeypatch):
+    """A TimeoutExpired from subprocess.run must return ok=False with an
+    indeterminate-state message and must not report restart_scheduled.
+    """
+    agent_dir = _agent_tmp(tmp_path)
+    _make_hermes_exe(agent_dir)
+
+    def _raise_timeout(cmd, **kw):
+        raise updates.subprocess.TimeoutExpired(cmd, 1800)
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates.subprocess, 'run', _raise_timeout)
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['ok'] is False, result
+    assert 'indeterminate' in result['message'].lower(), (
+        f'Expected indeterminate-state message; got {result["message"]!r}'
+    )
+    assert not result.get('restart_scheduled'), (
+        'restart_scheduled must not be set on timeout'
+    )
+
+
+def test_agent_update_os_error_propagates(tmp_path, monkeypatch):
+    """An OSError (e.g. permission denied or missing interpreter) must return
+    ok=False with the OS error detail and must not report restart_scheduled.
+    """
+    agent_dir = _agent_tmp(tmp_path)
+    _make_hermes_exe(agent_dir)
+
+    def _raise_os_error(cmd, **kw):
+        raise OSError('Permission denied')
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates.subprocess, 'run', _raise_os_error)
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['ok'] is False, result
+    assert 'Permission denied' in result['message'], (
+        f'OSError detail not in message: {result["message"]!r}'
+    )
+    assert not result.get('restart_scheduled'), (
+        'restart_scheduled must not be set on OSError'
     )
 

@@ -705,6 +705,12 @@ class TestSuccessfulUpdateReturnsRestartScheduled:
     def test_apply_update_falls_back_to_tracking_branch_without_release_tags(
         self, tmp_path, monkeypatch
     ):
+        """When no release tags exist, apply_update falls back to the upstream
+        tracking branch and pulls via --ff-only (api/updates.py:2316-2322).
+
+        Targets 'webui' because that target still walks the git sequence;
+        'agent' delegates to _apply_agent_update_inner since #6617.
+        """
         import api.updates as upd
 
         (tmp_path / '.git').mkdir()
@@ -726,16 +732,36 @@ class TestSuccessfulUpdateReturnsRestartScheduled:
 
         monkeypatch.setattr(upd, '_run_git', fake_run)
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
-        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
         monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
-        monkeypatch.setattr(
-            'api.updates.restart_active_profile_gateway',
-            lambda **kwargs: {'status': 'completed', 'message': 'Gateway service restarted successfully'},
-        )
 
-        result = upd.apply_update('agent')
+        result = upd.apply_update('webui')
         assert result['ok'] is True
         assert ['pull', '--ff-only', 'fork', 'feature-branch'] in ran
+
+    def test_apply_update_agent_delegates_to_agent_update_inner(
+        self, tmp_path, monkeypatch
+    ):
+        """apply_update('agent') must short-circuit to _apply_agent_update_inner;
+        no git fetch/pull/stash must run for the agent target after #6617.
+        """
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+        delegation_entered = []
+
+        def fake_agent_update_inner():
+            delegation_entered.append(1)
+            return {'ok': True, 'message': 'agent updated successfully',
+                    'target': 'agent', 'restart_scheduled': True}
+
+        monkeypatch.setattr(upd, '_apply_agent_update_inner', fake_agent_update_inner)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+
+        result = upd.apply_update('agent')
+        assert result['ok'] is True, result
+        assert delegation_entered == [1], (
+            'apply_update("agent") must delegate to _apply_agent_update_inner'
+        )
 
 
 class TestApplyForceUpdate:
@@ -1374,31 +1400,37 @@ class TestAgentUpdateRequiresGatewayRestart:
         ]
 
     def test_apply_update_agent_requires_gateway_restart(self, tmp_path, monkeypatch):
+        """apply_update('agent') must invoke the official updater subprocess,
+        then gate success on gateway restart completing.
+
+        Before #6617: applied its own git fetch/pull/stash sequence.
+        After #6617: delegates to subprocess.run([hermes_exe, 'update', '--yes'])
+        then calls _ensure_gateway_restart_for_agent_update().
+        """
         import api.updates as upd
 
         (tmp_path / '.git').mkdir()
-        ran = []
-        gateway_restarts = []
+        # create the platform-appropriate venv layout so _find_agent_executable
+        # returns a valid path instead of failing early
+        if sys.platform == 'win32':
+            _hermes_exe = tmp_path / 'venv' / 'Scripts' / 'hermes.exe'
+        else:
+            _hermes_exe = tmp_path / 'venv' / 'bin' / 'hermes'
+        _hermes_exe.parent.mkdir(parents=True, exist_ok=True)
+        _hermes_exe.write_text('fake')
 
-        def fake_run(args, cwd, timeout=10):
-            ran.append(args)
-            if args[0] == 'fetch':
-                return '', True
-            if args[0] == 'tag':
-                return '', True
-            if args[:2] == ['status', '--porcelain']:
-                return '', True
-            if args[:2] == ['rev-parse', '--abbrev-ref']:
-                return 'origin/master', True
-            if args[0] == 'pull':
-                return 'Already up to date.', True
-            return '', True
+        gateway_restarts = []
 
         def fake_gateway_restart(*, profile=None):
             gateway_restarts.append(profile)
             return {'status': 'completed', 'message': 'Gateway service restarted successfully'}
 
-        monkeypatch.setattr(upd, '_run_git', fake_run)
+        class _FakeProc:
+            returncode = 0
+            stdout = 'Updated successfully.\n'
+            stderr = ''
+
+        monkeypatch.setattr(upd.subprocess, 'run', lambda cmd, **kw: _FakeProc())
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
         monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
         monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
@@ -1411,79 +1443,82 @@ class TestAgentUpdateRequiresGatewayRestart:
         assert result['gateway_restart'] == 'completed'
         assert gateway_restarts == ['default']
 
-    def test_apply_update_agent_stash_conflict_success_invokes_gateway_restart(self, tmp_path, monkeypatch):
+    def test_apply_update_agent_gateway_in_progress_is_not_success(self, tmp_path, monkeypatch):
+        """apply_update('agent') with gateway returning in_progress must return ok=False.
+
+        Before #6617: ran its own git stash/pull sequence; 'in_progress' was
+        treated as success and stash_conflict was preserved in the response.
+        After #6617: delegates to subprocess.run([hermes_exe, 'update', '--yes']);
+        no stash path runs, so stash_conflict never appears.  P1-4 change:
+        'in_progress' means the gateway acknowledged restart but did not
+        confirm healthy — treated as ok=False so the client can retry.
+        """
         import api.updates as upd
 
         (tmp_path / '.git').mkdir()
-        gateway_restarts = []
-        ran = []
+        # create the platform-appropriate venv layout
+        if sys.platform == 'win32':
+            _hermes_exe = tmp_path / 'venv' / 'Scripts' / 'hermes.exe'
+        else:
+            _hermes_exe = tmp_path / 'venv' / 'bin' / 'hermes'
+        _hermes_exe.parent.mkdir(parents=True, exist_ok=True)
+        _hermes_exe.write_text('fake')
 
-        def fake_run(args, cwd, timeout=10):
-            ran.append(args)
-            if args[0] == 'fetch':
-                return '', True
-            if args[0] == 'tag':
-                return '', True
-            if args[:2] == ['status', '--porcelain']:
-                return 'M file', True
-            if args[:2] == ['status', '--porcelain', '--untracked-files=no']:
-                return 'M file', True
-            if args[:2] == ['rev-parse', '--abbrev-ref']:
-                return 'origin/master', True
-            if args[:2] == ['rev-parse', '--short']:
-                return 'abc1234', True
-            if args[:2] == ['stash', 'push']:
-                return '', True
-            if args[:2] == ['stash', 'apply']:
-                return '', False
-            if args[0] == 'stash':
-                return '', True
-            if args[:3] == ['reset', '--hard', 'HEAD']:
-                return '', True
-            if args[0] == 'pull':
-                return 'Updating', True
-            return '', True
+        gateway_restarts = []
 
         def fake_gateway_restart(*, profile=None):
             gateway_restarts.append(profile)
             return {'status': 'in_progress', 'message': 'Gateway service restart initiated (in progress)'}
 
-        monkeypatch.setattr(upd, '_run_git', fake_run)
+        class _FakeProc:
+            returncode = 0
+            stdout = 'Updated successfully.\n'
+            stderr = ''
+
+        monkeypatch.setattr(upd.subprocess, 'run', lambda cmd, **kw: _FakeProc())
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
         monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
-        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart when gateway in_progress')))
         monkeypatch.setattr('api.updates.restart_active_profile_gateway', fake_gateway_restart)
 
         result = upd.apply_update('agent')
-        assert result['ok'] is True
-        assert result['stash_conflict'] is True
+        # in_progress means the gateway did not confirm healthy; ok=False so the
+        # client retries rather than assuming success before the gateway is up.
+        assert result['ok'] is False
+        assert 'stash_conflict' not in result  # no stash path runs post-#6617
+        assert 'restart_scheduled' not in result
         assert result['target'] == 'agent'
-        assert result['restart_scheduled'] is True
         assert result['gateway_restart'] == 'in_progress'
         assert gateway_restarts == ['default']
 
     def test_apply_update_agent_without_gateway_restart_result_fails(self, tmp_path, monkeypatch):
+        """apply_update('agent') with a non-completing gateway restart must return ok=False.
+
+        Before #6617: ran its own git sequence; gateway 'busy' blocked success.
+        After #6617: delegates to subprocess.run([hermes_exe, 'update', '--yes']);
+        gateway 'busy' status is still not in {completed, in_progress}, so
+        _ensure_gateway_restart_for_agent_update returns ok=False and the
+        response includes target='agent', gateway_restart='busy'.
+        """
         import api.updates as upd
 
         (tmp_path / '.git').mkdir()
-
-        def fake_run(args, cwd, timeout=10):
-            if args[0] == 'fetch':
-                return '', True
-            if args[0] == 'tag':
-                return '', True
-            if args[:2] == ['status', '--porcelain']:
-                return '', True
-            if args[:2] == ['rev-parse', '--abbrev-ref']:
-                return 'origin/master', True
-            if args[:2] == ['rev-parse', '--short', 'origin/master']:
-                return 'abc1234', True
-            if args[0] == 'pull':
-                return 'Already up to date.', True
-            return '', True
+        # create the platform-appropriate venv layout
+        if sys.platform == 'win32':
+            _hermes_exe = tmp_path / 'venv' / 'Scripts' / 'hermes.exe'
+        else:
+            _hermes_exe = tmp_path / 'venv' / 'bin' / 'hermes'
+        _hermes_exe.parent.mkdir(parents=True, exist_ok=True)
+        _hermes_exe.write_text('fake')
 
         restart_calls = []
-        monkeypatch.setattr(upd, '_run_git', fake_run)
+
+        class _FakeProc:
+            returncode = 0
+            stdout = 'Updated successfully.\n'
+            stderr = ''
+
+        monkeypatch.setattr(upd.subprocess, 'run', lambda cmd, **kw: _FakeProc())
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
         monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
         monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
