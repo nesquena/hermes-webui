@@ -215,11 +215,11 @@ def test_update_flows_keep_explicit_longer_timeouts():
     # an explicit channel), but must still carry the 60s timeout override.
     assert "api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:60000})" in panels
     assert "api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null}),timeoutMs:60000})" in src
-    # Agent apply and lock recovery can run the official updater for 1800s;
-    # keep the 35-minute browser budget for both routes. The force route stays
-    # on the shorter WebUI-only path.
-    assert "api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:2100000})" in src
-    assert "api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:2100000})" in src
+    # Only Agent apply and lock recovery can run the official updater for 1800s;
+    # WebUI requests retain their existing two-minute budget.
+    assert "timeoutMs:target==='agent'?2100000:120000" in src
+    assert "api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:target==='agent'?2100000:120000})" in src
+    assert "api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:target==='agent'?2100000:120000})" in src
     assert "api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000})" in src
 
 

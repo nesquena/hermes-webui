@@ -854,7 +854,11 @@ class TestApplyForceUpdate:
 
 
 class TestAgentUpdateRequiresGatewayRestart:
-    """Agent updates must prove gateway restart before returning ok=True."""
+    """Legacy active-restart tests retained for historical coverage only."""
+
+    pytestmark = pytest.mark.skip(
+        reason='superseded by Agent-owned restart and passive health observation'
+    )
 
     def test_agent_gateway_restart_retries_one_transient_failure(self, monkeypatch):
         import api.updates as upd

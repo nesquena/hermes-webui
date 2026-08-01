@@ -25,7 +25,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from api.agent_health import get_active_profile_gateway_running_pid
-from api.gateway_restart import _resolve_hermes_command, restart_active_profile_gateway
+from api.gateway_restart import _resolve_hermes_command
 from api.profiles import get_active_profile_name
 from api.config import PYTHON_EXE, REPO_ROOT, STREAMS, STREAMS_LOCK
 
@@ -44,7 +44,6 @@ _cache_lock = threading.Lock()
 _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
-_AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
 _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
@@ -61,6 +60,24 @@ _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'tls connection was non-properly terminated',
     'ssl certificate problem',
 )
+# These markers mirror the current Agent updater source at
+# hermes_cli/main.py:10271-10379 and config.py:657-683. The completion line is
+# the updater's explicit transaction output; refusal/failure lines remain
+# failures even when the CLI catches an exception and exits zero.
+_AGENT_UPDATE_COMPLETION_MARKER = "✓ Update complete!"
+_AGENT_UPDATE_FAILURE_MARKERS = (
+    "Cannot update Hermes Agent:",
+    "✗ Update failed",
+    "✗ Failed to fetch updates from origin.",
+    "✗ Authentication failed",
+    "✗ Failed to reset to origin/",
+    "⚠ npm install failed",
+    "⚠ npm workspace install failed",
+    "⚠ Desktop build failed",
+    "⚠️  Config format update failed:",
+)
+_AGENT_GATEWAY_OBSERVATION_TIMEOUT_S = 10.0
+_AGENT_GATEWAY_OBSERVATION_POLL_S = 0.25
 _RELEASE_TAG_RE = re.compile(r'^v[0-9][0-9A-Za-z.+-]*$')
 # Phrases git emits when its own short-lived index/refs lock files block a
 # subsequent operation. Tuned to match only the true "lock file already exists"
@@ -1822,7 +1839,7 @@ def _schedule_restart(delay: float = 2.0) -> None:
 
 
 def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
-    """Run the active-profile gateway restart when agent checkout changed.
+    """Passively observe the active-profile gateway after Agent-owned restart.
 
     Returns:
         (ok, restart_payload) where:
@@ -1830,61 +1847,22 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
         - restart_payload contains helper status fields for response shaping.
     """
     target_profile = str(get_active_profile_name() or "default").strip() or "default"
-    gateway_pid_before_restart = get_active_profile_gateway_running_pid(profile=target_profile)
-    restart_result = restart_active_profile_gateway(profile=target_profile)
-    status = str(restart_result.get("status") or "")
-    if status in {"completed", "in_progress"}:
-        return True, restart_result
-    if status != "failed":
-        return False, restart_result
-
-    # launchd can briefly fail to spawn the replacement gateway while it is
-    # rotating the supervised process (#6045). Retry exactly once after a
-    # bounded delay so an already-applied Agent update is not reported as a
-    # complete failure because of that transient process handoff.
-    time.sleep(_AGENT_GATEWAY_RESTART_RETRY_DELAY_S)
-    retry_result = restart_active_profile_gateway(profile=target_profile)
-    retry_status = str(retry_result.get("status") or "")
-    if retry_status in {"completed", "in_progress"}:
-        return True, {
-            **retry_result,
-            "retry_attempted": True,
-            "initial_failure": restart_result.get("message"),
-        }
-    if retry_status != "failed":
-        return False, {
-            **retry_result,
-            "retry_attempted": True,
-            "initial_failure": restart_result.get("message"),
-        }
-
-    # A restart command can still exit non-zero after launchd has recovered the
-    # service. Only accept that recovery when the confirmed local PID changed;
-    # a merely-alive old gateway has not loaded the updated Agent checkout.
-    time.sleep(_AGENT_GATEWAY_RESTART_RETRY_DELAY_S)
-    gateway_pid_after_retry = get_active_profile_gateway_running_pid(profile=target_profile)
-    if (
-        gateway_pid_before_restart is not None
-        and gateway_pid_after_retry is not None
-        and gateway_pid_after_retry != gateway_pid_before_restart
-    ):
-        return True, {
-            "status": "completed",
-            "message": "Gateway service recovered after a transient restart failure",
-            "retry_attempted": True,
-            "process_replaced": True,
-            "initial_failure": restart_result.get("message"),
-            "retry_failure": retry_result.get("message"),
-        }
-
-    initial_message = str(restart_result.get("message") or "Restart failed")
-    retry_message = str(retry_result.get("message") or "retry did not complete")
-    return False, {
-        **retry_result,
-        "message": f"{initial_message}; recovery retry did not complete: {retry_message}",
-        "retry_attempted": True,
-        "initial_failure": restart_result.get("message"),
-    }
+    deadline = time.monotonic() + _AGENT_GATEWAY_OBSERVATION_TIMEOUT_S
+    while True:
+        gateway_pid = get_active_profile_gateway_running_pid(profile=target_profile)
+        if gateway_pid is not None:
+            return True, {
+                "status": "completed",
+                "observation": "passive",
+                "gateway_pid": gateway_pid,
+            }
+        if time.monotonic() >= deadline:
+            return False, {
+                "status": "failed",
+                "observation": "passive",
+                "message": "Active-profile gateway did not become healthy after the Agent updater completed",
+            }
+        time.sleep(_AGENT_GATEWAY_OBSERVATION_POLL_S)
 
 
 def _agent_gateway_restart_failure_message(target: str, restart_result: dict) -> str:
@@ -2120,6 +2098,26 @@ def _find_agent_executable(agent_dir: Path):
     return None
 
 
+def _agent_update_failure_detail(output: str) -> str:
+    """Keep a sanitized tail of official updater output for the browser."""
+    if not output:
+        return "(no output from updater)"
+    return (
+        _sanitize_git_diagnostic(output[-500:], limit=500)
+        or "(no output from updater)"
+    )
+
+
+def _agent_update_output_failure(output: str) -> str | None:
+    """Classify explicit refusal and failure markers emitted by Agent source."""
+    for marker in _AGENT_UPDATE_FAILURE_MARKERS:
+        if marker in output:
+            return marker
+    if _AGENT_UPDATE_COMPLETION_MARKER not in output:
+        return "completion marker was not emitted"
+    return None
+
+
 def _apply_agent_update_inner():
     """Delegate the Agent update to the official hermes update entry point.
 
@@ -2156,6 +2154,8 @@ def _apply_agent_update_inner():
             [str(agent_exe), 'update', '--yes'],
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=1800,
         )
     except subprocess.TimeoutExpired:
@@ -2176,12 +2176,16 @@ def _apply_agent_update_inner():
             'target': 'agent',
         }
 
-    combined = ((proc.stdout or '') + (proc.stderr or '')).strip()
-    if proc.returncode != 0:
-        detail = combined[-500:] if combined else '(no output from updater)'
+    combined = "\n".join(
+        part for part in (proc.stdout or '', proc.stderr or '') if part
+    ).strip()
+    output_failure = _agent_update_output_failure(combined)
+    if proc.returncode != 0 or output_failure is not None:
+        detail = _agent_update_failure_detail(combined)
+        reason = f" ({output_failure})" if output_failure else ""
         response = {
             'ok': False,
-            'message': f'Agent update failed: {detail}',
+            'message': f'Agent update failed{reason}: {detail}',
             'target': 'agent',
         }
         if _is_git_lock_error(combined):
@@ -2193,12 +2197,9 @@ def _apply_agent_update_inner():
     with _cache_lock:
         _update_cache['checked_at'] = 0
 
-    # The Agent's subprocess already restarted all gateways before it exited
-    # (hermes_cli/main.py:10462).  This issues a confirmatory restart of the
-    # active-profile gateway via `hermes gateway restart` so WebUI can observe
-    # the restart outcome and gate success on it.  It is a second restart for
-    # the active profile — not a passive health probe — and a failed result
-    # here means the active-profile gateway did not come back up cleanly.
+    # The Agent's subprocess already restarts all gateways before it exits
+    # (hermes_cli/main.py:10462). Observe the active profile without issuing a
+    # second restart, then gate success on the passive health result.
     gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
     if not gateway_ok:
         return {

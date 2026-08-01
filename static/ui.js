@@ -10006,7 +10006,7 @@ async function applyUpdates(){
       const _applyBody={target};
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
-      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:2100000});
+      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:target==='agent'?2100000:120000});
       if(!res.ok){
         _showUpdateError(target,res);
         resetApplyButton(0);
@@ -10066,7 +10066,7 @@ async function applyClearUpdateLock(btn){
   const originalLabel=btn.textContent;
   btn.textContent='Checking lock…';
   try{
-    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:2100000});
+    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:target==='agent'?2100000:120000});
     if(res.ok){
       sessionStorage.removeItem('hermes-update-checked');
       sessionStorage.removeItem('hermes-update-dismissed');

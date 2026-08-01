@@ -1438,7 +1438,7 @@ def _make_hermes_exe(agent_dir):
     return exe
 
 
-def _fake_proc(returncode=0, stdout='Updated successfully.\n', stderr=''):
+def _fake_proc(returncode=0, stdout='✓ Update complete!\n', stderr=''):
     m = MagicMock()
     m.returncode = returncode
     m.stdout = stdout
@@ -1563,6 +1563,150 @@ def test_agent_update_failure_keeps_late_updater_detail(tmp_path, monkeypatch):
 
     assert result['ok'] is False, result
     assert late_failure in result['message'], result
+
+
+@pytest.mark.parametrize('output,marker', [
+    (
+        'Cannot update Hermes Agent: this Hermes installation is managed by Homebrew.',
+        'Cannot update Hermes Agent:',
+    ),
+    ('  ⚠ npm install failed in repo root\n', '⚠ npm install failed'),
+    ('  ⚠ npm workspace install failed\n', '⚠ npm workspace install failed'),
+    ('  ⚠ Desktop build failed (non-fatal)\n', '⚠ Desktop build failed'),
+    (
+        '  ⚠️  Config format update failed: invalid schema\n✓ Update complete!\n',
+        '⚠️  Config format update failed:',
+    ),
+])
+def test_agent_zero_exit_refusal_and_caught_failure_do_not_report_success(
+    tmp_path, monkeypatch, output, marker,
+):
+    """Explicit Agent refusal/failure output overrides a zero exit code."""
+    agent_dir = _agent_tmp(tmp_path)
+    agent_exe = _make_hermes_exe(agent_dir)
+    gateway_called = []
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
+    monkeypatch.setattr(
+        updates.subprocess, 'run',
+        lambda cmd, **kwargs: _fake_proc(stdout=output),
+    )
+    monkeypatch.setattr(
+        updates, '_ensure_gateway_restart_for_agent_update',
+        lambda: gateway_called.append(1) or (True, {'status': 'completed'}),
+    )
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['ok'] is False, result
+    assert marker in result['message'], result
+    assert gateway_called == []
+
+
+def test_agent_zero_exit_without_completion_marker_is_not_success(tmp_path, monkeypatch):
+    """A zero exit without the official durable completion marker is failure."""
+    agent_dir = _agent_tmp(tmp_path)
+    agent_exe = _make_hermes_exe(agent_dir)
+    gateway_called = []
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
+    monkeypatch.setattr(
+        updates.subprocess, 'run',
+        lambda cmd, **kwargs: _fake_proc(stdout='Updated successfully.\n'),
+    )
+    monkeypatch.setattr(
+        updates, '_ensure_gateway_restart_for_agent_update',
+        lambda: gateway_called.append(1) or (True, {'status': 'completed'}),
+    )
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['ok'] is False, result
+    assert 'completion marker was not emitted' in result['message']
+    assert gateway_called == []
+
+
+def test_agent_output_is_decoded_as_utf8_with_replacement(tmp_path, monkeypatch):
+    """UTF-8 Agent output survives undecodable bytes on the Windows parent."""
+    agent_dir = _agent_tmp(tmp_path)
+    agent_exe = _make_hermes_exe(agent_dir)
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        return _fake_proc(stdout='Progress �\n✓ Update complete!\n')
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
+    monkeypatch.setattr(updates.subprocess, 'run', fake_run)
+    monkeypatch.setattr(
+        updates, '_ensure_gateway_restart_for_agent_update',
+        lambda: (True, {'status': 'completed'}),
+    )
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['ok'] is True, result
+    assert seen['encoding'] == 'utf-8'
+    assert seen['errors'] == 'replace'
+
+
+def test_agent_failure_tail_uses_existing_diagnostic_sanitizer(tmp_path, monkeypatch):
+    """Credentialed Agent diagnostics are redacted while the tail remains."""
+    agent_dir = _agent_tmp(tmp_path)
+    agent_exe = _make_hermes_exe(agent_dir)
+    password = 'super-secret-password'
+    token = 'ghp_1234567890abcdefghijklmnop'
+    stdout = f'fetch https://user:{password}@example.test/repo.git token={token}'
+    stderr = f'index https://user:{password}@example.test/repo.git token={token}'
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
+    monkeypatch.setattr(
+        updates.subprocess, 'run',
+        lambda cmd, **kwargs: _fake_proc(returncode=1, stdout=stdout, stderr=stderr),
+    )
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['ok'] is False, result
+    assert password not in result['message']
+    assert token not in result['message']
+    assert '<redacted>' in result['message']
+    assert 'index' in result['message']
+
+
+def test_agent_uses_passive_gateway_observation_after_official_restart(
+    tmp_path, monkeypatch,
+):
+    """The WebUI observes the Agent-owned restart without issuing another one."""
+    agent_dir = _agent_tmp(tmp_path)
+    agent_exe = _make_hermes_exe(agent_dir)
+    restart_calls = []
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
+    monkeypatch.setattr(updates.subprocess, 'run', lambda cmd, **kwargs: _fake_proc())
+    monkeypatch.setattr(updates, 'get_active_profile_name', lambda: 'default')
+    monkeypatch.setattr(
+        updates, 'get_active_profile_gateway_running_pid',
+        lambda profile: 4242,
+    )
+    monkeypatch.setattr(
+        updates, 'restart_active_profile_gateway',
+        lambda **kwargs: restart_calls.append(kwargs),
+        raising=False,
+    )
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['ok'] is True, result
+    assert result['gateway_restart'] == 'completed'
+    assert restart_calls == []
 
 
 def test_agent_update_lock_conflict_preserves_recovery_affordance(tmp_path, monkeypatch):
@@ -1719,7 +1863,7 @@ def test_update_target_matrix(scenario, setup, expected_ok, expected_msg_fragmen
 
         if setup.get('agent_exe', True):
             _rc = setup.get('agent_rc', 0)
-            _out = setup.get('agent_stdout', 'Updated successfully.\n')
+            _out = setup.get('agent_stdout', '✓ Update complete!\n')
             monkeypatch.setattr(
                 updates.subprocess, 'run',
                 lambda cmd, **kw: _fake_proc(returncode=_rc, stdout=_out),
