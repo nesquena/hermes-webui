@@ -9609,6 +9609,9 @@ function _formatUpdateCheckError(label,info){
   const detail=String(info.error).replace(/^fetch failed:?\s*/i,'').trim();
   return detail ? `${label}: ${detail}` : label;
 }
+function _updateCheckHasError(data){
+  return !!(data&&((data.webui&&data.webui.error)||(data.agent&&data.agent.error)));
+}
 function _isSafeUpdateCompareUrl(url){
   if(!url||!/^https?:\/\//i.test(url)) return false;
   try{
@@ -9915,18 +9918,24 @@ function _updateDirtyState(data){
 }
 function _showUpdateBanner(data){
   const parts=[];
+  const errorParts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
+  const webuiError=_formatUpdateCheckError('WebUI',data.webui);
+  const agentError=_formatUpdateCheckError('Agent',data.agent);
   if(webuiPart) parts.push(webuiPart);
   if(agentPart) parts.push(agentPart);
+  if(webuiError) errorParts.push(webuiError);
+  if(agentError) errorParts.push(agentError);
   window._updateData=data;
   const {webuiDirty,agentDirty,hasDirty,dirtyTarget}=_updateDirtyState(data);
+  const hasCheckError=_updateCheckHasError(data);
   const btnApply=$('btnApplyUpdate');
   if(btnApply){
     const webuiManual=!!(data&&data.webui&&data.webui.manual_update&&data.webui.behind>0);
     const webuiUpdatable=!!(data&&data.webui&&data.webui.behind>0&&!webuiManual);
     const agentUpdatable=!!(data&&data.agent&&data.agent.behind>0);
-    const hasApplyTargets=webuiUpdatable||agentUpdatable;
+    const hasApplyTargets=!hasCheckError&&(webuiUpdatable||agentUpdatable);
     btnApply.disabled=!hasApplyTargets;
     btnApply.style.display=hasApplyTargets?'':'none';
     if(webuiManual){
@@ -9948,7 +9957,7 @@ function _showUpdateBanner(data){
       if(forceBtn){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
     }
   }
-  if(!parts.length&&!hasDirty){
+  if(!parts.length&&!hasDirty&&!hasCheckError){
     _renderUpdateWhatsNewLinks(data);
     const staleBanner=$('updateBanner');
     if(staleBanner) staleBanner.classList.remove('visible');
@@ -9957,7 +9966,7 @@ function _showUpdateBanner(data){
   const msg=$('updateMsg');
   if(msg){
     const manualInstruction=_formatManualUpdateInstruction(data&&data.webui);
-    let baseMsg=parts.length?('\u2B06 '+parts.join(', ')+' available'+(manualInstruction?' \u00B7 '+manualInstruction:'')):'';
+    let baseMsg=hasCheckError?('\u26A0\uFE0F '+errorParts.join(', ')):parts.length?('\u2B06 '+parts.join(', ')+' available'+(manualInstruction?' \u00B7 '+manualInstruction:'')):'';
     if(hasDirty){
       const dirtyLabel=dirtyTarget==='webui'?'WebUI':'Agent';
       const dirtyNote=_i18nUpdateText('settings_local_changes_detected','Local changes detected')+' in '+dirtyLabel+(parts.length?'':'. Use "Force update" to restore a clean install')+'.';
@@ -10255,18 +10264,18 @@ async function forceUpdate(btn){
     if(res.up_to_date||res.refused_rewind){
       // No-op state: backend declined to reset the tree. Keep the local-changes sentence in
       // the banner so the user knows the dirty install still exists, and add a channel note.
-      // Do not hide or disable the button — the user needs a path forward.
+      // Remove the unavailable action while preserving a truthful recovery path.
       const bannerMsg=$('updateMsg');
       if(bannerMsg){
         const _lt=(typeof _i18nUpdateText==='function')?_i18nUpdateText:(k,f)=>f||k;
         const targetLabel=target==='webui'?'WebUI':target==='agent'?'Agent':target;
         const localNote=_lt('settings_local_changes_detected','Local changes detected')+' in '+targetLabel+'.';
         const channelNote=res.message||'The forced update did not reset this checkout.';
-        bannerMsg.textContent='⚠️ '+localNote+' '+channelNote;
+        bannerMsg.textContent='⚠️ '+localNote+' '+channelNote+' Select a channel with an available reset target or clean the '+targetLabel+' checkout manually.';
       }
       const bannerEl=$('updateBanner');
       if(bannerEl) bannerEl.classList.add('visible');
-      btn.disabled=false;btn.textContent='Force update';
+      btn.disabled=true;btn.style.display='none';btn.dataset.target='';btn.textContent='Force update';
       window._updateApplyInFlight=false;
       return;
     }

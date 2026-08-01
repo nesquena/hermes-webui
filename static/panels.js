@@ -11986,17 +11986,19 @@ async function checkUpdatesNow(channelOverride){
       if(data.webui&&data.webui.no_git&&!data.webui.manual_update) noGitParts.push('WebUI');
       if(data.agent&&data.agent.no_git&&!data.agent.ignored) noGitParts.push('Agent');
       const {hasDirty:_hasDirty}=(typeof _updateDirtyState==='function'?_updateDirtyState(data):{hasDirty:false,webuiDirty:false,agentDirty:false,dirtyTarget:''});
-      if(parts.length){
+      const _hasCheckError=(typeof _updateCheckHasError==='function')
+        ? _updateCheckHasError(data)
+        : errorParts.length>0;
+      if(_hasCheckError){
+        if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+      } else if(parts.length){
         let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
         if(manualInstruction) txt+=' · '+manualInstruction;
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
-      } else if(errorParts.length){
-        if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
-        // Stale-check payloads can carry dirty:true; still surface the recovery affordance.
-        if(_hasDirty&&typeof _showUpdateBanner==='function') _showUpdateBanner(data);
       } else if(_hasDirty){
         // Dirty-recovery takes priority over the no-git informational note (#4085 branch ordering).
         if(status){status.textContent=t('settings_local_changes_detected');status.style.color='var(--accent)';}

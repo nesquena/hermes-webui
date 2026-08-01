@@ -67,6 +67,30 @@
         "channel": "experimental"
       }
     },
+    "dirty_stale_positive_behind": {
+      "webui": {
+        "name": "webui",
+        "current_version": "exp-v0.52.150-dirty-a9b7cc19",
+        "latest_version": "exp-v0.52.153",
+        "behind": 3,
+        "dirty": true,
+        "stale_check": true,
+        "error": "fetch failed",
+        "channel": "experimental"
+      }
+    },
+    "clean_stale_check": {
+      "webui": {
+        "name": "webui",
+        "current_version": "exp-v0.52.153",
+        "latest_version": null,
+        "behind": null,
+        "dirty": false,
+        "stale_check": true,
+        "error": "fetch failed",
+        "channel": "experimental"
+      }
+    },
     "no_git_install": {
       "webui": {
         "name": "webui",

@@ -2398,6 +2398,8 @@ if(_formatUpdateTargetStatus('WebUI', {{ no_git: true, behind: 1 }}) !== null) t
         format_fn = extract_js_function(src, '_formatUpdateTargetStatus')
         instruction_fn = extract_js_function(src, '_formatManualUpdateInstruction')
         dirty_state_fn = extract_js_function(src, '_updateDirtyState')
+        error_fn = extract_js_function(src, '_formatUpdateCheckError')
+        check_error_fn = extract_js_function(src, '_updateCheckHasError')
         i18n_fn = extract_js_function(src, '_i18nUpdateText')
         show_fn = extract_js_function(src, '_showUpdateBanner')
         script = f"""
@@ -2419,6 +2421,8 @@ global.t = (key, ...args) => {{
 {format_fn}
 {instruction_fn}
 {dirty_state_fn}
+{error_fn}
+{check_error_fn}
 {i18n_fn}
 {show_fn}
 _showUpdateBanner({{
@@ -2453,6 +2457,7 @@ if(state.updateBanner.classList.added !== true) throw new Error('manual update m
         dirty_state_fn = extract_js_function(ui_src, '_updateDirtyState')
         i18n_fn = extract_js_function(ui_src, '_i18nUpdateText')
         error_fn = extract_js_function(ui_src, '_formatUpdateCheckError')
+        check_error_fn = extract_js_function(ui_src, '_updateCheckHasError')
         check_fn = extract_js_function(panels_src, 'checkUpdatesNow')
         script = f"""
 const state = {{
@@ -2492,6 +2497,7 @@ function _showUpdateBanner() {{}}
 {dirty_state_fn}
 {i18n_fn}
 {error_fn}
+{check_error_fn}
 {check_fn}
 (async () => {{
   await checkUpdatesNow();
@@ -2692,7 +2698,7 @@ class TestUpdateCompareSource:
         start = src.find('function _showUpdateBanner(data)')
         assert start != -1, "_showUpdateBanner not found"
         fn = src[start:src.find('function dismissUpdate()', start)]
-        empty_idx = fn.find('if(!parts.length&&!hasDirty)')
+        empty_idx = fn.find('if(!parts.length&&!hasDirty&&!hasCheckError)')
         assert empty_idx != -1, "_showUpdateBanner must handle empty update payloads (dirty guard required)"
         empty_block = fn[empty_idx:fn.find('return;', empty_idx) + len('return;')]
         assert '_renderUpdateWhatsNewLinks(data);' in empty_block
@@ -3338,6 +3344,8 @@ def _extract_banner_js():
         extract_js_function(src, '_updateDirtyState'),
         extract_js_function(src, '_formatUpdateTargetStatus'),
         extract_js_function(src, '_formatManualUpdateInstruction'),
+        extract_js_function(src, '_formatUpdateCheckError'),
+        extract_js_function(src, '_updateCheckHasError'),
         extract_js_function(src, '_i18nUpdateText'),
         extract_js_function(src, '_showUpdateBanner'),
     ])
@@ -3408,7 +3416,7 @@ def _run_force_update(update_data, target, confirm, api_response):
         'global._readHealthServerIdentity=async()=>null;'
         'global.sessionStorage={removeItem:()=>{},setItem:()=>{},getItem:()=>null};'
         + fn
-        + ';const _btn={disabled:false,textContent:"Force update",dataset:{target:' + target_json + '}};'
+        + ';const _btn=_el.btnForceUpdate;_btn.disabled=false;_btn.textContent="Force update";_btn.dataset.target=' + target_json + ';'
         'await forceUpdate(_btn);'
         'process.stdout.write(JSON.stringify({'
         'api_calls:_calls,'
@@ -3437,6 +3445,7 @@ def _run_check_updates_now(payload):
         extract_js_function(ui_src, '_formatUpdateTargetStatus'),
         extract_js_function(ui_src, '_formatManualUpdateInstruction'),
         extract_js_function(ui_src, '_formatUpdateCheckError'),
+        extract_js_function(ui_src, '_updateCheckHasError'),
         extract_js_function(ui_src, '_i18nUpdateText'),
         extract_js_function(ui_src, '_showUpdateBanner'),
     ])
@@ -3468,6 +3477,7 @@ def _run_check_updates_now(payload):
         'status_color:_el.checkUpdatesStatus.style.color,'
         'banner_visible:_el.updateBanner.classList._s.has("visible"),'
         'force_visible:_el.btnForceUpdate.style.display!=="none",'
+        'apply_visible:_el.btnApplyUpdate.style.display!=="none",'
         'force_target:_el.btnForceUpdate.dataset.target,'
         'msg:_el.updateMsg.textContent,'
         '}));'
@@ -3609,6 +3619,71 @@ class TestDirtyInstallRecovery:
         assert state['force_visible'], 'force button must be visible for dirty stale-check'
         assert state['force_target'] == 'webui'
 
+    def test_positive_behind_stale_error_suppresses_apply_and_preserves_error(self):
+        """A stale fetch error must not become an ordinary Apply state when behind is positive."""
+        state = _run_show_update_banner(_REPRO_PAYLOADS['dirty_stale_positive_behind'])
+        assert state['banner_visible'], 'stale error banner must remain visible'
+        assert not state['apply_visible'], 'stale error must suppress the ordinary Apply action'
+        assert state['force_visible'], 'dirty stale error must retain force recovery'
+        assert 'WebUI' in state['msg'], (
+            f'stale error must remain visible in the banner; got {state["msg"]!r}'
+        )
+
+    def test_positive_behind_stale_error_routes_through_settings_error_state(self):
+        """Settings must choose the error branch before the positive-behind branch."""
+        state = _run_check_updates_now(_REPRO_PAYLOADS['dirty_stale_positive_behind'])
+        assert state['status_color'] == 'var(--error)'
+        assert 'WebUI' in state['status_text']
+        assert state['banner_visible']
+        assert not state['apply_visible'], 'Settings stale error must not expose Apply'
+        assert state['force_visible']
+
+    def test_conflict_response_reveals_force_button_in_production_dom(self):
+        """The production apply click path must reveal the real DOM force control on conflict."""
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            pytest.skip('playwright is unavailable; run the production DOM conflict proof')
+
+        ui_src = read('static/ui.js')
+        apply_fn = extract_js_function(ui_src, 'applyUpdates')
+        error_fn = extract_js_function(ui_src, '_showUpdateError')
+        html = '''
+          <div id="updateBanner">
+            <span id="updateMsg"></span>
+            <div id="updateError" style="display:none"></div>
+            <button id="btnApplyUpdate" onclick="applyUpdates()">Update Now</button>
+            <button id="btnForceUpdate" style="display:none" onclick="forceUpdate(this)">Force update</button>
+            <button id="btnClearUpdateLock" style="display:none">Clear lock</button>
+          </div>
+        '''
+        script = f'''
+          window._updateData = {{webui: {{behind: 2, channel: 'stable'}}}};
+          window._updateApplyInFlight = false;
+          window.api = async () => ({{ok: false, conflict: true, message: 'merge conflict in the checkout'}});
+          window._readHealthServerIdentity = async () => null;
+          window._waitForServerThenReload = () => {{}};
+          window._i18nUpdateText = (_, fallback) => fallback;
+          window.$ = id => document.getElementById(id);
+          window.showToast = () => {{}};
+          {error_fn}
+          {apply_fn}
+        '''
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+            try:
+                page = browser.new_page()
+                page.set_content(html)
+                page.add_script_tag(content=script)
+                page.locator('#btnApplyUpdate').click()
+                page.wait_for_function("document.querySelector('#updateError').style.display === 'block'")
+                assert page.locator('#btnForceUpdate').is_visible()
+                assert page.locator('#btnForceUpdate').is_enabled()
+                assert page.locator('#btnForceUpdate').get_attribute('data-target') == 'webui'
+                assert 'merge conflict' in page.locator('#updateError').inner_text()
+            finally:
+                browser.close()
+
     def test_no_git_install_has_no_destructive_action(self):
         """Manual/no-git install must never offer the force-update action."""
         payload = _REPRO_PAYLOADS['no_git_install']
@@ -3712,9 +3787,13 @@ class TestDirtyInstallRecovery:
         assert 'local changes' in result['msg_text'].lower(), (
             f'banner msg must mention local changes; got {result["msg_text"]!r}'
         )
-        assert not result['btn_disabled'], (
-            'force button must be re-enabled after up_to_date (server declined, user can try another channel)'
+        assert result['btn_disabled'], (
+            'force button must be hidden and disabled after up_to_date leaves no reset target'
         )
+        assert not result['force_btn_visible'], (
+            'up_to_date must remove the unavailable force action from the banner'
+        )
+        assert 'Select a channel with an available reset target' in result['msg_text']
         assert not result['in_flight'], (
             'in_flight must be cleared after up_to_date (no restart pending)'
         )
@@ -3738,8 +3817,11 @@ class TestDirtyInstallRecovery:
         assert 'local changes' in result['msg_text'].lower(), (
             f'banner msg must mention local changes; got {result["msg_text"]!r}'
         )
-        assert not result['btn_disabled'], (
-            'force button must be re-enabled after refused_rewind (server declined, user can act)'
+        assert result['btn_disabled'], (
+            'force button must be hidden and disabled after refused_rewind leaves no safe reset target'
+        )
+        assert not result['force_btn_visible'], (
+            'refused_rewind must remove the unavailable force action from the banner'
         )
         assert not result['in_flight'], (
             'in_flight must be cleared after refused_rewind (no restart pending)'
@@ -3747,6 +3829,7 @@ class TestDirtyInstallRecovery:
         assert 'ahead of the stable channel' in result['msg_text'], (
             'refused_rewind banner must preserve the backend response message'
         )
+        assert 'Select a channel with an available reset target' in result['msg_text']
 
     def test_restart_holds_in_flight_guard(self):
         """P2.1: in_flight guard must stay true after a successful restart trigger."""
@@ -3827,18 +3910,20 @@ class TestDirtyInstallRecovery:
         # Extract the gate line from boot.js to run it verbatim.
         m = re.search(
             r'const \{hasDirty:_dirty\}=_updateDirtyState\(d\);'
-            r'if\(.+?\|\|_dirty\)_showUpdateBanner\(d\);',
+            r'if\(.+?\|\|_dirty\|\|_updateCheckHasError\(d\)\)_showUpdateBanner\(d\);',
             boot_src,
         )
         assert m, 'boot.js gate pattern not found; check static/boot.js for gate wiring'
         gate_js = m.group(0)
         fn_dirty = extract_js_function(ui_src, '_updateDirtyState')
+        fn_error = extract_js_function(ui_src, '_updateCheckHasError')
         payload = _REPRO_PAYLOADS['dirty_current']
         payload_json = json.dumps(payload)
         script = (
             '"use strict";'
             'let _bannerCalled=false;'
             + fn_dirty
+            + fn_error
             + ';function _showUpdateBanner(d){_bannerCalled=true;}'
             + ';const d=' + payload_json + ';'
             + gate_js
@@ -3850,6 +3935,29 @@ class TestDirtyInstallRecovery:
         assert result['called'], (
             'boot gate must call _showUpdateBanner for dirty/current payload'
         )
+
+    def test_boot_gate_calls_show_banner_for_clean_stale_error(self):
+        """Boot must surface a stale-check error even when no dirty flag is present."""
+        ui_src = read('static/ui.js')
+        boot_src = read('static/boot.js')
+        m = re.search(
+            r'const \{hasDirty:_dirty\}=_updateDirtyState\(d\);'
+            r'if\(.+?\|\|_dirty\|\|_updateCheckHasError\(d\)\)_showUpdateBanner\(d\);',
+            boot_src,
+        )
+        assert m, 'boot gate pattern not found; check stale-error wiring'
+        script = (
+            '"use strict";let _bannerCalled=false;'
+            + extract_js_function(ui_src, '_updateDirtyState')
+            + extract_js_function(ui_src, '_updateCheckHasError')
+            + ';function _showUpdateBanner(d){_bannerCalled=true;}'
+            + ';const d=' + json.dumps(_REPRO_PAYLOADS['clean_stale_check']) + ';'
+            + m.group(0)
+            + ';process.stdout.write(JSON.stringify({called:_bannerCalled}));'
+        )
+        r = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', timeout=15)
+        assert r.returncode == 0, f'node exited {r.returncode}:\n{r.stderr}'
+        assert json.loads(r.stdout)['called']
 
 
 def _run_dirty_state(payload):
@@ -3965,16 +4073,18 @@ class TestUpdateDirtyStateRouting:
         boot_src = read('static/boot.js')
         m = re.search(
             r'const \{hasDirty:_dirty\}=_updateDirtyState\(d\);'
-            r'if\(.+?\|\|_dirty\)_showUpdateBanner\(d\);',
+            r'if\(.+?\|\|_dirty\|\|_updateCheckHasError\(d\)\)_showUpdateBanner\(d\);',
             boot_src,
         )
         assert m, 'boot gate pattern not found in static/boot.js'
         gate_js = m.group(0)
         fn_dirty = extract_js_function(ui_src, '_updateDirtyState')
+        fn_error = extract_js_function(ui_src, '_updateCheckHasError')
         script = (
             '"use strict";'
             'let _bannerCalled=false;'
             + fn_dirty
+            + fn_error
             + ';function _showUpdateBanner(d){_bannerCalled=true;}'
             + ';const d=' + json.dumps(payload) + ';'
             + gate_js
