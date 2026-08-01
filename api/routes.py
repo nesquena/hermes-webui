@@ -13385,6 +13385,16 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Missing session_id")
         return j(handler, {"yolo_enabled": is_session_yolo_enabled(sid)})
 
+    if parsed.path == "/api/session/squash/status":
+        job_id = parse_qs(parsed.query).get("job_id", [""])[0].strip()
+        if not job_id:
+            return bad(handler, "Missing job_id")
+        from api.session_squash import squash_job_status
+        job = squash_job_status(job_id)
+        if not job:
+            return bad(handler, "job not found", 404)
+        return j(handler, {"ok": True, "job": job})
+
     if parsed.path == "/api/session/usage":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
@@ -15334,6 +15344,34 @@ def handle_post(handler, parsed) -> bool:
                 **worktree_retained,
             },
         )
+
+    if parsed.path == "/api/session/squash":
+        # Collapse an idle session to one verified summary message (squash-chat
+        # skill, in-process). Runs as a background job — aux-LLM summary
+        # generation can take minutes on long transcripts; the UI polls
+        # GET /api/session/squash/status.
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = str(body["session_id"]).strip()
+        if not is_safe_session_id(sid):
+            return bad(handler, "Invalid session id", 400)
+        if _session_is_subagent_view_only(sid):
+            return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
+        from api.session_squash import SquashError, start_squash_job
+        try:
+            job = start_squash_job(
+                sid,
+                confirm_session_id=body.get("confirm_session_id"),
+                summary=body.get("summary"),
+            )
+        except SquashError as exc:
+            return bad(handler, str(exc), exc.status)
+        except Exception:
+            logger.exception("session squash start failed for %s", sid)
+            return bad(handler, "Failed to start squash", status=500)
+        return j(handler, {"ok": True, "job": job})
 
     if parsed.path == "/api/session/clear":
         try:

@@ -4856,6 +4856,64 @@ async function clearConversation() {
   } catch(e) { setStatus(t('clear_failed') + e.message); }
 }
 
+// ── Squash (compact conversation to one verified summary) ──
+// Server-side counterpart of the squash-chat skill: archives the full
+// transcript, collapses the session to a single summary message and reloads
+// the view. Runs as a background job (aux-LLM summary can take minutes).
+async function squashConversation() {
+  if(!S.session) return;
+  const sid = S.session.session_id;
+  const _sqConfirmed = await showConfirmDialog({
+    title: t('squash_title'),
+    message: t('squash_message'),
+    confirmLabel: t('squash_confirm'),
+    danger: false,
+    focusCancel: true,
+  });
+  if(!_sqConfirmed) return;
+  const btn = $('btnSquash');
+  if(btn) btn.classList.add('squash-running');
+  showToast(t('squash_started'), 4000);
+  try {
+    const start = await api('/api/session/squash', {method:'POST', timeoutMs: 30000,
+      body: JSON.stringify({session_id: sid, confirm_session_id: sid})});
+    const jobId = start && start.job && start.job.job_id;
+    if(!jobId) throw new Error('no job id returned');
+    const job = await _pollSquashJob(jobId);
+    if(job.status === 'error') throw new Error(job.error || 'unknown error');
+    const r = job.result || {};
+    if(r.already_squashed) {
+      showToast(t('squash_already'));
+    } else {
+      let note = '';
+      if(r.summary_source === 'fallback-template') note = ' — ' + t('squash_fallback_note');
+      showToast(t('squash_done', (r.before && r.before.message_count) || 0, (r.after && r.after.message_count) || 1) + note, 7000);
+    }
+    await loadSession(sid, {force: true});
+  } catch(e) {
+    showToast(t('squash_failed') + e.message, 7000, 'error');
+  } finally {
+    if(btn) btn.classList.remove('squash-running');
+  }
+}
+
+function _pollSquashJob(jobId) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + 6 * 60 * 1000;
+    const tick = async () => {
+      try {
+        const data = await api('/api/session/squash/status?job_id=' + encodeURIComponent(jobId), {timeoutMs: 15000});
+        const job = data && data.job;
+        if(!job) { reject(new Error('job not found')); return; }
+        if(job.status === 'done' || job.status === 'error') { resolve(job); return; }
+        if(Date.now() > deadline) { reject(new Error('squash job timeout')); return; }
+        setTimeout(tick, 2000);
+      } catch(e) { reject(e); }
+    };
+    tick();
+  });
+}
+
 // ── Skills panel ──
 async function loadSkills() {
   if (_skillsData) { renderSkills(_skillsData); return; }
