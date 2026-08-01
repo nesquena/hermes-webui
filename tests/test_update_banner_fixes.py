@@ -2619,14 +2619,15 @@ class TestSequentialUpdateRestartCoordination:
         monkeypatch.setattr(upd, '_schedule_restart', _REAL_SCHEDULE_RESTART)
 
         # Hold _apply_lock from another thread (simulating an in-flight
-        # second update) for 0.4 s.
+        # second update) until the assertion has observed the blocked restart.
         release_time = []
         lock_held = _th.Event()
+        release_holder = _th.Event()
 
         def holder():
             with upd._apply_lock:
                 lock_held.set()
-                _t.sleep(0.4)
+                assert release_holder.wait(timeout=2), "test did not release the held update lock"
                 release_time.append(_t.monotonic())
 
         holder_thread = real_thread(target=holder, daemon=True)
@@ -2646,7 +2647,9 @@ class TestSequentialUpdateRestartCoordination:
         )
 
         # Let the holder release.
+        release_holder.set()
         holder_thread.join(timeout=2)
+        assert not holder_thread.is_alive(), "test did not release the held update lock"
         assert release_time, "holder didn't release the lock"
 
         # execv should fire shortly after the lock release.

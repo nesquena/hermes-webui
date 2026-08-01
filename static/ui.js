@@ -10321,7 +10321,8 @@ async function forceUpdate(btn){
       const bannerMsg=$('updateMsg');
       if(bannerMsg){
         const localNote=_lt('update_dirty_state','Local changes detected in {0}.',targetLabel);
-        const channelNote=String(res.message||'').trim()||_lt('update_force_noop','The forced update did not reset this checkout.');
+        const backendDetail=String(res.message||'').trim();
+        const channelNote=_lt('update_force_noop','The forced update did not reset this checkout.')+(backendDetail?' '+backendDetail:'');
         const guidanceKey=target==='agent'?'update_force_unavailable_agent':'update_force_unavailable_webui';
         const guidanceFallback=target==='agent'?'The Agent uses its fixed default channel; clean the Agent checkout manually.':'Select a channel with an available reset target or clean the WebUI checkout manually.';
         bannerMsg.textContent='⚠️ '+localNote+' '+channelNote+' '+_lt(guidanceKey,guidanceFallback);
