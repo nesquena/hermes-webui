@@ -3381,7 +3381,7 @@ def _apply_core_sync_or_error_marker(
             _stream_id,
             session.pending_started_at,
         )
-        _token_checkpointed = any(
+        _token_checkpointed = bool(_active_turn_token) and any(
             isinstance(message, dict)
             and message.get('role') == 'user'
             and message.get('_active_turn_token') == _active_turn_token
