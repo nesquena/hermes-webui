@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.js_source_extract import extract_function
+
 ROOT = Path(__file__).resolve().parents[1]
 MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 FIXTURE = json.loads(
@@ -18,29 +20,6 @@ FIXTURE = json.loads(
     ),
 )
 NODE = shutil.which("node")
-
-
-def _extract_function(name: str) -> str:
-    start = MESSAGES_JS.index(f"function {name}(")
-    paren = MESSAGES_JS.index("(", start)
-    depth = 1
-    index = paren + 1
-    while depth:
-        if MESSAGES_JS[index] == "(":
-            depth += 1
-        elif MESSAGES_JS[index] == ")":
-            depth -= 1
-        index += 1
-    brace = MESSAGES_JS.index("{", index)
-    depth = 1
-    index = brace + 1
-    while depth:
-        if MESSAGES_JS[index] == "{":
-            depth += 1
-        elif MESSAGES_JS[index] == "}":
-            depth -= 1
-        index += 1
-    return MESSAGES_JS[start:index]
 
 
 def _run_node(script: str) -> dict:
@@ -79,9 +58,10 @@ def _driver(
     permission: str = "granted",
     via_public_sender: bool = False,
 ) -> dict:
-    notification_options = _extract_function("_notificationOptions")
-    show_notification = _extract_function("_showPwaNotification")
-    send_notification = _extract_function("sendBrowserNotification")
+    notification_options = extract_function(MESSAGES_JS, "_notificationOptions")
+    show_notification = extract_function(MESSAGES_JS, "_showPwaNotification")
+    request_permission = extract_function(MESSAGES_JS, "requestNotificationPermission")
+    send_notification = extract_function(MESSAGES_JS, "sendBrowserNotification")
     registration = """\
 const delivery = {calls: [], entries: new Map(), toasts: 0};
 function recordNotification(method, title, options) {
@@ -136,6 +116,7 @@ navigator = {
 let navigator = {{}};
 {notification_options}
 {show_notification}
+{request_permission}
 {send_notification}
 {registration}
 globalThis.S = {{session: {{}}}};
@@ -152,6 +133,7 @@ globalThis.Notification = function(title, options) {{
   return recordNotification('direct', title, options);
 }};
 globalThis.Notification.permission = {json.dumps(permission)};
+globalThis.Notification.requestPermission = () => Promise.resolve('granted');
 globalThis.window.Notification = globalThis.Notification;
 globalThis.t = key => key;
 {delivery_setup}
@@ -160,7 +142,6 @@ globalThis.t = key => key;
   for (const send of {json.dumps(sends)}) {{
     if ({json.dumps(via_public_sender)}) {{
       await sendBrowserNotification(send.title, send.body, {{...send.options, force: true}});
-      await new Promise(resolve => setImmediate(resolve));
     }} else {{
       await _showPwaNotification(send.title, send.body, send.options);
     }}
@@ -243,6 +224,18 @@ def test_direct_delivery_renotifies_repeated_constructor_calls():
     assert result["tags"] == [FIXTURE["expected_tag"]]
 
 
+def test_public_sender_awaits_delivery_after_permission_grant():
+    result = _driver(
+        delivery="service-worker",
+        sends=[_send(FIXTURE["title"], FIXTURE["body"])],
+        permission="default",
+        via_public_sender=True,
+    )
+
+    assert [call["method"] for call in result["calls"]] == ["service-worker"]
+    assert result["tags"] == [FIXTURE["expected_tag"]]
+
+
 @pytest.mark.parametrize("delivery", ["inactive-service-worker", "rejected-service-worker"])
 def test_direct_fallback_when_service_worker_registration_unavailable(delivery: str):
     result = _driver(
@@ -291,12 +284,17 @@ def test_grouping_keeps_one_notification_entry():
     assert result["tags"] == [FIXTURE["expected_tag"]]
 
 
-def test_missing_session_id_uses_generic_grouping_tag():
+def test_repeated_missing_session_id_uses_generic_grouping_tag():
     result = _driver(
-        delivery="direct",
-        sends=[_send("Approval required", "Approve the tool call.", sid=None)],
+        delivery="service-worker",
+        sends=[
+            _send("Approval required", "Approve the tool call.", sid=None),
+            _send("Approval required", "Approve it again.", sid=None),
+        ],
+        via_public_sender=True,
     )
 
-    call = result["calls"][0]
-    assert call["options"]["tag"] == FIXTURE["generic_tag"]
-    assert call["options"]["data"]["url"] == FIXTURE["generic_url"]
+    assert result["toasts"] == 2
+    assert result["entryCount"] == 1
+    assert result["tags"] == [FIXTURE["generic_tag"]]
+    assert result["calls"][-1]["options"]["data"]["url"] == FIXTURE["generic_url"]
