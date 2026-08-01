@@ -1,4 +1,3 @@
-from tests.i18n_locale_loader import locale_source_text
 """Regression tests for the Japanese (`ja`) locale added by PR #1439.
 
 Mirrors `test_chinese_locale.py` and `test_korean_locale.py` — confirms the

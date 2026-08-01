@@ -1,3 +1,4 @@
+import io
 from tests.i18n_locale_loader import locale_source_text
 """Test: SVG, audio, video inline rendering (#481)"""
 import re

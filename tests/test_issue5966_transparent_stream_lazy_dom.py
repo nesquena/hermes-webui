@@ -296,8 +296,8 @@ def test_label_uses_i18n_with_fallback():
     body = _function_body(UI_JS, "_tOrDefault")
     assert "v!==key" in body
     assert "show_earlier_step_one: 'Show 1 earlier step'" in (
-        (ROOT / "static" / "split locale bundles").read_text(encoding="utf-8")
+        locale_source_text()
     )
     assert "show_earlier_steps: 'Show {0} earlier steps'" in (
-        (ROOT / "static" / "split locale bundles").read_text(encoding="utf-8")
+        locale_source_text()
     )

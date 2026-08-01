@@ -1,4 +1,3 @@
-from tests.i18n_locale_loader import locale_source_text
 """Tests for #1488 — composer voice buttons (dictation vs voice mode).
 
 The composer footer shows two voice-related buttons that look identical and

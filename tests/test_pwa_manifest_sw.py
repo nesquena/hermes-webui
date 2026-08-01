@@ -1,4 +1,3 @@
-from tests.i18n_locale_loader import locale_source_text
 """Regression tests for PWA support (manifest + service worker).
 
 Covers:
