@@ -3,8 +3,8 @@
   "reporter": "b3nw via Discord #report-bugs, 2026-07-28, WebUI exp-v0.52.153-dirty-a9b7cc19 Experimental",
   "symptom": "you get the same prompt text multiple times even though you're only actually executing the prompt a single time",
   "transcript": [
-    { "role": "user", "content": "same prompt" },
-    { "role": "assistant", "content": "provider failed", "_error": true }
+    { "id": "u-current", "role": "user", "content": "same prompt", "timestamp": 1700000000.125, "_source": "webui", "display_meta": { "lane": "main" } },
+    { "id": "a-error", "role": "assistant", "content": "provider failed", "timestamp": 1700000000.5, "_error": true }
   ],
   "regenerate_on_assistant_index": 1,
   "observed_base_result": {
@@ -19,15 +19,25 @@
     "note": "one logical user turn for the regenerated exchange, optimistically, after settlement, and after hard reload"
   },
   "earlier_identical_prompt_transcript": [
-    { "role": "user", "content": "same prompt" },
-    { "role": "assistant", "content": "first answer" },
-    { "role": "user", "content": "same prompt" },
-    { "role": "assistant", "content": "provider failed", "_error": true }
+    { "id": "u-earlier", "role": "user", "content": "same prompt", "timestamp": 1699999990.125 },
+    { "id": "a-earlier", "role": "assistant", "content": "first answer", "timestamp": 1699999991.125 },
+    { "id": "u-current", "role": "user", "content": "same prompt", "timestamp": 1700000000.125 },
+    { "id": "a-error", "role": "assistant", "content": "provider failed", "timestamp": 1700000000.5, "_error": true }
   ],
   "attachment_transcript": [
-    { "role": "user", "content": "describe this", "attachments": [{ "id": "att-1", "name": "shot.png", "mime": "image/png" }] },
-    { "role": "assistant", "content": "provider failed", "_error": true }
+    { "id": "u-attachment", "role": "user", "content": "describe this", "timestamp": 1700000010.125, "_source": "webui", "display_meta": { "lane": "attachment" }, "attachments": [{ "id": "att-1", "name": "shot.png", "mime": "image/png" }] },
+    { "id": "a-attachment-error", "role": "assistant", "content": "provider failed", "timestamp": 1700000010.5, "_error": true }
   ],
+  "compressed_lineage": {
+    "parent": [
+      { "id": "p-u1", "role": "user", "content": "parent prompt", "timestamp": 10.125 },
+      { "id": "p-a1", "role": "assistant", "content": "parent answer", "timestamp": 11.125 }
+    ],
+    "child": [
+      { "id": "c-u1", "role": "user", "content": "child prompt", "timestamp": 20.125 },
+      { "id": "c-a1", "role": "assistant", "content": "child error", "timestamp": 21.125, "_error": true }
+    ]
+  },
   "paged_session": {
     "_messages_offset": 40,
     "note": "regenerate must key on _oldestIdx + assistantIdx, not the visible row index"

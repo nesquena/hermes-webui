@@ -1,6 +1,7 @@
 """Default-off Hermes Gateway bridge for browser-originated chat turns."""
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -496,11 +497,15 @@ def _run_gateway_runs_api_streaming(
                 logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
                 message_content = str(msg_text or "")
         from api.streaming import _strip_oob_blocks
+        from api.streaming import _active_turn_authority, _active_turn_token_matches
 
         instructions_parts = []
         conversation_history = []
+        active_turn_identity = _active_turn_authority(session, stream_id, msg_text)
         for entry in getattr(session, "context_messages", None) or []:
             if not isinstance(entry, dict):
+                continue
+            if _active_turn_token_matches(entry, active_turn_identity):
                 continue
             role = str(entry.get("role") or "").strip().lower()
             if role not in {"user", "assistant"}:
@@ -715,6 +720,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         _session_payload_with_full_messages,
         _snapshot_and_append_partial_on_error,
         _terminal_turn_duration,
+        _advance_truncation_watermark_after_commit,
     )
 
     with _get_session_agent_lock(session_id):
@@ -754,6 +760,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         if not isinstance(session.messages, list):
             session.messages = []
         session.messages.append(error_message)
+        _advance_truncation_watermark_after_commit(session)
         session.workspace = str(workspace)
         session.model = model
         session.model_provider = model_provider
@@ -771,6 +778,38 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         if terminal_session_persisted:
             error_payload["terminal_session_persisted_session_id"] = session.session_id
         return error_payload
+
+
+def _settle_gateway_public_error(
+    session_id,
+    stream_id,
+    workspace,
+    model,
+    model_provider,
+    terminal_error,
+    public_error,
+):
+    """Persist one terminal turn, then retain the gateway-specific wire error."""
+    settled = _settle_gateway_terminal_error(
+        session_id,
+        stream_id,
+        workspace,
+        model,
+        model_provider,
+        terminal_error,
+    )
+    if settled is None:
+        return None
+    payload = dict(public_error or {})
+    for key in (
+        "session",
+        "session_id",
+        "terminal_session_persisted",
+        "terminal_session_persisted_session_id",
+    ):
+        if key in settled:
+            payload[key] = settled[key]
+    return payload
 
 
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
@@ -1151,12 +1190,22 @@ def _run_gateway_chat_streaming(
             put_gateway_event("apperror", error_payload)
             return
         if not assistant_text:
-            put_gateway_event("apperror", {
+            error_payload = _settle_gateway_public_error(
+                session_id,
+                stream_id,
+                workspace,
+                model,
+                model_provider,
+                "Gateway returned no assistant message for this turn.",
+                {
                 "label": "Gateway returned no response",
                 "type": "gateway_empty_response",
                 "message": "Gateway returned no assistant message for this turn.",
                 "hint": "Check that Hermes Gateway API server is running and reachable.",
-            })
+                },
+            )
+            if error_payload is not None:
+                put_gateway_event("apperror", error_payload)
             return
         with _get_session_agent_lock(session_id):
             s = get_session(session_id)
@@ -1187,6 +1236,17 @@ def _run_gateway_chat_streaming(
             previous_messages = list(getattr(s, "messages", None) or [])
             previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
             previous_process_wakeup_pause = dict(getattr(s, "process_wakeup_pause", {}) or {})
+            from api.streaming import _active_turn_authority, _active_turn_token_matches
+
+            active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
+            retained_user = next(
+                (
+                    message
+                    for message in previous_messages
+                    if _active_turn_token_matches(message, active_turn_identity)
+                ),
+                None,
+            )
             # Stamp stable ids on the two new rows (shared with the display merge
             # below) so display and model-context copies share an id for the
             # fork/truncate aligner (#context-message-stable-id).
@@ -1194,13 +1254,22 @@ def _run_gateway_chat_streaming(
                 from api.streaming import _assign_stable_message_ids
 
                 _assign_stable_message_ids(
-                    [user_msg, assistant_msg],
+                    [assistant_msg] if retained_user is not None else [user_msg, assistant_msg],
                     previous_context,
                     list(getattr(s, "messages", None) or []),
                 )
             except Exception:
                 logger.debug("Failed to stamp stable ids on gateway turn rows", exc_info=True)
-            s.context_messages = previous_context + [user_msg, assistant_msg]
+            if retained_user is not None:
+                if not any(
+                    _active_turn_token_matches(message, active_turn_identity)
+                    for message in previous_context
+                ):
+                    previous_context.append(copy.deepcopy(retained_user))
+                s.context_messages = previous_context + [assistant_msg]
+                s.messages = previous_messages + [assistant_msg]
+            else:
+                s.context_messages = previous_context + [user_msg, assistant_msg]
             try:
                 from api.streaming import _is_context_compression_marker
 
@@ -1212,31 +1281,36 @@ def _run_gateway_chat_streaming(
             except Exception:
                 logger.debug("Failed to filter gateway display context markers", exc_info=True)
                 display_context = previous_context
-            display = merge_session_messages_append_only(
-                previous_messages,
-                display_context,
-            )
-            try:
-                from api.streaming import _merge_display_messages_after_agent_result
-
-                s.messages = _merge_display_messages_after_agent_result(
-                    display,
-                    previous_context,
-                    s.context_messages,
-                    str(msg_text or ""),
-                    source=pending_source,
+            if retained_user is None:
+                display = merge_session_messages_append_only(
+                    previous_messages,
+                    display_context,
                 )
-            except Exception:
-                logger.debug("Failed to merge gateway display transcript", exc_info=True)
-                # Avoid duplicating the eager-save checkpointed user message.
-                if display:
-                    latest = display[-1]
-                    if isinstance(latest, dict) and latest.get("role") == "user":
-                        latest_text = " ".join(str(latest.get("content") or "").split())
-                        msg_norm = " ".join(str(msg_text or "").split())
-                        if latest_text == msg_norm:
-                            display = display[:-1]
-                s.messages = display + [user_msg, assistant_msg]
+                try:
+                    from api.streaming import _merge_display_messages_after_agent_result
+
+                    s.messages = _merge_display_messages_after_agent_result(
+                        display,
+                        previous_context,
+                        s.context_messages,
+                        str(msg_text or ""),
+                        source=pending_source,
+                    )
+                except Exception:
+                    logger.debug("Failed to merge gateway display transcript", exc_info=True)
+                    # Avoid duplicating the eager-save checkpointed user message.
+                    if display:
+                        latest = display[-1]
+                        if isinstance(latest, dict) and latest.get("role") == "user":
+                            latest_text = " ".join(str(latest.get("content") or "").split())
+                            msg_norm = " ".join(str(msg_text or "").split())
+                            if latest_text == msg_norm:
+                                display = display[:-1]
+                    s.messages = display + [user_msg, assistant_msg]
+            else:
+                from api.streaming import _advance_truncation_watermark_after_commit
+
+                _advance_truncation_watermark_after_commit(s)
             s.active_stream_id = None
             s.pending_user_message = None
             s.pending_attachments = None
@@ -1330,18 +1404,41 @@ def _run_gateway_chat_streaming(
             err_body = exc.read(2048).decode("utf-8", errors="replace")
         except Exception:
             err_body = ""
-        put_gateway_event(
-            "apperror",
-            _gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key())),
+        public_error = _gateway_http_error_event(
+            exc,
+            err_body,
+            api_key_configured=bool(_gateway_api_key()),
         )
+        error_payload = _settle_gateway_public_error(
+            session_id,
+            stream_id,
+            workspace,
+            model,
+            model_provider,
+            public_error.get("message") or str(exc),
+            public_error,
+        )
+        if error_payload is not None:
+            put_gateway_event("apperror", error_payload)
     except Exception as exc:
         safe = _redact_text(str(exc))[:500]
-        put_gateway_event("apperror", {
+        public_error = {
             "label": "Gateway request failed",
             "type": "gateway_error",
             "message": safe or "Gateway request failed.",
             "hint": "Check HERMES_WEBUI_GATEWAY_BASE_URL and Gateway API server health.",
-        })
+        }
+        error_payload = _settle_gateway_public_error(
+            session_id,
+            stream_id,
+            workspace,
+            model,
+            model_provider,
+            public_error["message"],
+            public_error,
+        )
+        if error_payload is not None:
+            put_gateway_event("apperror", error_payload)
     finally:
         mapped_run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
         if mapped_run_id:

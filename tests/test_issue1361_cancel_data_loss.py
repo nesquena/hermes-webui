@@ -26,6 +26,7 @@ import api.models as models
 import api.streaming as streaming
 from api.models import Session
 from api.run_journal import append_run_event
+from api.process_event_utils import build_active_turn_token
 from api.streaming import cancel_stream
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -104,6 +105,34 @@ def _setup_cancel_state(session_id, stream_id="stream_1361"):
     mock_agent.interrupt = Mock()
     config.AGENT_INSTANCES[stream_id] = mock_agent
     return stream_id, mock_agent
+
+
+def test_cancel_regeneration_reuses_token_owned_user_row():
+    sid = "test_6611_cancel_regeneration"
+    stream_id = "stream_6611_cancel"
+    started_at = 1700000100.875
+    retained = {
+        "id": "retained-user",
+        "role": "user",
+        "content": "same prompt",
+        "timestamp": 1600000000.125,
+        "attachments": [{"name": "shot.png"}],
+        "_active_turn_token": build_active_turn_token(stream_id, started_at),
+    }
+    session = _make_session(
+        session_id=sid,
+        pending_msg="same prompt",
+        messages=[retained],
+    )
+    session.pending_started_at = started_at
+    session.pending_attachments = [{"name": "shot.png"}]
+    session.save()
+    _setup_cancel_state(sid, stream_id)
+
+    assert cancel_stream(stream_id) is True
+
+    users = [row for row in models.SESSIONS[sid].messages if row.get("role") == "user"]
+    assert users == [retained]
 
 
 # ── §A: Reasoning text lost on cancel ───────────────────────────────────────

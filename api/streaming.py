@@ -85,7 +85,14 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     must report the count of that embedded transcript, otherwise completion and
     reconcile paths can mistake a complete payload for a stale short window.
     """
-    messages = list(getattr(session, 'messages', None) or [])
+    messages = []
+    for message in list(getattr(session, 'messages', None) or []):
+        if not isinstance(message, dict):
+            messages.append(message)
+            continue
+        public_message = copy.deepcopy(message)
+        public_message.pop('_active_turn_token', None)
+        messages.append(public_message)
     raw = session.compact() | {
         'messages': messages,
         'message_count': len(messages),
@@ -5992,9 +5999,17 @@ def _has_task_resume_compaction_marker(messages):
     return False
 
 
-def _new_turn_context_from_messages(messages, msg_text):
+def _new_turn_context_from_messages(messages, msg_text, active_turn_identity=None):
     """Return provider-facing history for a new user turn from a message list."""
-    history = _drop_checkpointed_current_user_from_context(messages, msg_text)
+    messages = list(messages or [])
+    if _active_turn_has_checkpoint(messages, active_turn_identity):
+        history = [
+            message
+            for message in messages
+            if not _active_turn_token_matches(message, active_turn_identity)
+        ]
+    else:
+        history = _drop_checkpointed_current_user_from_context(messages, msg_text)
     if _is_casual_fresh_chat_message(msg_text) and _has_task_resume_compaction_marker(history):
         return []
     return history
@@ -6960,6 +6975,16 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         recovered_ts = int(pending_started_at)
     pending_source = getattr(session, 'pending_user_source', None) or 'webui'
     pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
+    active_turn_identity = _active_turn_authority(
+        session,
+        getattr(session, 'active_stream_id', None),
+        pending_text,
+    )
+    if _active_turn_has_checkpoint(
+        getattr(session, 'messages', None),
+        active_turn_identity,
+    ):
+        return False
 
     def is_exact_checkpoint(messages):
         if not isinstance(messages, list) or not messages:
@@ -9484,6 +9509,7 @@ def _run_agent_streaming(
             _previous_context_messages = _new_turn_context_from_messages(
                 _previous_owner_context_messages,
                 msg_text,
+                _active_turn_identity,
             )
             # Dedup before feeding to agent — merge_session_messages_append_only
             # can produce duplicates when context_messages and state.db share
@@ -11912,7 +11938,15 @@ def cancel_stream(stream_id: str) -> bool:
                             if isinstance(_m, dict) and _m.get('role') == 'user':
                                 _last_user = _m
                                 break
-                        _already_persisted = False
+                        _cancel_turn_identity = _active_turn_authority(
+                            _cs,
+                            stream_id,
+                            _pending_user,
+                        )
+                        _already_persisted = _active_turn_has_checkpoint(
+                            _msgs_for_recovery,
+                            _cancel_turn_identity,
+                        )
                         if _last_user is not None:
                             _last_content = _last_user.get('content')
                             _last_ts = _last_user.get('timestamp') or 0

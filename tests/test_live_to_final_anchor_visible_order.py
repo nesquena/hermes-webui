@@ -437,7 +437,7 @@ def test_live_processed_anchor_renders_before_first_activity_row():
 def test_live_processed_anchor_starts_before_chat_start_returns_stream_id():
     send = _function_body(MESSAGES_JS, "send")
 
-    optimistic_idx = send.index("S.messages.push(userMsg);renderMessages();setBusy(true);")
+    optimistic_idx = send.index("clearLiveToolCards();  // clear any leftover live cards from last turn")
     started_idx = send.index("if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;", optimistic_idx)
     ensure_idx = send.index("if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();", optimistic_idx)
     fallback_idx = send.index("else appendThinking('',{pending:true});", ensure_idx)

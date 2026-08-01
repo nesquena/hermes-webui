@@ -84,7 +84,8 @@ def _base_messages_src() -> str:
         capture_output=True, text=True, encoding="utf-8",
         cwd=str(REPO),
     )
-    assert r.returncode == 0, f"git show failed:\n{r.stderr}"
+    if r.returncode != 0:
+        pytest.skip(f"git show {_BASE_COMMIT} unavailable (shallow clone): {r.stderr.strip()}")
     return r.stdout
 
 
@@ -97,8 +98,22 @@ def _head_ui_src() -> str:
 
 
 def _build_send_harness(send_js_src: str, messages: list, session_id: str,
-                        oldest_idx: int, regen_identity) -> str:
+                        oldest_idx: int, regen_identity, switch_on_upload=False) -> str:
     """Return a complete Node.js script that runs send() and emits JSON result."""
+    messages = [dict(message) for message in messages]
+    for idx, message in enumerate(messages):
+        message.setdefault("id", f"test-message-{idx}")
+        message.setdefault("timestamp", 1000.125 + idx)
+    if regen_identity and "absoluteIdx" in regen_identity:
+        absolute_idx = regen_identity["absoluteIdx"]
+        row = messages[absolute_idx]
+        regen_identity = {
+            "session_id": regen_identity.get("sessionId"),
+            "message_id": row["id"],
+            "timestamp": row["timestamp"],
+            "display_index": absolute_idx,
+            "display_keep_count": len(messages),
+        }
     state_json = json.dumps({
         "messages": messages,
         "session": {"session_id": session_id, "read_only": False, "title": "Test"},
@@ -109,6 +124,11 @@ def _build_send_harness(send_js_src: str, messages: list, session_id: str,
         "activeProfile": "default",
     })
     regen_js = json.dumps(regen_identity) if regen_identity is not None else "null"
+    upload_stub = (
+        "global.uploadPendingFiles=async()=>{S.session={session_id:'session-B',read_only:false,title:'B'};return [];};"
+        if switch_on_upload
+        else "global.uploadPendingFiles=async()=>[];"
+    )
 
     prefix = (
         '"use strict";'
@@ -162,7 +182,7 @@ def _build_send_harness(send_js_src: str, messages: list, session_id: str,
         "global.queueSessionMessage=()=>{};"
         "global._clearComposerAfterQueuedSelectionSend=()=>{};"
         "global._composerTextWithPendingSelections=()=>'';"
-        "global.uploadPendingFiles=async()=>[];"
+        f"{upload_stub}"
         "global._clearComposerDraft=async()=>{};"
         "global._flushSelectionBlocksToComposer=()=>{};"
         "global._clearStaleBusyStateBeforeSend=()=>{};"
@@ -192,8 +212,8 @@ def _build_send_harness(send_js_src: str, messages: list, session_id: str,
         "global.ensureLiveWorklogShell=()=>{};"
     )
     suffix = (
-        f"const _regenId={regen_js};"
-        "try { await send(_regenId ? {_regenIdentity:_regenId} : {}); } catch(_) {}"
+        f"const _regenTarget={regen_js};"
+        "try { await send(_regenTarget ? {regenerateTarget:_regenTarget} : {}); } catch(_) {}"
         "process.stdout.write(JSON.stringify({"
         "messages:S.messages,"
         "user_rows:S.messages.filter(m=>m.role==='user'),"
@@ -206,9 +226,16 @@ def _build_send_harness(send_js_src: str, messages: list, session_id: str,
 
 
 def _run_send(send_js_src: str, messages: list, session_id: str = "sid-1",
-              oldest_idx: int = 0, regen_identity=None) -> dict:
+              oldest_idx: int = 0, regen_identity=None, switch_on_upload=False) -> dict:
     """Execute send() in Node.js and return the result dict."""
-    script = _build_send_harness(send_js_src, messages, session_id, oldest_idx, regen_identity)
+    script = _build_send_harness(
+        send_js_src,
+        messages,
+        session_id,
+        oldest_idx,
+        regen_identity,
+        switch_on_upload=switch_on_upload,
+    )
     # Write to a temp file: the harness + extracted send() is too long for -e on Windows.
     tmp = tempfile.NamedTemporaryFile(
         mode="w", suffix=".js", encoding="utf-8", delete=False
@@ -224,6 +251,49 @@ def _run_send(send_js_src: str, messages: list, session_id: str = "sid-1",
         os.unlink(tmp.name)
     assert r.returncode == 0, f"node exited {r.returncode}:\n{r.stderr}"
     return json.loads(r.stdout)
+
+
+def _run_regenerate(*, switch_at=None) -> dict:
+    regenerate_src = extract_js_function(_head_ui_src(), "regenerateResponse")
+    full_messages = [
+        {"id": "old-a", "role": "assistant", "content": "older", "timestamp": 1.125},
+        {"id": "target-u", "role": "user", "content": "same prompt", "timestamp": 2.125,
+         "attachments": [{"name": "shot.png"}], "_source": "webui"},
+        {"id": "target-a", "role": "assistant", "content": "failed", "timestamp": 3.125,
+         "_error": True},
+    ]
+    visible_messages = full_messages[1:]
+    script = (
+        '"use strict";(async()=>{'
+        f"let S={{session:{{session_id:'session-A'}},busy:false,messages:{json.dumps(visible_messages)}}};"
+        "let _oldestIdx=1;const calls=[];const statuses=[];let sends=[];"
+        "const msg={value:''};global.$=(id)=>id==='msg'?msg:null;"
+        "global.msgContent=(m)=>String(m.content||'');global.renderMessages=()=>{};"
+        "global.t=(k)=>k;global.setStatus=(s)=>statuses.push(s);"
+        f"global._ensureAllMessagesLoaded=async()=>{{S.messages={json.dumps(full_messages)};_oldestIdx=0;"
+        + ("S.session={session_id:'session-B'};" if switch_at == "full-load" else "")
+        + "};"
+        "global.api=async(path,opts)=>{calls.push({path,body:JSON.parse(opts.body)});"
+        + ("S.session={session_id:'session-B'};" if switch_at == "truncate" else "")
+        + "return {ok:true};};"
+        "global.send=async(opts)=>{sends.push(opts);};"
+        f"{regenerate_src}"
+        "const btn={closest:()=>({dataset:{msgIdx:'1'}})};"
+        "await regenerateResponse(btn);"
+        "process.stdout.write(JSON.stringify({calls,sends,statuses,messages:S.messages,composer:msg.value,session:S.session}));"
+        "})()"
+    )
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".js", encoding="utf-8", delete=False)
+    try:
+        tmp.write(script)
+        tmp.close()
+        result = subprocess.run(
+            [NODE, tmp.name], capture_output=True, text=True, encoding="utf-8", timeout=30
+        )
+    finally:
+        os.unlink(tmp.name)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────
@@ -261,11 +331,16 @@ class TestReproduction:
         assert result["user_rows"][0].get("_pending") is True, (
             "regenerated user row must be marked _pending"
         )
+        start_body = next(
+            call["body"] for call in result["api_calls"] if call["url"] == "/api/chat/start"
+        )
+        assert start_body["regenerate_target"]["message_id"] == "u-current"
+        assert start_body["regenerate_target"]["timestamp"] == 1700000000.125
 
     def test_regen_identity_present_in_source(self):
         body = _fn_body(_head_ui_src(), "regenerateResponse")
-        assert "_regenIdentity" in body, (
-            "regenerateResponse() must pass _regenIdentity to send() to prevent duplicate user row"
+        assert "regenerateTarget" in body, (
+            "regenerateResponse() must pass regenerateTarget to send()"
         )
 
 
@@ -396,9 +471,9 @@ class TestSessionSwitchRace:
             f"regenerateResponse() must have at least 2 session fences; got {fence_count}"
         )
 
-    def test_mismatched_session_falls_back_to_push(self):
-        # send() with _regenIdentity.sessionId != S.session.session_id:
-        # _localRegenIdx becomes -1 → push fallback fires (no wrong-row mutation).
+    def test_mismatched_session_aborts_send(self):
+        # send() with _regenIdentity.sessionId != S.session.session_id must fail
+        # closed: abort without pushing rather than append into the wrong session (#6611).
         head_src = extract_js_function(_head_messages_src(), "send")
         messages = [{"role": "user", "content": "hello"}]
         result = _run_send(
@@ -406,14 +481,13 @@ class TestSessionSwitchRace:
             session_id="session-B",
             regen_identity={"absoluteIdx": 0, "sessionId": "session-A"},
         )
-        # Mismatch → push → 2 user rows (original + appended pending)
-        assert result["user_row_count"] == 2, (
-            "session mismatch: send() must fall back to push, not mutate wrong session row; "
-            f"got user_row_count={result['user_row_count']}"
+        # Fail closed: no push into wrong session, original row count unchanged
+        assert result["user_row_count"] == 1, (
+            "session mismatch with non-null _regenIdentity must abort (fail closed), "
+            f"not push into wrong session; got user_row_count={result['user_row_count']}"
         )
-        # Original row is NOT mutated (no _pending on it)
         assert result["user_rows"][0].get("_pending") is not True, (
-            "session-A row must not be mutated when session is now session-B"
+            "original user row must be unchanged after aborted send"
         )
 
     def test_send_reads_regen_identity(self):
@@ -421,19 +495,60 @@ class TestSessionSwitchRace:
         send_start = head_src.index("async function send(")
         send_end = head_src.index("const LIVE_STREAMS=", send_start)
         send_body = head_src[send_start:send_end]
-        assert "_regenId" in send_body, (
-            "send() must declare _regenId from options._regenIdentity"
+        assert "_regenTarget" in send_body, (
+            "send() must declare _regenTarget from options.regenerateTarget"
         )
-        assert "_regenIdentity" in send_body, (
-            "send() must read _regenIdentity from the options argument"
+        assert "regenerateTarget" in send_body, (
+            "send() must read regenerateTarget from the options argument"
         )
+
+    def test_send_stands_down_when_session_switches_during_upload_await(self):
+        head_src = extract_js_function(_head_messages_src(), "send")
+        result = _run_send(
+            head_src,
+            REPRO["transcript"][:1],
+            regen_identity={"absoluteIdx": 0, "sessionId": "sid-1"},
+            switch_on_upload=True,
+        )
+        assert not any(call["url"] == "/api/chat/start" for call in result["api_calls"])
+
+    @pytest.mark.parametrize("switch_at", ["full-load", "truncate"])
+    def test_actual_regenerate_stands_down_after_session_switch(self, switch_at):
+        result = _run_regenerate(switch_at=switch_at)
+        assert result["sends"] == []
+        assert result["composer"] == ""
+        if switch_at == "full-load":
+            assert result["calls"] == []
+
+
+def test_actual_regenerate_uses_full_history_row_and_display_space():
+    result = _run_regenerate()
+    assert len(result["calls"]) == 1
+    body = result["calls"][0]["body"]
+    assert body["keep_count_space"] == "display"
+    assert body["keep_count"] == 2
+    assert body["regenerate_target"] == {
+        "session_id": "session-A",
+        "message_id": "target-u",
+        "timestamp": 2.125,
+        "display_index": 1,
+        "display_keep_count": 2,
+    }
+    assert result["sends"] == [{"regenerateTarget": body["regenerate_target"]}]
+
+
+def test_regeneration_conflict_status_keys_exist_for_every_locale():
+    source = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+    locale_count = source.count("regen_failed:")
+    assert locale_count == 15
+    assert source.count("regen_stale_target:") == locale_count
+    assert source.count("regen_parent_only_target:") == locale_count
 
 
 class TestReloadPersistence:
     """After settlement, the persisted transcript has one user row."""
 
     def test_server_keep_count_is_correct(self):
-        transcript = REPRO["transcript"]
         assistant_idx = REPRO["regenerate_on_assistant_index"]
         absolute_keep_count = 0 + assistant_idx
         expected = REPRO["observed_base_result"]["keep_count"]
@@ -453,11 +568,11 @@ class TestReloadPersistence:
 
     def test_regen_identity_source_structure(self):
         body = _fn_body(_head_ui_src(), "regenerateResponse")
-        assert "absoluteIdx: absoluteKeepCount - 1" in body, (
-            "regenerateResponse() must pass absoluteIdx = absoluteKeepCount - 1 in _regenIdentity"
+        assert "display_index: selectedUserDisplayIdx" in body, (
+            "regenerateResponse() must pass the selected full-history display index"
         )
-        assert "sessionId: initialSid" in body, (
-            "regenerateResponse() must pass sessionId = initialSid in _regenIdentity"
+        assert "session_id: initialSid" in body, (
+            "regenerateResponse() must pass session_id = initialSid"
         )
 
 
@@ -487,6 +602,10 @@ class TestPreservationOrdinarySend:
         assert result["user_rows"][-1].get("_pending") is True, (
             "newly appended row must be marked _pending"
         )
+        start_body = next(
+            call["body"] for call in result["api_calls"] if call["url"] == "/api/chat/start"
+        )
+        assert "regenerate_target" not in start_body
 
 
 class TestModeAndStateMatrix:

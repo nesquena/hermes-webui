@@ -149,6 +149,8 @@ const LOCALES = {
     show_earlier_steps: 'Show {0} earlier steps',
     edit_failed: 'Edit failed: ',
     regen_failed: 'Regenerate failed: ',
+    regen_stale_target: 'The selected turn changed. Reload and try again.',
+    regen_parent_only_target: 'That turn belongs to archived parent history and cannot be regenerated here.',
     reconnect_active: 'A response is still being generated. Reload when ready?',
     reconnect_finished: 'A response was in progress when you last left. Messages may have updated.',
     // approval card
@@ -1912,6 +1914,8 @@ const LOCALES = {
     show_earlier_steps: 'Show {0} earlier steps',
     edit_failed: 'Modifica fallita: ',
     regen_failed: 'Rigenerazione fallita: ',
+    regen_stale_target: 'Il turno selezionato è cambiato. Ricarica e riprova.',
+    regen_parent_only_target: 'Quel turno appartiene alla cronologia principale archiviata e non può essere rigenerato qui.',
     reconnect_active: 'Una risposta è ancora in generazione. Ricaricare quando pronta?',
     reconnect_finished: 'Una risposta era in corso quando hai lasciato. I messaggi potrebbero essere aggiornati.',
     // approval card
@@ -3657,6 +3661,8 @@ const LOCALES = {
     show_earlier_steps: '前のステップを{0}件表示',
     edit_failed: '編集失敗: ',
     regen_failed: '再生成失敗: ',
+    regen_stale_target: '選択したターンが変更されました。再読み込みしてもう一度お試しください。',
+    regen_parent_only_target: 'そのターンはアーカイブされた親履歴に属しているため、ここでは再生成できません。',
     reconnect_active: '応答を生成中です。準備ができたら再読み込みしますか?',
     reconnect_finished: '前回離脱時に応答が進行中でした。メッセージが更新されている可能性があります。',
     // approval card
@@ -5391,6 +5397,8 @@ const LOCALES = {
     show_earlier_steps: 'Show {0} earlier steps',
     edit_failed: 'Не удалось отредактировать: ',
     regen_failed: 'Не удалось сгенерировать заново: ',
+    regen_stale_target: 'Выбранный ход изменился. Перезагрузите страницу и повторите попытку.',
+    regen_parent_only_target: 'Этот ход находится в архивной родительской истории и не может быть повторён здесь.',
     reconnect_active: 'Ответ всё ещё генерируется. Обновить, когда будет готово?',
     reconnect_finished: 'Когда вы уходили, ответ ещё генерировался. Сообщения могли обновиться.',
     approval_heading: 'Требуется подтверждение',
@@ -7103,6 +7111,8 @@ const LOCALES = {
     show_earlier_steps: 'Show {0} earlier steps',
     edit_failed: 'Error al editar: ',
     regen_failed: 'Error al regenerar: ',
+    regen_stale_target: 'El turno seleccionado cambió. Recarga la página e inténtalo de nuevo.',
+    regen_parent_only_target: 'Ese turno pertenece al historial principal archivado y no se puede regenerar aquí.',
     reconnect_active: 'Todavía se está generando una respuesta. ¿Recargar cuando termine?',
     reconnect_finished: 'Había una respuesta en curso cuando te fuiste. Puede que los mensajes se hayan actualizado.',
     // approval card
@@ -8794,6 +8804,8 @@ const LOCALES = {
     show_earlier_steps: 'Show {0} earlier steps',
     edit_failed: 'Bearbeiten fehlgeschlagen: ',
     regen_failed: 'Regeneration fehlgeschlagen: ',
+    regen_stale_target: 'Der ausgewählte Verlauf hat sich geändert. Lade neu und versuche es erneut.',
+    regen_parent_only_target: 'Dieser Verlauf gehört zum archivierten übergeordneten Verlauf und kann hier nicht neu erzeugt werden.',
     reconnect_active: 'Eine Antwort wird noch generiert. Neu laden, wenn bereit?',
     reconnect_finished: 'Eine Antwort war in Arbeit, als Sie zuletzt gegangen sind. Nachrichten könnten aktualisiert worden sein.',
     // approval card
@@ -10479,6 +10491,8 @@ const LOCALES = {
     show_earlier_steps: '显示前 {0} 个步骤',
     edit_failed: '编辑失败：',
     regen_failed: '重新生成失败：',
+    regen_stale_target: '所选轮次已更改。请重新加载后再试。',
+    regen_parent_only_target: '该轮次属于已归档的父级历史，无法在此重新生成。',
     reconnect_active: '回复仍在生成中，准备好后要重新加载吗？',
     reconnect_finished: '你离开时有回复正在生成，消息内容可能已经更新。',
     // approval card
@@ -12187,6 +12201,8 @@ const LOCALES = {
     show_earlier_steps: 'Show {0} earlier steps',
     edit_failed: '編輯失敗：',
     regen_failed: '重新產生失敗：',
+    regen_stale_target: '所選輪次已變更。請重新載入後再試。',
+    regen_parent_only_target: '該輪次屬於已封存的父層歷史，無法在此重新產生。',
     reconnect_active: '回覆仍在產生中。完成後要重新載入嗎？',
     reconnect_finished: '離開時仍有回覆正在處理。訊息可能已經更新。',
     // approval card
@@ -13840,6 +13856,8 @@ const LOCALES = {
     show_earlier_steps: 'Show {0} earlier steps',
     edit_failed: 'Falha ao editar: ',
     regen_failed: 'Falha ao regenerar: ',
+    regen_stale_target: 'O turno selecionado mudou. Recarregue e tente novamente.',
+    regen_parent_only_target: 'Esse turno pertence ao histórico pai arquivado e não pode ser regenerado aqui.',
     reconnect_active: 'Uma resposta ainda está sendo gerada. Recarregar quando estiver pronto?',
     reconnect_finished: 'Uma resposta estava em andamento quando você saiu. As mensagens podem ter atualizado.',
     // approval card
@@ -15470,6 +15488,8 @@ const LOCALES = {
     show_earlier_steps: 'Show {0} earlier steps',
     edit_failed: 'Edit failed: ',
     regen_failed: 'Regenerate failed: ',
+    regen_stale_target: '선택한 턴이 변경되었습니다. 새로고침한 후 다시 시도하세요.',
+    regen_parent_only_target: '이 턴은 보관된 상위 기록에 속하므로 여기에서 다시 생성할 수 없습니다.',
     reconnect_active: 'A response is still being generated. Reload when ready?',
     reconnect_finished: 'A response was in progress when you last left. Messages may have updated.',
     // approval card
@@ -17226,6 +17246,8 @@ const LOCALES = {
     show_earlier_steps: 'Show {0} earlier steps',
     edit_failed: 'Échec de la modification : ',
     regen_failed: 'Échec de la régénération : ',
+    regen_stale_target: 'Le tour sélectionné a changé. Rechargez la page et réessayez.',
+    regen_parent_only_target: 'Ce tour appartient à un historique parent archivé et ne peut pas être régénéré ici.',
     reconnect_active: 'Une réponse est toujours en cours de génération. Recharger quand vous êtes prêt ?',
     reconnect_finished: 'Une réponse était en cours lors de votre dernier départ. Les messages ont peut-être été mis à jour.',
     approval_heading: 'Approbation requise',
@@ -20301,6 +20323,8 @@ const LOCALES = {
     reconnect_finished: 'Když jste naposledy odešli, probíhala odezva. Zprávy mohly být aktualizovány.',
     reference_only_label: 'Pouze jako odkaz',
     regen_failed: 'Obnovení selhalo:',
+    regen_stale_target: 'Vybraný tah se změnil. Načtěte stránku znovu a opakujte akci.',
+    regen_parent_only_target: 'Tento tah patří do archivované nadřazené historie a zde jej nelze obnovit.',
     regenerate: 'Znovu generovat odpověď',
     remove: 'Odebrat',
     rename_failed: 'Přejmenování selhalo:',
@@ -20648,6 +20672,8 @@ const LOCALES = {
     show_earlier_steps: 'Show {0} earlier steps',
     edit_failed: 'Düzenleme başarısız oldu:',
     regen_failed: 'Yeniden oluşturma başarısız oldu:',
+    regen_stale_target: 'Seçilen tur değişti. Sayfayı yenileyip tekrar deneyin.',
+    regen_parent_only_target: 'Bu tur arşivlenmiş üst geçmişe ait ve burada yeniden oluşturulamaz.',
     reconnect_active: 'Halen bir yanıt oluşturuluyor. Hazır olduğunuzda yeniden yüklensin mi?',
     reconnect_finished: 'En son ayrıldığınızda bir yanıt sürüyordu. Mesajlar güncellenmiş olabilir.',
     // approval card
@@ -22395,6 +22421,8 @@ const LOCALES = {
     show_earlier_steps: 'Show {0} earlier steps',
     edit_failed: 'Edycja nie powiodła się: ',
     regen_failed: 'Ponowne generowanie nie powiodło się: ',
+    regen_stale_target: 'Wybrana tura uległa zmianie. Odśwież stronę i spróbuj ponownie.',
+    regen_parent_only_target: 'Ta tura należy do zarchiwizowanej historii nadrzędnej i nie może zostać tutaj wygenerowana ponownie.',
     reconnect_active: 'Odpowiedź jest nadal generowana. Odświeżyć, gdy będzie gotowa?',
     reconnect_finished: 'Podczas Twojej ostatniej wizyty odpowiedź była w toku. Wiadomości mogły zostać zaktualizowane.',
     // approval card
@@ -24127,6 +24155,8 @@ const LOCALES = {
     show_earlier_steps: 'Show {0} earlier steps',
     edit_failed: 'Chỉnh sửa thất bại: ',
     regen_failed: 'Tạo lại thất bại: ',
+    regen_stale_target: 'Lượt đã chọn đã thay đổi. Hãy tải lại và thử lại.',
+    regen_parent_only_target: 'Lượt này thuộc lịch sử cha đã lưu trữ và không thể tạo lại tại đây.',
     reconnect_active: 'Một phản hồi vẫn đang được tạo. Tải lại khi sẵn sàng?',
     reconnect_finished: 'Một phản hồi đang diễn ra khi bạn rời đi lần trước. Tin nhắn có thể đã được cập nhật.',
     // approval card
