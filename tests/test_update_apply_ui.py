@@ -138,7 +138,8 @@ def test_update_apply_structured_server_errors_still_use_json_message_path():
     show_error_call = src.index("_showUpdateError(target,res);", apply_start)
     reset_button = src.index("resetApplyButton(0);", show_error_call)
     assert show_error_call < reset_button
-    assert "const msg='Update failed ('+target+'): '+(res.message||'unknown error');" in src
+    assert "const msg=_i18nUpdateText('update_failed_prefix','Update failed: ')+'('+target+') '" in src
+    assert "res.message||_i18nUpdateText('update_unknown_error','unknown error')" in src
 
 
 def test_update_apply_successful_stash_conflict_displays_recovery_message():
