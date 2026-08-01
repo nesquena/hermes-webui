@@ -852,6 +852,10 @@ class TestApplyForceUpdate:
 class TestAgentUpdateCurrentContract:
     """Preserve current Agent ownership and WebUI target behavior."""
 
+    def test_lock_recovery_actions_wrap_before_the_message_column_collapses(self):
+        css = (REPO / "static" / "style.css").read_text(encoding="utf-8")
+        assert "@media (max-width:900px){.update-banner>div:first-child{flex-basis:100%;}.update-banner>div:last-child{width:100%;justify-content:flex-end;}}" in css
+
     def test_agent_update_delegates_restart_ownership_to_official_updater(
         self, tmp_path, monkeypatch,
     ):
