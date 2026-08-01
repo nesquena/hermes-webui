@@ -20017,9 +20017,12 @@ def _handle_live_models(handler, parsed):
                 # custom_providers config — live fetch returns ALL models the
                 # key has access to, but for proxy gateways like New-API that
                 # may include hundreds of unrelated models from other channels.
+                # When no models are explicitly configured for this provider,
+                # return the live list as-is (provider has no config filter).
                 if ids:
-                    _configured_set = set(_config_ids)
-                    ids = [mid for mid in ids if mid in _configured_set]
+                    if _config_ids:
+                        _configured_set = set(_config_ids)
+                        ids = [mid for mid in ids if mid in _configured_set]
                 else:
                     ids = list(_config_ids)
 
