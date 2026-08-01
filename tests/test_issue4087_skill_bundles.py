@@ -36,7 +36,7 @@ def test_bundle_routes_are_wired_through_dedicated_endpoints():
     assert 'if parsed.path == "/api/commands/bundles":' in ROUTES_PY
     assert 'if parsed.path == "/api/commands/bundles/resolve":' in ROUTES_PY
     assert 'return j(handler, {"bundles": list_command_bundles()})' in ROUTES_PY
-    assert 'return j(handler, resolve_bundle_command(command))' in ROUTES_PY
+    assert 'result = resolve_bundle_command(command)' in ROUTES_PY
 
 
 def test_frontend_bundle_dispatch_uses_dedicated_metadata_and_resolve_calls():

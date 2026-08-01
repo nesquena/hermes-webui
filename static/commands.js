@@ -445,9 +445,10 @@ async function _runAgentCommandTransport(text,_meta){
 async function resolveBundleCommand(text,_meta){
   const command=String(text||'').trim();
   if(!command) throw new Error('command is required');
+  const sessionId=String(S&&S.session&&S.session.session_id||'').trim();
   return api('/api/commands/bundles/resolve',{
     method:'POST',
-    body:JSON.stringify({command})
+    body:JSON.stringify(sessionId?{command,session_id:sessionId}:{command})
   });
 }
 
@@ -1161,7 +1162,9 @@ async function cmdUse(args){
       }
       return;
     }
-    const detail = await api(`/api/skills/content?name=${encodeURIComponent(match.name)}`);
+    const sessionId = String(S&&S.session&&S.session.session_id||'').trim();
+    const detailUrl = `/api/skills/content?name=${encodeURIComponent(match.name)}${sessionId?`&session_id=${encodeURIComponent(sessionId)}`:''}`;
+    const detail = await api(detailUrl);
     const skillContent = detail&&typeof detail.content==='string' ? detail.content.trim() : '';
     if(!skillContent) throw new Error(`Skill \`${match.name}\` has no readable content.`);
     const directive = `[USER OVERRIDE] You MUST follow the skill '${match.name}' content provided below before responding to the next message.`;

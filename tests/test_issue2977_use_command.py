@@ -83,7 +83,7 @@ def test_directive_text_uses_match_name():
 
 def test_use_fetches_canonical_skill_content():
     src = read("static/commands.js")
-    assert "api(`/api/skills/content?name=${encodeURIComponent(match.name)}`)" in src, \
+    assert "const detailUrl = `/api/skills/content?name=${encodeURIComponent(match.name)}${sessionId?`&session_id=${encodeURIComponent(sessionId)}`:''}`;" in src, \
         "cmdUse must fetch the canonical skill content after resolving the canonical skill name"
     assert "typeof detail.content==='string' ? detail.content.trim() : ''" in src, \
         "cmdUse must reject missing or non-string skill content"

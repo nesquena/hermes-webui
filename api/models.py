@@ -1791,7 +1791,21 @@ class Session:
 
     def record_server_skill_names(self, skill_names) -> bool:
         """Record names after an authorized server-owned resolution."""
-        if self.read_only or str(self.source_tag or '').strip().lower() == 'cron':
+        if self.read_only:
+            return False
+        from api.agent_sessions import normalize_agent_session_source
+
+        source_values = (
+            self.source_tag,
+            self.raw_source,
+            self.session_source,
+        )
+        if any(
+            is_cron_session(self.session_id, str(source or '').strip().lower())
+            or is_webhook_session(self.session_id, str(source or '').strip().lower())
+            or normalize_agent_session_source(source).get('session_source') in {'cron', 'webhook'}
+            for source in source_values
+        ):
             return False
         from api.session_skill_usage import increment_skill_provenance
 

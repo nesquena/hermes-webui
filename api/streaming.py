@@ -96,6 +96,22 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     return raw
 
 
+def _record_streaming_skill_provenance(session, session_id, tool_name, function_result, *, ephemeral=False) -> bool:
+    """Persist a successful skill_view result after the Agent identifies the tool."""
+    if ephemeral or session is None or tool_name != "skill_view":
+        return False
+    from api.session_skill_usage import successful_skill_names
+
+    skill_names = successful_skill_names(function_result)
+    if not skill_names:
+        return False
+    with _get_session_agent_lock(session_id):
+        if not session.record_server_skill_names(skill_names):
+            return False
+        session.save(touch_updated_at=False, skip_index=True)
+    return True
+
+
 def _compact_for_echo_compare(value: str) -> str:
     """Normalize visible stream text for duplicate echo detection."""
     return re.sub(r'\s+', '', str(value or ''))
@@ -8862,10 +8878,13 @@ def _run_agent_streaming(
 
             def on_tool_complete(tool_call_id, name, args, function_result):
                 try:
-                    if not ephemeral and s is not None:
-                        with _get_session_agent_lock(session_id):
-                            if s.record_server_skill_result(function_result):
-                                s.save(touch_updated_at=False, skip_index=True)
+                    _record_streaming_skill_provenance(
+                        s,
+                        session_id,
+                        name,
+                        function_result,
+                        ephemeral=ephemeral,
+                    )
                     _record_live_tool_complete(tool_call_id, name, function_result)
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
