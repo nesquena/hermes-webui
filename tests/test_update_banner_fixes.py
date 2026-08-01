@@ -2729,7 +2729,7 @@ class TestUpdateCompareSource:
 
     def test_update_banner_clears_stale_links_when_no_updates_remain(self):
         src = read('static/ui.js')
-        start = src.find('function _showUpdateBanner(data)')
+        start = src.find('function _showUpdateBanner(data')
         assert start != -1, "_showUpdateBanner not found"
         fn = src[start:src.find('function dismissUpdate()', start)]
         empty_idx = fn.find('if(!parts.length&&!hasDirty&&!hasCheckError)')
@@ -3489,6 +3489,7 @@ def _run_force_update(update_data, target, confirm, api_response):
         'const _calls=[];let _toast=false;'
         'const _el={'
         'updateError:{style:{display:"none"},textContent:""},'
+        'btnApplyUpdate:{style:{display:"inline-block"},disabled:false,textContent:"Update Now",dataset:{}},'
         'updateMsg:{textContent:""},'
         'updateBanner:{classList:{_s:new Set(),add(c){this._s.add(c);},remove(c){this._s.delete(c);},has(c){return this._s.has(c);}}},'
         'btnForceUpdate:{style:{display:"none"},disabled:true,dataset:{target:""}},'
@@ -3514,6 +3515,8 @@ def _run_force_update(update_data, target, confirm, api_response):
         'error_visible:_el.updateError.style.display!=="none",'
         'msg_text:_el.updateMsg.textContent,'
         'banner_visible:_el.updateBanner.classList._s.has("visible"),'
+        'apply_btn_visible:_el.btnApplyUpdate.style.display!=="none",'
+        'apply_btn_disabled:_el.btnApplyUpdate.disabled,'
         'force_btn_visible:_el.btnForceUpdate.style.display!=="none",'
         'btn_disabled:_btn.disabled,'
         'toast_shown:_toast,'
@@ -3922,6 +3925,8 @@ class TestDirtyInstallRecovery:
         assert not result['force_btn_visible'], (
             'up_to_date must remove the unavailable force action from the banner'
         )
+        assert not result['apply_btn_visible']
+        assert result['apply_btn_disabled']
         assert 'Select a channel with an available reset target' in result['msg_text']
         assert not result['in_flight'], (
             'in_flight must be cleared after up_to_date (no restart pending)'
@@ -3952,6 +3957,8 @@ class TestDirtyInstallRecovery:
         assert not result['force_btn_visible'], (
             'refused_rewind must remove the unavailable force action from the banner'
         )
+        assert not result['apply_btn_visible']
+        assert result['apply_btn_disabled']
         assert not result['in_flight'], (
             'in_flight must be cleared after refused_rewind (no restart pending)'
         )
@@ -3984,6 +3991,8 @@ class TestDirtyInstallRecovery:
         assert response['message'] in result['msg_text']
         assert 'fixed default channel' in result['msg_text'].lower()
         assert 'select a channel' not in result['msg_text'].lower()
+        assert not result['apply_btn_visible']
+        assert result['apply_btn_disabled']
 
     def test_restart_holds_in_flight_guard(self):
         """P2.1: in_flight guard must stay true after a successful restart trigger."""
@@ -4316,7 +4325,7 @@ def _run_apply_response_sequence(responses):
     return json.loads(r.stdout)
 
 
-def _run_clear_lock_response(response, raises=False, initial_error=''):
+def _run_clear_lock_response(response, raises=False, initial_error='', target='webui', update_data=None):
     """Run applyClearUpdateLock() and capture restart, toast, and control state."""
     src = read('static/ui.js')
     ui_fns = '\n'.join([
@@ -4331,6 +4340,10 @@ def _run_clear_lock_response(response, raises=False, initial_error=''):
         extract_js_function(src, 'applyClearUpdateLock'),
     ])
     response_js = 'throw new Error("connection lost")' if raises else 'return ' + json.dumps(response)
+    update_data = update_data or {
+        'webui': {'behind': 2, 'dirty': True, 'channel': 'stable'},
+        'agent': {'behind': 0, 'dirty': False},
+    }
     script = (
         '"use strict";'
         '(async()=>{'
@@ -4339,13 +4352,13 @@ def _run_clear_lock_response(response, raises=False, initial_error=''):
         'updateError:{style:{display:' + json.dumps('block' if initial_error else 'none') + '},textContent:' + json.dumps(initial_error) + '},'
         'btnApplyUpdate:{style:{display:"inline-block"},disabled:false,dataset:{}},'
         'btnForceUpdate:{style:{display:"none"},disabled:true,dataset:{target:""}},'
-        'btnClearUpdateLock:{style:{display:"inline-block"},disabled:false,dataset:{target:"webui"}},'
+        'btnClearUpdateLock:{style:{display:"inline-block"},disabled:false,dataset:{target:' + json.dumps(target) + '}},'
         'updateMsg:{textContent:""},'
         'updateBanner:{classList:{_s:new Set(),add(c){this._s.add(c);},remove(c){this._s.delete(c);},has(c){return this._s.has(c);}}},'
         '};'
-        'const _btn={style:{display:"inline-block"},disabled:false,textContent:"Clear lock",dataset:{target:"webui"}};'
+        'const _btn={style:{display:"inline-block"},disabled:false,textContent:"Clear lock",dataset:{target:' + json.dumps(target) + '}};'
         'global.window={_clearLockInFlight:false,_whatsNewSummaryEnabled:false};'
-        'global.window._updateData={webui:{behind:2,dirty:true,channel:"stable"},agent:{behind:0,dirty:false}};'
+        'global.window._updateData=' + json.dumps(update_data) + ';'
         'global.$=(id)=>id==="btnClearUpdateLock"?_btn:_el[id]||null;'
         'function t(k,...args){'
         'const values={update_no_change:"Für {0} wurde kein Update angewendet."};'
@@ -4418,6 +4431,21 @@ class TestUpdateRecoveryResponseLifecycle:
         assert not result['force_disabled']
         assert result['force_target'] == 'webui'
         assert not result['in_flight']
+
+    def test_clear_lock_up_to_date_preserves_failed_agent_target_when_both_are_dirty(self):
+        result = _run_clear_lock_response(
+            {'ok': True, 'up_to_date': True},
+            target='agent',
+            update_data={
+                'webui': {'behind': 0, 'dirty': True, 'channel': 'stable'},
+                'agent': {'behind': 0, 'dirty': True},
+            },
+        )
+        assert result['force_visible']
+        assert not result['force_disabled']
+        assert result['force_target'] == 'agent'
+        assert not result['apply_visible']
+        assert result['apply_disabled']
 
     def test_fresh_banner_reset_clears_previous_update_error(self):
         result = _run_show_update_banner({

@@ -9916,7 +9916,7 @@ function _updateDirtyState(data){
   const agentDirty=!!(data&&data.agent&&data.agent.dirty&&!data.agent.no_git);
   return {webuiDirty,agentDirty,hasDirty:webuiDirty||agentDirty,dirtyTarget:webuiDirty?'webui':(agentDirty?'agent':'')};
 }
-function _showUpdateBanner(data){
+function _showUpdateBanner(data,forceTargetOverride){
   const staleError=$('updateError');
   if(staleError){staleError.style.display='none';staleError.textContent='';}
   const parts=[];
@@ -9930,7 +9930,9 @@ function _showUpdateBanner(data){
   if(webuiError) errorParts.push(webuiError);
   if(agentError) errorParts.push(agentError);
   window._updateData=data;
-  const {webuiDirty,agentDirty,hasDirty,dirtyTarget}=_updateDirtyState(data);
+  const {webuiDirty,agentDirty,hasDirty,dirtyTarget:detectedDirtyTarget}=_updateDirtyState(data);
+  const dirtyTarget=(forceTargetOverride==='webui'&&webuiDirty)||
+    (forceTargetOverride==='agent'&&agentDirty)?forceTargetOverride:detectedDirtyTarget;
   const hasCheckError=_updateCheckHasError(data);
   const clearLockBtn=$('btnClearUpdateLock');
   if(clearLockBtn){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
@@ -10138,7 +10140,7 @@ async function applyClearUpdateLock(btn){
       btn.style.display='none';
       btn.dataset.target='';
       if(errEl){errEl.style.display='none';errEl.textContent='';}
-      if(typeof _showUpdateBanner==='function'&&window._updateData) _showUpdateBanner(window._updateData);
+      if(typeof _showUpdateBanner==='function'&&window._updateData) _showUpdateBanner(window._updateData,target);
       const applyBtn=$('btnApplyUpdate');
       if(applyBtn){applyBtn.disabled=true;applyBtn.style.display='none';}
       const targetLabel=target==='webui'?'WebUI':'Agent';
@@ -10336,6 +10338,8 @@ async function forceUpdate(btn){
       const bannerEl=$('updateBanner');
       if(bannerEl) bannerEl.classList.add('visible');
       btn.disabled=true;btn.style.display='none';btn.dataset.target='';btn.textContent=forceLabel;
+      const applyBtn=$('btnApplyUpdate');
+      if(applyBtn){applyBtn.disabled=true;applyBtn.style.display='none';}
       window._updateApplyInFlight=false;
       return;
     }
