@@ -1947,6 +1947,7 @@ def _session_list_cache_key(
     archived_limit: int | None = None,
     archived_offset: int = 0,
     show_claude_code_sessions: bool = True,
+    show_codex_sessions: bool = True,
 ) -> tuple:
     return _route_session_list_cache_key(
         active_profile=active_profile,
@@ -1962,7 +1963,7 @@ def _session_list_cache_key(
         sidebar_source=sidebar_source,
         archived_limit=archived_limit,
         archived_offset=archived_offset,
-    ) + (bool(show_claude_code_sessions),)
+    ) + (bool(show_claude_code_sessions), bool(show_codex_sessions))
 
 _ROUTE_SESSION_LIST_CACHE_DYNAMIC_EXPORTS = {
     "_SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION",
@@ -2199,6 +2200,7 @@ def _build_session_list_cache_payload(
     show_previous_messaging_sessions: bool,
     show_cron_sessions: bool,
     show_claude_code_sessions: bool = True,
+    show_codex_sessions: bool = True,
     include_archived: bool = False,
     exclude_hidden: bool = False,
     visible_only: bool = False,
@@ -2258,11 +2260,16 @@ def _build_session_list_cache_payload(
     if show_cli_sessions:
         diag_stage("get_cli_sessions")
         if _callable_accepts_kwarg(get_cli_sessions, "include_claude_code"):
-            cli = get_cli_sessions(
-                source_filter=source_filter,
-                all_profiles=all_profiles,
-                include_claude_code=show_claude_code_sessions,
-            )
+            _cli_kwargs = {
+                "source_filter": source_filter,
+                "all_profiles": all_profiles,
+                "include_claude_code": show_claude_code_sessions,
+            }
+            # Probed separately from include_claude_code: a test double may
+            # predate the Codex bridge and only accept the older keyword.
+            if _callable_accepts_kwarg(get_cli_sessions, "include_codex"):
+                _cli_kwargs["include_codex"] = show_codex_sessions
+            cli = get_cli_sessions(**_cli_kwargs)
         else:
             # Focused tests sometimes monkeypatch routes.get_cli_sessions with
             # the historical two-keyword signature.
@@ -2572,6 +2579,7 @@ def _build_session_list_cache_payload(
             "show_previous_messaging_sessions": show_previous_messaging_sessions,
             "show_cron_sessions": show_cron_sessions,
             "show_claude_code_sessions": show_claude_code_sessions if show_cli_sessions else False,
+            "show_codex_sessions": show_codex_sessions if show_cli_sessions else False,
             "show_webhook_sessions": show_webhook_sessions,
         },
     }
@@ -13161,6 +13169,7 @@ def handle_get(handler, parsed) -> bool:
             settings = load_settings()
             show_cli_sessions = bool(settings.get("show_cli_sessions"))
             show_claude_code_sessions = bool(settings.get("show_claude_code_sessions"))
+            show_codex_sessions = bool(settings.get("show_codex_sessions"))
             show_previous_messaging_sessions = bool(
                 settings.get("show_previous_messaging_sessions")
             )
@@ -13183,6 +13192,7 @@ def handle_get(handler, parsed) -> bool:
                 all_profiles=all_profiles,
                 show_cli_sessions=show_cli_sessions,
                 show_claude_code_sessions=show_claude_code_sessions,
+                show_codex_sessions=show_codex_sessions,
                 show_previous_messaging_sessions=show_previous_messaging_sessions,
                 show_cron_sessions=show_cron_sessions,
                 include_archived=include_archived,
@@ -13205,6 +13215,7 @@ def handle_get(handler, parsed) -> bool:
                     all_profiles=all_profiles,
                     show_cli_sessions=show_cli_sessions,
                     show_claude_code_sessions=show_claude_code_sessions,
+                    show_codex_sessions=show_codex_sessions,
                     show_previous_messaging_sessions=show_previous_messaging_sessions,
                     show_cron_sessions=show_cron_sessions,
                     include_archived=include_archived,
@@ -13223,6 +13234,25 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, _session_list_payload_to_response(payload), pretty=False)
         finally:
             diag.finish()
+
+    if parsed.path.startswith("/api/codex/session/"):
+        # Read-only Codex CLI transcript. The id may be given either bare
+        # (``<uuid>``) or in the sidebar form (``codex_<uuid>``); anything that
+        # isn't a well-formed uuid is rejected before it reaches SQLite, and the
+        # reader only ever opens files under ~/.codex/sessions.
+        from api.codex_sessions import get_codex_session_detail, thread_id_from_session_id
+
+        raw_id = unquote(parsed.path[len("/api/codex/session/"):]).strip().strip("/")
+        if thread_id_from_session_id(raw_id) is None:
+            return bad(handler, "Invalid Codex session id")
+        try:
+            detail = get_codex_session_detail(raw_id)
+        except Exception:
+            logger.debug("Codex session detail failed for %s", raw_id, exc_info=True)
+            detail = None
+        if not detail:
+            return bad(handler, "Codex session not found", 404)
+        return j(handler, detail)
 
     if parsed.path == "/api/projects":
         # ── Profile scoping (#1614) ────────────────────────────────────────
@@ -15812,6 +15842,7 @@ def handle_post(handler, parsed) -> bool:
             for k in (
                 "show_cli_sessions",
                 "show_claude_code_sessions",
+                "show_codex_sessions",
                 "show_cron_sessions",
                 "show_webhook_sessions",
                 "show_previous_messaging_sessions",

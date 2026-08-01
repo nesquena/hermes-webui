@@ -34,6 +34,13 @@ from api.config import (
 )
 from api.workspace import get_last_workspace
 from api.usage import prompt_cache_hit_percent
+from api.codex_sessions import (
+    CODEX_SOURCE,
+    codex_state_db_stat_key,
+    get_codex_session_messages,
+    get_codex_sessions,
+    is_codex_session_id,
+)
 from api.agent_sessions import (
     _is_continuation_session,
     is_cli_session_row,
@@ -6611,6 +6618,8 @@ def _normalize_cli_session_source_filter(source_filter) -> str | None:
         return None
     if normalized == 'claude-code':
         return CLAUDE_CODE_SOURCE
+    if normalized in {'codex-cli', 'codex_cli'}:
+        return CODEX_SOURCE
     return normalized
 
 
@@ -7114,17 +7123,32 @@ def _path_stat_cache_key(path):
         return None
 
 
-def _callable_accepts_include_claude_code(callable_obj) -> bool:
+def _callable_accepts_named_kwarg(callable_obj, name: str) -> bool:
+    """True when ``callable_obj`` takes ``name`` (or absorbs it via ``**kwargs``).
+
+    Focused tests monkeypatch the CLI-session helpers with historical
+    signatures, so every optional keyword this module threads through them has
+    to be probed before it is passed. Unintrospectable callables are assumed to
+    accept it (the pre-existing, permissive behavior).
+    """
     try:
         signature = inspect.signature(callable_obj)
     except (TypeError, ValueError):
         return True
-    if 'include_claude_code' in signature.parameters:
+    if name in signature.parameters:
         return True
     return any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD
         for parameter in signature.parameters.values()
     )
+
+
+def _callable_accepts_include_claude_code(callable_obj) -> bool:
+    return _callable_accepts_named_kwarg(callable_obj, 'include_claude_code')
+
+
+def _callable_accepts_include_codex(callable_obj) -> bool:
+    return _callable_accepts_named_kwarg(callable_obj, 'include_codex')
 
 
 def _sqlite_content_fingerprint(db_path: Path):
@@ -7253,7 +7277,11 @@ def _cli_sessions_streaming_freeze_marker():
         return ("streaming",)
 
 
-def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool = True):
+def _resolve_cli_sessions_context(
+    source_filter=None,
+    include_claude_code: bool = True,
+    include_codex: bool = True,
+):
     # Use the active WebUI profile's HERMES_HOME to find state.db.
     # The active profile is determined by what the user has selected in the UI
     # (stored in the server's runtime config). This means:
@@ -7294,6 +7322,11 @@ def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool 
         _path_cache_key(projects_dir),
         _path_stat_cache_key(projects_dir),
         _path_stat_cache_key(SESSION_INDEX_FILE),
+        bool(include_codex),
+        # Codex's own SQLite store lives outside HERMES_HOME, so its stat stamp
+        # has to be part of the key or a newly-finished Codex thread would be
+        # invisible until an unrelated invalidation happened to fire.
+        codex_state_db_stat_key() if include_codex else None,
     )
     return hermes_home, db_path, cli_profile, cache_key
 
@@ -7422,6 +7455,7 @@ def _load_cli_sessions_uncached(
     cron_project_limit: int | None | bool = CRON_PROJECT_CHIP_LIMIT,
     webhook_project_limit: int | None | bool = WEBHOOK_PROJECT_CHIP_LIMIT,
     include_claude_code: bool = True,
+    include_codex: bool = True,
 ) -> list:
     cli_sessions = []
     if source_filter in (None, CLAUDE_CODE_SOURCE) and include_claude_code:
@@ -7433,6 +7467,14 @@ def _load_cli_sessions_uncached(
     if source_filter == CLAUDE_CODE_SOURCE:
         return cli_sessions
 
+    if source_filter in (None, CODEX_SOURCE) and include_codex:
+        try:
+            cli_sessions.extend(get_codex_sessions(default_workspace=str(get_last_workspace())))
+        except Exception:
+            logger.debug("Codex session scan failed", exc_info=True)
+
+    if source_filter == CODEX_SOURCE:
+        return cli_sessions
 
     if not db_path.exists():
         return cli_sessions
@@ -7745,6 +7787,7 @@ def get_cli_sessions(
     *,
     all_profiles: bool = False,
     include_claude_code: bool = True,
+    include_codex: bool = True,
 ) -> list:
     """Read CLI sessions from the agent's SQLite store and return them as
     dicts in a format the WebUI sidebar can render alongside local sessions.
@@ -7770,6 +7813,8 @@ def get_cli_sessions(
             _path_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(SESSION_INDEX_FILE),
+            bool(include_codex),
+            codex_state_db_stat_key() if include_codex else None,
         )
     else:
         resolve_kwargs = {}
@@ -7778,17 +7823,30 @@ def get_cli_sessions(
         )
         if resolve_supports_include_claude_code:
             resolve_kwargs['include_claude_code'] = include_claude_code
+        resolve_supports_include_codex = _callable_accepts_include_codex(
+            _resolve_cli_sessions_context
+        )
+        if resolve_supports_include_codex:
+            resolve_kwargs['include_codex'] = include_codex
         hermes_home, db_path, cli_profile, cache_key = _resolve_cli_sessions_context(
             source_filter,
             **resolve_kwargs,
         )
         if not resolve_supports_include_claude_code:
             cache_key = cache_key + (bool(include_claude_code),)
+        if not resolve_supports_include_codex:
+            cache_key = cache_key + (
+                bool(include_codex),
+                codex_state_db_stat_key() if include_codex else None,
+            )
     ttl = _cli_sessions_cache_ttl_seconds()
     now = time.monotonic()
 
     def _load_sessions():
         loader_supports_include_claude_code = _callable_accepts_include_claude_code(
+            _load_cli_sessions_uncached
+        )
+        loader_supports_include_codex = _callable_accepts_include_codex(
             _load_cli_sessions_uncached
         )
         if all_profiles:
@@ -7802,6 +7860,11 @@ def get_cli_sessions(
                 }
                 if loader_supports_include_claude_code:
                     load_kwargs['include_claude_code'] = include_claude_code and idx == 0
+                # Codex's store is global (one ~/.codex, not per-Hermes-profile),
+                # so scan it on the first context only or every profile would
+                # contribute a duplicate copy of the same rows.
+                if loader_supports_include_codex:
+                    load_kwargs['include_codex'] = include_codex and idx == 0
                 merged.extend(
                     _load_cli_sessions_uncached(
                         ctx_home,
@@ -7814,6 +7877,8 @@ def get_cli_sessions(
         load_kwargs = {'source_filter': source_filter}
         if loader_supports_include_claude_code:
             load_kwargs['include_claude_code'] = include_claude_code
+        if loader_supports_include_codex:
+            load_kwargs['include_codex'] = include_codex
         return _load_cli_sessions_uncached(
             hermes_home,
             db_path,
@@ -9294,6 +9359,8 @@ def get_cli_session_messages(sid, *, profile=None) -> list:
     """
     if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
         return get_claude_code_session_messages(sid)
+    if is_codex_session_id(sid):
+        return get_codex_session_messages(sid)
     return get_state_db_session_messages(sid, stitch_continuations=True, profile=profile)
 
 

@@ -5848,6 +5848,8 @@ main.main > #mainPlugin{display:none;}
 .session-source-chip[data-source-key="slack"] { color: #4A154B; background: rgba(74, 21, 75, 0.12); }
 .session-item.cli-session[data-source-key="claude_code"] { border-left-color: rgba(217, 119, 6, 0.65); }
 .session-source-chip[data-source-key="claude_code"] { color: rgba(217, 119, 6, 0.85); background: rgba(217, 119, 6, 0.12); }
+.session-item.cli-session[data-source-key="codex"] { border-left-color: rgba(16, 163, 127, 0.65); }
+.session-source-chip[data-source-key="codex"] { color: rgba(16, 163, 127, 0.9); background: rgba(16, 163, 127, 0.12); }
 
 /* ═══════════════════════════════════════════════════════════════════
    Messages redesign — additive overrides for the transcript area.
