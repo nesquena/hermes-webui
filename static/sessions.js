@@ -988,6 +988,7 @@ function _rememberRenderedStreamingState(s, isStreaming) {
 
 function _inflightHasVisibleLiveState(inflight) {
   if (!inflight || typeof inflight !== 'object') return false;
+  if (Array.isArray(inflight.deliveredSteers) && inflight.deliveredSteers.length) return true;
   if (String(inflight.lastAssistantText || '').trim()) return true;
   if (String(inflight.lastReasoningText || '').trim()) return true;
   if (String(inflight.liveTurnHtml || '').trim()) return true;
@@ -2084,8 +2085,15 @@ async function loadSession(sid){
   }
 
   if(INFLIGHT[sid]&&INFLIGHT[sid].journalReplayFromStart&&activeStreamId){
+    const replayDeliveredSteers=Array.isArray(INFLIGHT[sid].deliveredSteers)
+      ? INFLIGHT[sid].deliveredSteers
+      : [];
     delete INFLIGHT[sid];
     if(typeof clearInflightState==='function') clearInflightState(sid);
+    if(replayDeliveredSteers.length){
+      INFLIGHT[sid]={streamId:activeStreamId,deliveredSteers:replayDeliveredSteers,reattach:true};
+      if(typeof saveInflightState==='function') saveInflightState(sid,INFLIGHT[sid]);
+    }
   }
 
   if(activeStreamId&&INFLIGHT[sid]&&!_inflightHasVisibleLiveState(INFLIGHT[sid])){

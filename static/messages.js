@@ -2000,6 +2000,7 @@ function closeLiveStream(sessionId, streamId, source){
         currentActivityBurstId:INFLIGHT[sessionId].currentActivityBurstId||0,
         currentLiveSegmentSeq:INFLIGHT[sessionId].currentLiveSegmentSeq||0,
         activityBurstAnchors:Array.isArray(INFLIGHT[sessionId].activityBurstAnchors)?INFLIGHT[sessionId].activityBurstAnchors:[],
+        deliveredSteers:Array.isArray(INFLIGHT[sessionId].deliveredSteers)?INFLIGHT[sessionId].deliveredSteers:[],
       });
     }
   }
@@ -2267,6 +2268,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       currentActivityBurstId:inflight.currentActivityBurstId||0,
       currentLiveSegmentSeq:inflight.currentLiveSegmentSeq||0,
       activityBurstAnchors:Array.isArray(inflight.activityBurstAnchors)?inflight.activityBurstAnchors:[],
+      deliveredSteers:Array.isArray(inflight.deliveredSteers)?inflight.deliveredSteers:[],
       todos:Array.isArray(inflight.todos)?inflight.todos:S.todos,
       todoStateMeta:inflight.todoStateMeta||S.todoStateMeta||null,
     });
@@ -2642,6 +2644,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // assistant -> steer -> assistant.
     const _sealers=window._liveAnchorProseSealers||(window._liveAnchorProseSealers=new Map());
     _sealers.set(String(streamId),function(){
+      if(_isActiveSession()&&S.activeStreamId!==streamId) return false;
       // Flush before the boundary. Bare recordActivityBoundary/_resetAssistantSegment
       // is what master uses only on switched-away branches; here a delta still sitting
       // in the deferred render would never reach live-prose:{stream}:{segmentSeq}, and
@@ -2674,6 +2677,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       : [];
     for(const _cachedSteer of _cachedDeliveredSteers){
       if(!_cachedSteer||typeof _cachedSteer!=='object') continue;
+      const _cachedSteerStreamId=String(
+        _cachedSteer.stream_id||(_cachedSteer.payload&&_cachedSteer.payload.stream_id)||''
+      );
+      if(_cachedSteerStreamId!==String(streamId)) continue;
       try{
         _anchorApi.applyAssistantTurnAnchorSourceEvent(
           _anchorRegistry,
@@ -4222,12 +4229,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         payload.activityBurstId=payload.activityBurstId||row.group.activity_burst_id;
       }
       const rowIdentity=(row.identity&&typeof row.identity==='object')?row.identity:{};
+      const sourceSeq=sourceType==='steer_delivered'&&rowIdentity.seq!=null
+        ? rowIdentity.seq
+        : row.seq;
       const sourceEvent={
         ...payload,
         source_event_type:sourceType,
         local_id:row.local_id||row.row_id||`snapshot:${sceneStreamId}:${i}`,
         event_id:row.event_id||null,
-        seq:row.seq??undefined,
+        seq:sourceSeq??undefined,
         status:row.status||undefined,
         stream_id:row.stream_id||rowIdentity.stream_id||sceneStreamId,
         run_id:row.run_id||rowIdentity.run_id||sceneRunId,

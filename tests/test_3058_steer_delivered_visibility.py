@@ -180,6 +180,17 @@ def test_3058_delivered_steer_projects_a_user_row_and_other_controls_stay_contro
     assert rows["clarify"]["role"] == "control"
 
 
+def test_3058_renderer_snapshot_keeps_the_delivered_steer_as_a_user_row():
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const snapshot=api.createAssistantTurnAnchorRendererSnapshot({rows:[{"
+        "kind:'control_boundary',source_event_type:'steer_delivered',role:'user',"
+        "status:'delivered',text:'steer'}]});"
+        "console.log(JSON.stringify({role:snapshot.rows[0].role,source:snapshot.rows[0].source_event_type}));"
+    )
+    assert out == {"role": "user", "source": "steer_delivered"}
+
+
 # ------------------------------------------------------------------- live row
 
 
@@ -353,6 +364,27 @@ def test_3058_the_reload_restore_path_carries_the_delivered_steer_cache():
     assert out["restored"] == [_CACHED_STEER]
 
 
+def test_3058_journal_replay_reset_preserves_browser_only_delivered_steers():
+    reset = _block_after(
+        _read(SESSIONS_JS),
+        "if(INFLIGHT[sid]&&INFLIGHT[sid].journalReplayFromStart&&activeStreamId){",
+    )
+    out = _run_node(
+        f"const sid='sid-3058';const activeStreamId={json.dumps(OWNER_STREAM)};\n"
+        f"const cached={json.dumps([_CACHED_STEER])};\n"
+        "const INFLIGHT={[sid]:{streamId:activeStreamId,journalReplayFromStart:true,deliveredSteers:cached}};\n"
+        "const cleared=[];const saved=[];\n"
+        "function clearInflightState(id){cleared.push(id);}\n"
+        "function saveInflightState(id,state){saved.push([id,state]);}\n"
+        "if(INFLIGHT[sid]&&INFLIGHT[sid].journalReplayFromStart&&activeStreamId)"
+        + reset
+        + "\nconsole.log(JSON.stringify({streamId:INFLIGHT[sid].streamId,steers:INFLIGHT[sid].deliveredSteers,cleared,saved:saved.length}));"
+    )
+    assert out["streamId"] == OWNER_STREAM
+    assert out["steers"] == [_CACHED_STEER]
+    assert out["saved"] == 1
+
+
 def test_3058_a_server_snapshot_recovery_keeps_the_browser_only_delivered_steers():
     """The other way the cache can be dropped: replaced rather than not read.
 
@@ -382,6 +414,40 @@ def test_3058_a_server_snapshot_recovery_keeps_the_browser_only_delivered_steers
     assert out["seq"] == 9
     assert out["steers"] == [_CACHED_STEER]
     assert out["otherStreamSteers"] is None
+
+
+def test_3058_token_persistence_keeps_the_delivered_steer_cache():
+    persist = _function(_read(MESSAGES_JS), "persistInflightState")
+    out = _run_node(
+        "const activeSid='sid-3058';const streamId='stream-3058';const uploaded=[];"
+        "const S={todos:[],todoStateMeta:null};"
+        f"const cached={json.dumps([_CACHED_STEER])};"
+        "const INFLIGHT={[activeSid]:{messages:[],uploaded:[],toolCalls:[],deliveredSteers:cached}};"
+        "const saved=[];function saveInflightState(sid,state){saved.push([sid,state]);}\n"
+        + persist
+        + "\npersistInflightState();\n"
+        "console.log(JSON.stringify({steers:saved[0][1].deliveredSteers}));"
+    )
+    assert out["steers"] == [_CACHED_STEER]
+
+
+def test_3058_reattach_replays_only_records_owned_by_the_attached_stream():
+    replay = _block_after(
+        _read(MESSAGES_JS),
+        "if(_anchorRegistry&&_anchorApi&&typeof _anchorApi.applyAssistantTurnAnchorSourceEvent==='function'){",
+    )
+    wrong_stream = dict(_CACHED_STEER)
+    wrong_stream["payload"] = dict(_CACHED_STEER["payload"], stream_id="stream-other")
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const _anchorApi=api;const activeSid=OWNER_SID;const streamId=OWNER_STREAM;\n"
+        + "const _anchorRegistry=newRegistry(OWNER_STREAM);\n"
+        + f"INFLIGHT[activeSid]={{deliveredSteers:{json.dumps([_CACHED_STEER, wrong_stream])}}};\n"
+        + "if(_anchorRegistry&&_anchorApi&&typeof _anchorApi.applyAssistantTurnAnchorSourceEvent==='function')"
+        + replay
+        + "\nconsole.log(JSON.stringify({rows:scene(_anchorRegistry).activity_rows.map(r=>r.text)}));"
+    )
+    assert out["rows"] == [STEER_TEXT]
 
 
 def test_3058_a_steer_sent_after_a_mid_run_reload_is_recorded_and_not_deduped_away():
@@ -471,7 +537,8 @@ def test_3058_the_seal_flushes_pending_prose_before_recording_the_boundary():
     seal = _block_after(_read(MESSAGES_JS), "_sealers.set(String(streamId),function()")
     out = _run_node(
         "const CALLS=[];\n"
-        "const streamId='stream-3058';\n"
+        "const streamId='stream-3058';const S={session:{session_id:'sid-3058'},activeStreamId:streamId};"
+        "function _isActiveSession(){return true;}\n"
         "let assistantRow=null;\n"
         "function _parseStreamState(){return {displayText:'half an answer not yet flushed'};}\n"
         "function ensureAssistantRow(){CALLS.push('ensureAssistantRow');assistantRow={};}\n"
@@ -552,6 +619,19 @@ def test_3058_a_steer_to_an_unknown_stream_seals_nothing_rather_than_the_wrong_r
     assert out["sealed"] == []
 
 
+def test_3058_a_sealer_does_not_touch_the_visible_replacement_stream():
+    seal = _block_after(_read(MESSAGES_JS), "_sealers.set(String(streamId),function()")
+    out = _run_node(
+        "const S={session:{session_id:'sid-3058'},activeStreamId:'stream-b'};"
+        "const streamId='stream-a';function _isActiveSession(){return true;}"
+        "const window={};let assistantRow=null;"
+        "const seal=function()"
+        + seal
+        + ";console.log(JSON.stringify({result:seal()}));"
+    )
+    assert out["result"] is False
+
+
 # ---------------------------------------------------------- feedback is guaranteed
 
 
@@ -580,6 +660,29 @@ def test_3058_a_declined_repaint_still_shows_the_user_something():
     assert out["recorded"] is True, "the record is durable even when the repaint declines"
     assert out["rows"] == 1
     assert out["indicators"] == [STEER_TEXT], "the user is never left with no feedback at all"
+
+
+def test_3058_accepted_delivery_leaves_the_running_turn_and_queue_untouched():
+    accepted_branch = _block_after(_read(COMMANDS_JS), "if(result&&result.accepted){")
+    out = _run_node(
+        _anchor_harness_prelude()
+        + _function(_read(COMMANDS_JS), "_steerRestoreText")
+        + "\nlet _steerUploadCache=null;"
+        + "const S={session:{session_id:OWNER_SID},activeStreamId:OWNER_STREAM,busy:true,pendingFiles:[]};"
+        + "const result={accepted:true};const ownerSid=OWNER_SID;const ownerStreamId=OWNER_STREAM;"
+        + f"const originalMsg={json.dumps(STEER_TEXT)};const explicitSteer=false;const pendingFilesSnapshot=[];"
+        + "function _clearComposerDraft(){}function renderTray(){}function showToast(){}"
+        + "function t(key){return key;}window._renderLiveAnchorActivitySceneForStream=()=>true;"
+        + "newRegistry(OWNER_STREAM);"
+        + "function drive(){"
+        + accepted_branch
+        + "}\ndrive();\n"
+        + "console.log(JSON.stringify({busy:S.busy,activeStreamId:S.activeStreamId,queue:SESSION_QUEUES[OWNER_SID]||[],rows:window._liveAnchorRegistries.get(OWNER_STREAM).anchor.activity_events.length}));"
+    )
+    assert out["busy"] is True
+    assert out["activeStreamId"] == OWNER_STREAM
+    assert out["queue"] == []
+    assert out["rows"] == 1
 
 
 # ------------------------------------------------- leftover / failure preservation
@@ -766,6 +869,21 @@ def test_3058_the_delivered_row_survives_sanitize_persist_and_hydrate_unchanged(
     assert hydrated_scene["activity_rows"][1]["source_event_type"] == "steer_delivered"
     assert hydrated_scene["activity_rows"][1]["status"] == "delivered"
     assert hydrated_scene["activity_rows"][1]["payload"]["files"] == ["spec.md"]
+
+
+def test_3058_scene_hydration_reuses_the_event_sequence_for_steer_deduplication():
+    hydrate = _function(_read(MESSAGES_JS), "_hydrateAnchorRegistryFromActivityScene")
+    out = _run_node(
+        "const seen=[];const _anchorRegistry={};"
+        "const _anchorApi={applyAssistantTurnAnchorSourceEvent(_registry,event){seen.push(event);}};"
+        "const activeSid='sid-3058';const streamId='stream-3058';let _anchorShadowWarned=false;"
+        "function _sourceEventTypeForSnapshotAnchorRow(row){return row.source_event_type;}\n"
+        + hydrate
+        + f"\n_hydrateAnchorRegistryFromActivityScene({json.dumps({'version':'activity_scene_v1','identity':{'stream_id':OWNER_STREAM},'activity_rows':[{'source_event_type':'steer_delivered','local_id':_CACHED_STEER['payload']['local_id'],'seq':4,'identity':{'seq':'steer-1'},'status':'delivered','text':STEER_TEXT,'payload':_CACHED_STEER['payload']}]})});\n"
+        "console.log(JSON.stringify({seq:seen[0].seq,localId:seen[0].local_id}));"
+    )
+    assert out["seq"] == "steer-1"
+    assert out["localId"] == _CACHED_STEER["payload"]["local_id"]
 
 
 def test_3058_a_virtualized_turn_rebuilds_the_row_from_the_scene_not_from_a_dom_node():
