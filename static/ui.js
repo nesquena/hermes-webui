@@ -10110,7 +10110,8 @@ function _renderLockManualInstruction(target, res){
   errEl.style.display='block';
   errEl.innerHTML='';
   const markerPath = res.marker_path || res.well_known_lock_path || '';
-  const agentLock = target === 'agent' || markerPath.indexOf('.hermes-update-in-progress') !== -1;
+  const agentLock = res.lock_kind === 'official-update'
+    || markerPath.indexOf('.hermes-update-in-progress') !== -1;
   const intro=document.createElement('div');
   intro.style.marginBottom='6px';
   intro.textContent=agentLock

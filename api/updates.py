@@ -99,7 +99,10 @@ _AGENT_UPDATE_FAILURE_MARKERS = (
 )
 _AGENT_UPDATE_NOOP_MARKERS = (
     "✓ Already up to date!",
+)
+_AGENT_UPDATE_HANDOFF_MARKERS = (
     "✓ Dependencies repaired!",
+    "⚠ Restart required to finish the managed Python runtime repair.",
 )
 _AGENT_UPDATE_LOCK_MARKERS = (
     ".hermes-update-in-progress",
@@ -286,9 +289,14 @@ def _is_git_lock_error(output: str) -> bool:
     if not output:
         return False
     lower_out = output.lower()
-    return any(sig in lower_out for sig in _GIT_LOCK_SIGNATURES) or any(
-        sig in lower_out for sig in _AGENT_UPDATE_LOCK_MARKERS
-    )
+    return any(sig in lower_out for sig in _GIT_LOCK_SIGNATURES)
+
+
+def _is_agent_update_lock_error(output: str) -> bool:
+    if not output:
+        return False
+    lower_out = output.lower()
+    return any(sig in lower_out for sig in _AGENT_UPDATE_LOCK_MARKERS)
 
 
 def _agent_update_lock_path() -> Path | None:
@@ -397,7 +405,7 @@ def apply_clear_lock(target: str) -> dict:
         if target == 'webui':
             path = REPO_ROOT
         elif target == 'agent':
-            path = _AGENT_DIR
+            path = Path(_AGENT_DIR) if _AGENT_DIR is not None else None
             if path is None:
                 return {'ok': False, 'message': 'Hermes Agent installation was not found'}
 
@@ -425,6 +433,24 @@ def apply_clear_lock(target: str) -> dict:
                     'target': target,
                     'manual_command': manual_command,
                     'well_known_lock_path': str(lock_path) if lock_path else None,
+                    'lock_kind': 'official-update',
+                }
+            git_inventory = _inventory_locks(path)
+            if git_inventory.get('well_known_lock_present'):
+                git_lock_path = git_inventory['well_known_lock_path']
+                return {
+                    'ok': False,
+                    'message': (
+                        'A Git index lock is present in the Agent checkout. '
+                        'Confirm that no Git process is running, remove the '
+                        f'lock manually, then click Retry. Run: rm -f {git_lock_path}'
+                    ),
+                    'lock_held': True,
+                    'lock_conflict': True,
+                    'target': target,
+                    'manual_command': f'rm -f {git_lock_path}',
+                    'well_known_lock_path': git_lock_path,
+                    'lock_kind': 'git-index',
                 }
         else:
             return {'ok': False, 'message': f'Unknown target: {target}'}
@@ -640,16 +666,25 @@ def _read_agent_source_version(agent_dir: Path) -> str | None:
 
 def _gateway_health_base_url() -> str:
     """Return the configured/default Hermes Agent gateway base URL."""
-    raw = (
-        os.environ.get('GATEWAY_HEALTH_URL')
-        or os.environ.get('HERMES_GATEWAY_HEALTH_URL')
-        or 'http://hermes-agent:8642'
-    ).strip()
-    if raw.endswith('/health/detailed'):
-        raw = raw[: -len('/health/detailed')]
-    elif raw.endswith('/health'):
-        raw = raw[: -len('/health')]
-    return raw.rstrip('/')
+    raw = next(
+        (
+            os.environ.get(name, '').strip()
+            for name in (
+                'GATEWAY_HEALTH_URL',
+                'HERMES_GATEWAY_HEALTH_URL',
+                'HERMES_API_URL',
+                'HERMES_WEBUI_GATEWAY_BASE_URL',
+            )
+            if os.environ.get(name, '').strip()
+        ),
+        'http://hermes-agent:8642',
+    )
+    raw = raw.rstrip('/')
+    for suffix in ('/health/detailed', '/v1/health', '/health', '/status'):
+        if raw.endswith(suffix):
+            raw = raw[: -len(suffix)].rstrip('/')
+            break
+    return raw
 
 
 def _version_from_gateway_health_payload(payload: object) -> str | None:
@@ -2358,6 +2393,8 @@ def _agent_update_output_failure(output: str) -> str | None:
             return marker
     if any(marker in output for marker in _AGENT_UPDATE_NOOP_MARKERS):
         return None
+    if any(marker in output for marker in _AGENT_UPDATE_HANDOFF_MARKERS):
+        return None
     if _AGENT_UPDATE_COMPLETION_MARKER not in output:
         return "completion marker was not emitted"
     return None
@@ -2368,6 +2405,23 @@ def _agent_update_output_noop(output: str) -> str | None:
         if marker in output:
             return marker
     return None
+
+
+def _agent_update_output_handoff(output: str) -> dict[str, bool]:
+    return {
+        'dependencies_repaired': '✓ Dependencies repaired!' in output,
+        'restart_required': any(
+            marker in output
+            for marker in _AGENT_UPDATE_HANDOFF_MARKERS[1:]
+        ),
+    }
+
+
+def _gateway_observation_has_evidence(snapshot: dict | None) -> bool:
+    return bool(snapshot) and any(
+        snapshot.get(key) is not None
+        for key in ('pid', 'start_time', 'version', 'health')
+    )
 
 
 def _apply_agent_update_inner():
@@ -2443,7 +2497,7 @@ def _apply_agent_update_inner():
             'message': f'Agent update failed{reason}: {detail}',
             'target': 'agent',
         }
-        if _is_git_lock_error(combined):
+        if _is_agent_update_lock_error(combined):
             response['lock_conflict'] = True
             lock_state = _agent_update_lock_state()
             if lock_state.get('path') is not None:
@@ -2452,6 +2506,21 @@ def _apply_agent_update_inner():
                     'marker_path': str(lock_state['path']),
                     'manual_command': f"rm -f {lock_state['path']}",
                 }
+                response['lock_kind'] = 'official-update'
+        elif _is_git_lock_error(combined):
+            response['lock_conflict'] = True
+            inventory = _inventory_locks(agent_dir)
+            response['lock_kind'] = 'git-index'
+            response['lock_recovery'] = {
+                'action': 'clear-git-lock-retry',
+                'well_known_lock_path': inventory['well_known_lock_path'],
+                'manual_command': (
+                    f"rm -f {inventory['well_known_lock_path']}"
+                    if inventory['well_known_lock_path']
+                    else 'Remove the Agent checkout .git/index.lock, then retry'
+                ),
+                'other_locks': inventory['other_locks'],
+            }
         return response
 
     noop_marker = _agent_update_output_noop(combined)
@@ -2472,6 +2541,8 @@ def _apply_agent_update_inner():
             'gateway_restart': 'not_required',
         }
 
+    handoff = _agent_update_output_handoff(combined)
+
     # Invalidate before the gateway gate so any early-return path below still
     # reflects the newly-installed version rather than the pre-update state.
     with _cache_lock:
@@ -2486,6 +2557,22 @@ def _apply_agent_update_inner():
         expected_version=expected_version,
     )
     if not gateway_ok:
+        non_git_install = not (agent_dir / '.git').exists()
+        if non_git_install and not _gateway_observation_has_evidence(previous_gateway):
+            return {
+                'ok': False,
+                'message': (
+                    'Agent update completed, but this ZIP/non-Git installation '
+                    'does not expose a gateway identity, version, and health '
+                    'signal that WebUI can use to verify replacement. The '
+                    'gateway was not claimed healthy; restart it manually and '
+                    'retry the update.'
+                ),
+                'target': 'agent',
+                'gateway_restart': 'unsupported',
+                'gateway_handoff': 'unsupported',
+                'unsupported_gateway_replacement': True,
+            }
         return {
             'ok': False,
             'message': _agent_gateway_restart_failure_message('agent', gateway_result),
@@ -2518,6 +2605,8 @@ def _apply_agent_update_inner():
         'target': 'agent',
         'restart_scheduled': True,
         'gateway_restart': gateway_result.get('status'),
+        'dependencies_repaired': handoff['dependencies_repaired'],
+        'restart_required': handoff['restart_required'],
     }
 
 

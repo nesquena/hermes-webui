@@ -1684,10 +1684,9 @@ def test_agent_zero_exit_without_completion_marker_is_not_success(tmp_path, monk
     'output,expected',
     [
         ('✓ Already up to date!\n', {'up_to_date': True}),
-        ('✓ Dependencies repaired!\n', {'dependencies_repaired': True}),
     ],
 )
-def test_agent_official_noop_markers_are_successful_without_gateway_replacement(
+def test_agent_official_noop_marker_is_successful_without_gateway_replacement(
     tmp_path, monkeypatch, output, expected,
 ):
     """Official no-op outcomes are successful even without the completion line."""
@@ -1714,6 +1713,53 @@ def test_agent_official_noop_markers_are_successful_without_gateway_replacement(
     assert result['ok'] is True, result
     assert result['no_op'] is True
     assert result['gateway_restart'] == 'not_required'
+    for key, value in expected.items():
+        assert result[key] is value
+
+
+@pytest.mark.parametrize(
+    'output,expected',
+    [
+        ('✓ Dependencies repaired!\n', {'dependencies_repaired': True}),
+        (
+            '✓ Dependencies repaired!\n'
+            '⚠ Restart required to finish the managed Python runtime repair.\n',
+            {'dependencies_repaired': True, 'restart_required': True},
+        ),
+    ],
+)
+def test_agent_dependency_repair_hands_off_to_gateway_and_webui_restart(
+    tmp_path, monkeypatch, output, expected,
+):
+    """Dependency repair follows the same gateway and WebUI handoff as an update."""
+    agent_dir = _agent_tmp(tmp_path)
+    agent_exe = _make_hermes_exe(agent_dir)
+    ensure_calls = []
+    schedule_calls = []
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
+    monkeypatch.setattr(updates.subprocess, 'run', lambda cmd, **kwargs: _fake_proc(stdout=output))
+    monkeypatch.setattr(
+        updates,
+        '_gateway_observation_snapshot',
+        lambda profile: {'pid': 100, 'start_time': 10, 'version': '0.19.0', 'health': 'running'},
+    )
+    monkeypatch.setattr(
+        updates,
+        '_ensure_gateway_restart_for_agent_update',
+        lambda *args, **kwargs: ensure_calls.append((args, kwargs)) or (
+            True, {'status': 'completed'}
+        ),
+    )
+    monkeypatch.setattr(updates, '_schedule_restart', lambda *args, **kwargs: schedule_calls.append(1))
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['ok'] is True, result
+    assert result['gateway_restart'] == 'completed'
+    assert len(ensure_calls) == 1
+    assert schedule_calls == [1]
     for key, value in expected.items():
         assert result[key] is value
 
@@ -1828,6 +1874,24 @@ def test_gateway_observation_uses_real_agent_health_version_and_status(tmp_path,
     assert snapshot['health'] == 'running'
 
 
+@pytest.mark.parametrize(
+    'variable',
+    ['HERMES_API_URL', 'HERMES_WEBUI_GATEWAY_BASE_URL'],
+)
+def test_gateway_health_probe_honors_canonical_gateway_url_variables(monkeypatch, variable):
+    """Post-update gateway evidence uses the documented gateway URL authority."""
+    for name in (
+        'GATEWAY_HEALTH_URL',
+        'HERMES_GATEWAY_HEALTH_URL',
+        'HERMES_API_URL',
+        'HERMES_WEBUI_GATEWAY_BASE_URL',
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(variable, 'http://gateway.test/v1/health')
+
+    assert updates._gateway_health_base_url() == 'http://gateway.test'
+
+
 def test_agent_passive_observation_rejects_surviving_old_gateway(tmp_path, monkeypatch):
     """A live PID is insufficient when it is the pre-update gateway."""
     previous = {'pid': 100, 'start_time': 10, 'version': '0.18.0', 'health': 'running'}
@@ -1916,6 +1980,29 @@ def test_agent_update_lock_conflict_preserves_recovery_affordance(tmp_path, monk
     assert result['lock_recovery']['marker_path'].endswith('.hermes-update-in-progress')
 
 
+def test_agent_git_index_lock_is_not_reported_as_official_update_lock(tmp_path, monkeypatch):
+    """A Git index lock keeps Git recovery wording and path ownership."""
+    agent_dir = _agent_tmp(tmp_path)
+    agent_exe = _make_hermes_exe(agent_dir)
+    git_lock_error = "fatal: Unable to create '.git/index.lock': File exists."
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
+    monkeypatch.setattr(
+        updates.subprocess,
+        'run',
+        lambda cmd, **kwargs: _fake_proc(returncode=1, stderr=git_lock_error),
+    )
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['ok'] is False, result
+    assert result['lock_conflict'] is True, result
+    assert result['lock_kind'] == 'git-index'
+    assert result['lock_recovery']['well_known_lock_path'].endswith('.git\\index.lock')
+    assert 'marker_path' not in result['lock_recovery']
+
+
 def test_agent_update_lock_contract_reads_live_holder_and_describes_it(tmp_path, monkeypatch):
     """The proof follows the Agent lock's current live-holder contract."""
     from hermes_cli import update_lock as agent_update_lock
@@ -1960,6 +2047,29 @@ def test_apply_clear_lock_agent_retries_after_official_marker_is_gone(tmp_path, 
     assert result['lock_recovery']['action'] == 'no-lock-found'
 
 
+def test_apply_clear_lock_agent_reports_git_index_lock_separately(tmp_path, monkeypatch):
+    """Agent clear-lock keeps a checkout lock distinct from UpdateLock."""
+    agent_dir = tmp_path / 'agent'
+    (agent_dir / '.git').mkdir(parents=True)
+    (agent_dir / '.git' / 'index.lock').write_text('', encoding='utf-8')
+    marker = tmp_path / '.hermes-update-in-progress'
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_agent_update_lock_path', lambda: marker)
+    monkeypatch.setattr(
+        updates,
+        '_agent_update_lock_state',
+        lambda: {'path': marker, 'holder': None, 'present': False},
+    )
+
+    result = updates.apply_clear_lock('agent')
+
+    assert result['ok'] is False, result
+    assert result['lock_kind'] == 'git-index'
+    assert result['well_known_lock_path'].endswith('.git\\index.lock')
+    assert '.git\\index.lock' in result['manual_command']
+
+
 def test_agent_non_git_root_still_invokes_official_updater(tmp_path, monkeypatch):
     """Supported ZIP and pip-style roots must reach the official command."""
     agent_dir = tmp_path / 'agent'
@@ -1983,6 +2093,36 @@ def test_agent_non_git_root_still_invokes_official_updater(tmp_path, monkeypatch
 
     assert result['ok'] is True, result
     assert calls and calls[0][-2:] == ['update', '--yes']
+
+
+def test_agent_non_git_without_gateway_evidence_reports_unsupported_handoff(
+    tmp_path, monkeypatch,
+):
+    """ZIP roots never claim a replacement when no gateway evidence exists."""
+    agent_dir = tmp_path / 'agent'
+    agent_dir.mkdir()
+    agent_exe = _make_hermes_exe(agent_dir)
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
+    monkeypatch.setattr(updates.subprocess, 'run', lambda cmd, **kwargs: _fake_proc())
+    monkeypatch.setattr(
+        updates,
+        '_gateway_observation_snapshot',
+        lambda profile: {'pid': None, 'start_time': None, 'version': None, 'health': None},
+    )
+    monkeypatch.setattr(
+        updates,
+        '_ensure_gateway_restart_for_agent_update',
+        lambda *args, **kwargs: (False, {'status': 'failed', 'message': 'no replacement'}),
+    )
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['ok'] is False, result
+    assert result['gateway_restart'] == 'unsupported'
+    assert result['gateway_handoff'] == 'unsupported'
+    assert result['unsupported_gateway_replacement'] is True
 
 
 def test_apply_force_update_agent_restarts_active_gateway(tmp_path, monkeypatch):

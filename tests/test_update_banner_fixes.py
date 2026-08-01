@@ -941,7 +941,8 @@ class TestAgentUpdateCurrentContract:
 
         assert 'The official Hermes Agent update lock is present.' in src
         assert 'A stale .git/index.lock is present.' in src
-        assert 'target === \'agent\'' in src
+        assert "res.lock_kind === 'official-update'" in src
+        assert "target === 'agent'" not in src[src.index('function _renderLockManualInstruction'):src.index('function _renderLockManualInstruction') + 700]
 
 
 
