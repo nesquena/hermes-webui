@@ -14,7 +14,6 @@ Covers:
 
 import pathlib
 import re
-import threading
 import time
 import sys
 import os
@@ -22,7 +21,6 @@ import io
 import json
 import subprocess
 import types
-import functools
 
 import pytest
 
@@ -439,8 +437,6 @@ class TestScheduleRestart:
 
         # Monkeypatch os.execv inside the module's thread closure
         import os as _os
-        original_execv = _os.execv
-
         monkeypatch.setattr(sys, 'platform', 'linux')
         monkeypatch.setattr(upd, '_wait_until_restart_safe', lambda *a, **k: {'restart_blocked': False})
         monkeypatch.setattr(_os, 'execv', fake_execv)
@@ -853,763 +849,67 @@ class TestApplyForceUpdate:
         assert result['ok'] is False
 
 
-class TestAgentUpdateRequiresGatewayRestart:
-    """Legacy active-restart tests retained for historical coverage only."""
+class TestAgentUpdateCurrentContract:
+    """Preserve current Agent ownership and WebUI target behavior."""
 
-    pytestmark = pytest.mark.skip(
-        reason='superseded by Agent-owned restart and passive health observation'
-    )
-
-    def test_agent_gateway_restart_retries_one_transient_failure(self, monkeypatch):
+    def test_agent_update_delegates_restart_ownership_to_official_updater(
+        self, tmp_path, monkeypatch,
+    ):
         import api.updates as upd
 
-        restart_results = iter([
-            {'status': 'failed', 'message': 'Restart failed: bad file descriptor'},
-            {'status': 'completed', 'message': 'Gateway service restarted successfully'},
-        ])
-        restart_calls = []
-        sleeps = []
+        agent_dir = tmp_path / 'agent'
+        agent_exe = agent_dir / 'venv' / ('Scripts' if sys.platform == 'win32' else 'bin') / (
+            'hermes.exe' if sys.platform == 'win32' else 'hermes'
+        )
+        agent_exe.parent.mkdir(parents=True)
+        agent_exe.write_text('fake')
 
-        def fake_restart(*, profile=None):
-            restart_calls.append(profile)
-            return next(restart_results)
+        class FakeProc:
+            returncode = 0
+            stdout = '✓ Update complete!\n'
+            stderr = ''
 
-        monkeypatch.setattr(upd, 'restart_active_profile_gateway', fake_restart)
-        monkeypatch.setattr(upd.time, 'sleep', sleeps.append)
-        monkeypatch.setattr(upd, 'get_active_profile_gateway_running_pid', lambda *, profile=None: 101)
-
-        ok, result = upd._ensure_gateway_restart_for_agent_update()
-
-        assert ok is True
-        assert result['status'] == 'completed'
-        assert result['retry_attempted'] is True
-        assert 'bad file descriptor' in result['initial_failure']
-        assert restart_calls == ['default', 'default']
-        assert sleeps == [upd._AGENT_GATEWAY_RESTART_RETRY_DELAY_S]
-
-    def test_agent_gateway_restart_retry_busy_stays_fail_closed(self, monkeypatch):
-        import api.updates as upd
-
-        restart_results = iter([
-            {'status': 'failed', 'message': 'Restart failed: first'},
-            {'status': 'busy', 'message': 'Restart already in progress'},
-        ])
-        sleeps = []
-        gateway_pid_calls = []
-
-        monkeypatch.setattr(upd, 'restart_active_profile_gateway', lambda **kwargs: next(restart_results))
-        monkeypatch.setattr(upd.time, 'sleep', sleeps.append)
+        ensure_calls = []
+        monkeypatch.setattr(upd, '_AGENT_DIR', agent_dir)
+        monkeypatch.setattr(upd, '_resolve_hermes_command', lambda: str(agent_exe))
+        monkeypatch.setattr(upd.subprocess, 'run', lambda cmd, **kwargs: FakeProc())
         monkeypatch.setattr(
             upd,
-            'get_active_profile_gateway_running_pid',
-            lambda *, profile=None: gateway_pid_calls.append(profile) or 101,
+            '_gateway_observation_snapshot',
+            lambda profile: {'pid': 100, 'start_time': 10, 'version': '0.19.0', 'health': 'running'},
         )
-
-        ok, result = upd._ensure_gateway_restart_for_agent_update()
-
-        assert ok is False
-        assert result['status'] == 'busy'
-        assert result['retry_attempted'] is True
-        assert 'first' in result['initial_failure']
-        assert sleeps == [upd._AGENT_GATEWAY_RESTART_RETRY_DELAY_S]
-        assert gateway_pid_calls == ['default']
-
-    def test_agent_gateway_restart_accepts_verified_process_replacement_after_retry_failure(self, monkeypatch):
-        import api.updates as upd
-
-        timeline = []
-        restart_results = iter([
-            {'status': 'failed', 'message': 'Restart failed: first'},
-            {'status': 'failed', 'message': 'Restart failed: retry'},
-        ])
-        sleeps = []
-        gateway_pids = iter([101, 202])
-
-        def fake_restart(*, profile=None):
-            timeline.append('restart')
-            return next(restart_results)
-
-        def fake_gateway_pid(*, profile=None):
-            pid = next(gateway_pids)
-            timeline.append(f'pid:{pid}')
-            return pid
-
-        monkeypatch.setattr(upd, 'restart_active_profile_gateway', fake_restart)
-        monkeypatch.setattr(upd.time, 'sleep', sleeps.append)
-        monkeypatch.setattr(upd, 'get_active_profile_gateway_running_pid', fake_gateway_pid)
-
-        ok, result = upd._ensure_gateway_restart_for_agent_update()
-
-        assert ok is True
-        assert result['status'] == 'completed'
-        assert result['retry_attempted'] is True
-        assert result['process_replaced'] is True
-        assert 'first' in result['initial_failure']
-        assert 'retry' in result['retry_failure']
-        assert timeline == ['pid:101', 'restart', 'restart', 'pid:202']
-        assert sleeps == [
-            upd._AGENT_GATEWAY_RESTART_RETRY_DELAY_S,
-            upd._AGENT_GATEWAY_RESTART_RETRY_DELAY_S,
-        ]
-
-    def test_agent_gateway_restart_fails_closed_after_retry_and_health_check(self, monkeypatch):
-        import api.updates as upd
-
-        restart_results = iter([
-            {'status': 'failed', 'message': 'Restart failed: first'},
-            {'status': 'failed', 'message': 'Restart failed: retry'},
-        ])
-        restart_calls = []
-        sleeps = []
-
-        def fake_restart(*, profile=None):
-            restart_calls.append(profile)
-            return next(restart_results)
-
-        monkeypatch.setattr(upd, 'restart_active_profile_gateway', fake_restart)
-        monkeypatch.setattr(upd.time, 'sleep', sleeps.append)
-        monkeypatch.setattr(upd, 'get_active_profile_gateway_running_pid', lambda *, profile=None: 101)
-
-        ok, result = upd._ensure_gateway_restart_for_agent_update()
-
-        assert ok is False
-        assert result['status'] == 'failed'
-        assert result['retry_attempted'] is True
-        assert 'Restart failed: first' in result['message']
-        assert 'Restart failed: retry' in result['message']
-        assert restart_calls == ['default', 'default']
-        assert sleeps == [
-            upd._AGENT_GATEWAY_RESTART_RETRY_DELAY_S,
-            upd._AGENT_GATEWAY_RESTART_RETRY_DELAY_S,
-        ]
-
-    def test_agent_gateway_restart_default_retry_cannot_use_sticky_named_profile(self, monkeypatch):
-        import api.updates as upd
-
-        default_restart_results = iter([
-            {'status': 'failed', 'message': 'Restart failed: default first'},
-            {'status': 'failed', 'message': 'Restart failed: default retry'},
-        ])
-        restart_profiles = []
-
-        def fake_restart(*, profile=None):
-            effective_profile = profile or 'sticky-work'
-            restart_profiles.append(effective_profile)
-            if effective_profile == 'sticky-work':
-                return {'status': 'completed', 'message': 'wrong profile restarted'}
-            return next(default_restart_results)
-
-        monkeypatch.setattr(upd, 'get_active_profile_name', lambda: 'default')
-        monkeypatch.setattr(upd, 'restart_active_profile_gateway', fake_restart)
-        monkeypatch.setattr(upd.time, 'sleep', lambda seconds: None)
-        monkeypatch.setattr(upd, 'get_active_profile_gateway_running_pid', lambda *, profile=None: 101)
-
-        ok, result = upd._ensure_gateway_restart_for_agent_update()
-
-        assert ok is False
-        assert restart_profiles == ['default', 'default']
-        assert result['status'] == 'failed'
-        assert 'default first' in result['message']
-        assert 'default retry' in result['message']
-
-    def test_agent_gateway_restart_real_profile_seam_unchanged_default_pid_fails(
-        self,
-        monkeypatch,
-        tmp_path,
-    ):
-        from api import agent_health, gateway_restart, profiles
-        import api.updates as upd
-
-        root_home = tmp_path / ".hermes"
-        sticky_home = root_home / "profiles" / "work"
-        sticky_home.mkdir(parents=True)
-        calls = {"popen": [], "pid_paths": []}
-
-        class FailedRestartProcess:
-            returncode = 7
-
-            def communicate(self, timeout=None):
-                return "", "restart failed"
-
-        class PathStrictGatewayStatus:
-            def get_running_pid(self, pid_path=None, cleanup_stale=False):
-                path = pathlib.Path(pid_path) if pid_path is not None else None
-                calls["pid_paths"].append(path)
-                if path == root_home / "gateway.pid":
-                    return 101
-                if path == sticky_home / "gateway.pid":
-                    return 202
-                return None
-
-        def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
-            calls["popen"].append((args, dict(env or {})))
-            return FailedRestartProcess()
-
-        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root_home)
-        monkeypatch.setattr(profiles, "_active_profile", "work")
-        monkeypatch.setattr(gateway_restart, "_GATEWAY_RESTART_LOCK", threading.Lock())
-        monkeypatch.setattr(gateway_restart.shutil, "which", lambda cmd: "/mock/bin/hermes")
-        monkeypatch.setattr(gateway_restart.subprocess, "Popen", fake_popen)
-        monkeypatch.setattr(agent_health, "_gateway_status_module", lambda: PathStrictGatewayStatus())
-        monkeypatch.setattr(upd.time, 'sleep', lambda seconds: None)
-
-        profiles.set_request_profile("default")
-        try:
-            ok, result = upd._ensure_gateway_restart_for_agent_update()
-        finally:
-            profiles.clear_request_profile()
-
-        assert ok is False
-        assert result["status"] == "failed"
-        assert calls["pid_paths"] == [root_home / "gateway.pid", root_home / "gateway.pid"]
-        assert [call[0] for call in calls["popen"]] == [
-            ["/mock/bin/hermes", "--profile", "default", "gateway", "restart"],
-            ["/mock/bin/hermes", "--profile", "default", "gateway", "restart"],
-        ]
-        assert [call[1]["HERMES_HOME"] for call in calls["popen"]] == [str(root_home), str(root_home)]
-
-    def test_agent_gateway_restart_legacy_implicit_sticky_pid_change_fails_closed(
-        self,
-        monkeypatch,
-        tmp_path,
-    ):
-        from api import agent_health, gateway_restart, profiles
-        import api.updates as upd
-
-        root_home = tmp_path / ".hermes"
-        sticky_home = root_home / "profiles" / "work"
-        sticky_home.mkdir(parents=True)
-        calls = {"popen": [], "implicit_pid": 0}
-
-        class FailedRestartProcess:
-            returncode = 7
-
-            def communicate(self, timeout=None):
-                return "", "restart failed"
-
-        class LegacyImplicitStickyGatewayStatus:
-            def __init__(self):
-                self._pids = iter([201, 202])
-
-            def get_running_pid(self, cleanup_stale=False):
-                calls["implicit_pid"] += 1
-                return next(self._pids)
-
-        def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
-            calls["popen"].append((args, dict(env or {})))
-            return FailedRestartProcess()
-
-        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root_home)
-        monkeypatch.setattr(profiles, "_active_profile", "work")
-        monkeypatch.setattr(gateway_restart, "_GATEWAY_RESTART_LOCK", threading.Lock())
-        monkeypatch.setattr(gateway_restart.shutil, "which", lambda cmd: "/mock/bin/hermes")
-        monkeypatch.setattr(gateway_restart.subprocess, "Popen", fake_popen)
-        monkeypatch.setattr(agent_health, "_gateway_status_module", LegacyImplicitStickyGatewayStatus)
-        monkeypatch.setattr(upd.time, 'sleep', lambda seconds: None)
-
-        profiles.set_request_profile("default")
-        try:
-            ok, result = upd._ensure_gateway_restart_for_agent_update()
-        finally:
-            profiles.clear_request_profile()
-
-        assert ok is False
-        assert result["status"] == "failed"
-        assert calls["implicit_pid"] == 0
-        assert [call[0] for call in calls["popen"]] == [
-            ["/mock/bin/hermes", "--profile", "default", "gateway", "restart"],
-            ["/mock/bin/hermes", "--profile", "default", "gateway", "restart"],
-        ]
-        assert [call[1]["HERMES_HOME"] for call in calls["popen"]] == [str(root_home), str(root_home)]
-
-    def test_agent_gateway_restart_kwargs_wrapper_pid_change_fails_closed(
-        self,
-        monkeypatch,
-        tmp_path,
-    ):
-        from api import agent_health, gateway_restart, profiles
-        import api.updates as upd
-
-        root_home = tmp_path / ".hermes"
-        sticky_home = root_home / "profiles" / "work"
-        sticky_home.mkdir(parents=True)
-        calls = {"popen": [], "ambient_pid": 0}
-
-        class FailedRestartProcess:
-            returncode = 7
-
-            def communicate(self, timeout=None):
-                return "", "restart failed"
-
-        class AmbientKwargsGatewayStatus:
-            def __init__(self):
-                self._pids = iter([201, 202])
-
-            def get_running_pid(self, **kwargs):
-                calls["ambient_pid"] += 1
-                return next(self._pids)
-
-        def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
-            calls["popen"].append((args, dict(env or {})))
-            return FailedRestartProcess()
-
-        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root_home)
-        monkeypatch.setattr(profiles, "_active_profile", "work")
-        monkeypatch.setattr(gateway_restart, "_GATEWAY_RESTART_LOCK", threading.Lock())
-        monkeypatch.setattr(gateway_restart.shutil, "which", lambda cmd: "/mock/bin/hermes")
-        monkeypatch.setattr(gateway_restart.subprocess, "Popen", fake_popen)
-        monkeypatch.setattr(agent_health, "_gateway_status_module", AmbientKwargsGatewayStatus)
-        monkeypatch.setattr(upd.time, 'sleep', lambda seconds: None)
-
-        profiles.set_request_profile("default")
-        try:
-            ok, result = upd._ensure_gateway_restart_for_agent_update()
-        finally:
-            profiles.clear_request_profile()
-
-        assert ok is False
-        assert result["status"] == "failed"
-        assert calls["ambient_pid"] == 0
-        assert [call[0] for call in calls["popen"]] == [
-            ["/mock/bin/hermes", "--profile", "default", "gateway", "restart"],
-            ["/mock/bin/hermes", "--profile", "default", "gateway", "restart"],
-        ]
-        assert [call[1]["HERMES_HOME"] for call in calls["popen"]] == [str(root_home), str(root_home)]
-
-    def test_agent_gateway_restart_wrapped_kwargs_pid_change_fails_closed(
-        self,
-        monkeypatch,
-        tmp_path,
-    ):
-        from api import agent_health, gateway_restart, profiles
-        import api.updates as upd
-
-        root_home = tmp_path / ".hermes"
-        sticky_home = root_home / "profiles" / "work"
-        sticky_home.mkdir(parents=True)
-        calls = {"popen": [], "ambient_pid": 0}
-
-        class FailedRestartProcess:
-            returncode = 7
-
-            def communicate(self, timeout=None):
-                return "", "restart failed"
-
-        def declared_pid_reader(pid_path=None, *, cleanup_stale=True):
-            raise AssertionError("wrapped declaration must not be followed")
-
-        class WrappedKwargsGatewayStatus:
-            def __init__(self):
-                self._pids = iter([201, 202])
-
-            @functools.wraps(declared_pid_reader)
-            def get_running_pid(self, **kwargs):
-                calls["ambient_pid"] += 1
-                return next(self._pids)
-
-        def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
-            calls["popen"].append((args, dict(env or {})))
-            return FailedRestartProcess()
-
-        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root_home)
-        monkeypatch.setattr(profiles, "_active_profile", "work")
-        monkeypatch.setattr(gateway_restart, "_GATEWAY_RESTART_LOCK", threading.Lock())
-        monkeypatch.setattr(gateway_restart.shutil, "which", lambda cmd: "/mock/bin/hermes")
-        monkeypatch.setattr(gateway_restart.subprocess, "Popen", fake_popen)
-        monkeypatch.setattr(agent_health, "_gateway_status_module", WrappedKwargsGatewayStatus)
-        monkeypatch.setattr(upd.time, 'sleep', lambda seconds: None)
-
-        profiles.set_request_profile("default")
-        try:
-            ok, result = upd._ensure_gateway_restart_for_agent_update()
-        finally:
-            profiles.clear_request_profile()
-
-        assert ok is False
-        assert result["status"] == "failed"
-        assert calls["ambient_pid"] == 0
-        assert [call[0] for call in calls["popen"]] == [
-            ["/mock/bin/hermes", "--profile", "default", "gateway", "restart"],
-            ["/mock/bin/hermes", "--profile", "default", "gateway", "restart"],
-        ]
-        assert [call[1]["HERMES_HOME"] for call in calls["popen"]] == [str(root_home), str(root_home)]
-
-    def test_agent_gateway_restart_wrapped_args_pid_change_fails_closed(
-        self,
-        monkeypatch,
-        tmp_path,
-    ):
-        from api import agent_health, gateway_restart, profiles
-        import api.updates as upd
-
-        root_home = tmp_path / ".hermes"
-        sticky_home = root_home / "profiles" / "work"
-        sticky_home.mkdir(parents=True)
-        calls = {"popen": [], "ambient_pid": 0}
-
-        class FailedRestartProcess:
-            returncode = 7
-
-            def communicate(self, timeout=None):
-                return "", "restart failed"
-
-        def declared_pid_reader(pid_path=None, *, cleanup_stale=True):
-            raise AssertionError("wrapped declaration must not be followed")
-
-        class WrappedArgsGatewayStatus:
-            def __init__(self):
-                self._pids = iter([201, 202])
-
-            @functools.wraps(declared_pid_reader)
-            def get_running_pid(self, *args):
-                calls["ambient_pid"] += 1
-                return next(self._pids)
-
-        def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
-            calls["popen"].append((args, dict(env or {})))
-            return FailedRestartProcess()
-
-        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root_home)
-        monkeypatch.setattr(profiles, "_active_profile", "work")
-        monkeypatch.setattr(gateway_restart, "_GATEWAY_RESTART_LOCK", threading.Lock())
-        monkeypatch.setattr(gateway_restart.shutil, "which", lambda cmd: "/mock/bin/hermes")
-        monkeypatch.setattr(gateway_restart.subprocess, "Popen", fake_popen)
-        monkeypatch.setattr(agent_health, "_gateway_status_module", WrappedArgsGatewayStatus)
-        monkeypatch.setattr(upd.time, 'sleep', lambda seconds: None)
-
-        profiles.set_request_profile("default")
-        try:
-            ok, result = upd._ensure_gateway_restart_for_agent_update()
-        finally:
-            profiles.clear_request_profile()
-
-        assert ok is False
-        assert result["status"] == "failed"
-        assert calls["ambient_pid"] == 0
-        assert [call[0] for call in calls["popen"]] == [
-            ["/mock/bin/hermes", "--profile", "default", "gateway", "restart"],
-            ["/mock/bin/hermes", "--profile", "default", "gateway", "restart"],
-        ]
-        assert [call[1]["HERMES_HOME"] for call in calls["popen"]] == [str(root_home), str(root_home)]
-
-    def test_agent_gateway_restart_shifted_positional_only_pid_path_is_bound(
-        self,
-        monkeypatch,
-        tmp_path,
-    ):
-        from api import agent_health, gateway_restart, profiles
-        import api.updates as upd
-
-        root_home = tmp_path / ".hermes"
-        sticky_home = root_home / "profiles" / "work"
-        sticky_home.mkdir(parents=True)
-        calls = {"popen": [], "pid_paths": [], "ambient_pid": 0}
-
-        class FailedRestartProcess:
-            returncode = 7
-
-            def communicate(self, timeout=None):
-                return "", "restart failed"
-
-        class ShiftedPositionalOnlyGatewayStatus:
-            def get_running_pid(self, ambient=None, pid_path=None, /, *, cleanup_stale=True):
-                if pid_path is None:
-                    calls["ambient_pid"] += 1
-                    return 202
-                path = pathlib.Path(pid_path)
-                calls["pid_paths"].append(path)
-                if path == root_home / "gateway.pid":
-                    return 101
-                return None
-
-        def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
-            calls["popen"].append((args, dict(env or {})))
-            return FailedRestartProcess()
-
-        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root_home)
-        monkeypatch.setattr(profiles, "_active_profile", "work")
-        monkeypatch.setattr(gateway_restart, "_GATEWAY_RESTART_LOCK", threading.Lock())
-        monkeypatch.setattr(gateway_restart.shutil, "which", lambda cmd: "/mock/bin/hermes")
-        monkeypatch.setattr(gateway_restart.subprocess, "Popen", fake_popen)
-        monkeypatch.setattr(agent_health, "_gateway_status_module", ShiftedPositionalOnlyGatewayStatus)
-        monkeypatch.setattr(upd.time, 'sleep', lambda seconds: None)
-
-        profiles.set_request_profile("default")
-        try:
-            ok, result = upd._ensure_gateway_restart_for_agent_update()
-        finally:
-            profiles.clear_request_profile()
-
-        assert ok is False
-        assert result["status"] == "failed"
-        assert calls["ambient_pid"] == 0
-        assert calls["pid_paths"] == [root_home / "gateway.pid", root_home / "gateway.pid"]
-        assert [call[0] for call in calls["popen"]] == [
-            ["/mock/bin/hermes", "--profile", "default", "gateway", "restart"],
-            ["/mock/bin/hermes", "--profile", "default", "gateway", "restart"],
-        ]
-        assert [call[1]["HERMES_HOME"] for call in calls["popen"]] == [str(root_home), str(root_home)]
-
-    def test_agent_gateway_restart_isolated_default_home_omits_profile_flag(
-        self,
-        monkeypatch,
-        tmp_path,
-    ):
-        from api import agent_health, gateway_restart, profiles
-        import api.updates as upd
-
-        base_home = tmp_path / ".hermes"
-        isolated_home = base_home / "profiles" / "default"
-        isolated_home.mkdir(parents=True)
-        calls = {"popen": [], "pid_paths": []}
-
-        class FailedRestartProcess:
-            returncode = 7
-
-            def communicate(self, timeout=None):
-                return "", "restart failed"
-
-        class PathStrictGatewayStatus:
-            def get_running_pid(self, pid_path=None, cleanup_stale=False):
-                path = pathlib.Path(pid_path) if pid_path is not None else None
-                calls["pid_paths"].append(path)
-                if path == isolated_home / "gateway.pid":
-                    return 101
-                return None
-
-        def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
-            calls["popen"].append((args, dict(env or {})))
-            return FailedRestartProcess()
-
-        monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME", str(isolated_home))
-        monkeypatch.setattr(profiles, "_INITIAL_ISOLATED_PROFILE_OPT_IN", "1")
-        monkeypatch.setattr(gateway_restart, "_GATEWAY_RESTART_LOCK", threading.Lock())
-        monkeypatch.setattr(gateway_restart.shutil, "which", lambda cmd: "/mock/bin/hermes")
-        monkeypatch.setattr(gateway_restart.subprocess, "Popen", fake_popen)
-        monkeypatch.setattr(agent_health, "_gateway_status_module", lambda: PathStrictGatewayStatus())
-        monkeypatch.setattr(upd.time, 'sleep', lambda seconds: None)
-
-        ok, result = upd._ensure_gateway_restart_for_agent_update()
-
-        assert ok is False
-        assert result["status"] == "failed"
-        assert calls["pid_paths"] == [isolated_home / "gateway.pid", isolated_home / "gateway.pid"]
-        assert [call[0] for call in calls["popen"]] == [
-            ["/mock/bin/hermes", "gateway", "restart"],
-            ["/mock/bin/hermes", "gateway", "restart"],
-        ]
-        assert [call[1]["HERMES_HOME"] for call in calls["popen"]] == [
-            str(isolated_home),
-            str(isolated_home),
-        ]
-
-    def test_apply_update_agent_requires_gateway_restart(self, tmp_path, monkeypatch):
-        """apply_update('agent') must invoke the official updater subprocess,
-        then gate success on gateway restart completing.
-
-        Before #6617: applied its own git fetch/pull/stash sequence.
-        After #6617: delegates to subprocess.run([hermes_exe, 'update', '--yes'])
-        then calls _ensure_gateway_restart_for_agent_update().
-        """
-        import api.updates as upd
-
-        (tmp_path / '.git').mkdir()
-        # create the platform-appropriate venv layout so _find_agent_executable
-        # returns a valid path instead of failing early
-        if sys.platform == 'win32':
-            _hermes_exe = tmp_path / 'venv' / 'Scripts' / 'hermes.exe'
-        else:
-            _hermes_exe = tmp_path / 'venv' / 'bin' / 'hermes'
-        _hermes_exe.parent.mkdir(parents=True, exist_ok=True)
-        _hermes_exe.write_text('fake')
-
-        gateway_restarts = []
-
-        def fake_gateway_restart(*, profile=None):
-            gateway_restarts.append(profile)
-            return {'status': 'completed', 'message': 'Gateway service restarted successfully'}
-
-        class _FakeProc:
-            returncode = 0
-            stdout = 'Updated successfully.\n'
-            stderr = ''
-
-        monkeypatch.setattr(upd.subprocess, 'run', lambda cmd, **kw: _FakeProc())
-        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
-        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
-        monkeypatch.setattr(upd, '_resolve_hermes_command', lambda: str(_hermes_exe))
-        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
-        monkeypatch.setattr('api.updates.restart_active_profile_gateway', fake_gateway_restart)
-
-        result = upd.apply_update('agent')
-        assert result['ok'] is True
-        assert result['target'] == 'agent'
-        assert result['restart_scheduled'] is True
-        assert result['gateway_restart'] == 'completed'
-        assert gateway_restarts == ['default']
-
-    def test_apply_update_agent_gateway_in_progress_is_not_success(self, tmp_path, monkeypatch):
-        """apply_update('agent') with gateway returning in_progress must return ok=False.
-
-        Before #6617: ran its own git stash/pull sequence; 'in_progress' was
-        treated as success and stash_conflict was preserved in the response.
-        After #6617: delegates to subprocess.run([hermes_exe, 'update', '--yes']);
-        no stash path runs, so stash_conflict never appears.  P1-4 change:
-        'in_progress' means the gateway acknowledged restart but did not
-        confirm healthy — treated as ok=False so the client can retry.
-        """
-        import api.updates as upd
-
-        (tmp_path / '.git').mkdir()
-        # create the platform-appropriate venv layout
-        if sys.platform == 'win32':
-            _hermes_exe = tmp_path / 'venv' / 'Scripts' / 'hermes.exe'
-        else:
-            _hermes_exe = tmp_path / 'venv' / 'bin' / 'hermes'
-        _hermes_exe.parent.mkdir(parents=True, exist_ok=True)
-        _hermes_exe.write_text('fake')
-
-        gateway_restarts = []
-
-        def fake_gateway_restart(*, profile=None):
-            gateway_restarts.append(profile)
-            return {'status': 'in_progress', 'message': 'Gateway service restart initiated (in progress)'}
-
-        class _FakeProc:
-            returncode = 0
-            stdout = 'Updated successfully.\n'
-            stderr = ''
-
-        monkeypatch.setattr(upd.subprocess, 'run', lambda cmd, **kw: _FakeProc())
-        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
-        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
-        monkeypatch.setattr(upd, '_resolve_hermes_command', lambda: str(_hermes_exe))
-        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart when gateway in_progress')))
-        monkeypatch.setattr('api.updates.restart_active_profile_gateway', fake_gateway_restart)
-
-        result = upd.apply_update('agent')
-        # in_progress means the gateway did not confirm healthy; ok=False so the
-        # client retries rather than assuming success before the gateway is up.
-        assert result['ok'] is False
-        assert 'stash_conflict' not in result  # no stash path runs post-#6617
-        assert 'restart_scheduled' not in result
-        assert result['target'] == 'agent'
-        assert result['gateway_restart'] == 'in_progress'
-        assert gateway_restarts == ['default']
-
-    def test_apply_update_agent_without_gateway_restart_result_fails(self, tmp_path, monkeypatch):
-        """apply_update('agent') with a non-completing gateway restart must return ok=False.
-
-        Before #6617: ran its own git sequence; gateway 'busy' blocked success.
-        After #6617: delegates to subprocess.run([hermes_exe, 'update', '--yes']);
-        gateway 'busy' status is still not in {completed, in_progress}, so
-        _ensure_gateway_restart_for_agent_update returns ok=False and the
-        response includes target='agent', gateway_restart='busy'.
-        """
-        import api.updates as upd
-
-        (tmp_path / '.git').mkdir()
-        # create the platform-appropriate venv layout
-        if sys.platform == 'win32':
-            _hermes_exe = tmp_path / 'venv' / 'Scripts' / 'hermes.exe'
-        else:
-            _hermes_exe = tmp_path / 'venv' / 'bin' / 'hermes'
-        _hermes_exe.parent.mkdir(parents=True, exist_ok=True)
-        _hermes_exe.write_text('fake')
-
-        restart_calls = []
-
-        class _FakeProc:
-            returncode = 0
-            stdout = 'Updated successfully.\n'
-            stderr = ''
-
-        monkeypatch.setattr(upd.subprocess, 'run', lambda cmd, **kw: _FakeProc())
-        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
-        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
-        monkeypatch.setattr(upd, '_resolve_hermes_command', lambda: str(_hermes_exe))
-        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
-        monkeypatch.setattr('api.updates.restart_active_profile_gateway', lambda **kwargs: (
-            restart_calls.append(kwargs.get('profile')),
-            {'status': 'busy', 'message': 'Restart already in progress. Please wait a moment and try again.'},
-        )[1])
-
-        result = upd.apply_update('agent')
-        assert result['ok'] is False
-        assert 'restart_scheduled' not in result
-        assert result['target'] == 'agent'
-        assert result['gateway_restart'] == 'busy'
-        assert 'hermes gateway restart' in result['message']
-        assert restart_calls == ['default']
-
-    def test_apply_force_update_agent_uses_gateway_restart_status(self, tmp_path, monkeypatch):
-        import api.updates as upd
-
-        (tmp_path / '.git').mkdir()
-        ran = []
-
-        def fake_run(args, cwd, timeout=10):
-            ran.append(args)
-            if args[0] == 'fetch':
-                return '', True
-            if args[:2] == ['rev-parse', '--abbrev-ref']:
-                return 'origin/master', True
-            if args[0] == 'checkout':
-                return '', True
-            if args[0] == 'reset':
-                return '', True
-            return '', True
-
-        monkeypatch.setattr(upd, '_run_git', fake_run)
-        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
-        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
-        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
-        monkeypatch.setattr('api.updates.restart_active_profile_gateway', lambda **kwargs: {'status': 'completed', 'message': 'Gateway service restarted successfully'})
-
-        result = upd.apply_force_update('agent')
-        assert result['ok'] is True
-        assert result['target'] == 'agent'
-        assert result['restart_scheduled'] is True
-        assert result['gateway_restart'] == 'completed'
-
-    def test_apply_force_update_agent_fails_when_gateway_restart_busy(self, tmp_path, monkeypatch):
-        import api.updates as upd
-
-        (tmp_path / '.git').mkdir()
-
-        def fake_run(args, cwd, timeout=10):
-            if args[0] == 'fetch':
-                return '', True
-            if args[:2] == ['rev-parse', '--abbrev-ref']:
-                return 'origin/master', True
-            if args[0] == 'checkout':
-                return '', True
-            if args[0] == 'reset':
-                return '', True
-            return '', True
-
-        monkeypatch.setattr(upd, '_run_git', fake_run)
-        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
-        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
-        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
         monkeypatch.setattr(
-            'api.updates.restart_active_profile_gateway',
-            lambda **kwargs: {'status': 'busy', 'message': 'Restart already in progress. Please wait a moment and try again.'},
+            upd,
+            '_ensure_gateway_restart_for_agent_update',
+            lambda *args, **kwargs: ensure_calls.append(1) or (
+                True, {'status': 'completed'}
+            ),
+        )
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
+        monkeypatch.setattr(
+            upd,
+            'restart_active_profile_gateway',
+            lambda **kwargs: (_ for _ in ()).throw(
+                AssertionError('normal Agent updates must not restart from WebUI')
+            ),
         )
 
-        result = upd.apply_force_update('agent')
-        assert result['ok'] is False
-        assert result['target'] == 'agent'
-        assert result['gateway_restart'] == 'busy'
-        assert 'hermes gateway restart' in result['message']
+        result = upd.apply_update('agent')
+
+        assert result['ok'] is True, result
+        assert result['gateway_restart'] == 'completed'
+        assert ensure_calls == [1]
 
     def test_apply_update_webui_does_not_call_gateway_restart(self, tmp_path, monkeypatch):
         import api.updates as upd
 
         (tmp_path / '.git').mkdir()
         monkeypatch.setattr(
-            'api.updates.restart_active_profile_gateway',
-            lambda: (_ for _ in ()).throw(AssertionError('helper must not run for webui updates')),
+            upd,
+            'restart_active_profile_gateway',
+            lambda **kwargs: (_ for _ in ()).throw(
+                AssertionError('helper must not run for webui updates')
+            ),
         )
 
         def fake_run(args, cwd, timeout=10):
@@ -1631,9 +931,18 @@ class TestAgentUpdateRequiresGatewayRestart:
         monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
 
         result = upd.apply_update('webui')
+
         assert result['ok'] is True
         assert result['target'] == 'webui'
         assert result['restart_scheduled'] is True
+
+    def test_agent_lock_recovery_ui_names_the_official_marker(self):
+        src = read('static/ui.js')
+
+        assert 'The official Hermes Agent update lock is present.' in src
+        assert 'A stale .git/index.lock is present.' in src
+        assert 'target === \'agent\'' in src
+
 
 
 # ── api/routes.py ─────────────────────────────────────────────────────────────
@@ -1708,8 +1017,8 @@ class TestUpdateSummaryRouteModelSelection:
         captured = {}
         profile_home = tmp_path / 'profiles' / 'work'
         fake_skill_module = types.ModuleType('tools.skills_tool')
-        setattr(fake_skill_module, 'HERMES_HOME', 'default-home')
-        setattr(fake_skill_module, 'SKILLS_DIR', 'default-home/skills')
+        fake_skill_module.HERMES_HOME = 'default-home'
+        fake_skill_module.SKILLS_DIR = 'default-home/skills'
         monkeypatch.setitem(sys.modules, 'tools.skills_tool', fake_skill_module)
 
         monkeypatch.setattr(profiles, 'get_hermes_home_for_profile', lambda profile: profile_home)
@@ -1768,8 +1077,8 @@ class TestUpdateSummaryRouteModelSelection:
                 'HERMES_TEST_PROFILE_ENV': os.environ.get('HERMES_TEST_PROFILE_ENV'),
                 'THREAD_HERMES_HOME': thread_env.get('HERMES_HOME'),
                 'THREAD_HERMES_TEST_PROFILE_ENV': thread_env.get('HERMES_TEST_PROFILE_ENV'),
-                'SKILL_MODULE_HOME': getattr(fake_skill_module, 'HERMES_HOME'),
-                'SKILL_MODULE_DIR': getattr(fake_skill_module, 'SKILLS_DIR'),
+                'SKILL_MODULE_HOME': fake_skill_module.HERMES_HOME,
+                'SKILL_MODULE_DIR': fake_skill_module.SKILLS_DIR,
             }
             captured['aux_task'] = task
             captured['main_runtime'] = dict(main_runtime or {})

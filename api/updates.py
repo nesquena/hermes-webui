@@ -78,12 +78,28 @@ _AGENT_UPDATE_FAILURE_MARKERS = (
     "✗ Auto-restore FAILED",
     "✗ Auto-restore file copy failed:",
     "⚠ Venv still unhealthy after repair:",
+    "still fails to import after updating:",
+    "⚠ state.db integrity check FAILED after snapshot:",
+    "✗ Snapshot copy ALSO failed integrity",
+    "⚠ Snapshot does not contain state.db",
+    "⚠ Pre-update backup: could not load backup module",
+    "⚠ Backup failed:",
+    "⚠ Backup skipped (no files found or write failed);",
+    "⚠ state.db is corrupted after update:",
+    "✗ Pre-update snapshot also failed integrity",
+    "⚠ Pre-update snapshot does not contain state.db",
+    "⚠ No pre-update snapshot was taken",
+    "⚠️  cron/jobs.json lost jobs during this update",
     "⚠ Lazy refresh failed unexpectedly:",
     "⚠ Lazy refresh failed; rerun `hermes update` once resolved.",
     "⚠ Lazy-refresh recovery incomplete",
     "⚠ Update partially complete — Node.js dependencies",
     "⚠ Update incomplete — some gateway units were not restarted:",
     "⚠ Gateway restart failed:",
+)
+_AGENT_UPDATE_NOOP_MARKERS = (
+    "✓ Already up to date!",
+    "✓ Dependencies repaired!",
 )
 _AGENT_UPDATE_LOCK_MARKERS = (
     ".hermes-update-in-progress",
@@ -652,24 +668,43 @@ def _version_from_gateway_health_payload(payload: object) -> str | None:
     return None
 
 
-def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | None:
-    """Best-effort cross-container gateway API fallback for Agent version."""
+def _probe_gateway_health(timeout: float = 0.75) -> dict:
+    """Read a real Agent gateway health response for post-update proof."""
     base = _gateway_health_base_url()
     if not base:
-        return None
+        return {}
     parsed = urlparse(base)
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:
-        return None
+        return {}
+
+    first_observation = None
     for path in ('/health', '/health/detailed'):
         try:
             with urllib.request.urlopen(f'{base}{path}', timeout=timeout) as resp:
                 payload = json.loads(resp.read().decode('utf-8'))
         except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
             continue
-        version = _version_from_gateway_health_payload(payload)
-        if version:
-            return version
-    return None
+        if not isinstance(payload, dict):
+            continue
+        status = payload.get('gateway_state')
+        if status is None and payload.get('status') == 'ok':
+            status = 'running'
+        observation = {
+            'health': status,
+            'version': _version_from_gateway_health_payload(payload),
+            'pid': payload.get('pid'),
+            'start_time': payload.get('start_time'),
+        }
+        if first_observation is None:
+            first_observation = observation
+        if observation['version']:
+            return observation
+    return first_observation or {}
+
+
+def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | None:
+    """Best-effort cross-container gateway API fallback for Agent version."""
+    return _probe_gateway_health(timeout).get('version')
 
 
 def _detect_agent_version() -> str:
@@ -1941,31 +1976,45 @@ def _ensure_gateway_restart_for_agent_update(
     while True:
         snapshot = _gateway_observation_snapshot(target_profile)
         gateway_pid = snapshot.get('pid')
-        identity_changed = previous_snapshot is None or (
-            gateway_pid != previous_snapshot.get('pid')
-            or snapshot.get('start_time') != previous_snapshot.get('start_time')
-        )
-        health_ok = snapshot.get('health') in (None, 'running')
-        version_ok = (
-            expected_version is None
-            or snapshot.get('version') is None
-            or snapshot.get('version') == expected_version
-        )
-        if gateway_pid is not None and identity_changed and health_ok and version_ok:
+        start_time = snapshot.get('start_time')
+        version = snapshot.get('version')
+        identity_changed = previous_snapshot is None
+        if previous_snapshot is not None:
+            pid_changed = gateway_pid is not None and gateway_pid != previous_snapshot.get('pid')
+            start_changed = (
+                start_time is not None
+                and previous_snapshot.get('start_time') is not None
+                and start_time != previous_snapshot.get('start_time')
+            )
+            version_changed = (
+                version is not None
+                and previous_snapshot.get('version') is not None
+                and version != previous_snapshot.get('version')
+            )
+            identity_changed = pid_changed or start_changed or version_changed
+        health_ok = snapshot.get('health') == 'running'
+        version_ok = expected_version is not None and version == expected_version
+        if identity_changed and health_ok and version_ok:
             return True, {
                 "status": "completed",
                 "observation": "passive",
                 "gateway_pid": gateway_pid,
-                "gateway_start_time": snapshot.get('start_time'),
-                "gateway_version": snapshot.get('version') or expected_version,
-                "gateway_health": snapshot.get('health') or 'pid-alive',
+                "gateway_start_time": start_time,
+                "gateway_version": version,
+                "gateway_health": snapshot.get('health'),
             }
         if time.monotonic() >= deadline:
             if gateway_pid is not None and not identity_changed:
                 detail = 'the pre-update gateway identity is still running'
-            elif gateway_pid is not None and not version_ok:
+            elif expected_version is None:
+                detail = 'the updated Agent version could not be determined'
+            elif version is None:
+                detail = 'the gateway did not report an Agent version'
+            elif not version_ok:
                 detail = 'the gateway reported a different Agent version'
-            elif gateway_pid is not None and not health_ok:
+            elif snapshot.get('health') is None:
+                detail = 'the gateway did not report health'
+            elif not health_ok:
                 detail = 'the replacement gateway is not healthy'
             else:
                 detail = 'no healthy replacement gateway was observed'
@@ -2017,6 +2066,7 @@ def apply_force_update(target: str, channel=None) -> dict:
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
+    agent_update_lock = None
     try:
         if target == 'webui':
             path = REPO_ROOT
@@ -2034,6 +2084,32 @@ def apply_force_update(target: str, channel=None) -> dict:
 
         if path is None or not (path / '.git').exists():
             return {'ok': False, 'message': 'Not a git repository'}
+
+        if target == 'agent':
+            try:
+                from hermes_cli.update_lock import UPDATE_EXIT_CONCURRENT, UpdateLock, describe_holder
+            except Exception as exc:
+                return {
+                    'ok': False,
+                    'message': f'The official Hermes Agent update lock is unavailable: {exc}',
+                    'target': target,
+                }
+            agent_update_lock = UpdateLock()
+            if not agent_update_lock.acquire():
+                holder = getattr(agent_update_lock, 'holder', None)
+                message = (
+                    describe_holder(holder)
+                    if holder is not None
+                    else 'Another Hermes update is already running. Retry after it exits.'
+                )
+                return {
+                    'ok': False,
+                    'message': message,
+                    'target': target,
+                    'lock_conflict': True,
+                    'agent_update_exit_code': UPDATE_EXIT_CONCURRENT,
+                    'lock_recovery': {'action': 'retry-after-official-update'},
+                }
 
         # NOTE: v2 of PR #5688 removed the prior stale-lock cleanup loop from
         # this entry point. The mtime-based heuristic was empirically proven
@@ -2142,6 +2218,8 @@ def apply_force_update(target: str, channel=None) -> dict:
             response['gateway_restart'] = gateway_result.get('status')
         return response
     finally:
+        if agent_update_lock is not None:
+            agent_update_lock.release()
         _apply_lock.release()
 
 
@@ -2227,7 +2305,7 @@ def _agent_source_version(agent_dir: Path | None) -> str | None:
 
 
 def _gateway_observation_snapshot(profile: str) -> dict:
-    """Read active gateway identity and health from the Agent-owned files."""
+    """Read active gateway identity and health from Agent-owned signals."""
     snapshot = {
         'pid': get_active_profile_gateway_running_pid(profile=profile),
         'start_time': None,
@@ -2251,6 +2329,10 @@ def _gateway_observation_snapshot(profile: str) -> dict:
                     break
     except Exception:
         pass
+    health_probe = _probe_gateway_health()
+    for key in ('health', 'version', 'pid', 'start_time'):
+        if health_probe.get(key) is not None:
+            snapshot[key] = health_probe[key]
     if snapshot['pid'] is not None and snapshot['start_time'] is None:
         try:
             from gateway.status import get_process_start_time
@@ -2274,8 +2356,17 @@ def _agent_update_output_failure(output: str) -> str | None:
     for marker in _AGENT_UPDATE_FAILURE_MARKERS:
         if marker in output:
             return marker
+    if any(marker in output for marker in _AGENT_UPDATE_NOOP_MARKERS):
+        return None
     if _AGENT_UPDATE_COMPLETION_MARKER not in output:
         return "completion marker was not emitted"
+    return None
+
+
+def _agent_update_output_noop(output: str) -> str | None:
+    for marker in _AGENT_UPDATE_NOOP_MARKERS:
+        if marker in output:
+            return marker
     return None
 
 
@@ -2305,7 +2396,6 @@ def _apply_agent_update_inner():
 
     target_profile = str(get_active_profile_name() or 'default').strip() or 'default'
     previous_gateway = _gateway_observation_snapshot(target_profile)
-    expected_version = _agent_source_version(agent_dir)
 
     try:
         # --yes suppresses every interactive prompt (stash restore:
@@ -2364,6 +2454,24 @@ def _apply_agent_update_inner():
                 }
         return response
 
+    noop_marker = _agent_update_output_noop(combined)
+    if noop_marker is not None:
+        with _cache_lock:
+            _update_cache['checked_at'] = 0
+        return {
+            'ok': True,
+            'message': (
+                'agent is already up to date'
+                if noop_marker == '✓ Already up to date!'
+                else 'agent dependencies repaired successfully'
+            ),
+            'target': 'agent',
+            'up_to_date': noop_marker == '✓ Already up to date!',
+            'dependencies_repaired': noop_marker == '✓ Dependencies repaired!',
+            'no_op': True,
+            'gateway_restart': 'not_required',
+        }
+
     # Invalidate before the gateway gate so any early-return path below still
     # reflects the newly-installed version rather than the pre-update state.
     with _cache_lock:
@@ -2372,6 +2480,7 @@ def _apply_agent_update_inner():
     # The Agent's subprocess already restarts all gateways before it exits.
     # Observe the active profile without issuing a second restart, and require
     # replacement identity, version compatibility, and health before success.
+    expected_version = _agent_source_version(agent_dir)
     gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update(
         previous_snapshot=previous_gateway,
         expected_version=expected_version,

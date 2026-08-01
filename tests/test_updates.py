@@ -1578,6 +1578,38 @@ def test_agent_update_failure_keeps_late_updater_detail(tmp_path, monkeypatch):
         '⚠️  Config format update failed:',
     ),
     (
+        '  ⚠ module still fails to import after updating:\n      ImportError\n✓ Update complete!\n',
+        'still fails to import after updating:',
+    ),
+    (
+        '⚠ Pre-update backup: could not load backup module (boom); continuing update.\n✓ Update complete!\n',
+        '⚠ Pre-update backup: could not load backup module',
+    ),
+    (
+        '  ⚠ Backup failed: access denied\n✓ Update complete!\n',
+        '⚠ Backup failed:',
+    ),
+    (
+        '  ⚠ Backup skipped (no files found or write failed); continuing update.\n✓ Update complete!\n',
+        '⚠ Backup skipped (no files found or write failed);',
+    ),
+    (
+        '  ⚠ state.db is corrupted after update: checksum mismatch\n✓ Update complete!\n',
+        '⚠ state.db is corrupted after update:',
+    ),
+    (
+        '  ✗ Pre-update snapshot also failed integrity\n✓ Update complete!\n',
+        '✗ Pre-update snapshot also failed integrity',
+    ),
+    (
+        '  ⚠ No pre-update snapshot was taken\n✓ Update complete!\n',
+        '⚠ No pre-update snapshot was taken',
+    ),
+    (
+        '  ⚠️  cron/jobs.json lost jobs during this update — restored 2 job(s)\n✓ Update complete!\n',
+        '⚠️  cron/jobs.json lost jobs during this update',
+    ),
+    (
         '  ✗ Auto-restore FAILED — restored copy also failed integrity\n✓ Update complete!\n',
         '✗ Auto-restore FAILED',
     ),
@@ -1646,6 +1678,44 @@ def test_agent_zero_exit_without_completion_marker_is_not_success(tmp_path, monk
     assert result['ok'] is False, result
     assert 'completion marker was not emitted' in result['message']
     assert gateway_called == []
+
+
+@pytest.mark.parametrize(
+    'output,expected',
+    [
+        ('✓ Already up to date!\n', {'up_to_date': True}),
+        ('✓ Dependencies repaired!\n', {'dependencies_repaired': True}),
+    ],
+)
+def test_agent_official_noop_markers_are_successful_without_gateway_replacement(
+    tmp_path, monkeypatch, output, expected,
+):
+    """Official no-op outcomes are successful even without the completion line."""
+    agent_dir = _agent_tmp(tmp_path)
+    agent_exe = _make_hermes_exe(agent_dir)
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
+    monkeypatch.setattr(updates.subprocess, 'run', lambda cmd, **kwargs: _fake_proc(stdout=output))
+    monkeypatch.setattr(
+        updates,
+        '_gateway_observation_snapshot',
+        lambda profile: {'pid': 100, 'start_time': 10, 'version': '0.19.0', 'health': 'running'},
+    )
+    monkeypatch.setattr(
+        updates,
+        '_ensure_gateway_restart_for_agent_update',
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError('no-op must not require replacement')),
+    )
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: (_ for _ in ()).throw(AssertionError('no-op must not restart')))
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['ok'] is True, result
+    assert result['no_op'] is True
+    assert result['gateway_restart'] == 'not_required'
+    for key, value in expected.items():
+        assert result[key] is value
 
 
 def test_agent_output_is_decoded_as_utf8_with_replacement(tmp_path, monkeypatch):
@@ -1731,6 +1801,33 @@ def test_agent_uses_passive_gateway_observation_after_official_restart(
     assert restart_calls == []
 
 
+def test_gateway_observation_uses_real_agent_health_version_and_status(tmp_path, monkeypatch):
+    """Cross-container health is a real version and health observation."""
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"status":"ok","platform":"hermes-agent","version":"0.19.0"}'
+
+    from api import agent_health, profiles
+
+    monkeypatch.setenv('GATEWAY_HEALTH_URL', 'http://gateway.test')
+    monkeypatch.setattr(updates, 'get_active_profile_gateway_running_pid', lambda *, profile=None: None)
+    monkeypatch.setattr(profiles, 'get_hermes_home_for_profile', lambda profile: tmp_path)
+    monkeypatch.setattr(agent_health, '_gateway_status_module', lambda: object())
+    monkeypatch.setattr(agent_health, '_read_gateway_runtime_status', lambda status, path: None)
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', lambda url, timeout=0.75: FakeResponse())
+
+    snapshot = updates._gateway_observation_snapshot('default')
+
+    assert snapshot['version'] == '0.19.0'
+    assert snapshot['health'] == 'running'
+
+
 def test_agent_passive_observation_rejects_surviving_old_gateway(tmp_path, monkeypatch):
     """A live PID is insufficient when it is the pre-update gateway."""
     previous = {'pid': 100, 'start_time': 10, 'version': '0.18.0', 'health': 'running'}
@@ -1760,6 +1857,14 @@ def test_agent_passive_observation_rejects_surviving_old_gateway(tmp_path, monke
             {'pid': 101, 'start_time': 11, 'version': '0.19.0', 'health': 'stopped'},
             'replacement gateway is not healthy',
         ),
+        (
+            {'pid': 101, 'start_time': 11, 'version': None, 'health': 'running'},
+            'did not report an Agent version',
+        ),
+        (
+            {'pid': 101, 'start_time': 11, 'version': '0.19.0', 'health': None},
+            'did not report health',
+        ),
     ],
 )
 def test_agent_passive_observation_rejects_bad_replacement_state(
@@ -1781,11 +1886,15 @@ def test_agent_passive_observation_rejects_bad_replacement_state(
 
 def test_agent_update_lock_conflict_preserves_recovery_affordance(tmp_path, monkeypatch):
     """An official updater lock failure still reaches clear-lock recovery."""
+    from hermes_cli import update_lock as agent_update_lock
+
     agent_dir = _agent_tmp(tmp_path)
     agent_exe = _make_hermes_exe(agent_dir)
     lock_error = (
-        '✗ Another Hermes update is already running (PID 1234, started 4s ago).\n'
-        '  .hermes-update-in-progress'
+        agent_update_lock.describe_holder(
+            agent_update_lock.UpdateHolder(pid=1234, age_seconds=4)
+        )
+        + f'\n  {agent_update_lock.MARKER_NAME}'
     )
 
     monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
@@ -1793,7 +1902,10 @@ def test_agent_update_lock_conflict_preserves_recovery_affordance(tmp_path, monk
     monkeypatch.setattr(
         updates.subprocess,
         'run',
-        lambda cmd, **kwargs: _fake_proc(returncode=1, stderr=lock_error),
+        lambda cmd, **kwargs: _fake_proc(
+            returncode=agent_update_lock.UPDATE_EXIT_CONCURRENT,
+            stderr=lock_error,
+        ),
     )
 
     result = updates._apply_update_inner('agent')
@@ -1802,6 +1914,27 @@ def test_agent_update_lock_conflict_preserves_recovery_affordance(tmp_path, monk
     assert result['lock_conflict'] is True, result
     assert lock_error in result['message'], result
     assert result['lock_recovery']['marker_path'].endswith('.hermes-update-in-progress')
+
+
+def test_agent_update_lock_contract_reads_live_holder_and_describes_it(tmp_path, monkeypatch):
+    """The proof follows the Agent lock's current live-holder contract."""
+    from hermes_cli import update_lock as agent_update_lock
+
+    marker = tmp_path / agent_update_lock.MARKER_NAME
+    marker.write_text(f'{os.getpid()}\n{time.time()}\n', encoding='utf-8')
+    monkeypatch.setattr(agent_update_lock, '_pid_alive', lambda pid: True)
+
+    holder = agent_update_lock.read_live_update(path=marker)
+
+    assert agent_update_lock.UPDATE_EXIT_CONCURRENT == 2
+    assert holder is not None
+    assert holder.pid == os.getpid()
+    assert 'Another Hermes update is already running' in agent_update_lock.describe_holder(holder)
+
+    lock = agent_update_lock.UpdateLock(path=marker)
+    assert lock.acquire() is False
+    assert lock.holder is not None
+    assert lock.holder.pid == os.getpid()
 
 
 def test_apply_clear_lock_agent_retries_after_official_marker_is_gone(tmp_path, monkeypatch):
@@ -1854,6 +1987,9 @@ def test_agent_non_git_root_still_invokes_official_updater(tmp_path, monkeypatch
 
 def test_apply_force_update_agent_restarts_active_gateway(tmp_path, monkeypatch):
     """Force recovery must actively restart the Agent gateway once."""
+    from hermes_cli import update_lock as agent_update_lock
+    official_update_lock = agent_update_lock.UpdateLock
+
     agent_dir = tmp_path / 'agent'
     (agent_dir / '.git').mkdir(parents=True)
     calls = []
@@ -1878,6 +2014,11 @@ def test_apply_force_update_agent_restarts_active_gateway(tmp_path, monkeypatch)
         updates, '_ensure_gateway_restart_for_agent_update',
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError('force path must actively restart')),
     )
+    monkeypatch.setattr(
+        agent_update_lock,
+        'UpdateLock',
+        lambda: official_update_lock(path=tmp_path / '.hermes-update-in-progress'),
+    )
     monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
 
     result = updates.apply_force_update('agent')
@@ -1885,6 +2026,44 @@ def test_apply_force_update_agent_restarts_active_gateway(tmp_path, monkeypatch)
     assert result['ok'] is True, result
     assert result['gateway_restart'] == 'completed'
     assert calls == [{'profile': 'default'}]
+
+
+def test_apply_force_update_agent_holds_official_update_lock_for_git_reset(tmp_path, monkeypatch):
+    """Force reset must serialize with every official Agent updater."""
+    from hermes_cli import update_lock as agent_update_lock
+
+    agent_dir = tmp_path / 'agent'
+    (agent_dir / '.git').mkdir(parents=True)
+    events = []
+
+    class FakeUpdateLock:
+        def acquire(self):
+            events.append('lock-acquire')
+            return True
+
+        def release(self):
+            events.append('lock-release')
+
+    def fake_git(args, cwd, timeout=10):
+        events.append(args[0])
+        if args[0] == 'fetch':
+            return '', True
+        if args[:2] == ['rev-parse', '--abbrev-ref']:
+            return 'origin/master', True
+        return '', True
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_run_git', fake_git)
+    monkeypatch.setattr(updates, '_select_apply_compare_ref', lambda *args, **kwargs: 'origin/master')
+    monkeypatch.setattr(updates, 'restart_active_profile_gateway', lambda **kwargs: {'status': 'completed'})
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+    monkeypatch.setattr(agent_update_lock, 'UpdateLock', FakeUpdateLock)
+
+    result = updates.apply_force_update('agent')
+
+    assert result['ok'] is True, result
+    assert events[0] == 'lock-acquire'
+    assert events.index('reset') < events.index('lock-release')
 
 
 def test_response_before_replacement_ordering(tmp_path, monkeypatch):

@@ -10109,9 +10109,13 @@ function _renderLockManualInstruction(target, res){
   }
   errEl.style.display='block';
   errEl.innerHTML='';
+  const markerPath = res.marker_path || res.well_known_lock_path || '';
+  const agentLock = target === 'agent' || markerPath.indexOf('.hermes-update-in-progress') !== -1;
   const intro=document.createElement('div');
   intro.style.marginBottom='6px';
-  intro.textContent='A stale .git/index.lock is present. The server cannot remove it safely — please run this command on the host:';
+  intro.textContent=agentLock
+    ? 'The official Hermes Agent update lock is present. Confirm that no Agent updater is running, then run this command on the host:'
+    : 'A stale .git/index.lock is present. The server cannot remove it safely — please run this command on the host:';
   errEl.appendChild(intro);
   const code=document.createElement('pre');
   code.style.background='rgba(0,0,0,0.05)';
