@@ -944,6 +944,33 @@ class TestAgentUpdateCurrentContract:
         assert "res.lock_kind === 'official-update'" in src
         assert "target === 'agent'" not in src[src.index('function _renderLockManualInstruction'):src.index('function _renderLockManualInstruction') + 700]
 
+    def test_clear_lock_no_op_does_not_restart_or_reload(self):
+        src = read('static/ui.js')
+        clear_lock_fn = extract_js_function(src, 'applyClearUpdateLock')
+        script = f"""
+let waits = 0;
+let toasts = [];
+const responses = [
+  {{ok: true, no_op: true, restart_scheduled: false, message: 'agent is already up to date'}},
+  {{ok: true, no_op: false, restart_scheduled: true, message: 'agent updated successfully'}},
+];
+global.window = {{}};
+global.sessionStorage = {{removeItem: () => {{}}}};
+global.api = async () => responses.shift();
+global.showToast = (message) => toasts.push(message);
+global._waitForServerThenReload = () => {{ waits += 1; }};
+{clear_lock_fn}
+(async () => {{
+  const button = {{dataset: {{target: 'agent'}}, disabled: false, textContent: 'Clear lock'}};
+  await applyClearUpdateLock(button);
+  if (waits !== 0) throw new Error('clear-lock no-op must not wait for a WebUI reload');
+  if (toasts[0] !== 'agent is already up to date') throw new Error('clear-lock no-op toast mismatch');
+  await applyClearUpdateLock(button);
+  if (waits !== 1) throw new Error('clear-lock update must wait for the scheduled restart');
+}})().catch(err => {{ console.error(err.stack || err.message); process.exit(1); }});
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
 
 
 # ── api/routes.py ─────────────────────────────────────────────────────────────

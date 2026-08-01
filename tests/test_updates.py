@@ -1964,6 +1964,42 @@ def test_gateway_health_probe_honors_canonical_gateway_url_variables(monkeypatch
     assert updates._gateway_health_base_url() == 'http://gateway.test'
 
 
+def test_gateway_health_probe_defaults_to_canonical_local_gateway(monkeypatch):
+    """Local post-update evidence uses the same loopback gateway as chat."""
+    from api import config
+
+    for name in (
+        'GATEWAY_HEALTH_URL',
+        'HERMES_GATEWAY_HEALTH_URL',
+        'HERMES_API_URL',
+        'HERMES_WEBUI_GATEWAY_BASE_URL',
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(config, 'get_config', lambda: {})
+
+    assert updates._gateway_health_base_url() == 'http://127.0.0.1:8642'
+
+
+def test_gateway_health_probe_uses_configured_webui_gateway_url(monkeypatch):
+    """Post-update evidence follows the configured WebUI gateway URL."""
+    from api import config
+
+    for name in (
+        'GATEWAY_HEALTH_URL',
+        'HERMES_GATEWAY_HEALTH_URL',
+        'HERMES_API_URL',
+        'HERMES_WEBUI_GATEWAY_BASE_URL',
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        config,
+        'get_config',
+        lambda: {'webui_gateway_base_url': 'http://configured-gateway.test/v1'},
+    )
+
+    assert updates._gateway_health_base_url() == 'http://configured-gateway.test/v1'
+
+
 def test_agent_passive_observation_rejects_surviving_old_gateway(tmp_path, monkeypatch):
     """A live PID is insufficient when it is the pre-update gateway."""
     previous = {'pid': 100, 'start_time': 10, 'version': '0.18.0', 'health': 'running'}

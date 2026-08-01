@@ -718,12 +718,19 @@ def _gateway_health_base_url() -> str:
                 'GATEWAY_HEALTH_URL',
                 'HERMES_GATEWAY_HEALTH_URL',
                 'HERMES_API_URL',
-                'HERMES_WEBUI_GATEWAY_BASE_URL',
             )
             if os.environ.get(name, '').strip()
         ),
-        'http://hermes-agent:8642',
+        '',
     )
+    if not raw:
+        try:
+            from api import config as webui_config
+            from api.gateway_chat import _gateway_base_url
+
+            raw = _gateway_base_url(webui_config.get_config())
+        except Exception:
+            raw = 'http://127.0.0.1:8642'
     raw = raw.rstrip('/')
     for suffix in ('/health/detailed', '/v1/health', '/health', '/status'):
         if raw.endswith(suffix):

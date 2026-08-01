@@ -10082,6 +10082,10 @@ async function applyClearUpdateLock(btn){
     if(res.ok){
       sessionStorage.removeItem('hermes-update-checked');
       sessionStorage.removeItem('hermes-update-dismissed');
+      if(res.no_op||res.restart_scheduled!==true){
+        showToast(res.message||(res.no_op?'Already up to date.':'Update applied.'));
+        return;
+      }
       showToast('Update applied — restarting…');
       _waitForServerThenReload({});
     } else if(res.lock_held){
