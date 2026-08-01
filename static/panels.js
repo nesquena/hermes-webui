@@ -8876,9 +8876,15 @@ async function _settleSettingsLocale(requested,selector){
   if(typeof activateLocale!=='function') return {status:'applied',requested,active:requested||'en',fallback:false};
   const result=await activateLocale(requested||'en');
   if(result&&result.status==='superseded') return result;
-  const active=(typeof getActiveLocale==='function')?getActiveLocale():(result&&result.active)||'en';
-  if(selector) selector.value=active;
-  return {...(result||{}),active};
+  const settled={...(result||{}),active:(typeof getActiveLocale==='function')?getActiveLocale():(result&&result.active)||'en'};
+  _reconcileSettingsLocaleSelector(selector,settled);
+  return settled;
+}
+
+function _reconcileSettingsLocaleSelector(selector,result){
+  if(!selector||!_settingsLocaleSettlementIsCurrent(result)) return false;
+  selector.value=result.active||((typeof getActiveLocale==='function')?getActiveLocale():'en');
+  return true;
 }
 
 async function _commitSettingsLocale(requested,selector,payload){
@@ -8887,7 +8893,7 @@ async function _commitSettingsLocale(requested,selector,payload){
   const generation=result&&result.generation;
   if(!_settingsLocaleCommitIsCurrent(generation)) return null;
   const active=(typeof getActiveLocale==='function')?getActiveLocale():(result&&result.active)||'en';
-  if(selector) selector.value=active;
+  _reconcileSettingsLocaleSelector(selector,{...result,active});
   if(payload) payload.language=active;
   return {active,generation};
 }
@@ -9149,9 +9155,7 @@ async function loadSettingsPanel(){
     // Keep settings modal and current page strings in sync with the resolved locale.
     const settingsLanguageSelector=document.getElementById('settingsLanguage');
     const localeResult=await _settleSettingsLocale(resolvedLanguage,settingsLanguageSelector);
-    if(localeResult&&localeResult.status==='superseded'&&settingsLanguageSelector&&typeof getActiveLocale==='function'){
-      settingsLanguageSelector.value=getActiveLocale();
-    }
+    const localeSettlementCurrent=_settingsLocaleSettlementIsCurrent(localeResult);
     // Populate model dropdown from /api/models + live model fetch (#872)
     const modelSel=$('settingsModel');
     if(modelSel){
@@ -9218,7 +9222,7 @@ async function loadSettingsPanel(){
           langSel.appendChild(opt);
         }
       }
-      langSel.value=pendingLanguage||getActiveLocale();
+      if(localeSettlementCurrent) langSel.value=pendingLanguage||getActiveLocale();
       langSel.addEventListener('change',async function(){
         await _settleSettingsLocale(this.value,this);
         _schedulePreferencesAutosave();

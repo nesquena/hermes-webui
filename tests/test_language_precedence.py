@@ -487,6 +487,7 @@ def test_settings_routes_persist_only_effective_locale():
 def test_settings_locale_continuations_recheck_current_settlement():
     assert "const pendingLanguage=langSel.value;" in PANELS_JS
     assert "_settingsLocaleSettlementIsCurrent(localeResult)" in PANELS_JS
+    assert "_reconcileSettingsLocaleSelector(selector,settled)" in PANELS_JS
     assert "const requestedLanguage=(selector&&selector.value)" in PANELS_JS
 
 
@@ -510,6 +511,8 @@ def _function_source(src: str, name: str) -> str:
 def test_settings_post_serializes_after_locale_settlement_and_ignores_stale_success():
     sources = [
         _function_source(PANELS_JS, "_settleSettingsLocale"),
+        _function_source(PANELS_JS, "_reconcileSettingsLocaleSelector"),
+        _function_source(PANELS_JS, "_settingsLocaleSettlementIsCurrent"),
         _function_source(PANELS_JS, "_settingsLocaleCommitIsCurrent"),
         _function_source(PANELS_JS, "_commitSettingsLocale"),
         _function_source(PANELS_JS, "_postSettingsAtLocaleCommit"),
@@ -588,4 +591,148 @@ def test_settings_post_serializes_after_locale_settlement_and_ignores_stale_succ
 def test_settings_save_paths_use_the_same_locale_commit_boundary():
     assert PANELS_JS.count("_postSettingsAtLocaleCommit(") >= 3
     assert PANELS_JS.count("_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)") >= 3
-    assert "if(localeResult&&localeResult.status==='superseded'&&settingsLanguageSelector" in PANELS_JS
+    assert "const localeSettlementCurrent=_settingsLocaleSettlementIsCurrent(localeResult);" in PANELS_JS
+
+
+def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
+    sources = [
+        _function_source(PANELS_JS, "_settleSettingsLocale"),
+        _function_source(PANELS_JS, "_reconcileSettingsLocaleSelector"),
+        _function_source(PANELS_JS, "_settingsLocaleSettlementIsCurrent"),
+        _function_source(PANELS_JS, "_settingsLocaleCommitIsCurrent"),
+        _function_source(PANELS_JS, "_commitSettingsLocale"),
+        _function_source(PANELS_JS, "_postSettingsAtLocaleCommit"),
+        _function_source(PANELS_JS, "saveSettings"),
+        _function_source(PANELS_JS, "_applySavedSettingsUi"),
+    ]
+    locale_start = PANELS_JS.index("const resolvedLanguage=")
+    language_start = PANELS_JS.index("// Language preference", locale_start)
+    language_end = PANELS_JS.index("const showUsageCb", language_start)
+    load_locale_segment = PANELS_JS[locale_start:language_end]
+    sources.append(
+        "async function loadSettingsPanel(){"
+        "const settings={language:'de'};"
+        + load_locale_segment
+        + "}"
+    )
+    combined_sources = "\n".join(sources)
+    script = textwrap.dedent(
+        f"""
+        (async () => {{
+          const vm = require('vm');
+          const selector = {{value: 'de', innerHTML: '', addEventListener: () => {{}}}};
+          const elements = new Proxy({{settingsLanguage: selector, settingsPassword: {{value: ''}}}}, {{
+            get: (target, key) => target[key] || {{value: '', checked: false, dataset: {{}}, style: {{}}, addEventListener: () => {{}}}}
+          }});
+          let active = 'de';
+          let generation = 1;
+          const requests = [];
+          let applyCount = 0;
+          let supersedeNext = false;
+          let saveMode = true;
+          const ctx = {{
+            console,
+            window: {{}},
+            document: {{documentElement: {{dataset: {{}}}}, querySelector: () => null, getElementById: (id) => elements[id]}},
+            localStorage: {{getItem: () => null, setItem: () => {{}}}},
+            $: (id) => saveMode ? elements[id] : (id === 'settingsLanguage' ? selector : null),
+            getActiveLocale: () => active,
+            getLocaleActivationGeneration: () => generation,
+            activateLocale: async (requested) => {{
+              if (supersedeNext) {{ supersedeNext = false; generation++; return {{status: 'superseded', requested, active, generation: generation - 1}}; }}
+              return {{status: 'applied', requested, active: requested, generation}};
+            }},
+            api: (path, options) => {{
+              if (options && options.method === 'POST') {{
+                const body = JSON.parse(options.body);
+                requests.push(body);
+                generation++;
+                active = 'fr';
+                return Promise.resolve({{...body, language: body.language}});
+              }}
+              return Promise.resolve({{language: 'de', theme: 'dark', skin: 'default'}});
+            }},
+            checkWebUIVersionSkew: () => {{}},
+            _bindMainAdvancedOptionsButton: () => {{}},
+            _loadAuxiliaryModels: () => {{}},
+            _applySavedSettingsUi: async (...args) => {{ applyCount++; }},
+            _settingsLocalePostInFlight: null,
+            _settingsPasswordAuthEnabled: false,
+            _settingsHermesDefaultModelOnOpen: '',
+            _settingsHermesDefaultModelProviderOnOpen: null,
+            _settingsDirty: false,
+            _workspaceTodosTab: false,
+            _captureModelDropdownSelection: () => ({{model: '', model_provider: null}}),
+            _speechPreferencesPayloadFromUi: () => ({{}}),
+            _structuredCodeViewFromUi: () => ({{}}),
+            _composerControlVisibilityPayload: () => ({{}}),
+            _getComposerControlOrder: () => [],
+            _setPreferencesAutosaveStatus: () => {{}},
+            _setSettingsAuthButtonsVisible: () => {{}},
+            _resetSettingsPanelState: () => {{}},
+            _setDefaultModel: () => {{}},
+            _hideSettingsPanel: () => {{}},
+            _loadAuxiliaryModels: () => {{}},
+            _markSettingsDirty: () => {{}},
+            _applyWorkspaceTodosTabVisibility: () => {{}},
+            _syncChatActivityDisplayModeControl: () => {{}},
+            _syncTransparentEventTimestampsControl: () => {{}},
+            _applySessionNavigationPrefs: () => {{}},
+            _persistDefaultMessageMode: (value) => value,
+            _ensureComposerControlVisibilityState: () => {{}},
+            _setComposerControlOrder: () => [],
+            _renderComposerControlChips: () => {{}},
+            _renderComposerSituationalControlChips: () => {{}},
+            _applyComposerFooterVisibilitySettings: () => {{}},
+            _syncSettingsMaxTokensPlaceholder: () => {{}},
+            _settingsAuthButtonsVisible: () => {{}},
+            _renderSettingsAuthStatus: () => {{}},
+            _updateCurrentPasswordVisibility: () => {{}},
+            _updateAuthWarningBadge: () => {{}},
+            _updateAuthDisabledWarning: () => {{}},
+            _setSettingsAuthButtonsVisible: () => {{}},
+            clearMessageRenderCache: () => {{}},
+            renderMessages: () => {{}},
+            syncTopbar: () => {{}},
+            renderSessionList: () => {{}},
+            showToast: () => {{}},
+            t: (key) => key,
+          }};
+          vm.createContext(ctx);
+          vm.runInContext({json.dumps(combined_sources)}, ctx);
+
+          const normal = vm.runInContext("saveSettings(false)", ctx);
+          await normal;
+          elements.settingsPassword.value = 'secret';
+          const password = vm.runInContext("saveSettings(false)", ctx);
+          await password;
+
+          selector.value = 'fr';
+          supersedeNext = true;
+          const selectorSettlement = await vm.runInContext("_settleSettingsLocale('fr', $('settingsLanguage'))", ctx);
+          const selectorAfter = selector.value;
+
+          selector.value = 'de';
+          saveMode = false;
+          supersedeNext = true;
+          await vm.runInContext("loadSettingsPanel()", ctx);
+          const loadAfter = selector.value;
+
+          const applied = vm.runInContext("_applySavedSettingsUi({{}}, {{language: 'de'}}, {{language: 'de'}})", ctx);
+          supersedeNext = true;
+          await applied;
+          const uiAfter = {{selector: selector.value, applyCount}};
+          process.stdout.write(JSON.stringify({{requests, selectorSettlement, selectorAfter, loadAfter, uiAfter}}));
+        }})()
+        """
+    )
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8")
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    result = json.loads(proc.stdout)
+    assert [request["language"] for request in result["requests"]] == ["de", "fr"]
+    assert result["requests"][0]["language"] == "de"
+    assert result["requests"][1]["language"] == "fr"
+    assert result["selectorSettlement"]["status"] == "superseded"
+    assert result["selectorAfter"] == "fr"
+    assert result["loadAfter"] == "de"
+    assert result["uiAfter"]["selector"] == "fr"
