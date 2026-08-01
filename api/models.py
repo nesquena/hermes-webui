@@ -1234,7 +1234,10 @@ class Session:
                  process_wakeup_pause=None,
                  share_token=None,
                  share_created_at=None,
+                 skill_provenance=None,
                  **kwargs):
+        from api.session_skill_usage import normalize_skill_provenance
+
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
         self.workspace = str(Path(workspace).expanduser().resolve())
@@ -1322,6 +1325,7 @@ class Session:
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
+        self.skill_provenance = normalize_skill_provenance(skill_provenance)
         # #5854: a compact fingerprint of anchor_activity_scenes ({scene_key:
         # updated_at}) persisted BEFORE the messages array so the sidebar-poll
         # freshness check can compare scene freshness without parsing the full
@@ -1393,6 +1397,7 @@ class Session:
             'enabled_toolsets', 'composer_draft',
             'process_wakeup_pause',
             'share_token', 'share_created_at',
+            'skill_provenance',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         # #5854: message_count and a compact anchor-scene fingerprint go in the
@@ -1697,6 +1702,8 @@ class Session:
         return n
 
     def compact(self, include_runtime=False, active_stream_ids=None) -> dict:
+        from api.session_skill_usage import compact_skill_provenance
+
         active_stream_ids = active_stream_ids if active_stream_ids is not None else set()
         has_pending_user_message = bool(self.pending_user_message)
         message_count = (
@@ -1776,10 +1783,33 @@ class Session:
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,
+            'skill_provenance': compact_skill_provenance(self.skill_provenance),
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,
         }
+
+    def record_server_skill_names(self, skill_names) -> bool:
+        """Record names after an authorized server-owned resolution."""
+        if self.read_only or str(self.source_tag or '').strip().lower() == 'cron':
+            return False
+        from api.session_skill_usage import increment_skill_provenance
+
+        updated = increment_skill_provenance(self.skill_provenance, skill_names)
+        if updated == self.skill_provenance:
+            return False
+        self.skill_provenance = updated
+        return True
+
+    def record_server_skill_result(self, result) -> bool:
+        from api.session_skill_usage import successful_skill_names
+
+        return self.record_server_skill_names(successful_skill_names(result))
+
+    def clear_server_skill_provenance(self) -> None:
+        from api.session_skill_usage import reset_skill_provenance
+
+        self.skill_provenance = reset_skill_provenance()
 
 
 PROCESS_WAKEUP_PROVIDER_UNAVAILABLE_TYPES = frozenset({

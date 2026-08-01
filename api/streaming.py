@@ -8862,6 +8862,10 @@ def _run_agent_streaming(
 
             def on_tool_complete(tool_call_id, name, args, function_result):
                 try:
+                    if not ephemeral and s is not None:
+                        with _get_session_agent_lock(session_id):
+                            if s.record_server_skill_result(function_result):
+                                s.save(touch_updated_at=False, skip_index=True)
                     _record_live_tool_complete(tool_call_id, name, function_result)
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)

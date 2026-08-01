@@ -195,11 +195,14 @@ def resolve_bundle_command(command: str) -> dict[str, Any]:
     if not resolved_message:
         raise RuntimeError("Bundle command returned no invocation text")
 
+    from api.session_skill_usage import normalize_skill_provenance
+
+    loaded = normalize_skill_provenance(list(loaded_skills or []))
     return {
         "name": bundle_key.lstrip("/"),
         "source": "bundle",
         "message": resolved_message,
-        "loaded_skills": list(loaded_skills or []),
+        "loaded_skills": list(loaded),
         "missing_skills": list(missing_skills or []),
     }
 
