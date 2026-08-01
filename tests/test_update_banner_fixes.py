@@ -2599,6 +2599,17 @@ class TestSequentialUpdateRestartCoordination:
         execv_time = []
         scheduled = []
         worker_thread = None
+        worker_acquiring_lock = _th.Event()
+        real_apply_lock = upd._apply_lock
+
+        class ProbedApplyLock:
+            def __enter__(self):
+                if _th.current_thread() is worker_thread:
+                    worker_acquiring_lock.set()
+                return real_apply_lock.__enter__()
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return real_apply_lock.__exit__(exc_type, exc_value, traceback)
 
         def fake_execv(exe, args):
             if _th.current_thread() is worker_thread:
@@ -2617,6 +2628,7 @@ class TestSequentialUpdateRestartCoordination:
         monkeypatch.setattr(os, 'execv', fake_execv)
         monkeypatch.setattr(upd.threading, 'Thread', CapturedThread)
         monkeypatch.setattr(upd, '_schedule_restart', _REAL_SCHEDULE_RESTART)
+        monkeypatch.setattr(upd, '_apply_lock', ProbedApplyLock())
 
         # Hold _apply_lock from another thread (simulating an in-flight
         # second update) until the assertion has observed the blocked restart.
@@ -2638,8 +2650,12 @@ class TestSequentialUpdateRestartCoordination:
         # No unrelated daemon can satisfy or invalidate the lock assertion.
         upd._schedule_restart(delay=0.05)
         assert len(scheduled) == 1, "scheduler must start one restart worker"
-        worker_thread = real_thread(target=scheduled[0], daemon=True)
+        worker_target = scheduled[0]
+        worker_thread = real_thread(target=worker_target, daemon=True)
         worker_thread.start()
+        assert worker_acquiring_lock.wait(timeout=2), (
+            "restart worker did not reach the apply-lock acquisition"
+        )
         assert not execv_called.is_set(), (
             "restart callback ran while _apply_lock was held by another "
             "thread; restart must wait for in-flight updates to finish"
@@ -3369,7 +3385,7 @@ def _extract_banner_js():
     ])
 
 
-def _run_show_update_banner(payload):
+def _run_show_update_banner(payload, stale_error=''):
     """Run _showUpdateBanner(payload) in Node.js; return rendered-state dict."""
     fn_src = _extract_banner_js()
     payload_json = json.dumps(payload)
@@ -3379,6 +3395,7 @@ def _run_show_update_banner(payload):
         'btnApplyUpdate:{style:{display:"none"},disabled:true,dataset:{}},'
         'btnForceUpdate:{style:{display:"none"},disabled:true,dataset:{target:""}},'
         'btnClearUpdateLock:{style:{display:"none"},disabled:true,dataset:{target:""}},'
+        'updateError:{style:{display:' + json.dumps('block' if stale_error else 'none') + '},textContent:' + json.dumps(stale_error) + '},'
         'updateMsg:{textContent:""},'
         'updateBanner:{classList:{_s:new Set(),add(c){this._s.add(c);},remove(c){this._s.delete(c);},has(c){return this._s.has(c);}}},'
         '};'
@@ -3399,6 +3416,8 @@ def _run_show_update_banner(payload):
         'clear_visible:_el.btnClearUpdateLock.style.display!=="none",'
         'clear_disabled:_el.btnClearUpdateLock.disabled,'
         'clear_target:_el.btnClearUpdateLock.dataset.target,'
+        'error_visible:_el.updateError.style.display!=="none",'
+        'error:_el.updateError.textContent,'
         'msg:_el.updateMsg.textContent,'
         '}));'
     )
@@ -4313,11 +4332,13 @@ def _run_clear_lock_response(response, raises=False, initial_error=''):
         'const _el={updateError:{style:{display:' + json.dumps('block' if initial_error else 'none') + '},textContent:' + json.dumps(initial_error) + '},btnForceUpdate:{style:{display:"none"},disabled:true,dataset:{target:""}}};'
         'const _btn={style:{display:"inline-block"},disabled:false,textContent:"Clear lock",dataset:{target:"webui"}};'
         'global.window={_clearLockInFlight:false};'
+        'global.window._updateData={webui:{behind:2,dirty:true,channel:"stable"}};'
         'global.$=(id)=>id==="updateError"?_el.updateError:id==="btnClearUpdateLock"?_btn:id==="btnForceUpdate"?_el.btnForceUpdate:null;'
         'function t(k){return k;}'
         'global.api=async()=>{' + response_js + ';};'
         'global._waitForServerThenReload=async()=>{_reloads+=1;};'
         'global.showToast=(...args)=>{_toast=args;};'
+        'global._showUpdateBanner=(data)=>{if(data&&data.webui&&data.webui.dirty){_el.btnForceUpdate.style.display="inline-block";_el.btnForceUpdate.disabled=false;_el.btnForceUpdate.dataset.target="webui";}};'
         'global.sessionStorage={removeItem:()=>{},setItem:()=>{},getItem:()=>null};'
         + ui_fns
         + ';await applyClearUpdateLock(_btn);'
@@ -4326,6 +4347,7 @@ def _run_clear_lock_response(response, raises=False, initial_error=''):
         'error_visible:_el.updateError.style.display!=="none",'
         'in_flight:!!window._clearLockInFlight,visible:_btn.style.display!=="none",'
         'disabled:_btn.disabled,target:_btn.dataset.target,'
+        'force_visible:_el.btnForceUpdate.style.display!=="none",'
         '}));'
         '})()'
     )
@@ -4372,7 +4394,16 @@ class TestUpdateRecoveryResponseLifecycle:
         assert not result['visible']
         assert result['disabled']
         assert result['target'] == ''
+        assert result['force_visible']
         assert not result['in_flight']
+
+    def test_fresh_banner_reset_clears_previous_update_error(self):
+        result = _run_show_update_banner({
+            'webui': {'behind': 0, 'dirty': False},
+            'agent': {'behind': 0, 'dirty': False},
+        }, stale_error='stale update failure')
+        assert not result['error_visible']
+        assert result['error'] == ''
 
     def test_clear_lock_delegated_lock_conflict_restores_recovery_control(self):
         result = _run_clear_lock_response({

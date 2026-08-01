@@ -9917,6 +9917,8 @@ function _updateDirtyState(data){
   return {webuiDirty,agentDirty,hasDirty:webuiDirty||agentDirty,dirtyTarget:webuiDirty?'webui':(agentDirty?'agent':'')};
 }
 function _showUpdateBanner(data){
+  const staleError=$('updateError');
+  if(staleError){staleError.style.display='none';staleError.textContent='';}
   const parts=[];
   const errorParts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
@@ -10136,6 +10138,7 @@ async function applyClearUpdateLock(btn){
       btn.style.display='none';
       btn.dataset.target='';
       if(errEl){errEl.style.display='none';errEl.textContent='';}
+      if(typeof _showUpdateBanner==='function'&&window._updateData) _showUpdateBanner(window._updateData);
       const noUpdateMessage=_lt('update_no_change','No update was applied.');
       showToast(noUpdateMessage,10000,'info');
     } else if(res.ok){
