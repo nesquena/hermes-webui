@@ -10075,6 +10075,7 @@ function _showUpdateError(target,res){
   // modifications).
   if(forceBtn&&(res.conflict||res.diverged)){
     forceBtn.dataset.target=target;
+    forceBtn.disabled=false;
     forceBtn.style.display='inline-block';
   }
   // Show "Clear lock and retry update" when the only failure was a stale
@@ -10260,9 +10261,7 @@ async function forceUpdate(btn){
         const _lt=(typeof _i18nUpdateText==='function')?_i18nUpdateText:(k,f)=>f||k;
         const targetLabel=target==='webui'?'WebUI':target==='agent'?'Agent':target;
         const localNote=_lt('settings_local_changes_detected','Local changes detected')+' in '+targetLabel+'.';
-        const channelNote=res.refused_rewind
-          ?'This checkout is ahead of the '+(channel||'current')+' channel; the forced update would downgrade it. Switch to Experimental or clean the repository manually.'
-          :'This channel has no published version to reset to; the forced update did not run. Switch to Experimental or clean the repository manually.';
+        const channelNote=res.message||'The forced update did not reset this checkout.';
         bannerMsg.textContent='⚠️ '+localNote+' '+channelNote;
       }
       const bannerEl=$('updateBanner');

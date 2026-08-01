@@ -2328,6 +2328,14 @@ if (_healthResponseServerIdentity({{ server_started_at: null, uptime_seconds: nu
             "_showUpdateError must reference the force update button"
         )
 
+    def test_conflict_response_reenables_force_button(self):
+        src = read('static/ui.js')
+        m = re.search(r'function _showUpdateError\b.*?\n\}', src, re.DOTALL)
+        assert m, "_showUpdateError() not found"
+        assert 'forceBtn.disabled=false' in m.group(0), (
+            "_showUpdateError must re-enable the force button it reveals"
+        )
+
     def test_error_displayed_persistently_not_just_toast(self):
         src = read('static/ui.js')
         m = re.search(r'function _showUpdateError\b.*?\n\}', src, re.DOTALL)
@@ -3735,6 +3743,9 @@ class TestDirtyInstallRecovery:
         )
         assert not result['in_flight'], (
             'in_flight must be cleared after refused_rewind (no restart pending)'
+        )
+        assert 'ahead of the stable channel' in result['msg_text'], (
+            'refused_rewind banner must preserve the backend response message'
         )
 
     def test_restart_holds_in_flight_guard(self):
