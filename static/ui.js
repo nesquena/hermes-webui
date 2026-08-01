@@ -8998,7 +8998,7 @@ function _compactInflightState(state){
     activityBurstAnchors:Array.isArray(state.activityBurstAnchors)?state.activityBurstAnchors.slice(-50):[],
     // #3058: pre-settlement recovery cache for delivered steers. The durable copy
     // is the anchor activity scene written at settlement; this only covers the gap.
-    deliveredSteers:Array.isArray(state.deliveredSteers)?state.deliveredSteers.slice(-20):[],
+    deliveredSteers:Array.isArray(state.deliveredSteers)?state.deliveredSteers:[],
     todos,
     todoStateMeta,
   }, limits.stringChars);
@@ -9045,7 +9045,8 @@ function loadInflightState(sid, streamId){
   const entry=all[sid];
   if(!entry) return null;
   if(streamId&&entry.streamId&&entry.streamId!==streamId) return null;
-  if(entry.updated_at&&Date.now()-entry.updated_at>10*60*1000){
+  const retainsDeliveredSteers=Array.isArray(entry.deliveredSteers)&&entry.deliveredSteers.length>0;
+  if(entry.updated_at&&Date.now()-entry.updated_at>10*60*1000&&!retainsDeliveredSteers){
     clearInflightState(sid);
     return null;
   }
@@ -12861,6 +12862,7 @@ function _renderLiveAnchorSceneUserRowsOnly(streamId, rows, opts){
   }
   turn.setAttribute('data-anchor-scene-live-owner','1');
   turn.setAttribute('data-anchor-stream-id',String(streamId||''));
+  turn.setAttribute('data-anchor-scene-live-mode',String((opts&&opts.mode)||chatActivityMode()||''));
   if(S.session) turn.dataset.sessionId=S.session.session_id;
   const blocks=_assistantTurnBlocks(turn);
   if(!blocks) return false;
@@ -12914,6 +12916,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   // honor requestedMode ONLY when there is no usable active mode.
   const knownMode=(m)=>m==='compact_worklog'||m==='transparent_stream'||m==='hide_all_activity';
   const sceneMode=knownMode(activeMode)?activeMode:(knownMode(requestedMode)?requestedMode:activeMode);
+  const requestedSessionId=String(opts.sessionId||'');
   if(sceneMode==='hide_all_activity'){
     // Final-answer-only hides assistant ACTIVITY. A delivered steer is the user's
     // own input inside the turn, so it stays visible; nothing else is painted. With
@@ -12921,10 +12924,14 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     const deliveredSteerRows=(Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[])
       .filter(row=>row&&row.role==='user'&&String(row.source_event_type||'')==='steer_delivered');
     if(!deliveredSteerRows.length) return false;
-    return _renderLiveAnchorSceneUserRowsOnly(streamId,deliveredSteerRows,opts);
+    const existingTurn=$('liveAssistantTurn');
+    const existingTurnSessionId=String(existingTurn&&existingTurn.dataset&&existingTurn.dataset.sessionId||'');
+    if(existingTurn&&requestedSessionId&&existingTurnSessionId&&existingTurnSessionId!==requestedSessionId){
+      if(!_resetMismatchedLiveAssistantTurnForSession(existingTurn, requestedSessionId)) return false;
+    }
+    return _renderLiveAnchorSceneUserRowsOnly(streamId,deliveredSteerRows,{...opts,mode:sceneMode});
   }
   const existingTurn=$('liveAssistantTurn');
-  const requestedSessionId=String(opts.sessionId||'');
   const existingTurnSessionId=String(existingTurn&&existingTurn.dataset&&existingTurn.dataset.sessionId||'');
   if(existingTurn&&requestedSessionId&&existingTurnSessionId&&existingTurnSessionId!==requestedSessionId){
     if(!_resetMismatchedLiveAssistantTurnForSession(existingTurn, requestedSessionId)) return false;
@@ -12935,7 +12942,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   const sceneRows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
   const deliveredSteerRows=sceneRows.filter(row=>row&&row.role==='user'&&String(row.source_event_type||'')==='steer_delivered');
   if(typeof isSimplifiedToolCalling==='function'&&!isSimplifiedToolCalling()){
-    return deliveredSteerRows.length?_renderLiveAnchorSceneUserRowsOnly(streamId,deliveredSteerRows,opts):false;
+    return deliveredSteerRows.length?_renderLiveAnchorSceneUserRowsOnly(streamId,deliveredSteerRows,{...opts,mode:sceneMode}):false;
   }
   if(sceneMode!=='compact_worklog') return false;
   if(!S.session||!S.activeStreamId) return false;
@@ -12951,6 +12958,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   }
   turn.setAttribute('data-anchor-scene-live-owner','1');
   turn.setAttribute('data-anchor-stream-id',String(streamId||''));
+  turn.setAttribute('data-anchor-scene-live-mode',String(sceneMode||''));
   // Re-stamp when reusing a turn restored or previously rendered in another mode.
   if(S.session) turn.dataset.sessionId=S.session.session_id;
   const blocks=_assistantTurnBlocks(turn);
@@ -13005,6 +13013,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   }
   turn.setAttribute('data-anchor-scene-live-owner','1');
   turn.setAttribute('data-anchor-stream-id',String(streamId||''));
+  turn.setAttribute('data-anchor-scene-live-mode',String((opts&&opts.mode)||'transparent_stream'));
   turn.setAttribute('data-live-assistant-turn','1');
   if(S.session) turn.dataset.sessionId=S.session.session_id;
   const blocks=_assistantTurnBlocks(turn);

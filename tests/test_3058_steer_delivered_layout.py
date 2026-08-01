@@ -54,7 +54,7 @@ ROWS = [
         "source_event_type": "steer_delivered",
         "status": "delivered",
         "row_id": "run-3058:steer-1",
-        "local_id": "steer:stream-3058:1:a1b2c3",
+        "local_id": "steer:stream-3058:1",
         "text": SHORT_STEER,
         "payload": {"delivered": True, "origin": "webui", "files": []},
     },
@@ -64,7 +64,7 @@ ROWS = [
         "source_event_type": "steer_delivered",
         "status": "delivered",
         "row_id": "run-3058:steer-2",
-        "local_id": "steer:stream-3058:2:d4e5f6",
+        "local_id": "steer:stream-3058:2",
         "text": LONG_STEER,
         "payload": {
             "delivered": True,
@@ -78,7 +78,7 @@ ROWS = [
         "source_event_type": "steer_delivered",
         "status": "delivered",
         "row_id": "run-3058:steer-3",
-        "local_id": "steer:stream-3058:3:99zz11",
+        "local_id": "steer:stream-3058:3",
         "text": UNBROKEN_STEER,
         "payload": {"delivered": True, "origin": "webui", "files": []},
     },
@@ -111,7 +111,7 @@ def _function(source: str, name: str) -> str:
 # The turn markup `_createAssistantTurn` builds, and the worklog rail
 # `ensureActivityGroup` builds, reproduced with their real class names so the
 # cascade the shipped renderer meets is the cascade under measurement.
-def _turn(turn_id: str, live: bool, worklog: bool) -> str:
+def _turn(turn_id: str, live: bool, worklog: bool, mode: str = "") -> str:
     inner = (
         '<div class="tool-worklog-group live-worklog" data-tool-worklog-group="1" '
         'data-anchor-scene-owner="1"><div class="tool-worklog-list"></div></div>'
@@ -119,8 +119,9 @@ def _turn(turn_id: str, live: bool, worklog: bool) -> str:
         else ""
     )
     live_attr = ' data-anchor-scene-live-owner="1"' if live else ""
+    mode_attr = f' data-anchor-scene-live-mode="{mode}"' if mode else ""
     return (
-        f'<div class="msg-row assistant-turn" id="{turn_id}" data-role="assistant"{live_attr}>'
+        f'<div class="msg-row assistant-turn" id="{turn_id}" data-role="assistant"{live_attr}{mode_attr}>'
         '<div class="msg-role assistant"><div class="role-icon assistant">H</div>'
         '<span class="msg-role-name">Hermes</span></div>'
         f'<div class="assistant-turn-blocks">{inner}</div>'
@@ -136,7 +137,7 @@ def _harness() -> str:
             _turn("liveWorklog", live=True, worklog=True),
             _turn("settledWorklog", live=False, worklog=True),
             _turn("transparentStream", live=True, worklog=False),
-            _turn("finalAnswerOnly", live=True, worklog=False),
+            _turn("finalAnswerOnly", live=True, worklog=False, mode="hide_all_activity"),
         ]
     )
     return f"""

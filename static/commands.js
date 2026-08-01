@@ -1332,9 +1332,9 @@ async function cmdInterrupt(args){
  * /steer <message> — Inject a steering hint mid-task without interrupting.
  *
  * Calls POST /api/chat/steer which looks up the cached AIAgent for this
- * session and calls agent.steer(text). The agent's run loop appends the
- * steer text to the next tool-result message so the model sees it on its
- * next iteration — same pathway as the CLI's /steer command.
+ * session and calls agent.steer(text). The WebUI can prove that its endpoint
+ * accepted the text for the active run; runtime consumption is outside this
+ * browser layer, as it is for the CLI's /steer command.
  *
  * Leaves the active stream alone when the agent isn't running, isn't cached,
  * or doesn't support steer (older hermes-agent versions). The failed steer text
@@ -1611,6 +1611,9 @@ function _recordDeliveredSteer(ownerSid, ownerStreamId, originalMsg, filesSnapsh
     source_event_type:'steer_delivered',
     seq:`steer-${ordinal}`,
     created_at:Date.now()/1000,
+    session_id:String(ownerSid),
+    turn_id:String((registry.anchor&&registry.anchor.identity&&registry.anchor.identity.turn_id)||''),
+    run_id:String((registry.anchor&&registry.anchor.identity&&registry.anchor.identity.run_id)||''),
     payload:{
       // local_id is the run-owned ordinal identity required by the anchor
       // contract. The ordinal is reseeded from both INFLIGHT and the live
@@ -1628,6 +1631,8 @@ function _recordDeliveredSteer(ownerSid, ownerStreamId, originalMsg, filesSnapsh
     },
   };
   let accepted=false;
+  // The seal is a best-effort rendering boundary. A DOM or teardown race must
+  // not prevent the registry from recording the accepted delivery.
   try{
     // Seal the in-flight prose segment first, so the settled scene reads
     // assistant -> steer -> assistant instead of merging the steer into the run
@@ -1635,6 +1640,10 @@ function _recordDeliveredSteer(ownerSid, ownerStreamId, originalMsg, filesSnapsh
     if(typeof window._sealLiveAnchorProseSegmentForStream==='function'){
       window._sealLiveAnchorProseSegmentForStream(ownerStreamId);
     }
+  }catch(err){
+    if(typeof console!=='undefined'&&console.warn) console.warn('steer delivery seal failed',err);
+  }
+  try{
     const result=anchorApi.applyAssistantTurnAnchorSourceEvent(
       registry,
       sourceEvent,
@@ -1650,11 +1659,19 @@ function _recordDeliveredSteer(ownerSid, ownerStreamId, originalMsg, filesSnapsh
   // Pre-settlement the browser-owned durable surface is INFLIGHT; the anchor scene
   // itself is only persisted at settlement. Replay on reattach is idempotent.
   try{
-    if(typeof INFLIGHT!=='undefined'&&INFLIGHT[ownerSid]){
-      const cached=Array.isArray(INFLIGHT[ownerSid].deliveredSteers)?INFLIGHT[ownerSid].deliveredSteers:[];
+    if(typeof INFLIGHT!=='undefined'&&INFLIGHT){
+      const existing=INFLIGHT[ownerSid];
+      const existingStreamId=String(existing&&existing.streamId||'');
+      // A session can retain a stale registry while a replacement stream owns
+      // the session. Never append the old stream's record to that new cache.
+      if(existing&&existingStreamId&&existingStreamId!==String(ownerStreamId)) return true;
+      const cache=existing||{streamId:String(ownerStreamId),deliveredSteers:[]};
+      const cached=Array.isArray(cache.deliveredSteers)?cache.deliveredSteers:[];
       cached.push(sourceEvent);
-      INFLIGHT[ownerSid].deliveredSteers=cached;
-      if(typeof saveInflightState==='function') saveInflightState(ownerSid,INFLIGHT[ownerSid]);
+      cache.streamId=String(ownerStreamId);
+      cache.deliveredSteers=cached;
+      INFLIGHT[ownerSid]=cache;
+      if(typeof saveInflightState==='function') saveInflightState(ownerSid,cache);
     }
   }catch(err){
     if(typeof console!=='undefined'&&console.warn) console.warn('steer delivery inflight mirror failed',err);
@@ -1745,7 +1762,7 @@ async function _trySteer(msg, explicitSteer){
         const _remaining=S.pendingFiles.filter(f=>!_delivered.has(f));
         if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
       }
-      // The user always gets feedback. Recording makes the row durable, but the
+      // The user gets feedback while still looking at the owning run. Recording makes the row durable, but the
       // repaint still declines on several live paths (no projectable scene, a stream
       // replaced during the steer await, simplified tool calling off, transparent
       // mode with nothing renderable), and master always showed something. So fall
@@ -1753,8 +1770,13 @@ async function _trySteer(msg, explicitSteer){
       // indicator is strictly degraded: NOT in S.messages, so it survives the done
       // event's S.messages replacement, and it self-removes when renderMessages
       // rebuilds msgInner, by which point the durable row paints from the scene.
-      if(!recorded||!_repaintDeliveredSteer(ownerSid,acceptedStreamId)){
-        _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
+      const feedbackOwnerIsCurrent=acceptedStreamId
+        ? _steerOwnerStreamIsCurrent(ownerSid,acceptedStreamId)
+        : _steerOwnerIsCurrent(ownerSid);
+      if(feedbackOwnerIsCurrent){
+        if(!recorded||!_repaintDeliveredSteer(ownerSid,acceptedStreamId)){
+          _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
+        }
       }
     }
     showToast(t('cmd_steer_delivered'),2500);

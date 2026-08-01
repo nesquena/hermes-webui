@@ -5989,7 +5989,7 @@ main.main > #mainPlugin{display:none;}
    steer. That mode's contract is to show nothing until the answer arrives, so the
    "Hermes" role header must not appear above a turn holding just the user's own
    steer. Stateless: the header returns the moment any other block is painted. */
-.assistant-turn[data-anchor-scene-live-owner="1"]:has(> .assistant-turn-blocks > [data-steer-delivery="delivered"]):not(:has(> .assistant-turn-blocks > *:not([data-steer-delivery="delivered"]))) > .msg-role.assistant { display: none; }
+.assistant-turn[data-anchor-scene-live-owner="1"][data-anchor-scene-live-mode="hide_all_activity"]:has(> .assistant-turn-blocks > [data-steer-delivery="delivered"]):not(:has(> .assistant-turn-blocks > *:not([data-steer-delivery="delivered"]))) > .msg-role.assistant { display: none; }
 /* Hide the entire "empty tool-anchor" assistant row (content='' with
    tool_calls). renderMessages keeps it in the DOM so tool cards can anchor
    to it, but visually it adds a ghost "Hermes" header above the tool cards.

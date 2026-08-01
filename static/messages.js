@@ -1949,15 +1949,21 @@ function _restoreDeliveredSteersIntoSettledMessages(messages, sid, records){
     const message=messages[i];
     if(message&&message.role==='assistant') assistants.push({message,index:i});
   }
-  const lastAssistant=assistants.length?assistants[assistants.length-1]:null;
   let changed=false;
   for(const [streamId,streamRecords] of groups){
     let target=assistants.slice().reverse().find(({message})=>{
       const scene=message._anchor_activity_scene;
-      const sceneId=scene&&((scene.stream_id)||(scene.identity&&scene.identity.stream_id));
-      return String(message._anchor_stream_id||sceneId||'')===streamId;
+      const identity=scene&&scene.identity&&typeof scene.identity==='object'?scene.identity:{};
+      const sceneStreamId=String(message._anchor_stream_id||scene&&scene.stream_id||identity.stream_id||'');
+      const sceneRunId=String(message.run_id||message._run_id||scene&&scene.run_id||identity.run_id||'');
+      const sceneTurnId=String(message.turn_id||message._turn_id||scene&&scene.turn_id||identity.turn_id||'');
+      const recordRunId=String(streamRecords[0]&&streamRecords[0].run_id||streamRecords[0]&&streamRecords[0].payload&&streamRecords[0].payload.run_id||'');
+      const recordTurnId=String(streamRecords[0]&&streamRecords[0].turn_id||streamRecords[0]&&streamRecords[0].payload&&streamRecords[0].payload.turn_id||'');
+      if(sceneStreamId) return sceneStreamId===streamId;
+      if(recordRunId&&sceneRunId) return recordRunId===sceneRunId;
+      if(recordTurnId&&sceneTurnId) return recordTurnId===sceneTurnId;
+      return false;
     });
-    if(!target&&groups.size===1) target=lastAssistant;
     if(!target) continue;
     const existing=target.message._anchor_activity_scene&&typeof target.message._anchor_activity_scene==='object'
       ? target.message._anchor_activity_scene
@@ -1970,26 +1976,44 @@ function _restoreDeliveredSteersIntoSettledMessages(messages, sid, records){
       run_id:runId,
       turn_id:String((existing&&existing.turn_id)||target.message.local_id||`settled:${sid}:${streamId}`),
     });
-    if(existing&&Array.isArray(existing.activity_rows)){
-      for(let index=0;index<existing.activity_rows.length;index+=1){
-        const sourceEvent=_settledAnchorSourceEventFromRow(existing.activity_rows[index],streamId,runId,index);
-        if(!sourceEvent) continue;
-        try{api.applyAssistantTurnAnchorSourceEvent(registry,sourceEvent,{session_id:sid,stream_id:streamId,run_id:runId});}catch(_){return changed;}
+    const events=[];
+    const pushEvents=(items, layer)=>{
+      if(!Array.isArray(items)) return;
+      for(let index=0;index<items.length;index+=1){
+        const sourceEvent=_settledAnchorSourceEventFromRow(items[index],streamId,runId,index);
+        if(sourceEvent) events.push({sourceEvent,layer,index});
       }
-    }
-    let applied=false;
-    for(const record of streamRecords){
+    };
+    pushEvents(existing&&existing.activity_rows,'activity');
+    pushEvents(existing&&existing.artifacts,'artifact');
+    pushEvents(existing&&existing.side_effects,'side_effect');
+    for(let index=0;index<streamRecords.length;index+=1){
+      const record=streamRecords[index];
       const payload=record&&record.payload&&typeof record.payload==='object'?record.payload:{};
-      const sourceEvent={
-        ...record,
-        source_event_type:'steer_delivered',
-        local_id:record.local_id||payload.local_id||null,
-        stream_id:streamId,
-        run_id:record.run_id||payload.run_id||runId,
-      };
+      events.push({
+        sourceEvent:{
+          ...record,
+          source_event_type:'steer_delivered',
+          local_id:record.local_id||payload.local_id||null,
+          stream_id:streamId,
+          run_id:record.run_id||payload.run_id||runId,
+          turn_id:record.turn_id||payload.turn_id||null,
+        },
+        layer:'steer',
+        index,
+      });
+    }
+    events.sort((left,right)=>{
+      const leftTime=Number(left.sourceEvent&&left.sourceEvent.created_at);
+      const rightTime=Number(right.sourceEvent&&right.sourceEvent.created_at);
+      if(Number.isFinite(leftTime)&&Number.isFinite(rightTime)&&leftTime!==rightTime) return leftTime-rightTime;
+      return left.layer==='steer'&&right.layer!=='steer'?1:(left.layer!=='steer'&&right.layer==='steer'?-1:left.index-right.index);
+    });
+    let applied=false;
+    for(const item of events){
       try{
-        const result=api.applyAssistantTurnAnchorSourceEvent(registry,sourceEvent,{session_id:sid,stream_id:streamId,run_id:runId});
-        applied=applied||!!(result&&result.applied||result&&result.reason==='duplicate');
+        const result=api.applyAssistantTurnAnchorSourceEvent(registry,item.sourceEvent,{session_id:sid,stream_id:streamId,run_id:runId});
+        if(item.layer==='steer') applied=applied||!!(result&&result.applied||result&&result.reason==='duplicate');
       }catch(_){ }
     }
     if(!applied&&!existing) continue;
@@ -2803,10 +2827,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _anchorRegistryCleanupTimer=setTimeout(()=>{
       _anchorRegistryCleanupTimer=null;
       if(_anchorRegistryMap.get(streamId)!==_anchorRegistry) return;
-      const live=LIVE_STREAMS[activeSid];
       const stillActive=!!(
-        (live&&live.streamId===streamId)
-        || (S.activeStreamId===streamId)
+        (S.activeStreamId===streamId)
         || (S.session&&S.session.session_id===activeSid&&S.session.active_stream_id===streamId)
         || (INFLIGHT[activeSid]&&INFLIGHT[activeSid].streamId===streamId)
       );

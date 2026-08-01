@@ -81,6 +81,7 @@ def _run_node(script: str) -> dict:
 # thin driver around them so the harness runs the shipped producer code.
 _STEER_DRIVER = """
 function _steerOwnerIsCurrent(sid){ return sid===CURRENT_SID; }
+function _steerOwnerStreamIsCurrent(sid,stream){ return sid===CURRENT_SID&&stream===OWNER_STREAM; }
 const INFLIGHT = {"sid-3058": {messages: []}};
 const SAVED_INFLIGHT = [];
 function saveInflightState(sid, state){ SAVED_INFLIGHT.push([sid, JSON.parse(JSON.stringify(state))]); }
@@ -280,9 +281,9 @@ def test_3058_accepted_response_stream_id_owns_the_record_after_a_stream_replace
         + "function drive(){"
         + accepted_branch
         + "}\ndrive();\n"
-        + "console.log(JSON.stringify({old:window._liveAnchorRegistries.get(OWNER_STREAM).anchor.activity_events.length,new:window._liveAnchorRegistries.get('stream-authoritative').anchor.activity_events.length}));"
+        + "console.log(JSON.stringify({old:window._liveAnchorRegistries.get(OWNER_STREAM).anchor.activity_events.length,new:window._liveAnchorRegistries.get('stream-authoritative').anchor.activity_events.length,indicators:RENDERED_INDICATORS}));"
     )
-    assert out == {"old": 0, "new": 1}
+    assert out == {"old": 0, "new": 1, "indicators": []}
 
 
 def test_3058_idle_session_restore_projects_the_browser_cache_into_the_settled_scene():
@@ -313,13 +314,51 @@ def test_3058_idle_session_restore_projects_the_browser_cache_into_the_settled_s
         + _function(_read(MESSAGES_JS), "_settledAnchorSourceEventFromRow")
         + "\n"
         + helper
-        + f"\nconst messages=[{{role:'assistant',content:'final answer'}}];"
+        + f"\nconst messages=[{{role:'assistant',content:'final answer',_anchor_activity_scene:{{version:'activity_scene_v1',identity:{{stream_id:'{stream}'}}}}}}];"
         + f"const changed=_restoreDeliveredSteersIntoSettledMessages(messages,'{OWNER_SID}',[{json.dumps(record)}]);"
         + "console.log(JSON.stringify({changed,stream:messages[0]._anchor_stream_id,rows:messages[0]._anchor_activity_scene.activity_rows.map(r=>[r.source_event_type,r.local_id,r.text])}));"
     )
     assert out["changed"] is True
     assert out["stream"] == stream
     assert out["rows"] == [["steer_delivered", f"steer:{stream}:1", STEER_TEXT]]
+
+
+def test_3058_idle_restore_matches_identity_preserves_other_layers_and_orders_by_time():
+    helper = _function(_read(MESSAGES_JS), "_restoreDeliveredSteersIntoSettledMessages")
+    stream = "stream-3058-ordered"
+    record = {
+        "source_event_type": "steer_delivered",
+        "seq": "steer-1",
+        "created_at": 200,
+        "stream_id": stream,
+        "payload": {"local_id": f"steer:{stream}:1", "stream_id": stream, "status": "delivered", "text": STEER_TEXT},
+    }
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "identity": {"stream_id": stream},
+        "activity_rows": [
+            {"source_event_type": "token", "created_at": 100, "seq": 1, "local_id": "p1", "status": "completed", "text": "before", "payload": {}},
+            {"source_event_type": "token", "created_at": 300, "seq": 2, "local_id": "p2", "status": "completed", "text": "after", "payload": {}},
+        ],
+        "artifacts": [{"source_event_type": "artifact_reference", "created_at": 150, "local_id": "artifact-1", "payload": {"text": "artifact"}}],
+        "side_effects": [{"source_event_type": "state_saved", "created_at": 160, "local_id": "effect-1", "payload": {"text": "saved"}}],
+    }
+    out = _run_node(
+        "const fs=require('fs');const vm=require('vm');"
+        f"const src=fs.readFileSync({json.dumps(str(ANCHORS_JS))},'utf8');"
+        "const sandbox={window:{}};vm.createContext(sandbox);vm.runInContext(src,sandbox);global.window=sandbox.window;"
+        + _function(_read(MESSAGES_JS), "_deliveredSteerStreamId")
+        + "\n"
+        + _function(_read(MESSAGES_JS), "_settledAnchorSourceEventFromRow")
+        + "\n"
+        + helper
+        + f"\nconst messages=[{{role:'assistant',content:'final',_anchor_activity_scene:{json.dumps(scene)}}}];"
+        + f"const changed=_restoreDeliveredSteersIntoSettledMessages(messages,'{OWNER_SID}',[{json.dumps(record)}]);"
+        + "const rebuilt=messages[0]._anchor_activity_scene;"
+        + "console.log(JSON.stringify({changed,rows:rebuilt.activity_rows.map(r=>r.text),artifacts:rebuilt.artifacts.length,effects:rebuilt.side_effects.length}));"
+    )
+    assert out == {"changed": True, "rows": ["before", STEER_TEXT, "after"], "artifacts": 1, "effects": 1}
 
 
 # ------------------------------------------------------------ worklog-worthiness
@@ -365,7 +404,7 @@ def test_3058_the_worklog_clause_does_not_widen_to_other_control_rows(source):
 # ------------------------------------------ INFLIGHT pre-settlement recovery cache
 
 
-def test_3058_delivered_steers_survive_inflight_compaction_bounded_to_twenty():
+def test_3058_delivered_steers_survive_inflight_compaction_without_a_fixed_cap():
     compact = _function(_read(UI_JS), "_compactInflightState")
     out = _run_node(
         "function _getInflightStateLimits(){return {messages:50,toolCalls:50,stringChars:100000,maxSessions:5,jsonChars:1000000};}\n"
@@ -375,12 +414,26 @@ def test_3058_delivered_steers_survive_inflight_compaction_bounded_to_twenty():
         "const many=Array.from({length:25},(_,i)=>({source_event_type:'steer_delivered',seq:'steer-'+(i+1),payload:{local_id:'steer:s:'+(i+1),status:'delivered',text:'t'+(i+1)}}));\n"
         "const kept=_compactInflightState({messages:[],deliveredSteers:many});\n"
         "const none=_compactInflightState({messages:[]});\n"
-        "console.log(JSON.stringify({count:kept.deliveredSteers.length,first:kept.deliveredSteers[0].payload.local_id,last:kept.deliveredSteers[19].payload.local_id,none:none.deliveredSteers}));"
+        "console.log(JSON.stringify({count:kept.deliveredSteers.length,first:kept.deliveredSteers[0].payload.local_id,last:kept.deliveredSteers[24].payload.local_id,none:none.deliveredSteers}));"
     )
-    assert out["count"] == 20
-    assert out["first"] == "steer:s:6"
+    assert out["count"] == 25
+    assert out["first"] == "steer:s:1"
     assert out["last"] == "steer:s:25"
     assert out["none"] == []
+
+
+def test_3058_delivered_cache_is_not_expired_during_a_long_running_recovery_gap():
+    read_map = _function(_read(UI_JS), "_readInflightStateMap")
+    load = _function(_read(UI_JS), "loadInflightState")
+    out = _run_node(
+        "const INFLIGHT_STATE_KEY='hermes-inflight';const entry={streamId:'stream-3058',updated_at:Date.now()-11*60*1000,deliveredSteers:[{source_event_type:'steer_delivered'}]};"
+        "const localStorage={getItem(){return JSON.stringify({'sid-3058':entry});},removeItem(){}};"
+        + read_map
+        + "\nfunction clearInflightState(){}\n"
+        + load
+        + "\nconsole.log(JSON.stringify(loadInflightState('sid-3058')));"
+    )
+    assert out["deliveredSteers"] == [{"source_event_type": "steer_delivered"}]
 
 
 _CACHED_STEER = {
@@ -406,7 +459,9 @@ def test_3058_the_reload_restore_path_carries_the_delivered_steer_cache():
     written by the compactor but absent from that whitelist is a cache nothing
     ever reads, so the record dies at the refresh it exists to survive.
     """
-    restore = _block_after(_read(SESSIONS_JS), "INFLIGHT[sid]={")
+    sessions_source = _read(SESSIONS_JS)
+    restore_start = sessions_source.index("INFLIGHT[sid]={\n        streamId:String(stored.streamId||'')")
+    restore = _balanced(sessions_source, sessions_source.index("{", restore_start + len("INFLIGHT[sid]=") ))
     out = _run_node(
         "const INFLIGHT={};const sid='sid-3058';\n"
         f"const stored={json.dumps({'streamId': OWNER_STREAM, 'messages': [], 'deliveredSteers': [_CACHED_STEER]})};\n"
@@ -416,6 +471,22 @@ def test_3058_the_reload_restore_path_carries_the_delivered_steer_cache():
     )
     assert out["missing"] is False, "loadSession's whitelist drops the delivered-steer cache"
     assert out["restored"] == [_CACHED_STEER]
+
+
+def test_3058_failed_idle_load_repersists_the_browser_only_delivery_cache():
+    preserve = _function(_read(SESSIONS_JS), "_preserveSettledDeliveredSteersForRecovery")
+    out = _run_node(
+        "const INFLIGHT={};const SAVED=[];"
+        "function saveInflightState(sid,state){SAVED.push([sid,state]);}\n"
+        + preserve
+        + f"\nconst records={json.dumps([_CACHED_STEER])};"
+        + "const kept=_preserveSettledDeliveredSteersForRecovery('sid-3058',records);"
+        + "console.log(JSON.stringify({kept,state:INFLIGHT['sid-3058'],saved:SAVED.length}));"
+    )
+    assert out["kept"] is True
+    assert out["state"]["streamId"] is None
+    assert out["state"]["deliveredSteers"] == [_CACHED_STEER]
+    assert out["saved"] == 1
 
 
 def test_3058_journal_replay_reset_preserves_browser_only_delivered_steers():
@@ -580,6 +651,17 @@ def test_3058_the_producer_seals_the_live_prose_segment_before_recording():
     assert out["after"] == 2
 
 
+def test_3058_a_seal_race_does_not_drop_the_durable_delivery_record():
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const registry=newRegistry();"
+        + "window._sealLiveAnchorProseSegmentForStream=function(){throw new Error('teardown race');};"
+        + f"const recorded=_recordDeliveredSteer(OWNER_SID,OWNER_STREAM,{json.dumps(STEER_TEXT)},[]);"
+        + "console.log(JSON.stringify({recorded,rows:scene(registry).activity_rows.length}));"
+    )
+    assert out == {"recorded": True, "rows": 1}
+
+
 def test_3058_the_seal_flushes_pending_prose_before_recording_the_boundary():
     """A bare boundary + reset loses whatever the deferred render had not written.
 
@@ -720,18 +802,19 @@ def test_3058_a_declined_repaint_still_shows_the_user_something():
     behind a "Steer delivered" toast.
     """
     commands = _read(COMMANDS_JS)
-    feedback = commands[commands.index("if(!recorded||!_repaintDeliveredSteer(") :]
-    feedback = feedback[: feedback.index("\n      }") + len("\n      }")]
+    feedback = _block_after(commands, "if(!recorded||!_repaintDeliveredSteer(ownerSid,acceptedStreamId))")
     out = _run_node(
         _anchor_harness_prelude()
         + "const registry=newRegistry();\n"
         "// the scene cannot be projected right now, so the repaint declines\n"
         "window._renderLiveAnchorActivitySceneForStream=function(){return false;};\n"
-        + f"const originalMsg={json.dumps(STEER_TEXT)};const pendingFilesSnapshot=[];\n"
-        "const ownerSid=OWNER_SID;const ownerStreamId=OWNER_STREAM;const acceptedStreamId=ownerStreamId;\n"
-        + "const recorded=_recordDeliveredSteer(ownerSid,ownerStreamId,originalMsg,pendingFilesSnapshot);\n"
-        + feedback
-        + "\n"
+            + f"const originalMsg={json.dumps(STEER_TEXT)};const pendingFilesSnapshot=[];\n"
+            "const ownerSid=OWNER_SID;const ownerStreamId=OWNER_STREAM;const acceptedStreamId=ownerStreamId;\n"
+            + "const recorded=_recordDeliveredSteer(ownerSid,ownerStreamId,originalMsg,pendingFilesSnapshot);\n"
+            + "if(_steerOwnerStreamIsCurrent(ownerSid,acceptedStreamId)){\n"
+            + feedback
+            + "\n}\n"
+            + "\n"
         "console.log(JSON.stringify({recorded,rows:scene(registry).activity_rows.length,indicators:RENDERED_INDICATORS}));"
     )
     assert out["recorded"] is True, "the record is durable even when the repaint declines"
