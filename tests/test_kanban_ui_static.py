@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_block, locale_codes, locale_source_text
 from pathlib import Path
 import re
 
@@ -7,19 +8,14 @@ ROOT = Path(__file__).resolve().parents[1]
 INDEX = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N = locale_source_text()
 COMPACT_INDEX = re.sub(r"\s+", "", INDEX)
 COMPACT_PANELS = re.sub(r"\s+", "", PANELS)
 COMPACT_STYLE = re.sub(r"\s+", "", STYLE)
 
 
 def _locale_blocks_with_body(i18n_text: str):
-    locale_blocks = re.findall(
-        r"\n\s*(?:'(?P<quoted>[a-z]{2}(?:-[A-Z][A-Za-z]+)?)'|(?P<plain>[a-z]{2}(?:-[A-Z]{2})?))\s*:\s*\{(.*?)\n\s*\},",
-        i18n_text,
-        flags=re.S,
-    )
-    return [(quoted or plain, body) for quoted, plain, body in locale_blocks]
+    return [(code, locale_block(code)) for code in locale_codes()]
 
 
 def test_kanban_has_native_sidebar_rail_and_mobile_tab():
@@ -1191,7 +1187,7 @@ def test_kanban_locale_parity():
     Refs: #1973
     """
     locale_blocks = _locale_blocks_with_body(I18N)
-    assert locale_blocks, "No locale blocks found in i18n.js"
+    assert locale_blocks, "No locale blocks found in split locale bundles"
 
     # Collect the kanban_* keys from the English block.
     en_name = "en"

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 from pathlib import Path
 
 from api import config
@@ -100,7 +101,7 @@ def test_ui_badge_lookup_prefers_row_provider_for_duplicate_model_ids():
 def test_configured_model_group_label_has_i18n_key():
     """The Configured model group must not render the raw i18n key."""
     root = Path(__file__).resolve().parent.parent
-    i18n = (root / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = locale_source_text()
 
     locale_count = i18n.count("_lang:")
     key_count = i18n.count("model_group_configured:")

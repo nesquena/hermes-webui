@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 import re
 import subprocess
 from pathlib import Path
@@ -9,7 +10,7 @@ PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 FADE_SETTING = "fade_text_effect"
 FADE_CHECKBOX_ID = "settingsFadeTextEffect"
@@ -119,8 +120,8 @@ def test_preferences_ui_exposes_and_saves_fade_text_effect():
     assert f'id="{FADE_CHECKBOX_ID}"' in INDEX_HTML
     assert f'data-i18n="{FADE_LABEL_KEY}"' in INDEX_HTML
     assert f'data-i18n="{FADE_DESC_KEY}"' in INDEX_HTML
-    assert FADE_LABEL_KEY in I18N_JS
-    assert FADE_DESC_KEY in I18N_JS
+    assert FADE_LABEL_KEY in I18N_SOURCE
+    assert FADE_DESC_KEY in I18N_SOURCE
 
     payload_block = function_block(PANELS_JS, "_preferencesPayloadFromUi")
     assert_contains_all(payload_block, [f"$('{FADE_CHECKBOX_ID}')", f"payload.{FADE_SETTING}="])

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """
 Tests for issue #1014 — model-not-found error classification.
 
@@ -5,7 +6,7 @@ Covers:
   1. streaming.py: 404/model-not-found errors detected and classified as 'model_not_found'
   2. streaming.py: HTML tags stripped from provider error messages before classification
   3. static/messages.js: apperror handler has model_not_found branch
-  4. static/i18n.js: model_not_found_label key present in all locales
+  4. static/split locale bundles: model_not_found_label key present in all locales
   5. streaming.py: model_not_found checked after auth but before generic error
 """
 import pathlib
@@ -154,7 +155,7 @@ class TestApperrorModelNotFound:
         )
 
 
-# ── 4. static/i18n.js: all locales ───────────────────────────────────────────
+# ── 4. static/split locale bundles: all locales ───────────────────────────────────────────
 
 class TestI18nModelNotFound:
     """All locales must have model_not_found_label."""
@@ -176,7 +177,7 @@ class TestI18nModelNotFound:
 
     def test_all_locales_have_model_not_found_label(self):
         """model_not_found_label must appear in all locales."""
-        src = _read("static/i18n.js")
+        src = locale_source_text()
         locale_count = len(self._locale_names(src))
         count = self._count_key(src, self.REQUIRED_KEY)
         assert count >= locale_count, (
@@ -186,7 +187,7 @@ class TestI18nModelNotFound:
 
     def test_english_label_is_plain_string(self):
         """English model_not_found_label must be a plain string, not a function."""
-        src = _read("static/i18n.js")
+        src = locale_source_text()
         en_start = src.find("\n  en: {")
         es_start = src.find("\n  es: {")
         en_block = src[en_start:es_start]

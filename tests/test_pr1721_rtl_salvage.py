@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression tests for PR #1721 salvage — RTL chat layout (Settings-only, no composer button).
 
 Salvaged from @malulian's PR #1721 per @aronprins design review (May 13 2026):
@@ -10,7 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 INDEX = REPO_ROOT / "static" / "index.html"
 STYLE = REPO_ROOT / "static" / "style.css"
 PANELS = REPO_ROOT / "static" / "panels.js"
-I18N = REPO_ROOT / "static" / "i18n.js"
+I18N = locale_source_text()
 CONFIG = REPO_ROOT / "api" / "config.py"
 
 
@@ -110,7 +111,7 @@ def test_rtl_in_config_defaults_and_writable_keys():
 
 
 def test_rtl_localized_in_all_locales():
-    js = I18N.read_text(encoding="utf-8")
+    js = I18N
     # Count occurrences — should match the 11 locale blocks
     assert js.count("settings_label_rtl:") == 15
     assert js.count("settings_desc_rtl:") == 15

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -89,7 +90,7 @@ def test_auth_sessions_have_lock_and_success_can_clear_login_attempts(monkeypatc
 
 
 def _english_i18n_keys():
-    text = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    text = locale_source_text()
     match = re.search(r"en:\s*\{([\s\S]*?)\n\s*\},\n\s*[a-z]{2}:", text)
     assert match, "could not find English locale block"
     return set(re.findall(r"^\s*([A-Za-z0-9_]+):", match.group(1), re.M))
@@ -98,7 +99,7 @@ def _english_i18n_keys():
 def _literal_i18n_refs():
     refs = set()
     for path in (ROOT / "static").glob("*.js"):
-        if path.name == "i18n.js":
+        if path.name == "split locale bundles":
             continue
         text = path.read_text(encoding="utf-8")
         refs.update(re.findall(r"\bt\(\s*['\"]([A-Za-z0-9_]+)['\"]", text))
@@ -115,7 +116,7 @@ def test_static_literal_i18n_keys_exist_in_english_locale():
 def test_critical_boot_storage_access_is_guarded():
     index = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
     boot = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
-    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = locale_source_text()
 
     theme_script = re.search(r"<script>\(function\(\)\{[\s\S]*?hermes-theme[\s\S]*?\}\)\(\)</script>", index)
     font_script = re.search(r"<script>\(function\(\)\{[\s\S]*?hermes-font-size[\s\S]*?\}\)\(\)</script>", index)

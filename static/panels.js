@@ -8637,7 +8637,7 @@ function _preferencesPayloadFromUi(){
   const sendKeySel=$('settingsSendKey');
   if(sendKeySel) payload.send_key=sendKeySel.value;
   const langSel=$('settingsLanguage');
-  if(langSel) payload.language=langSel.value;
+  if(langSel) payload.language=(typeof getActiveLocale==='function')?getActiveLocale():langSel.value;
   const showUsageCb=$('settingsShowTokenUsage');
   if(showUsageCb) payload.show_token_usage=showUsageCb.checked;
   const showQuotaChipCb=$('settingsShowQuotaChip');
@@ -8782,6 +8782,9 @@ function _schedulePreferencesAutosave(){
 
 async function _autosavePreferencesSettings(payload){
   try{
+    const localeResult=await _settleSettingsLocale(payload&&payload.language,$('settingsLanguage'));
+    if(localeResult&&localeResult.status==='superseded') return;
+    if(payload&&localeResult) payload={...payload,language:localeResult.active};
     const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
     if(payload&&payload.terminal_auto_expand_on_output!==undefined){
       window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
@@ -8861,6 +8864,15 @@ async function _autosavePreferencesSettings(payload){
     console.warn('[settings] preferences autosave failed', e);
     _setPreferencesAutosaveStatus('failed');
   }
+}
+
+async function _settleSettingsLocale(requested,selector){
+  if(typeof activateLocale!=='function') return {status:'applied',requested,active:requested||'en',fallback:false};
+  const result=await activateLocale(requested||'en');
+  if(result&&result.status==='superseded') return result;
+  const active=(typeof getActiveLocale==='function')?getActiveLocale():(result&&result.active)||'en';
+  if(selector) selector.value=active;
+  return {...(result||{}),active};
 }
 
 function _retryPreferencesAutosave(){
@@ -9097,10 +9109,8 @@ async function loadSettingsPanel(){
       ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'))
       : (settings.language || localStorage.getItem('hermes-lang') || 'en');
     // Keep settings modal and current page strings in sync with the resolved locale.
-    if(typeof setLocale==='function'){
-      setLocale(resolvedLanguage);
-      if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
-    }
+    const localeResult=await _settleSettingsLocale(resolvedLanguage,$('settingsLanguage'));
+    const effectiveLanguage=(localeResult&&localeResult.active)||resolvedLanguage;
     // Populate model dropdown from /api/models + live model fetch (#872)
     const modelSel=$('settingsModel');
     if(modelSel){
@@ -9156,20 +9166,20 @@ async function loadSettingsPanel(){
     // Send key preference
     const sendKeySel=$('settingsSendKey');
     if(sendKeySel){sendKeySel.value=settings.send_key||'enter';sendKeySel.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    // Language preference — populate from LOCALES bundle
+    // Language preference — metadata is eager, translation data is not.
     const langSel=$('settingsLanguage');
     if(langSel){
       langSel.innerHTML='';
-      if(typeof LOCALES!=='undefined'){
-        for(const [code,bundle] of Object.entries(LOCALES)){
+      if(typeof LOCALE_REGISTRY!=='undefined'){
+        for(const [code,metadata] of Object.entries(LOCALE_REGISTRY)){
           const opt=document.createElement('option');
-          opt.value=code;opt.textContent=bundle._label||code;
+          opt.value=code;opt.textContent=metadata._label||code;
           langSel.appendChild(opt);
         }
       }
-      langSel.value=resolvedLanguage;
-      langSel.addEventListener('change',function(){
-        if(typeof setLocale==='function'){setLocale(this.value);if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();}
+      langSel.value=effectiveLanguage;
+      langSel.addEventListener('change',async function(){
+        await _settleSettingsLocale(this.value,this);
         _schedulePreferencesAutosave();
       },{once:false});
     }
@@ -11837,7 +11847,7 @@ async function deletePasskey(id){
   catch(e){showToast('Failed to remove passkey: '+e.message);}
 }
 
-function _applySavedSettingsUi(saved, body, opts){
+async function _applySavedSettingsUi(saved, body, opts){
   const {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize}=opts;
   window._sendKey=sendKey||'enter';
   window._showTokenUsage=showTokenUsage;
@@ -11878,8 +11888,9 @@ function _applySavedSettingsUi(saved, body, opts){
   window._botName=body.bot_name||'Hermes';
   if(typeof applyBotName==='function') applyBotName();
   else if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
-  if(typeof setLocale==='function') setLocale(language);
-  if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
+  const localeResult=await _settleSettingsLocale(language,$('settingsLanguage'));
+  if(localeResult&&localeResult.status==='superseded') return;
+  if(localeResult) body.language=localeResult.active;
   _ensureComposerControlVisibilityState(saved||body||{});
   const composerOrderSource=(saved&&Array.isArray(saved.composer_control_order))
     ? saved.composer_control_order
@@ -12509,7 +12520,10 @@ async function saveSettings(andClose){
   Object.assign(body,_structuredCodeViewFromUi());
   Object.assign(body,_composerControlVisibilityPayload());
   body.composer_control_order=_getComposerControlOrder();
-  body.language=language;
+  body.language=(typeof getActiveLocale==='function')?getActiveLocale():language;
+  const localeResult=await _settleSettingsLocale(language,$('settingsLanguage'));
+  if(localeResult&&localeResult.status==='superseded') return;
+  if(localeResult) body.language=localeResult.active;
   body.show_token_usage=showTokenUsage;
   const maxTokensField=$('settingsMaxTokens');
   if(maxTokensField){
@@ -12572,7 +12586,7 @@ async function saveSettings(andClose){
           if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
         }
       }
-      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+      await _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       const cpField=$('settingsCurrentPassword'); if(cpField) cpField.value='';
       const pwField=$('settingsPassword'); if(pwField) pwField.value='';
@@ -12602,7 +12616,7 @@ async function saveSettings(andClose){
         if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
       }
     }
-    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+    await _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
     showToast(t('settings_saved'));
     _settingsDirty=false;
     _resetSettingsPanelState();

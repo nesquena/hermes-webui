@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for issue #492 — workspace drag-to-reorder."""
 import json, pytest
 from unittest.mock import patch, MagicMock, call
@@ -115,7 +116,7 @@ class TestWorkspaceReorderFrontend:
 
     def test_i18n_keys_present_in_all_locales(self):
         """workspace_drag_hint and workspace_reorder_failed must exist in all locales."""
-        with open("static/i18n.js", "r", encoding="utf-8") as f:
+        with io.StringIO(locale_source_text()) as f:
             content = f.read()
         for key in ("workspace_drag_hint", "workspace_reorder_failed"):
             count = content.count(key)

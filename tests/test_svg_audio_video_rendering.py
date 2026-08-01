@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Test: SVG, audio, video inline rendering (#481)"""
 import re
 
@@ -133,7 +134,7 @@ def test_media_label_class():
 
 def test_i18n_keys():
     """Verify media rendering i18n keys exist in all locales."""
-    with open('static/i18n.js', encoding="utf-8") as f:
+    with io.StringIO(locale_source_text()) as f:
         src = f.read()
     required_keys = [
         'media_audio_label',

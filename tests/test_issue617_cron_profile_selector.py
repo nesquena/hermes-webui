@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression coverage for issue #617 scheduled-job profile selection."""
 
 import io
@@ -214,7 +215,7 @@ def test_manual_cron_run_uses_execution_profile_but_persists_to_owning_store(mon
 def test_cron_profile_selector_source_hooks_present():
     panels = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
     css = (REPO / "static" / "style.css").read_text(encoding="utf-8")
-    i18n = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = locale_source_text()
 
     assert "async function loadCronProfiles()" in panels
     assert "api('/api/profiles')" in panels

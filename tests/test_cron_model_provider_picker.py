@@ -1,6 +1,7 @@
 """Coverage for model-aware cron job creation/editing in the WebUI."""
 
 from __future__ import annotations
+from tests.i18n_locale_loader import locale_source_text
 
 import io
 import json
@@ -10,7 +11,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 class _JSONHandler:
@@ -190,12 +191,12 @@ def test_cron_form_has_model_picker_and_saves_model_provider_state():
 
 
 def test_cron_model_picker_i18n_keys_exist():
-    assert "cron_model_label" in I18N_JS
-    assert "cron_model_use_default" in I18N_JS
-    assert "cron_model_hint" in I18N_JS
+    assert "cron_model_label" in I18N_SOURCE
+    assert "cron_model_use_default" in I18N_SOURCE
+    assert "cron_model_hint" in I18N_SOURCE
     # #4031: the no-agent hint key must be DEFINED in the locale table (with its
     # value), not merely referenced in panels.js — t() returns the key name itself
     # for a missing translation, so a missing key would render the literal
     # "cron_model_no_agent_hint" to the user instead of the hint text.
-    assert "cron_model_no_agent_hint:" in I18N_JS
-    assert "No-agent jobs run the configured script directly" in I18N_JS
+    assert "cron_model_no_agent_hint:" in I18N_SOURCE
+    assert "No-agent jobs run the configured script directly" in I18N_SOURCE

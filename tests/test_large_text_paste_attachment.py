@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression tests for large composer text paste attachment behavior."""
 import json
 import os
@@ -12,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 CHANGELOG = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
@@ -107,11 +108,11 @@ def test_large_text_paste_creates_markdown_file_and_uses_existing_tray():
 
 
 def test_large_text_status_uses_i18n_key_available_to_all_locales():
-    assert "text_pasted: 'Pasted text attached as '," in I18N_JS
-    assert I18N_JS.count("text_pasted:") == I18N_JS.count("image_pasted:")
-    assert "settings_label_large_text_paste_as_attachment" in I18N_JS
-    assert I18N_JS.count("settings_label_large_text_paste_as_attachment") == I18N_JS.count("settings_label_workspace_panel_open")
-    assert I18N_JS.count("settings_desc_large_text_paste_as_attachment") == I18N_JS.count("settings_desc_workspace_panel_open")
+    assert "text_pasted: 'Pasted text attached as '," in I18N_SOURCE
+    assert I18N_SOURCE.count("text_pasted:") == I18N_SOURCE.count("image_pasted:")
+    assert "settings_label_large_text_paste_as_attachment" in I18N_SOURCE
+    assert I18N_SOURCE.count("settings_label_large_text_paste_as_attachment") == I18N_SOURCE.count("settings_label_workspace_panel_open")
+    assert I18N_SOURCE.count("settings_desc_large_text_paste_as_attachment") == I18N_SOURCE.count("settings_desc_workspace_panel_open")
 
 
 def test_paste_handler_keeps_image_paste_path_before_large_text_path():

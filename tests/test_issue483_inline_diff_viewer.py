@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for issue #483 — inline diff/patch viewer."""
 import pytest
 
@@ -103,7 +104,7 @@ class TestDiffI18n:
     """i18n keys for diff viewer."""
 
     def test_diff_loading_key_in_all_locales(self):
-        with open("static/i18n.js", "r", encoding="utf-8") as f:
+        with io.StringIO(locale_source_text()) as f:
             content = f.read()
         count = content.count("diff_loading")
         assert count >= 8, f"diff_loading found {count} times, expected >= 8 (one per locale)"

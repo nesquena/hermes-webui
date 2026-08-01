@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression tests for sidebar lineage collapse helpers."""
 import json
 import shutil
@@ -1959,7 +1960,7 @@ console.log(JSON.stringify({{lineage:[..._expandedLineageKeys], child:[..._expan
 
 
 def test_lineage_segment_locale_keys_are_defined_for_sidebar_locales():
-    i18n = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = locale_source_text()
     required = [
         "session_meta_segments:",
         "session_lineage_segment_untitled:",
@@ -1978,7 +1979,7 @@ def test_session_meta_segments_softened_label_no_literal_segment_in_english():
     t() fallback for untranslated locales also produces softened copy.
     """
     import re
-    i18n_text = (REPO_ROOT / 'static' / 'i18n.js').read_text(encoding='utf-8')
+    i18n_text = locale_source_text()
     # Locate the English base-locale block (first occurrence, before any _lang guard).
     first_lang = i18n_text.index('_lang: \'en\'')
     second_lang = i18n_text.index('_lang:', first_lang + 1)

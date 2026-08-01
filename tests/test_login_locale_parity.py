@@ -1,4 +1,4 @@
-"""Regression tests for the server-side `_LOGIN_LOCALE` parity with `static/i18n.js`.
+"""Regression tests for the server-side `_LOGIN_LOCALE` parity with `static/split locale bundles`.
 
 Issue #1442: when v0.50.264 added `ja` as the 8th built-in locale, Opus pre-release
 advisor surfaced that `_LOGIN_LOCALE` (in `api/routes.py`) only contained
@@ -8,15 +8,15 @@ through every check and returns "en" when the locale is missing.
 
 These tests pin two invariants going forward:
 
-1. Every locale key registered in `static/i18n.js` LOCALES (top-level) must also
-   exist as a key in `_LOGIN_LOCALE` — so adding a new locale to i18n.js without
+1. Every locale key registered in `static/split locale bundles` LOCALES (top-level) must also
+   exist as a key in `_LOGIN_LOCALE` — so adding a new locale to split locale bundles without
    updating `_LOGIN_LOCALE` is caught at test time.
 
 2. Every entry in `_LOGIN_LOCALE` must carry the full required string set
    (`lang/title/subtitle/placeholder/btn/invalid_pw/conn_failed`) and every value
    must be a non-empty string.
 
-The companion follow-up — closing the i18n.js login-flow English-leak gaps for
+The companion follow-up — closing the split locale bundles login-flow English-leak gaps for
 `ko` (10 keys) and `es` (3 keys), and adding the 3 missing `pt` keys — is verified
 in `test_login_flow_translation_parity` below: every locale must have non-English
 values for the user-facing login/sign-out/password keys.
@@ -25,6 +25,7 @@ See issue #1442.
 """
 
 from __future__ import annotations
+from tests.i18n_locale_loader import locale_source_text
 
 from pathlib import Path
 import importlib
@@ -32,10 +33,10 @@ import re
 import sys
 
 import pytest
+from tests.i18n_locale_loader import locale_block, locale_codes
 
 
 REPO = Path(__file__).resolve().parent.parent
-I18N_PATH = REPO / "static" / "i18n.js"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -53,164 +54,12 @@ def _load_login_locale() -> dict:
 
 
 def _i18n_top_level_locale_keys() -> list[str]:
-    """Return the ordered list of top-level locale keys defined in static/i18n.js LOCALES."""
-    src = I18N_PATH.read_text(encoding="utf-8")
-    # Find `const LOCALES = {`
-    m = re.search(r"const\s+LOCALES\s*=\s*\{", src)
-    assert m, "LOCALES object not found in static/i18n.js"
-    body_start = m.end()
-    # Walk braces to find matching close, respecting strings/comments
-    depth = 1
-    i = body_start
-    n = len(src)
-    while i < n and depth > 0:
-        ch = src[i]
-        if ch == "/" and i + 1 < n and src[i + 1] == "/":
-            nl = src.find("\n", i)
-            i = n if nl < 0 else nl + 1
-            continue
-        if ch == "/" and i + 1 < n and src[i + 1] == "*":
-            end = src.find("*/", i + 2)
-            i = n if end < 0 else end + 2
-            continue
-        if ch in ("'", '"'):
-            q = ch
-            i += 1
-            while i < n and src[i] != q:
-                i += 2 if src[i] == "\\" else 1
-            i += 1
-            continue
-        if ch == "`":
-            i += 1
-            while i < n and src[i] != "`":
-                i += 2 if src[i] == "\\" else 1
-            i += 1
-            continue
-        if ch == "{":
-            depth += 1
-            i += 1
-            continue
-        if ch == "}":
-            depth -= 1
-            if depth == 0:
-                body_end = i
-                break
-            i += 1
-            continue
-        i += 1
-    else:
-        raise AssertionError("LOCALES object never closed in static/i18n.js")
-
-    body = src[body_start:body_end]
-
-    # Top-level locale keys are at 2-space indent: either `xx: {` or `'xx-Hant': {`.
-    # Use brace-tracking so we only pick up *top-level* keys, not nested ones.
-    keys: list[str] = []
-    j = 0
-    sub_depth = 0
-    blen = len(body)
-    while j < blen:
-        ch = body[j]
-        if ch == "/" and j + 1 < blen and body[j + 1] == "/":
-            nl = body.find("\n", j)
-            j = blen if nl < 0 else nl + 1
-            continue
-        if ch == "/" and j + 1 < blen and body[j + 1] == "*":
-            end = body.find("*/", j + 2)
-            j = blen if end < 0 else end + 2
-            continue
-        if ch in ("'", '"'):
-            q = ch
-            j += 1
-            while j < blen and body[j] != q:
-                j += 2 if body[j] == "\\" else 1
-            j += 1
-            continue
-        if ch == "`":
-            j += 1
-            while j < blen and body[j] != "`":
-                j += 2 if body[j] == "\\" else 1
-            j += 1
-            continue
-        if ch == "{":
-            sub_depth += 1
-            j += 1
-            continue
-        if ch == "}":
-            sub_depth -= 1
-            j += 1
-            continue
-        # Detect top-level key only when sub_depth is 0 and we're at the start
-        # of a fresh line (after a newline) at column 2.
-        if sub_depth == 0 and ch == "\n":
-            # Look at the next characters: `  KEY: {` where KEY is identifier or 'identifier-with-dash'
-            tail = body[j + 1 : j + 200]
-            mk = re.match(
-                r"  (?:'(?P<q>[A-Za-z][A-Za-z0-9_-]*)'|(?P<u>[A-Za-z][A-Za-z0-9_]*))\s*:\s*\{",
-                tail,
-            )
-            if mk:
-                keys.append(mk.group("q") or mk.group("u"))
-        j += 1
-    # Deduplicate while preserving order (LOCALES is a single object so no dups expected,
-    # but be defensive in case the file ever picks them up).
-    seen = set()
-    ordered_unique = []
-    for k in keys:
-        if k not in seen:
-            seen.add(k)
-            ordered_unique.append(k)
-    return ordered_unique
+    """Return the ordered locale codes from the eager registry manifest."""
+    return locale_codes()
 
 
 def _i18n_locale_block(loc: str) -> str:
-    """Return the body of a specific top-level locale block in i18n.js."""
-    src = I18N_PATH.read_text(encoding="utf-8")
-    if "-" in loc:
-        head = re.compile(rf"^  '{re.escape(loc)}':\s*\{{", re.M)
-    else:
-        head = re.compile(rf"^  {re.escape(loc)}:\s*\{{", re.M)
-    hm = head.search(src)
-    assert hm, f"locale {loc!r} not found in i18n.js"
-    body_start = hm.end()
-    depth = 1
-    i = body_start
-    n = len(src)
-    while i < n and depth > 0:
-        ch = src[i]
-        if ch == "/" and i + 1 < n and src[i + 1] == "/":
-            nl = src.find("\n", i)
-            i = n if nl < 0 else nl + 1
-            continue
-        if ch == "/" and i + 1 < n and src[i + 1] == "*":
-            end = src.find("*/", i + 2)
-            i = n if end < 0 else end + 2
-            continue
-        if ch in ("'", '"'):
-            q = ch
-            i += 1
-            while i < n and src[i] != q:
-                i += 2 if src[i] == "\\" else 1
-            i += 1
-            continue
-        if ch == "`":
-            i += 1
-            while i < n and src[i] != "`":
-                i += 2 if src[i] == "\\" else 1
-            i += 1
-            continue
-        if ch == "{":
-            depth += 1
-            i += 1
-            continue
-        if ch == "}":
-            depth -= 1
-            if depth == 0:
-                return src[body_start:i]
-            i += 1
-            continue
-        i += 1
-    raise AssertionError(f"locale {loc!r} block never closed")
+    return locale_block(loc)
 
 
 # Required sub-keys for every _LOGIN_LOCALE entry.
@@ -225,7 +74,7 @@ REQUIRED_LOGIN_KEYS = (
 )
 
 # Login-flow user-facing keys that must be translated (non-English) in every locale.
-# Adding a new locale to i18n.js without these translated will leak English to the
+# Adding a new locale to split locale bundles without these translated will leak English to the
 # user during the very first run / login experience.
 LOGIN_FLOW_TRANSLATED_KEYS = (
     "login_title",
@@ -248,7 +97,7 @@ LOGIN_FLOW_TRANSLATED_KEYS = (
 
 
 def test_every_i18n_locale_has_login_locale_entry():
-    """Every locale in static/i18n.js LOCALES must also exist as a key in _LOGIN_LOCALE."""
+    """Every locale in static/split locale bundles LOCALES must also exist as a key in _LOGIN_LOCALE."""
     i18n_keys = _i18n_top_level_locale_keys()
     login = _load_login_locale()
     missing = [k for k in i18n_keys if k not in login]
@@ -315,7 +164,7 @@ def _value_of(seg: str, key: str) -> str | None:
 
 @pytest.mark.parametrize("loc_key", ["es", "de", "ru", "zh", "zh-Hant", "ja", "pt", "ko", "pl"])
 def test_login_flow_keys_are_translated(loc_key: str):
-    """Login/sign-out/password keys in static/i18n.js must NOT equal the English value.
+    """Login/sign-out/password keys in static/split locale bundles must NOT equal the English value.
 
     This guards the `ko` 10-key, `es` 3-key, and `pt` 3-key gaps closed in this PR.
     Adding a new locale that copies English values for these keys leaks English to
@@ -331,7 +180,7 @@ def test_login_flow_keys_are_translated(loc_key: str):
             leaks.append(f"{k}={loc_val!r}")
     assert not leaks, (
         f"Locale {loc_key!r} leaks English for login-flow keys: {leaks}. "
-        f"Translate these in static/i18n.js (issue #1442)."
+        f"Translate these in static/split locale bundles (issue #1442)."
     )
 
 
@@ -361,5 +210,5 @@ def test_session_management_keys_present(loc_key: str):
     missing = [k for k in SESSION_MANAGEMENT_KEYS if _value_of(seg, k) is None]
     assert not missing, (
         f"Locale {loc_key!r} is missing session-management keys: {missing}. "
-        f"Add translations in static/i18n.js (issue #2112)."
+        f"Add translations in static/split locale bundles (issue #2112)."
     )

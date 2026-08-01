@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression tests for issue #696 — MCP server visibility panel MVP."""
 from pathlib import Path
 
@@ -33,7 +34,7 @@ def test_mcp_panel_renders_status_badges_tool_counts_and_empty_error_states():
 
 
 def test_mcp_i18n_includes_visibility_status_labels():
-    i18n = read("static/i18n.js")
+    i18n = locale_source_text()
     for key in [
         "mcp_status_active",
         "mcp_status_configured",

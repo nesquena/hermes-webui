@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """
 Sprint 42 Tests: SessionDB injection into AIAgent for WebUI sessions (PR #356).
 
@@ -660,7 +661,7 @@ class TestModelCustomInput(unittest.TestCase):
                       '.model-custom-input must be defined in style.css')
 
     def test_model_custom_i18n_keys(self):
-        i18n = self._read('i18n.js')
+        i18n = self.locale_source_text()
         # Find en locale block (appears first before es)
         en_block_start = i18n.find("'en'")
         es_block_start = i18n.find("'es'")

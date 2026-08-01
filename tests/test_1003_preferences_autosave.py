@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression checks for Issue #1003 Phase 2: Preferences settings autosave (PR #1369).
 
 Mirrors the structure of test_1003_appearance_autosave.py to verify the
@@ -15,7 +16,7 @@ from pathlib import Path
 
 PANELS_JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (Path(__file__).parent.parent / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def _function_block(src: str, name: str) -> str:
