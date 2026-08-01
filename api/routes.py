@@ -14390,6 +14390,7 @@ def handle_post(handler, parsed) -> bool:
                 # so `+ " (copy)"` doesn't TypeError.
                 title=(session.title or "Untitled") + " (copy)",
                 workspace=session.workspace,
+                session_start_workspace=getattr(session, "session_start_workspace", session.workspace),
                 model=session.model,
                 model_provider=session.model_provider,
                 messages=copy.deepcopy(session.messages),
@@ -15204,6 +15205,7 @@ def handle_post(handler, parsed) -> bool:
         )
         branch = Session(
             workspace=source.workspace,
+            session_start_workspace=getattr(source, "session_start_workspace", source.workspace),
             model=source.model,
             model_provider=getattr(source, "model_provider", None),
             profile=getattr(source, "profile", None),
@@ -21852,6 +21854,11 @@ def _handle_session_compression_recovery_start(handler, body):
                 session_id=uuid.uuid4().hex[:12],
                 title=title,
                 workspace=getattr(source, "workspace", get_last_workspace()),
+                session_start_workspace=getattr(
+                    source,
+                    "session_start_workspace",
+                    getattr(source, "workspace", get_last_workspace()),
+                ),
                 model=getattr(source, "model", None),
                 model_provider=getattr(source, "model_provider", None),
                 messages=[],
@@ -22491,19 +22498,12 @@ def _handle_chat_sync(handler, body):
                 _sanitize_messages_for_api,
                 _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
+                _webui_workspace_system_prompt,
                 _workspace_context_prefix,
             )
             workspace_ctx = _workspace_context_prefix(str(s.workspace))
             workspace_system_msg = (
-                f"Active workspace at session start: {s.workspace}\n"
-                "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
-                "workspace the user has selected in the web UI at the time they sent that message. "
-                "This tag is the single authoritative source of the active workspace and updates "
-                "with every message. It overrides any prior workspace mentioned in this system "
-                "prompt, memory, or conversation history. Always use the value from the most recent "
-                "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
-                "write_file, read_file, search_files, terminal workdir, and patch. "
-                "Never fall back to a hardcoded path when this tag is present.\n\n"
+                _webui_workspace_system_prompt(s.session_start_workspace) + "\n\n"
                 f"{_WEBUI_PROGRESS_PROMPT}\n\n"
                 "WebUI external-notes/durable-memory policy: Do not copy or dump this browser transcript "
                 "into external notes or durable memory by default. Write or update durable "

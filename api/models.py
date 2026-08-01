@@ -1188,6 +1188,7 @@ def model_explicit_pick_signature(model, model_provider) -> str:
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL,
+                 session_start_workspace=None,
                  model_provider=None,
                  messages=None, created_at=None, updated_at=None,
                  tool_calls=None, pinned: bool=False, archived: bool=False,
@@ -1238,6 +1239,9 @@ class Session:
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
         self.workspace = str(Path(workspace).expanduser().resolve())
+        self.session_start_workspace = str(
+            Path(session_start_workspace or self.workspace).expanduser().resolve()
+        )
         self.model = model
         self.model_provider = str(model_provider).strip().lower() if model_provider else None
         # #5979: signature of the model the user DELIBERATELY picked this session
@@ -1369,7 +1373,7 @@ class Session:
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
-            'session_id', 'title', 'workspace', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
+            'session_id', 'title', 'workspace', 'session_start_workspace', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
             'pinned', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
@@ -1539,7 +1543,13 @@ class Session:
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        _legacy_session_start_workspace = not data.get('session_start_workspace')
         session = cls(**data)
+        if _legacy_session_start_workspace:
+            try:
+                session.save(touch_updated_at=False, skip_index=True)
+            except Exception:
+                logger.debug("Failed to persist session-start workspace for %s", sid, exc_info=True)
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
@@ -1594,6 +1604,8 @@ class Session:
             parsed = json.loads(prefix)
             needed = {'session_id', 'title', 'created_at', 'updated_at'}
             if not needed.issubset(parsed.keys()):
+                return cls.load(sid)
+            if not parsed.get('session_start_workspace'):
                 return cls.load(sid)
             parsed['messages'] = []
             parsed['tool_calls'] = []
@@ -1713,6 +1725,7 @@ class Session:
             'session_id': self.session_id,
             'title': self.title,
             'workspace': self.workspace,
+            'session_start_workspace': self.session_start_workspace,
             'model': self.model,
             'model_provider': self.model_provider,
             'message_count': message_count,

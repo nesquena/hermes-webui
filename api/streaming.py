@@ -737,6 +737,21 @@ def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
     return "\n".join(lines)
 
 
+def _webui_workspace_system_prompt(workspace: str) -> str:
+    """Build the stable session-start workspace instructions."""
+    return (
+        f"Active workspace at session start: {workspace}\n"
+        "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
+        "workspace the user has selected in the web UI at the time they sent that message. "
+        "This tag is the single authoritative source of the active workspace and updates "
+        "with every message. It overrides any prior workspace mentioned in this system "
+        "prompt, memory, or conversation history. Always use the value from the most recent "
+        "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
+        "write_file, read_file, search_files, terminal workdir, and patch. "
+        "Never fall back to a hardcoded path when this tag is present."
+    )
+
+
 def _webui_ephemeral_system_prompt(
     personality_prompt: Optional[str],
     surface_context: Optional[dict] = None,
@@ -9414,17 +9429,7 @@ def _run_agent_streaming(
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
             workspace_ctx = _workspace_context_prefix(str(s.workspace))
-            workspace_system_msg = (
-                f"Active workspace at session start: {s.workspace}\n"
-                "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
-                "workspace the user has selected in the web UI at the time they sent that message. "
-                "This tag is the single authoritative source of the active workspace and updates "
-                "with every message. It overrides any prior workspace mentioned in this system "
-                "prompt, memory, or conversation history. Always use the value from the most recent "
-                "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
-                "write_file, read_file, search_files, terminal workdir, and patch. "
-                "Never fall back to a hardcoded path when this tag is present."
-            )
+            workspace_system_msg = _webui_workspace_system_prompt(s.session_start_workspace)
             # Resolve personality prompt from config.yaml agent.personalities
             # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)
             _personality_prompt = None
@@ -9453,7 +9458,7 @@ def _run_agent_streaming(
                     'source': 'webui',
                     'session_id': session_id,
                     'profile': getattr(s, 'profile', None),
-                    'workspace': s.workspace,
+                    'workspace': s.session_start_workspace,
                 },
                 config_data=_cfg,
             )
