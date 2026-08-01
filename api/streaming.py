@@ -783,8 +783,13 @@ def _webui_session_workspace_prompts(
     session_start_workspace = str(
         getattr(session, "session_start_workspace", None) or current_workspace
     )
+    try:
+        workspace_ctx = _workspace_context_prefix(current_workspace)
+    except Exception:
+        # Keep the current-turn authority available when prefix enrichment degrades.
+        workspace_ctx = f"[Workspace::v1: {_escape_workspace_prefix_path(current_workspace)}]\n"
     return {
-        "workspace_ctx": _workspace_context_prefix(current_workspace),
+        "workspace_ctx": workspace_ctx,
         "system_prompt": _webui_workspace_system_prompt(session_start_workspace),
         "ephemeral_system_prompt": _webui_ephemeral_system_prompt(
             personality_prompt,

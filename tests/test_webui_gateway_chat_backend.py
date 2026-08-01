@@ -7,6 +7,8 @@ import re
 import time
 import urllib.error
 
+import pytest
+
 import api.gateway_chat as gateway_chat
 import api.models as models
 import api.streaming as streaming
@@ -1489,6 +1491,87 @@ def test_gateway_runs_api_body_includes_session_id():
     finally:
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
+
+
+@pytest.mark.parametrize("use_runs_api", [False, True], ids=["legacy", "runs"])
+def test_gateway_degraded_prefill_and_prefix_keep_frozen_authority_and_current_tag(
+    tmp_path, monkeypatch, use_runs_api
+):
+    """Gateway fallback work must retain both prompt authorities."""
+    from unittest.mock import MagicMock
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_USE_RUNS_API", "1" if use_runs_api else "0")
+    monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *_args: use_runs_api)
+
+    initial = tmp_path / "initial-workspace"
+    current = tmp_path / "current-workspace"
+    s = new_session(workspace=str(initial))
+    s.workspace = str(initial)
+    s.active_stream_id = f"stream-gateway-degraded-{'runs' if use_runs_api else 'legacy'}"
+    s.pending_user_message = "hello"
+    s.pending_started_at = 1
+    monkeypatch.setattr(gateway_chat, "get_session", lambda _session_id: s)
+    channel = MagicMock()
+    channel.put_nowait = lambda _item: None
+    STREAMS[s.active_stream_id] = channel
+
+    def raise_prefill(_cfg):
+        raise RuntimeError("prefill unavailable")
+
+    def raise_prefix(_path):
+        raise RuntimeError("prefix unavailable")
+
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", raise_prefill)
+    monkeypatch.setattr(streaming, "_workspace_context_prefix", raise_prefix)
+    captured = {}
+    calls = 0
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size=65536):
+            return json.dumps({"run_id": "run-degraded"}).encode()
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    def fake_urlopen(req, timeout=0):
+        nonlocal calls
+        calls += 1
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return Response()
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    try:
+        gateway_chat._run_gateway_chat_streaming(
+            s.session_id, "hello", "test-model", str(current), s.active_stream_id
+        )
+    finally:
+        STREAMS.pop(s.active_stream_id, None)
+
+    body = captured["body"]
+    if use_runs_api:
+        assert "Active workspace at session start:" in body["instructions"]
+        assert "Final visible assistant replies" in body["instructions"]
+        escaped_current = str(current).replace("\\", "\\\\").replace("]", "\\]")
+        assert body["input"] == f"[Workspace::v1: {escaped_current}]\nhello"
+    else:
+        system = body["messages"][0]["content"]
+        assert "Active workspace at session start:" in system
+        assert "Final visible assistant replies" in system
+        escaped_current = str(current).replace("\\", "\\\\").replace("]", "\\]")
+        assert body["messages"][-1]["content"] == f"[Workspace::v1: {escaped_current}]\nhello"
 
 
 def test_gateway_runs_api_classifies_terminal_provider_error(tmp_path, monkeypatch):

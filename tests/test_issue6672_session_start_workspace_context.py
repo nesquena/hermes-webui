@@ -567,6 +567,7 @@ def test_run_agent_streaming_composes_frozen_context_through_production_worker(t
 
     class FakeAgent:
         def __init__(self, **kwargs):
+            captured["agent"] = self
             self.context_compressor = None
             self.ephemeral_system_prompt = None
             self.stream_delta_callback = kwargs.get("stream_delta_callback")
@@ -617,6 +618,7 @@ def test_run_agent_streaming_composes_frozen_context_through_production_worker(t
     finally:
         streaming.STREAMS.pop(session.active_stream_id, None)
     assert captured["system_message"] == streaming._webui_workspace_system_prompt(str(initial.resolve()))
+    assert "Final visible assistant replies" in captured["agent"].ephemeral_system_prompt
     assert captured["user_message"] == streaming._workspace_context_prefix(str(changed)) + "hello"
 
 

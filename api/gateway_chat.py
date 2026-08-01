@@ -38,6 +38,11 @@ from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
 
 logger = logging.getLogger(__name__)
 
+
+def _gateway_workspace_context_fallback(workspace):
+    escaped = str(workspace or "").replace("\\", "\\\\").replace("]", "\\]")
+    return f"[Workspace::v1: {escaped}]\n"
+
 # Maps stream_id -> gateway run_id for approval response relay.
 _STREAM_RUN_IDS: dict[str, str] = {}
 _STREAM_RUN_LIFECYCLE: dict[str, dict[str, Any]] = {}
@@ -488,7 +493,10 @@ def _run_gateway_runs_api_streaming(
             headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
         from api.streaming import _workspace_context_prefix
 
-        workspace_ctx = _workspace_context_prefix(str(workspace))
+        try:
+            workspace_ctx = _workspace_context_prefix(str(workspace))
+        except Exception:
+            workspace_ctx = _gateway_workspace_context_fallback(workspace)
         message_content: Any = workspace_ctx + str(msg_text or "")
         if attachments:
             try:
@@ -499,6 +507,48 @@ def _run_gateway_runs_api_streaming(
                 logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
                 message_content = workspace_ctx + str(msg_text or "")
         from api.streaming import _strip_oob_blocks
+
+        if not any(
+            isinstance(entry, dict) and str(entry.get("role") or "").strip().lower() == "system"
+            for entry in prefill_messages or []
+        ):
+            try:
+                from api.streaming import _webui_session_workspace_prompts
+
+                _workspace_prompts = _webui_session_workspace_prompts(
+                    session,
+                    workspace=workspace,
+                    config_data=cfg,
+                )
+                _gateway_system_prompt = (
+                    _workspace_prompts["system_prompt"]
+                    + "\n\n"
+                    + _workspace_prompts["ephemeral_system_prompt"]
+                )
+            except Exception:
+                from api.streaming import (
+                    _webui_ephemeral_system_prompt,
+                    _webui_workspace_system_prompt,
+                )
+
+                session_start_workspace = str(
+                    getattr(session, "session_start_workspace", None) or workspace or ""
+                )
+                _gateway_system_prompt = (
+                    _webui_workspace_system_prompt(session_start_workspace)
+                    + "\n\n"
+                    + _webui_ephemeral_system_prompt(
+                        None,
+                        surface_context={
+                            "source": "webui",
+                            "session_id": getattr(session, "session_id", None),
+                            "profile": getattr(session, "profile", None),
+                            "workspace": session_start_workspace,
+                        },
+                        config_data=cfg,
+                    )
+                )
+            prefill_messages = [{"role": "system", "content": _gateway_system_prompt}, *prefill_messages]
 
         instructions_parts = []
         conversation_history = []
@@ -917,16 +967,14 @@ def _run_gateway_chat_streaming(
             workspace_ctx = _workspace_context_prefix(str(workspace))
         except Exception:
             logger.debug("Failed to build Gateway workspace prefix", exc_info=True)
+            workspace_ctx = _gateway_workspace_context_fallback(workspace)
+        prefill_messages = []
+        _gateway_system_prompt = ""
         try:
             from api.streaming import (
-                _load_webui_prefill_context,
-                _prefill_messages_with_webui_context,
-                _normalize_prefill_messages_before_user_turn,
-                _public_prefill_context_status,
                 _webui_session_workspace_prompts,
             )
 
-            prefill_context = _load_webui_prefill_context(cfg)
             # #3324: the WebUI session/delivery context (connected platforms,
             # home channels, delivery hints, session framing) is now carried in
             # the ephemeral system prompt rather than a prefill `user` message.
@@ -942,19 +990,62 @@ def _run_gateway_chat_streaming(
                 + "\n\n"
                 + _workspace_prompts["ephemeral_system_prompt"]
             )
+        except Exception:
+            logger.debug("Failed to build WebUI gateway system prompt", exc_info=True)
+            try:
+                from api.streaming import (
+                    _webui_ephemeral_system_prompt,
+                    _webui_workspace_system_prompt,
+                )
+
+                session_start_workspace = str(
+                    getattr(s, "session_start_workspace", None) or workspace or ""
+                )
+                _gateway_system_prompt = (
+                    _webui_workspace_system_prompt(session_start_workspace)
+                    + "\n\n"
+                    + _webui_ephemeral_system_prompt(
+                        None,
+                        surface_context={
+                            "source": "webui",
+                            "session_id": getattr(s, "session_id", None),
+                            "profile": getattr(s, "profile", None),
+                            "workspace": session_start_workspace,
+                        },
+                        config_data=cfg,
+                    )
+                )
+            except Exception:
+                session_start_workspace = str(
+                    getattr(s, "session_start_workspace", None) or workspace or ""
+                )
+                _gateway_system_prompt = (
+                    f"Active workspace at session start: {session_start_workspace}\n"
+                    "Every user message is prefixed with [Workspace::v1: /absolute/path] "
+                    "indicating the workspace selected for that message."
+                )
+        try:
+            from api.streaming import (
+                _load_webui_prefill_context,
+                _prefill_messages_with_webui_context,
+                _normalize_prefill_messages_before_user_turn,
+                _public_prefill_context_status,
+            )
+
+            prefill_context = _load_webui_prefill_context(cfg)
             prefill_messages = _prefill_messages_with_webui_context(prefill_context, cfg)
             prefill_messages = _normalize_prefill_messages_before_user_turn(prefill_messages)
-            prefill_messages = [
-                {"role": "system", "content": _gateway_system_prompt},
-                *prefill_messages,
-            ]
             put_gateway_event("context_status", {
                 "session_id": session_id,
                 "prefill": _public_prefill_context_status(prefill_context),
             })
         except Exception:
             logger.debug("Failed to load WebUI gateway prefill context", exc_info=True)
-            prefill_messages = []
+        if _gateway_system_prompt:
+            prefill_messages = [
+                {"role": "system", "content": _gateway_system_prompt},
+                *prefill_messages,
+            ]
         if _use_runs_api:
             body_extras = {}
             if model_provider:
