@@ -539,14 +539,17 @@ def _record_session_skill_provenance(session_id, handler, skill_name) -> bool:
     sid = str(session_id or '').strip()
     if not sid:
         return False
-    try:
-        session = get_session(sid)
-    except KeyError:
-        return False
-    if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
-        return False
     with _get_session_agent_lock(sid):
-        if not session.record_server_skill_names([skill_name]):
+        try:
+            session = get_session(sid)
+        except KeyError:
+            return None
+        if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
+            return False
+        if _session_is_subagent_view_only(sid):
+            return False
+        names = skill_name if isinstance(skill_name, (list, tuple, set)) else [skill_name]
+        if not session.record_server_skill_names(names):
             return False
         session.save(touch_updated_at=False, skip_index=True)
     return True
@@ -13651,11 +13654,13 @@ def handle_get(handler, parsed) -> bool:
                 return bad(handler, "File not found", 404)
             resolved = _skill_view_from_file(skill_dir, _skill_md)
             if isinstance(resolved, dict) and resolved.get("success") is True:
-                _record_session_skill_provenance(
+                recorded = _record_session_skill_provenance(
                     qs.get("session_id", [""])[0],
                     handler,
                     resolved.get("name"),
                 )
+                if qs.get("session_id", [""])[0] and recorded is None:
+                    return bad(handler, "Session not found", 404)
             return j(
                 handler,
                 {"content": target.read_text(encoding="utf-8"), "path": file_path},
@@ -13664,11 +13669,13 @@ def handle_get(handler, parsed) -> bool:
         if not isinstance(data.get("linked_files"), dict):
             data["linked_files"] = {}
         if data.get("success") is True:
-            _record_session_skill_provenance(
+            recorded = _record_session_skill_provenance(
                 qs.get("session_id", [""])[0],
                 handler,
                 data.get("name"),
             )
+            if qs.get("session_id", [""])[0] and recorded is None:
+                return bad(handler, "Session not found", 404)
         return j(handler, data)
 
     # ── Memory API (GET) ──
@@ -15538,15 +15545,13 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, _sanitize_error(e), 500)
         session_id = str(body.get("session_id") or "").strip()
         if session_id:
-            try:
-                session = get_session(session_id)
-            except KeyError:
+            recorded = _record_session_skill_provenance(
+                session_id,
+                handler,
+                result.get("loaded_skills"),
+            )
+            if recorded is None:
                 return bad(handler, "Session not found", 404)
-            if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
-                return bad(handler, "Session not found", 404)
-            with _get_session_agent_lock(session_id):
-                if session.record_server_skill_names(result.get("loaded_skills")):
-                    session.save(touch_updated_at=False, skip_index=True)
         return j(handler, result)
 
     if parsed.path == "/api/commands/exec":

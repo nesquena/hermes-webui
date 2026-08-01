@@ -1801,9 +1801,8 @@ class Session:
             self.session_source,
         )
         if any(
-            is_cron_session(self.session_id, str(source or '').strip().lower())
-            or is_webhook_session(self.session_id, str(source or '').strip().lower())
-            or normalize_agent_session_source(source).get('session_source') in {'cron', 'webhook'}
+            normalize_agent_session_source(source).get('session_source')
+            in {'cron', 'background', 'webhook', 'subagent'}
             for source in source_values
         ):
             return False

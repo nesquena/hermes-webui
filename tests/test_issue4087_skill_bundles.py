@@ -44,7 +44,8 @@ def test_frontend_bundle_dispatch_uses_dedicated_metadata_and_resolve_calls():
     assert "api('/api/commands/bundles/resolve'" in COMMANDS_JS
     assert "await loadAgentCommandMetadata();" in COMMANDS_JS
     assert "const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'" in MESSAGES_JS
-    assert "await resolveBundleCommand(text,_bundleCmd)" in MESSAGES_JS
+    assert "const _bundleSessionId=String(S&&S.session&&S.session.session_id||'').trim();" in MESSAGES_JS
+    assert "await resolveBundleCommand(text,{..._bundleCmd,sessionId:_bundleSessionId})" in MESSAGES_JS
 
 
 def test_frontend_checks_agent_ownership_before_bundle_resolution():

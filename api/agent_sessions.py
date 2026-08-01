@@ -55,6 +55,7 @@ CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
 SOURCE_LABELS = {
     'acp': 'ACP',
     'api_server': 'API',
+    'background': 'Background',
     'cli': 'CLI',
     'cron': 'Cron',
     'discord': 'Discord',
@@ -95,6 +96,10 @@ def normalize_agent_session_source(raw_source: str | None) -> dict:
         session_source = 'cron'
     elif raw == 'webhook':
         session_source = 'webhook'
+    elif raw == 'background':
+        session_source = 'background'
+    elif raw == 'subagent':
+        session_source = 'subagent'
     elif raw == 'tool':
         session_source = 'tool'
     elif raw == 'api_server':

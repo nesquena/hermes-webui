@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from pathlib import PurePosixPath, PureWindowsPath
 
 MAX_SKILL_IDENTIFIERS = 64
 MAX_SKILL_IDENTIFIER_LENGTH = 128
@@ -17,6 +18,14 @@ def normalize_skill_identifier(value) -> str | None:
         return None
     name = value.strip()
     if len(name) > MAX_SKILL_IDENTIFIER_LENGTH or not _SKILL_IDENTIFIER.fullmatch(name):
+        return None
+    if (
+        PurePosixPath(name).is_absolute()
+        or PureWindowsPath(name).is_absolute()
+        or PureWindowsPath(name).drive
+        or ".." in PurePosixPath(name).parts
+        or ".." in PureWindowsPath(name).parts
+    ):
         return None
     return name
 

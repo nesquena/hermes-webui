@@ -75,6 +75,11 @@ def test_malformed_oversized_and_raw_values_are_dropped():
     ) == ("review",)
 
 
+def test_path_shaped_skill_identifiers_match_agent_lookup_guards():
+    for value in ("C:/private", r"C:\private", "foo/../bar", "../outside"):
+        assert normalize_skill_provenance({value: 1}) == {}
+
+
 def test_bundle_resolver_preserves_its_existing_loaded_skills_response(monkeypatch):
     agent_pkg = ModuleType("agent")
     skill_bundles = ModuleType("agent.skill_bundles")
@@ -175,6 +180,26 @@ def test_bundle_route_records_session_and_separates_session_errors(monkeypatch):
     assert errors == {"message": "Session not found", "status": 404}
 
 
+def test_provenance_writer_saves_only_after_locked_session_recheck(monkeypatch):
+    session = Session(session_id="issue6593-lock-recheck", profile="default")
+    saved = []
+    session.save = lambda **kwargs: saved.append(kwargs)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
+
+    assert routes._record_session_skill_provenance(
+        session.session_id, None, "review"
+    ) is True
+    assert saved == [{"touch_updated_at": False, "skip_index": True}]
+
+
+def test_provenance_writer_returns_404_state_after_locked_recheck(monkeypatch):
+    monkeypatch.setattr(routes, "get_session", lambda _sid: (_ for _ in ()).throw(KeyError("deleted")))
+
+    assert routes._record_session_skill_provenance(
+        "issue6593-deleted-race", None, "review"
+    ) is None
+
+
 def test_session_lineage_variants_preserve_or_reject_provenance():
     parent = Session(
         session_id="issue6593-lineage",
@@ -193,14 +218,22 @@ def test_session_lineage_variants_preserve_or_reject_provenance():
 
 
 def test_cron_webhook_and_read_only_variants_reject_writes():
+    ordinary = Session(session_id="cron_issue6593")
+    assert ordinary.record_server_skill_names(["client"]) is True
+
     variants = [
-        {"session_id": "cron_issue6593"},
         {"source_tag": "cron"},
         {"raw_source": "cron"},
         {"session_source": "cron"},
+        {"source_tag": "background"},
+        {"raw_source": "background"},
+        {"session_source": "background"},
         {"source_tag": "webhook"},
         {"raw_source": "webhook"},
         {"session_source": "webhook"},
+        {"source_tag": "subagent"},
+        {"raw_source": "subagent"},
+        {"session_source": "subagent"},
         {"read_only": True},
     ]
     for index, kwargs in enumerate(variants):

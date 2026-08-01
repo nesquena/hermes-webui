@@ -87,6 +87,8 @@ def test_use_fetches_canonical_skill_content():
         "cmdUse must fetch the canonical skill content after resolving the canonical skill name"
     assert "typeof detail.content==='string' ? detail.content.trim() : ''" in src, \
         "cmdUse must reject missing or non-string skill content"
+    assert "const sessionId = String(pending.sessionId||'').trim();" in src
+    assert "const cancelPending = () =>" in src
 
 
 def test_pending_promise_set_synchronously():
@@ -121,8 +123,8 @@ def test_directive_only_consumed_by_matching_session():
     src = read("static/messages.js")
     assert "const _pending=_forcedSkillDirectivePending;" in src, \
         "send() must snapshot the pending directive before awaiting it"
-    assert "if(!_pending.sessionId||_pending.sessionId===activeSid){" in src, \
-        "send() must only consume /use directives issued for the active session"
+    assert "if(_pending.sessionId && _pending.sessionId!==activeSid){" in src, \
+        "send() must clear /use directives issued for a different session"
     assert "if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;" in src, \
         "send() must not clear a newer pending directive created while awaiting"
     assert "[FORCED SKILL CONTEXT: ${_forcedSkillName}]" in src, \

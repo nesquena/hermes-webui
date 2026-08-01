@@ -1536,19 +1536,27 @@ async function send(){
           renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
         }
       }
+      const _bundleSessionId=String(S&&S.session&&S.session.session_id||'').trim();
       const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'
         ? await getBundleCommandMetadata(_parsedCmd.name)
         : null;
       if(_bundleCmd){
         try{
           const _bundleResolved=typeof resolveBundleCommand==='function'
-            ? await resolveBundleCommand(text,_bundleCmd)
+            ? await resolveBundleCommand(text,{..._bundleCmd,sessionId:_bundleSessionId})
             : null;
+          if(_bundleSessionId && String(S&&S.session&&S.session.session_id||'').trim()!==_bundleSessionId){
+            throw new Error('Session changed while resolving bundle command.');
+          }
           const _bundleMessage=String(_bundleResolved&&_bundleResolved.message||'').trim();
           if(!_bundleMessage) throw new Error('Bundle command runtime returned no invocation text.');
           _slashDisplayTextOverride=text;
           text=_bundleMessage;
         }catch(e){
+          if(_bundleSessionId && String(S&&S.session&&S.session.session_id||'').trim()!==_bundleSessionId){
+            showToast('Bundle command canceled because the active session changed.');
+            return;
+          }
           if(!S.session){await newSession();await renderSessionList();}
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
@@ -1611,7 +1619,9 @@ async function send(){
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
   if(_forcedSkillDirectivePending){
     const _pending=_forcedSkillDirectivePending;
-    if(!_pending.sessionId||_pending.sessionId===activeSid){
+    if(_pending.sessionId && _pending.sessionId!==activeSid){
+      if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
+    } else {
       const _directivePayload = await _pending.promise;
       if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
       if(_directivePayload){
