@@ -283,20 +283,24 @@ async function activateLocale(lang) {
     await ensureLocale(requested);
   } catch (_) {
     if (!isCurrent()) {
-      return { status: 'superseded', requested, active: getActiveLocale(), fallback: true };
+      return { status: 'superseded', requested, active: getActiveLocale(), fallback: true, generation };
     }
     const fallback = LOCALES[previous] ? previous : 'en';
     setLocale(fallback);
     if (typeof applyLocaleToDOM === 'function') applyLocaleToDOM();
-    return { status: 'fallback', requested, active: fallback, fallback: true };
+    return { status: 'fallback', requested, active: fallback, fallback: true, generation };
   }
   if (!isCurrent()) {
-    return { status: 'superseded', requested, active: getActiveLocale(), fallback: requested !== getActiveLocale() };
+    return { status: 'superseded', requested, active: getActiveLocale(), fallback: requested !== getActiveLocale(), generation };
   }
   setLocale(requested);
   if (typeof applyLocaleToDOM === 'function') applyLocaleToDOM();
   const active = getActiveLocale();
-  return { status: requested === active ? 'applied' : 'fallback', requested, active, fallback: requested !== active };
+  return { status: requested === active ? 'applied' : 'fallback', requested, active, fallback: requested !== active, generation };
+}
+
+function getLocaleActivationGeneration() {
+  return _activationGeneration;
 }
 
 function loadLocale() {
