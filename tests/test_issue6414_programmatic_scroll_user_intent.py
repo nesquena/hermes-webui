@@ -9,18 +9,24 @@ REPO = Path(__file__).resolve().parents[1]
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 
 
-def _function_body(name: str) -> str:
+SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
+
+
+def _function_body(name: str, source: str = UI_JS) -> str:
     marker = f"function {name}"
-    start = UI_JS.index(marker)
-    brace = UI_JS.index("{", start)
+    start = source.find(marker)
+    if start < 0:
+        marker = f"async function {name}"
+        start = source.index(marker)
+    brace = source.index("{", start)
     depth = 0
-    for index in range(brace, len(UI_JS)):
-        if UI_JS[index] == "{":
+    for index in range(brace, len(source)):
+        if source[index] == "{":
             depth += 1
-        elif UI_JS[index] == "}":
+        elif source[index] == "}":
             depth -= 1
             if depth == 0:
-                return UI_JS[start : index + 1]
+                return source[start : index + 1]
     raise AssertionError(f"{name} did not terminate")
 
 
@@ -110,3 +116,35 @@ def test_small_upward_wheel_does_not_unpin_after_programmatic_guard_stales():
     assert result["scrollPinned"] is True
     assert result["programmaticScroll"] is False
     assert result["cancels"] == 0
+
+
+def test_older_message_fallback_refreshes_programmatic_scroll_clock_after_slow_render():
+    """The actual older-message fallback must timestamp its own scroll write."""
+    fallback = _function_body("_loadOlderMessages", SESSIONS_JS)
+    assert "renderMessages({ preserveScroll: true });" in fallback
+    assert (
+        "_programmaticScroll = true;\n"
+        "        _programmaticScrollSetAt = performance.now();\n"
+        "        container.scrollTop = oldTop + addedHeight;"
+    ) in fallback
+
+    script = f"""
+let now = 1000;
+const performance = {{ now: () => now }};
+let _programmaticScroll = true;
+let _programmaticScrollSetAt = now;
+const PROGRAMMATIC_SCROLL_VALID_MS = 150;
+const container = {{ scrollTop: 0 }};
+{_function_body('_freshProgrammaticScrollActive')}
+now += 200;
+if (_freshProgrammaticScrollActive()) throw new Error('pre-render latch unexpectedly fresh');
+_programmaticScroll = true;
+_programmaticScrollSetAt = performance.now();
+container.scrollTop = 300;
+if (!_freshProgrammaticScrollActive()) throw new Error('fallback write did not refresh latch');
+now += 151;
+if (_freshProgrammaticScrollActive()) throw new Error('fallback latch did not expire from its write');
+console.log(JSON.stringify({{scrollTop: container.scrollTop}}));
+"""
+    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    assert json.loads(result.stdout) == {"scrollTop": 300}
