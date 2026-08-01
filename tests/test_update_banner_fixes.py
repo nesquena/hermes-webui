@@ -2586,7 +2586,6 @@ class TestSequentialUpdateRestartCoordination:
 
     def test_schedule_restart_waits_for_apply_lock(self, monkeypatch):
         """The restart safety wait and execv must run inside _apply_lock."""
-        import api.updates as upd
         import inspect
 
         source = inspect.getsource(_REAL_SCHEDULE_RESTART)
