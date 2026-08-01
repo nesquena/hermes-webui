@@ -24,7 +24,7 @@ REPO_ROOT = Path(__file__).parent.parent.resolve()
 PANELS_JS_PATH = REPO_ROOT / "static" / "panels.js"
 PANELS_JS = PANELS_JS_PATH.read_text(encoding="utf-8")
 
-_REPRO_PATH = REPO_ROOT / "tests" / "fixtures" / "webui-PR-TARGET-6612-REPRO.json"
+_REPRO_PATH = REPO_ROOT / "tests" / "fixtures" / "issue6612_update_channel_repro.json"
 with _REPRO_PATH.open(encoding="utf-8") as _f:
     _REPRO = json.load(_f)
 
@@ -563,29 +563,195 @@ def test_channel_writer_rejected_post():
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_channel_writer_missing_key_in_response():
-    """Server response missing update_channel key must fall back to 'stable'.
+def test_channel_writer_undefined_response():
+    """api() returning undefined (workspace.js:63: 401 redirect path) must
+    fall back to val, not to 'stable'.
 
-    POST /api/settings can theoretically return a partial dict (e.g., if the
-    route strips unknown keys). The JS guard defaults to 'stable' in that case.
-    This tests the defensive fallback on the confirmed-value extraction path.
+    When a session expires, api() resolves with undefined rather than throwing.
+    The confirmed-value extraction must not silently revert the selector to
+    'stable' when the user picked 'experimental'.
     """
     script = _channel_writer_script_prelude(PANELS_JS) + """
 (async () => {
-  global.api = async function() { return {}; };  // no update_channel key
-  global._confirmedUpdateChannel = null;
+  global.api = async function() { return undefined; };
+  global._confirmedUpdateChannel = 'stable';
   const sel = { value: 'experimental' };
   await _saveUpdateChannelFromSelector(sel);
   console.log(JSON.stringify({ selectorValue: sel.value, confirmed: _confirmedUpdateChannel }));
 })().catch(err => { console.error(err.message); process.exit(1); });
 """
     result = json.loads(_run_node(script))
-    assert result["selectorValue"] == "stable", (
-        f"missing update_channel in response must fall back to 'stable'; "
+    assert result["selectorValue"] == "experimental", (
+        f"undefined api() response must fall back to val ('experimental'), not 'stable'; "
         f"got {result['selectorValue']!r}"
     )
-    assert result["confirmed"] == "stable", (
-        f"_confirmedUpdateChannel must be set to 'stable'; got {result['confirmed']!r}"
+    assert result["confirmed"] == "experimental", (
+        f"_confirmedUpdateChannel must be set to val ('experimental'); got {result['confirmed']!r}"
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_channel_writer_string_response():
+    """api() returning a string body (workspace.js:81: non-JSON 200 response,
+    e.g. a reverse-proxy auth interstitial) must fall back to val, not to 'stable'.
+    """
+    script = _channel_writer_script_prelude(PANELS_JS) + """
+(async () => {
+  global.api = async function() { return '<html>login required</html>'; };
+  global._confirmedUpdateChannel = 'stable';
+  const sel = { value: 'experimental' };
+  await _saveUpdateChannelFromSelector(sel);
+  console.log(JSON.stringify({ selectorValue: sel.value, confirmed: _confirmedUpdateChannel }));
+})().catch(err => { console.error(err.message); process.exit(1); });
+"""
+    result = json.loads(_run_node(script))
+    assert result["selectorValue"] == "experimental", (
+        f"string api() response must fall back to val ('experimental'), not 'stable'; "
+        f"got {result['selectorValue']!r}"
+    )
+    assert result["confirmed"] == "experimental", (
+        f"_confirmedUpdateChannel must be set to val ('experimental'); got {result['confirmed']!r}"
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_status_slot_ownership():
+    """Two writers share the single preferences autosave status slot.
+
+    Scenario 1: generic autosave sets 'failed' with owner='preferences'.
+    Channel write succeeds; its 'saved' call must be blocked — the 'failed'+Retry
+    must stay visible so the user can retry the unsaved generic payload.
+
+    Scenario 2: stale channel failure (superseded by a second write) fires a
+    null-clear via the seq guard. That null-clear must NOT fire because
+    seq!==_channelSaveSeq, so the generic autosave's 'failed' state is preserved.
+    """
+    script = _node_prelude(PANELS_JS) + """
+global._preferencesAutosaveStatusOwner = null;
+
+// DOM stub: tracks className and textContent/innerHTML separately.
+function makeStatusEl() {
+  return {
+    _cls: '',
+    _content: '',
+    get className() { return this._cls; },
+    set className(v) { this._cls = v; },
+    classList: null,  // set below after object creation
+    set textContent(v) { this._content = v; },
+    get textContent() { return this._content; },
+    set innerHTML(v) { this._content = v; },
+  };
+}
+const statusEl = makeStatusEl();
+statusEl.classList = {
+  add(c) { statusEl._cls += (' ' + c); },
+  contains(c) { return statusEl._cls.split(' ').includes(c); },
+};
+global.$ = function(id) {
+  if (id === 'settingsPreferencesAutosaveStatus') return statusEl;
+  return null;
+};
+global.t = function(k) { return k; };
+global.esc = function(s) { return String(s); };
+
+global._setPreferencesAutosaveStatus = (0, eval)(
+  '(' + extractFunc(panelsSrc, '_setPreferencesAutosaveStatus') + ')'
+);
+global._saveUpdateChannelFromSelector = (0, eval)(
+  '(' + extractFunc(panelsSrc, '_saveUpdateChannelFromSelector') + ')'
+);
+
+(async () => {
+  const results = {};
+
+  // ── Scenario 1: generic autosave 'failed'; channel success must not overwrite ──
+  _setPreferencesAutosaveStatus('failed', 'preferences');
+  results.s1_afterGenericFailed = {
+    cls: statusEl._cls.trim(),
+    owner: _preferencesAutosaveStatusOwner,
+  };
+
+  // Channel write fires and succeeds
+  global.api = async function() { return { update_channel: 'experimental' }; };
+  global._confirmedUpdateChannel = 'stable';
+  const sel1 = { value: 'experimental' };
+  await _saveUpdateChannelFromSelector(sel1);
+  results.s1_afterChannelSuccess = {
+    cls: statusEl._cls.trim(),
+    owner: _preferencesAutosaveStatusOwner,
+    selectorValue: sel1.value,
+  };
+
+  // ── Scenario 2: stale channel failure's null-clear must not fire ──
+  // Reset state for a clean scenario.
+  statusEl._cls = '';
+  statusEl._content = '';
+  global._preferencesAutosaveStatusOwner = null;
+  global._channelSaveSeq = 0;
+  global._confirmedUpdateChannel = 'stable';
+
+  // Generic autosave sets 'failed'.
+  _setPreferencesAutosaveStatus('failed', 'preferences');
+  results.s2_afterGenericFailed = { cls: statusEl._cls.trim() };
+
+  // Channel write 1 starts (seq=1) but blocks.
+  let resolveBlock;
+  const block = new Promise(r => { resolveBlock = r; });
+  let callCount = 0;
+  global.api = async function(url, opts) {
+    callCount++;
+    if (callCount === 1) { await block; throw new Error('stale fail'); }
+    return { update_channel: 'stable' };
+  };
+
+  const p1 = _saveUpdateChannelFromSelector({ value: 'experimental' });  // seq=1, blocks
+
+  // Channel write 2 starts (seq=2) and resolves; seq now 2.
+  const sel2 = { value: 'stable' };
+  const p2 = _saveUpdateChannelFromSelector(sel2);  // seq=2
+  await p2;
+  results.s2_afterSecondWrite = { cls: statusEl._cls.trim(), owner: _preferencesAutosaveStatusOwner };
+
+  // Unblock write 1; its catch fires but seq(1)!==_channelSaveSeq(2) → no null-clear.
+  resolveBlock();
+  await p1;
+  results.s2_afterStaleFailure = { cls: statusEl._cls.trim(), owner: _preferencesAutosaveStatusOwner };
+
+  console.log(JSON.stringify(results));
+})().catch(err => { console.error(err.stack || err.message); process.exit(1); });
+"""
+    result = json.loads(_run_node(script))
+
+    # Scenario 1
+    assert "is-failed" in result["s1_afterGenericFailed"]["cls"], (
+        f"generic 'failed' must be set; got {result['s1_afterGenericFailed']!r}"
+    )
+    assert result["s1_afterGenericFailed"]["owner"] == "preferences", (
+        f"owner must be 'preferences'; got {result['s1_afterGenericFailed']['owner']!r}"
+    )
+    # Channel write succeeded but must NOT overwrite 'failed' from 'preferences'
+    assert "is-failed" in result["s1_afterChannelSuccess"]["cls"], (
+        f"channel 'saved' must be blocked by ownership guard; "
+        f"cls is now {result['s1_afterChannelSuccess']['cls']!r}"
+    )
+    assert result["s1_afterChannelSuccess"]["selectorValue"] == "experimental", (
+        f"selector must still update even when status write is blocked; "
+        f"got {result['s1_afterChannelSuccess']['selectorValue']!r}"
+    )
+
+    # Scenario 2
+    assert "is-failed" in result["s2_afterGenericFailed"]["cls"], (
+        f"generic 'failed' must be set before channel write; got {result['s2_afterGenericFailed']!r}"
+    )
+    # After write 2 succeeds: write 2 tried to write 'saving' then 'saved', but
+    # generic 'failed' blocks both → slot still shows 'failed'
+    assert "is-failed" in result["s2_afterSecondWrite"]["cls"], (
+        f"generic 'failed' must survive write 2; got {result['s2_afterSecondWrite']!r}"
+    )
+    # After stale write 1's failure: seq guard blocks the null-clear → slot unchanged
+    assert "is-failed" in result["s2_afterStaleFailure"]["cls"], (
+        f"stale failure's null-clear must be blocked by seq guard; "
+        f"cls is now {result['s2_afterStaleFailure']['cls']!r}"
     )
 
 
@@ -642,3 +808,4 @@ def test_channel_writer_concurrent_selection():
     assert result["finalSeq"] == 2, (
         f"_channelSaveSeq must be 2 after two calls; got {result['finalSeq']!r}"
     )
+
