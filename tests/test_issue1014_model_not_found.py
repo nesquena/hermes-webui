@@ -10,6 +10,7 @@ Covers:
 """
 import pathlib
 import re
+from tests._i18n_bundles import read_i18n_bundles
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 
@@ -176,7 +177,7 @@ class TestI18nModelNotFound:
 
     def test_all_locales_have_model_not_found_label(self):
         """model_not_found_label must appear in all locales."""
-        src = _read("static/i18n.js")
+        src = read_i18n_bundles(REPO_ROOT)
         locale_count = len(self._locale_names(src))
         count = self._count_key(src, self.REQUIRED_KEY)
         assert count >= locale_count, (
@@ -186,7 +187,7 @@ class TestI18nModelNotFound:
 
     def test_english_label_is_plain_string(self):
         """English model_not_found_label must be a plain string, not a function."""
-        src = _read("static/i18n.js")
+        src = read_i18n_bundles(REPO_ROOT)
         en_start = src.find("\n  en: {")
         es_start = src.find("\n  es: {")
         en_block = src[en_start:es_start]

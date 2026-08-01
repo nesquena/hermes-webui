@@ -2,6 +2,7 @@ from collections import Counter
 from pathlib import Path
 import re
 from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
+from tests._i18n_bundles import read_i18n_bundles
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -16,7 +17,7 @@ def read(path: Path) -> str:
 
 
 def test_vietnamese_locale_block_exists():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     assert "\n    _lang: 'vi'," in src
     assert "_label: 'Tiếng Việt'" in src
     assert "_speech: 'vi-VN'" in src
@@ -83,7 +84,7 @@ def extract_locale_block(src: str, locale_key: str) -> str:
 
 
 def test_vietnamese_locale_includes_representative_translations():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     vi_block = extract_locale_block(src, "vi")
     expected = [
         "settings_heading_title: 'Trung tâm điều khiển'",
@@ -100,7 +101,7 @@ def test_vietnamese_locale_includes_representative_translations():
 
 
 def test_vietnamese_locale_covers_english_keys():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     key_pattern = re.compile(r"^\s{4}([a-zA-Z0-9_]+):", re.MULTILINE)
     en_keys = set(key_pattern.findall(extract_locale_block(src, "en")))
     vi_keys = set(key_pattern.findall(extract_locale_block(src, "vi")))
@@ -110,7 +111,7 @@ def test_vietnamese_locale_covers_english_keys():
 
 
 def test_vietnamese_locale_has_no_duplicate_keys():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     key_pattern = re.compile(r"^\s{4}([a-zA-Z0-9_]+):", re.MULTILINE)
     keys = key_pattern.findall(extract_locale_block(src, "vi"))
     duplicates = sorted(k for k, count in Counter(keys).items() if count > 1)

@@ -1,5 +1,6 @@
 """Regression tests for WebUI notes source discovery."""
 from __future__ import annotations
+from tests._i18n_bundles import read_i18n_bundles
 
 
 def test_notes_sources_identifies_note_or_knowledge_mcp_servers():
@@ -351,7 +352,7 @@ def test_external_notes_menu_item_is_default_off_from_memory_payload():
 def test_external_notes_drawer_copy_is_localized_outside_english():
     from pathlib import Path
 
-    i18n = Path("static/i18n.js").read_text(encoding="utf-8")
+    i18n = read_i18n_bundles(Path(__file__).resolve().parents[1])
 
     assert i18n.count("external_notes_sources: 'Third-party notes'") == 1
     assert i18n.count("external_notes_recent_ai: 'Recently used by AI'") == 1
