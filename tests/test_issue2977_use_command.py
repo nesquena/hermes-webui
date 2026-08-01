@@ -143,7 +143,29 @@ def test_send_payload_keeps_session_context_atomic_across_awaits():
     assert "model_provider:_modelState.model_provider" in src
     assert "workspace:_chatSession.workspace" in src
     assert "profile:_chatSession.profile" in src
-    assert "staleError.code='SESSION_CHANGED'" in src
+    assert "..._chatPayloadModelState()," in src
+    assert "postStartData = startData;" in src
+    assert "if(!_ownerIsCurrent) return;" in src
+
+
+def test_accepted_chat_start_keeps_owner_until_stream_attach():
+    src = read("static/messages.js")
+    start = src.index("const startData=await api('/api/chat/start'")
+    accepted = src.index("postStartData = startData;", start)
+    attach = src.index("attachLiveStream(activeSid, streamId, uploadedNames);", accepted)
+    block = src[accepted:attach]
+    assert "staleError.code='SESSION_CHANGED'" not in block
+    assert "if(!INFLIGHT[activeSid])" in block
+    assert "markInflight(activeSid, streamId);" in block
+    assert "_ownerIsCurrent" in block
+
+
+def test_queued_drain_recomputes_model_provider_with_shared_authority():
+    src = read("static/ui.js")
+    drain = src[src.index("// Restore model from queued item"):src.index("autoResize();", src.index("// Restore model from queued item"))]
+    assert "_chatPayloadModelState()" in drain
+    assert "S.session.model_provider=_queuedModelState.model_provider||null" in drain
+    assert "S.session.model_provider=next.model_provider" not in drain
 
 
 def test_upload_stops_owner_work_after_session_switch():

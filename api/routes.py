@@ -551,7 +551,11 @@ def _record_session_skill_provenance(session_id, handler, skill_name) -> bool:
         names = skill_name if isinstance(skill_name, (list, tuple, set)) else [skill_name]
         if not session.record_server_skill_names(names):
             return False
-        session.save(touch_updated_at=False, skip_index=True)
+        try:
+            session.save(touch_updated_at=False, skip_index=True)
+        except Exception:
+            logger.debug("Failed to persist session skill provenance for %s", sid, exc_info=True)
+            return False
     return True
 
 

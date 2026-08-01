@@ -7962,9 +7962,15 @@ function setBusy(v){
         if(next.model&&S.session&&next.model!==S.session.model){
           S.session.model=next.model;
         }
-        if(next.model_provider&&S.session) S.session.model_provider=next.model_provider;
-        if(next.model&&S.session){
-          if(typeof _applyModelToDropdown==='function'&&$('modelSelect')) _applyModelToDropdown(next.model,$('modelSelect'),S.session.model_provider||null);
+        const _queuedModelState=typeof _chatPayloadModelState==='function'
+          ? _chatPayloadModelState()
+          : {model:S.session&&S.session.model,model_provider:S.session&&S.session.model_provider};
+        if(_queuedModelState.model&&S.session&&_queuedModelState.model!==S.session.model){
+          S.session.model=_queuedModelState.model;
+        }
+        if(S.session) S.session.model_provider=_queuedModelState.model_provider||null;
+        if(_queuedModelState.model&&S.session){
+          if(typeof _applyModelToDropdown==='function'&&$('modelSelect')) _applyModelToDropdown(_queuedModelState.model,$('modelSelect'),_queuedModelState.model_provider||null);
           if(typeof syncModelChip==='function') syncModelChip();
         }
         autoResize();

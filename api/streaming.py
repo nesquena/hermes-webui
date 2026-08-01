@@ -117,7 +117,11 @@ def _record_streaming_skill_provenance(session, session_id, tool_name, function_
             return False
         if not current_session.record_server_skill_names(skill_names):
             return False
-        current_session.save(touch_updated_at=False, skip_index=True)
+        try:
+            current_session.save(touch_updated_at=False, skip_index=True)
+        except Exception:
+            logger.debug("Failed to persist streaming skill provenance for %s", session_id, exc_info=True)
+            return False
     return True
 
 

@@ -1189,8 +1189,7 @@ function _sendSessionSnapshot(sid){
   return {
     session_id:ownerSid,
     workspace:session.workspace,
-    model:session.model,
-    model_provider:session.model_provider,
+    ..._chatPayloadModelState(),
     profile:S.activeProfile||session.profile||'default',
   };
 }
@@ -1828,11 +1827,6 @@ async function send(){
       attachments:uploaded.length?uploaded:undefined,
       moa_config:_pendingMoaConfig?true:undefined
     })});
-    if(!_sendSessionSnapshot(activeSid)){
-      const staleError=new Error('Session changed while starting the message.');
-      staleError.code='SESSION_CHANGED';
-      throw staleError;
-    }
     _pendingMoaConfig=null;
     postStartData = startData;
   }catch(e){
@@ -1909,14 +1903,16 @@ async function send(){
 
   const startData = postStartData || {};
   streamId = postStartData ? postStartData.stream_id : null;
-  S.activeStreamId = streamId;
+  if(_sendSessionSnapshot(activeSid)) S.activeStreamId = streamId;
   // setBusy(true) already ran with activeStreamId=null; refresh now that we
   // have a stream id so the primary button can switch to Stop (see
   // getComposerPrimaryAction).
-  if(typeof updateSendBtn==='function') updateSendBtn();
+  if(_sendSessionSnapshot(activeSid)&&typeof updateSendBtn==='function') updateSendBtn();
   _runOptionalPostStartUiStep('post-start ui/bookkeeping', ()=>{
+    const _ownerIsCurrent=!!_sendSessionSnapshot(activeSid);
     const _modelState=modelStateForPostStart || _chatPayloadModelState();
     const _explicitPick=explicitPickForPostStart;
+    if(!_ownerIsCurrent) return;
     if(startData&&startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
 
     if(startData&&startData.effective_model && S.session){
@@ -1961,20 +1957,21 @@ async function send(){
       // against real active-stream metadata before the background refresh lands.
       upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
     }
-    if(!INFLIGHT[activeSid]){
-      INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
-    }
-    const currentInflight=INFLIGHT[activeSid];
-    markInflight(activeSid, streamId);
-    if(typeof saveInflightState==='function'){
-      saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[]});
-    }
-    // Refresh session list so background streaming indicators appear immediately for the
-    // session that was just started and any others that may already be running.
-    if(typeof renderSessionList === 'function') {
-      void renderSessionList();
-    }
   });
+
+  if(!INFLIGHT[activeSid]){
+    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+  }
+  const currentInflight=INFLIGHT[activeSid];
+  markInflight(activeSid, streamId);
+  if(typeof saveInflightState==='function'){
+    saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[]});
+  }
+  // Refresh session list so background streaming indicators appear immediately for the
+  // session that was just started and any others that may already be running.
+  if(typeof renderSessionList === 'function') {
+    void renderSessionList();
+  }
 
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);

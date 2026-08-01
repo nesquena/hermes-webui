@@ -177,6 +177,37 @@ def test_skill_content_route_records_server_resolved_name(monkeypatch):
     assert response["name"] == "server-resolved"
 
 
+def test_provenance_save_failure_does_not_break_content_or_bundle_resolution(monkeypatch):
+    session = Session(session_id="issue6593-save-failure", profile="default")
+    session.save = lambda **kwargs: (_ for _ in ()).throw(OSError("disk unavailable"))
+    monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *args, **kwargs: True)
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *args, **kwargs: True)
+    monkeypatch.setattr(routes, "_skill_view_from_active_dir", lambda name: {
+        "success": True, "name": "resolved", "content": "body", "linked_files": {},
+    })
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **kwargs: payload)
+    content = routes.handle_get(
+        _RouteHandler("GET"),
+        SimpleNamespace(path="/api/skills/content", query=urlencode({"name": "typed", "session_id": session.session_id})),
+    )
+    assert content["name"] == "resolved"
+
+    body = {"command": "/bundle request", "session_id": session.session_id}
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: body)
+    monkeypatch.setattr(commands, "resolve_bundle_command", lambda command: {
+        "name": "bundle", "source": "bundle", "message": "resolved",
+        "loaded_skills": ["bundle-skill"], "missing_skills": [],
+    })
+    bundle = routes.handle_post(
+        _RouteHandler("POST"),
+        SimpleNamespace(path="/api/commands/bundles/resolve", query=""),
+    )
+    assert bundle["message"] == "resolved"
+    assert bundle["loaded_skills"] == ["bundle-skill"]
+
+
 def test_bundle_route_records_session_and_separates_session_errors(monkeypatch):
     handler = _RouteHandler("POST")
     parsed = SimpleNamespace(path="/api/commands/bundles/resolve", query="")
