@@ -48,6 +48,8 @@ def _function_source(source: str, name: str) -> str:
 OWNER_SOURCE = _function_source(MESSAGES, "_setActivePaneIdleIfOwner")
 SEND_SOURCE = _function_source(MESSAGES, "send")
 ATTACH_SOURCE = _function_source(MESSAGES, "attachLiveStream")
+_completion_start = BOOT.index("  window._voiceModeOnResponseComplete=function")
+VOICE_COMPLETE_SOURCE = BOOT[_completion_start:BOOT.index("  // ordinary autoReadLastAssistant", _completion_start)]
 
 
 HARNESS = r"""
@@ -112,9 +114,9 @@ const duplicate = api.settle('s1', 'stream-1', { success: false });
 const stale = api.settle('old-session', 'old-stream', { success: false });
 const ownerEvents = [];
 windowObj._voiceModeOnResponseComplete = outcome => ownerEvents.push(outcome);
-const ownerFactory = new Function('window','_isActiveSession','S','INFLIGHT','setBusy','setComposerStatus','setStatus',
+const ownerFactory = new Function('activeSid','streamId','window','_isActiveSession','S','INFLIGHT','setBusy','setComposerStatus','setStatus',
   "return (" + Buffer.from('${OWNER_B64}', 'base64').toString() + ");");
-const owner = ownerFactory(windowObj, () => true, S, { s1: {} }, () => { S.busy = false; }, () => {}, () => {});
+const owner = ownerFactory('s1', 'stream-1', windowObj, () => true, S, { s1: {} }, () => { S.busy = false; }, () => {}, () => {});
 S.busy = true;
 owner({ success: false });
 console.log(JSON.stringify({ before, afterRestart, afterSend, settled, duplicate, stale, finalState: api.state(), aborts: state.aborts, ownerEvents }));
@@ -124,6 +126,8 @@ console.log(JSON.stringify({ before, afterRestart, afterSend, settled, duplicate
 PRODUCTION_HARNESS = r"""
 const source = Buffer.from('${SEND_B64}', 'base64').toString();
 const ownerSource = Buffer.from('${OWNER_B64}', 'base64').toString();
+const runtimeSource = Buffer.from('${RUNTIME_B64}', 'base64').toString();
+const completionSource = Buffer.from('${COMPLETE_B64}', 'base64').toString();
 const msg = { value: 'production voice text' };
 const elements = new Map([['msg', msg]]);
 const S = {
@@ -131,23 +135,41 @@ const S = {
   pendingFiles: [], messages: [], toolCalls: [], busy: false, activeStreamId: null,
 };
 const INFLIGHT = {};
-const ownerEvents = [];
 const bound = [];
+const completionEvents = [];
+const state = { starts: 0, recognitions: [] };
 const windowObj = {
   _defaultMessageMode: 'steer',
-  _voiceLeasePrepareSubmission() { bound.push({ type: 'prepare' }); },
-  _voiceLeaseBind(streamId, sid) { bound.push({ type: 'bind', streamId, sid }); },
-  _voiceLeaseSettleLocal() { bound.push({ type: 'local-settle' }); },
 };
+const documentObj = { querySelector(){ return null; }, querySelectorAll(){ return []; } };
+const localStorage = { getItem(key) { return ({
+  'hermes-voice-mode-button': 'true', 'hermes-voice-silence-ms': '1000',
+  'hermes-voice-continuous': 'false', 'hermes-tts-engine': 'browser'
+})[key] || null; }, setItem(){} };
+function SpeechRecognition() {
+  const instance = { onresult: null, onend: null, onerror: null,
+    start(){ state.starts += 1; }, abort(){} };
+  state.recognitions.push(instance); return instance;
+}
+const elementVoice = () => ({ style: {}, classList: { add(){}, remove(){} }, textContent: '', className: '', value: '' });
+const modeBtn = elementVoice(), bar = elementVoice(), indicator = elementVoice(), label = elementVoice(), micBtn = elementVoice();
+const t = key => key;
+const autoResize = () => {};
+const _micOriginNeedsSecureContext = () => false;
+const _deactivate = () => {};
+const showToast = () => {};
+const _setButtonTooltip = () => {};
+const stopTTS = () => {};
+const _locale = { _speech: 'en-US' };
+const _speakResponse = () => {};
 const element = () => ({ value: '', style: {}, options: [], classList: { add(){}, remove(){} }, querySelectorAll(){ return []; } });
 const $ = id => elements.get(id) || element();
 const noOp = () => {};
-const ownerFactory = new Function('window','_isActiveSession','S','INFLIGHT','setBusy','setComposerStatus','setStatus',
+const ownerFactory = new Function('activeSid','streamId','window','_isActiveSession','S','INFLIGHT','setBusy','setComposerStatus','setStatus',
   'return (' + ownerSource + ');');
-windowObj._voiceModeOnResponseComplete = outcome => ownerEvents.push(outcome);
-const owner = ownerFactory(windowObj, () => true, S, INFLIGHT, value => { S.busy = value; }, noOp, noOp);
+const owner = ownerFactory('s1', 'stream-1', windowObj, () => true, S, INFLIGHT, value => { S.busy = value; }, noOp, noOp);
 const scope = {
-  $, S, INFLIGHT, window: windowObj, document: { querySelector(){ return null; }, querySelectorAll(){ return []; } },
+  $, S, INFLIGHT, window: windowObj, document: documentObj,
   COMMANDS: [], parseCommand: () => null, _pendingSelections: [], _sendInProgress: false, _sendInProgressSid: null,
   _composerTextWithPendingSelections: () => msg.value, _flushSelectionBlocksToComposer: noOp,
   shouldInterceptCompressionRecoveryContinuation: () => false, isCompressionUiRunning: () => false,
@@ -160,8 +182,12 @@ const scope = {
   startApprovalPolling: noOp, startClarifyPolling: noOp, _fetchYoloState: noOp,
   applySessionTitleUpdate: noOp, upsertActiveSessionForLocalTurn: noOp, _chatPayloadModelState: () => ({ model: 'model-1', model_provider: 'provider-1' }),
   _readPendingSessionModel: () => null, _clearPendingSessionModel: noOp, _activeProvider: 'provider-1',
-  updateQueueBadge: noOp, _queueDrainSid: null, localStorage: { setItem(){}, getItem(){ return null; } },
-  api: async () => ({ stream_id: 'stream-1' }), attachLiveStream: (sid, streamId) => { bound.push({ type: 'attach', sid, streamId }); owner({ success: true }); },
+  updateQueueBadge: noOp, _queueDrainSid: null, localStorage,
+  api: async () => ({ stream_id: 'stream-1' }), attachLiveStream: (sid, streamId) => {
+    bound.push({ type: 'attach', sid, streamId });
+    S.activeStreamId=null; S.session.active_stream_id=null; delete INFLIGHT[sid];
+    owner({ success: true });
+  },
   clearInflightState: noOp, clearInflight: noOp, stopApprovalPolling: noOp, stopClarifyPolling: noOp,
   hideApprovalCard: noOp, hideClarifyCard: noOp, removeThinking: noOp, clearOptimisticSessionStreaming: noOp,
   showToast: noOp, setStatus: noOp, renderMessages: noOp, _appRootPath: () => '/', history: { replaceState: noOp },
@@ -173,9 +199,21 @@ for (const match of source.matchAll(/\b[A-Za-z_$][\w$]*\b/g)) {
   if (!builtins.has(name) && !(name in scope)) scope[name] = noOp;
 }
 const send = new Function('scope', 'with(scope){ return (' + source + '); }')(scope);
+const voiceFactory = new Function('window','document','SpeechRecognition','localStorage','modeBtn','bar','indicator','label','micBtn','ta','S','t','autoResize','_micOriginNeedsSecureContext','_deactivate','showToast','_setButtonTooltip','stopTTS','_locale','send','setTimeout','clearTimeout','Date','_speakResponse','_voiceLeaseSettleOwner', runtimeSource + '\n' + completionSource + '\nreturn { activate(){ _voiceModeActive=true; _voiceContextId+=1; _voiceLease=_newVoiceLease(); }, start:()=>_startListening(_voiceLease), first:()=>_voiceLease&&_voiceLease.recognition };');
+const voiceApi = voiceFactory(windowObj, documentObj, SpeechRecognition, localStorage, modeBtn, bar, indicator, label, micBtn, msg, S, t, autoResize, _micOriginNeedsSecureContext, _deactivate, showToast, _setButtonTooltip, stopTTS, _locale, send, setTimeout, clearTimeout, Date, _speakResponse, (...args)=>windowObj._voiceLeaseSettleOwner(...args));
+const originalPrepare=windowObj._voiceLeasePrepareSubmission;
+windowObj._voiceLeasePrepareSubmission=(...args)=>{ bound.push({ type: 'prepare' }); return originalPrepare(...args); };
+const originalBind=windowObj._voiceLeaseBind;
+windowObj._voiceLeaseBind=(streamId,sid)=>{ bound.push({ type: 'bind', streamId, sid }); return originalBind(streamId,sid); };
+const originalCompletion=windowObj._voiceModeOnResponseComplete;
+windowObj._voiceModeOnResponseComplete=outcome=>{ completionEvents.push(outcome); return originalCompletion(outcome); };
+voiceApi.activate(); voiceApi.start();
+const recognition=voiceApi.first();
+recognition.onresult({ resultIndex: 0, results: [{ 0: { transcript: msg.value }, isFinal: true }] });
+recognition.onend();
 (async () => {
-  await send();
-  console.log(JSON.stringify({ bound, ownerEvents, streamId: S.activeStreamId, busy: S.busy, inProgress: scope._sendInProgress }));
+  await new Promise(resolve => setTimeout(resolve, 1150));
+  console.log(JSON.stringify({ bound, completionEvents, streamId: S.activeStreamId, busy: S.busy, inProgress: scope._sendInProgress, starts: state.starts }));
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
 """
 
@@ -197,6 +235,8 @@ def _run_production_send():
     script = PRODUCTION_HARNESS.replace(
         "${SEND_B64}", base64.b64encode(SEND_SOURCE.encode()).decode()
     ).replace("${OWNER_B64}", base64.b64encode(OWNER_SOURCE.encode()).decode())
+    script = script.replace("${RUNTIME_B64}", base64.b64encode(_voice_runtime().encode()).decode())
+    script = script.replace("${COMPLETE_B64}", base64.b64encode(VOICE_COMPLETE_SOURCE.encode()).decode())
     result = subprocess.run([NODE], input=script, capture_output=True, text=True)
     if result.returncode:
         raise AssertionError(result.stderr)
@@ -233,10 +273,11 @@ def test_production_send_binds_and_settles_through_owner_seam():
     result = _run_production_send()
     assert [entry["type"] for entry in result["bound"]] == ["prepare", "bind", "attach"]
     assert result["bound"][1] == {"type": "bind", "streamId": "stream-1", "sid": "s1"}
-    assert result["ownerEvents"] == [{"success": True}]
-    assert result["streamId"] == "stream-1"
+    assert result["completionEvents"] == [{"success": True}]
+    assert result["streamId"] is None
     assert result["busy"] is False
     assert result["inProgress"] is False
+    assert result["starts"] >= 1
 
 
 def test_production_send_and_stream_paths_share_the_lease_seams():

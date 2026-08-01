@@ -54,6 +54,7 @@ async function cancelStream(reason){
   // stream left to settle.
   if(respOk && respBody && respBody.cancelled===false && S.activeStreamId===streamId){
     S.activeStreamId=null;
+    if(S.session&&S.session.session_id===sid&&S.session.active_stream_id===streamId) S.session.active_stream_id=null;
     setBusy(false);
     if(typeof window._voiceLeaseSettleOwner==='function') window._voiceLeaseSettleOwner(sid,streamId,{success:false});
     if(typeof setComposerStatus==='function') setComposerStatus('');
@@ -1550,7 +1551,7 @@ window.renderTranscript=function(container, messages, opts){
   function _newVoiceLease(){
     return {id:++_voiceLeaseId,contextId:_voiceContextId,recognition:null,
       finalText:'',interimText:'',silenceTimer:null,restartTimer:null,deadlineAt:0,
-      submitted:false,settled:false,owner:null};
+      submitted:false,settled:false,owner:null,ttsUrls:[]};
   }
 
   function _resumeVoiceLease(){
@@ -1582,14 +1583,26 @@ window.renderTranscript=function(container, messages, opts){
     try{recognition.abort();}catch(_){ }
   }
 
+  function _revokeVoiceTtsUrls(lease){
+    if(!lease||!Array.isArray(lease.ttsUrls)) return;
+    for(const url of lease.ttsUrls){
+      try{if(typeof URL!=='undefined'&&typeof URL.revokeObjectURL==='function') URL.revokeObjectURL(url);}catch(_){ }
+    }
+    lease.ttsUrls=[];
+  }
+
   function _invalidateVoiceLease(options={}){
     const lease=_voiceLease;
+    const wasActive=_voiceModeActive;
     _voiceContextId+=1;
     _clearVoiceLeaseTimers(lease);
     _releaseVoiceRecognition(lease);
     _clearBrowserTtsRecovery();
-    if(typeof stopTTS==='function') stopTTS();
-    else try{speechSynthesis.cancel();}catch(_){ }
+    _revokeVoiceTtsUrls(lease);
+    if(wasActive){
+      if(typeof stopTTS==='function') stopTTS();
+      else try{speechSynthesis.cancel();}catch(_){ }
+    }
     _browserTtsSuppressNextErrorRearm=false;
     if(options.preserveSubmission&&lease&&lease.submitted&&_voiceManualPending===lease){
       lease.contextId=_voiceContextId;
@@ -1662,6 +1675,7 @@ window.renderTranscript=function(container, messages, opts){
       if(lease.submitted&&!lease.settled) return null;
       _clearVoiceLeaseTimers(lease);
       _clearBrowserTtsRecovery();
+      _revokeVoiceTtsUrls(lease);
       if(typeof stopTTS==='function') stopTTS();
       lease=_newVoiceLease();
       _voiceLease=lease;
@@ -1863,7 +1877,9 @@ window.renderTranscript=function(container, messages, opts){
     // stream completion. Drop back to listening on the new session instead.
     const currentSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
     if(lease.owner&&lease.owner.sid && currentSid && currentSid!==lease.owner.sid){
-      _voiceLeaseSettle(lease,{success:false});
+      lease.finalText='';
+      _voiceModeState='listening';
+      _scheduleVoiceRestart(lease,300);
       return;
     }
     _setState('speaking');
@@ -1906,6 +1922,7 @@ window.renderTranscript=function(container, messages, opts){
           if(!_voiceLeaseCurrent(lease)) return;
           const blob=new Blob([buf]);
           const url=URL.createObjectURL(blob);
+          lease.ttsUrls.push(url);
           const audio=new Audio(url);
           _playingEdgeAudio=audio;
           audio.onended=function(){
@@ -1951,6 +1968,7 @@ window.renderTranscript=function(container, messages, opts){
       .then(blob => {
         if(!_voiceLeaseCurrent(lease)) return;
         const url = URL.createObjectURL(blob);
+        lease.ttsUrls.push(url);
         const audio = new Audio(url);
         _playingEdgeAudio=audio;
         audio.onended = () => {
@@ -1996,6 +2014,7 @@ window.renderTranscript=function(container, messages, opts){
       .then(blob => {
         if(!_voiceLeaseCurrent(lease)) return;
         const url = URL.createObjectURL(blob);
+        lease.ttsUrls.push(url);
         const audio = new Audio(url);
         _playingEdgeAudio=audio;
         audio.onended = () => {
@@ -2047,6 +2066,7 @@ window.renderTranscript=function(container, messages, opts){
       .then(blob => {
         if(!_voiceLeaseCurrent(lease)) return;
         const url = URL.createObjectURL(blob);
+        lease.ttsUrls.push(url);
         const audio = new Audio(url);
         // Register with the shared handle (declared in ui.js, same global scope;
         // both scripts are fully evaluated before any voice interaction) so

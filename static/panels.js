@@ -6988,6 +6988,7 @@ async function switchToProfile(name) {
   // _switchGen-guarded finally always lifts the embargo — a throw in this synchronous
   // setup can't leak the embargo and freeze the sidebar (Codex re-gate 4).
   try {
+    if (typeof window._voiceLeaseInvalidate === 'function') window._voiceLeaseInvalidate({rearm:false});
     // Invalidate any in-flight/queued session-list render BEFORE showing the skeleton,
     // so a pre-switch /api/sessions response (old profile's rows, issued before the
     // switch) can't resolve, pass the generation guard, clear the skeleton flag, and
@@ -7012,7 +7013,6 @@ async function switchToProfile(name) {
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
-    if (typeof window._voiceLeaseInvalidate === 'function') window._voiceLeaseInvalidate({rearm:false});
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
@@ -7200,6 +7200,8 @@ async function switchToProfile(name) {
     return true;
 
   } catch (e) {
+    if (_switchGen === _profileSwitchGeneration && (typeof _sendInProgress==='undefined'||!_sendInProgress)
+      && typeof window._voiceLeaseResume === 'function') window._voiceLeaseResume();
     // Revert the optimistic name update on error
     if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
     if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;

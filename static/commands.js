@@ -718,6 +718,7 @@ async function cmdModel(args){
     // different provider not in the dropdown. Call /api/session/update directly.
     if(!match && !versionedNoSnap && S&&S.session&&S.session.session_id){
       const provider=q.slice(0,q.indexOf('/'));
+      if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
       try{
         const resp=await fetch(new URL('api/session/update',document.baseURI||location.href).href,{
           method:'POST',
@@ -729,7 +730,6 @@ async function cmdModel(args){
           }),
         });
         if(resp.ok){
-          if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
           S.session.model=q;
           S.session.model_provider=provider;
           if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
@@ -737,7 +737,11 @@ async function cmdModel(args){
           showToast(t('switched_to')+q);
           return;
         }
-      }catch(_){/* fall through to "no model match" */}
+        if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+      }catch(_){
+        if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+        /* fall through to "no model match" */
+      }
     }
   }
   if(!match){

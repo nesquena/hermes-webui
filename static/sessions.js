@@ -1385,6 +1385,7 @@ async function newSession(flash, options={}){
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
     const preserveVoiceSubmission=!S.session;
+    if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false,preserveSubmission:preserveVoiceSubmission});
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -1486,7 +1487,6 @@ async function newSession(flash, options={}){
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
-    if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false,preserveSubmission:preserveVoiceSubmission});
     S.session=data.session;S.messages=data.session.messages||[];
     if(typeof _sendInProgress==='undefined'||!_sendInProgress){
       if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
@@ -1638,9 +1638,9 @@ async function _switchProfileForSessionLoad(profile){
   if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
+  if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
   try{
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
-    if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
     S.activeProfile=data.active||name;
     S.activeProfileIsDefault=!!data.is_default;
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
@@ -1668,6 +1668,9 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
     _sessionListSkeletonActive=false;
     if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+    if(typeof _sendInProgress==='undefined'||!_sendInProgress){
+      if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+    }
     throw switchErr;
   }
 }
@@ -1716,6 +1719,7 @@ async function loadSession(sid){
     }
     return;
   }
+  if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
@@ -1960,7 +1964,6 @@ async function loadSession(sid){
     _loadingSessionId=null;
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
-  if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
   S.session=data.session;
   if(typeof _sendInProgress==='undefined'||!_sendInProgress){
     if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();

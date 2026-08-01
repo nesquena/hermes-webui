@@ -1443,7 +1443,7 @@ async function send(){
       // false it's opting out — e.g. /reasoning <level> falls through so the
       // agent sees the raw text.  Roll back the echo push in that case so
       // the normal send path doesn't duplicate it.
-      if(_cmd.fn(_parsedCmd.args)===false){
+      if(await _cmd.fn(_parsedCmd.args)===false){
         if(_pushedUser){S.messages.pop();renderMessages();}
         // Fall through to normal send path
       } else {
@@ -2252,6 +2252,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _setActivePaneIdleIfOwner(voiceOutcome){
     if(_isActiveSession()||!S.session||!INFLIGHT[S.session.session_id]){
+      if(S.session&&S.session.session_id===activeSid&&S.session.active_stream_id===streamId){
+        S.session.active_stream_id=null;
+      }
       setBusy(false);
       setComposerStatus('');
       if(typeof setStatus==='function') setStatus('');
