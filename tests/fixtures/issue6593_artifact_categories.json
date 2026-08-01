@@ -1,0 +1,28 @@
+{
+  "tool_calls": [
+    {"name": "write_file", "args": {"path": "src/app.py"}},
+    {"name": "unknown_tool", "args": {"path": "secrets.txt", "url": "https://private.example/hidden", "raw": "do not render"}}
+  ],
+  "messages": [
+    {
+      "role": "assistant",
+      "content": "MEDIA:assets/chart.png MEDIA:file:///tmp/shot.png [IMAGE:assets/unsupported.png]",
+      "tool_calls": [
+        {"id": "read-1", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"C:\\\\work\\\\src\\\\app.py\"}"}},
+        {"id": "search-1", "type": "function", "function": {"name": "search_files", "arguments": "{\"path\":\"C:\\\\work\\\\src\",\"pattern\":\"artifacts\"}"}},
+        {"id": "web-1", "type": "function", "function": {"name": "web_extract", "arguments": "{\"urls\":[{\"href\":\"https://example.com/docs\"}]}"}},
+        {"id": "partial-web", "name": "web_extract", "args": {"url": "https://example.org/visited"}, "snippet": "{\"href\":\"https://example.org/visited\""
+        }
+      ],
+      "_partial_tool_calls": [
+        {"id": "partial-read", "name": "read_file", "args": {"path": "C:\\work\\partial.md"}, "preview": "{\"path\":\"C:\\\\work\\preview.md\""}
+      ]
+    },
+    {"role": "tool", "tool_call_id": "read-1", "content": "{\"path\":\"C:\\\\work\\\\src\\\\README.md\",\"snippet\":\"artifact docs\"}"},
+    {"role": "tool", "tool_call_id": "search-1", "content": "{\"matches\":[{\"path\":\"C:\\\\work\\\\Makefile\""},
+    {"role": "tool", "tool_call_id": "web-1", "content": [{"type": "text", "text": "{\"results\":[{\"href\":\"https://example.com/docs\"}]}"}]},
+    {"role": "tool", "tool_call_id": "partial-web", "content": "MEDIA:assets/tool.png"},
+    {"role": "user", "content": "MEDIA:assets/user.png [IMAGE:assets/user-image.png]"},
+    {"role": "assistant", "content": [{"type": "output_text", "output_text": "MEDIA:assets/output.png"}]}
+  ]
+}

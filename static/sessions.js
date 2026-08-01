@@ -3170,6 +3170,7 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
   S.messages = msgs;
+  if(typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.
   if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){
@@ -3762,6 +3763,7 @@ async function _loadOlderMessages() {
     }
     S.messages = nextMessages;
     _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
+    if(typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
     // renderMessages() windows long transcripts from the end. If we do not
     // expand that window before rendering, the newly prepended page stays
     // hidden and the "hidden" counter rises while the viewport appears stuck.
@@ -3869,6 +3871,7 @@ async function _ensureAllMessagesLoaded() {
     _messagesTruncated = false;
     _oldestIdx = 0;
     _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
+    if(typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
     if (S.session && S.session.session_id === sid) {
       S.session.message_count = Number(data.session.message_count || msgs.length);
     }

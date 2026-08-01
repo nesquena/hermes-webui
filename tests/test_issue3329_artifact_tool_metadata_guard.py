@@ -47,7 +47,14 @@ def _collect_via_node(messages):
     # Pull in the function under test plus the helpers it transitively calls.
     import re
     consts = []
-    for name in ("ARTIFACT_IGNORE_RE", "ARTIFACT_MUTATION_TOOLS"):
+    for name in (
+        "ARTIFACT_IGNORE_RE",
+        "ARTIFACT_MUTATION_TOOLS",
+        "ARTIFACT_READ_TOOLS",
+        "ARTIFACT_WEB_TOOLS",
+        "ARTIFACT_CATEGORY_ORDER",
+        "ARTIFACT_CATEGORY_LIMITS",
+    ):
         m = re.search(rf"const {name} = .*?;", WORKSPACE_JS)
         assert m, f"{name} not found"
         consts.append(m.group(0))
@@ -55,9 +62,22 @@ def _collect_via_node(messages):
         _extract_fn(n)
         for n in (
             "_normalizeArtifactPath",
+            "_normalizeArtifactUrl",
+            "_normalizeArtifactTarget",
+            "_normalizeArtifactMediaRef",
+            "_parseArtifactJson",
+            "_artifactToolId",
+            "_artifactToolName",
+            "_artifactToolArgs",
+            "_artifactResultValues",
+            "_artifactTextFromValue",
+            "_artifactPartialFieldValues",
             "_artifactCandidatesFromText",
             "_artifactCandidatesFromToolCall",
-            "collectSessionArtifacts",
+            "_artifactToolResultPayload",
+                "_artifactToolResultsById",
+                "_artifactToolSources",
+                "collectSessionArtifacts",
         )
     )
     driver = (
