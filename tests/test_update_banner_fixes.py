@@ -2597,18 +2597,13 @@ class TestSequentialUpdateRestartCoordination:
         execv_time = []
         scheduled = []
         worker_thread = None
+        worker_ident = None
         worker_acquiring_lock = _th.Event()
-        acquire_attempts = 0
-        acquire_attempts_lock = _th.Lock()
         real_apply_lock = upd._apply_lock
 
         class ProbedApplyLock:
             def __enter__(self):
-                nonlocal acquire_attempts
-                with acquire_attempts_lock:
-                    acquire_attempts += 1
-                    is_restart_attempt = acquire_attempts == 2
-                if is_restart_attempt:
+                if _th.get_ident() == worker_ident:
                     worker_acquiring_lock.set()
                 return real_apply_lock.__enter__()
 
@@ -2616,7 +2611,7 @@ class TestSequentialUpdateRestartCoordination:
                 return real_apply_lock.__exit__(exc_type, exc_value, traceback)
 
         def fake_execv(exe, args):
-            if _th.current_thread() is worker_thread:
+            if _th.get_ident() == worker_ident:
                 execv_time.append(_t.monotonic())
                 execv_called.set()
 
@@ -2657,7 +2652,12 @@ class TestSequentialUpdateRestartCoordination:
         upd._schedule_restart(delay=0)
         assert len(scheduled) == 1, "scheduler must start one restart worker"
         worker_target = scheduled[0]
-        worker_thread = real_thread(target=worker_target, daemon=True)
+        def run_worker():
+            nonlocal worker_ident
+            worker_ident = _th.get_ident()
+            worker_target()
+
+        worker_thread = real_thread(target=run_worker, daemon=True)
         worker_thread.start()
         assert worker_acquiring_lock.wait(timeout=2), (
             "restart worker did not reach the apply-lock acquisition"
