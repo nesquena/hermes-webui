@@ -1456,7 +1456,7 @@ def test_agent_delegation_invokes_official_entry_point(tmp_path, monkeypatch):
     SIGHUP protection).
     """
     agent_dir = _agent_tmp(tmp_path)
-    _make_hermes_exe(agent_dir)
+    agent_exe = _make_hermes_exe(agent_dir)
 
     subprocess_calls = []
 
@@ -1465,6 +1465,7 @@ def test_agent_delegation_invokes_official_entry_point(tmp_path, monkeypatch):
         return _fake_proc()
 
     monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
     monkeypatch.setattr(updates.subprocess, 'run', fake_subprocess_run)
     monkeypatch.setattr(
         updates, '_ensure_gateway_restart_for_agent_update',
@@ -1494,7 +1495,7 @@ def test_agent_update_failure_propagates(tmp_path, monkeypatch):
     Head: the Agent's non-zero exit code maps to ok=False with the failure reason.
     """
     agent_dir = _agent_tmp(tmp_path)
-    _make_hermes_exe(agent_dir)
+    agent_exe = _make_hermes_exe(agent_dir)
 
     failure_reasons = [
         ('dependency install failed: pip error', 1),
@@ -1513,6 +1514,7 @@ def test_agent_update_failure_propagates(tmp_path, monkeypatch):
 
     for reason_text, rc in failure_reasons:
         monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+        monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
         monkeypatch.setattr(
             updates.subprocess, 'run',
             _make_run(rc, reason_text),
@@ -1538,22 +1540,61 @@ def test_agent_update_failure_propagates(tmp_path, monkeypatch):
         )
 
 
-def test_response_before_replacement_ordering(tmp_path, monkeypatch):
-    """The response dict is returned before _schedule_restart is called.
-
-    This proves the ordering contract: _schedule_restart() is invoked after
-    the function builds and returns its dict, so the HTTP layer can flush the
-    response before os.execv() replaces the process.  The real 2 s daemon
-    delay is mocked away; what this test verifies is that _schedule_restart is
-    called exactly once on success and that the caller already holds a response
-    dict by the time that call is made.
-    """
+def test_agent_update_failure_keeps_late_updater_detail(tmp_path, monkeypatch):
+    """Late install failures remain visible after the updater banner grows."""
     agent_dir = _agent_tmp(tmp_path)
-    _make_hermes_exe(agent_dir)
-
-    restart_calls = []
+    agent_exe = _make_hermes_exe(agent_dir)
+    late_failure = '✗ Dependency installation failed: uv sync exited 1'
+    stdout = ('⚕ Updating Hermes Agent...\n' + '→ Fetching updates...\n') * 100
 
     monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
+    monkeypatch.setattr(
+        updates.subprocess,
+        'run',
+        lambda cmd, **kwargs: _fake_proc(
+            returncode=1,
+            stdout=stdout,
+            stderr=late_failure,
+        ),
+    )
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['ok'] is False, result
+    assert late_failure in result['message'], result
+
+
+def test_agent_update_lock_conflict_preserves_recovery_affordance(tmp_path, monkeypatch):
+    """An official updater lock failure still reaches clear-lock recovery."""
+    agent_dir = _agent_tmp(tmp_path)
+    agent_exe = _make_hermes_exe(agent_dir)
+    lock_error = "fatal: Unable to create '.git/index.lock': File exists"
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
+    monkeypatch.setattr(
+        updates.subprocess,
+        'run',
+        lambda cmd, **kwargs: _fake_proc(returncode=1, stderr=lock_error),
+    )
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['ok'] is False, result
+    assert result['lock_conflict'] is True, result
+    assert lock_error in result['message'], result
+
+
+def test_response_before_replacement_ordering(tmp_path, monkeypatch):
+    """The successful handoff keeps the two-second replacement delay."""
+    agent_dir = _agent_tmp(tmp_path)
+    agent_exe = _make_hermes_exe(agent_dir)
+
+    restart_delays = []
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
     monkeypatch.setattr(
         updates.subprocess, 'run',
         lambda cmd, **kw: _fake_proc(),
@@ -1562,16 +1603,18 @@ def test_response_before_replacement_ordering(tmp_path, monkeypatch):
         updates, '_ensure_gateway_restart_for_agent_update',
         lambda: (True, {'status': 'completed'}),
     )
-    monkeypatch.setattr(updates, '_schedule_restart', lambda: restart_calls.append(1))
+    monkeypatch.setattr(
+        updates,
+        '_schedule_restart',
+        lambda delay=2.0: restart_delays.append(delay),
+    )
 
     result = updates._apply_update_inner('agent')
 
-    # The function must have returned a dict (response) before the restart fires.
-    assert isinstance(result, dict), 'function must return a response dict'
     assert result['ok'] is True, result
     assert result.get('restart_scheduled') is True
-    assert restart_calls == [1], (
-        '_schedule_restart must be called exactly once on success'
+    assert restart_delays == [2.0], (
+        'the WebUI replacement must retain its two-second response handoff delay'
     )
 
 
@@ -1582,9 +1625,10 @@ def test_post_restart_health_gate(tmp_path, monkeypatch):
     response must carry ok=False and surface the health failure reason.
     """
     agent_dir = _agent_tmp(tmp_path)
-    _make_hermes_exe(agent_dir)
+    agent_exe = _make_hermes_exe(agent_dir)
 
     monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
     monkeypatch.setattr(
         updates.subprocess, 'run',
         lambda cmd, **kw: _fake_proc(),
@@ -1664,9 +1708,14 @@ def test_update_target_matrix(scenario, setup, expected_ok, expected_msg_fragmen
     if target == 'agent':
         agent_dir = _agent_tmp(tmp_path)
         if setup.get('agent_exe', True):
-            _make_hermes_exe(agent_dir)
+            agent_exe = _make_hermes_exe(agent_dir)
 
         monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+        if setup.get('agent_exe', True):
+            monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
+        else:
+            monkeypatch.setattr(updates, 'PYTHON_EXE', str(agent_dir / 'missing-python'))
+            monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: 'hermes')
 
         if setup.get('agent_exe', True):
             _rc = setup.get('agent_rc', 0)
@@ -1763,24 +1812,25 @@ def test_webui_target_unchanged(tmp_path, monkeypatch):
     )
 
 
-def test_exe_discovery_dotcenv_layout(tmp_path, monkeypatch):
-    """_find_agent_executable must locate hermes in the .venv layout.
-
-    The host-platform layout (venv/) is covered by _make_hermes_exe in other
-    tests.  This test covers the alternate .venv/ prefix on both platforms.
-    """
+def test_exe_discovery_configured_python_layout(tmp_path, monkeypatch):
+    """Executable discovery follows the configured Python environment."""
     agent_dir = _agent_tmp(tmp_path)
 
     if _sys.platform == 'win32':
-        exe = agent_dir / '.venv' / 'Scripts' / 'hermes.exe'
+        python_exe = agent_dir / 'custom-env' / 'Scripts' / 'python.exe'
+        exe = python_exe.parent / 'hermes.exe'
     else:
-        exe = agent_dir / '.venv' / 'bin' / 'hermes'
-    exe.parent.mkdir(parents=True, exist_ok=True)
+        python_exe = agent_dir / 'custom-env' / 'bin' / 'python'
+        exe = python_exe.parent / 'hermes'
+    python_exe.parent.mkdir(parents=True, exist_ok=True)
+    python_exe.write_text('fake python')
     exe.write_text('fake')
 
+    monkeypatch.setattr(updates, 'PYTHON_EXE', str(python_exe))
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: 'hermes')
     found = updates._find_agent_executable(agent_dir)
     assert found == exe, (
-        f'Expected .venv-layout exe {exe}; got {found!r}'
+        f'Expected configured-layout exe {exe}; got {found!r}'
     )
 
 
@@ -1789,12 +1839,13 @@ def test_agent_update_timeout_propagates(tmp_path, monkeypatch):
     indeterminate-state message and must not report restart_scheduled.
     """
     agent_dir = _agent_tmp(tmp_path)
-    _make_hermes_exe(agent_dir)
+    agent_exe = _make_hermes_exe(agent_dir)
 
     def _raise_timeout(cmd, **kw):
         raise updates.subprocess.TimeoutExpired(cmd, 1800)
 
     monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
     monkeypatch.setattr(updates.subprocess, 'run', _raise_timeout)
     monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
 
@@ -1814,12 +1865,13 @@ def test_agent_update_os_error_propagates(tmp_path, monkeypatch):
     ok=False with the OS error detail and must not report restart_scheduled.
     """
     agent_dir = _agent_tmp(tmp_path)
-    _make_hermes_exe(agent_dir)
+    agent_exe = _make_hermes_exe(agent_dir)
 
     def _raise_os_error(cmd, **kw):
         raise OSError('Permission denied')
 
     monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
     monkeypatch.setattr(updates.subprocess, 'run', _raise_os_error)
     monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
 

@@ -25,9 +25,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from api.agent_health import get_active_profile_gateway_running_pid
-from api.gateway_restart import restart_active_profile_gateway
+from api.gateway_restart import _resolve_hermes_command, restart_active_profile_gateway
 from api.profiles import get_active_profile_name
-from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
+from api.config import PYTHON_EXE, REPO_ROOT, STREAMS, STREAMS_LOCK
 
 logger = logging.getLogger(__name__)
 
@@ -2105,20 +2105,18 @@ def _restore_stash_after_pull_failure(
 
 
 def _find_agent_executable(agent_dir: Path):
-    """Return the hermes executable inside the agent venv, or None.
-
-    Checks the standard venv and .venv layouts on both Windows and Unix.
-    Called from _apply_agent_update_inner to locate the official updater.
-    Defined at hermes_cli/main.py:9531 (git grep "def _cmd_update_impl").
-    """
+    """Resolve the Agent CLI through the WebUI's existing command authority."""
+    configured_python = Path(PYTHON_EXE)
     for candidate in (
-        agent_dir / 'venv' / 'Scripts' / 'hermes.exe',
-        agent_dir / 'venv' / 'bin' / 'hermes',
-        agent_dir / '.venv' / 'Scripts' / 'hermes.exe',
-        agent_dir / '.venv' / 'bin' / 'hermes',
+        configured_python.parent / 'hermes.exe',
+        configured_python.parent / 'hermes',
     ):
         if candidate.is_file():
             return candidate
+
+    resolved = _resolve_hermes_command()
+    if resolved != 'hermes':
+        return Path(resolved)
     return None
 
 
@@ -2180,12 +2178,15 @@ def _apply_agent_update_inner():
 
     combined = ((proc.stdout or '') + (proc.stderr or '')).strip()
     if proc.returncode != 0:
-        detail = combined[:500] if combined else '(no output from updater)'
-        return {
+        detail = combined[-500:] if combined else '(no output from updater)'
+        response = {
             'ok': False,
             'message': f'Agent update failed: {detail}',
             'target': 'agent',
         }
+        if _is_git_lock_error(combined):
+            response['lock_conflict'] = True
+        return response
 
     # Invalidate before the gateway gate so any early-return path below still
     # reflects the newly-installed version rather than the pre-update state.

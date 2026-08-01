@@ -344,6 +344,8 @@ class TestApplyUpdateDiagnostics:
         from api import updates
         # No hermes exe is present; _run_git must never be called.
         with patch(f'{_MODULE}._AGENT_DIR', tmp_path), \
+             patch(f'{_MODULE}.PYTHON_EXE', str(tmp_path / 'missing-python')), \
+             patch(f'{_MODULE}._resolve_hermes_command', return_value='hermes'), \
              patch(f'{_MODULE}._run_git') as mock_run_git:
             result = updates._apply_update_inner('agent')
 

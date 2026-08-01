@@ -415,7 +415,7 @@ class TestConflictError:
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
         monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
 
-        result = upd.apply_update('agent')
+        result = upd.apply_update('webui')
         # Message must be actionable — should mention git checkout or pull
         msg = result['message']
         assert 'git' in msg.lower(), f"message should mention git: {msg}"
@@ -1433,6 +1433,7 @@ class TestAgentUpdateRequiresGatewayRestart:
         monkeypatch.setattr(upd.subprocess, 'run', lambda cmd, **kw: _FakeProc())
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
         monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_resolve_hermes_command', lambda: str(_hermes_exe))
         monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
         monkeypatch.setattr('api.updates.restart_active_profile_gateway', fake_gateway_restart)
 
@@ -1478,6 +1479,7 @@ class TestAgentUpdateRequiresGatewayRestart:
         monkeypatch.setattr(upd.subprocess, 'run', lambda cmd, **kw: _FakeProc())
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
         monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_resolve_hermes_command', lambda: str(_hermes_exe))
         monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart when gateway in_progress')))
         monkeypatch.setattr('api.updates.restart_active_profile_gateway', fake_gateway_restart)
 
@@ -1521,6 +1523,7 @@ class TestAgentUpdateRequiresGatewayRestart:
         monkeypatch.setattr(upd.subprocess, 'run', lambda cmd, **kw: _FakeProc())
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
         monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_resolve_hermes_command', lambda: str(_hermes_exe))
         monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
         monkeypatch.setattr('api.updates.restart_active_profile_gateway', lambda **kwargs: (
             restart_calls.append(kwargs.get('profile')),
