@@ -6528,13 +6528,12 @@ def _custom_provider_slug_for_context(name: object) -> str:
         if raw.startswith("custom:"):
             return raw
         raw = unicodedata.normalize("NFC", raw)
-        slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
+        # Replace only colon and whitespace with hyphens
+        slug = re.sub(r"[:\s]+", "-", raw).strip("-")
         slug = re.sub(r"-{2,}", "-", slug)
-        has_non_ascii = any(ord(char) > 127 for char in raw)
-        if not slug or has_non_ascii:
-            digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
-            slug = f"{slug}-{digest}" if slug else f"provider-{digest}"
-        return f"custom:{slug}" if slug else ""
+        if not slug:
+            return ""
+        return f"custom:{slug}"
 
 
 def _providers_match_for_context(config_key: object, requested_provider: str) -> bool:
