@@ -2623,6 +2623,12 @@ _env_backend_generations: dict[str, int] = {}  # task_key -> generation that cre
 _file_backend_generations: dict[str, int] = {}  # task_key -> generation for file ops cache
 _last_backend_identity: str | None = None  # sha256 fingerprint of the last-seen config
 _terminal_env_guard_installed: bool = False
+# Active-use ownership: generation -> number of turns currently executing under
+# it.  A stale generation is only retired once no turn is still using it, so a
+# replacement can never tear down an environment another turn is mid-execution.
+_active_turn_generations: dict[int, int] = {}
+_pending_eviction_generation: int | None = None  # deferred retire, drained on last turn exit
+_turn_state = threading.local()  # thread-local backend generation for the running turn
 
 
 def _compute_backend_identity(profile_runtime_env: dict | None) -> str:
@@ -2657,6 +2663,78 @@ def _mark_env_backend_generation(task_key: str, generation: int) -> None:
         _env_backend_generations[task_key] = generation
 
 
+def _get_current_backend_generation() -> int:
+    """Return the current generation under the generation lock."""
+    with _backend_generation_lock:
+        return _current_backend_generation
+
+
+def _register_turn_generation() -> None:
+    """Mark the current thread as executing a turn under the current generation.
+
+    Runs at turn startup (after identity invalidation).  The stale-generation
+    retire path consults this counter so it never tears down an environment a
+    concurrent turn is still using.
+    """
+    gen = _get_current_backend_generation()
+    _turn_state.backend_generation = gen
+    with _backend_generation_lock:
+        _active_turn_generations[gen] = _active_turn_generations.get(gen, 0) + 1
+
+
+def _unregister_turn_generation() -> None:
+    """Mark the current turn as finished; drain any deferred stale eviction."""
+    gen = getattr(_turn_state, 'backend_generation', None)
+    if gen is None:
+        return
+    _turn_state.backend_generation = None
+    with _backend_generation_lock:
+        remaining = _active_turn_generations.get(gen, 1) - 1
+        if remaining > 0:
+            _active_turn_generations[gen] = remaining
+        else:
+            _active_turn_generations.pop(gen, None)
+    _drain_pending_eviction()
+
+
+def _drain_pending_eviction() -> None:
+    """Retire a previously-deferred stale environment once no turn uses it.
+
+    Called when the last turn under the deferred generation exits.  Safe to
+    call any time: no-ops when nothing is pending or the generation is still
+    in use.
+    """
+    global _pending_eviction_generation
+    with _backend_generation_lock:
+        pending = _pending_eviction_generation
+        if pending is None:
+            return
+        if _active_turn_generations.get(pending, 0) > 0:
+            return
+        _pending_eviction_generation = None
+    try:
+        from tools.terminal_tool import cleanup_vm, get_active_env
+        from tools.file_tools import clear_file_ops_cache
+
+        cached = get_active_env('default')
+        if cached is not None:
+            env_gen = getattr(cached, '_webui_backend_generation', None)
+            if env_gen is None or env_gen == pending:
+                logger.info(
+                    'Retiring deferred stale terminal environment (gen %s)',
+                    pending,
+                )
+                cleanup_vm('default')
+        clear_file_ops_cache('default')
+    except ImportError:
+        logger.debug(
+            'Terminal or file_tools not available for deferred invalidation',
+            exc_info=True,
+        )
+    except Exception:
+        logger.debug('Failed to drain deferred terminal env eviction', exc_info=True)
+
+
 def _invalidate_stale_terminal_backend(profile_runtime_env: dict | None) -> None:
     """Evict the cached terminal/file environment when the backend config changes.
 
@@ -2666,6 +2744,8 @@ def _invalidate_stale_terminal_backend(profile_runtime_env: dict | None) -> None
       - SSH host A -> SSH host B (same TERMINAL_ENV=ssh) is detected
       - The eviction targets only the exact stale generation, not an env
         that another concurrent session has already replaced.
+      - An environment still executing an older turn is never torn down:
+        its retire is deferred until the last turn under that generation exits.
     """
     global _last_backend_identity, _current_backend_generation
 
@@ -2676,11 +2756,13 @@ def _invalidate_stale_terminal_backend(profile_runtime_env: dict | None) -> None
     with _backend_generation_lock:
         if identity == _last_backend_identity:
             return  # same config, nothing to do
-        # Config changed — bump generation
+        # Config changed — bump generation.  NOTE: we do NOT clear the
+        # generation records here; the recorded generation is the evidence
+        # the stale check below compares against.  Popping it first made
+        # `recorded` always None so the eviction never ran.
         _last_backend_identity = identity
         stale_generation = _current_backend_generation
         _current_backend_generation += 1
-        _env_backend_generations.pop('default', None)
         _file_backend_generations.pop('default', None)
 
     if stale_generation is None:
@@ -2700,29 +2782,38 @@ def _invalidate_stale_terminal_backend(profile_runtime_env: dict | None) -> None
         # If another concurrent turn already replaced it with a newer generation
         # (or removed it), we skip the eviction.
         recorded = _get_expected_backend_generation('default')
-        if recorded != stale_generation:
-            logger.debug(
-                'Skipping eviction — cached env gen %s != stale gen %s',
-                recorded, stale_generation,
-            )
-            return
-
-        cached = get_active_env('default')
-        if cached is not None:
-            # Double-check the env object's side-attribute also confirms staleness
-            env_gen = getattr(cached, '_webui_backend_generation', None)
-            if env_gen is not None and env_gen != stale_generation:
-                logger.debug(
-                    'Skipping eviction — env object gen %s != stale gen %s',
-                    env_gen, stale_generation,
+        if recorded == stale_generation:
+            if _active_turn_generations.get(stale_generation, 0) > 0:
+                # A turn is still executing under the stale generation —
+                # defer the retire until that turn exits.
+                with _backend_generation_lock:
+                    _pending_eviction_generation = stale_generation
+                logger.info(
+                    'Deferring stale env retire (gen %s) — active turn still using it',
+                    stale_generation,
                 )
                 return
-            logger.info(
-                'Evicting stale terminal environment (gen %s) for new config',
-                stale_generation,
-            )
-            cleanup_vm('default')
-        clear_file_ops_cache('default')
+
+            cached = get_active_env('default')
+            if cached is not None:
+                # Double-check the env object's side-attribute also confirms staleness
+                env_gen = getattr(cached, '_webui_backend_generation', None)
+                if env_gen is not None and env_gen != stale_generation:
+                    logger.debug(
+                        'Skipping eviction — env object gen %s != stale gen %s',
+                        env_gen, stale_generation,
+                    )
+                    return
+                logger.info(
+                    'Evicting stale terminal environment (gen %s) for new config',
+                    stale_generation,
+                )
+                cleanup_vm('default')
+            clear_file_ops_cache('default')
+
+        # Publish ownership: the next environment acquired on this task_key
+        # belongs to the *new* generation.
+        _mark_env_backend_generation('default', _current_backend_generation)
     except ImportError:
         logger.debug(
             'Terminal or file_tools not available for cache invalidation',
@@ -2736,19 +2827,21 @@ def _invalidate_stale_terminal_backend(profile_runtime_env: dict | None) -> None
 
 
 def _refresh_env_generation_tag() -> None:
-    """After the agent turn, tag any newly-created environment with the
-    current generation so the next setup can detect staleness.
+    """After the agent turn, publish ownership of the live environment.
 
-    Safe to call multiple times: only tags an untagged or stale-tagged env.
+    Records the current generation as the owner of the cached 'default' env
+    (if one exists) and tags the env object with it.  This is the publish
+    side of the generation protocol: without it the invalidator has no
+    recorded owner to compare against and can never retire a stale env.
     """
     try:
         from tools.terminal_tool import get_active_env
 
         env = get_active_env('default')
         if env is not None:
-            recorded = _get_expected_backend_generation('default')
-            if recorded is not None:
-                env._webui_backend_generation = recorded
+            gen = _get_current_backend_generation()
+            _mark_env_backend_generation('default', gen)
+            env._webui_backend_generation = gen
     except ImportError:
         pass
     except Exception:
@@ -2779,9 +2872,23 @@ def _install_terminal_env_generation_guard() -> None:
         ):
             # Pre-flight: evict stale env under _env_lock, in the same
             # critical section the acquisition path uses.
+            #
+            # ⚠️ DEADLOCK GUARD: do NOT call tt.get_active_env() while
+            # holding tt._env_lock.  The agent's _env_lock is a plain
+            # non-reentrant threading.Lock and get_active_env() acquires it
+            # again (tools/terminal_tool.py ~1736-1740) — the first guarded
+            # terminal call would block forever.  Replicate the accessor's
+            # lookup inline instead so the read and the compare-and-retire
+            # stay atomic under one acquisition of the lock.
             effective_task_id = tt._resolve_container_task_id(task_id)
+            stale_env = None
             with tt._env_lock:
-                env = tt.get_active_env(task_id)
+                # Same lookup semantics as tt.get_active_env(task_id):
+                # prefer the collapsed container id, fall back to the raw id.
+                env = (
+                    tt._active_environments.get(effective_task_id)
+                    or tt._active_environments.get(task_id)
+                )
                 if env is not None:
                     env_gen = getattr(env, '_webui_backend_generation', None)
                     if env_gen is not None:
@@ -2793,8 +2900,21 @@ def _install_terminal_env_generation_guard() -> None:
                                 'Guard evicting stale env (gen %s, expected %s) on task %s',
                                 env_gen, expected, effective_task_id,
                             )
-                            tt._active_environments.pop(effective_task_id, None)
-                            tt._last_activity.pop(effective_task_id, None)
+                            # Compare-and-retire: pop only if the registry still
+                            # points at THIS env object (someone else may have
+                            # replaced it since the read).
+                            if tt._active_environments.get(effective_task_id) is env:
+                                tt._active_environments.pop(effective_task_id, None)
+                                tt._last_activity.pop(effective_task_id, None)
+                                stale_env = env
+
+            if stale_env is not None:
+                # Publish ownership for the replacement BEFORE the original
+                # tool call runs: the next env acquired on this task belongs
+                # to the current generation.
+                _mark_env_backend_generation(
+                    effective_task_id, _get_current_backend_generation()
+                )
 
             return original_terminal_tool(
                 command, background=background, timeout=timeout,
@@ -9010,11 +9130,15 @@ def _run_agent_streaming(
 
         # #5937: invalidate the cached "default" terminal environment when
         # the profile's terminal backend identity changes.  Uses a full
-        # config fingerprint (not just TERMINAL_ENV type) and generation
+        # config fingerprint (not just TERMINAL_ENV) and generation
         # tracking so SSH host A -> host B is detected and only the exact
         # stale generation is evicted.
         _invalidate_stale_terminal_backend(_safe_profile_runtime_env)
         _install_terminal_env_generation_guard()
+        # Active-use ownership: this turn now executes under the current
+        # generation, so a concurrent profile switch defers retiring an env
+        # this turn may still be using.
+        _register_turn_generation()
 
         # Register a gateway-style notify callback so the approval system can
         # push the `approval` SSE event the moment a dangerous command is
@@ -11877,6 +12001,9 @@ def _run_agent_streaming(
             # turn's setup can detect staleness.  Run before env var restoration
             # so get_active_env() still works.
             _refresh_env_generation_tag()
+            # Active-use ownership: this turn has finished; drain any stale
+            # eviction deferred while it was still executing.
+            _unregister_turn_generation()
             with _ENV_LOCK:
                 for _key, _old_value in old_profile_env.items():
                     if _old_value is None: os.environ.pop(_key, None)
