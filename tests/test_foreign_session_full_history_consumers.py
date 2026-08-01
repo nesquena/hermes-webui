@@ -71,6 +71,7 @@ ASYNC_SLASH_BLOCK = SEND_SRC[
     )
 ]
 BACKGROUND_SRC = _maybe_extract(MESSAGES_JS, "startBackgroundPolling")
+GATEWAY_SRC = _maybe_extract(SESSIONS_JS, "startGatewaySSE")
 CAPTURE_SRC = _maybe_extract(SESSIONS_JS, "_captureTranscriptReplacement")
 CURRENT_SRC = _maybe_extract(SESSIONS_JS, "_transcriptReplacementIsCurrent")
 COMMIT_SRC = _maybe_extract(SESSIONS_JS, "_commitTranscriptReplacement")
@@ -787,6 +788,145 @@ startBackgroundPolling('parent', 'task-1', 'prompt');
 """
 
 
+def _full_history_writer_race_script(writer: str) -> str:
+    sessions_path = str(REPO / "static" / "sessions.js")
+    messages_path = str(REPO / "static" / "messages.js")
+    if writer == "gateway":
+        writer_src = GATEWAY_SRC
+        writer_setup = """
+const gatewayEvents = {};
+class EventSource {
+  constructor() {}
+  addEventListener(name, handler) { gatewayEvents[name] = handler; }
+}
+function stopGatewaySSE() { _gatewaySSE = null; }
+function stopGatewayPollFallback() {}
+function _installSidebarSseFocusHook() {}
+function _sidebarSseBackgrounded() { return false; }
+function _isDuplicateGatewaySessionSnapshot() { return false; }
+function _isExternalSession() { return true; }
+function _externalImportPayload() { return {}; }
+function _isCliImportRefreshPrefixMatch() { return true; }
+function highlightCode() {}
+function renderSessionList() {}
+let _gatewaySSE = null;
+let _gatewaySSEWarningShown = false;
+let _gatewayPollTimer = null;
+let _gatewayPollVisibilityHandler = null;
+let _gatewayProbeInFlight = false;
+const document = {
+  hidden: false,
+  addEventListener() {},
+  removeEventListener() {},
+};
+const location = { href: 'http://localhost/' };
+"""
+        writer_start = """
+startGatewaySSE();
+if (typeof gatewayEvents.sessions_changed !== 'function') throw new Error('gateway event handler was not installed');
+const ensurePromise = _ensureAllMessagesLoaded();
+gatewayEvents.sessions_changed({data: JSON.stringify({sessions: [{session_id: 'parent', updated_at: 2, message_count: 2, source: 'cli'}]})});
+await Promise.resolve();
+if (typeof resolveImport !== 'function') throw new Error('gateway import request was not started');
+resolveImport({session: {session_id: 'parent', messages: [
+  {role: 'assistant', content: 'old'},
+  {role: 'assistant', content: 'gateway result'},
+]}});
+await Promise.resolve();
+if (typeof resolveFullLoad !== 'function') throw new Error('full-history request was not started');
+resolveFullLoad({session: {session_id: 'parent', messages: [
+  {role: 'assistant', content: 'old'},
+], tool_calls: [], message_count: 1}});
+await ensurePromise;
+console.log(JSON.stringify({messages: S.messages.map(message => message.content), generation: _messagesGeneration}));
+"""
+    elif writer == "background":
+        writer_src = BACKGROUND_SRC
+        writer_setup = """
+function hideBackgroundBadge() {}
+function renderMessages() {}
+function showToast() {}
+function t(key) { return key; }
+const _bgPollTimers = {};
+function setTimeout() { return 1; }
+"""
+        writer_start = """
+const ensurePromise = _ensureAllMessagesLoaded();
+startBackgroundPolling('parent', 'task-1', 'prompt');
+await Promise.resolve();
+if (typeof resolveStatus !== 'function') throw new Error('background status request was not started');
+resolveStatus({results: [{task_id: 'task-1', answer: 'background result'}]});
+await Promise.resolve();
+if (typeof resolveFullLoad !== 'function') throw new Error('full-history request was not started');
+resolveFullLoad({session: {session_id: 'parent', messages: [
+  {role: 'assistant', content: 'old'},
+], tool_calls: [], message_count: 1}});
+await ensurePromise;
+console.log(JSON.stringify({messages: S.messages.map(message => message.content), generation: _messagesGeneration}));
+"""
+    else:
+        raise ValueError(writer)
+    api_body = """
+async function api(url) {
+  if (String(url).startsWith('/api/session?')) {
+    return await new Promise(resolve => { resolveFullLoad = resolve; });
+  }
+  if (String(url).includes('/api/session/import_cli')) {
+    return await new Promise(resolve => { resolveImport = resolve; });
+  }
+  if (String(url).includes('/api/background/status')) {
+    return await new Promise(resolve => { resolveStatus = resolve; });
+  }
+  throw new Error('unexpected API request: ' + url);
+}
+"""
+    return f"""
+const fs = require('fs');
+const sessionsSrc = fs.readFileSync({json.dumps(sessions_path)}, 'utf8');
+const messagesSrc = fs.readFileSync({json.dumps(messages_path)}, 'utf8');
+function extractFunction(source, name) {{
+  let start = source.indexOf(`async function ${{name}}(`);
+  if (start < 0) start = source.indexOf(`function ${{name}}(`);
+  if (start < 0) throw new Error(`missing function ${{name}}`);
+  const brace = source.indexOf('{{', start);
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {{
+    if (source[i] === '{{') depth++;
+    else if (source[i] === '}}' && --depth === 0) return source.slice(start, i + 1);
+  }}
+  throw new Error(`unterminated ${{name}}`);
+}}
+const ensureAllSrc = sessionsSrc.slice(
+  sessionsSrc.indexOf('let _loadingOlder = false;'),
+  sessionsSrc.indexOf('const SESSION_ARCHIVED_PAGE_SIZE')
+);
+let _messagesTruncated = true;
+let _loadingSessionId = 'parent';
+let resolveFullLoad = null;
+let resolveImport = null;
+let resolveStatus = null;
+const S = {{session: {{session_id: 'parent', message_count: 0}}, messages: [], toolCalls: [], busy: false, activeStreamId: null}};
+const window = {{_showCliSessions: true, _carryForwardEphemeralTurnFields: (_current, incoming) => incoming}};
+function _syncToolCallsForLoadedMessages() {{}}
+function clearLiveToolCards() {{}}
+function syncTopbar() {{}}
+function _setSessionViewedCount() {{}}
+function _isSessionActivelyViewedForList() {{ return true; }}
+function _messageRenderableMessageCount() {{ return S.messages.length; }}
+function _currentMessageRenderWindowSize() {{ return S.messages.length; }}
+function _hydrateTodosFromSession() {{}}
+function scheduleTodosRefresh() {{}}
+function _setSessionCompletionUnread() {{}}
+{api_body}
+{ENSURE_ALL_FN}
+{writer_setup}
+{writer_src}
+(async () => {{
+{writer_start}
+}})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""
+
+
 def _compression_post_render_generation_script() -> str:
     return f"""
 let _messagesGeneration = 0;
@@ -1059,6 +1199,30 @@ def test_background_polling_rejects_stale_owner_or_generation_and_keeps_retry():
     assert newer_writer["rendered"] is False
     assert newer_writer["toasts"] == []
     assert newer_writer["timerCount"] == 1
+
+
+@pytest.mark.parametrize("writer", ["gateway", "background"])
+def test_active_transcript_writers_invalidate_pending_full_history_loads(writer):
+    result = _run_node(_full_history_writer_race_script(writer))
+
+    if writer == "gateway":
+        assert result["messages"] == ["old", "gateway result"]
+    else:
+        assert len(result["messages"]) == 1
+        assert result["messages"][0].endswith("background result")
+    assert result["generation"] == 1
+
+
+def test_writer_graph_covers_gateway_and_background_generation_authorities():
+    assert "const replacementTicket = _captureTranscriptReplacement();" in SESSIONS_JS
+    assert "_commitTranscriptReplacement(replacementTicket, () =>" in SESSIONS_JS
+    assert "startGatewaySSE" in SESSIONS_JS
+    assert "import_cli" in SESSIONS_JS
+    assert "function startBackgroundPolling" in MESSAGES_JS
+    assert "const requestGeneration=typeof _messagesGeneration==='number'" in MESSAGES_JS
+    assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n            S.messages.push(msg);" in MESSAGES_JS
+    assert "S.messages = _nextToAssign;" in SESSIONS_JS
+    assert "S.messages.push(msg);" in MESSAGES_JS
 
 
 def test_compression_stops_post_render_updates_when_generation_changes():
