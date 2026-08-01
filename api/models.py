@@ -42,7 +42,7 @@ from api.agent_sessions import (
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
-from api.process_event_utils import stamp_message_source
+from api.process_event_utils import attach_wakeup_display_meta, stamp_message_source
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
@@ -8183,6 +8183,8 @@ def get_state_db_session_messages(
                 # sidecar in the WebUI's internal history; the provider-safe
                 # projection strips it before any direct API request.
                 'api_content',
+                'display_kind',
+                'display_metadata',
             ]
             id_col = ['id'] if 'id' in available else []
             selected = id_col + ['role', 'content', 'timestamp'] + [c for c in optional if c in available]
@@ -8298,7 +8300,7 @@ def get_state_db_session_messages(
                     value = row[col]
                     if value in (None, ''):
                         continue
-                    if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
+                    if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items', 'display_metadata'}:
                         value = _json_loads_if_string(value)
                     msg[col] = value
                 # Keep durable provenance only alongside a real Agent replay
@@ -9657,6 +9659,43 @@ def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
     return True
 
 
+def _normalize_wakeup_rows_for_display(messages):
+    """Project trusted gateway wake provenance and dedupe by delivery id.
+
+    ``display_kind`` and ``display_metadata`` are persisted by the agent at
+    turn start. Unlike message text, they are not user-controlled inference.
+    Rows without that durable provenance are deliberately left byte-identical.
+    """
+    if not isinstance(messages, list) or not messages:
+        return messages
+    seen_delivery_ids = set()
+    normalized = []
+    for msg in messages:
+        if (
+            not isinstance(msg, dict)
+            or msg.get("role") != "user"
+            or msg.get("display_kind") != "process_wakeup"
+        ):
+            normalized.append(msg)
+            continue
+        metadata = msg.get("display_metadata")
+        delivery_id = (
+            str(metadata.get("delivery_id") or "").strip()
+            if isinstance(metadata, dict)
+            else ""
+        )
+        if not delivery_id:
+            normalized.append(msg)
+            continue
+        if delivery_id in seen_delivery_ids:
+            continue
+        seen_delivery_ids.add(delivery_id)
+        msg["_source"] = "process_wakeup"
+        attach_wakeup_display_meta(msg, "process_wakeup")
+        normalized.append(msg)
+    return normalized
+
+
 def merge_session_messages_append_only(
     sidecar_messages: list,
     state_messages: list,
@@ -9776,7 +9815,7 @@ def merge_session_messages_append_only(
 
     watermark_timestamp = _message_timestamp_as_float({"timestamp": truncation_watermark})
     if not state_messages:
-        return sidecar_messages
+        return _normalize_wakeup_rows_for_display(sidecar_messages)
     if not sidecar_messages:
         if watermark_timestamp is None:
             # No watermark — keep everything, just dedup.
@@ -9841,7 +9880,7 @@ def merge_session_messages_append_only(
                 deduped.append(msg)
             else:
                 _merge_session_display_metadata(seen_messages.get(key), msg)
-        return deduped
+        return _normalize_wakeup_rows_for_display(deduped)
 
     merged_messages = []
     seen_message_keys = set()
@@ -9890,7 +9929,7 @@ def merge_session_messages_append_only(
         merged_messages.append(msg)
         _remember_merged_message(msg)
     if _sidecar_has_terminal_partial_error(sidecar_messages):
-        return merged_messages
+        return _normalize_wakeup_rows_for_display(merged_messages)
     sidecar_visible_lookup = _build_visible_duplicate_lookup(sidecar_visible_keys)
     state_replay_idx = 0
     skipped_state_visible_counts = {}
@@ -10159,7 +10198,7 @@ def merge_session_messages_append_only(
         seen_visible_keys.add(visible_key)
         merged_messages.append(msg)
         _remember_merged_message(msg)
-    return merged_messages
+    return _normalize_wakeup_rows_for_display(merged_messages)
 
 
 def reconciled_state_db_messages_for_session(
