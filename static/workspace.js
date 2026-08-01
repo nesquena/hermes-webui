@@ -424,21 +424,23 @@ const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|_
 const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);
 const ARTIFACT_READ_TOOLS = new Set(['read_file','search_files']);
 const ARTIFACT_WEB_TOOLS = new Set(['web_search','web_extract','browser_navigate']);
-const ARTIFACT_CATEGORY_ORDER = ['modified','read','web','media'];
+const ARTIFACT_CATEGORY_ORDER = Object.freeze(['modified','read','web','media']);
 const ARTIFACT_CATEGORY_LIMITS = Object.freeze({modified:50, read:50, web:50, media:50});
 
-function _normalizeArtifactPath(path){
+function _normalizeArtifactPath(path, allowExtensionless=false){
   if(!path) return '';
   path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
   if(!path || path.length > 240 || path.includes('://')) return '';
+  if(/^[a-z][a-z0-9+.-]*:/i.test(path) && !/^[a-z]:[\\/]/i.test(path)) return '';
   // Canonicalize workspace-relative prefixes so a file-tree open ("foo.md") and a
   // tool arg recorded as "./foo.md" or "~/foo.md" compare equal for mutation
   // tracking; otherwise an agent edit via a ./-prefixed path leaves the open
   // preview stale (#3262 / pre-release regression-gate finding).
   path = path.replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
-  if(!path) return '';
+  if(!path || path === '.' || path.split(/[\\/]/).some(part => part === '..')) return '';
+  if(/[\u0000-\u001f\u007f]/.test(path)) return '';
   if(ARTIFACT_IGNORE_RE.test(path)) return '';
-  if(!/[./]/.test(path)) return '';
+  if(!allowExtensionless && !/[./]/.test(path)) return '';
   return path;
 }
 
@@ -455,11 +457,50 @@ function _normalizeArtifactUrl(url){
   }
 }
 
-function _normalizeArtifactTarget(value){
+function _normalizeArtifactTarget(value, allowExtensionless=false){
   if(typeof value !== 'string') return '';
   const candidate = value.trim();
   if(/^[a-z][a-z0-9+.-]*:/i.test(candidate) && !/^[a-z]:[\\/]/i.test(candidate) && !/^(?:https?):/i.test(candidate)) return '';
-  return /^(?:https?):/i.test(candidate) ? _normalizeArtifactUrl(candidate) : _normalizeArtifactPath(candidate);
+  return /^(?:https?):/i.test(candidate) ? _normalizeArtifactUrl(candidate) : _normalizeArtifactPath(candidate, allowExtensionless);
+}
+
+function _normalizeArtifactMediaRef(value){
+  if(typeof value !== 'string') return '';
+  const candidate = value.trim().replace(/^[`"'(<]+|[`"'\]>,.;:]+$/g,'');
+  if(!candidate) return '';
+  if(/^file:\/\//i.test(candidate)){
+    try{
+      const parsed = new URL(candidate);
+      if(parsed.hostname) return '';
+      const localPath = decodeURIComponent(parsed.pathname || '');
+      return _normalizeArtifactPath(localPath, true);
+    }catch(_){
+      return '';
+    }
+  }
+  return _normalizeArtifactTarget(candidate, true);
+}
+
+function _looksLikeArtifactPath(value){
+  return /[\\/]/.test(value) || /^(?:[a-z]:[\\/]|~[\\/]|\.\.?[\\/])/i.test(value);
+}
+
+function _parseArtifactJson(value){
+  if(value && typeof value === 'object') return value;
+  if(typeof value !== 'string') return null;
+  const text = value.trim();
+  if(!text) return null;
+  const attempts = [text];
+  const end = Math.max(text.lastIndexOf(String.fromCharCode(125)), text.lastIndexOf(String.fromCharCode(93)));
+  if(end >= 0 && end + 1 < text.length) attempts.push(text.slice(0, end + 1));
+  for(const candidate of attempts){
+    try{
+      let parsed = JSON.parse(candidate);
+      if(typeof parsed === 'string') parsed = JSON.parse(parsed);
+      if(parsed && typeof parsed === 'object') return parsed;
+    }catch(_){ }
+  }
+  return null;
 }
 
 function _artifactCandidatesFromText(text){
@@ -467,7 +508,7 @@ function _artifactCandidatesFromText(text){
   const out = [];
   const seen = new Set();
   const add = (value, category='modified', kind='diff') => {
-    const path = category === 'web' ? _normalizeArtifactUrl(value) : _normalizeArtifactTarget(value);
+    const path = category === 'web' ? _normalizeArtifactUrl(value) : category === 'media' ? _normalizeArtifactMediaRef(value) : _normalizeArtifactTarget(value, category === 'read');
     if(!path || seen.has(`${category}:${path}`)) return;
     seen.add(`${category}:${path}`); out.push({path, category, kind});
   };
@@ -486,7 +527,7 @@ function _artifactCandidatesFromText(text){
   const images = /\[IMAGE:\s*([^\]]+)\]/gi;
   while((m = images.exec(text))){
     const imageRef = m[1].trim();
-    if(!/\s/.test(imageRef)) add(imageRef, 'media', 'media');
+    if(!/\s/.test(imageRef) && _looksLikeArtifactPath(imageRef)) add(imageRef, 'media', 'media');
   }
   return out;
 }
@@ -495,10 +536,11 @@ function _artifactCandidatesFromToolCall(tc){
   if(!tc) return [];
   const name = String(tc.name || '').replace(/^functions\./,'');
   const args = tc.arguments || tc.args || tc.input || {};
-  const result = tc.result || tc.output || tc.snippet || '';
+  const resultValues = [tc.result, tc.output, tc.snippet].filter(value => value != null && value !== '');
+  const result = resultValues[0] || '';
   const out = [];
   const addPath = (path, category, source=name || 'tool') => {
-    path = _normalizeArtifactPath(path);
+    path = _normalizeArtifactPath(path, category === 'read');
     if(path) out.push({path, category, kind:source});
   };
   const addUrl = (url, source='web_page') => {
@@ -514,11 +556,16 @@ function _artifactCandidatesFromToolCall(tc){
     else if(typeof value === 'string') addUrl(value, source);
   };
   const addResultUrls = value => {
-    if(!value || typeof value !== 'object') return;
-    addUrls(value.url, 'web_result');
-    addUrls(value.urls, 'web_result');
-    if(Array.isArray(value.results)) value.results.forEach(resultItem => {
-      if(resultItem && typeof resultItem === 'object') addUrl(resultItem.url, 'web_result');
+    const parsed = _parseArtifactJson(value);
+    if(!parsed || typeof parsed !== 'object') return;
+    addUrls(parsed.url, 'web_result');
+    addUrls(parsed.urls, 'web_result');
+    const web = parsed.data && typeof parsed.data === 'object' ? parsed.data.web : parsed.web;
+    if(Array.isArray(web)) web.forEach(resultItem => {
+      if(resultItem && typeof resultItem === 'object') addUrl(resultItem.url || resultItem.href, 'web_result');
+    });
+    if(Array.isArray(parsed.results)) parsed.results.forEach(resultItem => {
+      if(resultItem && typeof resultItem === 'object') addUrl(resultItem.url || resultItem.href, 'web_result');
     });
   };
   if(ARTIFACT_MUTATION_TOOLS.has(name) && args && typeof args === 'object'){
@@ -527,13 +574,26 @@ function _artifactCandidatesFromToolCall(tc){
     if(Array.isArray(args.edits)) args.edits.forEach(e=>addPath(e&&e.path, 'modified'));
   }
   if(ARTIFACT_READ_TOOLS.has(name) && args && typeof args === 'object'){
-    for(const key of ['path','file_path']) addPath(args[key], 'read', name);
-    addPaths(args.paths, 'read', name);
+    if(name === 'read_file'){
+      for(const key of ['path','file_path']) addPath(args[key], 'read', name);
+      addPaths(args.paths, 'read', name);
+    }else if(name === 'search_files'){
+      const parsed = resultValues.map(_parseArtifactJson).find(value => value && typeof value === 'object');
+      if(parsed && typeof parsed === 'object'){
+        addPaths(parsed.files, 'read', name);
+        if(Array.isArray(parsed.matches)) parsed.matches.forEach(match => addPath(match && match.path, 'read', name));
+        if(typeof parsed.matches_text === 'string'){
+          for(const line of parsed.matches_text.split(/\r?\n/)){
+            if(line.trim() && !/^\s+\d+\s*:/.test(line) && !/^\s/.test(line)) addPath(line.trim(), 'read', name);
+          }
+        }
+      }
+    }
   }
   if(ARTIFACT_WEB_TOOLS.has(name) && args && typeof args === 'object'){
     addUrls(args.url, 'web_page');
     addUrls(args.urls, 'web_page');
-    addResultUrls(result);
+    for(const value of resultValues) addResultUrls(value);
   }
   const resultText = typeof result === 'string' ? result : '';
   // Tool results may include unified diffs from patch-style tools; scan those
@@ -579,12 +639,12 @@ async function refreshOpenPreviewIfMutated(){
 }
 
 function collectSessionArtifacts(){
-  const categoryOrder = ['modified','read','web','media'];
+  const categoryOrder = ARTIFACT_CATEGORY_ORDER;
   const grouped = Object.fromEntries(categoryOrder.map(category => [category, []]));
   const seen = Object.fromEntries(categoryOrder.map(category => [category, new Set()]));
   const push = (candidate, source) => {
     const category = categoryOrder.includes(candidate.category) ? candidate.category : 'modified';
-    const path = category === 'web' ? _normalizeArtifactUrl(candidate.path) : _normalizeArtifactTarget(candidate.path);
+    const path = category === 'web' ? _normalizeArtifactUrl(candidate.path) : category === 'media' ? _normalizeArtifactMediaRef(candidate.path) : _normalizeArtifactTarget(candidate.path, category === 'read');
     if(!path || seen[category].has(path) || grouped[category].length >= ARTIFACT_CATEGORY_LIMITS[category]) return;
     seen[category].add(path);
     grouped[category].push({path, category, source: candidate.kind || source});
@@ -598,20 +658,29 @@ function collectSessionArtifacts(){
   // tool_calls / tool_use content blocks that survive the S.toolCalls clear.
   for(const msg of (S.messages || [])){
     if(!msg) continue;
+    const messageRole = String(msg.role || '').toLowerCase();
+    const allowMessageMedia = messageRole === 'assistant' || messageRole === 'tool';
     const textValues = [];
     if(typeof msg.content === 'string') textValues.push(msg.content);
     else if(Array.isArray(msg.content)) for(const block of msg.content){
-      if(block && block.type === 'text' && typeof block.text === 'string') textValues.push(block.text);
+      if(block && ['text','input_text','output_text'].includes(block.type)){
+        const text = block.text || block.input_text || block.output_text || block.content;
+        if(typeof text === 'string') textValues.push(text);
+      }
     }
     else if(typeof msg.text === 'string') textValues.push(msg.text);
     else if(typeof msg.message === 'string') textValues.push(msg.message);
     // Text-mined diff/patch fences (existing path).
     for(const text of textValues){
-      for(const a of _artifactCandidatesFromText(text)) push(a, a.kind);
+      for(const a of _artifactCandidatesFromText(text)){
+        if(a.category === 'media' && !allowMessageMedia) continue;
+        push(a, a.kind);
+      }
     }
     // Structured tool_calls array (OpenAI format: {function:{name,arguments}}).
-    if(Array.isArray(msg.tool_calls)){
-      for(const tc of msg.tool_calls){
+    for(const toolCalls of [msg.tool_calls, msg._partial_tool_calls]){
+      if(!Array.isArray(toolCalls)) continue;
+      for(const tc of toolCalls){
         if(!tc || typeof tc !== 'object') continue;
         const fn = (tc.function && typeof tc.function === 'object') ? tc.function : tc;
         const name = fn.name || tc.name || '';
@@ -673,7 +742,7 @@ function renderSessionArtifacts(){
     web: 'workspace_artifact_category_web',
     media: 'workspace_artifact_category_media',
   };
-  const categoryOrder = ['modified','read','web','media'];
+  const categoryOrder = ARTIFACT_CATEGORY_ORDER;
   const categoryLabelFallbacks = {
     modified: 'Modified Files',
     read: 'Files Read',

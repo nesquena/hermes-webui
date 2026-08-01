@@ -52,6 +52,7 @@ def _collect_via_node(messages):
         "ARTIFACT_MUTATION_TOOLS",
         "ARTIFACT_READ_TOOLS",
         "ARTIFACT_WEB_TOOLS",
+        "ARTIFACT_CATEGORY_ORDER",
         "ARTIFACT_CATEGORY_LIMITS",
     ):
         m = re.search(rf"const {name} = .*?;", WORKSPACE_JS)
@@ -63,6 +64,9 @@ def _collect_via_node(messages):
             "_normalizeArtifactPath",
             "_normalizeArtifactUrl",
             "_normalizeArtifactTarget",
+            "_normalizeArtifactMediaRef",
+            "_looksLikeArtifactPath",
+            "_parseArtifactJson",
             "_artifactCandidatesFromText",
             "_artifactCandidatesFromToolCall",
             "collectSessionArtifacts",

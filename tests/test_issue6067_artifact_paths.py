@@ -182,6 +182,7 @@ def test_issue6067_artifact_filenames_remain_visible_across_artifact_widths():
         </div>
         <span id="workspaceArtifactsCount"></span>
         <script>
+          const ARTIFACT_CATEGORY_ORDER = ['modified', 'read', 'web', 'media'];
           const S = {{session: {{workspace: '/workspace'}}, artifacts: {items!r}}};
           const opened = [];
           const $ = id => document.getElementById(id);

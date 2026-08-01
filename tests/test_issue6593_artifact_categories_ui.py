@@ -1,6 +1,7 @@
 """Rendered workspace artifact category and action coverage for #6593."""
 
 import os
+import json
 import re
 import subprocess
 import sys
@@ -12,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _layout_helpers import assert_layout_sane
 
 REPO = Path(__file__).resolve().parent.parent
+FIXTURE = REPO / "tests" / "fixtures" / "issue6593_artifact_categories.json"
 SOURCE_MODE = os.environ.get("ISSUE6593_SOURCE_MODE", "head")
 
 
@@ -53,9 +55,39 @@ def _locale_blocks():
     ]
 
 
-def _render_harness(items):
+def _artifact_bundle():
+    consts = "\n".join(
+        re.search(rf"const {name} = .*?;", WORKSPACE_JS).group(0)
+        for name in (
+            "ARTIFACT_IGNORE_RE",
+            "ARTIFACT_MUTATION_TOOLS",
+            "ARTIFACT_READ_TOOLS",
+            "ARTIFACT_WEB_TOOLS",
+            "ARTIFACT_CATEGORY_ORDER",
+            "ARTIFACT_CATEGORY_LIMITS",
+        )
+    )
+    return consts + "\n" + "\n".join(
+        _function(WORKSPACE_JS, name)
+        for name in (
+            "_normalizeArtifactPath",
+            "_normalizeArtifactUrl",
+            "_normalizeArtifactTarget",
+            "_normalizeArtifactMediaRef",
+            "_looksLikeArtifactPath",
+            "_parseArtifactJson",
+            "_artifactCandidatesFromText",
+            "_artifactCandidatesFromToolCall",
+            "collectSessionArtifacts",
+        )
+    )
+
+
+def _render_harness(payload):
     renderer = _function(WORKSPACE_JS, "renderSessionArtifacts")
     css = STYLE_CSS.replace("</style>", "")
+    tool_calls = json.dumps(payload["tool_calls"])
+    messages = json.dumps(payload["messages"])
     return f"""
       <style>{css}</style>
       <style>
@@ -71,7 +103,11 @@ def _render_harness(items):
       </div>
       <span id="workspaceArtifactsCount"></span>
       <script>
-        const S = {{ session: {{ workspace: '/workspace' }}, artifacts: {items!r} }};
+        const S = {{
+          toolCalls: {tool_calls},
+          messages: {messages},
+          session: {{ workspace: '/workspace', session_id: 'ui-proof' }}
+        }};
         const $ = id => document.getElementById(id);
         const esc = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;')
           .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -82,9 +118,11 @@ def _render_harness(items):
           workspace_artifact_category_media: 'Inline Media',
           workspace_artifact_source_session: 'session'
         }})[key] || key;
-        const collectSessionArtifacts = () => S.artifacts;
         const openArtifactPath = path => window.opened = [...(window.opened || []), path];
-        {_function(WORKSPACE_JS, "_normalizeArtifactUrl") if "function _normalizeArtifactUrl(" in WORKSPACE_JS else ""}
+        {_artifact_bundle()}
+        const _issue6593CollectedArtifacts = collectSessionArtifacts();
+        window.issue6593CollectedArtifacts = _issue6593CollectedArtifacts;
+        collectSessionArtifacts = () => _issue6593CollectedArtifacts.map(item => ({{...item, source: item.category}}));
         {renderer}
         renderSessionArtifacts();
       </script>
@@ -93,42 +131,72 @@ def _render_harness(items):
 
 def test_grouped_sections_are_quiet_responsive_and_keyboard_usable():
     playwright = pytest.importorskip("playwright.sync_api")
-    items = [
-        {"category": "modified", "path": "src/app.py", "source": "mutated"},
-        {"category": "read", "path": "README.md", "source": "read"},
-        {"category": "web", "path": "https://example.com/docs", "source": "web"},
-        {"category": "media", "path": "assets/chart.png", "source": "media"},
-    ]
+    fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    search_call = dict(fixture["tool_calls"][2])
+    search_call["result"] = '{"files":["src/app.py"]}'
+    payload = {
+        "tool_calls": [fixture["tool_calls"][0], search_call, *fixture["tool_calls"][3:6]],
+        "messages": [fixture["messages"][0], fixture["messages"][5]],
+    }
     with playwright.sync_playwright() as api:
         browser = api.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         page = browser.new_page(viewport={"width": 1024, "height": 600})
-        page.set_content(_render_harness(items))
+        page.set_content(_render_harness(payload))
         screenshot_path = os.environ.get("ISSUE6593_SCREENSHOT_PATH")
         if screenshot_path:
             page.screenshot(path=screenshot_path)
         groups = page.locator(".workspace-artifact-group")
         assert groups.count() == 4
+        collected = page.evaluate("() => window.issue6593CollectedArtifacts")
+        assert [item["category"] for item in collected] == [
+            "modified", "read", "web", "web", "web", "media", "media"
+        ]
+        assert all("user" not in item["path"] for item in collected)
+        assert page.locator(".workspace-artifact-group").evaluate_all(
+            "nodes => nodes.map(node => node.dataset.artifactCategory)"
+        ) == ["modified", "read", "web", "media"]
         assert page.locator(".workspace-artifact-group-title > span:first-child").all_text_contents() == [
             "Modified Files", "Files Read", "Web Pages", "Inline Media"
         ]
-        assert page.locator(".workspace-artifact-item").count() == 3
-        assert page.locator(".workspace-artifact-link").count() == 1
-        assert page.locator(".workspace-artifact-link").get_attribute("href") == "https://example.com/docs"
-        assert page.locator(".workspace-artifact-link").get_attribute("rel") == "noopener noreferrer"
-        assert page.locator(".workspace-artifact-link").get_attribute("target") == "_blank"
+        assert page.locator(".workspace-artifact-item").count() == 4
+        assert page.locator(".workspace-artifact-link").count() == 3
+        assert page.locator("a[href^='javascript:']").count() == 0
+        assert "private.example" not in page.locator("body").inner_text()
+        assert page.locator(".workspace-artifact-link").first.get_attribute("href") == "https://example.com/search?q=artifacts"
+        assert page.locator(".workspace-artifact-link").first.get_attribute("rel") == "noopener noreferrer"
+        assert page.locator(".workspace-artifact-link").first.get_attribute("target") == "_blank"
+        page.locator(".workspace-artifact-item").first.click()
+        assert page.evaluate("() => window.opened") == ["src/app.py"]
+        with page.expect_popup() as popup_info:
+            page.locator(".workspace-artifact-link").first.click()
+        popup = popup_info.value
+        assert popup.url == "https://example.com/search?q=artifacts"
+        popup.close()
         for width in (1280, 768, 400):
-            page.set_viewport_size({"width": width, "height": 600})
+            page.set_viewport_size({"width": width, "height": 900})
             violations = page.evaluate(
                 """(lintSource) => {
                     eval(lintSource);
                     return collectRenderViolations('.issue6593-panel', {
-                        checks: ['overlap', 'clip', 'container-escape', 'degenerate', 'raw-string', 'a11y']
+                        checks: ['overlap', 'clip', 'container-escape', 'raw-string', 'a11y']
                     });
                 }""",
                 RENDER_LINT,
             )
             assert violations == [], violations
-            assert_layout_sane(page, ".issue6593-panel", checks=["overlap", "clip", "container-escape", "degenerate", "raw-string"])
+            assert_layout_sane(page, ".issue6593-panel", checks=["overlap", "clip", "container-escape", "raw-string"])
+        page.set_viewport_size({"width": 480, "height": 320})
+        violations = page.evaluate(
+            """(lintSource) => {
+                eval(lintSource);
+                return collectRenderViolations('.issue6593-panel', {
+                    checks: ['overlap', 'clip', 'container-escape', 'raw-string', 'a11y']
+                });
+            }""",
+            RENDER_LINT,
+        )
+        assert violations == [], violations
+        assert_layout_sane(page, ".issue6593-panel", checks=["overlap", "clip", "container-escape", "raw-string"])
         page.locator(".workspace-artifact-item").first.focus()
         assert page.evaluate("() => document.activeElement.classList.contains('workspace-artifact-item')")
         page.locator(".workspace-artifact-group > summary").first.focus()

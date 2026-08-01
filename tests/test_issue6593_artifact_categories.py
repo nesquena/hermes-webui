@@ -44,9 +44,12 @@ def _collect(payload):
         if match:
             consts.append(match.group(0))
     function_names = (
-            "_normalizeArtifactPath",
-            "_normalizeArtifactUrl",
-            "_normalizeArtifactTarget",
+        "_normalizeArtifactPath",
+        "_normalizeArtifactUrl",
+        "_normalizeArtifactTarget",
+        "_normalizeArtifactMediaRef",
+        "_looksLikeArtifactPath",
+        "_parseArtifactJson",
         "_artifactCandidatesFromText",
         "_artifactCandidatesFromToolCall",
         "collectSessionArtifacts",
@@ -77,13 +80,17 @@ def test_reported_read_web_media_fixture_projects_all_categories():
     assert [(item.get("category", "modified"), item["path"]) for item in items] == [
         ("modified", "src/app.py"),
         ("read", "src/app.py"),
-        ("read", "README.md"),
+        ("read", "src/README.md"),
+        ("read", "Makefile"),
         ("web", "https://example.com/search?q=artifacts"),
         ("web", "https://example.com/docs"),
         ("web", "https://example.org/visited"),
         ("media", "assets/chart.png"),
         ("media", "assets/diagram.png"),
+        ("media", "/tmp/shot.png"),
         ("media", "assets/array.png"),
+        ("media", "assets/output.png"),
+        ("media", "assets/tool.png"),
     ]
 
 
@@ -94,6 +101,37 @@ def test_structured_inputs_reject_unknown_and_raw_values():
     assert "https://private.example/hidden" not in values
     assert "javascript:alert(1)" not in values
     assert "do not render" not in values
+    assert "src" not in values
+    assert "assets/user.png" not in values
+    assert "assets/user-image.png" not in values
+    assert "alt text" not in values
+    assert "chart.png" not in values
+    assert "../secret.png" not in values
+
+
+def test_extensionless_read_targets_and_path_traversal_boundaries():
+    items = _collect({
+        "tool_calls": [
+            {"name": "read_file", "args": {"path": name}}
+            for name in ("LICENSE", "Makefile", "Dockerfile", "../secret", "src/../../secret")
+        ],
+        "messages": [],
+    })
+    assert [item["path"] for item in items] == ["LICENSE", "Makefile", "Dockerfile"]
+
+
+def test_search_files_projects_paths_from_grouped_match_text():
+    items = _collect({
+        "tool_calls": [{
+            "name": "search_files",
+            "args": {"path": "src", "pattern": "artifact"},
+            "result": json.dumps({
+                "matches_text": "src/README.md\n  12: artifact\nsrc/Makefile\n  4: artifact"
+            }),
+        }],
+        "messages": [],
+    })
+    assert [item["path"] for item in items] == ["src/README.md", "src/Makefile"]
 
 
 def test_category_bounds_and_dedup_are_deterministic():
