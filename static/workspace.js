@@ -948,8 +948,8 @@ function renderSessionArtifacts(){
     const directory = (parts.head || parts.tail)
       ? `<div class="workspace-artifact-directory"><span class="workspace-artifact-directory-head">${esc(parts.head)}</span><span class="workspace-artifact-directory-tail">${esc(parts.tail)}</span></div>`
       : '';
-    const sourceKey = sourceLabels[item.source] || 'workspace_artifact_source_session';
-    const sourceValue = t(sourceKey);
+    const sourceKey = sourceLabels[item.source] || (item.source ? '' : 'workspace_artifact_source_session');
+    const sourceValue = sourceKey ? t(sourceKey) : (item.source ? String(item.source).replace(/_/g, ' ') : categoryLabelFallbacks[item.category] || 'session');
     const source = esc(sourceValue);
     const sourceAttrs = sourceKey ? ` data-i18n="${sourceKey}"` : '';
     const contents = `<div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div>`;
