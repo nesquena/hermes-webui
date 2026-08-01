@@ -2111,7 +2111,9 @@ def test_agent_passive_observation_rejects_bad_replacement_state(
 
 def test_agent_update_lock_conflict_preserves_recovery_affordance(tmp_path, monkeypatch):
     """An official updater lock failure still reaches clear-lock recovery."""
-    from hermes_cli import update_lock as agent_update_lock
+    agent_update_lock = pytest.importorskip(
+        "hermes_cli.update_lock", reason="requires the optional Hermes Agent package"
+    )
 
     agent_dir = _agent_tmp(tmp_path)
     agent_exe = _make_hermes_exe(agent_dir)
@@ -2160,7 +2162,9 @@ def test_agent_git_index_lock_is_not_reported_as_official_update_lock(tmp_path, 
     assert result['ok'] is False, result
     assert result['lock_conflict'] is True, result
     assert result['lock_kind'] == 'git-index'
-    assert result['lock_recovery']['well_known_lock_path'].endswith('.git\\index.lock')
+    assert result['lock_recovery']['well_known_lock_path'].replace('\\', '/').endswith(
+        '/.git/index.lock'
+    )
     assert 'marker_path' not in result['lock_recovery']
 
 
@@ -2183,14 +2187,16 @@ def test_agent_non_index_git_lock_preserves_reported_lock_path(tmp_path, monkeyp
     result = updates._apply_update_inner('agent')
 
     assert result['lock_kind'] == 'git-other'
-    assert result['git_lock_path'].endswith('.git\\FETCH_HEAD.lock')
+    assert result['git_lock_path'].replace('\\', '/').endswith('/.git/FETCH_HEAD.lock')
     assert result['lock_recovery']['manual_command'] == updates._manual_remove_command(lock)
     assert '.git\\index.lock' not in result['lock_recovery']['manual_command']
 
 
 def test_agent_update_lock_contract_reads_live_holder_and_describes_it(tmp_path, monkeypatch):
     """The proof follows the Agent lock's current live-holder contract."""
-    from hermes_cli import update_lock as agent_update_lock
+    agent_update_lock = pytest.importorskip(
+        "hermes_cli.update_lock", reason="requires the optional Hermes Agent package"
+    )
 
     marker = tmp_path / agent_update_lock.MARKER_NAME
     marker.write_text(f'{os.getpid()}\n{time.time()}\n', encoding='utf-8')
@@ -2251,8 +2257,10 @@ def test_apply_clear_lock_agent_reports_git_index_lock_separately(tmp_path, monk
 
     assert result['ok'] is False, result
     assert result['lock_kind'] == 'git-index'
-    assert result['well_known_lock_path'].endswith('.git\\index.lock')
-    assert '.git\\index.lock' in result['manual_command']
+    assert result['well_known_lock_path'].replace('\\', '/').endswith(
+        '/.git/index.lock'
+    )
+    assert '.git/index.lock' in result['manual_command'].replace('\\', '/')
 
 
 def test_apply_clear_lock_agent_reports_non_index_git_lock(tmp_path, monkeypatch):
@@ -2282,7 +2290,7 @@ def test_apply_clear_lock_agent_reports_non_index_git_lock(tmp_path, monkeypatch
 
     assert result['ok'] is False, result
     assert result['lock_kind'] == 'git-other'
-    assert result['git_lock_path'].endswith('.git\\FETCH_HEAD.lock')
+    assert result['git_lock_path'].replace('\\', '/').endswith('/.git/FETCH_HEAD.lock')
     assert result['manual_command'] == updates._manual_remove_command(lock)
 
 
@@ -2343,7 +2351,9 @@ def test_agent_non_git_without_gateway_evidence_reports_unsupported_handoff(
 
 def test_apply_force_update_agent_restarts_active_gateway(tmp_path, monkeypatch):
     """Force recovery must actively restart the Agent gateway once."""
-    from hermes_cli import update_lock as agent_update_lock
+    agent_update_lock = pytest.importorskip(
+        "hermes_cli.update_lock", reason="requires the optional Hermes Agent package"
+    )
     official_update_lock = agent_update_lock.UpdateLock
 
     agent_dir = tmp_path / 'agent'
@@ -2386,7 +2396,9 @@ def test_apply_force_update_agent_restarts_active_gateway(tmp_path, monkeypatch)
 
 def test_apply_force_update_agent_holds_official_update_lock_for_git_reset(tmp_path, monkeypatch):
     """Force reset must serialize with every official Agent updater."""
-    from hermes_cli import update_lock as agent_update_lock
+    agent_update_lock = pytest.importorskip(
+        "hermes_cli.update_lock", reason="requires the optional Hermes Agent package"
+    )
 
     agent_dir = tmp_path / 'agent'
     (agent_dir / '.git').mkdir(parents=True)
