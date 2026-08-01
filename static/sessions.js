@@ -2113,10 +2113,14 @@ async function loadSession(sid){
       _rearmActiveSessionStream();
       return;
     }
-    const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);
-    if(liveTailPrepared){
-      S.messages=_dropCurrentTurnAssistantMessages(S.messages);
-    }
+    _prepareRunningLiveTail(S.messages,inflightMessages);
+    // Always drop the completed assistant when recovering from an INFLIGHT
+    // snapshot.  If the live assistant has no text yet, the completed
+    // assistant is the authoritative response, but keeping it in the base
+    // prevents _hasCurrentTailUserDuplicate from matching the optimistic
+    // user message — causing a duplicate user row.  Dropping it lets the
+    // live assistant (even if empty) take over the current-turn slot.
+    S.messages=_dropCurrentTurnAssistantMessages(S.messages);
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
@@ -3608,29 +3612,7 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
     let candidate=msg;
     if(!candidate) continue;
     const duplicate=String(candidate.role||'')==='user'
-      ? (()=>{
-          // When the base ends with the current turn's user message
-          // (after _dropCurrentTurnAssistantMessages has removed the
-          // completed assistant reply), dedup against the last user
-          // message. Walk backwards past compaction markers and live
-          // messages to find the last real user message.
-          for(let i=merged.length-1;i>=0;i--){
-            const m=merged[i];
-            if(!m||m._live) continue;
-            const role=String(m.role||'');
-            if(role==='user'){
-              if(typeof _isContextCompactionMessage==='function'
-                &&_isContextCompactionMessage(m)) continue;
-              return _sameTranscriptMessage(m,candidate);
-            }
-            if(role==='tool') continue;
-            // Non-live assistant: turn is complete, skip past it
-            // and keep looking for the real last user message.
-            if(role==='assistant') continue;
-            break;
-          }
-          return false;
-        })()
+      ? _hasCurrentTailUserDuplicate(merged,candidate)
       : merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
     if(!duplicate) merged.push(candidate);
   }

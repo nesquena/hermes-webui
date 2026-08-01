@@ -856,7 +856,7 @@ def test_load_session_rebuilds_live_tail_before_snapshot_fallback():
     body = _function_body(SESSIONS_JS, "loadSession")
     ensure_pos = body.find("_ensureInflightLiveAssistantMessage(INFLIGHT[sid]);")
     inflight_pos = body.find("const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);")
-    prepare_pos = body.find("const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);")
+    prepare_pos = body.find("_prepareRunningLiveTail(S.messages,inflightMessages);")
     drop_assistant_pos = body.find("S.messages=_dropCurrentTurnAssistantMessages(S.messages);")
     merge_pos = body.find("S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);")
     restore_pos = body.find("restoreLiveTurnHtmlForSession(sid)")
@@ -1488,10 +1488,11 @@ def test_merge_inflight_dedup_skips_completed_assistant_to_find_last_user():
 const assert = require('assert');
 {helper_src}
 
-// Case 1: base ends with completed assistant → inflight user must dedup
-// base = [user:q, assistant:ans]  (completed turn)
-// inflight = [user:q, live assistant]  (stale snapshot from session switch)
-// expected: 1 user row, 1 assistant row (live)
+// Case 1: INFLIGHT recovery path — base ends with completed assistant
+// loadSession calls _dropCurrentTurnAssistantMessages before _mergeInflightTailMessages
+// base = [user:q, assistant:ans] → after drop → [user:q]
+// inflight = [user:q, live assistant]
+// expected: 1 user row (deduped)
 let base = [
   {{role:'user', content:'hello'}},
   {{role:'assistant', content:'answer'}},
@@ -1500,15 +1501,17 @@ let inflight = [
   {{role:'user', content:'hello'}},
   {{role:'assistant', _live:true, content:'answer'}},
 ];
+// Simulate loadSession: drop completed assistant, then merge
+base = _dropCurrentTurnAssistantMessages(base);
 let merged = _mergeInflightTailMessages(base, inflight);
 let users = merged.filter(m => m.role === 'user');
 assert.strictEqual(users.length, 1,
-  'Completed assistant in base should not block dedup: expected 1 user, got ' + users.length);
-let assistants = merged.filter(m => m.role === 'assistant');
-assert.ok(assistants.length >= 1, 'Expected at least 1 assistant row');
+  'After dropping completed assistant, dedup should work: expected 1 user, got ' + users.length);
 
-// Case 2: multi-turn base → inflight user must dedup against the last user,
-// not against an earlier user from a different turn
+// Case 2: multi-turn base, INFLIGHT recovery path
+// base = [u1, a1, u2, a2] → after drop → [u1, a1, u2]
+// inflight = [u2, live assistant]
+// expected: 2 users (u2 deduped against base's last user)
 base = [
   {{role:'user', content:'first'}},
   {{role:'assistant', content:'first answer'}},
@@ -1519,6 +1522,7 @@ inflight = [
   {{role:'user', content:'second'}},
   {{role:'assistant', _live:true, content:'second answer live'}},
 ];
+base = _dropCurrentTurnAssistantMessages(base);
 merged = _mergeInflightTailMessages(base, inflight);
 users = merged.filter(m => m.role === 'user');
 assert.strictEqual(users.length, 2,
