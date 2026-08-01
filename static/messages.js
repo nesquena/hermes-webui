@@ -6143,6 +6143,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
+          // Settle guard (text side of the #4539 class): on long tool-heavy
+          // turns the done payload can lag the live stream — the final
+          // assistant text was fully streamed to the live DOM but is absent
+          // from d.session.messages. renderMessages() below replaces the live
+          // DOM wholesale, so that conclusion would vanish from view until the
+          // next session reload. When the last assistant message carries no
+          // text but this turn streamed a final segment, carry that segment
+          // onto the message before the DOM is replaced.
+          try{
+            const _streamedTail=_stripXmlToolCalls(String(assistantText||'').slice(Math.max(0,segmentStart||0))).trim();
+            if(_streamedTail){
+              const _lastSettledAsst=[...S.messages].reverse().find(m=>m&&m.role==='assistant');
+              if(_lastSettledAsst){
+                const _sc=_lastSettledAsst.content;
+                const _hasSettledText=(typeof _sc==='string'&&!!_sc.trim())
+                  ||(Array.isArray(_sc)&&_sc.some(p=>p&&typeof p==='object'&&String(p.text||p.content||'').trim()));
+                if(!_hasSettledText){
+                  if(Array.isArray(_sc)) _lastSettledAsst.content=[..._sc,{type:'text',text:_streamedTail}];
+                  else _lastSettledAsst.content=_streamedTail;
+                }
+              }
+            }
+          }catch(_settleTextGuardErr){ }
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
           if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
           if(S.session&&S.session.session_id){

@@ -1492,6 +1492,11 @@ async function newSession(flash, options={}){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;S.messages=data.session.messages||[];
+    // Repaint atomically with the state switch. The sidebar keys its active
+    // row from S.session.session_id; delaying this render until after every
+    // hydration helper let one rejected helper leave the new sidebar row
+    // active while the old conversation remained in the main pane.
+    renderMessages();
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -1551,7 +1556,7 @@ async function newSession(flash, options={}){
       });
     }
     updateQueueBadge(S.session.session_id);
-    syncTopbar();renderMessages();
+    syncTopbar();
     if(typeof _announceNewSessionWorkspace==='function') _announceNewSessionWorkspace(S.session);
     // Keep new-chat first paint instant. The workspace tree / git badge can
     // refresh right after paint unless this caller explicitly needs it loaded

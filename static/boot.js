@@ -2096,7 +2096,12 @@ $('btnNewChat').onclick=async()=>{
      && await _restoreRememberedNewChatDraftSession()){
     await renderSessionList();closeMobileSidebar();$('msg').focus();return;
   }
-  await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
+  try{
+    await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
+  }catch(_newSessionErr){
+    try{ console.error('[webui] new conversation failed',_newSessionErr); }catch(_){ }
+    if(typeof showToast==='function') showToast(String((_newSessionErr&&_newSessionErr.message)||_newSessionErr));
+  }
 };
 $('btnDownload').onclick=()=>{
   if(!S.session)return;
