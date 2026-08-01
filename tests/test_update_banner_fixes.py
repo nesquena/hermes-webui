@@ -2592,17 +2592,26 @@ class TestSequentialUpdateRestartCoordination:
         import threading as _th
         import time as _t
 
+        real_thread = _th.Thread
         execv_called = _th.Event()
         execv_time = []
         real_apply_lock = upd._apply_lock
+        restart_threads = []
+
+        class RecordingThread(real_thread):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                restart_threads.append(self)
 
         def fake_execv(exe, args):
-            execv_time.append(_t.monotonic())
-            execv_called.set()
+            if _th.current_thread() is restart_threads[0]:
+                execv_time.append(_t.monotonic())
+                execv_called.set()
 
         monkeypatch.setattr(sys, 'platform', 'linux')
         monkeypatch.setattr(upd, '_wait_until_restart_safe', lambda *a, **k: {'restart_blocked': False})
         monkeypatch.setattr(os, 'execv', fake_execv)
+        monkeypatch.setattr(upd.threading, 'Thread', RecordingThread)
         monkeypatch.setattr(upd, '_schedule_restart', _REAL_SCHEDULE_RESTART)
 
         # Hold _apply_lock from another thread (simulating an in-flight
@@ -2617,11 +2626,12 @@ class TestSequentialUpdateRestartCoordination:
                 release_holder.wait(timeout=10)
                 release_time.append(_t.monotonic())
 
-        holder_thread = _th.Thread(target=holder, daemon=True)
+        holder_thread = real_thread(target=holder, daemon=True)
         holder_thread.start()
         assert lock_held.wait(timeout=10), "holder did not acquire _apply_lock"
 
         upd._schedule_restart(delay=0)
+        assert len(restart_threads) == 1, "scheduler must start one restart worker"
         _t.sleep(0.2)
         assert not execv_called.is_set(), (
             "restart callback ran while _apply_lock was held by another "
