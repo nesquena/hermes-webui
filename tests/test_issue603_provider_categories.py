@@ -1,3 +1,4 @@
+import io
 from tests.i18n_locale_loader import locale_source_text
 """Tests for #603 — categorize providers in setup wizard.
 

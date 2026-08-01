@@ -25,7 +25,6 @@ See issue #1442.
 """
 
 from __future__ import annotations
-from tests.i18n_locale_loader import locale_source_text
 
 from pathlib import Path
 import importlib

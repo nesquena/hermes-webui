@@ -1,4 +1,3 @@
-from tests.i18n_locale_loader import locale_source_text
 """Regression tests for issue #1560 — Settings password silently no-ops when
 HERMES_WEBUI_PASSWORD env var is set.
 

@@ -123,7 +123,7 @@ def test_critical_boot_storage_access_is_guarded():
     assert theme_script and "try" in theme_script.group(0)
     assert font_script and "try" in font_script.group(0)
     assert "try{localStorage.removeItem('hermes-webui-server-stopped')" in boot
-    assert "try { localStorage.setItem('hermes-lang', resolved); } catch" in i18n
+    assert "try { localStorage.setItem('hermes-lang', active); } catch" in i18n
     assert "try { stored = localStorage.getItem('hermes-lang'); } catch" in i18n
 
 

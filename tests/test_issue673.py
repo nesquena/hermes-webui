@@ -1,4 +1,4 @@
-from tests.i18n_locale_loader import locale_source_text
+from tests.i18n_locale_loader import locale_block, locale_codes
 """
 Tests for issue #673 — sidebar density mode for the session list.
 
@@ -27,8 +27,6 @@ BOOT_JS = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_SOURCE = locale_source_text()
-
 from tests._pytest_port import BASE
 
 
@@ -123,22 +121,7 @@ class TestSidebarDensitySessionRendering(unittest.TestCase):
 
 
 class TestSidebarDensityI18N(unittest.TestCase):
-    def _extract_locale_block(self, start_marker, end_marker):
-        start = I18N_SOURCE.find(start_marker)
-        end = I18N_SOURCE.find(end_marker, start)
-        self.assertGreater(start, -1)
-        self.assertGreater(end, start)
-        return I18N_SOURCE[start:end]
-
     def test_all_locale_blocks_have_sidebar_density_keys(self):
-        locale_ranges = [
-            ("\n  en: {", "\n  ru: {"),
-            ("\n  ru: {", "\n  es: {"),
-            ("\n  es: {", "\n  de: {"),
-            ("\n  de: {", "\n  zh: {"),
-            ("\n  zh: {", "\n  // Traditional Chinese (zh-Hant)"),
-            ("\n  // Traditional Chinese (zh-Hant)\n  'zh-Hant': {", "\n};"),
-        ]
         required = (
             "settings_label_sidebar_density",
             "settings_desc_sidebar_density",
@@ -146,10 +129,10 @@ class TestSidebarDensityI18N(unittest.TestCase):
             "settings_sidebar_density_detailed",
             "session_meta_messages",
         )
-        for start, end in locale_ranges:
-            block = self._extract_locale_block(start, end)
+        for locale in locale_codes():
+            block = locale_block(locale)
             for key in required:
-                self.assertIn(key, block, f"{key} missing from locale block {start}")
+                self.assertIn(key, block, f"{key} missing from locale block {locale}")
 
 
 class TestSidebarDensitySettingsAPI(unittest.TestCase):

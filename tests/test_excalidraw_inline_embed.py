@@ -1,3 +1,4 @@
+import io
 from tests.i18n_locale_loader import locale_source_text
 """Test: Excalidraw inline embed (#479)"""
 import re

@@ -1,3 +1,4 @@
+import io
 from tests.i18n_locale_loader import locale_source_text
 """Tests for issue #483 — inline diff/patch viewer."""
 import pytest
