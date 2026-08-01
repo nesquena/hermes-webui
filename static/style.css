@@ -6459,7 +6459,7 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .workspace-panel-tabs{display:flex;gap:4px;padding:6px 8px;border-bottom:1px solid var(--border);}
 .workspace-panel-tab{flex:1;border:1px solid transparent;background:transparent;color:var(--muted);border-radius:7px;padding:5px 8px;font-size:12px;cursor:pointer;}
 .workspace-panel-tab.active{background:var(--surface-subtle);color:var(--text);border-color:var(--border2);}
-.workspace-artifacts{flex:1;overflow:auto;padding:8px;}
+.workspace-artifacts{flex:1;min-height:0;overflow:auto;padding:8px;}
 .workspace-artifact-empty{padding:16px 8px;color:var(--muted);font-size:12px;line-height:1.5;text-align:center;}
 .workspace-artifact-group{margin:0 0 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface-subtle);}
 .workspace-artifact-group:last-child{margin-bottom:0;}

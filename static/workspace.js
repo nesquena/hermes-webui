@@ -429,7 +429,7 @@ const ARTIFACT_CATEGORY_LIMITS = Object.freeze({modified:50, read:50, web:50, me
 
 function _normalizeArtifactPath(path, allowExtensionless=false){
   if(!path) return '';
-  path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
+  path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'').replace(/\\/g,'/');
   if(!path || path.length > 240 || path.includes('://')) return '';
   if(/^[a-z][a-z0-9+.-]*:/i.test(path) && !/^[a-z]:[\\/]/i.test(path)) return '';
   // Canonicalize workspace-relative prefixes so a file-tree open ("foo.md") and a
@@ -469,20 +469,19 @@ function _normalizeArtifactMediaRef(value){
   const candidate = value.trim().replace(/^[`"'(<]+|[`"'\]>,.;:]+$/g,'');
   if(!candidate) return '';
   if(/^file:\/\//i.test(candidate)){
+    let localPath = '';
     try{
       const parsed = new URL(candidate);
       if(parsed.hostname) return '';
-      const localPath = decodeURIComponent(parsed.pathname || '');
-      return _normalizeArtifactPath(localPath, true);
+      localPath = decodeURIComponent(parsed.pathname || '');
     }catch(_){
-      return '';
+      try{ localPath = decodeURIComponent(candidate.replace(/^file:\/\//i,'')); }catch(__){ return ''; }
     }
+    localPath = _normalizeArtifactPath(localPath, true);
+    if(!localPath) return '';
+    return `file://${localPath.startsWith('/') ? '' : '/'}${localPath}`;
   }
   return _normalizeArtifactTarget(candidate, true);
-}
-
-function _looksLikeArtifactPath(value){
-  return /[\\/]/.test(value) || /^(?:[a-z]:[\\/]|~[\\/]|\.\.?[\\/])/i.test(value);
 }
 
 function _parseArtifactJson(value){
@@ -501,6 +500,59 @@ function _parseArtifactJson(value){
     }catch(_){ }
   }
   return null;
+}
+
+function _artifactToolId(tool){
+  if(!tool || typeof tool !== 'object') return '';
+  return String(tool.tool_call_id || tool.tool_use_id || tool.call_id || tool.tid || tool.id || '').trim();
+}
+
+function _artifactToolName(tool){
+  if(!tool || typeof tool !== 'object') return '';
+  const fn = tool.function && typeof tool.function === 'object' ? tool.function : {};
+  return String(tool.name || tool.tool_name || fn.name || '').replace(/^functions\./,'');
+}
+
+function _artifactToolArgs(tool){
+  if(!tool || typeof tool !== 'object') return {};
+  const fn = tool.function && typeof tool.function === 'object' ? tool.function : {};
+  let args = tool.arguments || tool.args || tool.input || fn.arguments || fn.input || {};
+  if(typeof args === 'string'){
+    try{ args = JSON.parse(args); }catch(_){ }
+  }
+  return args;
+}
+
+function _artifactResultValues(tool){
+  if(!tool || typeof tool !== 'object') return [];
+  return [tool.result, tool.output, tool.content, tool.snippet, tool.preview]
+    .filter(value => value != null && value !== '');
+}
+
+function _artifactTextFromValue(value){
+  if(typeof value === 'string') return value;
+  if(Array.isArray(value)) return value.map(item => _artifactTextFromValue(item)).filter(Boolean).join('\n');
+  if(value && typeof value === 'object'){
+    if(typeof value.text === 'string') return value.text;
+    if(value.content != null) return _artifactTextFromValue(value.content);
+  }
+  return '';
+}
+
+function _artifactPartialFieldValues(value, fields){
+  const text = _artifactTextFromValue(value);
+  if(!text) return [];
+  const names = fields.join('|');
+  const re = new RegExp(`(?:["'](?:${names})["']|(?:${names}))\\s*:\\s*["']((?:\\\\.|[^"'])*)`, 'gi');
+  const out = [];
+  let match;
+  while((match = re.exec(text))){
+    let decoded = match[1];
+    try{ decoded = JSON.parse(`"${decoded}"`); }catch(_){ }
+    decoded = String(decoded).replace(/\\\\/g,'\\');
+    out.push(decoded);
+  }
+  return out;
 }
 
 function _artifactCandidatesFromText(text){
@@ -524,20 +576,14 @@ function _artifactCandidatesFromText(text){
   }
   const media = /MEDIA:([^\s\)\]]+)/g;
   while((m = media.exec(text))) add(m[1], 'media', 'media');
-  const images = /\[IMAGE:\s*([^\]]+)\]/gi;
-  while((m = images.exec(text))){
-    const imageRef = m[1].trim();
-    if(!/\s/.test(imageRef) && _looksLikeArtifactPath(imageRef)) add(imageRef, 'media', 'media');
-  }
   return out;
 }
 
 function _artifactCandidatesFromToolCall(tc){
   if(!tc) return [];
-  const name = String(tc.name || '').replace(/^functions\./,'');
-  const args = tc.arguments || tc.args || tc.input || {};
-  const resultValues = [tc.result, tc.output, tc.snippet].filter(value => value != null && value !== '');
-  const result = resultValues[0] || '';
+  const name = _artifactToolName(tc);
+  const args = _artifactToolArgs(tc);
+  const resultValues = _artifactResultValues(tc);
   const out = [];
   const addPath = (path, category, source=name || 'tool') => {
     path = _normalizeArtifactPath(path, category === 'read');
@@ -554,19 +600,22 @@ function _artifactCandidatesFromToolCall(tc){
   const addUrls = (value, source) => {
     if(Array.isArray(value)) value.forEach(url => addUrls(url, source));
     else if(typeof value === 'string') addUrl(value, source);
+    else if(value && typeof value === 'object') addUrl(value.url || value.href, source);
   };
   const addResultUrls = value => {
     const parsed = _parseArtifactJson(value);
-    if(!parsed || typeof parsed !== 'object') return;
-    addUrls(parsed.url, 'web_result');
-    addUrls(parsed.urls, 'web_result');
-    const web = parsed.data && typeof parsed.data === 'object' ? parsed.data.web : parsed.web;
-    if(Array.isArray(web)) web.forEach(resultItem => {
-      if(resultItem && typeof resultItem === 'object') addUrl(resultItem.url || resultItem.href, 'web_result');
-    });
-    if(Array.isArray(parsed.results)) parsed.results.forEach(resultItem => {
-      if(resultItem && typeof resultItem === 'object') addUrl(resultItem.url || resultItem.href, 'web_result');
-    });
+    if(parsed && typeof parsed === 'object'){
+      addUrls(parsed.url, 'web_result');
+      addUrls(parsed.urls, 'web_result');
+      const web = parsed.data && typeof parsed.data === 'object' ? parsed.data.web : parsed.web;
+      if(Array.isArray(web)) web.forEach(resultItem => {
+        if(resultItem && typeof resultItem === 'object') addUrl(resultItem.url || resultItem.href, 'web_result');
+      });
+      if(Array.isArray(parsed.results)) parsed.results.forEach(resultItem => {
+        if(resultItem && typeof resultItem === 'object') addUrl(resultItem.url || resultItem.href, 'web_result');
+      });
+    }
+    for(const url of _artifactPartialFieldValues(value, ['url','href'])) addUrl(url, 'web_result');
   };
   if(ARTIFACT_MUTATION_TOOLS.has(name) && args && typeof args === 'object'){
     for(const key of ['path','file_path','source','destination']) addPath(args[key], 'modified');
@@ -577,6 +626,14 @@ function _artifactCandidatesFromToolCall(tc){
     if(name === 'read_file'){
       for(const key of ['path','file_path']) addPath(args[key], 'read', name);
       addPaths(args.paths, 'read', name);
+      for(const value of resultValues){
+        const parsed = _parseArtifactJson(value);
+        if(parsed && typeof parsed === 'object'){
+          addPath(parsed.path, 'read', name);
+          addPath(parsed.file_path, 'read', name);
+        }
+        for(const path of _artifactPartialFieldValues(value, ['path','file_path'])) addPath(path, 'read', name);
+      }
     }else if(name === 'search_files'){
       const parsed = resultValues.map(_parseArtifactJson).find(value => value && typeof value === 'object');
       if(parsed && typeof parsed === 'object'){
@@ -588,6 +645,7 @@ function _artifactCandidatesFromToolCall(tc){
           }
         }
       }
+      for(const path of resultValues.flatMap(value => _artifactPartialFieldValues(value, ['path','file_path']))) addPath(path, 'read', name);
     }
   }
   if(ARTIFACT_WEB_TOOLS.has(name) && args && typeof args === 'object'){
@@ -595,15 +653,56 @@ function _artifactCandidatesFromToolCall(tc){
     addUrls(args.urls, 'web_page');
     for(const value of resultValues) addResultUrls(value);
   }
-  const resultText = typeof result === 'string' ? result : '';
   // Tool results may include unified diffs from patch-style tools; scan those
   // narrowly after structured args so diff headers can still contribute paths.
-  if(ARTIFACT_MUTATION_TOOLS.has(name)) for(const a of _artifactCandidatesFromText(resultText)) out.push(a);
+  for(const value of resultValues){
+    for(const a of _artifactCandidatesFromText(_artifactTextFromValue(value))){
+      if(a.category === 'modified') out.push(a);
+    }
+  }
   if(!out.length && ARTIFACT_MUTATION_TOOLS.has(name)){
     const argsText = typeof args === 'string' ? args : JSON.stringify(args || {});
     for(const a of _artifactCandidatesFromText(argsText)) out.push(a);
   }
   return out;
+}
+
+function _artifactToolResultPayload(message){
+  if(!message || typeof message !== 'object') return null;
+  if(message.role === 'tool') return {
+    result: message.content,
+    output: message.output,
+    snippet: message.snippet,
+    preview: message.preview,
+  };
+  if(!Array.isArray(message.content)) return null;
+  const results = message.content.filter(block => block && block.type === 'tool_result');
+  if(!results.length) return null;
+  return results.map(block => ({
+    result: block.content,
+    output: block.output,
+    snippet: block.snippet,
+    preview: block.preview,
+  }));
+}
+
+function _artifactToolResultsById(messages){
+  const results = new Map();
+  for(const message of (Array.isArray(messages) ? messages : [])){
+    if(!message || typeof message !== 'object') continue;
+    if(message.role === 'tool'){
+      const id = _artifactToolId(message);
+      if(id) results.set(id, _artifactToolResultPayload(message));
+    }
+    if(Array.isArray(message.content)){
+      for(const block of message.content){
+        if(!block || block.type !== 'tool_result') continue;
+        const id = _artifactToolId({tool_use_id:block.tool_use_id, tool_call_id:block.tool_call_id});
+        if(id) results.set(id, {result:block.content, output:block.output, snippet:block.snippet, preview:block.preview});
+      }
+    }
+  }
+  return results;
 }
 
 const _turnMutatedPreviewPaths = new Set();
@@ -649,6 +748,14 @@ function collectSessionArtifacts(){
     seen[category].add(path);
     grouped[category].push({path, category, source: candidate.kind || source});
   };
+  const toolResultsById = _artifactToolResultsById(S.messages);
+  const processToolCall = (tc, source) => {
+    if(!tc || typeof tc !== 'object') return;
+    const result = toolResultsById.get(_artifactToolId(tc));
+    const fakeTc = {...tc};
+    if(result) Object.assign(fakeTc, result);
+    for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a, a.kind || _artifactToolName(tc) || source || 'tool');
+  };
   // Source 1: session-level tool call summaries (may be empty when messages
   // carry their own tool metadata — see _syncToolCallsForLoadedMessages).
   for(const tc of (S.toolCalls || [])){
@@ -659,7 +766,7 @@ function collectSessionArtifacts(){
   for(const msg of (S.messages || [])){
     if(!msg) continue;
     const messageRole = String(msg.role || '').toLowerCase();
-    const allowMessageMedia = messageRole === 'assistant' || messageRole === 'tool';
+    const allowMessageMedia = messageRole === 'assistant';
     const textValues = [];
     if(typeof msg.content === 'string') textValues.push(msg.content);
     else if(Array.isArray(msg.content)) for(const block of msg.content){
@@ -682,22 +789,14 @@ function collectSessionArtifacts(){
       if(!Array.isArray(toolCalls)) continue;
       for(const tc of toolCalls){
         if(!tc || typeof tc !== 'object') continue;
-        const fn = (tc.function && typeof tc.function === 'object') ? tc.function : tc;
-        const name = fn.name || tc.name || '';
-        let args = fn.arguments || tc.arguments || tc.args || tc.input || {};
-        if(typeof args === 'string'){ try{ args = JSON.parse(args); }catch(_){} }
-        const fakeTc = {name, args, result: tc.result || tc.output || ''};
-        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a, a.kind || name || 'tool');
+        processToolCall(tc, 'tool_call');
       }
     }
     // Structured content array with tool_use blocks (Anthropic format).
     if(Array.isArray(msg.content)){
       for(const block of msg.content){
         if(!block || block.type !== 'tool_use') continue;
-        let inp = block.input || {};
-        if(typeof inp === 'string'){ try{ inp = JSON.parse(inp); }catch(_){} }
-        const fakeTc = {name: block.name || '', args: inp, result: block.result || ''};
-        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a, a.kind || block.name || 'tool');
+        processToolCall(block, 'tool_use');
       }
     }
   }
@@ -749,17 +848,33 @@ function renderSessionArtifacts(){
     web: 'Web Pages',
     media: 'Inline Media',
   };
+  const artifactMediaHref = (ref) => {
+    if(/^https?:/i.test(ref)) return _normalizeArtifactUrl(ref);
+    let path = String(ref || '');
+    if(/^file:\/\//i.test(path)){
+      try{
+        const parsed = new URL(path);
+        if(parsed.hostname) return '';
+        path = decodeURIComponent(parsed.pathname || '');
+      }catch(_){
+        try{ path = decodeURIComponent(path.replace(/^file:\/\//i,'')); }catch(__){ return ''; }
+      }
+    }
+    path = _normalizeArtifactPath(path, true);
+    if(!path || !S.session || !S.session.session_id) return '';
+    return `api/media?path=${encodeURIComponent(path)}&session_id=${encodeURIComponent(S.session.session_id)}`;
+  };
   const renderItem = item => {
     const path = displayPath(item.path);
     const parts = splitArtifactDisplayPath(path);
     const directory = (parts.head || parts.tail)
       ? `<div class="workspace-artifact-directory"><span class="workspace-artifact-directory-head">${esc(parts.head)}</span><span class="workspace-artifact-directory-tail">${esc(parts.tail)}</span></div>`
       : '';
-    const source = item.source ? esc(item.source) : esc(t('workspace_artifact_source_session') || 'session');
+    const source = item.source ? esc(String(item.source).replace(/_/g, ' ')) : esc(t('workspace_artifact_source_session') || 'session');
     const sourceAttrs = item.source ? '' : ' data-i18n="workspace_artifact_source_session"';
     const contents = `<div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div>`;
-    if(item.category === 'web' || (item.category === 'media' && /^https?:/i.test(item.path))){
-      const url = _normalizeArtifactUrl(item.path);
+    if(item.category === 'web' || item.category === 'media'){
+      const url = item.category === 'web' ? _normalizeArtifactUrl(item.path) : artifactMediaHref(item.path);
       return url ? `<a class="workspace-artifact-link" href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="${esc(url)}">${contents}</a>` : '';
     }
     return `<button type="button" class="workspace-artifact-item" title="${esc(path)}" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)">${contents}</button>`;

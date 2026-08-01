@@ -65,10 +65,17 @@ def _collect_via_node(messages):
             "_normalizeArtifactUrl",
             "_normalizeArtifactTarget",
             "_normalizeArtifactMediaRef",
-            "_looksLikeArtifactPath",
             "_parseArtifactJson",
+            "_artifactToolId",
+            "_artifactToolName",
+            "_artifactToolArgs",
+            "_artifactResultValues",
+            "_artifactTextFromValue",
+            "_artifactPartialFieldValues",
             "_artifactCandidatesFromText",
             "_artifactCandidatesFromToolCall",
+            "_artifactToolResultPayload",
+            "_artifactToolResultsById",
             "collectSessionArtifacts",
         )
     )

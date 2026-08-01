@@ -48,10 +48,17 @@ def _collect(payload):
         "_normalizeArtifactUrl",
         "_normalizeArtifactTarget",
         "_normalizeArtifactMediaRef",
-        "_looksLikeArtifactPath",
         "_parseArtifactJson",
+        "_artifactToolId",
+        "_artifactToolName",
+        "_artifactToolArgs",
+        "_artifactResultValues",
+        "_artifactTextFromValue",
+        "_artifactPartialFieldValues",
         "_artifactCandidatesFromText",
         "_artifactCandidatesFromToolCall",
+        "_artifactToolResultPayload",
+        "_artifactToolResultsById",
         "collectSessionArtifacts",
     )
     functions = "\n".join(consts) + "\n" + "\n".join(
@@ -79,18 +86,16 @@ def test_reported_read_web_media_fixture_projects_all_categories():
     items = _collect(json.loads(FIXTURE.read_text(encoding="utf-8")))
     assert [(item.get("category", "modified"), item["path"]) for item in items] == [
         ("modified", "src/app.py"),
-        ("read", "src/app.py"),
-        ("read", "src/README.md"),
-        ("read", "Makefile"),
-        ("web", "https://example.com/search?q=artifacts"),
+        ("read", "C:/work/src/app.py"),
+        ("read", "C:/work/src/README.md"),
+        ("read", "C:/work/Makefile"),
+        ("read", "C:/work/partial.md"),
+        ("read", "C:/work/preview.md"),
         ("web", "https://example.com/docs"),
         ("web", "https://example.org/visited"),
         ("media", "assets/chart.png"),
-        ("media", "assets/diagram.png"),
-        ("media", "/tmp/shot.png"),
-        ("media", "assets/array.png"),
+        ("media", "file:///tmp/shot.png"),
         ("media", "assets/output.png"),
-        ("media", "assets/tool.png"),
     ]
 
 
@@ -104,7 +109,8 @@ def test_structured_inputs_reject_unknown_and_raw_values():
     assert "src" not in values
     assert "assets/user.png" not in values
     assert "assets/user-image.png" not in values
-    assert "alt text" not in values
+    assert "unsupported.png" not in values
+    assert "assets/tool.png" not in values
     assert "chart.png" not in values
     assert "../secret.png" not in values
 
@@ -134,6 +140,19 @@ def test_search_files_projects_paths_from_grouped_match_text():
     assert [item["path"] for item in items] == ["src/README.md", "src/Makefile"]
 
 
+def test_diff_fences_from_non_allowlisted_results_keep_mutation_projection():
+    items = _collect({
+        "tool_calls": [{
+            "name": "custom_patch_wrapper",
+            "result": "```diff\n--- a/src/generated.py\n+++ b/src/generated.py\n@@\n```",
+        }],
+        "messages": [],
+    })
+    assert [(item["category"], item["path"]) for item in items] == [
+        ("modified", "src/generated.py")
+    ]
+
+
 def test_category_bounds_and_dedup_are_deterministic():
     payload = {
         "tool_calls": [
@@ -157,3 +176,55 @@ def test_category_bounds_and_dedup_are_deterministic():
     assert len(by_category["media"]) == 50
     assert by_category["read"] == [f"src/read-{index}.py" for index in range(50)]
     assert by_category["media"] == [f"assets/{index}.png" for index in range(50)]
+
+
+def test_settled_tool_results_are_correlated_by_provider_tool_id():
+    payload = {
+        "tool_calls": [],
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "web-1",
+                    "function": {"name": "web_extract", "arguments": "{}"},
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "web-1",
+                "content": '{"results":[{"href":"https://example.com/correlated"}]}',
+            },
+            {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "anthropic-1",
+                    "name": "web_extract",
+                    "input": {},
+                }],
+            },
+            {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "anthropic-1",
+                    "content": '{"results":[{"url":"https://example.com/anthropic"}]}',
+                }],
+            },
+        ],
+    }
+    assert [item["path"] for item in _collect(payload)] == [
+        "https://example.com/correlated",
+        "https://example.com/anthropic",
+    ]
+
+
+def test_media_uses_shipped_media_contract_without_image_grammar():
+    items = _collect({
+        "tool_calls": [],
+        "messages": [
+            {"role": "assistant", "content": "MEDIA:C:\\work\\chart.png [IMAGE:C:\\work\\false.png]"},
+            {"role": "user", "content": "MEDIA:C:\\work\\user.png"},
+        ],
+    })
+    assert [item["path"] for item in items] == ["C:/work/chart.png"]
