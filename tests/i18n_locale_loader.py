@@ -40,6 +40,17 @@ def locale_source_text() -> str:
         count=1,
         flags=re.DOTALL,
     )
+    english_registration = re.search(
+        r"registerLocale\(\s*['\"]en['\"]\s*,\s*\{",
+        runtime,
+    )
+    assert english_registration, "English locale registration not found"
+    english_body_start = runtime.find("{", english_registration.start()) + 1
+    english_body_end = english_body_start + len(locale_block("en"))
+    runtime = (
+        runtime[: english_registration.start()]
+        + runtime[english_body_end + 2 :]
+    )
     helper_sources = []
     for code in locale_codes():
         source = locale_sources()[code]
