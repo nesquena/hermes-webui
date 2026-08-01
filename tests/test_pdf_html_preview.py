@@ -1,3 +1,4 @@
+import io
 from tests.i18n_locale_loader import locale_source_text
 """Tests for #480 (PDF first-page preview) and #482 (HTML iframe sandbox).
 
