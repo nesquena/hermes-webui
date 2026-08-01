@@ -6,46 +6,72 @@ import textwrap
 
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_CORE_JS = (REPO_ROOT / "static" / "i18n-core.js").read_text(encoding="utf-8")
 BOOT_JS = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 CONFIG_PY = (REPO_ROOT / "api" / "config.py").read_text(encoding="utf-8")
 
 
-def _run_i18n_case(script_expr: str, *, navigator_obj: object | None = None) -> dict:
-    wrapped_expr = f"(() => ({script_expr}))()"
+def _run_i18n_case(
+    script_expr: str,
+    bundles: tuple[str, ...] = (),
+    *,
+    navigator_obj: object | None = None,
+) -> dict:
+    wrapped_expr = f"(async () => ({script_expr}))()"
+    sources = [REPO_ROOT / "static" / "i18n-core.js"] + [
+        REPO_ROOT / "static" / "locales" / f"{bundle}.js" for bundle in bundles
+    ]
     if navigator_obj is None:
         navigator_src = "undefined"
     elif navigator_obj == "throwing":
-        # Mimic some embedded webviews: a `navigator` object whose
-        # `languages` / `language` accessors throw on read.
         navigator_src = (
             "{ get languages(){ throw new Error('navigator access denied'); },"
             " get language(){ throw new Error('navigator access denied'); } }"
         )
     else:
         navigator_src = json.dumps(navigator_obj)
+    locale_dir = str(REPO_ROOT / "static" / "locales")
     script = textwrap.dedent(
         f"""
         const fs = require('fs');
         const vm = require('vm');
-        const src = fs.readFileSync({json.dumps(str(REPO_ROOT / "static" / "i18n.js"))}, 'utf8');
+        const sources = {json.dumps([str(source) for source in sources])};
+        const localeDir = {json.dumps(locale_dir)};
+        const autoLoadSelected = {str(navigator_obj is not None).lower()};
         const storage = {{}};
-        const ctx = {{
+        let ctx;
+        ctx = {{
           localStorage: {{
             getItem: (k) => Object.prototype.hasOwnProperty.call(storage, k) ? storage[k] : null,
             setItem: (k, v) => {{ storage[k] = String(v); }},
           }},
           document: {{
+            baseURI: 'https://example.test/',
             documentElement: {{ lang: '' }},
             querySelectorAll: () => [],
+            createElement: () => ({{}}),
+            head: {{
+              appendChild: (script) => {{
+                const requestPath = script.src.split(/[?#]/, 1)[0];
+                const filename = requestPath.slice(requestPath.lastIndexOf('/') + 1);
+                if (autoLoadSelected && filename.endsWith('.js')) {{
+                  try {{
+                    vm.runInContext(fs.readFileSync(localeDir + '/' + filename, 'utf8'), ctx);
+                    script.onload();
+                    return;
+                  }} catch (_) {{}}
+                }}
+                script.onerror();
+              }},
+            }},
           }},
           navigator: {navigator_src},
         }};
         vm.createContext(ctx);
-        vm.runInContext(src, ctx);
+        for (const source of sources) vm.runInContext(fs.readFileSync(source, 'utf8'), ctx);
         const out = vm.runInContext({json.dumps(wrapped_expr)}, ctx);
-        process.stdout.write(JSON.stringify(out));
+        Promise.resolve(out).then((value) => process.stdout.write(JSON.stringify(value)));
         """
     )
     proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
@@ -227,8 +253,10 @@ def _has_precedence_call(src: str, first_arg: str) -> bool:
 
 
 def test_i18n_exposes_locale_resolvers():
-    assert "function resolveLocale(" in I18N_JS
-    assert "function resolvePreferredLocale(" in I18N_JS
+    assert "function resolveLocale(" in I18N_CORE_JS
+    assert "function resolvePreferredLocale(" in I18N_CORE_JS
+    assert "function ensureLocale(" in I18N_CORE_JS
+    assert "const LOCALE_REGISTRY" in I18N_CORE_JS
 
 
 def test_locale_alias_resolution_and_precedence_logic():
@@ -264,7 +292,8 @@ def test_set_locale_normalizes_alias_and_persists_canonical_key():
   saved: localStorage.getItem('hermes-lang'),
   htmlLang: document.documentElement.lang,
 }
-        """
+        """,
+        bundles=("zh",),
     )
     assert result["saved"] == "zh"
     assert result["htmlLang"] == "zh-CN"
@@ -273,6 +302,219 @@ def test_set_locale_normalizes_alias_and_persists_canonical_key():
 def test_boot_and_settings_panel_use_shared_locale_precedence():
     assert _has_precedence_call(BOOT_JS, "s.language")
     assert _has_precedence_call(PANELS_JS, "settings.language")
+
+
+def test_registry_keeps_all_metadata_eager_and_english_loaded():
+    result = _run_i18n_case(
+        """
+{
+  registry: Object.keys(LOCALE_REGISTRY),
+  loaded: Object.keys(LOCALES),
+  labels: Object.values(LOCALE_REGISTRY).map((entry) => entry._label),
+  english: t('offline_title'),
+}
+        """
+    )
+    assert len(result["registry"]) == 15
+    assert result["loaded"] == ["en"]
+    assert len(result["labels"]) == 15
+    assert result["english"] == "Connection lost"
+
+
+def test_selected_locale_is_applied_only_after_bundle_registration():
+    script = textwrap.dedent(
+        f"""
+        const fs = require('fs');
+        const vm = require('vm');
+        const source = fs.readFileSync({json.dumps(str(REPO_ROOT / "static" / "i18n-core.js"))}, 'utf8');
+        const bundle = fs.readFileSync({json.dumps(str(REPO_ROOT / "static" / "locales" / "it.js"))}, 'utf8');
+        const storage = {{}};
+        let pendingScript = null;
+        const label = {{ textContent: 'Connection lost', getAttribute: () => 'offline_title', hasAttribute: () => false }};
+        const ctx = {{
+          localStorage: {{ getItem: (key) => storage[key] || null, setItem: (key, value) => {{ storage[key] = String(value); }} }},
+          document: {{
+            baseURI: 'https://example.test/hermes/', currentScript: null,
+            documentElement: {{ lang: '' }},
+            querySelectorAll: (selector) => selector === '[data-i18n]' ? [label] : [],
+            createElement: () => ({{ async: false }}),
+            head: {{ appendChild: (script) => {{ pendingScript = script; }} }},
+          }},
+        }};
+        vm.createContext(ctx);
+        vm.runInContext(source, ctx);
+        const ready = vm.runInContext("activateLocale('it')", ctx);
+        const before = vm.runInContext("t('offline_title')", ctx);
+        vm.runInContext(bundle, ctx);
+        pendingScript.onload();
+        ready.then((result) => {{
+          process.stdout.write(JSON.stringify({{ before, after: label.textContent, active: result.active, state: vm.runInContext("LOCALE_STATES.it", ctx) }}));
+        }});
+        """
+    )
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    result = json.loads(proc.stdout)
+    assert result == {
+        "before": "Connection lost",
+        "after": "Connessione persa",
+        "active": "it",
+        "state": "loaded",
+    }
+
+
+def test_failed_bundle_keeps_english_fallback_and_previous_locale():
+    result = _run_i18n_case(
+        """
+(async () => {
+  const before = t('offline_title');
+  const result = await activateLocale('fr');
+  return { before, active: result.active, fallback: result.fallback, state: LOCALE_STATES.fr };
+})()
+        """
+    )
+    assert result == {
+        "before": "Connection lost",
+        "active": "en",
+        "fallback": True,
+        "state": "failed",
+    }
+
+
+def test_activation_generation_owns_completion_order_and_stale_side_effects():
+    bundle_paths = {
+        code: str(REPO_ROOT / "static" / "locales" / f"{code}.js")
+        for code in ("fr", "de")
+    }
+    script = textwrap.dedent(
+        f"""
+        const fs = require('fs');
+        const vm = require('vm');
+        const core = fs.readFileSync({json.dumps(str(REPO_ROOT / 'static' / 'i18n-core.js'))}, 'utf8');
+        const bundles = {json.dumps(bundle_paths)};
+
+        function setup() {{
+          const storage = {{}};
+          const writes = {{storage: 0, dom: 0, lang: 0}};
+          const scripts = [];
+          const element = {{getAttribute: () => 'offline_title', hasAttribute: () => false}};
+          Object.defineProperty(element, 'textContent', {{set: () => writes.dom++}});
+          const documentElement = {{}};
+          Object.defineProperty(documentElement, 'lang', {{set: () => writes.lang++}});
+          const ctx = {{
+            localStorage: {{
+              getItem: (key) => storage[key] || null,
+              setItem: (key, value) => {{ writes.storage++; storage[key] = String(value); }},
+            }},
+            document: {{
+              baseURI: 'https://example.test/hermes/',
+              currentScript: null,
+              documentElement,
+              querySelectorAll: (selector) => selector === '[data-i18n]' ? [element] : [],
+              createElement: () => ({{}}),
+              head: {{ appendChild: (script) => scripts.push(script) }},
+            }},
+          }};
+          vm.createContext(ctx);
+          vm.runInContext(core, ctx);
+          return {{ctx, scripts, writes, storage}};
+        }}
+
+        function register(env, code) {{
+          vm.runInContext(fs.readFileSync(bundles[code], 'utf8'), env.ctx);
+          env.scripts.find((script) => script.src.includes('/' + code + '.js')).onload();
+        }}
+
+        async function completionOrder(first) {{
+          const env = setup();
+          const fr = vm.runInContext("activateLocale('fr')", env.ctx);
+          const de = vm.runInContext("activateLocale('de')", env.ctx);
+          if (first === 'fr') register(env, 'fr');
+          register(env, 'de');
+          if (first === 'de') register(env, 'fr');
+          return {{
+            fr: await fr,
+            de: await de,
+            active: vm.runInContext('getActiveLocale()', env.ctx),
+            storage: env.storage,
+            writes: env.writes,
+          }};
+        }}
+
+        async function staleFailure() {{
+          const env = setup();
+          const fr = vm.runInContext("activateLocale('fr')", env.ctx);
+          const de = vm.runInContext("activateLocale('de')", env.ctx);
+          const before = {{...env.writes}};
+          env.scripts.find((script) => script.src.includes('/fr.js')).onerror();
+          const afterFailure = {{...env.writes}};
+          register(env, 'de');
+          return {{fr: await fr, de: await de, afterFailure, before, active: vm.runInContext('getActiveLocale()', env.ctx)}};
+        }}
+
+        async function englishSelectionWhilePending() {{
+          const env = setup();
+          const pending = vm.runInContext("activateLocale('fr')", env.ctx);
+          const english = vm.runInContext("activateLocale('en')", env.ctx);
+          const englishResult = await english;
+          const before = {{...env.writes}};
+          register(env, 'fr');
+          return {{english: englishResult, pending: await pending, active: vm.runInContext('getActiveLocale()', env.ctx), before, after: env.writes}};
+        }}
+
+        async function fallbackFrom(active) {{
+          const env = setup();
+          const prior = vm.runInContext(`activateLocale('${{active}}')`, env.ctx);
+          if (active === 'de') register(env, 'de');
+          await prior;
+          const failed = vm.runInContext("activateLocale('fr')", env.ctx);
+          env.scripts.find((script) => script.src.includes('/fr.js')).onerror();
+          return await failed;
+        }}
+
+        (async () => {{
+          const missing = setup();
+          vm.runInContext("registerLocale('fr', {{_lang: 'fr', only: 'x'}})", missing.ctx);
+          await vm.runInContext("activateLocale('fr')", missing.ctx);
+          process.stdout.write(JSON.stringify({{
+            frFirst: await completionOrder('fr'),
+            deFirst: await completionOrder('de'),
+            staleFailure: await staleFailure(),
+            englishSelection: await englishSelectionWhilePending(),
+            englishFallback: await fallbackFrom('en'),
+            nonEnglishFallback: await fallbackFrom('de'),
+            missingKey: vm.runInContext("t('offline_title')", missing.ctx),
+          }}));
+        }})();
+        """
+    )
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    result = json.loads(proc.stdout)
+    for order in (result["frFirst"], result["deFirst"]):
+        assert order["active"] == "de"
+        assert order["de"]["status"] == "applied"
+        assert order["fr"]["status"] == "superseded"
+        assert order["storage"]["hermes-lang"] == "de"
+    assert result["staleFailure"]["fr"]["status"] == "superseded"
+    assert result["staleFailure"]["afterFailure"] == result["staleFailure"]["before"]
+    assert result["staleFailure"]["active"] == "de"
+    assert result["englishSelection"]["english"]["status"] == "applied"
+    assert result["englishSelection"]["pending"]["status"] == "superseded"
+    assert result["englishSelection"]["active"] == "en"
+    assert result["englishSelection"]["after"] == result["englishSelection"]["before"]
+    assert result["englishFallback"]["status"] == "fallback"
+    assert result["englishFallback"]["active"] == "en"
+    assert result["nonEnglishFallback"]["status"] == "fallback"
+    assert result["nonEnglishFallback"]["active"] == "de"
+    assert result["missingKey"] == "Connection lost"
+
+
+def test_settings_routes_persist_only_effective_locale():
+    assert "function _settleSettingsLocale(" in PANELS_JS
+    assert "payload.language=(typeof getActiveLocale==='function')?getActiveLocale():langSel.value" in PANELS_JS
+    assert PANELS_JS.count("await _settleSettingsLocale(") >= 4
+    assert "body.language=localeResult.active" in PANELS_JS
 
 
 # --- #7622 round-3 behavioural pins -----------------------------------------
@@ -306,7 +548,7 @@ def test_i18n_exposes_guarded_browser_hint_helper():
     """`_detectBrowserLanguageHint` must exist and survive a `navigator`
     accessor that throws — used by loadLocale, boot.js, and panels.js
     to keep a single bad read from aborting boot / settings hydration."""
-    assert "function _detectBrowserLanguageHint" in I18N_JS
+    assert "function _detectBrowserLanguageHint" in I18N_CORE_JS
 
     # Happy path: navigator.languages[0] wins.
     out = _run_i18n_case(
@@ -373,7 +615,7 @@ def test_load_locale_first_visit_uses_browser_hint_when_no_preference():
     out = _run_i18n_case(
         """
 {
-  ...(loadLocale(), {}),
+  ...(await loadLocale(), {}),
   saved: localStorage.getItem('hermes-lang'),
   htmlLang: document.documentElement.lang,
 }
@@ -388,7 +630,7 @@ def test_load_locale_first_visit_uses_browser_hint_when_no_preference():
     out = _run_i18n_case(
         """
 {
-  ...(loadLocale(), {}),
+  ...(await loadLocale(), {}),
   saved: localStorage.getItem('hermes-lang'),
 }
         """,
@@ -402,7 +644,7 @@ def test_load_locale_first_visit_uses_browser_hint_when_no_preference():
     out = _run_i18n_case(
         """
 {
-  ...(loadLocale(), {}),
+  ...(await loadLocale(), {}),
   saved: localStorage.getItem('hermes-lang'),
 }
         """,
@@ -419,7 +661,7 @@ def test_load_locale_first_visit_uses_browser_hint_when_no_preference():
         """
 {
   ...(setLocale('fr'), {}),  // pre-seed localStorage
-  ...(loadLocale(), {}),
+  ...(await loadLocale(), {}),
   saved: localStorage.getItem('hermes-lang'),
 }
         """,

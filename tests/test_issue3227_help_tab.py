@@ -1,9 +1,10 @@
+from tests.i18n_locale_loader import locale_source_text
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS  = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS    = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 STYLE_CSS  = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 LOCALE_COUNT = 15  # en, it, ja, ru, es, de, zh, zh-Hant, pt, ko, fr, tr, pl, vi, cs
@@ -42,11 +43,11 @@ def test_panels_js_foreach_includes_help():
 
 
 def test_i18n_help_keys_present_in_all_locales():
-    assert I18N_JS.count("settings_tab_help") == LOCALE_COUNT
-    assert I18N_JS.count("settings_help_docs_label") == LOCALE_COUNT
-    assert I18N_JS.count("settings_help_issue_label") == LOCALE_COUNT
-    assert I18N_JS.count("settings_help_docs_link") == LOCALE_COUNT
-    assert I18N_JS.count("settings_help_issue_link") == LOCALE_COUNT
+    assert I18N_SOURCE.count("settings_tab_help") == LOCALE_COUNT
+    assert I18N_SOURCE.count("settings_help_docs_label") == LOCALE_COUNT
+    assert I18N_SOURCE.count("settings_help_issue_label") == LOCALE_COUNT
+    assert I18N_SOURCE.count("settings_help_docs_link") == LOCALE_COUNT
+    assert I18N_SOURCE.count("settings_help_issue_link") == LOCALE_COUNT
 
 
 def test_help_card_link_hover_is_contrast_safe():

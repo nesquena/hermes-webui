@@ -1,9 +1,10 @@
+from tests.i18n_locale_loader import locale_source_text
 from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
 
@@ -73,10 +74,10 @@ def test_click_near_bottom_and_resets_clear_new_message_cue():
 
 
 def test_new_message_cue_i18n_keys_exist_in_locale_blocks():
-    assert I18N_JS.count("session_new_message:") >= 8
-    assert I18N_JS.count("session_new_message_label:") >= 8
-    assert "session_new_message: 'New message'" in I18N_JS
-    assert "session_new_message_label: 'New message available, jump to end'" in I18N_JS
+    assert I18N_SOURCE.count("session_new_message:") >= 8
+    assert I18N_SOURCE.count("session_new_message_label:") >= 8
+    assert "session_new_message: 'New message'" in I18N_SOURCE
+    assert "session_new_message_label: 'New message available, jump to end'" in I18N_SOURCE
 
 
 def test_new_message_cue_has_stable_pill_styling():

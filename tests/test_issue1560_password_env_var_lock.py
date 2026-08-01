@@ -16,6 +16,8 @@ import pathlib
 import urllib.error
 import urllib.request
 
+from tests.i18n_locale_loader import locale_block, locale_codes
+
 REPO = pathlib.Path(__file__).parent.parent
 
 
@@ -104,34 +106,20 @@ def test_panels_js_hides_disable_auth_button_when_env_locked():
         'Disable Auth button must be hidden in the env-locked code path'
 
 
-# ── i18n: keys present in all 10 locales (static/i18n.js) ──────────────────
+# ── i18n: keys present in every registered locale ───────────────────────────
 
 
-LOCALES = ['en', 'it', 'ja', 'ru', 'es', 'de', 'zh', 'zh-Hant', 'pt', 'ko']
+LOCALES = locale_codes()
 
 
 def _split_locales(i18n_src):
-    """Split i18n.js into per-locale source slices.
-
-    Locale block headers look like `  en: {` or `  'zh-Hant': {`. We slice each
-    block from its header to the next sibling header at the same indentation.
-    """
-    import re
-    pattern = re.compile(r"^  ['\"]?([\w\-]+)['\"]?: \{$", re.MULTILINE)
-    matches = list(pattern.finditer(i18n_src))
-    blocks = {}
-    for i, m in enumerate(matches):
-        name = m.group(1)
-        start = m.start()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(i18n_src)
-        blocks[name] = i18n_src[start:end]
-    return blocks
+    """Return the registered locale bundle bodies through the shared loader."""
+    return {locale: locale_block(locale) for locale in LOCALES}
 
 
 def test_i18n_password_env_var_locked_in_all_locales():
     """Every locale must define the password_env_var_locked banner string."""
-    src = _read('static/i18n.js')
-    blocks = _split_locales(src)
+    blocks = _split_locales(None)
     missing = [loc for loc in LOCALES if loc not in blocks
                or 'password_env_var_locked:' not in blocks[loc]]
     assert not missing, \
@@ -140,8 +128,7 @@ def test_i18n_password_env_var_locked_in_all_locales():
 
 def test_i18n_password_env_var_locked_placeholder_in_all_locales():
     """Every locale must define the password_env_var_locked_placeholder string."""
-    src = _read('static/i18n.js')
-    blocks = _split_locales(src)
+    blocks = _split_locales(None)
     missing = [loc for loc in LOCALES
                if loc not in blocks
                or 'password_env_var_locked_placeholder:' not in blocks[loc]]
@@ -151,8 +138,7 @@ def test_i18n_password_env_var_locked_placeholder_in_all_locales():
 
 def test_i18n_locked_string_mentions_env_var_name_in_all_locales():
     """Each locale's banner must literally mention HERMES_WEBUI_PASSWORD so users can find it."""
-    src = _read('static/i18n.js')
-    blocks = _split_locales(src)
+    blocks = _split_locales(None)
     for loc in LOCALES:
         block = blocks.get(loc, '')
         # Find the password_env_var_locked entry

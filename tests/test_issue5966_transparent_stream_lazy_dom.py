@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression coverage for #5966: Transparent Stream memory blowup on long histories.
 
 A reasoning-heavy chat (15+ prompts) in Transparent Stream mode built a DOM node
@@ -295,8 +296,8 @@ def test_label_uses_i18n_with_fallback():
     body = _function_body(UI_JS, "_tOrDefault")
     assert "v!==key" in body
     assert "show_earlier_step_one: 'Show 1 earlier step'" in (
-        (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+        (ROOT / "static" / "split locale bundles").read_text(encoding="utf-8")
     )
     assert "show_earlier_steps: 'Show {0} earlier steps'" in (
-        (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+        (ROOT / "static" / "split locale bundles").read_text(encoding="utf-8")
     )
