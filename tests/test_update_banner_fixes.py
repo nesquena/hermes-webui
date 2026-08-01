@@ -4320,8 +4320,14 @@ def _run_clear_lock_response(response, raises=False, initial_error=''):
     """Run applyClearUpdateLock() and capture restart, toast, and control state."""
     src = read('static/ui.js')
     ui_fns = '\n'.join([
+        extract_js_function(src, '_updateDirtyState'),
+        extract_js_function(src, '_formatUpdateTargetStatus'),
+        extract_js_function(src, '_formatManualUpdateInstruction'),
+        extract_js_function(src, '_formatUpdateCheckError'),
+        extract_js_function(src, '_updateCheckHasError'),
         extract_js_function(src, '_i18nUpdateText'),
         extract_js_function(src, '_showUpdateError'),
+        extract_js_function(src, '_showUpdateBanner'),
         extract_js_function(src, 'applyClearUpdateLock'),
     ])
     response_js = 'throw new Error("connection lost")' if raises else 'return ' + json.dumps(response)
@@ -4329,16 +4335,27 @@ def _run_clear_lock_response(response, raises=False, initial_error=''):
         '"use strict";'
         '(async()=>{'
         'let _reloads=0;let _toast=null;'
-        'const _el={updateError:{style:{display:' + json.dumps('block' if initial_error else 'none') + '},textContent:' + json.dumps(initial_error) + '},btnForceUpdate:{style:{display:"none"},disabled:true,dataset:{target:""}}};'
+        'const _el={'
+        'updateError:{style:{display:' + json.dumps('block' if initial_error else 'none') + '},textContent:' + json.dumps(initial_error) + '},'
+        'btnApplyUpdate:{style:{display:"inline-block"},disabled:false,dataset:{}},'
+        'btnForceUpdate:{style:{display:"none"},disabled:true,dataset:{target:""}},'
+        'btnClearUpdateLock:{style:{display:"inline-block"},disabled:false,dataset:{target:"webui"}},'
+        'updateMsg:{textContent:""},'
+        'updateBanner:{classList:{_s:new Set(),add(c){this._s.add(c);},remove(c){this._s.delete(c);},has(c){return this._s.has(c);}}},'
+        '};'
         'const _btn={style:{display:"inline-block"},disabled:false,textContent:"Clear lock",dataset:{target:"webui"}};'
-        'global.window={_clearLockInFlight:false};'
-        'global.window._updateData={webui:{behind:2,dirty:true,channel:"stable"}};'
-        'global.$=(id)=>id==="updateError"?_el.updateError:id==="btnClearUpdateLock"?_btn:id==="btnForceUpdate"?_el.btnForceUpdate:null;'
-        'function t(k){return k;}'
+        'global.window={_clearLockInFlight:false,_whatsNewSummaryEnabled:false};'
+        'global.window._updateData={webui:{behind:2,dirty:true,channel:"stable"},agent:{behind:0,dirty:false}};'
+        'global.$=(id)=>id==="btnClearUpdateLock"?_btn:_el[id]||null;'
+        'function t(k,...args){'
+        'const values={update_no_change:"Für {0} wurde kein Update angewendet."};'
+        'const value=values[k]||k;'
+        'return value.replace(/\\{(\\d+)\\}/g,(match,index)=>args[index]===undefined?match:String(args[index]));'
+        '}'
         'global.api=async()=>{' + response_js + ';};'
         'global._waitForServerThenReload=async()=>{_reloads+=1;};'
         'global.showToast=(...args)=>{_toast=args;};'
-        'global._showUpdateBanner=(data)=>{if(data&&data.webui&&data.webui.dirty){_el.btnForceUpdate.style.display="inline-block";_el.btnForceUpdate.disabled=false;_el.btnForceUpdate.dataset.target="webui";}};'
+        'function _renderUpdateWhatsNewLinks(){}'
         'global.sessionStorage={removeItem:()=>{},setItem:()=>{},getItem:()=>null};'
         + ui_fns
         + ';await applyClearUpdateLock(_btn);'
@@ -4347,7 +4364,8 @@ def _run_clear_lock_response(response, raises=False, initial_error=''):
         'error_visible:_el.updateError.style.display!=="none",'
         'in_flight:!!window._clearLockInFlight,visible:_btn.style.display!=="none",'
         'disabled:_btn.disabled,target:_btn.dataset.target,'
-        'force_visible:_el.btnForceUpdate.style.display!=="none",'
+        'apply_visible:_el.btnApplyUpdate.style.display!=="none",apply_disabled:_el.btnApplyUpdate.disabled,'
+        'force_visible:_el.btnForceUpdate.style.display!=="none",force_disabled:_el.btnForceUpdate.disabled,force_target:_el.btnForceUpdate.dataset.target,'
         '}));'
         '})()'
     )
@@ -4390,11 +4408,15 @@ class TestUpdateRecoveryResponseLifecycle:
         })
         assert result['reloads'] == 0
         assert result['toast'][2] == 'info'
-        assert 'No update was applied' in result['toast'][0]
+        assert result['toast'][0] == 'Für WebUI wurde kein Update angewendet.'
         assert not result['visible']
         assert result['disabled']
         assert result['target'] == ''
+        assert not result['apply_visible']
+        assert result['apply_disabled']
         assert result['force_visible']
+        assert not result['force_disabled']
+        assert result['force_target'] == 'webui'
         assert not result['in_flight']
 
     def test_fresh_banner_reset_clears_previous_update_error(self):
@@ -4413,6 +4435,7 @@ class TestUpdateRecoveryResponseLifecycle:
         })
         assert result['reloads'] == 0
         assert result['error_visible']
+        assert 'webui' in result['error'].lower()
         assert result['visible']
         assert not result['disabled']
         assert result['target'] == 'webui'

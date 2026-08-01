@@ -10139,7 +10139,10 @@ async function applyClearUpdateLock(btn){
       btn.dataset.target='';
       if(errEl){errEl.style.display='none';errEl.textContent='';}
       if(typeof _showUpdateBanner==='function'&&window._updateData) _showUpdateBanner(window._updateData);
-      const noUpdateMessage=_lt('update_no_change','No update was applied.');
+      const applyBtn=$('btnApplyUpdate');
+      if(applyBtn){applyBtn.disabled=true;applyBtn.style.display='none';}
+      const targetLabel=target==='webui'?'WebUI':'Agent';
+      const noUpdateMessage=_lt('update_no_change','No update was applied for {0}.',targetLabel);
       showToast(noUpdateMessage,10000,'info');
     } else if(res.ok){
       btn.disabled=true;
