@@ -718,6 +718,7 @@ async function cmdModel(args){
     // different provider not in the dropdown. Call /api/session/update directly.
     if(!match && !versionedNoSnap && S&&S.session&&S.session.session_id){
       const provider=q.slice(0,q.indexOf('/'));
+      const contextSid=S.session.session_id;
       if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
       try{
         const resp=await fetch(new URL('api/session/update',document.baseURI||location.href).href,{
@@ -730,6 +731,7 @@ async function cmdModel(args){
           }),
         });
         if(resp.ok){
+          if(!S.session||S.session.session_id!==contextSid) return;
           S.session.model=q;
           S.session.model_provider=provider;
           if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
@@ -737,9 +739,9 @@ async function cmdModel(args){
           showToast(t('switched_to')+q);
           return;
         }
-        if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+        if(S.session&&S.session.session_id===contextSid&&typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
       }catch(_){
-        if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+        if(S.session&&S.session.session_id===contextSid&&typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
         /* fall through to "no model match" */
       }
     }
@@ -1261,6 +1263,7 @@ async function cmdGoal(args){
     appendThinking();setBusy(true);
     setComposerStatus(t('goal_working_toward'));
     S.activeStreamId=r.stream_id;
+    if(typeof window._voiceLeasePrepareSubmission==='function') window._voiceLeasePrepareSubmission({replaceOwner:true});
     if(typeof window._voiceLeaseBind==='function') window._voiceLeaseBind(r.stream_id,activeSid);
     if(S.session&&S.session.session_id===activeSid){
       S.session.active_stream_id=r.stream_id;

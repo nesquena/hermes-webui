@@ -1664,15 +1664,16 @@ window.renderTranscript=function(container, messages, opts){
     if(typeof send==='function') send();
   }
 
-  function _voiceLeasePrepareSubmission(){
+  function _voiceLeasePrepareSubmission(options={}){
     let lease=_voiceLease;
     if(!_voiceModeActive) return null;
     if(!lease){
       lease=_newVoiceLease();
       _voiceLease=lease;
     }
-    if(lease&&(lease.submitted||lease.settled)){
-      if(lease.submitted&&!lease.settled) return null;
+    if(lease&&lease.owner&&!lease.settled&&!options.replaceOwner) return null;
+    if(lease&&(lease.submitted||lease.settled||options.replaceOwner)){
+      if(lease.submitted&&!lease.settled&&!options.replaceOwner) return null;
       _clearVoiceLeaseTimers(lease);
       _clearBrowserTtsRecovery();
       _revokeVoiceTtsUrls(lease);
@@ -2401,6 +2402,7 @@ function _applySessionContextMetadataUpdate(data){
 
 $('modelSelect').onchange=async()=>{
   const selectedModel=$('modelSelect').value;
+  const contextSid=S.session&&S.session.session_id||null;
   const modelState=(typeof _modelStateForSelect==='function')
     ? _modelStateForSelect($('modelSelect'),selectedModel)
     : {model:selectedModel,model_provider:null};
@@ -2435,9 +2437,13 @@ $('modelSelect').onchange=async()=>{
       model_provider:modelState.model_provider||null,
     })});
   }catch(e){
-    if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+    if((!contextSid&&(!S.session||!S.session.session_id))
+      ||(S.session&&S.session.session_id===contextSid)){
+      if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+    }
     throw e;
   }
+  if(!S.session||S.session.session_id!==contextSid) return;
   // NOTE: do NOT clear the pending explicit-pick marker here. It must survive until
   // the NEXT send() consumes it, otherwise the normal "pick → session-update → send"
   // flow loses the explicit-pick signal before /api/chat/start runs and the server

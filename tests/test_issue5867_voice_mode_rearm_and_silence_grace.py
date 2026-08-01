@@ -50,6 +50,8 @@ SEND_SOURCE = _function_source(MESSAGES, "send")
 ATTACH_SOURCE = _function_source(MESSAGES, "attachLiveStream")
 _completion_start = BOOT.index("  window._voiceModeOnResponseComplete=function")
 VOICE_COMPLETE_SOURCE = BOOT[_completion_start:BOOT.index("  // ordinary autoReadLastAssistant", _completion_start)]
+SPEAK_SOURCE = _function_source(BOOT, "_speakResponse")
+ACTIVATE_SOURCE = _function_source(BOOT, "_activate")
 
 
 HARNESS = r"""
@@ -128,6 +130,8 @@ const source = Buffer.from('${SEND_B64}', 'base64').toString();
 const ownerSource = Buffer.from('${OWNER_B64}', 'base64').toString();
 const runtimeSource = Buffer.from('${RUNTIME_B64}', 'base64').toString();
 const completionSource = Buffer.from('${COMPLETE_B64}', 'base64').toString();
+const speakSource = Buffer.from('${SPEAK_B64}', 'base64').toString();
+const activateSource = Buffer.from('${ACTIVATE_B64}', 'base64').toString();
 const msg = { value: 'production voice text' };
 const elements = new Map([['msg', msg]]);
 const S = {
@@ -161,7 +165,6 @@ const showToast = () => {};
 const _setButtonTooltip = () => {};
 const stopTTS = () => {};
 const _locale = { _speech: 'en-US' };
-const _speakResponse = () => {};
 const element = () => ({ value: '', style: {}, options: [], classList: { add(){}, remove(){} }, querySelectorAll(){ return []; } });
 const $ = id => elements.get(id) || element();
 const noOp = () => {};
@@ -199,15 +202,16 @@ for (const match of source.matchAll(/\b[A-Za-z_$][\w$]*\b/g)) {
   if (!builtins.has(name) && !(name in scope)) scope[name] = noOp;
 }
 const send = new Function('scope', 'with(scope){ return (' + source + '); }')(scope);
-const voiceFactory = new Function('window','document','SpeechRecognition','localStorage','modeBtn','bar','indicator','label','micBtn','ta','S','t','autoResize','_micOriginNeedsSecureContext','_deactivate','showToast','_setButtonTooltip','stopTTS','_locale','send','setTimeout','clearTimeout','Date','_speakResponse','_voiceLeaseSettleOwner', runtimeSource + '\n' + completionSource + '\nreturn { activate(){ _voiceModeActive=true; _voiceContextId+=1; _voiceLease=_newVoiceLease(); }, start:()=>_startListening(_voiceLease), first:()=>_voiceLease&&_voiceLease.recognition };');
-const voiceApi = voiceFactory(windowObj, documentObj, SpeechRecognition, localStorage, modeBtn, bar, indicator, label, micBtn, msg, S, t, autoResize, _micOriginNeedsSecureContext, _deactivate, showToast, _setButtonTooltip, stopTTS, _locale, send, setTimeout, clearTimeout, Date, _speakResponse, (...args)=>windowObj._voiceLeaseSettleOwner(...args));
+const speechSynthesis = { cancel(){}, speaking:false, getVoices(){ return []; }, speak(){} };
+const voiceFactory = new Function('window','document','SpeechRecognition','localStorage','modeBtn','bar','indicator','label','micBtn','ta','S','t','autoResize','_micOriginNeedsSecureContext','_deactivate','showToast','_setButtonTooltip','stopTTS','_locale','send','setTimeout','clearTimeout','Date','_voiceLeaseSettleOwner','speechSynthesis', runtimeSource + '\n' + completionSource + '\n' + speakSource + '\n' + activateSource + '\nreturn { activate:()=>_activate(), start:()=>_startListening(_voiceLease), first:()=>_voiceLease&&_voiceLease.recognition };');
+const voiceApi = voiceFactory(windowObj, documentObj, SpeechRecognition, localStorage, modeBtn, bar, indicator, label, micBtn, msg, S, t, autoResize, _micOriginNeedsSecureContext, _deactivate, showToast, _setButtonTooltip, stopTTS, _locale, send, setTimeout, clearTimeout, Date, (...args)=>windowObj._voiceLeaseSettleOwner(...args), speechSynthesis);
 const originalPrepare=windowObj._voiceLeasePrepareSubmission;
 windowObj._voiceLeasePrepareSubmission=(...args)=>{ bound.push({ type: 'prepare' }); return originalPrepare(...args); };
 const originalBind=windowObj._voiceLeaseBind;
 windowObj._voiceLeaseBind=(streamId,sid)=>{ bound.push({ type: 'bind', streamId, sid }); return originalBind(streamId,sid); };
 const originalCompletion=windowObj._voiceModeOnResponseComplete;
 windowObj._voiceModeOnResponseComplete=outcome=>{ completionEvents.push(outcome); return originalCompletion(outcome); };
-voiceApi.activate(); voiceApi.start();
+voiceApi.activate();
 const recognition=voiceApi.first();
 recognition.onresult({ resultIndex: 0, results: [{ 0: { transcript: msg.value }, isFinal: true }] });
 recognition.onend();
@@ -237,6 +241,8 @@ def _run_production_send():
     ).replace("${OWNER_B64}", base64.b64encode(OWNER_SOURCE.encode()).decode())
     script = script.replace("${RUNTIME_B64}", base64.b64encode(_voice_runtime().encode()).decode())
     script = script.replace("${COMPLETE_B64}", base64.b64encode(VOICE_COMPLETE_SOURCE.encode()).decode())
+    script = script.replace("${SPEAK_B64}", base64.b64encode(SPEAK_SOURCE.encode()).decode())
+    script = script.replace("${ACTIVATE_B64}", base64.b64encode(ACTIVATE_SOURCE.encode()).decode())
     result = subprocess.run([NODE], input=script, capture_output=True, text=True)
     if result.returncode:
         raise AssertionError(result.stderr)
