@@ -521,7 +521,7 @@ class TestRemoveProviderKey:
         monkeypatch.setattr(cfg_mod, "_get_config_path", lambda: config_path)
         monkeypatch.setattr(providers, "reload_config", lambda: None)
 
-        providers._clean_provider_key_from_config("custom:local-127.0.0.1-15721")
+        providers._clean_provider_key_from_config("custom:local-(127.0.0.1:15721)")
 
         reloaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         custom_provider = reloaded["custom_providers"][0]
