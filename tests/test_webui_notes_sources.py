@@ -352,7 +352,7 @@ def test_external_notes_menu_item_is_default_off_from_memory_payload():
 def test_external_notes_drawer_copy_is_localized_outside_english():
     from pathlib import Path
 
-        i18n = locale_source_text()
+    i18n = locale_source_text()
 
     assert i18n.count("external_notes_sources: 'Third-party notes'") == 1
     assert i18n.count("external_notes_recent_ai: 'Recently used by AI'") == 1
