@@ -1823,9 +1823,16 @@ async function loadSession(sid){
   // resolution out of the first-paint path; old provider-shaped model IDs are
   // repaired by the deferred resolver after S.session is assigned.
   // Guard against network/server failures to prevent a permanently stuck loading state.
+  // #fastnav: kick the parallel metadata+tail prefetch NOW when no hover
+  // prefetch is in flight (keyboard nav, direct click). The two requests race
+  // in parallel instead of sequentially, and the _apiSessionNav consumers
+  // below simply await the matching in-flight promise.
+  if(typeof _prefetchSessionForNav==='function' && !opts.skipPrefetch){
+    try{_prefetchSessionForNav(sid);}catch(_){}
+  }
   let data;
   try {
-    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    data = await _apiSessionNav(sid, `/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
     const profileMismatch=_sessionProfileMismatchFromError(e);
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
@@ -2999,6 +3006,14 @@ let _messagesTruncated = false;
 // server-bounded and do not consume the visible-message budget.
 // Older messages are loaded on-demand via _loadOlderMessages().
 const _INITIAL_MSG_LIMIT = 30;
+// First-paint tail window for a conversation click: intentionally smaller than
+// the older-rows page size above so the initial load renders the latest
+// conclusion + latest user message after a single short round-trip instead of
+// paying for ~30 visible rows (perf: session navigation latency, #fastnav).
+// This only sizes the messages=1 tail window used by
+// _messageReloadLimitForSession(); _loadOlderMessages() keeps paging with
+// _INITIAL_MSG_LIMIT, and scrolling up backfills history exactly as before.
+const _INITIAL_TAIL_MSG_LIMIT = 8;
 // ============================================================================
 // COUPLED CONSTANT — keep in sync with api/routes.py:_MAX_MSG_LIMIT.
 // ============================================================================
@@ -3066,7 +3081,9 @@ function _messageReloadLimitForSession(sid){
       return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);
     }
   }
-  return _INITIAL_MSG_LIMIT;
+  // Small first-paint tail (latest conclusion + latest user message); older
+  // rows backfill via _loadOlderMessages() at the _INITIAL_MSG_LIMIT page size.
+  return _INITIAL_TAIL_MSG_LIMIT;
 }
 
 function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
@@ -3096,6 +3113,87 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   }else{
     S.toolCalls=[];
   }
+}
+
+// ============================================================================
+// Session navigation prefetch cache (#fastnav)
+// ----------------------------------------------------------------------------
+// Clicking a sidebar conversation used to pay two SEQUENTIAL round-trips
+// (messages=0 metadata, then the messages=1 tail window) before first paint —
+// each one multiplied by the operator's network latency (Tailscale remote
+// access). This module instead:
+//   1. prefetches BOTH payloads in parallel as soon as a sidebar row is
+//      hovered (pointerenter), so the click itself is usually free;
+//   2. lets loadSession()/_ensureMessagesLoaded() consume those in-flight
+//      promises instead of re-issuing the requests;
+//   3. kicks the same parallel prefetch at loadSession() entry when no hover
+//      happened (keyboard nav, direct click), turning the two sequential
+//      round-trips into one effective round-trip.
+// Safety guards:
+//   - rows flagged .streaming are never prefetched nor served from cache (a
+//     live turn mutates the transcript continuously; the SSE/poll path owns
+//     that session's freshness);
+//   - entries expire after _SESSION_NAV_CACHE_TTL_MS and the cache is
+//     LRU-bounded to _SESSION_NAV_CACHE_MAX sessions;
+//   - consumption is URL-exact: a caller asking for a different msg_limit
+//     (e.g. the same-session force-reload hint) misses the cache and fetches
+//     normally, exactly as before.
+// ============================================================================
+const _SESSION_NAV_CACHE_TTL_MS = 20000;
+const _SESSION_NAV_CACHE_MAX = 6;
+const _sessionNavCache = new Map(); // sid -> {at:number, urls:Map<string,Promise>}
+
+function _sessionNavRowIsStreaming(sid){
+  try{
+    const rows=document.querySelectorAll('#sessionList .session-item.streaming');
+    for(const r of rows){ if(r.dataset && r.dataset.sid===sid) return true; }
+  }catch(_){}
+  return false;
+}
+
+function _sessionNavCacheTouch(sid, entry){
+  _sessionNavCache.delete(sid);
+  _sessionNavCache.set(sid, entry);
+  while(_sessionNavCache.size > _SESSION_NAV_CACHE_MAX){
+    const oldest=_sessionNavCache.keys().next().value;
+    _sessionNavCache.delete(oldest);
+  }
+}
+
+function _prefetchSessionForNav(sid){
+  if(!sid) return;
+  if(S.session && S.session.session_id===sid) return;      // already active
+  if(_sessionNavRowIsStreaming(sid)) return;               // live turn: SSE owns freshness
+  const now=Date.now();
+  const existing=_sessionNavCache.get(sid);
+  if(existing && (now-existing.at)<_SESSION_NAV_CACHE_TTL_MS) return; // fresh enough
+  const base=`/api/session?session_id=${encodeURIComponent(sid)}`;
+  // Mirror the exact URLs loadSession()/_ensureMessagesLoaded() request so a
+  // later click awaits the same promise instead of re-fetching.
+  const urls=new Map();
+  urls.set(`${base}&messages=0&resolve_model=0`,
+    api(`${base}&messages=0&resolve_model=0`));
+  urls.set(`${base}&messages=1&resolve_model=0&msg_limit=${_INITIAL_TAIL_MSG_LIMIT}&expand_renderable=1`,
+    api(`${base}&messages=1&resolve_model=0&msg_limit=${_INITIAL_TAIL_MSG_LIMIT}&expand_renderable=1`, {timeoutMs:120000}));
+  // A rejected prefetch must not surface as an unhandled rejection: the real
+  // load path re-fetches on cache miss and reports its own errors.
+  for(const p of urls.values()){ p.catch(()=>{ _sessionNavCache.delete(sid); }); }
+  _sessionNavCacheTouch(sid, {at:now, urls});
+}
+
+function _apiSessionNav(sid, url, apiOpts){
+  // Consume a fresh prefetched promise for this exact URL when available;
+  // otherwise fall through to a normal api() call (identical behavior to the
+  // pre-#fastnav code path).
+  const entry=_sessionNavCache.get(sid);
+  if(entry && (Date.now()-entry.at)<_SESSION_NAV_CACHE_TTL_MS && !_sessionNavRowIsStreaming(sid)){
+    const p=entry.urls.get(url);
+    if(p){
+      entry.urls.delete(url); // single-use: later reloads must re-read fresh state
+      return p;
+    }
+  }
+  return api(url, apiOpts);
 }
 
 async function _ensureMessagesLoaded(sid, opts) {
@@ -3136,7 +3234,8 @@ async function _ensureMessagesLoaded(sid, opts) {
   const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
   let data;
   try {
-    data = await api(
+    data = await _apiSessionNav(
+      sid,
       `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
       {timeoutMs:120000}
     );
@@ -8851,6 +8950,13 @@ function renderSessionListFromCache(){
       // after an actual press starts on this row; otherwise hovered rows stay
       // faded until the next sidebar rerender clears their DOM nodes.
       _updateSessionGesture(e.clientX,e.clientY);
+    };
+    // #fastnav: hovering a row warms the navigation prefetch cache so the
+    // pointerup/click that follows usually awaits already in-flight payloads
+    // instead of starting two sequential round-trips from scratch.
+    el.onpointerenter=(e)=>{
+      if(e.pointerType==='touch') return;
+      if(typeof _prefetchSessionForNav==='function') _prefetchSessionForNav(s.session_id);
     };
     el.onpointercancel=(e)=>{
       if(e.pointerType==='touch') return;
