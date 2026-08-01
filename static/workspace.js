@@ -268,11 +268,17 @@ function _workspaceRouteForPathRel(path, kind, opts={}){
     params.set('token', grant.token);
     if(kind === 'raw' && opts.download) params.set('download', '1');
     if(kind === 'raw' && opts.inline) params.set('inline', '1');
+    if(kind === 'list' && opts.cursor) params.set('cursor', String(opts.cursor));
     if(kind === 'list') return `/api/escape/list?${params.toString()}`;
     if(kind === 'read') return `/api/escape/file/read?${params.toString()}`;
     if(kind === 'raw') return `/api/escape/file/raw?${params.toString()}`;
   }
-  if(kind === 'list') return `/api/list?session_id=${sessionId}&path=${encodeURIComponent(normalizedPath || '.')}`;
+  if(kind === 'list'){
+    const cursor = opts.cursor
+      ? `&cursor=${encodeURIComponent(String(opts.cursor))}`
+      : '';
+    return `/api/list?session_id=${sessionId}&path=${encodeURIComponent(normalizedPath || '.')}${cursor}`;
+  }
   if(kind === 'read') return `/api/file?session_id=${sessionId}&path=${encodeURIComponent(normalizedPath || '.')}`;
   if(kind === 'raw'){
     const extra = [];
@@ -610,24 +616,16 @@ function renderSessionArtifacts(){
 }
 
 // Follow all cursor pages and return the union of entries.
-// Caps at 500 pages to prevent infinite loops from a misbehaving server.
-const _FETCH_ALL_PAGES_MAX=500;
 async function _fetchAllPages(baseUrl){
   let entries=[];
   let cursor=null;
-  let pages=0;
   do{
     const url=cursor?baseUrl+'&cursor='+encodeURIComponent(cursor):baseUrl;
     const data=await api(url);
     entries=entries.concat(data.entries||[]);
-    const next=(data.has_more&&data.cursor)?data.cursor:null;
-    if(next===cursor) break; // same cursor twice — server bug; stop
-    cursor=next;
-    pages++;
-    if(pages>=_FETCH_ALL_PAGES_MAX){
-      console.warn('_fetchAllPages: page cap reached; returning partial results');
-      break;
-    }
+    if(!data.has_more) break;
+    if(!data.cursor||data.cursor===cursor) throw new Error('Directory listing cursor did not advance');
+    cursor=data.cursor;
   }while(cursor);
   return entries;
 }
@@ -638,19 +636,15 @@ async function _workspacePathExists(path){
   const name=parts.pop();
   if(!name) return false;
   const dir=parts.length?parts.join('/'):'.';
-  const baseUrl=`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dir)}`;
-  // Short-circuit: check each page as it arrives instead of collecting all pages.
+  const baseUrl=_workspaceRouteForPath(dir,'list');
   let cursor=null;
-  let pages=0;
   do{
     const url=cursor?baseUrl+'&cursor='+encodeURIComponent(cursor):baseUrl;
     const data=await api(url);
     if((data.entries||[]).some(e=>e&&(e.path===path||e.name===name))) return true;
-    const next=(data.has_more&&data.cursor)?data.cursor:null;
-    if(next===cursor) break;
-    cursor=next;
-    pages++;
-    if(pages>=_FETCH_ALL_PAGES_MAX) break;
+    if(!data.has_more) return false;
+    if(!data.cursor||data.cursor===cursor) throw new Error('Directory listing cursor did not advance');
+    cursor=data.cursor;
   }while(cursor);
   return false;
 }
@@ -705,6 +699,7 @@ const _WS_SKELETON_ROWS = [
 // UNCONDITIONALLY at switch start (even when the workspace panel is closed, since
 // loadDir('.') still runs then), so the stale response is rejected.
 let _wsTreeGen = 0;
+let _wsDirRequestGen = 0;
 function bumpWorkspaceTreeGen(){
   _wsTreeGen = (typeof _wsTreeGen === 'number' ? _wsTreeGen : 0) + 1;
   return _wsTreeGen;
@@ -758,6 +753,8 @@ async function loadDir(path, opts={}){
   const refreshExpanded=!!(opts&&opts.refreshExpanded);
   if(!S.session)return;
   const sessionId=S.session.session_id;
+  const requestGen=++_wsDirRequestGen;
+  const requestPath=path||'.';
   const treeGen=_wsTreeGen;  // #4671: capture the workspace-tree generation. A profile
                              // switch bumps it (bumpWorkspaceTreeGen), so a stale response
                              // from the previous workspace — which would pass the session_id
@@ -770,12 +767,12 @@ async function loadDir(path, opts={}){
     }
     // Reset cursor state on every fresh loadDir call; continuation appends via _loadMoreDir.
     S._dirCursor=null;S._dirHasMore=false;
-    S.currentDir=path||'.';
-    const data=await api(
-      _workspaceRouteForPath(path, 'list') ||
-      `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path||'.')}`
-    );
-    if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
+    S.currentDir=requestPath;
+    const route=_workspaceRouteForPath(requestPath, 'list');
+    if(!route)return;
+    const data=await api(route);
+    if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen
+      ||requestGen!==_wsDirRequestGen||(S.currentDir||'.')!==requestPath)return;
     if(data.workspace_recovered&&data.workspace){
       S.session.workspace=String(data.workspace);
       S._dirCache={};
@@ -799,7 +796,8 @@ async function loadDir(path, opts={}){
             .then(entries=>({dirPath,entries}))
             .catch(()=>({dirPath,entries:[]}))
         ));
-        if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
+        if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen
+          ||requestGen!==_wsDirRequestGen||(S.currentDir||'.')!==requestPath)return;
         for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
       }
       if(expanded.size>0)renderFileTree();
@@ -814,9 +812,11 @@ async function loadDir(path, opts={}){
       await refreshOpenPreviewIfMutated();
     }
     // Fetch git info for workspace root (non-blocking)
-    if(!path||path==='.') _refreshGitBadge();
+    if(!requestPath||requestPath==='.') _refreshGitBadge();
   }catch(e){
-    const grant = _workspaceEscapeGrantForPath(path);
+    if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen
+      ||requestGen!==_wsDirRequestGen||(S.currentDir||'.')!==requestPath)return;
+    const grant = _workspaceEscapeGrantForPath(requestPath);
     if(grant && e && e.status===403){
       _clearWorkspaceEscapeGrant(grant.path);
       showToast(t('external_link_grant_expired') || t('file_open_failed'), 5000, 'error');
@@ -856,14 +856,16 @@ function _renderLoadMoreRow(){
 async function _loadMoreDir(){
   if(!S.session||!S._dirCursor||!S._dirHasMore)return;
   const sessionId=S.session.session_id;
+  const requestGen=++_wsDirRequestGen;
   const treeGen=_wsTreeGen;
   const cursor=S._dirCursor;
   const path=S.currentDir||'.';
   try{
-    const data=await api(
-      `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path)}&cursor=${encodeURIComponent(cursor)}`
-    );
-    if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen||(S.currentDir||'.')!==path)return;
+    const route=_workspaceRouteForPath(path,'list',{cursor});
+    if(!route)return;
+    const data=await api(route);
+    if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen
+      ||requestGen!==_wsDirRequestGen||(S.currentDir||'.')!==path||S._dirCursor!==cursor)return;
     // Append only entries not already present (dedup by path for mutation safety).
     const seen=new Set(S.entries.map(function(e){return e.path;}));
     const fresh=(data.entries||[]).filter(function(e){return !seen.has(e.path);});
@@ -872,11 +874,12 @@ async function _loadMoreDir(){
     S._dirHasMore=!!(data.has_more);
     renderFileTree();
   }catch(e){
-    if(e&&e.status===404){
+    if(e&&e.status===404&&S.session&&S.session.session_id===sessionId&&treeGen===_wsTreeGen
+      &&requestGen===_wsDirRequestGen&&(S.currentDir||'.')===path&&S._dirCursor===cursor){
       // Server restarted; cursor is invalid. Clear stale state so the tree is consistent.
       S._dirCursor=null;S._dirHasMore=false;
       renderFileTree();
-      if(typeof showToast==='function')showToast('Directory listing expired. Refresh to see all files.',4000,'warning');
+      if(typeof showToast==='function')showToast(t('workspace_listing_expired'),4000,'warning');
     }else{
       console.warn('loadMoreDir',e);
     }

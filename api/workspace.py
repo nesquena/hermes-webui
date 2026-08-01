@@ -8,6 +8,7 @@ profile has its own workspace configuration.  State files live at
 paths are used as fallback when no profile module is available.
 """
 import base64
+import heapq
 import hashlib
 import hmac
 import json
@@ -36,10 +37,20 @@ _LIST_DIR_PAGE_SIZE = 200
 _LIST_DIR_CURSOR_SECRET: bytes = secrets.token_bytes(32)
 
 
+class _ReverseSortKey:
+    """Heap wrapper that keeps the largest sort key at the root."""
+
+    def __init__(self, key: tuple):
+        self.key = key
+
+    def __lt__(self, other: '_ReverseSortKey') -> bool:
+        return self.key > other.key
+
+
 def _encode_list_cursor(resolved_path: Path, last_key: tuple) -> str:
     """Return a tamper-evident, opaque cursor encoding the sort key of the last returned entry."""
     path_str = str(resolved_path)
-    k = [int(last_key[0]), int(last_key[1]), str(last_key[2])]
+    k = [int(last_key[0]), int(last_key[1]), str(last_key[2]), str(last_key[3])]
     payload = json.dumps({'k': k, 'p': path_str}, sort_keys=True, separators=(',', ':'))
     sig = hmac.new(_LIST_DIR_CURSOR_SECRET, payload.encode('utf-8'), 'sha256').hexdigest()
     token = json.dumps({'k': k, 'p': path_str, 's': sig}, sort_keys=True, separators=(',', ':'))
@@ -49,18 +60,19 @@ def _encode_list_cursor(resolved_path: Path, last_key: tuple) -> str:
 def _decode_list_cursor(cursor: str, expected_resolved: 'Path') -> tuple:
     """Validate and decode a cursor; raise ValueError on tampering or cross-directory use.
 
-    Returns a sort-key tuple (not_is_link: bool, is_file: bool, name_lower: str).
+    Returns a complete sort-key tuple (not_is_link, is_file, name_lower, name).
     """
     try:
         raw = base64.urlsafe_b64decode(cursor.encode('ascii') + b'==').decode('utf-8')
         token = json.loads(raw)
         path_str = str(token['p'])
         k = token['k']
-        if not isinstance(k, list) or len(k) != 3:
+        if not isinstance(k, list) or len(k) != 4:
             raise ValueError("invalid cursor")
         not_link = bool(k[0])
         is_file = bool(k[1])
         name_lower = str(k[2])
+        name = str(k[3])
         sig = str(token['s'])
     except (KeyError, TypeError, IndexError, ValueError):
         raise ValueError("invalid cursor")
@@ -74,7 +86,7 @@ def _decode_list_cursor(cursor: str, expected_resolved: 'Path') -> tuple:
         raise ValueError("invalid cursor")
     if path_str != str(expected_resolved):
         raise ValueError("cursor is for a different directory")
-    return (not_link, is_file, name_lower)
+    return (not_link, is_file, name_lower, name)
 
 from api.config import (
     WORKSPACES_FILE as _GLOBAL_WS_FILE,
@@ -1420,8 +1432,18 @@ def list_dir(workspace: Path, rel: str = '.', cursor: str | None = None) -> dict
                 'mtime_ns': mtime_ns,
             }
 
-    page_entries: list = []
-    has_more = False
+    # Retain only the smallest page plus one visible candidate while scanning.
+    candidate_heap: list = []
+    candidate_seq = 0
+
+    def _retain_candidate(sort_key, entry):
+        nonlocal candidate_seq
+        record = (_ReverseSortKey(sort_key), candidate_seq, sort_key, entry)
+        candidate_seq += 1
+        if len(candidate_heap) < _LIST_DIR_PAGE_SIZE + 1:
+            heapq.heappush(candidate_heap, record)
+        elif sort_key < candidate_heap[0][2]:
+            heapq.heapreplace(candidate_heap, record)
 
     if _DIR_FD_OK:
         def _sort_key_de(de):
@@ -1435,7 +1457,7 @@ def list_dir(workspace: Path, rel: str = '.', cursor: str | None = None) -> dict
                     is_file = de.is_file()
                 except OSError:
                     pass
-            return (not is_link, is_file, de.name.lower())
+            return (not is_link, is_file, de.name.lower(), de.name)
 
         dir_fd = open_anchored_fd(workspace, target, want_dir=True)
         try:
@@ -1443,35 +1465,31 @@ def list_dir(workspace: Path, rel: str = '.', cursor: str | None = None) -> dict
             if not stat.S_ISDIR(st.st_mode):
                 raise FileNotFoundError(f"Not a directory: {rel}")
             with os.scandir(dir_fd) as scan:
-                keyed = sorted(((de, _sort_key_de(de)) for de in scan), key=lambda x: x[1])
-            for de, sk in keyed:
-                if last_key is not None and sk <= last_key:
-                    continue
-                name = de.name
-                is_symlink = de.is_symlink()
-                raw_link = None
-                if is_symlink:
+                for de in scan:
+                    sk = _sort_key_de(de)
+                    if last_key is not None and sk <= last_key:
+                        continue
+                    name = de.name
+                    is_symlink = de.is_symlink()
+                    raw_link = None
+                    if is_symlink:
+                        try:
+                            raw_link = os.readlink(name, dir_fd=dir_fd)
+                        except OSError:
+                            raw_link = None
                     try:
-                        raw_link = os.readlink(name, dir_fd=dir_fd)
+                        lst = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
                     except OSError:
-                        raw_link = None
-                try:
-                    lst = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-                except OSError:
-                    lst = None
-                reachable = True
-                if is_symlink:
-                    try:
-                        os.stat(name, dir_fd=dir_fd, follow_symlinks=True)
-                    except OSError:
-                        reachable = False
-                entry = _process_entry(name, is_symlink, raw_link, lst, reachable)
-                if entry is not None:
-                    page_entries.append(entry)
-                    if len(page_entries) > _LIST_DIR_PAGE_SIZE:
-                        has_more = True
-                        page_entries.pop()
-                        break
+                        lst = None
+                    reachable = True
+                    if is_symlink:
+                        try:
+                            os.stat(name, dir_fd=dir_fd, follow_symlinks=True)
+                        except OSError:
+                            reachable = False
+                    entry = _process_entry(name, is_symlink, raw_link, lst, reachable)
+                    if entry is not None:
+                        _retain_candidate(sk, entry)
         finally:
             try:
                 os.close(dir_fd)
@@ -1490,9 +1508,10 @@ def list_dir(workspace: Path, rel: str = '.', cursor: str | None = None) -> dict
                     is_file = p.is_file()
                 except OSError:
                     pass
-            return (not is_link, is_file, p.name.lower())
+            return (not is_link, is_file, p.name.lower(), p.name)
 
-        for item, sk in sorted(((item, _sort_key_p(item)) for item in target.iterdir()), key=lambda x: x[1]):
+        for item in target.iterdir():
+            sk = _sort_key_p(item)
             if last_key is not None and sk <= last_key:
                 continue
             name = item.name
@@ -1515,19 +1534,17 @@ def list_dir(workspace: Path, rel: str = '.', cursor: str | None = None) -> dict
                     reachable = False
             entry = _process_entry(name, is_symlink, raw_link, lst, reachable)
             if entry is not None:
-                page_entries.append(entry)
-                if len(page_entries) > _LIST_DIR_PAGE_SIZE:
-                    has_more = True
-                    page_entries.pop()
-                    break
+                _retain_candidate(sk, entry)
 
-    page = page_entries  # already bounded to _LIST_DIR_PAGE_SIZE
-    if has_more and page:
-        last = page[-1]
-        last_is_link = last.get('type') == 'symlink'
-        last_is_file = last.get('type') == 'file'
-        last_key_out = (not last_is_link, last_is_file, last['name'].lower())
-        next_cursor = _encode_list_cursor(target_resolved, last_key_out)
+    ordered = sorted(
+        ((record[2], record[3]) for record in candidate_heap),
+        key=lambda item: item[0],
+    )
+    page_records = ordered[:_LIST_DIR_PAGE_SIZE]
+    page = [entry for _, entry in page_records]
+    has_more = len(ordered) > _LIST_DIR_PAGE_SIZE
+    if has_more:
+        next_cursor = _encode_list_cursor(target_resolved, page_records[-1][0])
     else:
         next_cursor = None
     return {'entries': page, 'has_more': has_more, 'cursor': next_cursor}

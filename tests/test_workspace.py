@@ -1,4 +1,10 @@
 """Pagination tests for list_dir and /api/list (#6645)."""
+import io
+import json
+import os
+from urllib.parse import urlparse
+from unittest.mock import patch
+
 import pytest
 
 import api.workspace as w
@@ -31,20 +37,50 @@ def _make_files(directory, count, prefix="f"):
         (directory / f"{prefix}{i:04d}.txt").write_text("x", encoding="utf-8")
 
 
+class _MockHandler:
+    def __init__(self):
+        self._status = None
+        self.headers = {}
+        self.wfile = io.BytesIO()
+
+    def send_response(self, status):
+        self._status = status
+
+    def send_header(self, key, val):
+        pass
+
+    def end_headers(self):
+        pass
+
+
+def _call_list_route(workspace, query):
+    from api.routes import _handle_list_dir
+
+    handler = _MockHandler()
+    parsed = urlparse(f"http://localhost/api/list?session_id=s1&{query}")
+    with patch('api.routes.get_session', side_effect=KeyError), \
+         patch('api.routes.get_cli_sessions', return_value=[{'session_id': 's1', 'workspace': str(workspace)}]), \
+         patch('api.routes.resolve_trusted_workspace', return_value=workspace):
+        _handle_list_dir(handler, parsed)
+    return handler._status, json.loads(handler.wfile.getvalue().decode('utf-8'))
+
+
 # ── reproduction: 201-entry directory ───────────────────────────────────────
 
 def test_list_dir_201_entries(tmp_path):
-    """201 entries: first page has 200, has_more is True, cursor lets you reach all 201."""
+    """The route exposes continuation for a 201-entry directory."""
     ws = tmp_path / "ws"
     ws.mkdir()
     _make_files(ws, 201)
 
-    result = list_dir(ws, ".")
+    status, result = _call_list_route(ws, "path=.")
+    assert status == 200
     assert result["has_more"] is True
     assert result["cursor"] is not None
     assert len(result["entries"]) == 200
 
-    result2 = list_dir(ws, ".", cursor=result["cursor"])
+    status2, result2 = _call_list_route(ws, f"path=.&cursor={result['cursor']}")
+    assert status2 == 200
     assert len(result2["entries"]) == 1
     assert result2["has_more"] is False
     assert result2["cursor"] is None
@@ -100,6 +136,25 @@ def test_list_dir_both_branches(tmp_path, monkeypatch):
            [e["name"] for e in result_fallback["entries"]]
 
 
+def test_list_dir_sort_materialization_is_bounded(tmp_path, monkeypatch):
+    """The final sort sees only the page plus one candidate."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _make_files(ws, 1000)
+    real_sorted = sorted
+    observed_sizes = []
+
+    def bounded_sorted(iterable, *args, **kwargs):
+        values = list(iterable)
+        observed_sizes.append(len(values))
+        return real_sorted(values, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.sorted", bounded_sorted)
+    result = list_dir(ws, ".")
+    assert len(result["entries"]) == 200
+    assert observed_sizes and max(observed_sizes) <= 201
+
+
 # ── cursor tampering and cross-directory rejection ───────────────────────────
 
 def test_list_dir_cursor_tamper(tmp_path):
@@ -120,9 +175,8 @@ def test_list_dir_cursor_tamper(tmp_path):
         list_dir(ws, ".", cursor=corrupted)
 
     # Cursor issued for a different directory.
-    other_result = list_dir(other, ".")
     # other has <=200 entries so no cursor is issued; build one manually via helper
-    other_cursor = _encode_list_cursor(other.resolve(), (True, True, 'a0000.txt'))
+    other_cursor = _encode_list_cursor(other.resolve(), (True, True, 'a0000.txt', 'a0000.txt'))
     with pytest.raises(ValueError):
         list_dir(ws, ".", cursor=other_cursor)
 
@@ -223,7 +277,7 @@ def test_list_dir_single_page_unchanged(tmp_path):
     assert result["has_more"] is False
     assert result["cursor"] is None
     names = [e["name"] for e in result["entries"]]
-    # All entries are regular files, so sort key is (True, True, name.lower()). Verify alpha order.
+    # All entries are regular files, so verify the preserved alpha order.
     assert names == sorted(names, key=str.lower)
     assert "a.txt" in names
     assert "b.txt" in names
@@ -250,6 +304,72 @@ def test_list_dir_symlink_rejected_on_continuation(tmp_path):
     result2 = list_dir(ws, ".", cursor=result1["cursor"])
     names2 = {e["name"] for e in result2["entries"]}
     assert "zz_broken" not in names2, "broken symlink must be filtered on continuation page"
+
+
+def test_list_dir_external_symlink_continuation_keeps_display_only_shape(tmp_path):
+    """Continuation pages retain containment metadata without exposing targets."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _make_files(ws, 200)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    escapes = []
+    try:
+        for i in range(201):
+            escape = ws / f"link{i:03d}"
+            escape.symlink_to(outside)
+            escapes.append(escape)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+
+    first = list_dir(ws, ".")
+    second = list_dir(ws, ".", cursor=first["cursor"])
+    entry = next(e for e in second["entries"] if e["name"] == "link200")
+    assert entry["type"] == "symlink"
+    assert entry["target_outside_workspace"] is True
+    assert "target" not in entry
+    assert "is_dir" in entry and entry["is_dir"] is False
+
+
+def test_list_dir_complete_key_handles_case_ties(tmp_path):
+    """Case-equivalent names remain reachable after a page boundary."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _make_files(ws, 199, prefix="a")
+    (ws / "Foo.txt").write_text("x", encoding="utf-8")
+    if (ws / "foo.txt").exists():
+        pytest.skip("case-equivalent names unavailable")
+    try:
+        (ws / "foo.txt").write_text("x", encoding="utf-8")
+    except OSError:
+        pytest.skip("case-equivalent names unavailable")
+    (ws / "zz.txt").write_text("x", encoding="utf-8")
+
+    first = list_dir(ws, ".")
+    second = list_dir(ws, ".", cursor=first["cursor"])
+    assert first["entries"][-1]["name"] == "Foo.txt"
+    assert {e["name"] for e in second["entries"]} == {"foo.txt", "zz.txt"}
+
+
+def test_list_dir_cursor_keeps_nonregular_sort_key(tmp_path):
+    """A non-regular entry at the boundary does not skip its sibling."""
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO support unavailable")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    for i in range(199):
+        (ws / f"a{i:04d}").mkdir()
+    fifo = ws / "m-special"
+    try:
+        os.mkfifo(fifo)
+    except OSError:
+        pytest.skip("FIFO creation unavailable")
+    (ws / "z-special").mkdir()
+
+    first = list_dir(ws, ".")
+    second = list_dir(ws, ".", cursor=first["cursor"])
+    assert first["entries"][-1]["name"] == "m-special"
+    assert [e["name"] for e in second["entries"]] == ["z-special"]
 
 
 # ── route-level cursor contract ───────────────────────────────────────────────

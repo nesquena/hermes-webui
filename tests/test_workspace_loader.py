@@ -143,8 +143,10 @@ def test_append_by_cursor(tmp_path):
 
         // ── fetch stub (must come AFTER vm.runInThisContext to overwrite workspace api) ──
         const _apiResponses = [];
+        const _apiUrls = [];
         // eslint-disable-next-line no-global-assign
         api = async function(url, opts){{
+          _apiUrls.push(url);
           if(!_apiResponses.length) throw new Error('no api response queued for: ' + url);
           return _apiResponses.shift();
         }};
@@ -181,6 +183,28 @@ def test_append_by_cursor(tmp_path):
           const allNames = S.entries.map(function(e){{ return e.name; }});
           const unique = new Set(allNames);
           assert.strictEqual(unique.size, 201, 'append: no duplicates expected');
+          assert(_apiUrls[0].includes('/api/list?session_id=test-sid&path=.&cursor='),
+            'continuation must use the shared workspace route helper');
+
+          // Escape-directory continuation uses the authorized route, base URI, and token.
+          S._escapeGrants = {{escape:{{sessionId:'test-sid',path:'escape',token:'grant',expiresAt:Date.now()+60000}}}};
+          const escapeRoute = _workspaceRouteForPath('escape/sub', 'list', {{cursor:'next'}});
+          assert(escapeRoute.includes('http://localhost/api/escape/list?'),
+            'escape continuation must use the escape route');
+          assert(escapeRoute.includes('token=grant') && escapeRoute.includes('cursor=next'),
+            'escape continuation must retain authorization and cursor');
+          _apiResponses.push({{entries:[{{name:'file.txt',path:'escape/file.txt'}}],has_more:false,cursor:null}});
+          assert.strictEqual(await _workspacePathExists('escape/file.txt'), true,
+            'artifact existence must use the same escape route helper');
+          assert(_apiUrls[_apiUrls.length-1].includes('/api/escape/list?'),
+            'artifact existence must retain the escape route');
+
+          // The fetch-all consumer has no second page-count truncation boundary.
+          const manyPages = Array.from({{length:501}}, (_, i) =>
+            ({{entries:[{{name:'p'+i,path:'p'+i}}],has_more:i<500,cursor:i<500?'c'+i:null}}));
+          _apiResponses.push(...manyPages);
+          const allPages = await _fetchAllPages('/api/list?session_id=test-sid&path=expanded');
+          assert.strictEqual(allPages.length, 501, 'fetch-all must follow every cursor page');
 
           // ── test 2: session guard — mismatched session_id → no append ──
           S.entries = page1.slice();
@@ -213,6 +237,49 @@ def test_append_by_cursor(tmp_path):
 
           assert.strictEqual(S.entries.length, page1.length,
             'treeGen guard: entries must not change after gen bump');
+
+          // ── test 4: navigation ownership — stale first page cannot repaint ──
+          S.session = {{session_id:'test-sid',workspace:'/ws'}};
+          S.currentDir = '.';
+          S.entries = [];
+          const rootDeferred = new Promise(resolve => {{ global._resolveRoot = resolve; }});
+          const subDeferred = new Promise(resolve => {{ global._resolveSub = resolve; }});
+          _apiResponses.push(rootDeferred, subDeferred);
+          const rootLoad = loadDir('.');
+          const subLoad = loadDir('sub');
+          global._resolveRoot({{entries:[{{name:'root.txt',path:'root.txt'}}],has_more:false,cursor:null}});
+          global._resolveSub({{entries:[{{name:'sub.txt',path:'sub/sub.txt'}}],has_more:false,cursor:null}});
+          await Promise.all([rootLoad, subLoad]);
+          assert.strictEqual(S.currentDir, 'sub', 'latest navigation should own currentDir');
+          assert.deepStrictEqual(S.entries.map(e => e.name), ['sub.txt'],
+            'stale first-page response must not repaint the newer directory');
+
+          // A same-path refresh owns a new cursor, so the old continuation is rejected.
+          S.currentDir = 'same';
+          S.entries = [{{name:'fresh.txt',path:'fresh.txt'}}];
+          S._dirCursor = 'old-same-cursor';
+          S._dirHasMore = true;
+          const oldPage = new Promise(resolve => {{ global._resolveOldPage = resolve; }});
+          _apiResponses.push(oldPage);
+          const oldContinuation = _loadMoreDir();
+          S._dirCursor = 'new-same-cursor';
+          global._resolveOldPage({{entries:[{{name:'stale.txt',path:'stale.txt'}}],has_more:false,cursor:null}});
+          await oldContinuation;
+          assert.deepStrictEqual(S.entries.map(e => e.name), ['fresh.txt'],
+            'same-path refresh must reject the old continuation response');
+
+          // ── test 5: stale continuation 404 cannot clear newer cursor ──
+          S.currentDir = 'sub';
+          S._dirCursor = 'old-cursor';
+          S._dirHasMore = true;
+          const stale404 = Promise.reject({{status:404}});
+          _apiResponses.push(stale404);
+          const staleLoad = _loadMoreDir();
+          S.currentDir = 'newer';
+          S._dirCursor = 'new-cursor';
+          await staleLoad;
+          assert.strictEqual(S._dirCursor, 'new-cursor',
+            'stale continuation must not clear a newer cursor');
 
           console.log('PASS');
         }}

@@ -42,6 +42,7 @@ from _layout_helpers import assert_layout_sane, assert_no_raw_i18n_keys
 
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 WORKSPACE_JS = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
@@ -54,7 +55,16 @@ def _extract_fn(source: str, name: str) -> str:
             break
     else:
         raise AssertionError(f"{name!r} not found in JS source")
-    brace = source.index("{", start)
+    paren = source.index("(", start)
+    paren_depth = 0
+    for i in range(paren, len(source)):
+        if source[i] == "(":
+            paren_depth += 1
+        elif source[i] == ")":
+            paren_depth -= 1
+            if paren_depth == 0:
+                break
+    brace = source.index("{", i)
     depth = 0
     for i in range(brace, len(source)):
         if source[i] == "{":
@@ -93,7 +103,11 @@ def _build_harness(
     """Return a self-contained HTML page exercising the paging UI components."""
     render_load_more = _extract_fn(WORKSPACE_JS, "_renderLoadMoreRow")
     load_more_dir = _extract_fn(WORKSPACE_JS, "_loadMoreDir")
+    route_for_path = _extract_fn(WORKSPACE_JS, "_workspaceRouteForPath")
+    route_for_path_rel = _extract_fn(WORKSPACE_JS, "_workspaceRouteForPathRel")
+    normalize_rel_path = _extract_fn(WORKSPACE_JS, "_normalizeWorkspaceRelPath")
     wrapper = _extract_wrapper(WORKSPACE_JS)
+    render_file_tree = _extract_fn(UI_JS, "renderFileTree")
 
     entries_json = json.dumps(entries)
     next_json = json.dumps(next_page or [])
@@ -102,12 +116,12 @@ def _build_harness(
 
     if has_more and next_page is not None:
         api_stub = (
-            f"async function api(url){{"
+            f"async function api(url){{window._apiUrls.push(url);"
             f"return{{entries:{next_json},has_more:false,cursor:null}};}}"
         )
     else:
         api_stub = (
-            "async function api(url){"
+            "async function api(url){window._apiUrls.push(url);"
             "throw new Error('api() must not be called in this test case');}"
         )
 
@@ -125,6 +139,7 @@ body{{margin:0;background:#141327;color:#efe7dd;font-family:Inter,system-ui,sans
 </div>
 <script>
 {I18N_JS}
+window._apiUrls=[];
 {api_stub}
 const S={{
   session:{{session_id:'s1',workspace:'/ws'}},
@@ -136,22 +151,25 @@ const S={{
   showHiddenWorkspaceFiles:false,
 }};
 let _wsTreeGen=0;
+let _wsDirRequestGen=0;
 function bumpWorkspaceTreeGen(){{_wsTreeGen+=1;return _wsTreeGen;}}
 function $(id){{return document.getElementById(id);}}
-function renderFileTree(){{
-  const box=$('fileTree');
-  if(!box)return;
-  box.innerHTML='';
-  for(const e of S.entries){{
+function _workspaceEscapeGrantForPath(){{return null;}}
+{normalize_rel_path}
+{route_for_path_rel}
+{route_for_path}
+function _visibleWorkspaceEntries(entries){{return Array.isArray(entries)?entries:[];}}
+function _renderTreeItems(container, entries){{
+  for(const e of entries){{
     const el=document.createElement('div');
     el.className='file-item';
     el.style.paddingLeft='8px';
     el.textContent=e.name;
     el.dataset.wsPath=e.path;
-    box.appendChild(el);
+    container.appendChild(el);
   }}
-  // NOTE: _renderLoadMoreRow is NOT called here; the wrapper below adds it.
 }}
+{render_file_tree}
 {render_load_more}
 {load_more_dir}
 {wrapper}
@@ -192,11 +210,12 @@ def _launch():
     return pw, browser
 
 
-def test_load_more_row_appears_when_has_more():
+@pytest.mark.parametrize("width", [1280, 768, 400])
+def test_load_more_row_appears_when_has_more(width):
     """A directory flagged has_more must render the .ws-load-more-row button."""
     pw, browser = _launch()
     try:
-        page = browser.new_page(viewport={"width": 400, "height": 600})
+        page = browser.new_page(viewport={"width": width, "height": 600})
         page.set_content(_build_harness(_PAGE_ONE, has_more=True, cursor="test-cursor"))
         rows = page.locator(".ws-load-more-row")
         assert rows.count() == 1, "load-more row must appear when S._dirHasMore=true"
@@ -205,11 +224,12 @@ def test_load_more_row_appears_when_has_more():
         pw.stop()
 
 
-def test_no_raw_i18n_keys_in_file_tree():
+@pytest.mark.parametrize("width", [1280, 768, 400])
+def test_no_raw_i18n_keys_in_file_tree(width):
     """t('load_more_entries') must resolve to real prose, not the key string."""
     pw, browser = _launch()
     try:
-        page = browser.new_page(viewport={"width": 400, "height": 600})
+        page = browser.new_page(viewport={"width": width, "height": 600})
         page.set_content(_build_harness(_PAGE_ONE, has_more=True, cursor="test-cursor"))
         assert_no_raw_i18n_keys(page, "#fileTree")
     finally:
@@ -217,11 +237,12 @@ def test_no_raw_i18n_keys_in_file_tree():
         pw.stop()
 
 
-def test_layout_sane_with_load_more_row():
+@pytest.mark.parametrize("width", [1280, 768, 400])
+def test_layout_sane_with_load_more_row(width):
     """The file tree with the load-more row must pass the layout lint sweep."""
     pw, browser = _launch()
     try:
-        page = browser.new_page(viewport={"width": 400, "height": 600})
+        page = browser.new_page(viewport={"width": width, "height": 600})
         page.set_content(_build_harness(_PAGE_ONE, has_more=True, cursor="test-cursor"))
         assert_layout_sane(page, "#fileTree")
     finally:
@@ -229,11 +250,12 @@ def test_layout_sane_with_load_more_row():
         pw.stop()
 
 
-def test_click_load_more_appends_without_duplicates():
+@pytest.mark.parametrize("width", [1280, 768, 400])
+def test_click_load_more_appends_without_duplicates(width):
     """Clicking load-more must append new entries and deduplicate paths."""
     pw, browser = _launch()
     try:
-        page = browser.new_page(viewport={"width": 400, "height": 600})
+        page = browser.new_page(viewport={"width": width, "height": 600})
         page.set_content(
             _build_harness(
                 _PAGE_ONE, has_more=True, cursor="test-cursor", next_page=_PAGE_TWO
@@ -249,6 +271,9 @@ def test_click_load_more_appends_without_duplicates():
             "file000.txt", "file001.txt", "file002.txt", "file003.txt",
             "file004.txt", "file005.txt", "file006.txt",
         ], f"expected 7 unique entries after append, got {paths}"
+        assert "/api/list?session_id=s1&path=.&cursor=test-cursor" in page.evaluate(
+            "() => _apiUrls[0]"
+        )
         assert page.locator(".ws-load-more-row").count() == 0, (
             "load-more row must be removed after the last page loads"
         )
@@ -257,11 +282,12 @@ def test_click_load_more_appends_without_duplicates():
         pw.stop()
 
 
-def test_no_load_more_row_when_single_page():
+@pytest.mark.parametrize("width", [1280, 768, 400])
+def test_no_load_more_row_when_single_page(width):
     """A directory that fits one page must not render the load-more row."""
     pw, browser = _launch()
     try:
-        page = browser.new_page(viewport={"width": 400, "height": 600})
+        page = browser.new_page(viewport={"width": width, "height": 600})
         page.set_content(_build_harness(_PAGE_ONE, has_more=False, cursor=None))
         assert page.locator(".ws-load-more-row").count() == 0, (
             "load-more row must not appear when S._dirHasMore=false"
