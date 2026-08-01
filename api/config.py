@@ -4911,7 +4911,16 @@ _available_models_cache_ts: float = 0.0
 _available_models_live_rebuild_ts: float = 0.0
 _available_models_cache_source_fingerprint: dict | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
-_SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 300.0
+# Session-visit freshness horizon for /api/models?freshness=session_visit.
+# perf(#fastnav): raised 300s -> 1800s. The visit-time catalog refresh is a
+# synchronous multi-second provider round-trip (force_refresh=True) fired from
+# a deferred frontend side-effect on EVERY session click once the disk cache
+# is older than this TTL — during active piloting that meant a ~4s background
+# request competing for a browser connection nearly every visit. Provider
+# catalogs do not change meaningfully within 30 minutes, and the deferred
+# dropdown repaint still picks up the fresh catalog on the next visit after a
+# rebuild, so the coarser horizon costs nothing operationally.
+_SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 1800.0
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
