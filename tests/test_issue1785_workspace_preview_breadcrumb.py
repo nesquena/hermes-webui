@@ -52,7 +52,10 @@ def test_load_dir_keeps_workspace_panel_open_when_clearing_preview():
 
 def test_load_dir_ignores_stale_session_results():
     block = _function_block(WORKSPACE_JS, "loadDir")
-    assert "const owner=_workspaceCaptureDirRequestOwner(requestPath)" in block
+    assert "let owner=_workspaceCaptureDirRequestOwner(requestPath)" in block
+    assert block.count("_workspaceCaptureDirRequestOwner(requestPath)") >= 2, (
+        "loadDir must recapture ownership after workspace recovery"
+    )
     assert "_workspaceRequestOwnerIsCurrent(owner)" in block, (
         "loadDir must revalidate the shared request owner after awaited work"
     )
