@@ -65,11 +65,12 @@ def _driver(
     registration = """\
 const delivery = {calls: [], entries: new Map(), toasts: 0};
 function recordNotification(method, title, options) {
-  const existing = delivery.entries.has(options.tag);
-  delivery.entries.set(options.tag, {title, options});
-  if (!existing || options.renotify) delivery.toasts += 1;
-  delivery.calls.push({method, title, options});
-  return Promise.resolve();
+  return Promise.resolve().then(() => {
+    const existing = delivery.entries.has(options.tag);
+    delivery.entries.set(options.tag, {title, options});
+    if (!existing || options.renotify) delivery.toasts += 1;
+    delivery.calls.push({method, title, options});
+  });
 }
 """
     delivery_setup = (
