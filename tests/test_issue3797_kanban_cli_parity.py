@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """
 Regression tests for Kanban UI task workspace and dependency controls (#3797).
 Tests the Kanban workspace kind selector, workspace path validation, and dependency
@@ -10,7 +11,7 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 class TestKanbanWorkspaceSelector:
@@ -47,7 +48,7 @@ class TestKanbanWorkspaceSelector:
             "kanban_workspace_path_required",
         ]
         for key in required_keys:
-            assert f"{key}:" in I18N_JS, f"i18n key '{key}' not found"
+            assert f"{key}:" in I18N_SOURCE, f"i18n key '{key}' not found"
 
 
 class TestWorkspacePathValidation:
@@ -140,7 +141,7 @@ class TestDependencyControls:
             "kanban_dependency_placeholder",
         ]
         for key in required_keys:
-            assert f"{key}:" in I18N_JS, f"i18n key '{key}' not found"
+            assert f"{key}:" in I18N_SOURCE, f"i18n key '{key}' not found"
 
 
 class TestAPIIntegration:

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression tests for per-turn response duration in WebUI.
 
 The WebUI should expose how long an agent turn took, using backend timing so
@@ -10,7 +11,7 @@ STREAMING_PY = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 ROUTES_PY = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
 
@@ -126,15 +127,15 @@ def test_compact_worklog_hides_bottom_live_footer_timer():
 
 
 def test_processed_elapsed_anchor_is_i18n_driven():
-    assert "function _i18nProcessedElapsed(prefix, duration)" in I18N_JS
-    assert "function _i18nProcessedElapsedEn(duration)" in I18N_JS
-    assert "return _i18nProcessedElapsed('Processed', duration);" in I18N_JS
-    assert "function _i18nProcessedElapsedZh(duration)" in I18N_JS
-    assert "return _i18nProcessedElapsed('已处理', duration);" in I18N_JS
-    assert "function _i18nProcessedElapsedZhHant(duration)" in I18N_JS
-    assert "return _i18nProcessedElapsed('已處理', duration);" in I18N_JS
-    assert "processed_elapsed: _i18nProcessedElapsedEn" in I18N_JS
-    assert "processed_elapsed: _i18nProcessedElapsedZh" in I18N_JS
-    assert "processed_elapsed: _i18nProcessedElapsedZhHant" in I18N_JS
+    assert "function _i18nProcessedElapsed(prefix, duration)" in I18N_SOURCE
+    assert "function _i18nProcessedElapsedEn(duration)" in I18N_SOURCE
+    assert "return _i18nProcessedElapsed('Processed', duration);" in I18N_SOURCE
+    assert "function _i18nProcessedElapsedZh(duration)" in I18N_SOURCE
+    assert "return _i18nProcessedElapsed('已处理', duration);" in I18N_SOURCE
+    assert "function _i18nProcessedElapsedZhHant(duration)" in I18N_SOURCE
+    assert "return _i18nProcessedElapsed('已處理', duration);" in I18N_SOURCE
+    assert "processed_elapsed: _i18nProcessedElapsedEn" in I18N_SOURCE
+    assert "processed_elapsed: _i18nProcessedElapsedZh" in I18N_SOURCE
+    assert "processed_elapsed: _i18nProcessedElapsedZhHant" in I18N_SOURCE
     assert "t('processed_elapsed','')" in UI_JS
     assert "`已处理 ${" not in UI_JS

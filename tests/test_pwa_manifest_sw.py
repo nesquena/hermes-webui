@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression tests for PWA support (manifest + service worker).
 
 Covers:
@@ -258,7 +259,7 @@ class TestIndexHtmlIntegration:
             "panels.js",
             "commands.js",
             "icons.js",
-            "i18n.js",
+            "i18n-core.js",
             "workspace.js",
             "terminal.js",
             "onboarding.js",
@@ -271,6 +272,14 @@ class TestIndexHtmlIntegration:
                 f"sw.js SHELL_ASSETS entry for {asset} must carry "
                 "?v=__WEBUI_VERSION__ to match the URL the page requests"
             )
+
+    def test_sw_precaches_core_and_caches_versioned_locale_requests_on_demand(self):
+        src = SW.read_text(encoding="utf-8")
+        assert "./static/i18n-core.js' + VQ" in src
+        assert "./static/" + "i18n" + ".js" not in src
+        assert "VERSIONED_LOCALE_ASSET" in src
+        assert "url.search === VQ" in src
+        assert "!SHELL_ASSETS.includes(shellPath) && !isRequestedLocale" in src
 
     def test_sw_shell_assets_are_network_first(self):
         """Shell JS/CSS must prefer the network, then fall back to CacheStorage.

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """
 Tests for issue #673 — sidebar density mode for the session list.
 
@@ -8,7 +9,7 @@ Covers:
 - static/panels.js: load/save settings wire sidebar_density correctly
 - static/sessions.js: detailed mode renders message count + model, and profile
   only when the "show all profiles" toggle is active
-- static/i18n.js: locale keys exist for all shipped locales
+- static/split locale bundles: locale keys exist for all shipped locales
 - Integration: GET/POST /api/settings round-trip sidebar_density
 """
 
@@ -26,7 +27,7 @@ BOOT_JS = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 from tests._pytest_port import BASE
 
@@ -123,11 +124,11 @@ class TestSidebarDensitySessionRendering(unittest.TestCase):
 
 class TestSidebarDensityI18N(unittest.TestCase):
     def _extract_locale_block(self, start_marker, end_marker):
-        start = I18N_JS.find(start_marker)
-        end = I18N_JS.find(end_marker, start)
+        start = I18N_SOURCE.find(start_marker)
+        end = I18N_SOURCE.find(end_marker, start)
         self.assertGreater(start, -1)
         self.assertGreater(end, start)
-        return I18N_JS[start:end]
+        return I18N_SOURCE[start:end]
 
     def test_all_locale_blocks_have_sidebar_density_keys(self):
         locale_ranges = [

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression coverage for #2246 per-turn jump-to-question buttons."""
 
 from pathlib import Path
@@ -5,7 +6,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def test_assistant_footer_gets_completed_turn_question_jump_button():
@@ -89,7 +90,7 @@ def test_question_jump_footer_is_discoverable_on_desktop_without_exposing_action
 
 def test_question_jump_text_is_localized():
     for key in ("jump_to_question", "jump_to_question_label"):
-        assert I18N_JS.count(f"{key}:") >= 12
+        assert I18N_SOURCE.count(f"{key}:") >= 12
 
 
 def test_question_jump_skips_hidden_first_segment_and_falls_back():

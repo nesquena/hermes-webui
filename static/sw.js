@@ -32,7 +32,7 @@ const SHELL_ASSETS = [
   './static/panels.js' + VQ,
   './static/commands.js' + VQ,
   './static/icons.js' + VQ,
-  './static/i18n.js' + VQ,
+  './static/i18n-core.js' + VQ,
   './static/workspace.js' + VQ,
   './static/terminal.js' + VQ,
   './static/onboarding.js' + VQ,
@@ -43,6 +43,7 @@ const SHELL_ASSETS = [
   './static/favicon-32.png',
   './manifest.json',
 ];
+const VERSIONED_LOCALE_ASSET = /^\.\/static\/locales\/[A-Za-z0-9-]+\.js$/;
 
 function deleteOldShellCaches() {
   return caches.keys().then((keys) =>
@@ -151,7 +152,9 @@ self.addEventListener('fetch', (event) => {
     ? url.pathname.slice(scopePath.length)
     : url.pathname.replace(/^\/+/, '');
   const shellPath = './' + relPath.replace(/^\/+/, '') + url.search;
-  if (!SHELL_ASSETS.includes(shellPath)) return;
+  const shellPathWithoutQuery = shellPath.slice(0, shellPath.length - url.search.length);
+  const isRequestedLocale = url.search === VQ && VERSIONED_LOCALE_ASSET.test(shellPathWithoutQuery);
+  if (!SHELL_ASSETS.includes(shellPath) && !isRequestedLocale) return;
 
   // Shell assets: network-first with cache fallback. This keeps offline support
   // but avoids executing stale JS/CSS after a local hotfix when WEBUI_VERSION

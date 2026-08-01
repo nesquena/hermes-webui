@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression coverage for #6160: optional hiding of the full new-chat welcome panel."""
 from pathlib import Path
 import json
@@ -9,7 +10,7 @@ INDEX = REPO_ROOT / "static" / "index.html"
 STYLE = REPO_ROOT / "static" / "style.css"
 PANELS = REPO_ROOT / "static" / "panels.js"
 BOOT = REPO_ROOT / "static" / "boot.js"
-I18N = REPO_ROOT / "static" / "i18n.js"
+I18N = locale_source_text()
 CONFIG = REPO_ROOT / "api" / "config.py"
 
 
@@ -122,7 +123,7 @@ def test_panels_round_trip_and_hot_apply_hide_welcome_panel():
 
 
 def test_hide_welcome_panel_copy_covers_every_locale():
-    js = I18N.read_text(encoding="utf-8")
+    js = I18N
     assert js.count("settings_label_hide_empty_state_panel:") == 15
     assert js.count("settings_desc_hide_empty_state_panel:") == 15
     assert "settings_label_hide_empty_state_panel: 'Ukryj panel powitalny nowej konwersacji'" in js

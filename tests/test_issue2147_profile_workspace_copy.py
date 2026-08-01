@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression tests for issue #2147 profile/workspace mental-model copy."""
 from pathlib import Path
 
@@ -17,7 +18,7 @@ def test_profiles_panel_surfaces_profiles_vs_workspaces_help_card():
 
 
 def test_profile_concept_help_distinguishes_how_from_where():
-    i18n = read("static/i18n.js")
+    i18n = locale_source_text()
     assert "Agent identity, memory, skills, model/provider config, and connected tools" in i18n
     assert "Create profiles for roles like researcher, writer, marketer, or developer" in i18n
     assert "Project or product folders on disk" in i18n

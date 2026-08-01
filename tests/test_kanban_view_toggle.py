@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression coverage for the Kanban consolidated-view toggle.
 
 The Kanban board can be rendered as profile lanes or as one consolidated
@@ -17,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def test_kanban_header_exposes_accessible_view_toggle():
@@ -72,7 +73,7 @@ def test_kanban_view_toggle_has_css_and_i18n():
         "kanban_view_consolidated_saved",
         "kanban_view_update_failed",
     ):
-        assert f"{key}:" in I18N_JS
+        assert f"{key}:" in I18N_SOURCE
 
 
 def test_kanban_config_patch_persists_lane_by_profile_to_config_yaml(tmp_path, monkeypatch):
