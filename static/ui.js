@@ -9005,18 +9005,43 @@ function _compactInflightState(state){
 }
 function _writeInflightStateMap(all){
   const limits=_getInflightStateLimits();
-  const entries=Object.entries(all||{})
+  let entries=Object.entries(all||{})
     .sort((a,b)=>Number(b[1]&&b[1].updated_at||0)-Number(a[1]&&a[1].updated_at||0))
     .slice(0,limits.maxSessions);
-  const compact={};
-  for(const [sid,entry] of entries) compact[sid]=entry;
-  let json=JSON.stringify(compact);
-  if(json.length>limits.jsonChars){
-    const current=entries[0];
-    json=JSON.stringify(current?{[current[0]]:current[1]}:{});
+  const serialize=items=>JSON.stringify(Object.fromEntries(items));
+  let json=serialize(entries);
+  while(json.length>limits.jsonChars&&entries.length>1){
+    entries=entries.slice(0,-1);
+    json=serialize(entries);
+  }
+  if(json.length>limits.jsonChars&&entries.length){
+    const [sid,entry]=entries[0];
+    const reduced={...entry};
+    const trimOldest=(field)=>{
+      while(json.length>limits.jsonChars&&Array.isArray(reduced[field])&&reduced[field].length>1){
+        reduced[field]=reduced[field].slice(1);
+        json=serialize([[sid,reduced]]);
+      }
+    };
+    // Keep the newest delivered records ahead of less durable live-tail data.
+    trimOldest('deliveredSteers');
+    trimOldest('messages');
+    trimOldest('toolCalls');
+    trimOldest('activityBurstAnchors');
+    if(json.length>limits.jsonChars){
+      for(const field of ['lastAssistantText','lastReasoningText']){
+        if(typeof reduced[field]==='string'&&reduced[field].length){
+          reduced[field]=reduced[field].slice(-2000);
+          json=serialize([[sid,reduced]]);
+        }
+      }
+    }
+    entries=[[sid,reduced]];
+    json=serialize(entries);
   }
   if(json.length>limits.jsonChars){
-    localStorage.removeItem(INFLIGHT_STATE_KEY);
+    // Leave an existing snapshot intact when even the newest reduced entry
+    // cannot fit; removing the whole key would erase unrelated recovery state.
     return false;
   }
   localStorage.setItem(INFLIGHT_STATE_KEY,json);

@@ -366,6 +366,44 @@ def test_3058_idle_restore_does_not_guess_across_multiple_unidentified_assistant
     assert out == {"changed": False, "attached": 0}
 
 
+def test_3058_idle_restore_materializes_a_current_turn_after_a_historical_assistant():
+    helper = _function(_read(MESSAGES_JS), "_restoreDeliveredSteersIntoSettledMessages")
+    stream = "stream-3058-no-response"
+    record = {"source_event_type": "steer_delivered", "stream_id": stream, "payload": {"stream_id": stream, "local_id": f"steer:{stream}:1", "text": STEER_TEXT}}
+    out = _run_node(
+        "const fs=require('fs');const vm=require('vm');"
+        f"const src=fs.readFileSync({json.dumps(str(ANCHORS_JS))},'utf8');const sandbox={{window:{{}}}};vm.createContext(sandbox);vm.runInContext(src,sandbox);global.window=sandbox.window;"
+        + _function(_read(MESSAGES_JS), "_deliveredSteerStreamId")
+        + "\n"
+        + _function(_read(MESSAGES_JS), "_settledAnchorSourceEventFromRow")
+        + "\n"
+        + helper
+        + f"\nconst messages=[{{role:'assistant',content:'old answer'}},{{role:'user',content:'new request'}}];const changed=_restoreDeliveredSteersIntoSettledMessages(messages,'{OWNER_SID}',[{json.dumps(record)}]);"
+        + "console.log(JSON.stringify({changed,attached:messages.map(m=>!!m._anchor_activity_scene),roles:messages.map(m=>m.role)}));"
+    )
+    assert out == {"changed": True, "attached": [False, False, True], "roles": ["assistant", "user", "assistant"]}
+
+
+def test_3058_idle_restore_keeps_replacement_stream_groups_in_the_current_turn():
+    helper = _function(_read(MESSAGES_JS), "_restoreDeliveredSteersIntoSettledMessages")
+    records = [
+        {"source_event_type": "steer_delivered", "stream_id": "stream-a", "payload": {"stream_id": "stream-a", "local_id": "steer:stream-a:1", "text": "first"}},
+        {"source_event_type": "steer_delivered", "stream_id": "stream-b", "payload": {"stream_id": "stream-b", "local_id": "steer:stream-b:1", "text": "second"}},
+    ]
+    out = _run_node(
+        "const fs=require('fs');const vm=require('vm');"
+        f"const src=fs.readFileSync({json.dumps(str(ANCHORS_JS))},'utf8');const sandbox={{window:{{}}}};vm.createContext(sandbox);vm.runInContext(src,sandbox);global.window=sandbox.window;"
+        + _function(_read(MESSAGES_JS), "_deliveredSteerStreamId")
+        + "\n"
+        + _function(_read(MESSAGES_JS), "_settledAnchorSourceEventFromRow")
+        + "\n"
+        + helper
+        + f"\nconst messages=[{{role:'user',content:'new request'}},{{role:'assistant',content:'answer'}}];const restored=[];const changed=_restoreDeliveredSteersIntoSettledMessages(messages,'{OWNER_SID}',{json.dumps(records)},rows=>restored.push(...rows));"
+        + "console.log(JSON.stringify({changed,restored:restored.length,rows:messages[1]._anchor_activity_scene.activity_rows.map(r=>r.text)}));"
+    )
+    assert out == {"changed": True, "restored": 2, "rows": ["first", "second"]}
+
+
 def test_3058_current_turn_response_check_ignores_historical_assistants():
     helper = _function(_read(MESSAGES_JS), "_hasCurrentTurnAssistantResponse")
     out = _run_node(

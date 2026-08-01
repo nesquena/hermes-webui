@@ -943,6 +943,12 @@ function _purgeStaleInflightEntries() {
     }
     const s = sessionsById.get(sid);
     if (!s.is_streaming) {
+      // A delivered steer remains browser-owned until the anchor scene write
+      // succeeds, so an idle sidebar refresh must not purge its recovery copy.
+      if(_inflightHasVisibleLiveState(INFLIGHT[sid])&&
+          Array.isArray(INFLIGHT[sid].deliveredSteers)&&INFLIGHT[sid].deliveredSteers.length){
+        continue;
+      }
       // Session exists but is not streaming — purge it.
       delete INFLIGHT[sid];
       if (typeof clearInflightState === 'function') clearInflightState(sid);
@@ -2311,14 +2317,6 @@ async function loadSession(sid){
 
     // Reconstruct tool calls from message metadata, or fall back to session-level summary.
     // (hasMessageToolMetadata already computed inside _ensureMessagesLoaded; S.toolCalls set there.)
-    if(!activeStreamId&&settledDeliveredSteers.length&&typeof _restoreDeliveredSteersIntoSettledMessages==='function'){
-      const restoredSettledSteers=_restoreDeliveredSteersIntoSettledMessages(S.messages,sid,settledDeliveredSteers);
-      if(restoredSettledSteers){
-        if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
-        delete INFLIGHT[sid];
-        if(typeof clearInflightState==='function') clearInflightState(sid);
-      }
-    }
     updateQueueBadge(sid);
 
     // Attach pending user message if one is queued.
@@ -2335,6 +2333,35 @@ async function loadSession(sid){
     // same-session stream into activeStreamId so the existing attach branch
     // (and all its `attachLiveStream(sid, activeStreamId, ...)` calls) keeps it.
     activeStreamId = activeStreamId || ((S.activeStreamId && S.session && S.session.session_id===sid) ? S.activeStreamId : null);
+
+    if(!activeStreamId&&settledDeliveredSteers.length&&typeof _restoreDeliveredSteersIntoSettledMessages==='function'){
+      const restoredRecords=[];
+      const restoredSettledSteers=_restoreDeliveredSteersIntoSettledMessages(
+        S.messages,
+        sid,
+        settledDeliveredSteers,
+        records=>{ if(Array.isArray(records)) restoredRecords.push(...records); },
+      );
+      if(restoredSettledSteers){
+        if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+        const restoredKeys=new Set(restoredRecords.map(record=>{
+          const payload=record&&record.payload&&typeof record.payload==='object'?record.payload:{};
+          return `${String(record&&record.stream_id||payload.stream_id||'')}|${String(record&&record.local_id||payload.local_id||record&&record.event_id||payload.event_id||'')}`;
+        }));
+        const remaining=settledDeliveredSteers.filter(record=>{
+          const payload=record&&record.payload&&typeof record.payload==='object'?record.payload:{};
+          const key=`${String(record&&record.stream_id||payload.stream_id||'')}|${String(record&&record.local_id||payload.local_id||record&&record.event_id||payload.event_id||'')}`;
+          return !restoredKeys.has(key);
+        });
+        if(remaining.length){
+          INFLIGHT[sid]={streamId:null,deliveredSteers:remaining};
+          if(typeof saveInflightState==='function') saveInflightState(sid,INFLIGHT[sid]);
+        }else{
+          delete INFLIGHT[sid];
+          if(typeof clearInflightState==='function') clearInflightState(sid);
+        }
+      }
+    }
 
     if(activeStreamId){
       S.busy=true;
