@@ -9203,10 +9203,10 @@ _SETTINGS_DEFAULTS = {
     "update_channel": "stable",  # stable | experimental — which release stream to track (stable = soaked/promoted; experimental = every batch)
     "ignore_agent_updates": False,  # keep WebUI update notices but suppress Agent update checks
     "whats_new_summary_enabled": False,  # show an LLM-written What's New summary before diff links
-    "tts_enabled": False,
+    "tts_enabled": True,
     "tts_auto_read": False,
-    "tts_engine": "browser",
-    "tts_voice": "",
+    "tts_engine": "openai",
+    "tts_voice": "nova",
     "tts_rate": 1.0,
     "tts_pitch": 1.0,
     "voice_mode_button": False,
