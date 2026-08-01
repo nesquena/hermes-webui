@@ -456,6 +456,10 @@ function runCrossSessionOrderingBase({seedBeaconInflight, resolveBeaconMsgsBefor
   const apiHost = makeHarness();
   globalThis.apiHost = apiHost;
   globalThis.api = apiHost.api;
+  // #fastnav: extracted loadSession/_ensureMessagesLoaded now share the
+  // prefetch-aware wrapper. This harness intentionally tests the underlying
+  // ordered api() contract, so preserve that behavior with a direct stub.
+  globalThis._apiSessionNav = (_sid, url, opts) => apiHost.api(url, opts);
 
   const calls = makeCrossSessionCalls(apiHost);
 
@@ -519,6 +523,10 @@ async function runStaleRejectedIdleCatch() {
   const apiHost = makeHarness();
   globalThis.apiHost = apiHost;
   globalThis.api = apiHost.api;
+  // #fastnav: extracted loadSession/_ensureMessagesLoaded now share the
+  // prefetch-aware wrapper. This harness intentionally tests the underlying
+  // ordered api() contract, so preserve that behavior with a direct stub.
+  globalThis._apiSessionNav = (_sid, url, opts) => apiHost.api(url, opts);
 
   S.session = { session_id: 'sid-atlas', message_count: 0 };
 
