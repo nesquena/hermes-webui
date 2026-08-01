@@ -1,6 +1,7 @@
 """Regression for #6414: real upward wheel intent wins during a render scroll guard."""
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -118,33 +119,95 @@ def test_small_upward_wheel_does_not_unpin_after_programmatic_guard_stales():
     assert result["cancels"] == 0
 
 
-def test_older_message_fallback_refreshes_programmatic_scroll_clock_after_slow_render():
-    """The actual older-message fallback must timestamp its own scroll write."""
-    fallback = _function_body("_loadOlderMessages", SESSIONS_JS)
-    assert "renderMessages({ preserveScroll: true });" in fallback
-    assert (
-        "_programmaticScroll = true;\n"
-        "        _programmaticScrollSetAt = performance.now();\n"
-        "        container.scrollTop = oldTop + addedHeight;"
-    ) in fallback
-
+def test_older_message_fallback_executes_real_slow_render_writer_contract():
+    """Exercise the production fallback, rather than retyping its ownership edge."""
     script = f"""
 let now = 1000;
 const performance = {{ now: () => now }};
+let storedTop = 100;
+let writeObservation = null;
+const container = {{
+  scrollHeight: 1000,
+  clientHeight: 300,
+  get scrollTop() {{ return storedTop; }},
+  set scrollTop(value) {{
+    storedTop = value;
+    writeObservation = {{ value, at: now, fresh: _freshProgrammaticScrollActive() }};
+  }},
+}};
+const document = {{ getElementById: (id) => id === 'messages' ? container : null }};
+const window = {{}};
+const S = {{
+  session: {{ session_id: 'slow-render-session' }},
+  messages: [{{ role: 'assistant', content: 'tail' }}],
+}};
+let _loadingOlder = false;
+let _messagesTruncated = true;
+let _oldestIdx = 1;
+let _messagesGeneration = 0;
+let _loadingSessionId = null;
+let _messageRenderWindowSize = 50;
+let _scrollPinned = true;
 let _programmaticScroll = true;
 let _programmaticScrollSetAt = now;
+const _INITIAL_MSG_LIMIT = 50;
+const _msgLimitMax = 100;
+const MESSAGE_RENDER_WINDOW_DEFAULT = 50;
 const PROGRAMMATIC_SCROLL_VALID_MS = 150;
-const container = {{ scrollTop: 0 }};
+async function api() {{
+  return {{
+    session: {{
+      messages: [
+        {{ role: 'user', content: 'older' }},
+        {{ role: 'assistant', content: 'tail' }},
+      ],
+      _messages_truncated: true,
+      _messages_offset: 0,
+      tool_calls: [],
+    }},
+  }};
+}}
+function _sameTranscriptMessage(a, b) {{ return a && b && a.role === b.role && a.content === b.content; }}
+function _syncToolCallsForLoadedMessages() {{}}
+function _messageIsRenderable() {{ return true; }}
+function msgContent(message) {{ return message && message.content; }}
+function _currentMessageRenderWindowSize() {{ return _messageRenderWindowSize; }}
+function renderMessages() {{ now += 200; container.scrollHeight = 1300; }}
+function _captureMessageViewportAnchor() {{ return null; }}
+function _restoreMessageViewportAnchor() {{ return false; }}
+function _messageVirtualPrependedHeightDelta() {{ return null; }}
+function requestAnimationFrame() {{ return 0; }}
 {_function_body('_freshProgrammaticScrollActive')}
-now += 200;
-if (_freshProgrammaticScrollActive()) throw new Error('pre-render latch unexpectedly fresh');
-_programmaticScroll = true;
-_programmaticScrollSetAt = performance.now();
-container.scrollTop = 300;
-if (!_freshProgrammaticScrollActive()) throw new Error('fallback write did not refresh latch');
-now += 151;
-if (_freshProgrammaticScrollActive()) throw new Error('fallback latch did not expire from its write');
-console.log(JSON.stringify({{scrollTop: container.scrollTop}}));
+{_function_body('_loadOlderMessages', SESSIONS_JS)}
+
+await _loadOlderMessages();
+if (!writeObservation) throw new Error('real fallback did not write scrollTop');
+if (!writeObservation.fresh) throw new Error('real fallback write inherited a stale latch');
+if (writeObservation.at !== 1200) throw new Error('fallback timestamp was not taken after slow render');
+now = writeObservation.at + 151;
+if (_freshProgrammaticScrollActive()) throw new Error('fallback latch did not expire from its own write');
+console.log(JSON.stringify({{ top: storedTop, observation: writeObservation }}));
 """
-    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
-    assert json.loads(result.stdout) == {"scrollTop": 300}
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    observed = json.loads(result.stdout)
+    assert observed["top"] == 400
+    assert observed["observation"] == {"value": 400, "at": 1200, "fresh": True}
+
+
+def test_all_programmatic_scroll_writers_stamp_the_shared_freshness_clock():
+    """Keep UI and session writers from silently drifting apart."""
+    for source_name, source in (("ui.js", UI_JS), ("sessions.js", SESSIONS_JS)):
+        writers = list(re.finditer(r"_programmaticScroll\s*=\s*true\s*;", source))
+        assert writers, f"{source_name} has no programmatic-scroll writers"
+        for writer in writers:
+            tail = source[writer.end() : writer.end() + 160]
+            assert re.match(
+                r"\s*_programmaticScrollSetAt\s*=\s*performance\.now\(\)\s*;",
+                tail,
+            ), f"{source_name} writer lacks a paired freshness timestamp"
+
