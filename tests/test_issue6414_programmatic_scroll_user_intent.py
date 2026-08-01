@@ -136,6 +136,7 @@ const container = {{
   }},
 }};
 const document = {{ getElementById: (id) => id === 'messages' ? container : null }};
+function $(id) {{ return document.getElementById(id); }}
 const window = {{}};
 const S = {{
   session: {{ session_id: 'slow-render-session' }},
