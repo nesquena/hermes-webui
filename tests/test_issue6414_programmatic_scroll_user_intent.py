@@ -211,4 +211,3 @@ def test_all_programmatic_scroll_writers_stamp_the_shared_freshness_clock():
                 r"\s*_programmaticScrollSetAt\s*=\s*performance\.now\(\)\s*;",
                 tail,
             ), f"{source_name} writer lacks a paired freshness timestamp"
-
