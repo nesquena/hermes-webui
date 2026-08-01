@@ -358,9 +358,10 @@ def test_resolve_pinned_title_script_mapping():
     # Unknown names and blank stay unresolved -> conversation-based fallback.
     assert _resolve_pinned_title_script("Klingon") == ""
     assert _resolve_pinned_title_script("") == ""
-    # Thai has no _script_counts bucket, so it is unresolvable ON PURPOSE:
-    # script validation cannot see Thai text at all.
-    assert _resolve_pinned_title_script("Thai") == ""
+    # Thai gained a bucket when classification went name-based (round 4), so
+    # it resolves now. It was unresolvable while Thai text was invisible to
+    # _script_counts.
+    assert _resolve_pinned_title_script("Thai") == "thai"
     # Native-script endonyms are also unresolved by design: the mapping keys
     # must stay ASCII because api/streaming.py is English-only
     # (test_title_generation_source_has_no_cjk_literals). Such pins keep the
@@ -491,3 +492,148 @@ def test_english_pin_overrides_legacy_german_heuristic(monkeypatch):
 
     assert title == "Old Image Display Issue"
     assert status == "llm_stub"
+
+
+# ── unclassified alphabets are visible to drift detection ───────────────────
+#
+# Follow-up finding on ed88789d: `_script_counts` dropped every alphabetic
+# character outside its seven ranges, so a title written wholly in an
+# unclassified script (Thai, Georgian, Armenian, half-width forms, ...) had
+# nothing in the denominator and passed any pin. Classification now falls
+# back to the Unicode character name, Thai/Georgian/Armenian get buckets of
+# their own (and become pinnable), and anything still unrecognized counts as
+# a real `other` bucket instead of vanishing.
+#
+# The overreach guards matter as much as the rejections here: half-width
+# katakana and full-width Latin are LEGITIMATE Japanese title characters and
+# must classify as cjk/latin rather than `other`.
+
+
+def test_agent_route_rejects_thai_under_english_pin(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "English"})
+    monkeypatch.setattr(streaming, "generate_title_raw_via_agent", _fake_transport("วิธีแก้ไข", []))
+
+    title, status, _ = streaming._generate_llm_session_title_for_agent(
+        object(), "How do I fix this error?", "Do it like this."
+    )
+
+    assert title is None
+    assert status == "llm_language_mismatch"
+
+
+def test_aux_route_rejects_thai_under_english_pin(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "English"})
+    monkeypatch.setattr(streaming, "generate_title_raw_via_aux", _fake_transport("วิธีแก้ไข", []))
+
+    title, status, _ = streaming._generate_llm_session_title_via_aux(
+        "How do I fix this error?", "Do it like this."
+    )
+
+    assert title is None
+    assert status == "llm_language_mismatch_aux"
+
+
+def test_unpinned_conversation_check_sees_thai_drift(monkeypatch):
+    """The same invisible-alphabet hole existed with no pin at all. An
+    English conversation start must reject an all-Thai title."""
+    from api.streaming import _title_language_mismatch
+
+    assert _title_language_mismatch("How do I fix this error?", "วิธีแก้ไข") is True
+
+
+def test_thai_pin_is_now_resolvable_and_validates(monkeypatch):
+    """Making Thai visible must not recreate the round-1 break for Thai pins:
+    a Thai pin accepts compliant Thai output and rejects Latin output."""
+    from api import streaming
+
+    assert streaming._resolve_pinned_title_script("Thai") == "thai"
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "Thai"})
+    calls = []
+    monkeypatch.setattr(streaming, "generate_title_raw_via_aux", _fake_transport("วิธีแก้ไข", calls))
+    title, status, _ = streaming._generate_llm_session_title_via_aux(
+        "How do I fix this error?", "Do it like this."
+    )
+    assert title == "วิธีแก้ไข"
+    assert status == "llm_stub"
+
+    monkeypatch.setattr(streaming, "generate_title_raw_via_aux", _fake_transport("Fix Method Guide", []))
+    title, status, _ = streaming._generate_llm_session_title_via_aux(
+        "How do I fix this error?", "Do it like this."
+    )
+    assert title is None
+    assert status == "llm_language_mismatch_aux"
+
+
+def test_georgian_and_armenian_resolve():
+    from api.streaming import _resolve_pinned_title_script, _script_drift
+
+    assert _resolve_pinned_title_script("Georgian") == "georgian"
+    assert _resolve_pinned_title_script("Armenian") == "armenian"
+    # Georgian output under an English pin is drift.
+    assert _script_drift("გამოსწორება", "latin") is True
+    # Georgian output under a Georgian pin is not.
+    assert _script_drift("გამოსწორება", "georgian") is False
+
+
+def test_halfwidth_and_fullwidth_forms_classify_correctly():
+    """Overreach guard: half-width katakana is katakana and full-width Latin
+    is Latin. Neither may land in `other` and poison a legitimate title."""
+    from api.streaming import _script_counts
+
+    counts = _script_counts("ﾒﾓ帳アプリ")  # 2 half-width, 3 regular katakana, 1 Han
+    assert counts.get("cjk", 0) == 6
+    assert "other" not in counts
+
+    counts = _script_counts("Ａpp")  # full-width A + ASCII
+    assert counts.get("latin", 0) == 3
+    assert "other" not in counts
+
+
+def test_japanese_pin_accepts_halfwidth_katakana_title(monkeypatch):
+    """The overreach test for this round, end to end: a Japanese pin must
+    accept a Japanese title that uses half-width forms."""
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "Japanese"})
+    monkeypatch.setattr(streaming, "generate_title_raw_via_aux", _fake_transport("ﾒﾓ帳アプリの設定", []))
+
+    title, status, _ = streaming._generate_llm_session_title_via_aux(
+        "How do I configure the memo app?", "Like this."
+    )
+
+    assert title == "ﾒﾓ帳アプリの設定"
+    assert status == "llm_stub"
+
+
+def test_mixed_script_borrowed_term_still_accepted(monkeypatch):
+    """Borrowed-term control: an English-pinned title carrying one short
+    foreign word under the 35% threshold must survive."""
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "English"})
+    monkeypatch.setattr(
+        streaming, "generate_title_raw_via_aux",
+        _fake_transport("Fixing the Sawasdee ครับ Greeting Bug", []),
+    )
+
+    title, status, _ = streaming._generate_llm_session_title_via_aux(
+        "How do I fix this error?", "Do it like this."
+    )
+
+    assert title == "Fixing the Sawasdee ครับ Greeting Bug"
+    assert status == "llm_stub"
+
+
+def test_truly_unclassified_letters_count_as_other():
+    """Letters no keyword recognizes still land in a counted bucket, so an
+    all-unknown-script title can no longer pass a pin by vanishing."""
+    from api.streaming import _script_counts, _script_drift
+
+    counts = _script_counts("ᬅᬓ᭄ᬱᬭ")  # Balinese
+    assert sum(counts.values()) >= 2
+    assert _script_drift("ᬅᬓ᭄ᬱᬭ", "latin") is True
