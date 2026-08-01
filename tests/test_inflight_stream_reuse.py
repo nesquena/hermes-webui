@@ -1531,10 +1531,7 @@ let lastUser = users[users.length - 1];
 assert.strictEqual(lastUser.content, 'second',
   'Last user should be "second", not "first"');
 
-// Case 3: genuinely new identical prompt after completed assistant
-// base = [user:q, assistant:ans] + inflight = [user:q, live assistant] (new turn, same text)
-// Actually this is the same as case 1 — the message is identical, so it's a dedup.
-// Let's test: genuinely new different prompt is preserved
+// Case 3: genuinely new different prompt is preserved
 base = [
   {{role:'user', content:'hello'}},
   {{role:'assistant', content:'answer'}},
@@ -1549,6 +1546,43 @@ assert.strictEqual(users.length, 2,
   'New different prompt should be preserved: expected 2 users, got ' + users.length);
 assert.strictEqual(users[1].content, 'hello again',
   'Second user should be the new prompt');
+
+// Case 4: identical text but distinct turn identity must not dedup
+// This is the bug scenario from #6649 reviewer: same user text across
+// two real turns should remain as two user rows after drop+merge.
+let base4 = [
+  {{role:'user', content:'hello', timestamp:1000, id:'msg-1'}},
+  {{role:'assistant', content:'answer'}},
+];
+let inflight4 = [
+  {{role:'user', content:'hello', timestamp:2000, id:'msg-2'}},
+  {{role:'assistant', _live:true, content:'answer live'}},
+];
+base4 = _dropCurrentTurnAssistantMessages(base4);
+let merged4 = _mergeInflightTailMessages(base4, inflight4);
+let users4 = merged4.filter(m => m.role === 'user');
+assert.strictEqual(users4.length, 2,
+  'Distinct identical prompts must not dedup: expected 2 users, got ' + users4.length);
+assert.strictEqual(users4[1].id, 'msg-2',
+  'Second user should preserve its message id');
+assert.strictEqual(users4[1].timestamp, 2000,
+  'Second user should preserve its timestamp');
+
+// Case 5: identical text, no stable identity — fall back to text dedup.
+// Without id/timestamp the messages are indistinguishable, so one row is correct.
+let base5 = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', content:'answer'}},
+];
+let inflight5 = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', _live:true, content:'answer live'}},
+];
+base5 = _dropCurrentTurnAssistantMessages(base5);
+let merged5 = _mergeInflightTailMessages(base5, inflight5);
+let users5 = merged5.filter(m => m.role === 'user');
+assert.strictEqual(users5.length, 1,
+  'Text-only duplicate should still dedup when no identity is available: expected 1 user, got ' + users5.length);
 """
     result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr

@@ -3262,6 +3262,15 @@ function _sameTranscriptMessage(a,b){
   if(!(a&&b)) return false;
   const role=String(a.role||'');
   if(role!==String(b.role||'')) return false;
+  const aId=a.id, bId=b.id;
+  if(aId && bId){
+    if(aId === bId) return true;
+    return false;
+  }
+  const aTs=(a.timestamp||a._ts||0), bTs=(b.timestamp||b._ts||0);
+  if(aTs && bTs && role==='user'){
+    return aTs === bTs;
+  }
   const aText=_messageComparableText(a);
   const bText=_messageComparableText(b);
   if(aText===bText) return true;
