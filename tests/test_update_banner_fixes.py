@@ -3519,7 +3519,8 @@ def _run_check_updates_now(payload):
         extract_js_function(ui_src, '_showUpdateBanner'),
     ])
     check_fn = extract_js_function(panels_src, 'checkUpdatesNow')
-    api_result = json.dumps(payload)
+    payloads = payload if isinstance(payload, list) else [payload]
+    api_result = json.dumps(payloads)
     harness = (
         '"use strict";'
         '(async()=>{'
@@ -3537,18 +3538,20 @@ def _run_check_updates_now(payload):
         'global.window={_updateData:null,_whatsNewSummaryEnabled:false};'
         'global.$=(id)=>_el[id]||null;'
         'function t(k){return k;}'
-        'global.api=async()=>(' + api_result + ');'
+        'let _apiIndex=0;global.api=async()=>(' + api_result + ')[_apiIndex++];'
         'function _renderUpdateWhatsNewLinks(){}'
         '\n' + ui_fns + '\n' + check_fn
-        + ';await checkUpdatesNow();'
-        'process.stdout.write(JSON.stringify({'
-        'status_text:_el.checkUpdatesStatus.textContent,'
-        'status_color:_el.checkUpdatesStatus.style.color,'
+        + ';const states=[];'
+        + 'for(let i=0;i<' + str(len(payloads)) + ';i++){await checkUpdatesNow();states.push({'
+        'status_text:_el.checkUpdatesStatus.textContent,status_color:_el.checkUpdatesStatus.style.color,'
         'banner_visible:_el.updateBanner.classList._s.has("visible"),'
         'force_visible:_el.btnForceUpdate.style.display!=="none",'
         'apply_visible:_el.btnApplyUpdate.style.display!=="none",'
-        'force_target:_el.btnForceUpdate.dataset.target,'
-        'msg:_el.updateMsg.textContent,'
+        'force_target:_el.btnForceUpdate.dataset.target,msg:_el.updateMsg.textContent});}'
+        + ';const state=states[states.length-1];'
+        'process.stdout.write(JSON.stringify({'
+        'status_text:state.status_text,status_color:state.status_color,banner_visible:state.banner_visible,'
+        'force_visible:state.force_visible,apply_visible:state.apply_visible,force_target:state.force_target,msg:state.msg,states'
         '}));'
         '})()'
     )
@@ -3579,6 +3582,28 @@ class TestDirtyInstallRecovery:
         assert not state['banner_visible'], 'banner must be hidden for clean/current'
         assert not state['force_visible'], 'no force button for clean/current'
         assert not state['apply_visible'], 'no apply button for clean/current'
+
+    def test_settings_disabled_retires_stale_recovery_state(self):
+        states = _run_check_updates_now([
+            _REPRO_PAYLOADS['dirty_current'],
+            {'disabled': True},
+        ])['states']
+        assert states[0]['force_visible']
+        assert not states[1]['banner_visible']
+        assert not states[1]['force_visible']
+        assert not states[1]['apply_visible']
+        assert states[1]['force_target'] == ''
+
+    def test_settings_no_git_retires_stale_recovery_state(self):
+        states = _run_check_updates_now([
+            _REPRO_PAYLOADS['dirty_current'],
+            {'webui': {'no_git': True}, 'agent': None},
+        ])['states']
+        assert states[0]['force_visible']
+        assert not states[1]['banner_visible']
+        assert not states[1]['force_visible']
+        assert not states[1]['apply_visible']
+        assert states[1]['force_target'] == ''
 
     def test_force_route_called_on_confirm(self):
         """Force route: confirming dialog calls /api/updates/force with the payload channel."""
@@ -4241,13 +4266,14 @@ def _run_apply_response_sequence(responses):
         'btnClearUpdateLock:{style:{display:"inline-block"},disabled:false,textContent:"Clear lock",dataset:{target:"agent"}},'
         'updateError:{style:{display:"none"},textContent:""},'
         '};'
-        'global.window={_updateData:{webui:{behind:2,channel:"stable"}},_updateApplyInFlight:false};'
+        'global.window={_updateData:{webui:{behind:2,dirty:true,channel:"stable"}},_updateApplyInFlight:false};'
         'global.$=(id)=>_el[id]||null;'
         'function t(k){return k;}'
         'global.api=async()=>(' + json.dumps(responses) + ')[_apiIndex++];'
         'global._readHealthServerIdentity=async()=>null;'
         'global._waitForServerThenReload=async()=>{_reloads+=1;};'
         'global.showToast=(...args)=>{_toast=args;};'
+        'global._showUpdateBanner=(data)=>{if(data&&data.webui&&data.webui.dirty){_el.btnForceUpdate.style.display="inline-block";_el.btnForceUpdate.disabled=false;_el.btnForceUpdate.dataset.target="webui";}};'
         'global.sessionStorage={removeItem:()=>{},setItem:()=>{},getItem:()=>null};'
         + ui_fns
         + ';await applyUpdates();'
@@ -4259,6 +4285,8 @@ def _run_apply_response_sequence(responses):
         'clear_visible:_el.btnClearUpdateLock.style.display!=="none",'
         'clear_disabled:_el.btnClearUpdateLock.disabled,'
         'clear_target:_el.btnClearUpdateLock.dataset.target,'
+        'force_visible:_el.btnForceUpdate.style.display!=="none",'
+        'apply_visible:_el.btnApplyUpdate.style.display!=="none",apply_disabled:_el.btnApplyUpdate.disabled,'
         '}));'
         '})()'
     )
@@ -4267,11 +4295,12 @@ def _run_apply_response_sequence(responses):
     return json.loads(r.stdout)
 
 
-def _run_clear_lock_response(response, raises=False):
+def _run_clear_lock_response(response, raises=False, initial_error=''):
     """Run applyClearUpdateLock() and capture restart, toast, and control state."""
     src = read('static/ui.js')
     ui_fns = '\n'.join([
         extract_js_function(src, '_i18nUpdateText'),
+        extract_js_function(src, '_showUpdateError'),
         extract_js_function(src, 'applyClearUpdateLock'),
     ])
     response_js = 'throw new Error("connection lost")' if raises else 'return ' + json.dumps(response)
@@ -4279,10 +4308,10 @@ def _run_clear_lock_response(response, raises=False):
         '"use strict";'
         '(async()=>{'
         'let _reloads=0;let _toast=null;'
-        'const _el={updateError:{style:{display:"none"},textContent:""}};'
+        'const _el={updateError:{style:{display:' + json.dumps('block' if initial_error else 'none') + '},textContent:' + json.dumps(initial_error) + '},btnForceUpdate:{style:{display:"none"},disabled:true,dataset:{target:""}}};'
         'const _btn={style:{display:"inline-block"},disabled:false,textContent:"Clear lock",dataset:{target:"webui"}};'
         'global.window={_clearLockInFlight:false};'
-        'global.$=(id)=>id==="updateError"?_el.updateError:null;'
+        'global.$=(id)=>id==="updateError"?_el.updateError:id==="btnClearUpdateLock"?_btn:id==="btnForceUpdate"?_el.btnForceUpdate:null;'
         'function t(k){return k;}'
         'global.api=async()=>{' + response_js + ';};'
         'global._waitForServerThenReload=async()=>{_reloads+=1;};'
@@ -4318,6 +4347,17 @@ class TestUpdateRecoveryResponseLifecycle:
         assert not result['error_visible']
         assert not result['in_flight']
 
+    def test_apply_up_to_date_preserves_dirty_force_recovery(self):
+        result = _run_apply_response_sequence([{
+            'ok': True,
+            'up_to_date': True,
+        }])
+        assert result['reloads'] == 0
+        assert result['force_visible']
+        assert not result['apply_visible']
+        assert result['apply_disabled']
+        assert not result['in_flight']
+
     def test_clear_lock_up_to_date_is_info_without_restart(self):
         result = _run_clear_lock_response({
             'ok': True,
@@ -4332,6 +4372,30 @@ class TestUpdateRecoveryResponseLifecycle:
         assert result['target'] == ''
         assert not result['in_flight']
 
+    def test_clear_lock_delegated_lock_conflict_restores_recovery_control(self):
+        result = _run_clear_lock_response({
+            'ok': False,
+            'lock_conflict': True,
+            'message': 'lock appeared during retry',
+        })
+        assert result['reloads'] == 0
+        assert result['error_visible']
+        assert result['visible']
+        assert not result['disabled']
+        assert result['target'] == 'webui'
+        assert not result['in_flight']
+
+    def test_clear_lock_delegated_stash_conflict_keeps_localized_warning(self):
+        result = _run_clear_lock_response({
+            'ok': True,
+            'stash_conflict': True,
+            'message': 'English backend stash details',
+        })
+        assert result['reloads'] == 1
+        assert result['toast'][2] == 'warning'
+        assert 'Local changes were preserved in git stash.' in result['toast'][0]
+        assert result['error_visible']
+
     def test_clear_lock_exception_retires_recovery_control(self):
         result = _run_clear_lock_response({}, raises=True)
         assert result['reloads'] == 0
@@ -4340,6 +4404,14 @@ class TestUpdateRecoveryResponseLifecycle:
         assert result['disabled']
         assert result['target'] == ''
         assert not result['in_flight']
+
+    def test_clear_lock_up_to_date_clears_previous_error(self):
+        result = _run_clear_lock_response({
+            'ok': True,
+            'up_to_date': True,
+        }, initial_error='Update failed (agent) stale lock')
+        assert not result['error_visible']
+        assert result['error'] == ''
 
     def test_later_non_lock_failure_clears_previous_clear_lock_target(self):
         result = _run_apply_response_sequence([

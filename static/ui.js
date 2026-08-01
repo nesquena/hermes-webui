@@ -9961,6 +9961,8 @@ function _showUpdateBanner(data){
     _renderUpdateWhatsNewLinks(data);
     const staleBanner=$('updateBanner');
     if(staleBanner) staleBanner.classList.remove('visible');
+    const staleMessage=$('updateMsg');
+    if(staleMessage) staleMessage.textContent='';
     return;
   }
   const msg=$('updateMsg');
@@ -10051,8 +10053,7 @@ async function applyUpdates(){
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000});
       if(res.up_to_date){
         const targetLabel=target==='webui'?'WebUI':'Agent';
-        const detail=res.message?(' '+res.message):'';
-        noUpdateMessages.push(updateText('update_no_change','No update was applied for {0}.',targetLabel)+detail);
+        noUpdateMessages.push(updateText('update_no_change','No update was applied for {0}.',targetLabel));
         continue;
       }
       if(!res.ok){
@@ -10062,14 +10063,17 @@ async function applyUpdates(){
       }
       appliedTargetCount+=1;
       if(res.stash_conflict){
-        stashConflictMessages.push('Update applied ('+target+'): '+(res.message||'Local changes were preserved in git stash.'));
+        const targetLabel=target==='webui'?'WebUI':'Agent';
+        stashConflictMessages.push(updateText('update_applied_with_target','Update applied ({0}): ',targetLabel)+updateText('update_stash_preserved','Local changes were preserved in git stash.'));
         if(errEl){errEl.textContent=stashConflictMessages.join('\n\n');errEl.style.display='block';}
       }
     }
     if(!appliedTargetCount){
       const noUpdateMessage=noUpdateMessages.join('\n\n')||updateText('update_no_change','No update was applied.');
       showToast(noUpdateMessage,10000,'info');
+      if(typeof _showUpdateBanner==='function'&&window._updateData) _showUpdateBanner(window._updateData);
       resetApplyButton(0);
+      if(btn){btn.disabled=true;btn.style.display='none';}
       return;
     }
     const stashConflictMessage=stashConflictMessages.join('\n\n');
@@ -10123,6 +10127,7 @@ async function applyClearUpdateLock(btn){
   btn.disabled=true;
   const originalLabel=btn.textContent;
   const _lt=(key,fallback,...args)=>_i18nUpdateText(key,fallback,...args);
+  const errEl=$('updateError');
   btn.textContent=_lt('update_lock_checking','Checking lock…');
   try{
     const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:60000});
@@ -10130,7 +10135,8 @@ async function applyClearUpdateLock(btn){
       btn.disabled=true;
       btn.style.display='none';
       btn.dataset.target='';
-      const noUpdateMessage=_lt('update_no_change','No update was applied.')+(res.message?' '+res.message:'');
+      if(errEl){errEl.style.display='none';errEl.textContent='';}
+      const noUpdateMessage=_lt('update_no_change','No update was applied.');
       showToast(noUpdateMessage,10000,'info');
     } else if(res.ok){
       btn.disabled=true;
@@ -10138,7 +10144,14 @@ async function applyClearUpdateLock(btn){
       btn.dataset.target='';
       sessionStorage.removeItem('hermes-update-checked');
       sessionStorage.removeItem('hermes-update-dismissed');
-      showToast(_lt('update_applied_restarting','Update applied — restarting…'));
+      if(res.stash_conflict){
+        const targetLabel=target==='webui'?'WebUI':'Agent';
+        const stashMessage=_lt('update_applied_with_target','Update applied ({0}): ',targetLabel)+_lt('update_stash_preserved','Local changes were preserved in git stash.');
+        if(errEl){errEl.textContent=stashMessage;errEl.style.display='block';}
+        showToast(stashMessage,10000,'warning');
+      } else {
+        showToast(_lt('update_applied_restarting','Update applied — restarting…'));
+      }
       _waitForServerThenReload({});
     } else if(res.lock_held){
       btn.style.display='none';
@@ -10149,12 +10162,13 @@ async function applyClearUpdateLock(btn){
       // has presumably removed the lock, the server's success branch
       // runs the normal non-destructive apply).
       _renderLockManualInstruction(target, res);
+    } else if(res.lock_conflict){
+      _showUpdateError(target,res);
     } else {
       btn.disabled=true;
       btn.style.display='none';
       btn.dataset.target='';
       const msg=_lt('update_lock_check_failed','Could not check the lock: ')+(res.message||_lt('update_unknown_error','unknown error'));
-      const errEl=$('updateError');
       if(errEl){errEl.textContent=msg;errEl.style.display='block';}
       else showToast(msg);
     }
@@ -10163,7 +10177,6 @@ async function applyClearUpdateLock(btn){
     btn.style.display='none';
     btn.dataset.target='';
     const msg=_lt('update_lock_request_failed','Lock-check request failed: ')+((e&&e.message)||String(e));
-    const errEl=$('updateError');
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
     else showToast(msg);
   }finally{
@@ -10308,7 +10321,7 @@ async function forceUpdate(btn){
       const bannerMsg=$('updateMsg');
       if(bannerMsg){
         const localNote=_lt('update_dirty_state','Local changes detected in {0}.',targetLabel);
-        const channelNote=res.message||_lt('update_force_noop','The forced update did not reset this checkout.');
+        const channelNote=String(res.message||'').trim()||_lt('update_force_noop','The forced update did not reset this checkout.');
         const guidanceKey=target==='agent'?'update_force_unavailable_agent':'update_force_unavailable_webui';
         const guidanceFallback=target==='agent'?'The Agent uses its fixed default channel; clean the Agent checkout manually.':'Select a channel with an available reset target or clean the WebUI checkout manually.';
         bannerMsg.textContent='⚠️ '+localNote+' '+channelNote+' '+_lt(guidanceKey,guidanceFallback);
