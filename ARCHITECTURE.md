@@ -373,7 +373,9 @@ list_dir(workspace, rel='.'):
       checks to every scanned candidate.
     - Retains only 201 candidates while scanning, sorts that bounded retained set,
       and returns a page of 200 entries with {name, path, type, size}, has_more,
-      and an opaque signed cursor for the next stable ordering slice. The scan
+      and an opaque signed cursor for the next stable ordering slice. Both list
+      routes also return a directory-level metadata signature that is stable
+      across continuation pages. The scan
       itself remains proportional to the directory size; the bound applies to
       retained candidates and final sorting, not directory traversal or per-entry
       validation work.

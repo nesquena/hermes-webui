@@ -274,6 +274,70 @@ def test_append_by_cursor(tmp_path):
           assert.deepStrictEqual(S.entries.map(e => e.name), ['sub.txt'],
             'stale first-page response must not repaint the newer directory');
 
+          // ── test 4b: profile ownership rejects a stale first page without a tree bump ──
+          S.session = {{session_id:'profile-sid',workspace:'/old-ws'}};
+          S.activeProfile = 'profile-before';
+          S.currentDir = '.';
+          S.entries = [{{name:'new-profile.txt',path:'new-profile.txt'}}];
+          const profileDeferred = new Promise(resolve => {{ global._resolveProfile = resolve; }});
+          _apiResponses.push(profileDeferred);
+          const profileLoad = loadDir('.');
+          S.activeProfile = 'profile-after';
+          global._resolveProfile({{entries:[{{name:'old-profile.txt',path:'old-profile.txt'}}],has_more:false,cursor:null}});
+          await profileLoad;
+          assert.deepStrictEqual(S.entries.map(e => e.name), ['new-profile.txt'],
+            'profile switch without a tree bump must reject a stale first-page response');
+
+          // ── test 4c: profile ownership rejects a stale continuation without a tree bump ──
+          S.session = {{session_id:'profile-continuation-sid',workspace:'/old-ws'}};
+          S.activeProfile = 'profile-before';
+          S.currentDir = '.';
+          S.entries = [{{name:'new-page.txt',path:'new-page.txt'}}];
+          S._dirCursor = 'profile-cursor';
+          S._dirHasMore = true;
+          const profilePageDeferred = new Promise(resolve => {{ global._resolveProfilePage = resolve; }});
+          _apiResponses.push(profilePageDeferred);
+          const profilePageLoad = _loadMoreDir();
+          S.activeProfile = 'profile-after';
+          global._resolveProfilePage({{entries:[{{name:'old-page.txt',path:'old-page.txt'}}],has_more:false,cursor:null}});
+          await profilePageLoad;
+          assert.deepStrictEqual(S.entries.map(e => e.name), ['new-page.txt'],
+            'profile switch without a tree bump must reject a stale continuation');
+          assert.strictEqual(S._dirCursor, 'profile-cursor',
+            'stale continuation must preserve the new profile cursor');
+
+          // ── test 4d: session-object ownership rejects a replacement with the same identity fields ──
+          S.session = {{session_id:'same-owner-sid',workspace:'/same-ws'}};
+          S.activeProfile = 'same-owner-profile';
+          S.currentDir = '.';
+          S.entries = [{{name:'new-session-owner.txt',path:'new-session-owner.txt'}}];
+          const sessionObjectDeferred = new Promise(resolve => {{ global._resolveSessionObject = resolve; }});
+          _apiResponses.push(sessionObjectDeferred);
+          const sessionObjectLoad = loadDir('.');
+          S.session = {{session_id:'same-owner-sid',workspace:'/same-ws'}};
+          global._resolveSessionObject({{entries:[{{name:'old-session-owner.txt',path:'old-session-owner.txt'}}],has_more:false,cursor:null}});
+          await sessionObjectLoad;
+          assert.deepStrictEqual(S.entries.map(e => e.name), ['new-session-owner.txt'],
+            'replacing the session object must reject a stale first-page response');
+
+          // ── test 4e: session-object ownership also fences continuations ──
+          S.session = {{session_id:'same-owner-page-sid',workspace:'/same-ws'}};
+          S.activeProfile = 'same-owner-profile';
+          S.currentDir = '.';
+          S.entries = [{{name:'new-session-page.txt',path:'new-session-page.txt'}}];
+          S._dirCursor = 'same-owner-cursor';
+          S._dirHasMore = true;
+          const sessionPageDeferred = new Promise(resolve => {{ global._resolveSessionPage = resolve; }});
+          _apiResponses.push(sessionPageDeferred);
+          const sessionPageLoad = _loadMoreDir();
+          S.session = {{session_id:'same-owner-page-sid',workspace:'/same-ws'}};
+          global._resolveSessionPage({{entries:[{{name:'old-session-page.txt',path:'old-session-page.txt'}}],has_more:false,cursor:null}});
+          await sessionPageLoad;
+          assert.deepStrictEqual(S.entries.map(e => e.name), ['new-session-page.txt'],
+            'replacing the session object must reject a stale continuation');
+          assert.strictEqual(S._dirCursor, 'same-owner-cursor',
+            'stale session-object continuation must preserve the current cursor');
+
           // A same-path refresh owns a new cursor, so the old continuation is rejected.
           S.currentDir = 'same';
           S.entries = [{{name:'fresh.txt',path:'fresh.txt'}}];
@@ -376,6 +440,18 @@ def test_append_by_cursor(tmp_path):
             'stale artifact lookup must not open in the newer session');
           assert.strictEqual(_statusMessages.length, 0,
             'stale artifact lookup must not report failure in the newer session');
+
+          // ── test 9: artifact 403 clears the grant and shows recovery ──
+          S.session = {{session_id:'artifact-403',workspace:'/ws'}};
+          S.activeProfile = 'profile-a';
+          S._escapeGrants = {{escape:{{sessionId:'artifact-403',path:'escape',token:'bad',
+            expiresAt:Date.now()+60000}}}};
+          _apiResponses.push(Promise.reject({{status:403}}));
+          await openArtifactPath('escape/artifact.txt');
+          assert(!S._escapeGrants.escape,
+            'artifact 403 must discard the unusable escape grant');
+          assert(_toasts.includes('external_link_grant_expired'),
+            'artifact 403 must show the localized grant recovery message');
 
           console.log('PASS');
         }}

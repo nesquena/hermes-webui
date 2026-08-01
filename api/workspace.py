@@ -1553,24 +1553,39 @@ def list_dir(workspace: Path, rel: str = '.', cursor: str | None = None) -> dict
 def dir_signature(workspace: Path, rel: str = '.', entries: list[dict] | None = None) -> str:
     """Return a cheap, stable signature for a listed workspace directory.
 
-    The signature is based only on bounded directory-entry metadata already used
-    by the workspace tree: names, displayed paths, entry type, file sizes,
-    mtimes, and symlink targets. It intentionally does not read file contents.
+    The signature covers the directory and all child metadata, so every page of
+    a paginated listing carries the same value. It intentionally does not read
+    file contents or depend on the entries returned for one page. ``entries``
+    remains accepted for compatibility with callers that supplied a page before
+    the signature became directory-level.
     """
-    if entries is None:
-        entries = list_dir(workspace, rel)['entries']
-    payload = []
-    for entry in entries:
-        payload.append({
-            'name': entry.get('name'),
-            'path': entry.get('path'),
-            'type': entry.get('type'),
-            'is_dir': entry.get('is_dir'),
-            'size': entry.get('size'),
-            'mtime_ns': entry.get('mtime_ns'),
-            'target': entry.get('target'),
-            'target_outside_workspace': entry.get('target_outside_workspace'),
-        })
+    target = safe_resolve_ws(workspace, rel)
+    stat_result = target.stat()
+    children = []
+    with os.scandir(target) as directory:
+        for child in directory:
+            try:
+                child_stat = child.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            children.append({
+                'name': child.name,
+                'mode': child_stat.st_mode,
+                'size': child_stat.st_size,
+                'mtime_ns': getattr(child_stat, 'st_mtime_ns', None),
+                'ctime_ns': getattr(child_stat, 'st_ctime_ns', None),
+                'st_dev': getattr(child_stat, 'st_dev', None),
+                'st_ino': getattr(child_stat, 'st_ino', None),
+            })
+    payload = {
+        'workspace': str(Path(workspace).resolve()),
+        'path': str(target),
+        'st_dev': getattr(stat_result, 'st_dev', None),
+        'st_ino': getattr(stat_result, 'st_ino', None),
+        'st_mtime_ns': getattr(stat_result, 'st_mtime_ns', None),
+        'st_ctime_ns': getattr(stat_result, 'st_ctime_ns', None),
+        'children': sorted(children, key=lambda child: child['name']),
+    }
     raw = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
@@ -1784,7 +1799,7 @@ def list_authorized_escape_dir(
         "entries": entries,
         "has_more": page["has_more"],
         "cursor": page["cursor"],
-        "signature": dir_signature(external_root, external_rel, entries),
+        "signature": dir_signature(external_root, external_rel),
         "virtual_root": surface_path,
         "read_only": True,
     }

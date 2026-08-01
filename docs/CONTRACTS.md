@@ -24,7 +24,8 @@ contributor guidance; it does not change runtime behavior or CI gates.
   `list_dir()` and both directory-list routes return up to 200 stable entries
   plus `has_more` and an opaque cursor when more entries remain. The producer
   scans and validates the directory, while bounding retained candidates and
-  final sorting rather than claiming bounded traversal.
+  final sorting rather than claiming bounded traversal. The route `signature`
+  is directory-level metadata and remains stable across continuation pages.
 
 ## Runtime, durability, and state contracts
 

@@ -103,6 +103,9 @@ def _build_harness(
     """Return a self-contained HTML page exercising the paging UI components."""
     render_load_more = _extract_fn(WORKSPACE_JS, "_renderLoadMoreRow")
     load_more_dir = _extract_fn(WORKSPACE_JS, "_loadMoreDir")
+    capture_request_owner = _extract_fn(WORKSPACE_JS, "_workspaceCaptureRequestOwner")
+    capture_dir_request_owner = _extract_fn(WORKSPACE_JS, "_workspaceCaptureDirRequestOwner")
+    request_owner_is_current = _extract_fn(WORKSPACE_JS, "_workspaceRequestOwnerIsCurrent")
     route_for_path = _extract_fn(WORKSPACE_JS, "_workspaceRouteForPath")
     route_for_path_rel = _extract_fn(WORKSPACE_JS, "_workspaceRouteForPathRel")
     normalize_rel_path = _extract_fn(WORKSPACE_JS, "_normalizeWorkspaceRelPath")
@@ -155,6 +158,7 @@ const S={{
 }};
 let _wsTreeGen=0;
 let _wsDirRequestGen=0;
+let _wsArtifactRequestGen=0;
 function bumpWorkspaceTreeGen(){{_wsTreeGen+=1;return _wsTreeGen;}}
 function $(id){{return document.getElementById(id);}}
 function _workspaceEscapeGrantForPath(){{return null;}}
@@ -176,6 +180,9 @@ function showConfirmDialog(){{return Promise.resolve(false);}}
 {normalize_rel_path}
 {route_for_path_rel}
 {route_for_path}
+{capture_request_owner}
+{capture_dir_request_owner}
+{request_owner_is_current}
 function _visibleWorkspaceEntries(entries){{return Array.isArray(entries)?entries:[];}}
 {render_tree_items}
 {render_file_tree}

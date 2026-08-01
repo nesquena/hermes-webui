@@ -672,8 +672,9 @@ async function openArtifactPath(path){
       setStatus(t('file_open_failed'));
       return;
     }
-  }catch(_){
+  }catch(error){
     if(!_workspaceRequestOwnerIsCurrent(owner)) return;
+    if(error&&error.status===403&&_workspaceShowListingFailure(error,rel)==='grant-expired') return;
     setStatus(t('file_open_failed'));
     return;
   }
@@ -703,9 +704,9 @@ const _WS_SKELETON_ROWS = [
 // #4671 CORE: an empty-session profile switch REUSES the same session_id, so
 // loadDir()'s session_id guard alone can't reject a pre-switch /api/list response
 // that resolves after the new profile's loadDir('.') — it would paint the previous
-// workspace's files over the switched-to profile. switchToProfile() bumps this
-// UNCONDITIONALLY at switch start (even when the workspace panel is closed, since
-// loadDir('.') still runs then), so the stale response is rejected.
+// workspace's files over the switched-to profile. The shared owner also captures
+// the session object and active profile, so this remains safe when a profile
+// transition does not bump the tree generation.
 let _wsTreeGen = 0;
 let _wsDirRequestGen = 0;
 let _wsArtifactRequestGen = 0;
@@ -748,11 +749,17 @@ function _workspaceCaptureRequestOwner(path, cachePath, serial=false, requireCur
     currentDir:String(S.currentDir||'.'),
     requireCurrentDir,
     requestGen:serial?++_wsArtifactRequestGen:null,
+    dirRequestGen:null,
     cacheRef:S._dirCache,
     cachePath:cachePath==null?null:String(cachePath),
     cacheVersion:cachePath==null?null:_workspaceCacheVersion(String(cachePath)),
     path:path==null?null:String(path),
   };
+}
+function _workspaceCaptureDirRequestOwner(path, requireCurrentDir=false){
+  const owner=_workspaceCaptureRequestOwner(path,null,false,requireCurrentDir);
+  owner.dirRequestGen=++_wsDirRequestGen;
+  return owner;
 }
 function _workspaceRequestOwnerIsCurrent(owner){
   if(!owner||!S.session||S.session!==owner.sessionRef
@@ -761,7 +768,8 @@ function _workspaceRequestOwnerIsCurrent(owner){
     ||String(S.session.workspace||'')!==owner.workspace
     ||_wsTreeGen!==owner.treeGen
     ||(owner.requireCurrentDir&&String(S.currentDir||'.')!==owner.currentDir)
-    ||(owner.requestGen!==null&&owner.requestGen!==_wsArtifactRequestGen)) return false;
+    ||(owner.requestGen!==null&&owner.requestGen!==_wsArtifactRequestGen)
+    ||(owner.dirRequestGen!==null&&owner.dirRequestGen!==_wsDirRequestGen)) return false;
   if(owner.cachePath!==null&&(
     S._dirCache!==owner.cacheRef
     ||_workspaceCacheVersion(owner.cachePath)!==owner.cacheVersion)) return false;
@@ -830,14 +838,8 @@ async function loadDir(path, opts={}){
   const preservePreview=!!(opts&&opts.preservePreview);
   const refreshExpanded=!!(opts&&opts.refreshExpanded);
   if(!S.session)return;
-  const sessionId=S.session.session_id;
-  const requestGen=++_wsDirRequestGen;
   const requestPath=path||'.';
-  const treeGen=_wsTreeGen;  // #4671: capture the workspace-tree generation. A profile
-                             // switch bumps it (bumpWorkspaceTreeGen), so a stale response
-                             // from the previous workspace — which would pass the session_id
-                             // guard because an empty-session switch reuses the same id — is
-                             // rejected here instead of painting the wrong profile's files.
+  const owner=_workspaceCaptureDirRequestOwner(requestPath);
   try{
     if(!path||path==='.'||refreshExpanded){
       _workspaceResetDirCache();
@@ -849,8 +851,7 @@ async function loadDir(path, opts={}){
     const route=_workspaceRouteForPath(requestPath, 'list');
     if(!route)return;
     const data=await api(route);
-    if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen
-      ||requestGen!==_wsDirRequestGen||(S.currentDir||'.')!==requestPath)return;
+    if(!_workspaceRequestOwnerIsCurrent(owner)||(S.currentDir||'.')!==requestPath)return;
     if(data.workspace_recovered&&data.workspace){
       S.session.workspace=String(data.workspace);
       _workspaceResetDirCache();
@@ -877,8 +878,7 @@ async function loadDir(path, opts={}){
             .then(entries=>({dirPath,entries,error:null}))
             .catch(error=>({dirPath,entries:null,error}))
         ));
-        if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen
-          ||requestGen!==_wsDirRequestGen||(S.currentDir||'.')!==requestPath)return;
+        if(!_workspaceRequestOwnerIsCurrent(owner)||(S.currentDir||'.')!==requestPath)return;
         for(const {dirPath,entries,error} of results){
           const owner=owners.get(dirPath);
           if(!_workspaceRequestOwnerIsCurrent(owner))continue;
@@ -900,8 +900,7 @@ async function loadDir(path, opts={}){
     // Fetch git info for workspace root (non-blocking)
     if(!requestPath||requestPath==='.') _refreshGitBadge();
   }catch(e){
-    if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen
-      ||requestGen!==_wsDirRequestGen||(S.currentDir||'.')!==requestPath)return;
+    if(!_workspaceRequestOwnerIsCurrent(owner)||(S.currentDir||'.')!==requestPath)return;
     const grant = _workspaceEscapeGrantForPath(requestPath);
     if(grant && e && e.status===403){
       _clearWorkspaceEscapeGrant(grant.path);
@@ -946,17 +945,14 @@ function _renderLoadMoreRow(){
 // server-issued cursor.  Session and tree-generation guards match loadDir's.
 async function _loadMoreDir(){
   if(!S.session||!S._dirCursor||!S._dirHasMore)return;
-  const sessionId=S.session.session_id;
-  const requestGen=++_wsDirRequestGen;
-  const treeGen=_wsTreeGen;
   const cursor=S._dirCursor;
   const path=S.currentDir||'.';
+  const owner=_workspaceCaptureDirRequestOwner(path,true);
   try{
     const route=_workspaceRouteForPath(path,'list',{cursor});
     if(!route)return;
     const data=await api(route);
-    if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen
-      ||requestGen!==_wsDirRequestGen||(S.currentDir||'.')!==path||S._dirCursor!==cursor)return;
+    if(!_workspaceRequestOwnerIsCurrent(owner)||S._dirCursor!==cursor)return;
     // Append only entries not already present (dedup by path for mutation safety).
     const seen=new Set(S.entries.map(function(e){return e.path;}));
     const fresh=(data.entries||[]).filter(function(e){return !seen.has(e.path);});
@@ -965,8 +961,7 @@ async function _loadMoreDir(){
     S._dirHasMore=!!(data.has_more);
     renderFileTree();
   }catch(e){
-    if(e&&S.session&&S.session.session_id===sessionId&&treeGen===_wsTreeGen
-      &&requestGen===_wsDirRequestGen&&(S.currentDir||'.')===path&&S._dirCursor===cursor){
+    if(e&&_workspaceRequestOwnerIsCurrent(owner)&&S._dirCursor===cursor){
       if(e.status===404||e.status===403){
         // Restarted listings and expired escape grants cannot be retried with this cursor.
         S._dirCursor=null;S._dirHasMore=false;

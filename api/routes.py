@@ -16987,7 +16987,7 @@ def _handle_list_dir(handler, parsed):
                 "entries": entries,
                 "has_more": result["has_more"],
                 "cursor": result["cursor"],
-                "signature": dir_signature(Path(workspace), rel_path, entries),
+                "signature": dir_signature(Path(workspace), rel_path),
                 "path": rel_path,
                 "workspace": str(workspace),
                 "workspace_recovered": recovered,
