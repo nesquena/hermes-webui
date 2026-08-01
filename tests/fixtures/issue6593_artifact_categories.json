@@ -1,0 +1,17 @@
+{
+  "tool_calls": [
+    {"name": "write_file", "args": {"path": "src/app.py"}},
+    {"name": "read_file", "args": {"path": "src/app.py"}},
+    {"name": "search_files", "args": {"path": "README.md", "pattern": "artifacts"}},
+    {"name": "web_search", "args": {"url": "https://example.com/search?q=artifacts"}},
+    {"name": "web_extract", "args": {"urls": ["https://example.com/docs", "javascript:alert(1)"]}},
+    {"name": "browser_navigate", "result": {"url": "https://example.org/visited"}},
+    {"name": "unknown_tool", "args": {"path": "secrets.txt", "url": "https://private.example/hidden", "raw": "do not render"}},
+    {"name": "read_file", "args": {"path": "src/app.py"}}
+  ],
+  "messages": [
+    {"role": "assistant", "content": "Here is the generated image MEDIA:assets/chart.png [IMAGE:assets/diagram.png]"},
+    {"role": "assistant", "content": "MEDIA:javascript:alert(1)"},
+    {"role": "assistant", "content": [{"type": "text", "text": "MEDIA:assets/array.png"}]}
+  ]
+}
