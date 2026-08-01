@@ -19850,8 +19850,42 @@ function renderFileTree(){
     return;
   }
   _renderTreeItems(box, visibleEntries, 0);
+  // #6645: when the current directory's listing was truncated server-side
+  // (200-entry page cap), surface it with a count + "load more" row instead
+  // of the previous silent cut — users must not have to guess items are missing.
+  const curDir = S.currentDir || '.';
+  const dirMeta = (S._dirMeta || {})[curDir];
+  if(dirMeta && dirMeta.has_more) _appendWsLoadMoreRow(box, curDir, dirMeta, 0);
   // #5657: restore the pre-wipe scroll position now that the tree is tall again.
   if(box) box.scrollTop=prevScrollTop;
+}
+
+// #6645: render the "Showing X of Y — load more" row for a paginated listing.
+// Clicking the button appends the next page (see _wsLoadMoreDirEntries) and
+// re-renders; the row disappears once the last page has been loaded.
+function _appendWsLoadMoreRow(container, dirPath, meta, depth){
+  const row=document.createElement('div');
+  row.className='file-item file-load-more';
+  row.style.paddingLeft=(8+depth*16)+'px';
+  const btn=document.createElement('button');
+  btn.type='button';
+  btn.className='file-load-more-btn';
+  const total=Number(meta&&meta.total)||0;
+  const shown=_visibleWorkspaceEntries(S._dirCache[dirPath]||[]).length;
+  btn.textContent=total
+    ? t('workspace_dir_load_more', shown, total)
+    : t('workspace_dir_load_more_plain');
+  btn.title=t('workspace_dir_load_more_title');
+  btn.onclick=(e)=>{
+    e.stopPropagation();
+    if(meta.loading)return;
+    meta.loading=true;
+    btn.disabled=true;
+    btn.textContent=t('workspace_dir_loading');
+    _wsLoadMoreDirEntries(dirPath);
+  };
+  row.appendChild(btn);
+  container.appendChild(row);
 }
 
 let _wsActiveDragPath=null;
@@ -20197,6 +20231,9 @@ function _renderTreeItems(container, entries, depth){
             try{
               const data=await api(_workspaceRouteForPath(item.path, 'list'));
               S._dirCache[item.path]=data.entries||[];
+              // #6645: keep pagination metadata so an expanded >200-entry
+              // subdirectory renders a "load more" row instead of truncating.
+              if(typeof _wsStoreDirListing==='function')_wsStoreDirListing(item.path,data);
             }catch(e2){S._dirCache[item.path]=[];}
           }
           renderFileTree();
@@ -20242,6 +20279,9 @@ function _renderTreeItems(container, entries, depth){
         empty.textContent=t('empty_dir');
         container.appendChild(empty);
       }
+      // #6645: expanded subdirectories are paginated too — surface truncation.
+      const subMeta=(S._dirMeta||{})[item.path];
+      if(subMeta&&subMeta.has_more)_appendWsLoadMoreRow(container,item.path,subMeta,depth+1);
     }
   }
 }
