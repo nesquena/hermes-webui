@@ -445,9 +445,10 @@ async function _runAgentCommandTransport(text,_meta){
 async function resolveBundleCommand(text,_meta){
   const command=String(text||'').trim();
   if(!command) throw new Error('command is required');
+  const sessionId=String(_meta&&(_meta.sessionId||_meta.session_id)||S&&S.session&&S.session.session_id||'').trim();
   return api('/api/commands/bundles/resolve',{
     method:'POST',
-    body:JSON.stringify({command})
+    body:JSON.stringify(sessionId?{command,session_id:sessionId}:{command})
   });
 }
 
@@ -1148,20 +1149,37 @@ async function cmdUse(args){
   pending.promise = new Promise(r => { resolve = r; });
   _forcedSkillDirectivePending = pending;
   const isCurrentSession = () => !pending.sessionId || (S.session&&S.session.session_id)===pending.sessionId;
+  const cancelPending = () => {
+    resolve(null);
+    if(_forcedSkillDirectivePending===pending)_forcedSkillDirectivePending = null;
+  };
   try{
     const data = await api('/api/skills');
+    if(!isCurrentSession()){
+      cancelPending();
+      return;
+    }
     const skills = data.skills || [];
     const match = skills.find(s => (s.name||'').toLowerCase() === args.toLowerCase());
     if(!match){
-      resolve(null);
-      if(_forcedSkillDirectivePending===pending)_forcedSkillDirectivePending = null;
+      cancelPending();
       if(isCurrentSession()){
         const msg = {role:'assistant', content:`No skill named \`${args}\`. Use \`/skills\` to see available skills.`};
         S.messages.push(msg); renderMessages();
       }
       return;
     }
-    const detail = await api(`/api/skills/content?name=${encodeURIComponent(match.name)}`);
+    if(!isCurrentSession()){
+      cancelPending();
+      return;
+    }
+    const sessionId = String(pending.sessionId||'').trim();
+    const detailUrl = `/api/skills/content?name=${encodeURIComponent(match.name)}${sessionId?`&session_id=${encodeURIComponent(sessionId)}`:''}`;
+    const detail = await api(detailUrl);
+    if(!isCurrentSession()){
+      cancelPending();
+      return;
+    }
     const skillContent = detail&&typeof detail.content==='string' ? detail.content.trim() : '';
     if(!skillContent) throw new Error(`Skill \`${match.name}\` has no readable content.`);
     const directive = `[USER OVERRIDE] You MUST follow the skill '${match.name}' content provided below before responding to the next message.`;
@@ -1172,8 +1190,7 @@ async function cmdUse(args){
     }
     showToast(`Skill \`${match.name}\` will be used for next turn.`);
   }catch(e){
-    resolve(null);
-    if(_forcedSkillDirectivePending===pending)_forcedSkillDirectivePending = null;
+    cancelPending();
     showToast('Failed to load skills: '+e.message);
   }
 }

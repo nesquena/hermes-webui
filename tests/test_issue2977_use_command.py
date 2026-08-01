@@ -1,4 +1,10 @@
 from pathlib import Path
+import json
+import shutil
+import subprocess
+import textwrap
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,10 +89,12 @@ def test_directive_text_uses_match_name():
 
 def test_use_fetches_canonical_skill_content():
     src = read("static/commands.js")
-    assert "api(`/api/skills/content?name=${encodeURIComponent(match.name)}`)" in src, \
+    assert "const detailUrl = `/api/skills/content?name=${encodeURIComponent(match.name)}${sessionId?`&session_id=${encodeURIComponent(sessionId)}`:''}`;" in src, \
         "cmdUse must fetch the canonical skill content after resolving the canonical skill name"
     assert "typeof detail.content==='string' ? detail.content.trim() : ''" in src, \
         "cmdUse must reject missing or non-string skill content"
+    assert "const sessionId = String(pending.sessionId||'').trim();" in src
+    assert "const cancelPending = () =>" in src
 
 
 def test_pending_promise_set_synchronously():
@@ -121,9 +129,81 @@ def test_directive_only_consumed_by_matching_session():
     src = read("static/messages.js")
     assert "const _pending=_forcedSkillDirectivePending;" in src, \
         "send() must snapshot the pending directive before awaiting it"
-    assert "if(!_pending.sessionId||_pending.sessionId===activeSid){" in src, \
-        "send() must only consume /use directives issued for the active session"
+    assert "if(_pending.sessionId && _pending.sessionId!==activeSid){" in src, \
+        "send() must clear /use directives issued for a different session"
     assert "if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;" in src, \
         "send() must not clear a newer pending directive created while awaiting"
     assert "[FORCED SKILL CONTEXT: ${_forcedSkillName}]" in src, \
         "send() must prepend deterministic forced-skill content before the user message"
+
+
+def test_send_payload_keeps_session_context_atomic_across_awaits():
+    src = read("static/messages.js")
+    assert "function _sendSessionSnapshot(sid)" in src
+    assert "let _sendInProgressContext = null;" in src
+    assert "uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid" in src
+    assert src.count("if(!_sendSessionSnapshot(activeSid)){_clearStaleSend(activeSid);return;}") >= 2
+    assert "session_id:_chatSession.session_id" in src
+    assert "const _modelState=_chatPayloadModelState();" in src
+    assert "model:_modelState.model" in src
+    assert "model_provider:_modelState.model_provider" in src
+    assert "workspace:_chatSession.workspace" in src
+    assert "profile:_chatSession.profile" in src
+    assert "..._chatPayloadModelState()," in src
+    assert "postStartData = startData;" in src
+    assert "if(!_ownerIsCurrent) return;" in src
+
+
+def test_accepted_chat_start_keeps_owner_until_stream_attach():
+    src = read("static/messages.js")
+    start = src.index("const startData=await api('/api/chat/start'")
+    accepted = src.index("postStartData = startData;", start)
+    attach = src.index("attachLiveStream(activeSid, streamId, uploadedNames);", accepted)
+    block = src[accepted:attach]
+    assert "staleError.code='SESSION_CHANGED'" not in block
+    assert "if(!INFLIGHT[activeSid])" in block
+    assert "markInflight(activeSid, streamId);" in block
+    assert "_ownerIsCurrent" in block
+
+
+def test_queued_drain_recomputes_model_provider_with_shared_authority():
+    src = read("static/ui.js")
+    assert "function _applyQueuedSessionModelState(next)" in src
+    drain_start = src.index("const _queuedModelState=_applyQueuedSessionModelState(next);")
+    drain = src[drain_start:src.index("autoResize();", drain_start)]
+    assert "_applyQueuedSessionModelState(next)" in drain
+    assert "S.session.model_provider=_queuedModelState.model_provider||null" in drain
+    assert "S.session.model_provider=next.model_provider" not in drain
+
+
+def test_queued_drain_preserves_model_provider_pair_behaviorally():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+    src = read("static/ui.js")
+    start = src.index("function _applyQueuedSessionModelState(next)")
+    end = src.index("// ── Queue chip display", start)
+    helper = src[start:end]
+    harness = textwrap.dedent(
+        """
+        const S = {session: {model: 'old-model', model_provider: 'old-provider'}};
+        function _chatPayloadModelState() {
+          return {model: S.session.model, model_provider: S.session.model_provider};
+        }
+        %(helper)s
+        const state = _applyQueuedSessionModelState({
+          model: 'queued-model', model_provider: 'queued-provider'
+        });
+        console.log(JSON.stringify({state, session: S.session}));
+        """
+    ) % {"helper": helper}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["state"] == {"model": "queued-model", "model_provider": "queued-provider"}
+    assert result["session"] == {"model": "queued-model", "model_provider": "queued-provider"}
+
+
+def test_upload_stops_owner_work_after_session_switch():
+    src = read("static/ui.js")
+    assert "if(!_uploadPendingFilesCurrentSession(sessionId))break;" in src

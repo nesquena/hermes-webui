@@ -444,7 +444,7 @@ def test_send_intercepts_bundle_commands_before_agent_round_trip():
     intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
 
     assert "const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'" in intercept
-    assert "await resolveBundleCommand(text,_bundleCmd)" in intercept
+    assert "await resolveBundleCommand(text,{..._bundleCmd,sessionId:_bundleOwnerSessionId})" in intercept
     assert "_slashDisplayTextOverride=text;" in intercept
     assert "text=_bundleMessage;" in intercept
 

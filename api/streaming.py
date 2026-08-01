@@ -96,6 +96,35 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     return raw
 
 
+def _record_streaming_skill_provenance(session, session_id, tool_name, function_result, *, ephemeral=False) -> bool:
+    """Persist a successful skill_view result after the Agent identifies the tool."""
+    if ephemeral or session is None or tool_name != "skill_view":
+        return False
+    from api.session_skill_usage import successful_skill_names
+
+    skill_names = successful_skill_names(function_result)
+    if not skill_names:
+        return False
+    with _get_session_agent_lock(session_id):
+        # The callback closes over the Session that started the turn. Delete
+        # removes that sidecar and cache entry under this same lock, so resolve
+        # the owner again before mutating or saving any object.
+        try:
+            current_session = get_session(session_id)
+        except KeyError:
+            return False
+        if current_session is None or str(getattr(current_session, "session_id", "")) != str(session_id):
+            return False
+        if not current_session.record_server_skill_names(skill_names):
+            return False
+        try:
+            current_session.save(touch_updated_at=False, skip_index=True)
+        except Exception:
+            logger.debug("Failed to persist streaming skill provenance for %s", session_id, exc_info=True)
+            return False
+    return True
+
+
 def _compact_for_echo_compare(value: str) -> str:
     """Normalize visible stream text for duplicate echo detection."""
     return re.sub(r'\s+', '', str(value or ''))
@@ -8910,6 +8939,16 @@ def _run_agent_streaming(
                     put('metering', _tool_stats)
                 except Exception:
                     logger.debug('Failed to update live prompt estimate on tool completion', exc_info=True)
+                try:
+                    _record_streaming_skill_provenance(
+                        s,
+                        getattr(s, 'session_id', None) or session_id,
+                        name,
+                        function_result,
+                        ephemeral=ephemeral,
+                    )
+                except Exception:
+                    logger.debug('Failed to persist streaming skill provenance', exc_info=True)
 
             _AIAgent = _get_ai_agent()
             if _AIAgent is None:

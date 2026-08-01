@@ -534,6 +534,31 @@ def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
     return _profiles_match(session_profile, active_profile)
 
 
+def _record_session_skill_provenance(session_id, handler, skill_name) -> bool:
+    """Persist one server-resolved skill name for an authorized session."""
+    sid = str(session_id or '').strip()
+    if not sid:
+        return False
+    with _get_session_agent_lock(sid):
+        try:
+            session = get_session(sid)
+        except KeyError:
+            return None
+        if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
+            return False
+        if _session_is_subagent_view_only(sid):
+            return False
+        names = skill_name if isinstance(skill_name, (list, tuple, set)) else [skill_name]
+        if not session.record_server_skill_names(names):
+            return False
+        try:
+            session.save(touch_updated_at=False, skip_index=True)
+        except Exception:
+            logger.debug("Failed to persist session skill provenance for %s", sid, exc_info=True)
+            return False
+    return True
+
+
 def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
     if not path:
         return False
@@ -13631,6 +13656,16 @@ def handle_get(handler, parsed) -> bool:
                 return bad(handler, "Invalid file path", 400)
             if not target.exists() or not target.is_file():
                 return bad(handler, "File not found", 404)
+            try:
+                resolved = _skill_view_from_file(skill_dir, _skill_md)
+            except Exception:
+                resolved = None
+            if isinstance(resolved, dict) and resolved.get("success") is True:
+                _record_session_skill_provenance(
+                    qs.get("session_id", [""])[0],
+                    handler,
+                    resolved.get("name"),
+                )
             return j(
                 handler,
                 {"content": target.read_text(encoding="utf-8"), "path": file_path},
@@ -13638,6 +13673,12 @@ def handle_get(handler, parsed) -> bool:
         data = _skill_view_from_active_dir(name)
         if not isinstance(data.get("linked_files"), dict):
             data["linked_files"] = {}
+        if data.get("success") is True:
+            _record_session_skill_provenance(
+                qs.get("session_id", [""])[0],
+                handler,
+                data.get("name"),
+            )
         return j(handler, data)
 
     # ── Memory API (GET) ──
@@ -14429,6 +14470,7 @@ def handle_post(handler, parsed) -> bool:
                 manual_title=getattr(session, "manual_title", False),
                 # Composer draft — preserve per-session draft state.
                 composer_draft=copy.deepcopy(getattr(session, "composer_draft", None) or {}),
+                skill_provenance=copy.deepcopy(getattr(session, "skill_provenance", None) or {}),
                 # Context engine state — preserve so the duplicate's context engine
                 # starts from the same point as the original.
                 context_engine=getattr(session, "context_engine", None),
@@ -15051,6 +15093,7 @@ def handle_post(handler, parsed) -> bool:
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
+            s.clear_server_skill_provenance()
             s.clear_generation = uuid.uuid4().hex if had_sidecar_messages else None
             # Reset the title via the rename helper so clearing a manually-named
             # session also clears manual_title/llm_title_generated — otherwise the
@@ -15221,6 +15264,7 @@ def handle_post(handler, parsed) -> bool:
             # Context engine — inherit state so branch's context engine starts correctly
             context_engine=getattr(source, "context_engine", None),
             context_engine_state=copy.deepcopy(getattr(source, "context_engine_state", None) or {}),
+            skill_provenance=copy.deepcopy(getattr(source, "skill_provenance", None) or {}),
             parent_session_id=source.session_id,
             session_source="fork",
         )
@@ -15495,13 +15539,21 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "command is required")
 
         try:
-            return j(handler, resolve_bundle_command(command))
+            result = resolve_bundle_command(command)
         except KeyError:
             return bad(handler, "Bundle command not found", 404)
         except ValueError as e:
             return bad(handler, str(e), 400)
         except RuntimeError as e:
             return bad(handler, _sanitize_error(e), 500)
+        session_id = str(body.get("session_id") or "").strip()
+        if session_id:
+            _record_session_skill_provenance(
+                session_id,
+                handler,
+                result.get("loaded_skills"),
+            )
+        return j(handler, result)
 
     if parsed.path == "/api/commands/exec":
         from api.commands import execute_agent_command, execute_plugin_command
@@ -21874,6 +21926,7 @@ def _handle_session_compression_recovery_start(handler, body):
                 worktree_created_at=getattr(source, "worktree_created_at", None),
                 compression_recovery_source_session_id=sid,
                 compression_recovery_action=action,
+                skill_provenance=copy.deepcopy(getattr(source, "skill_provenance", None) or {}),
             )
             # Preserve the workspace/model/profile lane, but intentionally start with an
             # empty model-facing transcript so a focused follow-up does not replay the

@@ -7957,14 +7957,13 @@ function setBusy(v){
         }
         $('msg').value=next.text||'';
         S.pendingFiles=Array.isArray(next.files)?[...next.files]:[];
-        // Restore model from queued item (sent in /api/chat/start payload)
-        // Note: profile is NOT restored — full profile switch requires server interaction
-        if(next.model&&S.session&&next.model!==S.session.model){
-          S.session.model=next.model;
+        const _queuedModelState=_applyQueuedSessionModelState(next);
+        if(_queuedModelState.model&&S.session&&_queuedModelState.model!==S.session.model){
+          S.session.model=_queuedModelState.model;
         }
-        if(next.model_provider&&S.session) S.session.model_provider=next.model_provider;
-        if(next.model&&S.session){
-          if(typeof _applyModelToDropdown==='function'&&$('modelSelect')) _applyModelToDropdown(next.model,$('modelSelect'),S.session.model_provider||null);
+        if(S.session) S.session.model_provider=_queuedModelState.model_provider||null;
+        if(_queuedModelState.model&&S.session){
+          if(typeof _applyModelToDropdown==='function'&&$('modelSelect')) _applyModelToDropdown(_queuedModelState.model,$('modelSelect'),_queuedModelState.model_provider||null);
           if(typeof syncModelChip==='function') syncModelChip();
         }
         autoResize();
@@ -7973,6 +7972,23 @@ function setBusy(v){
       },120);
     }
   }
+}
+
+function _applyQueuedSessionModelState(next){
+  if(!S.session) return {model:'',model_provider:null};
+  // Restore the complete queued pair before resolving fallback metadata, so a
+  // prior session provider cannot shadow the provider captured with the model.
+  const queuedModel=String(next&&next.model||'').trim();
+  if(queuedModel) S.session.model=queuedModel;
+  if(next&&Object.prototype.hasOwnProperty.call(next,'model_provider')){
+    S.session.model_provider=next.model_provider||null;
+  }
+  const state=typeof _chatPayloadModelState==='function'
+    ? _chatPayloadModelState()
+    : {model:S.session.model,model_provider:S.session.model_provider||null};
+  S.session.model=state.model||S.session.model||'';
+  S.session.model_provider=state.model_provider||null;
+  return state;
 }
 
 // ── Queue chip display (Codex Desktop pattern) ─────────────────────────────
@@ -20636,6 +20652,7 @@ async function uploadPendingFiles(options={}){
   _uploadPendingFilesUpdateProgress(sessionId,0);
   const total=pendingFiles.length;
   for(let i=0;i<total;i++){
+    if(!_uploadPendingFilesCurrentSession(sessionId))break;
     const f=pendingFiles[i];
     try{
       if(f&&f.size>MAX_UPLOAD_BYTES)throw new Error(_uploadTooLargeMessage(f));
@@ -20644,6 +20661,7 @@ async function uploadPendingFiles(options={}){
       const isArchive=_ARCHIVE_EXTS.test(f.name);
       const url=new URL(isArchive?'api/upload/extract':'api/upload',document.baseURI||location.href).href;
       const res=await fetch(url,{method:'POST',credentials:'include',body:fd});
+      if(!_uploadPendingFilesCurrentSession(sessionId))break;
       if(_redirectIfUnauth(res)) return;
       if(!res.ok){const err=await res.text();throw new Error(err);}
       const data=await res.json();
