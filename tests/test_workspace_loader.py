@@ -4,10 +4,8 @@ Runs a minimal Node.js harness that stubs the browser globals (fetch, DOM,
 S, api, renderFileTree, etc.) and exercises _loadMoreDir's session/treeGen
 guards and dedup logic without a real browser.
 """
-import json
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 import textwrap
 

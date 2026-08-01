@@ -12,7 +12,6 @@ from api.workspace import (
     EscapeAuthorizationExpiredError,
     list_dir,
     _encode_list_cursor,
-    _decode_list_cursor,
 )
 
 
@@ -379,7 +378,7 @@ def test_list_dir_route_contract(tmp_path):
     import io
     import json as _json
     from urllib.parse import urlparse
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
 
     ws = tmp_path / "ws"
     ws.mkdir()

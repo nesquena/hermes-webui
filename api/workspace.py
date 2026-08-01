@@ -75,9 +75,9 @@ def _decode_list_cursor(cursor: str, expected_resolved: 'Path') -> tuple:
         name = str(k[3])
         sig = str(token['s'])
     except (KeyError, TypeError, IndexError, ValueError):
-        raise ValueError("invalid cursor")
+        raise ValueError("invalid cursor") from None
     except Exception:
-        raise ValueError("invalid cursor")
+        raise ValueError("invalid cursor") from None
     payload = json.dumps({'k': k, 'p': path_str}, sort_keys=True, separators=(',', ':'))
     expected_sig = hmac.new(
         _LIST_DIR_CURSOR_SECRET, payload.encode('utf-8'), 'sha256'
@@ -92,7 +92,7 @@ from api.config import (
     WORKSPACES_FILE as _GLOBAL_WS_FILE,
     LAST_WORKSPACE_FILE as _GLOBAL_LW_FILE,
     DEFAULT_WORKSPACE as _BOOT_DEFAULT_WORKSPACE,
-    MAX_FILE_BYTES, IMAGE_EXTS, MD_EXTS
+    MAX_FILE_BYTES
 )
 
 
@@ -1055,7 +1055,7 @@ def safe_resolve_ws(root: Path, requested: str) -> Path:
     try:
         resolved.relative_to(root_resolved)
     except ValueError:
-        raise ValueError(f"Path traversal blocked: {requested}")
+        raise ValueError(f"Path traversal blocked: {requested}") from None
     return resolved
 
 

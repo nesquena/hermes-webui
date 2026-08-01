@@ -12,7 +12,7 @@ def test_directory_signature_is_directory_metadata_only_and_changes_on_mutation(
     assert all("mtime_ns" in entry for entry in entries)
 
     (tmp_path / "beta.txt").write_text("two", encoding="utf-8")
-    entries2 = list_dir(tmp_path, ".")["entries"]
+    list_dir(tmp_path, ".")
     sig2 = dir_signature(tmp_path)
 
     assert sig2 != sig1
