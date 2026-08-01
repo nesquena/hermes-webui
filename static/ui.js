@@ -12874,6 +12874,31 @@ function _renderLiveAnchorSceneUserRowsOnly(streamId, rows, opts){
   }
   return painted;
 }
+function _renderSettledAnchorSceneUserRowsOnlyForMessage(message, segment, rawIdx){
+  if(!message||!message._anchor_activity_scene||!segment) return false;
+  const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
+  if(!blocks) return false;
+  const rows=_anchorSceneRowsForRendering(message._anchor_activity_scene,{settled:true})
+    .filter(row=>row&&row.role==='user'&&String(row.source_event_type||'')==='steer_delivered');
+  if(!rows.length) return false;
+  blocks.querySelectorAll('[data-anchor-settled-scene-row="1"][data-steer-delivery="delivered"]').forEach(el=>el.remove());
+  let painted=false;
+  for(const row of rows){
+    const node=_anchorSceneNodeForRow(row,{settled:true});
+    if(!node) continue;
+    node.setAttribute('data-anchor-scene-row','1');
+    node.setAttribute('data-anchor-settled-scene-row','1');
+    node.setAttribute('data-anchor-row-id',String(row.row_id||row.local_id||''));
+    if(row.local_id) node.setAttribute('data-anchor-local-id',String(row.local_id));
+    node.setAttribute('data-anchor-row-role',String(row.role||'user'));
+    node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
+    node.setAttribute('data-anchor-owner-idx',String(rawIdx));
+    if(segment.parentElement===blocks) blocks.insertBefore(node,segment);
+    else blocks.appendChild(node);
+    painted=true;
+  }
+  return painted;
+}
 function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
   const requestedMode=opts.mode;
@@ -12907,7 +12932,11 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(sceneMode==='transparent_stream'){
     return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);
   }
-  if(typeof isSimplifiedToolCalling==='function'&&!isSimplifiedToolCalling()) return false;
+  const sceneRows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
+  const deliveredSteerRows=sceneRows.filter(row=>row&&row.role==='user'&&String(row.source_event_type||'')==='steer_delivered');
+  if(typeof isSimplifiedToolCalling==='function'&&!isSimplifiedToolCalling()){
+    return deliveredSteerRows.length?_renderLiveAnchorSceneUserRowsOnly(streamId,deliveredSteerRows,opts):false;
+  }
   if(sceneMode!=='compact_worklog') return false;
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
@@ -13624,6 +13653,14 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
   if(typeof isTransparentStream==='function'&&isTransparentStream()){
     return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);
+  }
+  const deliveredSteerRows=_anchorSceneRowsForRendering(message._anchor_activity_scene,{settled:true})
+    .filter(row=>row&&row.role==='user'&&String(row.source_event_type||'')==='steer_delivered');
+  if(deliveredSteerRows.length&&(
+    (typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode())
+    || (typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode())
+  )){
+    return _renderSettledAnchorSceneUserRowsOnlyForMessage(message,segment,rawIdx);
   }
   if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()) return false;
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));

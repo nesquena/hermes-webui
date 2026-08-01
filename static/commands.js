@@ -1553,13 +1553,6 @@ async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot){
 // not in a transient DOM node. Record it on the owning stream's assistant-turn
 // anchor, which already carries that timeline through settlement, replay hydration
 // and session re-entry. WebUI observed delivery only; nothing here claims more.
-function _steerDeliveredTextFingerprint(text){
-  // djb2. It only has to keep two distinct steers apart, not resist an attacker.
-  let h=5381;
-  const s=String(text||'');
-  for(let i=0;i<s.length;i+=1) h=(((h<<5)+h)^s.charCodeAt(i))>>>0;
-  return h.toString(36);
-}
 const _steerDeliveredOrdinalByStream = new Map();
 function _nextSteerDeliveredOrdinal(ownerSid, ownerStreamId){
   // A page-lifetime counter restarts at 0 on reload, so the first steer after a
@@ -1577,6 +1570,17 @@ function _nextSteerDeliveredOrdinal(ownerSid, ownerStreamId){
         const n=Number(payload.ordinal)||0;
         if(n>highest) highest=n;
       }
+    }
+    const registry=typeof window!=='undefined'&&window._liveAnchorRegistries&&typeof window._liveAnchorRegistries.get==='function'
+      ? window._liveAnchorRegistries.get(key)
+      : null;
+    const events=registry&&registry.anchor&&Array.isArray(registry.anchor.activity_events)
+      ? registry.anchor.activity_events
+      : [];
+    for(const event of events){
+      if(!event||event.source_event_type!=='steer_delivered') continue;
+      const n=Number(event.payload&&event.payload.ordinal)||0;
+      if(n>highest) highest=n;
     }
   }catch(_){}
   const next=highest+1;
@@ -1608,11 +1612,11 @@ function _recordDeliveredSteer(ownerSid, ownerStreamId, originalMsg, filesSnapsh
     seq:`steer-${ordinal}`,
     created_at:Date.now()/1000,
     payload:{
-      // local_id is what makes replay idempotent: the anchor dedupes on
-      // local:[session, sourceType, local_id, seq]. Replay re-applies this exact
-      // record, so it always dedupes; the fingerprint is what keeps two DISTINCT
-      // steers apart if no cache existed to seed the ordinal from.
-      local_id:`steer:${ownerStreamId}:${ordinal}:${_steerDeliveredTextFingerprint(text)}`,
+      // local_id is the run-owned ordinal identity required by the anchor
+      // contract. The ordinal is reseeded from both INFLIGHT and the live
+      // registry, so a reload or cache miss cannot mint a second row at the same
+      // ordinal.
+      local_id:`steer:${ownerStreamId}:${ordinal}`,
       // Read back by _nextSteerDeliveredOrdinal to reseed after a reload.
       stream_id:String(ownerStreamId),
       ordinal,
@@ -1729,7 +1733,8 @@ async function _trySteer(msg, explicitSteer){
     // Record the delivery on the owning run's assistant-turn anchor. Recording is
     // owner-scoped, not viewer-scoped: it runs even when the user switched away
     // during the await, because the row belongs to the owner's turn either way.
-    const recorded=_recordDeliveredSteer(ownerSid,ownerStreamId,originalMsg,pendingFilesSnapshot);
+    const acceptedStreamId=String(result.stream_id||result.streamId||ownerStreamId||'');
+    const recorded=_recordDeliveredSteer(ownerSid,acceptedStreamId,originalMsg,pendingFilesSnapshot);
     // Only mutate the visible tray/DOM if the user is still looking at the owning
     // session.
     if(_steerOwnerIsCurrent(ownerSid)){
@@ -1748,7 +1753,7 @@ async function _trySteer(msg, explicitSteer){
       // indicator is strictly degraded: NOT in S.messages, so it survives the done
       // event's S.messages replacement, and it self-removes when renderMessages
       // rebuilds msgInner, by which point the durable row paints from the scene.
-      if(!recorded||!_repaintDeliveredSteer(ownerSid,ownerStreamId)){
+      if(!recorded||!_repaintDeliveredSteer(ownerSid,acceptedStreamId)){
         _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
       }
     }

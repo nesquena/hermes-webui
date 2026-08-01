@@ -2012,6 +2012,17 @@ async function loadSession(sid){
   // so a server_turn_started that attaches a live stream MID-RELOAD is honored
   // by the attach/idle decision instead of being clobbered by the stale snapshot.
   let activeStreamId=S.session.active_stream_id||null;
+  let settledDeliveredSteers=[];
+  if(!activeStreamId){
+    const localDeliveredSteers=INFLIGHT[sid]&&Array.isArray(INFLIGHT[sid].deliveredSteers)
+      ? INFLIGHT[sid].deliveredSteers
+      : [];
+    const storedIdleState=typeof loadInflightState==='function'?loadInflightState(sid):null;
+    const storedDeliveredSteers=storedIdleState&&Array.isArray(storedIdleState.deliveredSteers)
+      ? storedIdleState.deliveredSteers
+      : [];
+    settledDeliveredSteers=localDeliveredSteers.length?localDeliveredSteers:storedDeliveredSteers;
+  }
   // If the server says the session is idle, reset browser-side streaming flags
   // NOW — BEFORE _acknowledgeSessionVisit() below (whose sidebar repaint would
   // otherwise inherit the PREVIOUS session's busy/stream state) and before the
@@ -2277,6 +2288,9 @@ async function loadSession(sid){
 
     // Reconstruct tool calls from message metadata, or fall back to session-level summary.
     // (hasMessageToolMetadata already computed inside _ensureMessagesLoaded; S.toolCalls set there.)
+    if(settledDeliveredSteers.length&&typeof _restoreDeliveredSteersIntoSettledMessages==='function'){
+      _restoreDeliveredSteersIntoSettledMessages(S.messages,sid,settledDeliveredSteers);
+    }
     updateQueueBadge(sid);
 
     // Attach pending user message if one is queued.

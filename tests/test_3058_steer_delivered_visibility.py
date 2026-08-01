@@ -107,7 +107,6 @@ def _anchor_harness_prelude() -> str:
         + _STEER_DRIVER
         + _function(commands, "_steerIndicatorText")
         + "\n"
-        + _function(commands, "_steerDeliveredTextFingerprint")
         + "\n"
         "const _steerDeliveredOrdinalByStream=new Map();\n"
         + _function(commands, "_nextSteerDeliveredOrdinal")
@@ -175,7 +174,7 @@ def test_3058_delivered_steer_projects_a_user_row_and_other_controls_stay_contro
     assert steer["hints"] == {"compact_worklog": "user_message", "transparent_stream": "user_message"}
     assert steer["status"] == "delivered"
     assert steer["text"] == STEER_TEXT
-    assert steer["local_id"].startswith(f"steer:{OWNER_STREAM}:1:")
+    assert steer["local_id"] == f"steer:{OWNER_STREAM}:1"
     assert rows["approval"]["role"] == "control"
     assert rows["clarify"]["role"] == "control"
 
@@ -268,6 +267,61 @@ def test_3058_replaying_the_same_delivery_never_produces_a_second_row():
     assert out["replayStatus"] == ["delivered"]
 
 
+def test_3058_accepted_response_stream_id_owns_the_record_after_a_stream_replacement():
+    accepted_branch = _block_after(_read(COMMANDS_JS), "if(result&&result.accepted){")
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const S={session:{session_id:OWNER_SID},activeStreamId:OWNER_STREAM,busy:true,pendingFiles:[]};"
+        + "const result={accepted:true,stream_id:'stream-authoritative'};const ownerSid=OWNER_SID;const ownerStreamId=OWNER_STREAM;"
+        + f"const originalMsg={json.dumps(STEER_TEXT)};const explicitSteer=false;const pendingFilesSnapshot=[];"
+        + "function _steerRestoreText(msg){return msg;}function _clearComposerDraft(){}function renderTray(){}function showToast(){}"
+        + "function t(key){return key;}window._renderLiveAnchorActivitySceneForStream=()=>true;"
+        + "newRegistry(OWNER_STREAM);newRegistry('stream-authoritative');"
+        + "function drive(){"
+        + accepted_branch
+        + "}\ndrive();\n"
+        + "console.log(JSON.stringify({old:window._liveAnchorRegistries.get(OWNER_STREAM).anchor.activity_events.length,new:window._liveAnchorRegistries.get('stream-authoritative').anchor.activity_events.length}));"
+    )
+    assert out == {"old": 0, "new": 1}
+
+
+def test_3058_idle_session_restore_projects_the_browser_cache_into_the_settled_scene():
+    helper = _function(_read(MESSAGES_JS), "_restoreDeliveredSteersIntoSettledMessages")
+    stream = "stream-3058-settled"
+    record = {
+        "source_event_type": "steer_delivered",
+        "seq": "steer-1",
+        "stream_id": stream,
+        "payload": {
+            "local_id": f"steer:{stream}:1",
+            "stream_id": stream,
+            "ordinal": 1,
+            "status": "delivered",
+            "text": STEER_TEXT,
+            "delivered": True,
+            "origin": "webui",
+            "files": [],
+        },
+    }
+    out = _run_node(
+        "const fs=require('fs');const vm=require('vm');"
+        f"const src=fs.readFileSync({json.dumps(str(ANCHORS_JS))},'utf8');"
+        "const sandbox={window:{}};vm.createContext(sandbox);vm.runInContext(src,sandbox);"
+        "global.window=sandbox.window;"
+        + _function(_read(MESSAGES_JS), "_deliveredSteerStreamId")
+        + "\n"
+        + _function(_read(MESSAGES_JS), "_settledAnchorSourceEventFromRow")
+        + "\n"
+        + helper
+        + f"\nconst messages=[{{role:'assistant',content:'final answer'}}];"
+        + f"const changed=_restoreDeliveredSteersIntoSettledMessages(messages,'{OWNER_SID}',[{json.dumps(record)}]);"
+        + "console.log(JSON.stringify({changed,stream:messages[0]._anchor_stream_id,rows:messages[0]._anchor_activity_scene.activity_rows.map(r=>[r.source_event_type,r.local_id,r.text])}));"
+    )
+    assert out["changed"] is True
+    assert out["stream"] == stream
+    assert out["rows"] == [["steer_delivered", f"steer:{stream}:1", STEER_TEXT]]
+
+
 # ------------------------------------------------------------ worklog-worthiness
 
 
@@ -333,7 +387,7 @@ _CACHED_STEER = {
     "source_event_type": "steer_delivered",
     "seq": "steer-1",
     "payload": {
-        "local_id": f"steer:{OWNER_STREAM}:1:abc123",
+        "local_id": f"steer:{OWNER_STREAM}:1",
         "stream_id": OWNER_STREAM,
         "ordinal": 1,
         "status": "delivered",
@@ -585,6 +639,11 @@ def test_3058_the_seal_is_per_stream_and_expires_with_the_registry_it_seals_into
         "const timers=[];\n"
         "function setTimeout(fn){timers.push(fn);}\n"
         "const _anchorRegistryMap=new Map();\n"
+        "let _anchorRegistryCleanupTimer=null;\n"
+        "const LIVE_STREAMS={};\n"
+        "const INFLIGHT={};\n"
+        "const S={activeStreamId:null,session:{session_id:'sid-3058',active_stream_id:null}};\n"
+        "const activeSid='sid-3058';\n"
         "const _anchorRegistry={id:'reg-a'};\n"
         "const streamId='stream-a';\n"
         "_anchorRegistryMap.set('stream-a',_anchorRegistry);\n"
@@ -600,6 +659,24 @@ def test_3058_the_seal_is_per_stream_and_expires_with_the_registry_it_seals_into
     assert out["sealed"] == ["a"], "the dispatcher must reach the addressed stream, not the newest one"
     assert out["remaining"] == ["stream-b"], "the expired stream's seal must not outlive its registry"
     assert out["registries"] == []
+
+
+def test_3058_active_stream_registry_cleanup_defers_until_the_stream_is_gone():
+    cleanup = _function(_read(MESSAGES_JS), "_scheduleAnchorRegistryCleanup")
+    out = _run_node(
+        "const window={_liveAnchorProseSealers:new Map()};"
+        "window._liveAnchorProseSealers.set('stream-a',()=>true);"
+        "const timers=[];function setTimeout(fn){timers.push(fn);}"
+        "const _anchorRegistryMap=new Map();let _anchorRegistryCleanupTimer=null;"
+        "const LIVE_STREAMS={};const INFLIGHT={};"
+        "const activeSid='sid-3058';const S={activeStreamId:'stream-a',session:{session_id:activeSid,active_stream_id:'stream-a'}};"
+        "const _anchorRegistry={id:'reg-a'};const streamId='stream-a';"
+        "_anchorRegistryMap.set(streamId,_anchorRegistry);LIVE_STREAMS[activeSid]={streamId};INFLIGHT[activeSid]={streamId};"
+        + cleanup
+        + "\n_scheduleAnchorRegistryCleanup(1);timers.forEach(fn=>fn());"
+        + "console.log(JSON.stringify({registry:_anchorRegistryMap.has(streamId),sealer:window._liveAnchorProseSealers.has(streamId)}));"
+    )
+    assert out == {"registry": True, "sealer": True}
 
 
 def test_3058_a_steer_to_an_unknown_stream_seals_nothing_rather_than_the_wrong_run():
@@ -651,7 +728,7 @@ def test_3058_a_declined_repaint_still_shows_the_user_something():
         "// the scene cannot be projected right now, so the repaint declines\n"
         "window._renderLiveAnchorActivitySceneForStream=function(){return false;};\n"
         + f"const originalMsg={json.dumps(STEER_TEXT)};const pendingFilesSnapshot=[];\n"
-        "const ownerSid=OWNER_SID;const ownerStreamId=OWNER_STREAM;\n"
+        "const ownerSid=OWNER_SID;const ownerStreamId=OWNER_STREAM;const acceptedStreamId=ownerStreamId;\n"
         + "const recorded=_recordDeliveredSteer(ownerSid,ownerStreamId,originalMsg,pendingFilesSnapshot);\n"
         + feedback
         + "\n"

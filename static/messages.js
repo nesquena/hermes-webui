@@ -1905,6 +1905,110 @@ async function send(){
 const LIVE_STREAMS={};
 const _STREAM_NOTIFICATION_BACKGROUND={};
 
+function _deliveredSteerStreamId(record){
+  if(!record||typeof record!=='object') return '';
+  return String(record.stream_id||((record.payload&&record.payload.stream_id)||'')||'').trim();
+}
+
+function _settledAnchorSourceEventFromRow(row, sceneStreamId, sceneRunId, index){
+  if(!row||typeof row!=='object') return null;
+  const sourceType=String(row.source_event_type||'').trim();
+  if(!sourceType) return null;
+  const payload=row.payload&&typeof row.payload==='object'?{...row.payload}:{};
+  if(row.text&&!payload.text) payload.text=row.text;
+  const identity=row.identity&&typeof row.identity==='object'?row.identity:{};
+  return {
+    ...payload,
+    source_event_type:sourceType,
+    local_id:row.local_id||row.row_id||`settled:${sceneStreamId}:${index}`,
+    event_id:row.event_id||identity.event_id||null,
+    seq:identity.seq??row.seq??undefined,
+    status:row.status||undefined,
+    stream_id:row.stream_id||identity.stream_id||sceneStreamId,
+    run_id:row.run_id||identity.run_id||sceneRunId,
+    created_at:payload.created_at??row.created_at??undefined,
+  };
+}
+
+function _restoreDeliveredSteersIntoSettledMessages(messages, sid, records){
+  if(!Array.isArray(messages)||!messages.length||!Array.isArray(records)||!records.length) return false;
+  const api=typeof window!=='undefined'?window.HermesAssistantTurnAnchors:null;
+  if(!api||typeof api.createAssistantTurnAnchorRegistry!=='function'||
+      typeof api.applyAssistantTurnAnchorSourceEvent!=='function'||
+      typeof api.projectAssistantTurnAnchorActivityScene!=='function') return false;
+  const groups=new Map();
+  for(const record of records){
+    const streamId=_deliveredSteerStreamId(record);
+    if(!streamId) continue;
+    if(!groups.has(streamId)) groups.set(streamId,[]);
+    groups.get(streamId).push(record);
+  }
+  if(!groups.size) return false;
+  const assistants=[];
+  for(let i=0;i<messages.length;i+=1){
+    const message=messages[i];
+    if(message&&message.role==='assistant') assistants.push({message,index:i});
+  }
+  const lastAssistant=assistants.length?assistants[assistants.length-1]:null;
+  let changed=false;
+  for(const [streamId,streamRecords] of groups){
+    let target=assistants.slice().reverse().find(({message})=>{
+      const scene=message._anchor_activity_scene;
+      const sceneId=scene&&((scene.stream_id)||(scene.identity&&scene.identity.stream_id));
+      return String(message._anchor_stream_id||sceneId||'')===streamId;
+    });
+    if(!target&&groups.size===1) target=lastAssistant;
+    if(!target) continue;
+    const existing=target.message._anchor_activity_scene&&typeof target.message._anchor_activity_scene==='object'
+      ? target.message._anchor_activity_scene
+      : null;
+    const existingIdentity=existing&&existing.identity&&typeof existing.identity==='object'?existing.identity:{};
+    const runId=String((existing&&(existing.run_id||existingIdentity.run_id))||streamRecords[0].run_id||'').trim()||null;
+    const registry=api.createAssistantTurnAnchorRegistry({
+      session_id:sid,
+      stream_id:streamId,
+      run_id:runId,
+      turn_id:String((existing&&existing.turn_id)||target.message.local_id||`settled:${sid}:${streamId}`),
+    });
+    if(existing&&Array.isArray(existing.activity_rows)){
+      for(let index=0;index<existing.activity_rows.length;index+=1){
+        const sourceEvent=_settledAnchorSourceEventFromRow(existing.activity_rows[index],streamId,runId,index);
+        if(!sourceEvent) continue;
+        try{api.applyAssistantTurnAnchorSourceEvent(registry,sourceEvent,{session_id:sid,stream_id:streamId,run_id:runId});}catch(_){return changed;}
+      }
+    }
+    let applied=false;
+    for(const record of streamRecords){
+      const payload=record&&record.payload&&typeof record.payload==='object'?record.payload:{};
+      const sourceEvent={
+        ...record,
+        source_event_type:'steer_delivered',
+        local_id:record.local_id||payload.local_id||null,
+        stream_id:streamId,
+        run_id:record.run_id||payload.run_id||runId,
+      };
+      try{
+        const result=api.applyAssistantTurnAnchorSourceEvent(registry,sourceEvent,{session_id:sid,stream_id:streamId,run_id:runId});
+        applied=applied||!!(result&&result.applied||result&&result.reason==='duplicate');
+      }catch(_){ }
+    }
+    if(!applied&&!existing) continue;
+    let scene;
+    try{scene=api.projectAssistantTurnAnchorActivityScene(registry,{mode:(existing&&existing.mode)||'compact_worklog'});}catch(_){scene=null;}
+    if(!scene) continue;
+    target.message._anchor_activity_scene={
+      ...scene,
+      mode:(existing&&existing.mode)||scene.mode||'compact_worklog',
+      final_answer:(existing&&existing.final_answer)||String(target.message.content||''),
+      final_message_ref:(existing&&existing.final_message_ref)||target.message.local_id||null,
+      terminal_state:(existing&&existing.terminal_state)||'completed',
+    };
+    target.message._anchor_stream_id=streamId;
+    changed=true;
+  }
+  return changed;
+}
+
 // #4416: track whether the tab was hidden at ANY point during a live stream, so
 // the response-complete notification fires for a backgrounded tab even when
 // Chromium throttles the background-tab SSE and delivers the `done` event LATE
@@ -2636,6 +2740,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _anchorShadowWarned=false;
   let _anchorReasoningFlushed=false;
   let _anchorLocalSeq=0;
+  let _anchorRegistryCleanupTimer=null;
   if(_anchorRegistryMap&&_anchorRegistry) _anchorRegistryMap.set(streamId,_anchorRegistry);
   if(typeof window!=='undefined'&&_anchorRegistry){
     // #3058 slice 3: commands.js records a delivered steer straight onto this
@@ -2694,8 +2799,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _scheduleAnchorRegistryCleanup(delayMs=600000){
     if(!_anchorRegistryMap||!_anchorRegistry) return;
-    setTimeout(()=>{
+    if(_anchorRegistryCleanupTimer) clearTimeout(_anchorRegistryCleanupTimer);
+    _anchorRegistryCleanupTimer=setTimeout(()=>{
+      _anchorRegistryCleanupTimer=null;
       if(_anchorRegistryMap.get(streamId)!==_anchorRegistry) return;
+      const live=LIVE_STREAMS[activeSid];
+      const stillActive=!!(
+        (live&&live.streamId===streamId)
+        || (S.activeStreamId===streamId)
+        || (S.session&&S.session.session_id===activeSid&&S.session.active_stream_id===streamId)
+        || (INFLIGHT[activeSid]&&INFLIGHT[activeSid].streamId===streamId)
+      );
+      if(stillActive){
+        _scheduleAnchorRegistryCleanup(delayMs);
+        return;
+      }
       _anchorRegistryMap.delete(streamId);
       // The seal closure retains this whole attachLiveStream scope, so it expires
       // on the same identity-guarded path as the registry it seals into.
@@ -3745,8 +3863,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
   }
   function _anchorSceneHasWorklogWorthyRows(scene){
-    if(scene&&scene.mode==='hide_all_activity') return false;
-    if(typeof window!=='undefined'&&typeof window.isFinalAnswerOnlyMode==='function'&&window.isFinalAnswerOnlyMode()) return false;
+    const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
+    const hasDeliveredSteer=rows.some(row=>row&&String(row.source_event_type||'')==='steer_delivered');
+    if(scene&&scene.mode==='hide_all_activity'&&!hasDeliveredSteer) return false;
+    if(typeof window!=='undefined'&&typeof window.isFinalAnswerOnlyMode==='function'&&window.isFinalAnswerOnlyMode()&&!hasDeliveredSteer) return false;
     // A worklog (the collapsible "已处理 …" rail) is only meaningful when the turn
     // actually DID worklog-worthy work — a tool call, a thinking/reasoning pass, or
     // a compression lifecycle card. A turn that only streamed prose (e.g. a long
@@ -3756,7 +3876,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // shrinks the transcript by the full streamed height → the browser clamps a
     // bottom-pinned viewport back to the top (the "jump back" report). Require at least
     // one genuinely worklog-worthy row before promoting the turn to a worklog.
-    const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
     for(const row of rows){
       if(!row||typeof row!=='object') continue;
       const role=String(row.role||'');
