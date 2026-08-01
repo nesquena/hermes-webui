@@ -190,6 +190,7 @@ def test_authorized_listing_paginates_external_directory_with_read_only_rows(tmp
     assert second["has_more"] is False
     assert second["cursor"] is None
     assert first["read_only"] is True and second["read_only"] is True
+    assert first["signature"] == second["signature"]
     all_entries = first["entries"] + second["entries"]
     assert {entry["name"] for entry in all_entries} == {
         f"entry-{index:03d}.txt" for index in range(201)

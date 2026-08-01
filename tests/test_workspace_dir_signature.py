@@ -42,3 +42,20 @@ def test_directory_signature_includes_followed_symlink_target_metadata(tmp_path)
     target.write_text("changed target contents", encoding="utf-8")
 
     assert dir_signature(workspace) != before
+
+
+def test_directory_signature_detects_same_stat_symlink_retarget(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target_a = tmp_path / "target-a.txt"
+    target_b = tmp_path / "target-b.txt"
+    target_a.write_text("same", encoding="utf-8")
+    target_b.write_text("same", encoding="utf-8")
+    link = workspace / "target-link.txt"
+    link.symlink_to(target_a)
+
+    before = dir_signature(workspace)
+    link.unlink()
+    link.symlink_to(target_b)
+
+    assert dir_signature(workspace) != before

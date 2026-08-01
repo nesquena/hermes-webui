@@ -1579,10 +1579,13 @@ def dir_signature(workspace: Path, rel: str = '.', entries: list[dict] | None = 
             })
             if stat.S_ISLNK(child_stat.st_mode):
                 try:
+                    resolved_target = Path(child.path).resolve()
                     target_stat = child.stat(follow_symlinks=True)
-                except OSError:
+                except (OSError, RuntimeError):
+                    resolved_target = None
                     target_stat = None
                 children[-1]['target'] = None if target_stat is None else {
+                    'path': str(resolved_target),
                     'mode': target_stat.st_mode,
                     'size': target_stat.st_size,
                     'mtime_ns': getattr(target_stat, 'st_mtime_ns', None),
