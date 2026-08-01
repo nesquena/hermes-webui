@@ -24,6 +24,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tests.helpers import source_between as _source_between
+from tests._i18n_bundles import read_i18n_bundles
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -290,7 +291,7 @@ class TestFrontendWiring:
     def setup_class(cls):
         cls.cmds = (Path(__file__).parent.parent / "static" / "commands.js").read_text(encoding="utf-8")
         cls.msgs = (Path(__file__).parent.parent / "static" / "messages.js").read_text(encoding="utf-8")
-        cls.i18n = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+        cls.i18n = read_i18n_bundles(Path(__file__).parent.parent)
 
     def test_cmd_steer_calls_endpoint(self):
         idx = self.cmds.find("async function cmdSteer(")
@@ -964,7 +965,7 @@ class TestI18nKeys:
 
     @classmethod
     def setup_class(cls):
-        cls.i18n = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+        cls.i18n = read_i18n_bundles(Path(__file__).parent.parent)
 
     def test_cmd_steer_delivered_in_all_locales(self):
         assert self.i18n.count("cmd_steer_delivered:") >= 6, (

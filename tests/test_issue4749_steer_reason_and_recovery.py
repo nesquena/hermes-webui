@@ -11,9 +11,10 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from tests._i18n_bundles import read_i18n_bundles
 
 REPO = Path(__file__).parent.parent
-I18N_JS = REPO / "static" / "i18n.js"
+I18N_JS = read_i18n_bundles(REPO)
 COMMANDS_JS = REPO / "static" / "commands.js"
 STREAMING_PY = REPO / "api" / "streaming.py"
 
@@ -48,7 +49,7 @@ FRONTEND_NETWORK_CODE = "network_error"
 
 def test_i18n_steer_failure_keys_exist():
     """All 10 expected i18n keys are present in the en locale block."""
-    text = I18N_JS.read_text(encoding="utf-8")
+    text = I18N_JS
     # Find the en locale block: from 'en:' or 'en =' up to the next top-level locale key
     en_match = re.search(r"\ben\s*:\s*\{", text)
     assert en_match, "Could not locate 'en:' locale block in i18n.js"

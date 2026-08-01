@@ -1,5 +1,6 @@
 """Regression tests for issue #696 — MCP server visibility panel MVP."""
 from pathlib import Path
+from tests._i18n_bundles import read_i18n_bundles
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,7 +34,7 @@ def test_mcp_panel_renders_status_badges_tool_counts_and_empty_error_states():
 
 
 def test_mcp_i18n_includes_visibility_status_labels():
-    i18n = read("static/i18n.js")
+    i18n = read_i18n_bundles(ROOT)
     for key in [
         "mcp_status_active",
         "mcp_status_configured",

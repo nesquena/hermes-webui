@@ -17,6 +17,7 @@ import sys
 import types
 import unittest
 from unittest import mock
+from tests._i18n_bundles import read_i18n_bundles
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
@@ -660,7 +661,7 @@ class TestModelCustomInput(unittest.TestCase):
                       '.model-custom-input must be defined in style.css')
 
     def test_model_custom_i18n_keys(self):
-        i18n = self._read('i18n.js')
+        i18n = read_i18n_bundles(STATIC.parent)
         # Find en locale block (appears first before es)
         en_block_start = i18n.find("'en'")
         es_block_start = i18n.find("'es'")

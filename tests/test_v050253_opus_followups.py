@@ -13,6 +13,7 @@ Three small follow-ups landed alongside the main batch:
 from __future__ import annotations
 
 from pathlib import Path
+from tests._i18n_bundles import read_i18n_bundles
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -67,7 +68,7 @@ def test_no_orphan_wiki_i18n_keys():
     from a different branch. Zero references existed outside i18n.js. They
     were stripped by Opus pre-release follow-up. This test pins that they
     don't return."""
-    i18n_src = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n_src = read_i18n_bundles(REPO)
     # If wiki_* keys are added in the future, they MUST have at least one
     # reference outside i18n.js. Until then, this test fails loudly.
     forbidden_keys = [

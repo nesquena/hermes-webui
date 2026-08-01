@@ -1,13 +1,14 @@
 """Verdigris skin registration and emerald/bronze palette affordances."""
 
 from pathlib import Path
+from tests._i18n_bundles import read_i18n_bundles
 
 REPO = Path(__file__).parent.parent
 CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 CONFIG_PY = (REPO / "api" / "config.py").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(REPO)
 
 
 def test_verdigris_skin_is_registered_in_all_files():
