@@ -67,3 +67,17 @@ def test_streaming_completion_does_not_resurrect_deleted_session(monkeypatch):
     ) is False
     assert session.names == []
     assert session.saved == 0
+
+
+def test_streaming_save_failure_does_not_escape_tool_completion(monkeypatch):
+    session = _Session()
+    session.save = lambda **kwargs: (_ for _ in ()).throw(OSError("disk unavailable"))
+    monkeypatch.setattr(streaming, "get_session", lambda _session_id: session)
+    monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _session_id: nullcontext())
+    assert streaming._record_streaming_skill_provenance(
+        session,
+        "stream-session",
+        "skill_view",
+        '{"success": true, "name": "review"}',
+    ) is False
+    assert session.names == ["review"]

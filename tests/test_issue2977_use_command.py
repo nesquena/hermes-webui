@@ -1,4 +1,10 @@
 from pathlib import Path
+import json
+import shutil
+import subprocess
+import textwrap
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -162,10 +168,40 @@ def test_accepted_chat_start_keeps_owner_until_stream_attach():
 
 def test_queued_drain_recomputes_model_provider_with_shared_authority():
     src = read("static/ui.js")
-    drain = src[src.index("// Restore model from queued item"):src.index("autoResize();", src.index("// Restore model from queued item"))]
-    assert "_chatPayloadModelState()" in drain
+    assert "function _applyQueuedSessionModelState(next)" in src
+    drain_start = src.index("const _queuedModelState=_applyQueuedSessionModelState(next);")
+    drain = src[drain_start:src.index("autoResize();", drain_start)]
+    assert "_applyQueuedSessionModelState(next)" in drain
     assert "S.session.model_provider=_queuedModelState.model_provider||null" in drain
     assert "S.session.model_provider=next.model_provider" not in drain
+
+
+def test_queued_drain_preserves_model_provider_pair_behaviorally():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+    src = read("static/ui.js")
+    start = src.index("function _applyQueuedSessionModelState(next)")
+    end = src.index("// ── Queue chip display", start)
+    helper = src[start:end]
+    harness = textwrap.dedent(
+        """
+        const S = {session: {model: 'old-model', model_provider: 'old-provider'}};
+        function _chatPayloadModelState() {
+          return {model: S.session.model, model_provider: S.session.model_provider};
+        }
+        %(helper)s
+        const state = _applyQueuedSessionModelState({
+          model: 'queued-model', model_provider: 'queued-provider'
+        });
+        console.log(JSON.stringify({state, session: S.session}));
+        """
+    ) % {"helper": helper}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["state"] == {"model": "queued-model", "model_provider": "queued-provider"}
+    assert result["session"] == {"model": "queued-model", "model_provider": "queued-provider"}
 
 
 def test_upload_stops_owner_work_after_session_switch():

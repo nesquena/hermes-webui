@@ -7957,14 +7957,7 @@ function setBusy(v){
         }
         $('msg').value=next.text||'';
         S.pendingFiles=Array.isArray(next.files)?[...next.files]:[];
-        // Restore model from queued item (sent in /api/chat/start payload)
-        // Note: profile is NOT restored — full profile switch requires server interaction
-        if(next.model&&S.session&&next.model!==S.session.model){
-          S.session.model=next.model;
-        }
-        const _queuedModelState=typeof _chatPayloadModelState==='function'
-          ? _chatPayloadModelState()
-          : {model:S.session&&S.session.model,model_provider:S.session&&S.session.model_provider};
+        const _queuedModelState=_applyQueuedSessionModelState(next);
         if(_queuedModelState.model&&S.session&&_queuedModelState.model!==S.session.model){
           S.session.model=_queuedModelState.model;
         }
@@ -7979,6 +7972,23 @@ function setBusy(v){
       },120);
     }
   }
+}
+
+function _applyQueuedSessionModelState(next){
+  if(!S.session) return {model:'',model_provider:null};
+  // Restore the complete queued pair before resolving fallback metadata, so a
+  // prior session provider cannot shadow the provider captured with the model.
+  const queuedModel=String(next&&next.model||'').trim();
+  if(queuedModel) S.session.model=queuedModel;
+  if(next&&Object.prototype.hasOwnProperty.call(next,'model_provider')){
+    S.session.model_provider=next.model_provider||null;
+  }
+  const state=typeof _chatPayloadModelState==='function'
+    ? _chatPayloadModelState()
+    : {model:S.session.model,model_provider:S.session.model_provider||null};
+  S.session.model=state.model||S.session.model||'';
+  S.session.model_provider=state.model_provider||null;
+  return state;
 }
 
 // ── Queue chip display (Codex Desktop pattern) ─────────────────────────────

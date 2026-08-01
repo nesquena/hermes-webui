@@ -208,6 +208,32 @@ def test_provenance_save_failure_does_not_break_content_or_bundle_resolution(mon
     assert bundle["loaded_skills"] == ["bundle-skill"]
 
 
+def test_linked_file_route_survives_provenance_save_failure(monkeypatch, tmp_path):
+    session = Session(session_id="issue6593-linked-save-failure", profile="default")
+    session.save = lambda **kwargs: (_ for _ in ()).throw(OSError("disk unavailable"))
+    skill_dir = tmp_path / "review"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("# Review\n", encoding="utf-8")
+    (skill_dir / "references.md").write_text("linked body", encoding="utf-8")
+    monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *args, **kwargs: True)
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *args, **kwargs: True)
+    monkeypatch.setattr(routes, "_active_skills_dir", lambda: tmp_path)
+    monkeypatch.setattr(routes, "_active_skill_search_dirs", lambda skills_dir: [skills_dir])
+    monkeypatch.setattr(routes, "_skill_view_from_file", lambda *_args: {
+        "success": True, "name": "review", "content": "# Review", "linked_files": {},
+    })
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **kwargs: payload)
+    response = routes.handle_get(
+        _RouteHandler("GET"),
+        SimpleNamespace(
+            path="/api/skills/content",
+            query=urlencode({"name": "review", "file": "references.md", "session_id": session.session_id}),
+        ),
+    )
+    assert response == {"content": "linked body", "path": "references.md"}
+
+
 def test_bundle_route_records_session_and_separates_session_errors(monkeypatch):
     handler = _RouteHandler("POST")
     parsed = SimpleNamespace(path="/api/commands/bundles/resolve", query="")
