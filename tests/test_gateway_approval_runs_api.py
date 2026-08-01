@@ -3689,3 +3689,140 @@ def test_gateway_chat_completions_body_carries_resolved_skill():
     context_user_rows = [m for m in saved_context if m.get("role") == "user"]
     assert context_user_rows
     assert context_user_rows[-1]["content"] == expansion
+
+
+def _assert_gateway_writeback_split(s, raw_command, expansion):
+    """Shared route-composed writeback assertions: the persisted display row
+    stays the raw command while the model-context user row carries the
+    resolved payload."""
+    user_rows = [m for m in s.messages if isinstance(m, dict) and m.get("role") == "user"]
+    assert user_rows, "expected a persisted user row"
+    assert user_rows[-1].get("content") == raw_command, (
+        "gateway writeback must persist the raw slash command"
+    )
+    context_user_rows = [
+        m for m in s.context_messages
+        if isinstance(m, dict) and m.get("role") == "user"
+    ]
+    assert context_user_rows, (
+        "gateway writeback must keep the resolved payload in model context; "
+        f"context_messages={str(s.context_messages)[:300]!r} "
+        f"messages={str(s.messages)[:300]!r}"
+    )
+    assert expansion in str(context_user_rows[-1].get("content") or ""), (
+        "gateway writeback must keep the resolved payload in model context"
+    )
+
+
+def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch):
+    """Route-composed regression for the gateway seam (round-4 re-gate).
+
+    Enters through _start_chat_stream_for_session with the raw slash command
+    plus its resolved model message, captures the real outbound request for
+    both serializers (Runs API and chat/completions), and proves the persisted
+    display row stays raw while model context is expanded.
+
+    Must fail if api/routes.py stops forwarding agent_message to the gateway
+    worker (revert `if agent_message: worker_kwargs[...]`).
+    """
+    import time as _time
+
+    import api.gateway_chat as gateway_chat
+    import api.models as models
+    import api.routes as routes
+
+    raw_command = "/llm-wiki list pages"
+    expansion = "[IMPORTANT: The user has invoked the llm-wiki skill...]\nfull skill body"
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda *a, **k: None)
+    monkeypatch.setattr(
+        gateway_chat, "_gateway_reasoning_effort_for_request", lambda *a, **k: None
+    )
+
+    def _scenario(*, runs_api: bool):
+        captured = {}
+        sse_body = (
+            b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'
+            b"data: [DONE]\n\n"
+            if not runs_api
+            else b'data: {"event":"run.completed","output":"done","usage":{}}\n\n'
+        )
+
+        class _JsonResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return None
+
+            def read(self, *args):
+                return json.dumps(self.payload).encode("utf-8")
+
+        def fake_urlopen(req, timeout=0):
+            if req.data is not None:
+                captured["body"] = json.loads(req.data.decode("utf-8"))
+            if runs_api and req.full_url.endswith("/v1/runs"):
+                return _JsonResponse({"run_id": "run-route"})
+            resp = MagicMock()
+            resp.__iter__ = lambda s: iter(sse_body.split(b"\n"))
+            resp.__enter__ = lambda s: s
+            resp.__exit__ = lambda s, *a: None
+            return resp
+
+        monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+        if runs_api:
+            monkeypatch.setattr(gateway_chat, "_gateway_use_runs_api_enabled", lambda cfg: True)
+            monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a, **k: True)
+        else:
+            monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a, **k: False)
+
+        s = models.new_session(workspace="/tmp", model="test-model")
+        s.save()
+        routes._start_chat_stream_for_session(
+            s,
+            msg=raw_command,
+            agent_message=expansion,
+            attachments=None,
+            workspace="/tmp",
+            model="test-model",
+            model_provider=None,
+            normalized_model=False,
+            source="webui",
+            external_runtime_owned=True,
+        )
+        # Wait for the gateway worker writeback (clears active_stream_id),
+        # reading the persisted session like a reloading client would.
+        deadline = _time.time() + 10
+        saved = s
+        while _time.time() < deadline:
+            try:
+                saved = models.get_session(s.session_id)
+            except Exception:
+                saved = s
+            if getattr(saved, "active_stream_id", None) is None:
+                break
+            _time.sleep(0.05)
+        return saved, captured
+
+    # Runs API serializer.
+    s_runs, body_runs = _scenario(runs_api=True)
+    runs_input = body_runs["body"].get("input")
+    assert runs_input == expansion, (
+        f"Runs API input must be the resolved payload, got {str(runs_input)[:80]!r}"
+    )
+    assert raw_command not in runs_input
+    _assert_gateway_writeback_split(s_runs, raw_command, expansion)
+
+    # chat/completions serializer.
+    s_cc, body_cc = _scenario(runs_api=False)
+    cc_user = body_cc["body"]["messages"][-1]
+    assert cc_user["role"] == "user"
+    assert cc_user["content"] == expansion, (
+        "chat/completions user message must be the resolved payload"
+    )
+    _assert_gateway_writeback_split(s_cc, raw_command, expansion)
