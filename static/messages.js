@@ -1763,6 +1763,12 @@ async function send(){
 
   // Start the agent via POST, get a stream_id back
   let streamId;
+  // #2761: when auto-compression rotates the backend session id to a
+  // continuation session, the `compressed` SSE event carries the new id.
+  // Recovery paths (done settle, _restoreSettledSession) must know it to
+  // avoid polling the archived pre-compression session and freezing the
+  // live turn behind the running compression card.
+  let _streamCompressionContinuationSid='';
   let postStartData;
   let modelStateForPostStart;
   let explicitPickForPostStart;
@@ -1881,6 +1887,7 @@ async function send(){
   const startData = postStartData || {};
   streamId = postStartData ? postStartData.stream_id : null;
   S.activeStreamId = streamId;
+  _streamCompressionContinuationSid='';
   // setBusy(true) already ran with activeStreamId=null; refresh now that we
   // have a stream id so the primary button can switch to Stop (see
   // getComposerPrimaryAction).
@@ -6142,10 +6149,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         },_doneEvent);
         _scheduleAnchorRegistryCleanup();
         _clearAnchorProseIncrementalNode();
-        const isActiveSession=_isSessionCurrentPane(activeSid);
-        const isSessionViewed=_isSessionActivelyViewed(activeSid);
         const completedSession=d.session||{session_id:activeSid};
         const completedSid=completedSession.session_id||activeSid;
+        // #2761 (Gate A): auto-compression can rotate the backend session id
+        // mid-turn to a continuation session. If the pane already advanced to
+        // that continuation id (external refresh / apperror reconcile) before
+        // `done` arrives, _isSessionCurrentPane(activeSid) is false and the
+        // settle block below is skipped — leaving the running compression card
+        // frozen and the final answer never rendered. The done payload belongs
+        // to the visible pane when its completed session id equals the
+        // currently displayed session, so treat that as an active-session
+        // settle even though the turn's original activeSid rotated.
+        const isActiveSession=_isSessionCurrentPane(activeSid)
+          || (!!completedSid && !!S.session && S.session.session_id===completedSid);
+        const isSessionViewed=_isSessionActivelyViewed(activeSid);
         const completedMessageCount=completedSession.message_count != null
           ? completedSession.message_count
           : (
@@ -6509,6 +6526,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
       const eventSid=d.old_session_id||d.session_id||activeSid;
       const continuationSid=d.new_session_id||d.continuation_session_id||'';
+      // #2761 (Gate B): capture the rotated continuation id so recovery paths
+      // (done settle, _restoreSettledSession) can poll the session that
+      // actually carries the final answer instead of the archived
+      // pre-compression session.
+      if(continuationSid&&continuationSid!==activeSid) _streamCompressionContinuationSid=continuationSid;
       const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||d.new_session_id===currentSid||d.continuation_session_id===currentSid));
       if(!eventMatchesCurrent) return;
       _applyToAnchor('compressed',d,e);
@@ -6978,7 +7000,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return returnStatus?'stale':false;
     }
     try{
-      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      // #2761 (Gate B): after auto-compression the backend rotates to a
+      // continuation session id. Polling the ORIGINAL activeSid returns the
+      // archived pre-compression session, which may keep a stale
+      // active_stream_id/pending_user_message (exhausting the retry loop into
+      // _finalizeStreamEndFallback) or simply lack the final answer — either
+      // way the response never renders. When the `compressed` event gave us
+      // the rotated id, poll that session instead.
+      const _restoreSid=(_streamCompressionContinuationSid&&_streamCompressionContinuationSid!==activeSid)
+        ? _streamCompressionContinuationSid
+        : activeSid;
+      const data=await api(`/api/session?session_id=${encodeURIComponent(_restoreSid)}`);
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
@@ -7004,7 +7036,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
         _markSessionCompletionUnread(completedSid, session.message_count);
       }
-      const isActiveSession=_isSessionCurrentPane(activeSid);
+      // #2761 (Gate B): when the session was rotated to a continuation id,
+      // the pane is authoritative if it is showing the rotated session (or
+      // still the original one).
+      const isActiveSession=_isSessionCurrentPane(activeSid)||_isSessionCurrentPane(_restoreSid);
       if(isActiveSession){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
@@ -7067,6 +7102,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(completedSid);
       }
       if(_isActiveSession()) _queueDrainSid=activeSid;
+      else if(S.session&&S.session.session_id===_restoreSid) _queueDrainSid=_restoreSid;
       renderSessionList();
       _setActivePaneIdleIfOwner();
       return returnStatus?'restored':true;
