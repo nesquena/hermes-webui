@@ -482,3 +482,9 @@ def test_settings_routes_persist_only_effective_locale():
     assert "payload.language=(typeof getActiveLocale==='function')?getActiveLocale():langSel.value" in PANELS_JS
     assert PANELS_JS.count("await _settleSettingsLocale(") >= 4
     assert "body.language=localeResult.active" in PANELS_JS
+
+
+def test_settings_locale_continuations_recheck_current_settlement():
+    assert "const pendingLanguage=langSel.value;" in PANELS_JS
+    assert "_settingsLocaleSettlementIsCurrent(localeResult)" in PANELS_JS
+    assert "const requestedLanguage=(selector&&selector.value)" in PANELS_JS

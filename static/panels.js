@@ -8782,7 +8782,9 @@ function _schedulePreferencesAutosave(){
 
 async function _autosavePreferencesSettings(payload){
   try{
-    const localeResult=await _settleSettingsLocale(payload&&payload.language,$('settingsLanguage'));
+    const selector=$('settingsLanguage');
+    const requestedLanguage=(selector&&selector.value)||((typeof getActiveLocale==='function')?getActiveLocale():(payload&&payload.language));
+    const localeResult=await _settleSettingsLocale(requestedLanguage,selector);
     if(localeResult&&localeResult.status==='superseded') return;
     if(payload&&localeResult) payload={...payload,language:localeResult.active};
     const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
@@ -8873,6 +8875,14 @@ async function _settleSettingsLocale(requested,selector){
   const active=(typeof getActiveLocale==='function')?getActiveLocale():(result&&result.active)||'en';
   if(selector) selector.value=active;
   return {...(result||{}),active};
+}
+
+function _settingsLocaleSettlementIsCurrent(result){
+  return !!result && result.status!=='superseded' && (
+    typeof getLocaleActivationGeneration!=='function' ||
+    result.generation===undefined ||
+    result.generation===getLocaleActivationGeneration()
+  );
 }
 
 function _retryPreferencesAutosave(){
@@ -9109,8 +9119,9 @@ async function loadSettingsPanel(){
       ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'))
       : (settings.language || localStorage.getItem('hermes-lang') || 'en');
     // Keep settings modal and current page strings in sync with the resolved locale.
-    const localeResult=await _settleSettingsLocale(resolvedLanguage,$('settingsLanguage'));
-    const effectiveLanguage=(localeResult&&localeResult.active)||resolvedLanguage;
+    const settingsLanguageSelector=document.getElementById('settingsLanguage');
+    const localeResult=await _settleSettingsLocale(resolvedLanguage,settingsLanguageSelector);
+    if(localeResult&&localeResult.status==='superseded') return;
     // Populate model dropdown from /api/models + live model fetch (#872)
     const modelSel=$('settingsModel');
     if(modelSel){
@@ -9169,7 +9180,7 @@ async function loadSettingsPanel(){
     // Language preference — metadata is eager, translation data is not.
     const langSel=$('settingsLanguage');
     if(langSel){
-      langSel.innerHTML='';
+      const pendingLanguage=langSel.value;langSel.innerHTML='';
       if(typeof LOCALE_REGISTRY!=='undefined'){
         for(const [code,metadata] of Object.entries(LOCALE_REGISTRY)){
           const opt=document.createElement('option');
@@ -9177,7 +9188,7 @@ async function loadSettingsPanel(){
           langSel.appendChild(opt);
         }
       }
-      langSel.value=effectiveLanguage;
+      langSel.value=pendingLanguage||getActiveLocale();
       langSel.addEventListener('change',async function(){
         await _settleSettingsLocale(this.value,this);
         _schedulePreferencesAutosave();
@@ -11888,8 +11899,12 @@ async function _applySavedSettingsUi(saved, body, opts){
   window._botName=body.bot_name||'Hermes';
   if(typeof applyBotName==='function') applyBotName();
   else if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
-  const localeResult=await _settleSettingsLocale(language,$('settingsLanguage'));
+  const localeResult=await _settleSettingsLocale(
+    (($('settingsLanguage')||{}).value)||((typeof getActiveLocale==='function')?getActiveLocale():language),
+    $('settingsLanguage')
+  );
   if(localeResult&&localeResult.status==='superseded') return;
+  if(!_settingsLocaleSettlementIsCurrent(localeResult)) return;
   if(localeResult) body.language=localeResult.active;
   _ensureComposerControlVisibilityState(saved||body||{});
   const composerOrderSource=(saved&&Array.isArray(saved.composer_control_order))
@@ -12521,8 +12536,12 @@ async function saveSettings(andClose){
   Object.assign(body,_composerControlVisibilityPayload());
   body.composer_control_order=_getComposerControlOrder();
   body.language=(typeof getActiveLocale==='function')?getActiveLocale():language;
-  const localeResult=await _settleSettingsLocale(language,$('settingsLanguage'));
+  const localeResult=await _settleSettingsLocale(
+    (($('settingsLanguage')||{}).value)||((typeof getActiveLocale==='function')?getActiveLocale():language),
+    $('settingsLanguage')
+  );
   if(localeResult&&localeResult.status==='superseded') return;
+  if(!_settingsLocaleSettlementIsCurrent(localeResult)) return;
   if(localeResult) body.language=localeResult.active;
   body.show_token_usage=showTokenUsage;
   const maxTokensField=$('settingsMaxTokens');
