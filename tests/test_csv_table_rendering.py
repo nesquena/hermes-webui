@@ -1,3 +1,4 @@
+import io
 from tests.i18n_locale_loader import locale_source_text
 """Test: CSV table rendering (#485)"""
 import re

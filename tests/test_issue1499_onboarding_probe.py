@@ -27,7 +27,6 @@ discovered data was indistinguishable from user-entered data after persist).
 """
 
 from __future__ import annotations
-from tests.i18n_locale_loader import locale_source_text
 
 import json
 import threading

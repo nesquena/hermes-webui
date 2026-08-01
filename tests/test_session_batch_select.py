@@ -1,3 +1,4 @@
+import io
 from tests.i18n_locale_loader import locale_source_text
 """Test: session batch select mode functions exist in sessions.js (#568)"""
 import re
