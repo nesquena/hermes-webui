@@ -42,7 +42,7 @@ from api.agent_sessions import (
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
-from api.process_event_utils import stamp_message_source
+from api.process_event_utils import stamp_message_source, stamp_wakeup_source_if_untagged, wakeup_event_key
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
@@ -9579,6 +9579,42 @@ def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
     return True
 
 
+def _normalize_wakeup_rows_for_display(messages):
+    """Stamp untagged wakeup rows and drop duplicate completion wakeups.
+
+    Display-side backstop for wake deliveries that persist without a durable
+    ``_source`` (self-POST wake turns, gateway-side turns merged from
+    state.db): stamp them so the never-render / ``[[SILENT]]``-collapse
+    contract holds, and collapse same-event completion rows (eager + merged
+    twins, or stale post-restart redeliveries) to the first occurrence.
+    Watch-match wakeups are stamped but never deduplicated (they can fire
+    several times for one process legitimately). Model context in state.db
+    is untouched — this only shapes the WebUI store projection.
+    """
+    if not isinstance(messages, list) or not messages:
+        return messages
+    seen_keys = set()
+    normalized = []
+    dropped = 0
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            stamp_wakeup_source_if_untagged(msg)
+            if msg.get("_source") == "process_wakeup":
+                key = wakeup_event_key(msg.get("content"))
+                if key is not None:
+                    if key in seen_keys:
+                        dropped += 1
+                        continue
+                    seen_keys.add(key)
+        normalized.append(msg)
+    if dropped:
+        logger.info(
+            "dropped %d duplicate process-completion wakeup row(s) during merge",
+            dropped,
+        )
+    return normalized
+
+
 def merge_session_messages_append_only(
     sidecar_messages: list,
     state_messages: list,
@@ -9812,7 +9848,7 @@ def merge_session_messages_append_only(
         merged_messages.append(msg)
         _remember_merged_message(msg)
     if _sidecar_has_terminal_partial_error(sidecar_messages):
-        return merged_messages
+        return _normalize_wakeup_rows_for_display(merged_messages)
     sidecar_visible_lookup = _build_visible_duplicate_lookup(sidecar_visible_keys)
     state_replay_idx = 0
     skipped_state_visible_counts = {}
@@ -10081,7 +10117,7 @@ def merge_session_messages_append_only(
         seen_visible_keys.add(visible_key)
         merged_messages.append(msg)
         _remember_merged_message(msg)
-    return merged_messages
+    return _normalize_wakeup_rows_for_display(merged_messages)
 
 
 def reconciled_state_db_messages_for_session(

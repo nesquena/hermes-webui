@@ -1,0 +1,144 @@
+"""Tests for the wakeup ``_source`` backstop and completion-row dedup.
+
+Wakeup deliveries that arrive without durable source metadata (api_server
+self-POST wake turns, gateway-side turns merged from state.db) must still be
+stamped ``_source='process_wakeup'`` so the never-render UI contract and the
+``[[SILENT]]`` turn collapse keep working, and duplicate deliveries of the
+same completion must collapse to a single store row.
+"""
+
+from api.models import _normalize_wakeup_rows_for_display
+from api.process_event_utils import (
+    is_wakeup_user_text,
+    stamp_message_source,
+    stamp_wakeup_source_if_untagged,
+    wakeup_event_key,
+)
+
+RAW_COMPLETION = (
+    "[IMPORTANT: Background process proc_5b9fcce4cbff completed (exit_code=1).\n"
+    "Command: exec yarn build --outDir /tmp/build --emptyOutDir\n"
+    "Output:\n"
+    "yarn run v1.22.22\n"
+    "error Couldn't find a package.json file in \"/a0\"\n"
+    "]"
+)
+PREFIXED_COMPLETION = (
+    "[Workspace::v1: /a0/usr/projects/MES/.worktrees/hermes-70ce773a]\n"
+    + RAW_COMPLETION
+)
+WRAPPED_COMPLETION = (
+    "[INTERNAL BACKGROUND EVENT — this is internal orchestration input, "
+    "not a user message.\nUse it to resume the current task.\n"
+    "Technical event follows:\n" + RAW_COMPLETION + "]"
+)
+WATCH_MATCH = (
+    '[IMPORTANT: Background process proc_aaaabbbbcccc matched watch pattern "DONE".\n'
+    "Command: make test\n"
+    "Matched output:\nDONE\n]"
+)
+
+
+def test_is_wakeup_user_text_shapes():
+    assert is_wakeup_user_text(RAW_COMPLETION)
+    assert is_wakeup_user_text(PREFIXED_COMPLETION)
+    assert is_wakeup_user_text(WRAPPED_COMPLETION)
+    assert is_wakeup_user_text(WATCH_MATCH)
+
+
+def test_is_wakeup_user_text_rejects_human_text():
+    assert not is_wakeup_user_text("Bonjour, peux-tu vérifier le build ?")
+    assert not is_wakeup_user_text("")
+    assert not is_wakeup_user_text(None)
+    # Mentioning a completion mid-paragraph is not the pinned envelope.
+    assert not is_wakeup_user_text("voici le log: " + RAW_COMPLETION)
+
+
+def test_wakeup_event_key_completion_shapes_agree():
+    key = ("completion", "proc_5b9fcce4cbff", "1")
+    assert wakeup_event_key(RAW_COMPLETION) == key
+    assert wakeup_event_key(PREFIXED_COMPLETION) == key
+    assert wakeup_event_key(WRAPPED_COMPLETION) == key
+
+
+def test_wakeup_event_key_watch_and_human_are_none():
+    assert wakeup_event_key(WATCH_MATCH) is None
+    assert wakeup_event_key("hello") is None
+
+
+def test_backstop_stamps_untagged_wakeup_row():
+    msg = {"role": "user", "content": RAW_COMPLETION}
+    assert stamp_wakeup_source_if_untagged(msg)
+    assert msg["_source"] == "process_wakeup"
+    assert msg["_wakeup_meta"]["task_id"] == "proc_5b9fcce4cbff"
+    assert msg["_wakeup_meta"]["exit_code"] == 1
+
+
+def test_backstop_leaves_human_and_stamped_rows_untouched():
+    human = {"role": "user", "content": "peux-tu relancer le build ?"}
+    assert not stamp_wakeup_source_if_untagged(human)
+    assert "_source" not in human
+
+    stamped = {"role": "user", "content": RAW_COMPLETION, "_source": "telegram"}
+    assert not stamp_wakeup_source_if_untagged(stamped)
+    assert stamped["_source"] == "telegram"
+
+    assistant = {"role": "assistant", "content": RAW_COMPLETION}
+    assert not stamp_wakeup_source_if_untagged(assistant)
+
+
+def test_stamp_message_source_falls_back_to_backstop():
+    msg = {"role": "user", "content": PREFIXED_COMPLETION}
+    stamp_message_source(msg, None)
+    assert msg["_source"] == "process_wakeup"
+
+    msg2 = {"role": "user", "content": "hello"}
+    stamp_message_source(msg2, "webui")
+    assert "_source" not in msg2
+
+    msg3 = {"role": "user", "content": RAW_COMPLETION}
+    stamp_message_source(msg3, "webui", active_turn_token="s1:1.0")
+    assert msg3["_source"] == "process_wakeup"
+    assert msg3["_active_turn_token"] == "s1:1.0"
+
+
+def test_normalize_collapses_eager_and_merged_twins():
+    eager = {"role": "user", "content": RAW_COMPLETION, "_active_turn_token": "t:1"}
+    merged = {"role": "user", "content": PREFIXED_COMPLETION}
+    reply = {"role": "assistant", "content": "[[SILENT]]"}
+    out = _normalize_wakeup_rows_for_display([eager, merged, reply])
+    assert len(out) == 2
+    assert out[0]["_source"] == "process_wakeup"
+    assert out[0]["_active_turn_token"] == "t:1"  # first occurrence kept
+    assert out[1] is reply
+
+
+def test_normalize_keeps_distinct_processes_and_watch_rows():
+    other = RAW_COMPLETION.replace("proc_5b9fcce4cbff", "proc_000011112222")
+    rows = [
+        {"role": "user", "content": RAW_COMPLETION},
+        {"role": "user", "content": other},
+        {"role": "user", "content": WATCH_MATCH},
+        {"role": "user", "content": WATCH_MATCH},
+    ]
+    out = _normalize_wakeup_rows_for_display(rows)
+    # Two completions (distinct sids) + both watch rows survive.
+    assert len(out) == 4
+    assert all(m["_source"] == "process_wakeup" for m in out)
+
+
+def test_normalize_stamps_previously_stamped_rows_into_dedup():
+    first = {
+        "role": "user",
+        "content": RAW_COMPLETION,
+        "_source": "process_wakeup",
+    }
+    second = {"role": "user", "content": PREFIXED_COMPLETION}
+    out = _normalize_wakeup_rows_for_display([first, second])
+    assert len(out) == 1
+    assert out[0] is first
+
+
+def test_normalize_passes_through_empty_and_non_list():
+    assert _normalize_wakeup_rows_for_display([]) == []
+    assert _normalize_wakeup_rows_for_display(None) is None

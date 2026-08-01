@@ -1208,6 +1208,12 @@ def _run_gateway_chat_streaming(
             pending_source = getattr(s, "pending_user_source", None) or "webui"
             if pending_source != "webui":
                 user_msg["_source"] = pending_source
+            else:
+                # Gateway-run wake turns (api_server self-POST) carry no
+                # durable source: fall back to the content-shape backstop so
+                # the merged row still satisfies the hide/collapse contract.
+                from api.process_event_utils import stamp_wakeup_source_if_untagged
+                stamp_wakeup_source_if_untagged(user_msg)
             if attachments:
                 user_msg["attachments"] = list(attachments)
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
