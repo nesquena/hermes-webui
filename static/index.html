@@ -754,6 +754,10 @@
               </span>
               <button class="ctx-compress-btn composer-mobile-context-compress" id="composerMobileCtxCompressBtn" type="button" style="display:none"></button>
             </div>
+            <button class="composer-mobile-config-action composer-mobile-squash-action" id="composerMobileSquashBtn" type="button" onclick="closeMobileComposerConfig();squashConversation()" data-i18n-title="squash_button_tooltip" data-i18n-aria-label="squash_button_tooltip" title="Squash conversation" aria-label="Squash conversation">
+              <span class="composer-mobile-squash-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg></span>
+              <span class="composer-mobile-config-copy composer-mobile-squash-copy"><span class="composer-mobile-config-value" data-i18n="squash_title">Squash conversation</span><span class="composer-mobile-context-detail" data-i18n="squash_mobile_hint">Archive full history and keep one summary</span></span>
+            </button>
           </div>
           <div class="ws-dropdown ws-dropdown-footer" id="composerWsDropdown" hidden aria-hidden="true" inert></div>
           <div class="composer-reasoning-dropdown" id="composerReasoningDropdown">
