@@ -566,8 +566,11 @@ def _is_agent_compression_start_status(kind: str, message: str) -> bool:
     auto-compression.
 
     Positive markers below match the agent emitters in hermes-agent
-    (``turn_context`` preflight, ``conversation_loop`` pre-API / 413 / too-large,
-    ``conversation_compression`` compaction status). Explicitly reject skip /
+    (``conversation_loop`` pre-API / 413 / too-large,
+    ``conversation_compression`` compaction status). Preflight compression
+    (``turn_context``) is intentionally excluded — the later authoritative
+    ``Compacting context`` marker is the signal that compression actually
+    proceeded. Explicitly reject skip /
     defer notices so "Skipping preflight compression…" never surfaces as a
     running compress divider.
     """
@@ -587,8 +590,7 @@ def _is_agent_compression_start_status(kind: str, message: str) -> bool:
     if 'compressed' in m and 'compressing' not in m and 'compression attempt' not in m:
         return False
     return (
-        'preflight compression:' in m
-        or 'pre-api compression:' in m
+        'pre-api compression:' in m
         or 'compacting context' in m
         or 'context too large' in m
         or '— compressing (' in m
