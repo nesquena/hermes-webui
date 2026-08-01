@@ -157,7 +157,7 @@ def test_update_apply_successful_stash_conflict_displays_recovery_message():
     restart_wait = body.index("_waitForServerThenReload", message_join)
 
     assert messages_decl < stash_branch < message_push < persistent_display < message_join < restart_wait
-    assert "showToast(stashConflictMessage||'Update applied" in body
+    assert "showToast(stashConflictMessage||updateText('update_applied_restarting'" in body
     assert "stashConflictMessages.length?10000" in body
 
 
@@ -174,7 +174,7 @@ def test_update_apply_multiple_stash_conflicts_are_aggregated_not_overwritten():
     assert "stashConflictMessages.push('Update applied ('+target+'): " in body
     assert "errEl.textContent=stashConflictMessages.join('\\n\\n')" in body
     assert "const stashConflictMessage=stashConflictMessages.join('\\n\\n');" in body
-    assert "showToast(stashConflictMessage||'Update applied" in body
+    assert "showToast(stashConflictMessage||updateText('update_applied_restarting'" in body
 
 
 def test_update_apply_network_error_classifier_ignores_http_status_errors():

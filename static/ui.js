@@ -10005,7 +10005,7 @@ function _formatUpdateApplyExceptionMessage(error){
 async function applyUpdates(){
   if(window._updateApplyInFlight) return;
   window._updateApplyInFlight=true;
-  const updateText=(key,fallback)=>(typeof _i18nUpdateText==='function'?_i18nUpdateText(key,fallback):fallback);
+  const updateText=(key,fallback,...args)=>(typeof _i18nUpdateText==='function'?_i18nUpdateText(key,fallback,...args):String(fallback).replace(/\{(\d+)\}/g,(match,index)=>args[index]===undefined?match:String(args[index])));
   const btn=$('btnApplyUpdate');
   const resetApplyButton=(delayMs)=>{
     const reset=()=>{
@@ -10022,6 +10022,8 @@ async function applyUpdates(){
   // retry starts clean (otherwise stale state points at the wrong target).
   const forceBtnReset=$('btnForceUpdate');
   if(forceBtnReset){forceBtnReset.disabled=true;forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
+  const clearLockBtnReset=$('btnClearUpdateLock');
+  if(clearLockBtnReset){clearLockBtnReset.disabled=true;clearLockBtnReset.style.display='none';clearLockBtnReset.dataset.target='';}
   const targets=[];
   if(window._updateData?.agent?.behind>0) targets.push('agent');
   if(window._updateData?.webui?.behind>0&&!window._updateData?.webui?.manual_update) targets.push('webui');
@@ -10034,6 +10036,8 @@ async function applyUpdates(){
   }
   try{
     const stashConflictMessages=[];
+    const noUpdateMessages=[];
+    let appliedTargetCount=0;
     const baselineServerIdentity = await _readHealthServerIdentity();
     for(const target of targets){
       // Send the channel the CHECK reported for this target (what was actually
@@ -10045,18 +10049,31 @@ async function applyUpdates(){
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000});
+      if(res.up_to_date){
+        const targetLabel=target==='webui'?'WebUI':'Agent';
+        const detail=res.message?(' '+res.message):'';
+        noUpdateMessages.push(updateText('update_no_change','No update was applied for {0}.',targetLabel)+detail);
+        continue;
+      }
       if(!res.ok){
         _showUpdateError(target,res);
         resetApplyButton(0);
         return;
       }
+      appliedTargetCount+=1;
       if(res.stash_conflict){
         stashConflictMessages.push('Update applied ('+target+'): '+(res.message||'Local changes were preserved in git stash.'));
         if(errEl){errEl.textContent=stashConflictMessages.join('\n\n');errEl.style.display='block';}
       }
     }
+    if(!appliedTargetCount){
+      const noUpdateMessage=noUpdateMessages.join('\n\n')||updateText('update_no_change','No update was applied.');
+      showToast(noUpdateMessage,10000,'info');
+      resetApplyButton(0);
+      return;
+    }
     const stashConflictMessage=stashConflictMessages.join('\n\n');
-    showToast(stashConflictMessage||'Update applied — restarting…',stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
+    showToast(stashConflictMessage||updateText('update_applied_restarting','Update applied — restarting…'),stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
     _waitForServerThenReload({baselineServerIdentity});
@@ -10070,6 +10087,7 @@ async function applyUpdates(){
 function _showUpdateError(target,res){
   const errEl=$('updateError');
   const forceBtn=$('btnForceUpdate');
+  const clearLockBtn=$('btnClearUpdateLock');
   const msg=_i18nUpdateText('update_failed_prefix','Update failed: ')+'('+target+') '+(res.message||_i18nUpdateText('update_unknown_error','unknown error'));
   if(errEl){
     errEl.textContent=msg;
@@ -10087,10 +10105,10 @@ function _showUpdateError(target,res){
     forceBtn.disabled=false;
     forceBtn.style.display='inline-block';
   }
+  if(clearLockBtn){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
   // Show "Clear lock and retry update" when the only failure was a stale
   // git lock. This calls the new non-destructive /api/updates/clear_lock
   // endpoint, which probes the lock for a holder and refuses if held.
-  const clearLockBtn=$('btnClearUpdateLock');
   if(clearLockBtn&&res.lock_conflict){
     clearLockBtn.dataset.target=target;
     clearLockBtn.disabled=false;
@@ -10108,12 +10126,23 @@ async function applyClearUpdateLock(btn){
   btn.textContent=_lt('update_lock_checking','Checking lock…');
   try{
     const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:60000});
-    if(res.ok){
+    if(res.up_to_date){
+      btn.disabled=true;
+      btn.style.display='none';
+      btn.dataset.target='';
+      const noUpdateMessage=_lt('update_no_change','No update was applied.')+(res.message?' '+res.message:'');
+      showToast(noUpdateMessage,10000,'info');
+    } else if(res.ok){
+      btn.disabled=true;
+      btn.style.display='none';
+      btn.dataset.target='';
       sessionStorage.removeItem('hermes-update-checked');
       sessionStorage.removeItem('hermes-update-dismissed');
       showToast(_lt('update_applied_restarting','Update applied — restarting…'));
       _waitForServerThenReload({});
     } else if(res.lock_held){
+      btn.style.display='none';
+      btn.dataset.target='';
       // v2.2: server returns manual-instruction. Show the exact `rm`
       // command + a one-click "I've removed it, retry update" affordance
       // that POSTs the same endpoint a second time (now that the user
@@ -10121,19 +10150,25 @@ async function applyClearUpdateLock(btn){
       // runs the normal non-destructive apply).
       _renderLockManualInstruction(target, res);
     } else {
+      btn.disabled=true;
+      btn.style.display='none';
+      btn.dataset.target='';
       const msg=_lt('update_lock_check_failed','Could not check the lock: ')+(res.message||_lt('update_unknown_error','unknown error'));
       const errEl=$('updateError');
       if(errEl){errEl.textContent=msg;errEl.style.display='block';}
       else showToast(msg);
     }
   }catch(e){
+    btn.disabled=true;
+    btn.style.display='none';
+    btn.dataset.target='';
     const msg=_lt('update_lock_request_failed','Lock-check request failed: ')+((e&&e.message)||String(e));
     const errEl=$('updateError');
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
     else showToast(msg);
   }finally{
     window._clearLockInFlight=false;
-    btn.disabled=false;
+    btn.disabled=btn.style.display==='none'||!btn.dataset.target;
     btn.textContent=originalLabel;
   }
 }
@@ -10291,6 +10326,8 @@ async function forceUpdate(btn){
     // _updateApplyInFlight intentionally stays true: the page will reload, and clearing
     // it here would open a double-submit window while _waitForServerThenReload is pending.
   }catch(e){
+    btn.style.display='none';
+    btn.dataset.target='';
     if(errEl){errEl.textContent=_lt('update_force_failed','Force update failed: ')+e.message;errEl.style.display='block';}
     btn.disabled=false;btn.textContent=forceLabel;
     window._updateApplyInFlight=false;

@@ -4221,3 +4221,151 @@ class TestUpdateDirtyStateRouting:
         inline_pat = re.compile(r'\.dirty\b[^;]*&&[^;]*\.no_git')
         assert not inline_pat.search(show_fn), '_showUpdateBanner must not inline the dirty predicate'
         assert not inline_pat.search(check_fn), 'checkUpdatesNow must not inline the dirty predicate'
+
+
+def _run_apply_response_sequence(responses):
+    """Run applyUpdates() with ordered API responses and capture terminal UI state."""
+    src = read('static/ui.js')
+    ui_fns = '\n'.join([
+        extract_js_function(src, '_i18nUpdateText'),
+        extract_js_function(src, '_showUpdateError'),
+        extract_js_function(src, 'applyUpdates'),
+    ])
+    script = (
+        '"use strict";'
+        '(async()=>{'
+        'let _apiIndex=0;let _reloads=0;let _toast=null;'
+        'const _el={'
+        'btnApplyUpdate:{style:{display:"inline-block"},disabled:false,textContent:"Update Now",dataset:{}},'
+        'btnForceUpdate:{style:{display:"inline-block"},disabled:false,textContent:"Force update",dataset:{target:"webui"}},'
+        'btnClearUpdateLock:{style:{display:"inline-block"},disabled:false,textContent:"Clear lock",dataset:{target:"agent"}},'
+        'updateError:{style:{display:"none"},textContent:""},'
+        '};'
+        'global.window={_updateData:{webui:{behind:2,channel:"stable"}},_updateApplyInFlight:false};'
+        'global.$=(id)=>_el[id]||null;'
+        'function t(k){return k;}'
+        'global.api=async()=>(' + json.dumps(responses) + ')[_apiIndex++];'
+        'global._readHealthServerIdentity=async()=>null;'
+        'global._waitForServerThenReload=async()=>{_reloads+=1;};'
+        'global.showToast=(...args)=>{_toast=args;};'
+        'global.sessionStorage={removeItem:()=>{},setItem:()=>{},getItem:()=>null};'
+        + ui_fns
+        + ';await applyUpdates();'
+        + (';await applyUpdates();' if len(responses) > 1 else '')
+        + 'process.stdout.write(JSON.stringify({'
+        'reloads:_reloads,toast:_toast,error:_el.updateError.textContent,'
+        'error_visible:_el.updateError.style.display!=="none",'
+        'in_flight:!!window._updateApplyInFlight,'
+        'clear_visible:_el.btnClearUpdateLock.style.display!=="none",'
+        'clear_disabled:_el.btnClearUpdateLock.disabled,'
+        'clear_target:_el.btnClearUpdateLock.dataset.target,'
+        '}));'
+        '})()'
+    )
+    r = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', timeout=15)
+    assert r.returncode == 0, f'node exited {r.returncode}:\n{r.stderr}'
+    return json.loads(r.stdout)
+
+
+def _run_clear_lock_response(response, raises=False):
+    """Run applyClearUpdateLock() and capture restart, toast, and control state."""
+    src = read('static/ui.js')
+    ui_fns = '\n'.join([
+        extract_js_function(src, '_i18nUpdateText'),
+        extract_js_function(src, 'applyClearUpdateLock'),
+    ])
+    response_js = 'throw new Error("connection lost")' if raises else 'return ' + json.dumps(response)
+    script = (
+        '"use strict";'
+        '(async()=>{'
+        'let _reloads=0;let _toast=null;'
+        'const _el={updateError:{style:{display:"none"},textContent:""}};'
+        'const _btn={style:{display:"inline-block"},disabled:false,textContent:"Clear lock",dataset:{target:"webui"}};'
+        'global.window={_clearLockInFlight:false};'
+        'global.$=(id)=>id==="updateError"?_el.updateError:null;'
+        'function t(k){return k;}'
+        'global.api=async()=>{' + response_js + ';};'
+        'global._waitForServerThenReload=async()=>{_reloads+=1;};'
+        'global.showToast=(...args)=>{_toast=args;};'
+        'global.sessionStorage={removeItem:()=>{},setItem:()=>{},getItem:()=>null};'
+        + ui_fns
+        + ';await applyClearUpdateLock(_btn);'
+        + 'process.stdout.write(JSON.stringify({'
+        'reloads:_reloads,toast:_toast,error:_el.updateError.textContent,'
+        'error_visible:_el.updateError.style.display!=="none",'
+        'in_flight:!!window._clearLockInFlight,visible:_btn.style.display!=="none",'
+        'disabled:_btn.disabled,target:_btn.dataset.target,'
+        '}));'
+        '})()'
+    )
+    r = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', timeout=15)
+    assert r.returncode == 0, f'node exited {r.returncode}:\n{r.stderr}'
+    return json.loads(r.stdout)
+
+
+class TestUpdateRecoveryResponseLifecycle:
+    """Every apply and clear-lock response leaves recovery state truthful."""
+
+    def test_apply_up_to_date_is_info_without_restart(self):
+        result = _run_apply_response_sequence([{
+            'ok': True,
+            'up_to_date': True,
+            'message': 'no compare ref',
+        }])
+        assert result['reloads'] == 0
+        assert result['toast'][2] == 'info'
+        assert 'No update was applied' in result['toast'][0]
+        assert not result['error_visible']
+        assert not result['in_flight']
+
+    def test_clear_lock_up_to_date_is_info_without_restart(self):
+        result = _run_clear_lock_response({
+            'ok': True,
+            'up_to_date': True,
+            'message': 'no compare ref',
+        })
+        assert result['reloads'] == 0
+        assert result['toast'][2] == 'info'
+        assert 'No update was applied' in result['toast'][0]
+        assert not result['visible']
+        assert result['disabled']
+        assert result['target'] == ''
+        assert not result['in_flight']
+
+    def test_clear_lock_exception_retires_recovery_control(self):
+        result = _run_clear_lock_response({}, raises=True)
+        assert result['reloads'] == 0
+        assert result['error_visible']
+        assert not result['visible']
+        assert result['disabled']
+        assert result['target'] == ''
+        assert not result['in_flight']
+
+    def test_later_non_lock_failure_clears_previous_clear_lock_target(self):
+        result = _run_apply_response_sequence([
+            {'ok': False, 'lock_conflict': True, 'message': 'stale lock'},
+            {'ok': False, 'conflict': True, 'message': 'normal conflict'},
+        ])
+        assert result['reloads'] == 0
+        assert not result['clear_visible']
+        assert result['clear_disabled']
+        assert result['clear_target'] == ''
+        assert result['error_visible']
+
+    def test_all_new_recovery_copy_keys_are_present_in_each_locale(self):
+        src = read('static/i18n.js')
+        keys = [
+            'update_no_change', 'update_dirty_state', 'update_dirty_force_hint',
+            'update_force_unavailable_webui', 'update_force_unavailable_agent',
+            'update_force_confirm_title', 'update_force_confirm_message',
+            'update_force_updating', 'update_force_failed', 'update_force_noop',
+            'update_force_applied_restarting', 'update_applied_restarting',
+            'update_applied_with_target', 'update_stash_preserved',
+            'update_lock_checking', 'update_lock_check_failed',
+            'update_lock_request_failed', 'update_lock_present',
+            'update_lock_present_host', 'update_lock_copy_command',
+            'update_lock_copied', 'update_lock_clipboard_unavailable',
+            'update_lock_copy_failed', 'update_lock_retry', 'update_lock_other_files',
+        ]
+        for key in keys:
+            assert len(re.findall(r'^\s+' + re.escape(key) + r':', src, re.MULTILINE)) == 15, key
