@@ -2598,11 +2598,17 @@ class TestSequentialUpdateRestartCoordination:
         scheduled = []
         worker_thread = None
         worker_acquiring_lock = _th.Event()
+        acquire_attempts = 0
+        acquire_attempts_lock = _th.Lock()
         real_apply_lock = upd._apply_lock
 
         class ProbedApplyLock:
             def __enter__(self):
-                if _th.current_thread() is worker_thread:
+                nonlocal acquire_attempts
+                with acquire_attempts_lock:
+                    acquire_attempts += 1
+                    is_restart_attempt = acquire_attempts == 2
+                if is_restart_attempt:
                     worker_acquiring_lock.set()
                 return real_apply_lock.__enter__()
 
