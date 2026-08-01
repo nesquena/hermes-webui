@@ -9945,7 +9945,7 @@ function _showUpdateBanner(data){
     } else {
       // Clean state (not manual, not dirty): reset any stale force affordance
       const forceBtn=$('btnForceUpdate');
-      if(forceBtn){forceBtn.style.display='none';forceBtn.dataset.target='';}
+      if(forceBtn){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
     }
   }
   if(!parts.length&&!hasDirty){
@@ -10012,7 +10012,7 @@ async function applyUpdates(){
   // Hide any leftover force-update button from a prior conflict so a fresh
   // retry starts clean (otherwise stale state points at the wrong target).
   const forceBtnReset=$('btnForceUpdate');
-  if(forceBtnReset){forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
+  if(forceBtnReset){forceBtnReset.disabled=true;forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
   const targets=[];
   if(window._updateData?.agent?.behind>0) targets.push('agent');
   if(window._updateData?.webui?.behind>0&&!window._updateData?.webui?.manual_update) targets.push('webui');
@@ -10245,24 +10245,29 @@ async function forceUpdate(btn){
     const baselineServerIdentity = await _readHealthServerIdentity();
     const body=channel?{target,channel}:{target};
     const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(body),timeoutMs:120000});
-    if(!res.ok){
+    if(!res.ok&&!res.refused_rewind){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';
       window._updateApplyInFlight=false;
       return;
     }
-    if(res.up_to_date){
-      // No compare ref on this channel (e.g. stable HEAD already past latest stable tag):
-      // the backend did not touch the tree. Show as informational in the banner message area,
-      // not as an error. Hide the force button — pressing again would produce the same outcome.
-      const infoMsg=res.message||'No remote update to reset to on this channel — local changes remain unchanged. Switch to Experimental or update manually.';
+    if(res.up_to_date||res.refused_rewind){
+      // No-op state: backend declined to reset the tree. Keep the local-changes sentence in
+      // the banner so the user knows the dirty install still exists, and add a channel note.
+      // Do not hide or disable the button — the user needs a path forward.
       const bannerMsg=$('updateMsg');
-      if(bannerMsg) bannerMsg.textContent='ℹ️ '+infoMsg;
+      if(bannerMsg){
+        const _lt=(typeof _i18nUpdateText==='function')?_i18nUpdateText:(k,f)=>f||k;
+        const targetLabel=target==='webui'?'WebUI':target==='agent'?'Agent':target;
+        const localNote=_lt('settings_local_changes_detected','Local changes detected')+' in '+targetLabel+'.';
+        const channelNote=res.refused_rewind
+          ?'This checkout is ahead of the '+(channel||'current')+' channel; the forced update would downgrade it. Switch to Experimental or clean the repository manually.'
+          :'This channel has no published version to reset to; the forced update did not run. Switch to Experimental or clean the repository manually.';
+        bannerMsg.textContent='⚠️ '+localNote+' '+channelNote;
+      }
       const bannerEl=$('updateBanner');
       if(bannerEl) bannerEl.classList.add('visible');
-      const forceBtn=$('btnForceUpdate');
-      if(forceBtn){forceBtn.style.display='none';forceBtn.dataset.target='';}
-      btn.disabled=true;btn.textContent='Force update';
+      btn.disabled=false;btn.textContent='Force update';
       window._updateApplyInFlight=false;
       return;
     }

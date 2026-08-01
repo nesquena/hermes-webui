@@ -71,28 +71,19 @@
       "webui": {
         "name": "webui",
         "behind": null,
-        "dirty": false,
-        "no_git": true,
-        "channel": "stable"
+        "no_git": true
       }
     },
     "no_git_webui_dirty_agent": {
       "webui": {
         "name": "webui",
-        "current": "v0.52.153",
-        "latest": null,
-        "behind": 0,
-        "dirty": false,
-        "no_git": true,
-        "channel": "stable"
+        "behind": null,
+        "no_git": true
       },
       "agent": {
         "name": "agent",
-        "current": "v0.9.4",
-        "latest": "v0.9.4",
         "behind": 0,
-        "dirty": true,
-        "channel": "stable"
+        "dirty": true
       }
     },
     "manual_webui_dirty_agent": {
@@ -115,18 +106,6 @@
         "behind": 0,
         "dirty": true,
         "channel": "stable"
-      }
-    },
-    "noGitWebUiDirtyAgent": {
-      "webui": {
-        "name": "webui",
-        "behind": null,
-        "no_git": true
-      },
-      "agent": {
-        "name": "agent",
-        "behind": 0,
-        "dirty": true
       }
     }
   },

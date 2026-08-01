@@ -11985,7 +11985,7 @@ async function checkUpdatesNow(channelOverride){
       const noGitParts=[];
       if(data.webui&&data.webui.no_git&&!data.webui.manual_update) noGitParts.push('WebUI');
       if(data.agent&&data.agent.no_git&&!data.agent.ignored) noGitParts.push('Agent');
-      const {hasDirty:_hasDirty}=_updateDirtyState(data);
+      const {hasDirty:_hasDirty}=(typeof _updateDirtyState==='function'?_updateDirtyState(data):{hasDirty:false,webuiDirty:false,agentDirty:false,dirtyTarget:''});
       if(parts.length){
         let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
         if(manualInstruction) txt+=' · '+manualInstruction;

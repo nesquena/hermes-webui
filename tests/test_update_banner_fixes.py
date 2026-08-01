@@ -3319,7 +3319,7 @@ class TestCheckForUpdatesButton:
 
 # ── #4085: Dirty install recovery ─────────────────────────────────────────────
 
-_REPRO_PATH = REPO / 'tests' / 'fixtures' / 'webui-PR-TARGET-4085-REPRO.json'
+_REPRO_PATH = REPO / 'tests' / 'fixtures' / 'issue4085_dirty_install_repro.json'
 _REPRO_PAYLOADS = json.loads(_REPRO_PATH.read_text(encoding='utf-8'))['payloads']
 
 
@@ -3409,6 +3409,7 @@ def _run_force_update(update_data, target, confirm, api_response):
         'msg_text:_el.updateMsg.textContent,'
         'banner_visible:_el.updateBanner.classList._s.has("visible"),'
         'force_btn_visible:_el.btnForceUpdate.style.display!=="none",'
+        'btn_disabled:_btn.disabled,'
         'toast_shown:_toast,'
         'in_flight:!!window._updateApplyInFlight,'
         '}));'
@@ -3700,14 +3701,40 @@ class TestDirtyInstallRecovery:
         assert not result['toast_shown'], 'success toast must not fire when server reports up_to_date'
         assert not result['error_visible'], 'up_to_date must not use the error slot (wrong color)'
         assert result['banner_visible'], 'banner must be visible with the up_to_date info message'
-        assert 'up to date' in result['msg_text'].lower(), (
-            f'banner msg must mention up-to-date; got {result["msg_text"]!r}'
+        assert 'local changes' in result['msg_text'].lower(), (
+            f'banner msg must mention local changes; got {result["msg_text"]!r}'
         )
-        assert not result['force_btn_visible'], (
-            'force button must be hidden after up_to_date (re-pressing would give same result)'
+        assert not result['btn_disabled'], (
+            'force button must be re-enabled after up_to_date (server declined, user can try another channel)'
         )
         assert not result['in_flight'], (
             'in_flight must be cleared after up_to_date (no restart pending)'
+        )
+
+    def test_refused_rewind_honest_banner(self):
+        """P2: refused_rewind=true must show honest local-changes banner, not red error, and re-enable the button."""
+        payload = _REPRO_PAYLOADS['dirty_current']
+        result = _run_force_update(
+            update_data=payload,
+            target='webui',
+            confirm=True,
+            api_response={
+                'ok': False,
+                'refused_rewind': True,
+                'message': 'webui checkout is ahead of the stable channel; refusing to downgrade.',
+            },
+        )
+        assert not result['toast_shown'], 'success toast must not fire when server refuses rewind'
+        assert not result['error_visible'], 'refused_rewind must not use the error slot (wrong color)'
+        assert result['banner_visible'], 'banner must be visible with the refused_rewind info message'
+        assert 'local changes' in result['msg_text'].lower(), (
+            f'banner msg must mention local changes; got {result["msg_text"]!r}'
+        )
+        assert not result['btn_disabled'], (
+            'force button must be re-enabled after refused_rewind (server declined, user can act)'
+        )
+        assert not result['in_flight'], (
+            'in_flight must be cleared after refused_rewind (no restart pending)'
         )
 
     def test_restart_holds_in_flight_guard(self):
