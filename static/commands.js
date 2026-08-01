@@ -1255,6 +1255,7 @@ async function cmdGoal(args){
     appendThinking();setBusy(true);
     setComposerStatus(t('goal_working_toward'));
     S.activeStreamId=r.stream_id;
+    if(typeof window._voiceLeaseBind==='function') window._voiceLeaseBind(r.stream_id,activeSid);
     if(S.session&&S.session.session_id===activeSid){
       S.session.active_stream_id=r.stream_id;
       if(typeof r.pending_started_at==='number')S.session.pending_started_at=r.pending_started_at;
@@ -1466,6 +1467,7 @@ function _steerClearCurrentOwnerDeadRun(ownerSid, ownerStreamId){
   if(S.busy){S.busy=false;changed=true;}
   if(S.activeStreamId){S.activeStreamId=null;changed=true;}
   if(S.session&&S.session.active_stream_id){S.session.active_stream_id=null;changed=true;}
+  if(changed&&typeof window._voiceLeaseSettleOwner==='function') window._voiceLeaseSettleOwner(ownerSid,ownerStreamId,{success:false});
   if(typeof INFLIGHT!=='undefined'&&INFLIGHT&&INFLIGHT[ownerSid]){
     delete INFLIGHT[ownerSid];
     changed=true;

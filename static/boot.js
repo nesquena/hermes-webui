@@ -55,6 +55,7 @@ async function cancelStream(reason){
   if(respOk && respBody && respBody.cancelled===false && S.activeStreamId===streamId){
     S.activeStreamId=null;
     setBusy(false);
+    if(typeof window._voiceLeaseSettleOwner==='function') window._voiceLeaseSettleOwner(sid,streamId,{success:false});
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
     // /api/chat/cancel only exposes `cancelled:bool`, so we cannot
@@ -88,6 +89,7 @@ async function cancelSessionStream(session){
     if(S.session) S.session.active_stream_id=null;
     clearInflight();
     setBusy(false);
+    if(typeof window._voiceLeaseSettleOwner==='function') window._voiceLeaseSettleOwner(sid,streamId,{success:false});
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
   }
@@ -1529,9 +1531,6 @@ window.renderTranscript=function(container, messages, opts){
   let _voiceContextId=0;
   let _voiceManualPending=null;
   let _recognition=null;
-  let _silenceTimer=null;
-  let _voiceGeneration=0;
-  let _voiceModeThinkingSid=null;
   let _browserTtsKeepAlive=null;
   let _browserTtsWatchdog=null;
   let _browserTtsSuppressNextErrorRearm=false;
@@ -1582,16 +1581,26 @@ window.renderTranscript=function(container, messages, opts){
     try{recognition.abort();}catch(_){ }
   }
 
-  function _invalidateVoiceLease(){
+  function _invalidateVoiceLease(options={}){
     const lease=_voiceLease;
     _voiceContextId+=1;
-    _voiceLease=null;
-    _voiceManualPending=null;
     _clearVoiceLeaseTimers(lease);
     _releaseVoiceRecognition(lease);
     _clearBrowserTtsRecovery();
-    try{speechSynthesis.cancel();}catch(_){ }
+    if(typeof stopTTS==='function') stopTTS();
+    else try{speechSynthesis.cancel();}catch(_){ }
     _browserTtsSuppressNextErrorRearm=false;
+    if(options.preserveSubmission&&lease&&lease.submitted&&_voiceManualPending===lease){
+      lease.contextId=_voiceContextId;
+      lease.owner=null;
+      lease.settled=false;
+      lease.manual=true;
+      _voiceLease=lease;
+      _voiceModeState='thinking';
+      return;
+    }
+    _voiceLease=null;
+    _voiceManualPending=null;
     _voiceModeState='idle';
   }
 
@@ -1656,6 +1665,15 @@ window.renderTranscript=function(container, messages, opts){
   function _voiceLeaseSettleLocal(){
     const lease=_voiceManualPending;
     if(!lease||!_voiceLeaseCurrent(lease)) return;
+    if(_voiceBusy()){
+      lease.submitted=false;
+      lease.manual=false;
+      lease.finalText='';
+      lease.interimText='';
+      _voiceManualPending=null;
+      _voiceModeState='thinking';
+      return;
+    }
     _voiceManualPending=null;
     lease.owner={sid:'',streamId:''};
     _voiceLeaseSettle(lease,{success:false,local:true});
@@ -1684,7 +1702,7 @@ window.renderTranscript=function(container, messages, opts){
     return _voiceLeaseSettle(lease,outcome||{success:false});
   };
   window._voiceLeaseInvalidate=(options={})=>{
-    _invalidateVoiceLease();
+    _invalidateVoiceLease(options);
     if(options.rearm!==false) _resumeVoiceLease();
   };
   window._voiceLeaseResume=_resumeVoiceLease;
@@ -1707,13 +1725,14 @@ window.renderTranscript=function(container, messages, opts){
     // Chromium can drop utter.onend on later turns, so force a recovery path.
     const watchdogMs=Math.max(4000,Math.round((String(clean||'').length/(12*safeRate))*1000)+10000);
     _browserTtsWatchdog=setTimeout(()=>{
-      if(!_voiceModeActive||_voiceModeState!=='speaking') return;
+      if(!_voiceLeaseCurrent(lease)||_voiceModeState!=='speaking') return;
       _browserTtsSuppressNextErrorRearm=true;
       try{ speechSynthesis.cancel(); }catch(_){}
       _clearBrowserTtsRecovery();
       _scheduleVoiceRestart(lease,0);
     },watchdogMs);
     _browserTtsKeepAlive=setInterval(()=>{
+      if(!_voiceLeaseCurrent(lease)) return;
       if(!_voiceModeActive||_voiceModeState!=='speaking'){
         _clearBrowserTtsRecovery();
         return;
@@ -1738,10 +1757,6 @@ window.renderTranscript=function(container, messages, opts){
 
   function _startListening(){
     let lease=arguments[0]||_voiceLease;
-    // Compatibility aliases retain the public recognition configuration seam.
-    // _recognition=new SpeechRecognition();
-    // _recognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true';
-    // _silenceTimer=setTimeout(()=>{_voiceModeSend();},_voiceSilenceMs());
     if(!_voiceModeActive||_voiceBusy()) return;
     lease=lease||_voiceLease;
     if(!_voiceLeaseCurrent(lease)) return;
@@ -1811,20 +1826,14 @@ window.renderTranscript=function(container, messages, opts){
   function _voiceModeSend(){
     const lease=_voiceLease;
     if(!_voiceLeaseCurrent(lease)) return;
-    _voiceModeThinkingSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
     _voiceLeaseSubmit(lease);
   }
 
   function _speakResponse(lease){
     lease=lease||_voiceLease;
     if(!_voiceLeaseCurrent(lease)) return;
-    // The lease owner supersedes the legacy sid pin; stale callbacks still
-    // return to the current lease's listening state through _startListening().
-    if(_voiceModeThinkingSid&&lease.owner&&lease.owner.sid!==_voiceModeThinkingSid) _scheduleVoiceRestart(lease,0);
     // Bail out if the user navigated to a different session between send and
-    // stream completion. The patched autoReadLastAssistant fires globally;
-    // without this guard it would TTS-read the wrong session's last assistant
-    // message. Drop back to listening on the new session instead.
+    // stream completion. Drop back to listening on the new session instead.
     const currentSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
     if(lease.owner&&lease.owner.sid && currentSid && currentSid!==lease.owner.sid){
       _voiceLeaseSettle(lease,{success:false});
@@ -1867,23 +1876,27 @@ window.renderTranscript=function(container, messages, opts){
       };
       Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
         .then(function(buf){
+          if(!_voiceLeaseCurrent(lease)) return;
           const blob=new Blob([buf]);
           const url=URL.createObjectURL(blob);
           const audio=new Audio(url);
           _playingEdgeAudio=audio;
           audio.onended=function(){
+            if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
             _ttsSpeaking=false;
             if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
             URL.revokeObjectURL(url);
             if(_voiceModeActive) _scheduleVoiceRestart(lease,500);
           };
           audio.onerror=function(){
+            if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
             _ttsSpeaking=false;
             if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
             URL.revokeObjectURL(url);
             if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
           };
           audio.play().catch(function(){
+            if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
             _ttsSpeaking=false;
             if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
             URL.revokeObjectURL(url);
@@ -1891,6 +1904,7 @@ window.renderTranscript=function(container, messages, opts){
           });
         })
         .catch(function(){
+          if(!_voiceLeaseCurrent(lease)) return;
           _ttsSpeaking=false;
           if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
         });
@@ -1908,22 +1922,26 @@ window.renderTranscript=function(container, messages, opts){
         return r.blob();
       })
       .then(blob => {
+        if(!_voiceLeaseCurrent(lease)) return;
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         _playingEdgeAudio=audio;
         audio.onended = () => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
           if(_voiceModeActive) _scheduleVoiceRestart(lease,500);
         };
         audio.onerror = () => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
           if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
         };
         audio.play().catch(e => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
@@ -1931,6 +1949,7 @@ window.renderTranscript=function(container, messages, opts){
         });
       })
       .catch(() => {
+        if(!_voiceLeaseCurrent(lease)) return;
         _ttsSpeaking=false;
         if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
       });
@@ -1948,22 +1967,26 @@ window.renderTranscript=function(container, messages, opts){
         return r.blob();
       })
       .then(blob => {
+        if(!_voiceLeaseCurrent(lease)) return;
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         _playingEdgeAudio=audio;
         audio.onended = () => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
           if(_voiceModeActive) _scheduleVoiceRestart(lease,500);
         };
         audio.onerror = () => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
           if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
         };
         audio.play().catch(() => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
@@ -1971,6 +1994,7 @@ window.renderTranscript=function(container, messages, opts){
         });
       })
       .catch(() => {
+        if(!_voiceLeaseCurrent(lease)) return;
         _ttsSpeaking=false;
         if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
       });
@@ -1994,6 +2018,7 @@ window.renderTranscript=function(container, messages, opts){
         return r.blob();
       })
       .then(blob => {
+        if(!_voiceLeaseCurrent(lease)) return;
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         // Register with the shared handle (declared in ui.js, same global scope;
@@ -2002,24 +2027,28 @@ window.renderTranscript=function(container, messages, opts){
         // Edge playback. Without this the audio is local here and unstoppable.
         _playingEdgeAudio=audio;
         audio.onended = () => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
           if(_voiceModeActive) _scheduleVoiceRestart(lease,500);
         };
         audio.onerror = () => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
           if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
         };
         audio.play().catch(e => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
         });
       })
       .catch(() => {
+        if(!_voiceLeaseCurrent(lease)) return;
         _ttsSpeaking=false;
         if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
       });
@@ -2040,12 +2069,14 @@ window.renderTranscript=function(container, messages, opts){
     if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
 
     utter.onend=()=>{
+      if(!_voiceLeaseCurrent(lease)) return;
       _browserTtsSuppressNextErrorRearm=false;
       _clearBrowserTtsRecovery();
       // After speaking, go back to listening
       if(_voiceModeActive&&_voiceModeState==='speaking') _scheduleVoiceRestart(lease,500);
     };
     utter.onerror=()=>{
+      if(!_voiceLeaseCurrent(lease)) return;
       _clearBrowserTtsRecovery();
       if(_browserTtsSuppressNextErrorRearm){
         _browserTtsSuppressNextErrorRearm=false;

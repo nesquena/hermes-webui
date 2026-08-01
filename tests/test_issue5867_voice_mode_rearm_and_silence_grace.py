@@ -9,6 +9,7 @@ import pytest
 
 NODE = shutil.which("node")
 BOOT = Path("static/boot.js").read_text(encoding="utf-8")
+MESSAGES = Path("static/messages.js").read_text(encoding="utf-8")
 
 
 def _voice_runtime():
@@ -16,6 +17,35 @@ def _voice_runtime():
     start = BOOT.index("  let _voiceModeActive=false;")
     end = BOOT.index("  function _speakResponse(", start)
     return BOOT[pref:BOOT.index("  let _voiceModeActive=false;", pref)] + BOOT[start:end]
+
+
+def _function_source(source: str, name: str) -> str:
+    anchor = f"function {name}("
+    start = source.index(anchor)
+    paren_start = source.index("(", start)
+    paren_depth = 1
+    paren_end = paren_start + 1
+    while paren_depth:
+        if source[paren_end] == "(":
+            paren_depth += 1
+        elif source[paren_end] == ")":
+            paren_depth -= 1
+        paren_end += 1
+    body_start = source.index("{", paren_end)
+    depth = 1
+    idx = body_start + 1
+    while depth:
+        if source[idx] == "{":
+            depth += 1
+        elif source[idx] == "}":
+            depth -= 1
+        idx += 1
+    return source[start:idx]
+
+
+OWNER_SOURCE = _function_source(MESSAGES, "_setActivePaneIdleIfOwner")
+SEND_SOURCE = _function_source(MESSAGES, "send")
+ATTACH_SOURCE = _function_source(MESSAGES, "attachLiveStream")
 
 
 HARNESS = r"""
@@ -76,15 +106,26 @@ advance(500);
 const afterSend = { sends: state.sends, state: api.state() };
 api.prepare(); api.bind('stream-1', 's1');
 const settled = api.settle('s1', 'stream-1', { success: false });
-console.log(JSON.stringify({ before, afterRestart, afterSend, settled, finalState: api.state(), aborts: state.aborts }));
+const duplicate = api.settle('s1', 'stream-1', { success: false });
+const stale = api.settle('old-session', 'old-stream', { success: false });
+const ownerEvents = [];
+windowObj._voiceModeOnResponseComplete = outcome => ownerEvents.push(outcome);
+const ownerFactory = new Function('window','_isActiveSession','S','INFLIGHT','setBusy','setComposerStatus','setStatus',
+  "return (" + Buffer.from('${OWNER_B64}', 'base64').toString() + ");");
+const owner = ownerFactory(windowObj, () => true, S, { s1: {} }, () => { S.busy = false; }, () => {}, () => {});
+S.busy = true;
+owner({ success: false });
+console.log(JSON.stringify({ before, afterRestart, afterSend, settled, duplicate, stale, finalState: api.state(), aborts: state.aborts, ownerEvents }));
 """
 
 
 def _run_runtime():
     encoded = base64.b64encode(_voice_runtime().encode()).decode()
+    owner_encoded = base64.b64encode(OWNER_SOURCE.encode()).decode()
     script = HARNESS.replace(
         "${RUNTIME}", "${Buffer.from('" + encoded + "','base64').toString()}"
     )
+    script = script.replace("${OWNER_B64}", owner_encoded)
     result = subprocess.run([NODE, "-e", script], capture_output=True, text=True)
     if result.returncode:
         raise AssertionError(result.stderr)
@@ -105,4 +146,22 @@ def test_voice_lease_composes_endpoint_restart_and_exact_terminal_settlement():
 def test_voice_lease_ignores_duplicate_or_stale_owner_callbacks():
     result = _run_runtime()
     assert result["settled"] is True
+    assert result["duplicate"] is False
+    assert result["stale"] is False
     assert result["aborts"] >= 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_actual_messages_owner_seam_settles_voice_outcome_once():
+    result = _run_runtime()
+    assert result["ownerEvents"] == [{"success": False}]
+
+
+def test_production_send_and_stream_paths_share_the_lease_seams():
+    assert "_voiceLeasePrepareSubmission" not in SEND_SOURCE.split("if(!S.session)", 1)[0]
+    assert "if(typeof window._voiceLeasePrepareSubmission==='function') window._voiceLeasePrepareSubmission();" in SEND_SOURCE
+    assert "if(streamId&&typeof window._voiceLeaseBind==='function') window._voiceLeaseBind(streamId,activeSid);" in SEND_SOURCE
+    assert "if(!streamId&&typeof window._voiceLeaseSettleLocal==='function') window._voiceLeaseSettleLocal();" in SEND_SOURCE
+    assert ATTACH_SOURCE.count("_setActivePaneIdleIfOwner({success:true});") == 1
+    assert ATTACH_SOURCE.count("_setActivePaneIdleIfOwner({success:false});") >= 5
+    assert "window._voiceModeOnResponseComplete(voiceOutcome);" in OWNER_SOURCE

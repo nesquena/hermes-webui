@@ -7012,6 +7012,7 @@ async function switchToProfile(name) {
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
+    if (typeof window._voiceLeaseInvalidate === 'function') window._voiceLeaseInvalidate({rearm:false});
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
@@ -7092,6 +7093,7 @@ async function switchToProfile(name) {
     // model patch above (don't touch a session about to be replaced).
     if (S.session && !sessionInProgress) {
       S.session.profile = data.active || name;
+      if (typeof window._voiceLeaseResume === 'function') window._voiceLeaseResume();
     }
     if (typeof refreshProfileTransitionReasoningChip === 'function') {
       refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider);

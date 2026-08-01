@@ -29,7 +29,7 @@ def test_boot_js_declares_browser_tts_recovery_helpers():
     assert "let _browserTtsWatchdog=null;" in src
     assert "let _browserTtsSuppressNextErrorRearm=false;" in src
     assert "function _clearBrowserTtsRecovery()" in src
-    assert "function _armBrowserTtsRecovery(clean, rate)" in src
+    assert "function _armBrowserTtsRecovery(clean, rate, lease)" in src
 
 
 def test_browser_tts_watchdog_rearms_listening_if_onend_drops():
@@ -39,7 +39,7 @@ def test_browser_tts_watchdog_rearms_listening_if_onend_drops():
     assert "_voiceModeState!=='speaking'" in arm_body
     assert "_browserTtsSuppressNextErrorRearm=true;" in arm_body
     assert "speechSynthesis.cancel()" in arm_body
-    assert "_startListening();" in arm_body
+    assert "_scheduleVoiceRestart(lease,0);" in arm_body
     assert "_browserTtsKeepAlive=setInterval" in arm_body
     assert "speechSynthesis.pause();" in arm_body
     assert "speechSynthesis.resume();" in arm_body
@@ -57,7 +57,7 @@ def test_browser_tts_callbacks_and_deactivate_clear_recovery_handles():
     assert "_browserTtsSuppressNextErrorRearm=false;" in speak_body
     assert "_voiceModeActive&&_voiceModeState==='speaking'" in speak_body
     assert "if(_browserTtsSuppressNextErrorRearm){" in speak_body
-    assert "_armBrowserTtsRecovery(clean, utter.rate);" in speak_body
+    assert "_armBrowserTtsRecovery(clean, utter.rate, lease);" in speak_body
 
     deactivate_body = _extract_function(src, "_deactivate")
     assert "_clearBrowserTtsRecovery();" in deactivate_body, (

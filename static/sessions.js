@@ -1384,6 +1384,7 @@ async function newSession(flash, options={}){
   }
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
+    const preserveVoiceSubmission=!S.session;
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -1485,7 +1486,7 @@ async function newSession(flash, options={}){
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
-    if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
+    if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false,preserveSubmission:preserveVoiceSubmission});
     S.session=data.session;S.messages=data.session.messages||[];
     if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
     S._pendingSessionToolsets=null;

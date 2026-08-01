@@ -1330,7 +1330,6 @@ async function send(){
   _flushSelectionBlocksToComposer();
   text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
-  if(typeof window._voiceLeasePrepareSubmission==='function') window._voiceLeasePrepareSubmission();
   if(typeof shouldInterceptCompressionRecoveryContinuation==='function'&&shouldInterceptCompressionRecoveryContinuation(text,S.pendingFiles)){
     if(typeof showCompressionRecoveryContinuationHint==='function') showCompressionRecoveryContinuationHint();
     _sendInProgress=false;_sendInProgressSid=null;
@@ -1357,6 +1356,7 @@ async function send(){
   if(S.busy||compressionRunning){
     if(text||S.pendingFiles.length){
       if(!S.session){await newSession();await renderSessionList();}
+      if(typeof window._voiceLeasePrepareSubmission==='function') window._voiceLeasePrepareSubmission();
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
       // /queue, /terminal, /goal, or /yolo while the agent is running and have
@@ -1560,6 +1560,7 @@ async function send(){
     }
   }
   if(!S.session){await newSession();await renderSessionList();}
+  if(typeof window._voiceLeasePrepareSubmission==='function') window._voiceLeasePrepareSubmission();
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
@@ -6095,8 +6096,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
-          // TTS auto-read: speak the last assistant response if enabled (#499)
-          if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
+          // TTS auto-read remains the normal completion path when voice mode is inactive.
+          if(typeof window._voiceModeActive!=='function'||!window._voiceModeActive()){
+            if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
+          }
         }
         if(!lastAsst&&d.session&&Array.isArray(d.session.messages)){
           lastAsst=[...d.session.messages].reverse().find(m=>m&&m.role==='assistant')||null;

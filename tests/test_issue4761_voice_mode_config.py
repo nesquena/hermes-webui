@@ -45,8 +45,8 @@ class TestVoiceModeSilenceMsConfig:
     def test_silence_ms_read_at_timeout_use_time(self):
         src = _boot_src()
         assert "_voiceSilenceMs()" in src, "The silence timeout must be read when scheduling auto-send."
-        assert re.search(r"setTimeout\s*\(\s*\(\)\s*=>\s*\{\s*_voiceModeSend\(\);\s*\}\s*,\s*_voiceSilenceMs\(\)\s*\)", src, re.S), (
-            "Voice mode must call _voiceSilenceMs() inside the setTimeout path so mirrored server settings apply without reload."
+        assert re.search(r"function _armVoiceSilence\(lease\)[\s\S]*const delay=_voiceSilenceMs\(\)", src), (
+            "Voice mode must call _voiceSilenceMs() inside the lease-owned timer so settings apply without reload."
         )
 
 
@@ -56,7 +56,7 @@ class TestVoiceModeContinuousConfig:
     def test_continuous_reads_local_storage(self):
         src = _boot_src()
         assert (
-            "_recognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true'"
+            "recognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true'"
             in src
         ), (
             "_recognition.continuous must read from localStorage key "
@@ -70,7 +70,7 @@ class TestVoiceModeContinuousConfig:
         src = _boot_src()
         # The continuous flag must not replace or disable the silence timer logic.
         assert (
-            "_silenceTimer=setTimeout" in src
+            "lease.silenceTimer=setTimeout" in src
         ), "The silence timer must still exist for continuous mode send decision."
 
 
@@ -83,16 +83,15 @@ class TestBootJsVoiceSectionIntegrity:
 
     def test_voice_mode_declares_recognition(self):
         src = _boot_src()
-        assert "_recognition=new SpeechRecognition()" in src
+        assert "const recognition=new SpeechRecognition();" in src
 
     def test_voice_mode_state_machine_present(self):
         src = _boot_src()
         for state in ("idle", "listening", "thinking", "speaking"):
             assert f"'{state}'" in src, f"Voice mode state '{state}' must be referenced."
 
-    def test_voice_mode_patches_auto_read(self):
+    def test_voice_mode_uses_owned_completion(self):
         src = _boot_src()
-        assert "autoReadLastAssistant" in src, (
-            "voice mode must still override autoReadLastAssistant to pipe "
-            "response completion into _speakResponse."
+        assert "window._voiceModeOnResponseComplete=function(outcome)" in src, (
+            "voice mode must expose its exact-owner completion transition."
         )
