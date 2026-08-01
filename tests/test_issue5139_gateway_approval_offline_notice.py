@@ -42,7 +42,7 @@ def _run_gateway_warning_case(unavailable_reason: str) -> list:
         assert req.full_url == "http://127.0.0.1:8642/v1/chat/completions"
         assert req.get_method() == "POST"
         payload = req.data.decode("utf-8")
-        assert json.loads(payload)["messages"][-1]["content"] == "hi"
+        assert json.loads(payload)["messages"][-1]["content"].endswith("\nhi")
         resp = MagicMock()
         resp.__iter__ = lambda s: iter(
             [

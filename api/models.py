@@ -7472,14 +7472,15 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
 
     metadata = dict(default)
     try:
-        webui_meta = Session.load_metadata_only(sid)
+        prefix = _read_metadata_json_prefix(p)
+        webui_meta = json.loads(prefix) if prefix else None
     except Exception:
         webui_meta = None
-    if webui_meta:
-        title = getattr(webui_meta, 'title', None)
+    if isinstance(webui_meta, dict):
+        title = webui_meta.get('title')
         if title:
             metadata["title"] = title
-        metadata["archived"] = bool(getattr(webui_meta, 'archived', False))
+        metadata["archived"] = bool(webui_meta.get('archived', False))
 
     with _SIDECAR_METADATA_CACHE_LOCK:
         # Re-check under lock in case a concurrent build populated it; either

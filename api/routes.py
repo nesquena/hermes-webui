@@ -26086,14 +26086,16 @@ def _handle_session_import(handler, body):
     if not isinstance(messages, list):
         return bad(handler, 'JSON must contain a "messages" array')
     title = body.get("title", "Imported session")
+    session_start_workspace_raw = body.get("session_start_workspace")
+    if session_start_workspace_raw is not None and not isinstance(session_start_workspace_raw, (str, Path)):
+        return bad(handler, "session_start_workspace must be a path string")
     try:
         workspace = str(resolve_trusted_workspace(body.get("workspace", str(DEFAULT_WORKSPACE))))
     except (TypeError, ValueError) as e:
         return bad(handler, str(e))
     model = body.get("model", DEFAULT_MODEL)
-    session_start_workspace_raw = body.get("session_start_workspace", workspace)
-    if not isinstance(session_start_workspace_raw, (str, Path)):
-        return bad(handler, "session_start_workspace must be a path string")
+    if session_start_workspace_raw is None:
+        session_start_workspace_raw = workspace
     try:
         session_start_workspace = str(resolve_trusted_workspace(session_start_workspace_raw))
     except (TypeError, ValueError) as e:
