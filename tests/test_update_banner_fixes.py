@@ -2596,25 +2596,34 @@ class TestSequentialUpdateRestartCoordination:
         execv_called = _th.Event()
         execv_time = []
         real_apply_lock = upd._apply_lock
-        restart_threads = []
+        scheduled = []
+        worker_thread = None
 
-        class RecordingThread(real_thread):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                target = kwargs.get('target')
-                if target is not None and getattr(target, '__name__', '') == '_do':
-                    restart_threads.append(self)
+        class ProbedApplyLock:
+            def __enter__(self):
+                return real_apply_lock.__enter__()
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return real_apply_lock.__exit__(exc_type, exc_value, traceback)
+
+        class CapturedThread:
+            def __init__(self, target, daemon):
+                self.target = target
+
+            def start(self):
+                scheduled.append(self.target)
 
         def fake_execv(exe, args):
-            if _th.current_thread() is restart_threads[0]:
+            if _th.current_thread() is worker_thread:
                 execv_time.append(_t.monotonic())
                 execv_called.set()
 
         monkeypatch.setattr(sys, 'platform', 'linux')
         monkeypatch.setattr(upd, '_wait_until_restart_safe', lambda *a, **k: {'restart_blocked': False})
         monkeypatch.setattr(os, 'execv', fake_execv)
-        monkeypatch.setattr(upd.threading, 'Thread', RecordingThread)
+        monkeypatch.setattr(upd.threading, 'Thread', CapturedThread)
         monkeypatch.setattr(upd, '_schedule_restart', _REAL_SCHEDULE_RESTART)
+        monkeypatch.setattr(upd, '_apply_lock', ProbedApplyLock())
 
         # Hold _apply_lock from another thread (simulating an in-flight
         # second update) until the assertion has observed the blocked restart.
@@ -2633,7 +2642,9 @@ class TestSequentialUpdateRestartCoordination:
         assert lock_held.wait(timeout=10), "holder did not acquire _apply_lock"
 
         upd._schedule_restart(delay=0)
-        assert len(restart_threads) == 1, "scheduler must start one restart worker"
+        assert len(scheduled) == 1, "scheduler must start one restart worker"
+        worker_thread = real_thread(target=scheduled[0], daemon=True)
+        worker_thread.start()
         _t.sleep(0.2)
         assert not execv_called.is_set(), (
             "restart callback ran while _apply_lock was held by another "
@@ -2652,6 +2663,8 @@ class TestSequentialUpdateRestartCoordination:
             f"execv fired before lock was released "
             f"(execv={execv_time[0]}, release={release_time[0]})"
         )
+        worker_thread.join(timeout=10)
+        assert not worker_thread.is_alive(), "restart worker did not finish"
 
     def test_schedule_restart_still_fires_when_no_update_in_flight(self, monkeypatch):
         """Sanity: with nothing holding the lock, restart still fires promptly."""
