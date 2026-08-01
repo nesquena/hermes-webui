@@ -11278,20 +11278,37 @@ function _thinkingActivityNode(text, open, disclosureKey){
 function chatActivityMode(){
   if(typeof window==='undefined') return 'compact_worklog';
   const mode=window._chatActivityDisplayMode;
-  if(mode==='compact_worklog'||mode==='transparent_stream'||mode==='hide_all_activity') return mode;
+  if(mode==='compact_worklog'||mode==='transparent_stream'||mode==='transparent_live_compact_settled'||mode==='hide_all_activity') return mode;
   return window._transparentStream ? 'transparent_stream' : 'compact_worklog';
 }
+// transparent_live_compact_settled resolves per render path: activity streams
+// transparently while the turn runs, then settled history collapses into the
+// Compact Worklog ("Trace: N tools") once the turn completes or is reloaded.
+function chatActivityLiveMode(){
+  const mode=chatActivityMode();
+  return mode==='transparent_live_compact_settled'?'transparent_stream':mode;
+}
+function chatActivitySettledMode(){
+  const mode=chatActivityMode();
+  return mode==='transparent_live_compact_settled'?'compact_worklog':mode;
+}
+function isTransparentLiveMode(){
+  return chatActivityLiveMode()==='transparent_stream';
+}
 function isTransparentStream(){
-  return chatActivityMode()==='transparent_stream';
+  return chatActivitySettledMode()==='transparent_stream';
 }
 function isFinalAnswerOnlyMode(){
   return chatActivityMode()==='hide_all_activity';
 }
 function isCompactWorklogMode(){
-  return isSimplifiedToolCalling()&&chatActivityMode()==='compact_worklog';
+  return isSimplifiedToolCalling()&&chatActivitySettledMode()==='compact_worklog';
 }
 if(typeof window!=='undefined'){
   window.chatActivityMode=chatActivityMode;
+  window.chatActivityLiveMode=chatActivityLiveMode;
+  window.chatActivitySettledMode=chatActivitySettledMode;
+  window.isTransparentLiveMode=isTransparentLiveMode;
   window.isTransparentStream=isTransparentStream;
   window.isFinalAnswerOnlyMode=isFinalAnswerOnlyMode;
   window.isCompactWorklogMode=isCompactWorklogMode;
@@ -11752,7 +11769,7 @@ function _transparentToolDetailHtml(tc, status){
   return `<div class="tool-card-detail" data-transparent-detail-mode="full"><div class="transparent-detail-modes" role="tablist"><span class="transparent-detail-mode active" role="tab" tabindex="0" data-mode="full" onclick="_setTransparentDetailMode(this,'full')">Full</span><span class="transparent-detail-mode" role="tab" tabindex="0" data-mode="output" onclick="_setTransparentDetailMode(this,'output')">Output</span></div><div class="tool-card-args">${argHtml}</div>${preview?`<div class="tool-card-result"><pre>${esc(preview)}</pre></div>`:''}</div>`;
 }
 function _syncTransparentEventControls(turn){
-  if(!turn||!isTransparentStream()) return;
+  if(!turn||!isTransparentLiveMode()) return;
   const blocks=_assistantTurnBlocks(turn);
   if(!blocks) return;
   const rows=Array.from(blocks.querySelectorAll(':scope > .transparent-event-row,[data-transparent-event-row="1"]'));
@@ -11823,7 +11840,7 @@ function _syncTransparentEventControls(turn){
   _applyTransparentRowFading(turn);
 }
 function _rehydrateTransparentStreamDom(root){
-  if(!root||!isTransparentStream()) return;
+  if(!root||!isTransparentLiveMode()) return;
   // Handle BOTH a container root and a root that IS itself an assistant turn
   // (the live-turn restore path passes the #liveAssistantTurn element directly,
   // which querySelectorAll('.assistant-turn') would not match). (Trifecta C1 r2.)
@@ -12099,7 +12116,7 @@ function _setTransparentRowsExpanded(root, expanded){
 const _transparentTurnCollapsedStates={}; // key: `${sid}:${turnMsgIdx}` → boolean
 function _wireTransparentTurnToggle(turn){
   if(!turn) return;
-  if(!isTransparentStream()) return;
+  if(!isTransparentLiveMode()) return;
   const role=turn.querySelector('.msg-role.assistant');
   if(!role) return;
   turn.setAttribute('data-transparent-turn-toggle-bound','1');
@@ -12138,7 +12155,7 @@ function _wireTransparentTurnToggle(turn){
 // event stays at full opacity, each earlier event drops one step. Floors
 // at 0.32 so labels stay readable.
 function _applyTransparentRowFading(turn){
-  if(!turn||!isTransparentStream()) return;
+  if(!turn||!isTransparentLiveMode()) return;
   // Recency-fading only makes sense on the LIVE turn (draw the eye to the most
   // recent activity). On settled/historical turns it permanently dims the trace
   // below readable contrast (floor .32) — the opposite of a transparent record.
@@ -12204,7 +12221,7 @@ function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensTex
   return `<div class="transparent-turn-footer">${parts.join('<span class="lf-sep">·</span>')}</div>`;
 }
 function _renderTransparentTurnFooter(turn, opts){
-  if(!turn||!isTransparentStream()) return;
+  if(!turn||!isTransparentLiveMode()) return;
   const blocks=_assistantTurnBlocks(turn);
   if(!blocks) return;
   const hasRows=blocks.querySelector(':scope > .transparent-event-row');
@@ -13210,7 +13227,7 @@ function _updateLiveAnchorReasoningRowForFallback(turn, text, opts){
 function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
   const requestedMode=opts.mode;
-  const activeMode=chatActivityMode();
+  const activeMode=chatActivityLiveMode();
   // The USER's active activity-display mode is authoritative for what gets
   // painted. `requestedMode` (opts.mode) is only a fallback hint from callers
   // that hardcode {mode:'compact_worklog'} (appendLiveToolCard / ensureLiveWorklogShell
@@ -13611,12 +13628,18 @@ function _refreshTransparentLiveRow(existing, node, opts){
 }
 function _renderLiveAnchorActivitySceneForStream(streamId, sessionId, opts){
   const requestedMode=opts&&opts.mode;
-  const activeMode=chatActivityMode();
-  const mode=activeMode==='hide_all_activity'
-    ? 'hide_all_activity'
-    : (requestedMode==='compact_worklog'||requestedMode==='transparent_stream'||requestedMode==='hide_all_activity'
-    ? requestedMode
-    : activeMode);
+  const configuredMode=chatActivityMode();
+  const activeMode=chatActivityLiveMode();
+  // TLCS is the only hybrid mode: stale compact hints must not suppress its
+  // transparent live view. Preserve the established override semantics for
+  // the three pre-existing modes.
+  const mode=configuredMode==='transparent_live_compact_settled'
+    ? activeMode
+    : (activeMode==='hide_all_activity'
+      ? 'hide_all_activity'
+      : (requestedMode==='compact_worklog'||requestedMode==='transparent_stream'||requestedMode==='hide_all_activity'
+        ? requestedMode
+        : activeMode));
   const scene=_projectLiveAnchorActivitySceneForStream(streamId,mode);
   if(!scene) return false;
   return renderLiveAnchorActivityScene(streamId,scene,{...(opts||{}),sessionId});
@@ -16205,7 +16228,7 @@ function renderMessages(options){
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
   if(!S.busy&&Array.isArray(S.messages)&&typeof _hydrateIdLinkedHistoricalToolScenes==='function'){
-    const activityMode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
+    const activityMode=typeof chatActivitySettledMode==='function'?chatActivitySettledMode():'compact_worklog';
     _hydrateIdLinkedHistoricalToolScenes(S.messages,{sessionId:sid,mode:activityMode});
   }
   const msgCount=S.messages.length;
@@ -18636,7 +18659,7 @@ function appendLiveToolCard(tc){
   const burstAnchor=burstId?_findLatestVisibleLiveAssistantByBurst(inner, burstId):null;
   const anchor=segmentAnchor||burstAnchor||_findLatestVisibleLiveAssistant(inner)||children.filter(el=>el.matches('[data-live-assistant="1"]')).pop();
   const effectiveSegmentSeq=anchor&&anchor.getAttribute?anchor.getAttribute('data-live-segment-seq')||segmentSeq:segmentSeq;
-  if(isTransparentStream()){
+  if(isTransparentLiveMode()){
     const insertTransparentRow=(row)=>{
       const liveFooter=inner.querySelector('#liveRunStatus');
       if(liveFooter&&liveFooter.parentElement===inner){
@@ -18857,7 +18880,7 @@ function ensureLiveWorklogShell(){
   }
   const blocks=_assistantTurnBlocks(turn);
   if(!blocks) return null;
-  if(isTransparentStream()){
+  if(isTransparentLiveMode()){
     _moveLiveRunStatusToTurnEnd();
     scrollIfPinned();
     return blocks;
@@ -19844,7 +19867,7 @@ function appendThinking(text='', options){
       burstId?`burst:${burstId}`:
       'turn'
     ));
-    if(isTransparentStream()){
+    if(isTransparentLiveMode()){
       let row=blocks.querySelector(`.agent-activity-thinking[data-live-thinking="1"][data-live-thinking-key="${CSS.escape(thinkingKey)}"]`);
       if(!row){
         row=_thinkingActivityNode(clean, false);

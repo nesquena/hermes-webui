@@ -101,22 +101,32 @@ def test_transparent_stream_event_timestamps_default_true_and_persist_boolean(mo
     assert json.loads(settings_path.read_text(encoding="utf-8"))["transparent_stream_event_timestamps"] is False
 
 
-def test_chat_activity_display_mode_supports_three_values():
+def test_chat_activity_display_mode_supports_four_values():
     assert "function chatActivityMode()" in UI_JS
+    assert "function chatActivityLiveMode()" in UI_JS
+    assert "function chatActivitySettledMode()" in UI_JS
+    assert "function isTransparentLiveMode()" in UI_JS
     assert "function isTransparentStream()" in UI_JS
     assert "function isFinalAnswerOnlyMode()" in UI_JS
     assert "function isCompactWorklogMode()" in UI_JS
-    assert "chatActivityMode()==='transparent_stream'" in UI_JS
+    assert "mode==='compact_worklog'||mode==='transparent_stream'||mode==='transparent_live_compact_settled'||mode==='hide_all_activity'" in UI_JS
+    assert "mode==='transparent_live_compact_settled'?'transparent_stream':mode" in UI_JS
+    assert "mode==='transparent_live_compact_settled'?'compact_worklog':mode" in UI_JS
+    assert "chatActivitySettledMode()==='transparent_stream'" in UI_JS
     assert "chatActivityMode()==='hide_all_activity'" in UI_JS
+    assert "chatActivitySettledMode()==='compact_worklog'" in UI_JS
     assert "window._chatActivityDisplayMode" in BOOT_JS
     assert "window._chatActivityDisplayMode" in PANELS_JS
     assert "window._simplifiedToolCalling=true" in BOOT_JS
     assert "window._simplifiedToolCalling=true" in PANELS_JS
 
 
-def test_chat_activity_display_mode_picker_uses_three_desktop_columns():
-    assert INDEX_HTML.count('class="chat-activity-mode-btn') == 3
-    assert "#mainSettings .chat-activity-mode-toggle{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));" in STYLE_CSS
+def test_chat_activity_display_mode_picker_uses_four_desktop_columns():
+    assert INDEX_HTML.count('class="chat-activity-mode-btn') == 4
+    assert 'data-chat-activity-mode="transparent_live_compact_settled"' in INDEX_HTML
+    assert 'value="transparent_live_compact_settled"' in INDEX_HTML
+    assert "settings_option_transparent_live_compact_settled" in I18N_JS
+    assert "#mainSettings .chat-activity-mode-toggle{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));" in STYLE_CSS
     assert "#mainSettings .chat-activity-mode-toggle{grid-template-columns:1fr;}" in STYLE_CSS
 
 
@@ -131,6 +141,9 @@ global.window = {{
 }};
 global.isSimplifiedToolCalling = () => true;
 eval(extractFunc('chatActivityMode'));
+eval(extractFunc('chatActivityLiveMode'));
+eval(extractFunc('chatActivitySettledMode'));
+eval(extractFunc('isTransparentLiveMode'));
 eval(extractFunc('isTransparentStream'));
 eval(extractFunc('isFinalAnswerOnlyMode'));
 eval(extractFunc('isCompactWorklogMode'));
@@ -191,6 +204,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){{
 }}
 let activeMode = 'compact_worklog';
 global.chatActivityMode = () => activeMode;
+eval(extractFunc('chatActivityLiveMode'));
 eval(extractFunc('_renderLiveAnchorActivitySceneForStream'));
 eval(extractFunc('_renderLiveAnchorActivitySceneSnapshotForStream'));
 const helperResult = _renderLiveAnchorActivitySceneForStream('stream-1', 'sid-1', {{mode:'hide_all_activity'}});
@@ -233,6 +247,9 @@ global.S = {{ session: {{ session_id: 'sid-1' }}, activeStreamId: 'stream-1' }};
 global.isSimplifiedToolCalling = () => true;
 global.$ = () => {{ throw new Error('unexpected DOM access'); }};
 eval(extractFunc('chatActivityMode'));
+eval(extractFunc('chatActivityLiveMode'));
+eval(extractFunc('chatActivitySettledMode'));
+eval(extractFunc('isTransparentLiveMode'));
 eval(extractFunc('isTransparentStream'));
 eval(extractFunc('isFinalAnswerOnlyMode'));
 eval(extractFunc('isCompactWorklogMode'));
@@ -418,7 +435,7 @@ def test_transparent_stream_live_branch_uses_direct_rows():
     append_thinking_start = UI_JS.index("function appendThinking(text='', options){")
     append_thinking_end = UI_JS.index("function updateThinking", append_thinking_start)
     append_thinking_block = UI_JS[append_thinking_start:append_thinking_end]
-    assert "if(isTransparentStream())" in append_thinking_block
+    assert "if(isTransparentLiveMode())" in append_thinking_block
     assert "turn=_createAssistantTurn()" in append_thinking_block
     assert "row.id='thinkingRow'" in append_thinking_block
     assert "_decorateTransparentEventRow(row,{" in append_thinking_block
@@ -429,7 +446,7 @@ def test_transparent_stream_live_branch_uses_direct_rows():
     append_tool_start = UI_JS.index("function appendLiveToolCard(tc){")
     append_tool_end = UI_JS.index("function _findLatestLiveAssistantByBurst", append_tool_start)
     append_tool_block = UI_JS[append_tool_start:append_tool_end]
-    assert "if(isTransparentStream())" in append_tool_block
+    assert "if(isTransparentLiveMode())" in append_tool_block
     assert "_decorateTransparentEventRow(buildToolCard(tc)" in append_tool_block
     assert "_syncTransparentEventControls(turn)" in append_tool_block
     assert "ensureLiveWorklogContainer(inner" in append_tool_block  # compact_worklog fallback remains intact
@@ -469,8 +486,8 @@ def test_chat_activity_display_mode_plumbing_preserves_hide_all_activity():
     assert "s.chat_activity_display_mode==='transparent_stream'||s.chat_activity_display_mode==='hide_all_activity'" in BOOT_JS
     assert "window._transparentEventTimestamps=s.transparent_stream_event_timestamps!==false;" in BOOT_JS
     assert "window._transparentEventTimestamps=true;" in BOOT_JS
-    assert "chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='hide_all_activity')" in PANELS_JS
-    assert "const next=mode==='transparent_stream'||mode==='hide_all_activity' ? mode : 'compact_worklog';" in PANELS_JS
+    assert "chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='hide_all_activity'||chatActivityModeSel.value==='transparent_live_compact_settled')" in PANELS_JS
+    assert "const next=mode==='transparent_stream'||mode==='transparent_live_compact_settled'||mode==='hide_all_activity' ? mode : 'compact_worklog';" in PANELS_JS
     assert "if(typeof _syncTransparentEventTimestampsControl==='function') _syncTransparentEventTimestampsControl(window._transparentEventTimestamps,next);" in PANELS_JS
     assert "window._transparentEventTimestamps=next;" in PANELS_JS
     assert "hide_all_activity" in PANELS_JS
@@ -581,7 +598,7 @@ def test_transparent_live_tool_rows_append_at_turn_end_before_status():
     start = UI_JS.index("function appendLiveToolCard(tc){")
     end = UI_JS.index("function clearLiveToolCards()", start)
     live_block = UI_JS[start:end]
-    transparent_start = live_block.index("if(isTransparentStream()){")
+    transparent_start = live_block.index("if(isTransparentLiveMode()){")
     transparent_end = live_block.index("if(anchor) _removeEmptyLiveWorklogShells(inner);", transparent_start)
     transparent_live = live_block[transparent_start:transparent_end]
 

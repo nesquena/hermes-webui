@@ -9368,7 +9368,7 @@ _SETTINGS_DEFAULTS = {
     "structured_code_default_view": "auto",  # JSON/YAML fenced-block default render: auto | on | off (#484 follow-up). auto => Tree when line count >= structured_code_auto_tree_lines, else Raw.
     "structured_code_auto_tree_lines": 10,  # in 'auto' mode, minimum line count to default a JSON/YAML block to Tree view (preserves the original hardcoded >=10 behavior)
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
-    "chat_activity_display_mode": "compact_worklog",  # compact_worklog | transparent_stream | hide_all_activity
+    "chat_activity_display_mode": "compact_worklog",  # compact_worklog | transparent_stream | transparent_live_compact_settled | hide_all_activity
     "transparent_stream_event_timestamps": True,  # show per-event timestamp chips inside Transparent Stream
     "auto_scroll_follow": True,  # follow new output to the bottom while streaming (Codex/Claude-Code-style sticky bottom); the user scrolling up unpins and is respected
     "show_background_wakeups": True,  # show process-completion wakeups as compact transcript status rows
@@ -9653,7 +9653,7 @@ _SETTINGS_ENUM_VALUES = {
     "font_size": {"small", "default", "large", "xlarge"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},
     "default_message_mode": {"queue", "interrupt", "steer"},
-    "chat_activity_display_mode": {"compact_worklog", "transparent_stream", "hide_all_activity"},
+    "chat_activity_display_mode": {"compact_worklog", "transparent_stream", "transparent_live_compact_settled", "hide_all_activity"},
     "structured_code_default_view": {"auto", "on", "off"},
 }
 _SETTINGS_INT_RANGES = {
