@@ -9003,6 +9003,35 @@ function _compactInflightState(state){
     todoStateMeta,
   }, limits.stringChars);
 }
+function _compactDeliveredSteerForStorage(record, maxTextChars=12000){
+  const source=record&&typeof record==='object'?record:{};
+  const payload=source.payload&&typeof source.payload==='object'?source.payload:{};
+  const streamId=String(source.stream_id||payload.stream_id||'');
+  const localId=String(source.local_id||payload.local_id||source.event_id||payload.event_id||'');
+  const rawText=String(payload.text??source.text??'');
+  const text=rawText.length>maxTextChars
+    ? rawText.slice(0,Math.max(32,maxTextChars))+'\n\n[truncated for browser recovery storage]'
+    : rawText;
+  const compactPayload={
+    local_id:localId,
+    stream_id:streamId,
+    ordinal:payload.ordinal??source.ordinal??undefined,
+    status:'delivered',
+    text,
+    files:Array.isArray(payload.files)?payload.files.slice(-20):[],
+    delivered:true,
+    origin:payload.origin||source.origin||'webui',
+  };
+  return {
+    source_event_type:'steer_delivered',
+    stream_id:streamId,
+    local_id:localId,
+    event_id:source.event_id||payload.event_id||null,
+    status:'delivered',
+    created_at:source.created_at??payload.created_at??undefined,
+    payload:compactPayload,
+  };
+}
 function _writeInflightStateMap(all){
   const limits=_getInflightStateLimits();
   let entries=Object.entries(all||{})
@@ -9023,11 +9052,24 @@ function _writeInflightStateMap(all){
         json=serialize([[sid,reduced]]);
       }
     };
-    // Keep the newest delivered records ahead of less durable live-tail data.
-    trimOldest('deliveredSteers');
+    // Keep delivery records ahead of less durable live-tail data. Compact
+    // their optional fields before dropping any record for the storage limit.
     trimOldest('messages');
     trimOldest('toolCalls');
     trimOldest('activityBurstAnchors');
+    if(json.length>limits.jsonChars&&Array.isArray(reduced.deliveredSteers)){
+      reduced.deliveredSteers=reduced.deliveredSteers.map(record=>_compactDeliveredSteerForStorage(record,12000));
+      json=serialize([[sid,reduced]]);
+    }
+    if(json.length>limits.jsonChars&&Array.isArray(reduced.deliveredSteers)){
+      reduced.deliveredSteers=reduced.deliveredSteers.map(record=>_compactDeliveredSteerForStorage(record,2000));
+      json=serialize([[sid,reduced]]);
+    }
+    if(json.length>limits.jsonChars&&Array.isArray(reduced.deliveredSteers)){
+      reduced.deliveredSteers=reduced.deliveredSteers.map(record=>_compactDeliveredSteerForStorage(record,256));
+      json=serialize([[sid,reduced]]);
+    }
+    trimOldest('deliveredSteers');
     if(json.length>limits.jsonChars){
       for(const field of ['lastAssistantText','lastReasoningText']){
         if(typeof reduced[field]==='string'&&reduced[field].length){
@@ -9055,13 +9097,9 @@ function saveInflightState(sid, state){
     all[sid]=entry;
     _writeInflightStateMap(all);
   }catch(err){
+    // Keep the previous recovery map intact when the browser quota is already
+    // exhausted; clearing it would erase unrelated delivered-steer records.
     if(!_isStorageQuotaError(err)) return;
-    try{
-      localStorage.removeItem(INFLIGHT_STATE_KEY);
-      _writeInflightStateMap({[sid]:entry});
-    }catch(_){
-      try{localStorage.removeItem(INFLIGHT_STATE_KEY);}catch(__){}
-    }
   }
 }
 function loadInflightState(sid, streamId){

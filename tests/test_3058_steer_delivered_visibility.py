@@ -514,6 +514,25 @@ def test_3058_delivered_steers_survive_inflight_compaction_without_a_fixed_cap()
     assert out["none"] == []
 
 
+def test_3058_oversized_storage_compacts_the_delivery_record_without_erasing_it():
+    compact_record = _function(_read(UI_JS), "_compactDeliveredSteerForStorage")
+    write_map = _function(_read(UI_JS), "_writeInflightStateMap")
+    out = _run_node(
+        "const INFLIGHT_STATE_KEY='hermes-inflight-state';"
+        "const store={};const localStorage={getItem:k=>store[k]||null,setItem:(k,v)=>{store[k]=v;},removeItem:k=>{delete store[k];}};"
+        "function _getInflightStateLimits(){return {messages:24,toolCalls:48,stringChars:60000,maxSessions:8,jsonChars:5000};}"
+        + compact_record
+        + "\n"
+        + write_map
+        + "\nconst huge={updated_at:1,streamId:'stream-3058',deliveredSteers:[{source_event_type:'steer_delivered',stream_id:'stream-3058',payload:{local_id:'steer:stream-3058:1',stream_id:'stream-3058',text:'x'.repeat(100000),files:[]}}]};"
+        + "const ok=_writeInflightStateMap({'sid-3058':huge});const parsed=JSON.parse(store[INFLIGHT_STATE_KEY]);"
+        + "console.log(JSON.stringify({ok,count:parsed['sid-3058'].deliveredSteers.length,text:parsed['sid-3058'].deliveredSteers[0].payload.text}));"
+    )
+    assert out["ok"] is True
+    assert out["count"] == 1
+    assert "truncated for browser recovery storage" in out["text"]
+
+
 def test_3058_delivered_cache_is_not_expired_during_a_long_running_recovery_gap():
     read_map = _function(_read(UI_JS), "_readInflightStateMap")
     load = _function(_read(UI_JS), "loadInflightState")
