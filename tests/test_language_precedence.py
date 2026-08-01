@@ -526,7 +526,7 @@ def test_settings_routes_persist_only_effective_locale():
 #   - all three call sites use the shared guarded helper
 #   - the guarded helper survives a throwing `navigator` accessor
 #
-# Each test loads the real `static/i18n.js` in a Node `vm` sandbox, so
+# Each test loads the split production core in a Node `vm` sandbox, so
 # the assertions are against the production code, not a copy.
 
 
@@ -668,3 +668,7 @@ def test_load_locale_first_visit_uses_browser_hint_when_no_preference():
         navigator_obj={"languages": ["zh-CN"], "language": "zh-CN"},
     )
     assert out["saved"] == "fr"
+def test_settings_locale_continuations_recheck_current_settlement():
+    assert "const pendingLanguage=langSel.value;" in PANELS_JS
+    assert "_settingsLocaleSettlementIsCurrent(localeResult)" in PANELS_JS
+    assert "const requestedLanguage=(selector&&selector.value)" in PANELS_JS
