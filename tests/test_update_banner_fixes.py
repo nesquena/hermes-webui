@@ -2646,7 +2646,9 @@ class TestSequentialUpdateRestartCoordination:
 
         # Capture the scheduler target, then run only this target under test.
         # No unrelated daemon can satisfy or invalidate the lock assertion.
-        upd._schedule_restart(delay=0.05)
+        # The delay is unrelated to lock ordering; skip it so the worker's
+        # lock-acquisition event is the synchronization point under test.
+        upd._schedule_restart(delay=0)
         assert len(scheduled) == 1, "scheduler must start one restart worker"
         worker_target = scheduled[0]
         worker_thread = real_thread(target=worker_target, daemon=True)
