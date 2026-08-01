@@ -11722,6 +11722,7 @@ def cancel_stream(stream_id: str) -> bool:
     _snap_tool_calls = None
     _snap_flag = None
     _snap_agent = None
+    _snap_owner_session_id = None
     _cancel_session_payload = None
 
     with streams_lock:
@@ -11733,6 +11734,16 @@ def cancel_stream(stream_id: str) -> bool:
         # cancel must snapshot them too or it loses the already-streamed text.
         _snap_flag = cancel_flags.get(stream_id)
         _snap_agent = agent_instances.get(stream_id)
+        # Capture the stream owner WHILE the stream still exists (#6623). The
+        # just-starting worker takes its `q is None -> unregister_stream_owner`
+        # early path (api/streaming.py `_run_agent_streaming` and
+        # api/gateway_chat.py `_run_gateway_chat_streaming`) the instant
+        # STREAMS[stream_id] is popped below, so reading the owner AFTER the
+        # pop can race that teardown and yield None — leaving the session's
+        # active_stream_id/pending_* stuck while cancel still returns True.
+        # Reading it here, under streams_lock and before any pop, gives cancel
+        # a stable owner to resolve session cleanup against.
+        _snap_owner_session_id = stream_owner_session_id(stream_id)
         _snap_partial_text = partial_texts.get(stream_id, '')
         if not _snap_partial_text:
             _live_partials = getattr(_live_config, 'STREAM_PARTIAL_TEXT', partial_texts)
@@ -11771,8 +11782,10 @@ def cancel_stream(stream_id: str) -> bool:
 
     # Mark the worker lifecycle registry immediately. The SSE maps may be popped
     # below while the worker is still unwinding; ACTIVE_RUNS is what recovery /
-    # health polling sees during that detached window.
-    update_active_run(stream_id, phase="cancelling")
+    # health polling sees during that detached window. Stamp cancelled_at so
+    # _clear_stale_stream_state() can eventually reclaim the session if the
+    # worker is stuck in C-level I/O and never reaches its finally (#6623).
+    update_active_run(stream_id, phase="cancelling", cancelled_at=time.time())
 
     # Set WebUI layer cancel flag. Prefer the snapshot captured under the lock;
     # fall back to a fresh lookup for the ACTIVE_RUNS-only path (stream absent).
@@ -11850,9 +11863,13 @@ def cancel_stream(stream_id: str) -> bool:
         _cancel_session_id = active_run_session_id
     # Third fallback: stream owner registry — populated before the worker
     # thread starts, so it's always available even for early cancels that
-    # race ahead of AGENT_INSTANCES and ACTIVE_RUNS (#6623).
-    if not _cancel_session_id and stream_id:
-        _cancel_session_id = stream_owner_session_id(stream_id)
+    # race ahead of AGENT_INSTANCES and ACTIVE_RUNS (#6623). The owner is
+    # read UNDER streams_lock above (while STREAMS[stream_id] still exists),
+    # NOT here after the eager pop: the just-starting worker unregisters the
+    # owner the instant the stream map entry disappears, so a post-pop lookup
+    # would race that teardown and return None.
+    if not _cancel_session_id and _snap_owner_session_id:
+        _cancel_session_id = _snap_owner_session_id
     # Use the snapshots captured under streams_lock above (the worker's finally
     # may have popped the live buffers by now via agent.interrupt()). For the
     # ACTIVE_RUNS-only path (stream absent) the snapshots are None → fall back to
