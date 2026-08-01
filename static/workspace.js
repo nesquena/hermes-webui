@@ -631,7 +631,9 @@ async function _fetchAllPages(baseUrl){
 }
 
 async function _workspacePathExists(path){
-  if(!S.session||!path) return false;
+  const owner=arguments.length>1&&arguments[1]
+    ? arguments[1] : _workspaceCaptureRequestOwner(path,null,true,false);
+  if(!S.session||!path||!_workspaceRequestOwnerIsCurrent(owner)) return false;
   const parts=String(path).split('/').filter(Boolean);
   const name=parts.pop();
   if(!name) return false;
@@ -639,8 +641,10 @@ async function _workspacePathExists(path){
   const baseUrl=_workspaceRouteForPath(dir,'list');
   let cursor=null;
   do{
+    if(!_workspaceRequestOwnerIsCurrent(owner)) return false;
     const url=cursor?baseUrl+'&cursor='+encodeURIComponent(cursor):baseUrl;
     const data=await api(url);
+    if(!_workspaceRequestOwnerIsCurrent(owner)) return false;
     if((data.entries||[]).some(e=>e&&(e.path===path||e.name===name))) return true;
     if(!data.has_more) return false;
     if(!data.cursor||data.cursor===cursor) throw new Error('Directory listing cursor did not advance');
@@ -661,15 +665,19 @@ async function openArtifactPath(path){
     else if(rel === ws.replace(/\/+$/,'')) rel = '.';
   }
   if(!rel) rel = '.';
+  const owner=_workspaceCaptureRequestOwner(rel,null,true,false);
   try{
-    if(!(await _workspacePathExists(rel))){
+    if(!(await _workspacePathExists(rel,owner))){
+      if(!_workspaceRequestOwnerIsCurrent(owner)) return;
       setStatus(t('file_open_failed'));
       return;
     }
   }catch(_){
+    if(!_workspaceRequestOwnerIsCurrent(owner)) return;
     setStatus(t('file_open_failed'));
     return;
   }
+  if(!_workspaceRequestOwnerIsCurrent(owner)) return;
   openFile(rel);
 }
 
@@ -700,11 +708,81 @@ const _WS_SKELETON_ROWS = [
 // loadDir('.') still runs then), so the stale response is rejected.
 let _wsTreeGen = 0;
 let _wsDirRequestGen = 0;
+let _wsArtifactRequestGen = 0;
 function bumpWorkspaceTreeGen(){
   _wsTreeGen = (typeof _wsTreeGen === 'number' ? _wsTreeGen : 0) + 1;
   return _wsTreeGen;
 }
 if(typeof window!=='undefined') window.bumpWorkspaceTreeGen = bumpWorkspaceTreeGen;
+
+function _workspaceCacheVersions(){
+  if(!S._dirCacheVersions) S._dirCacheVersions=Object.create(null);
+  return S._dirCacheVersions;
+}
+function _workspaceCacheVersion(path){
+  return Number(_workspaceCacheVersions()[path]||0);
+}
+function _workspaceSetDirCache(path, entries){
+  if(!S._dirCache) S._dirCache={};
+  const versions=_workspaceCacheVersions();
+  versions[path]=_workspaceCacheVersion(path)+1;
+  S._dirCache[path]=entries;
+}
+function _workspaceDeleteDirCache(path){
+  const versions=_workspaceCacheVersions();
+  versions[path]=_workspaceCacheVersion(path)+1;
+  if(S._dirCache) delete S._dirCache[path];
+}
+function _workspaceResetDirCache(){
+  S._dirCache={};
+  S._dirCacheVersions=Object.create(null);
+}
+function _workspaceCaptureRequestOwner(path, cachePath, serial=false, requireCurrentDir=false){
+  const session=S.session;
+  return {
+    sessionRef:session,
+    sessionId:String(session&&session.session_id||''),
+    profile:String(S.activeProfile||(session&&session.profile)||'default'),
+    workspace:String(session&&session.workspace||''),
+    treeGen:_wsTreeGen,
+    currentDir:String(S.currentDir||'.'),
+    requireCurrentDir,
+    requestGen:serial?++_wsArtifactRequestGen:null,
+    cacheRef:S._dirCache,
+    cachePath:cachePath==null?null:String(cachePath),
+    cacheVersion:cachePath==null?null:_workspaceCacheVersion(String(cachePath)),
+    path:path==null?null:String(path),
+  };
+}
+function _workspaceRequestOwnerIsCurrent(owner){
+  if(!owner||!S.session||S.session!==owner.sessionRef
+    ||String(S.session.session_id||'')!==owner.sessionId
+    ||String(S.activeProfile||(S.session&&S.session.profile)||'default')!==owner.profile
+    ||String(S.session.workspace||'')!==owner.workspace
+    ||_wsTreeGen!==owner.treeGen
+    ||(owner.requireCurrentDir&&String(S.currentDir||'.')!==owner.currentDir)
+    ||(owner.requestGen!==null&&owner.requestGen!==_wsArtifactRequestGen)) return false;
+  if(owner.cachePath!==null&&(
+    S._dirCache!==owner.cacheRef
+    ||_workspaceCacheVersion(owner.cachePath)!==owner.cacheVersion)) return false;
+  return true;
+}
+function _workspaceShowListingFailure(error, path){
+  const status=Number(error&&error.status||0);
+  const grant=typeof _workspaceEscapeGrantForPath==='function'
+    ? _workspaceEscapeGrantForPath(path) : null;
+  if(status===403&&grant){
+    _clearWorkspaceEscapeGrant(grant.path);
+    if(typeof showToast==='function')showToast(t('external_link_grant_expired'),5000,'error');
+    return 'grant-expired';
+  }
+  if(status===404){
+    if(typeof showToast==='function')showToast(t('workspace_listing_expired'),4000,'warning');
+    return 'expired';
+  }
+  if(typeof showToast==='function')showToast(t('workspace_listing_failed')||t('file_open_failed'),5000,'error');
+  return 'failed';
+}
 
 function showWorkspaceTreeSkeleton(){
   const tree = $('fileTree');
@@ -762,7 +840,7 @@ async function loadDir(path, opts={}){
                              // rejected here instead of painting the wrong profile's files.
   try{
     if(!path||path==='.'||refreshExpanded){
-      S._dirCache={};
+      _workspaceResetDirCache();
       _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
     // Reset cursor state on every fresh loadDir call; continuation appends via _loadMoreDir.
@@ -775,7 +853,7 @@ async function loadDir(path, opts={}){
       ||requestGen!==_wsDirRequestGen||(S.currentDir||'.')!==requestPath)return;
     if(data.workspace_recovered&&data.workspace){
       S.session.workspace=String(data.workspace);
-      S._dirCache={};
+      _workspaceResetDirCache();
       _restoreExpandedDirs();
       if(typeof syncWorkspaceDisplays==='function')syncWorkspaceDisplays();
       if(typeof syncTerminalButton==='function')syncTerminalButton();
@@ -791,14 +869,22 @@ async function loadDir(path, opts={}){
       const expanded=S._expandedDirs||new Set();
       const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);
       if(pending.length){
+        const owners=new Map(pending.map(dirPath=>[
+          dirPath,_workspaceCaptureRequestOwner(dirPath,dirPath,false,true)
+        ]));
         const results=await Promise.all(pending.map(dirPath=>
           _fetchAllPages(_workspaceRouteForPath(dirPath, 'list'))
-            .then(entries=>({dirPath,entries}))
-            .catch(()=>({dirPath,entries:[]}))
+            .then(entries=>({dirPath,entries,error:null}))
+            .catch(error=>({dirPath,entries:null,error}))
         ));
         if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen
           ||requestGen!==_wsDirRequestGen||(S.currentDir||'.')!==requestPath)return;
-        for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
+        for(const {dirPath,entries,error} of results){
+          const owner=owners.get(dirPath);
+          if(!_workspaceRequestOwnerIsCurrent(owner))continue;
+          if(error){_workspaceShowListingFailure(error,dirPath);continue;}
+          _workspaceSetDirCache(dirPath,entries);
+        }
       }
       if(expanded.size>0)renderFileTree();
     }
@@ -847,7 +933,12 @@ function _renderLoadMoreRow(){
   row.setAttribute('role','button');
   row.setAttribute('tabindex','0');
   row.onclick=function(){_loadMoreDir();};
-  row.onkeydown=function(e){if(e.key==='Enter'||e.key===' ')_loadMoreDir();};
+  row.onkeydown=function(e){
+    if(e.key==='Enter'||e.key===' '){
+      e.preventDefault();
+      _loadMoreDir();
+    }
+  };
   box.appendChild(row);
 }
 
@@ -874,12 +965,16 @@ async function _loadMoreDir(){
     S._dirHasMore=!!(data.has_more);
     renderFileTree();
   }catch(e){
-    if(e&&e.status===404&&S.session&&S.session.session_id===sessionId&&treeGen===_wsTreeGen
+    if(e&&S.session&&S.session.session_id===sessionId&&treeGen===_wsTreeGen
       &&requestGen===_wsDirRequestGen&&(S.currentDir||'.')===path&&S._dirCursor===cursor){
-      // Server restarted; cursor is invalid. Clear stale state so the tree is consistent.
-      S._dirCursor=null;S._dirHasMore=false;
-      renderFileTree();
-      if(typeof showToast==='function')showToast(t('workspace_listing_expired'),4000,'warning');
+      if(e.status===404||e.status===403){
+        // Restarted listings and expired escape grants cannot be retried with this cursor.
+        S._dirCursor=null;S._dirHasMore=false;
+        renderFileTree();
+        _workspaceShowListingFailure(e,path);
+      }else{
+        _workspaceShowListingFailure(e,path);
+      }
     }else{
       console.warn('loadMoreDir',e);
     }

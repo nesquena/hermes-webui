@@ -20,6 +20,11 @@ contributor guidance; it does not change runtime behavior or CI gates.
 - [`CHANGELOG.md`](../CHANGELOG.md): release history maintained by the release
   workflow. Read it for context, but do not edit it in ordinary contributor PRs;
   put release-note-ready wording in the PR body instead.
+- [`ARCHITECTURE.md`](../ARCHITECTURE.md): the current workspace listing contract;
+  `list_dir()` and both directory-list routes return up to 200 stable entries
+  plus `has_more` and an opaque cursor when more entries remain. The producer
+  scans and validates the directory, while bounding retained candidates and
+  final sorting rather than claiming bounded traversal.
 
 ## Runtime, durability, and state contracts
 

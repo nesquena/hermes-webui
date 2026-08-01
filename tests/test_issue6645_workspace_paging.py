@@ -108,6 +108,7 @@ def _build_harness(
     normalize_rel_path = _extract_fn(WORKSPACE_JS, "_normalizeWorkspaceRelPath")
     wrapper = _extract_wrapper(WORKSPACE_JS)
     render_file_tree = _extract_fn(UI_JS, "renderFileTree")
+    render_tree_items = _extract_fn(UI_JS, "_renderTreeItems")
 
     entries_json = json.dumps(entries)
     next_json = json.dumps(next_page or [])
@@ -132,6 +133,7 @@ def _build_harness(
 body{{margin:0;background:#141327;color:#efe7dd;font-family:Inter,system-ui,sans-serif;}}
 .test-tree-host{{width:320px;height:600px;display:flex;flex-direction:column;background:#17162b;}}
 #fileTree{{flex:1;overflow-y:auto;padding:8px;}}
+.file-del-btn{{width:20px;height:20px;min-width:20px;}}
 </style>
 </head><body>
 <div class="test-tree-host">
@@ -148,6 +150,7 @@ const S={{
   _dirCache:{{}},
   _dirHasMore:{has_more_js},
   _dirCursor:{cursor_js},
+  _expandedDirs:new Set(),
   showHiddenWorkspaceFiles:false,
 }};
 let _wsTreeGen=0;
@@ -155,20 +158,26 @@ let _wsDirRequestGen=0;
 function bumpWorkspaceTreeGen(){{_wsTreeGen+=1;return _wsTreeGen;}}
 function $(id){{return document.getElementById(id);}}
 function _workspaceEscapeGrantForPath(){{return null;}}
+function _workspaceEscapeExactGrant(){{return null;}}
+function _showFileContextMenu(){{}}
+function _setWsDragData(){{}}
+function _clearWsDragData(){{}}
+function _clearWorkspaceMoveDragOver(){{}}
+function _bindWorkspaceMoveDropTarget(){{}}
+function _bindWorkspaceOsUploadDropTarget(){{}}
+function fileIcon(){{return '';}}
+function li(){{return '';}}
+function deleteWorkspaceFile(){{}}
+function deleteWorkspaceDir(){{}}
+function openFile(){{}}
+function loadDir(){{}}
+function authorizeWorkspaceEscapeNavigation(){{return Promise.resolve(null);}}
+function showConfirmDialog(){{return Promise.resolve(false);}}
 {normalize_rel_path}
 {route_for_path_rel}
 {route_for_path}
 function _visibleWorkspaceEntries(entries){{return Array.isArray(entries)?entries:[];}}
-function _renderTreeItems(container, entries){{
-  for(const e of entries){{
-    const el=document.createElement('div');
-    el.className='file-item';
-    el.style.paddingLeft='8px';
-    el.textContent=e.name;
-    el.dataset.wsPath=e.path;
-    container.appendChild(el);
-  }}
-}}
+{render_tree_items}
 {render_file_tree}
 {render_load_more}
 {load_more_dir}
@@ -277,6 +286,33 @@ def test_click_load_more_appends_without_duplicates(width):
         assert page.locator(".ws-load-more-row").count() == 0, (
             "load-more row must be removed after the last page loads"
         )
+    finally:
+        browser.close()
+        pw.stop()
+
+
+def test_space_key_load_more_prevents_tree_scroll():
+    """Keyboard activation must consume Space instead of scrolling the tree."""
+    pw, browser = _launch()
+    try:
+        page = browser.new_page(viewport={"width": 400, "height": 600})
+        page.set_content(
+            _build_harness(
+                _PAGE_ONE, has_more=True, cursor="test-cursor", next_page=_PAGE_TWO
+            )
+        )
+        result = page.locator(".ws-load-more-row").evaluate(
+            """row => {
+                row.focus();
+                const event = new KeyboardEvent('keydown', {
+                    key: ' ', bubbles: true, cancelable: true
+                });
+                const dispatched = row.dispatchEvent(event);
+                return {defaultPrevented: event.defaultPrevented, dispatched};
+            }"""
+        )
+        assert result == {"defaultPrevented": True, "dispatched": False}
+        page.wait_for_function("() => !document.querySelector('.ws-load-more-row')")
     finally:
         browser.close()
         pw.stop()

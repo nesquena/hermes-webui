@@ -8,7 +8,12 @@ from unittest.mock import patch
 import pytest
 
 import api.workspace as w
-from api.workspace import list_dir, _encode_list_cursor, _decode_list_cursor
+from api.workspace import (
+    EscapeAuthorizationExpiredError,
+    list_dir,
+    _encode_list_cursor,
+    _decode_list_cursor,
+)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -113,13 +118,14 @@ def test_list_dir_page_boundary(tmp_path):
 # ── both backend branches emit the same cursor contract ──────────────────────
 
 def test_list_dir_both_branches(tmp_path, monkeypatch):
-    """Both _DIR_FD_OK branches produce the same cursor contract for >200 entries."""
+    """Both branches are checked when the host can execute both implementations."""
     ws = tmp_path / "ws"
     ws.mkdir()
     _make_files(ws, 201)
 
-    # dir_fd branch (default on Linux/macOS; may be False on Windows)
-    # Run whichever branch is naturally active first.
+    if not w._DIR_FD_OK:
+        pytest.skip("native dir_fd enumeration is unavailable on this Windows host")
+
     result_native = list_dir(ws, ".")
 
     # Force the fallback branch.
@@ -134,6 +140,18 @@ def test_list_dir_both_branches(tmp_path, monkeypatch):
     # Both branches return the same names in the same order on the first page.
     assert [e["name"] for e in result_native["entries"]] == \
            [e["name"] for e in result_fallback["entries"]]
+
+
+def test_list_dir_fallback_branch_runs_on_windows(tmp_path, monkeypatch):
+    """The path-based branch remains covered even where dir_fd is unavailable."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _make_files(ws, 201)
+    monkeypatch.setattr(w, "_DIR_FD_OK", False)
+    result = list_dir(ws, ".")
+    assert len(result["entries"]) == 200
+    assert result["has_more"] is True
+    assert result["cursor"]
 
 
 def test_list_dir_sort_materialization_is_bounded(tmp_path, monkeypatch):
@@ -439,3 +457,60 @@ def test_list_dir_route_contract(tmp_path):
          patch('api.routes.resolve_trusted_workspace', return_value=ws):
         _handle_list_dir(h3, parsed3)
     assert h3._status == 404
+
+
+def test_escape_list_route_forwards_cursor_and_error_contract():
+    """The escape adapter must preserve continuation metadata and map expired grants to 403."""
+    from types import SimpleNamespace
+    from api.routes import _handle_escape_list_dir
+
+    class MockHandler:
+        def __init__(self):
+            self._status = None
+            self.headers = {}
+            self.wfile = io.BytesIO()
+
+        def send_response(self, status):
+            self._status = status
+
+        def send_header(self, key, val):
+            pass
+
+        def end_headers(self):
+            pass
+
+    captured = {}
+
+    def fake_list(workspace, session_id, token, rel, cursor):
+        captured.update({
+            "workspace": workspace,
+            "session_id": session_id,
+            "token": token,
+            "rel": rel,
+            "cursor": cursor,
+        })
+        return {"entries": [{"name": "next.txt"}], "has_more": True, "cursor": "next"}
+
+    handler = MockHandler()
+    parsed = urlparse(
+        "http://localhost/api/escape/list?session_id=s1&token=grant&path=escape&cursor=page1"
+    )
+    with patch("api.routes.get_session_for_file_ops", return_value=SimpleNamespace(workspace="/ws")), \
+         patch("api.routes.list_authorized_escape_dir", side_effect=fake_list):
+        _handle_escape_list_dir(handler, parsed)
+    assert handler._status == 200
+    assert json.loads(handler.wfile.getvalue().decode("utf-8")) == {
+        "entries": [{"name": "next.txt"}], "has_more": True, "cursor": "next"
+    }
+    assert captured["cursor"] == "page1"
+    assert captured["token"] == "grant"
+
+    expired = MockHandler()
+    with patch("api.routes.get_session_for_file_ops", return_value=SimpleNamespace(workspace="/ws")), \
+         patch(
+             "api.routes.list_authorized_escape_dir",
+             side_effect=EscapeAuthorizationExpiredError("Escape authorization expired"),
+         ):
+        _handle_escape_list_dir(expired, parsed)
+    assert expired._status == 403
+    assert "expired" in json.loads(expired.wfile.getvalue().decode("utf-8"))["error"].lower()

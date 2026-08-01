@@ -57,6 +57,7 @@ def test_append_by_cursor(tmp_path):
     # Write harness to a temp file to avoid inline-eval scope conflicts.
     harness_path = tmp_path / "harness.js"
     workspace_js_path = str(WORKSPACE_JS).replace("\\", "/")
+    ui_js_path = str(REPO / "static" / "ui.js").replace("\\", "/")
 
     harness = textwrap.dedent(f"""
         // ── DOM / browser stubs ────────────────────────────────────────────
@@ -106,6 +107,7 @@ def test_append_by_cursor(tmp_path):
           entries: [],
           currentDir: '.',
           _dirCache: {{}},
+          _dirCacheVersions: Object.create(null),
           _dirCursor: null,
           _dirHasMore: false,
           _expandedDirs: new Set(),
@@ -114,7 +116,25 @@ def test_append_by_cursor(tmp_path):
 
         global.renderBreadcrumb = function(){{}};
         global.renderFileTree = function(){{}};
-        global.showToast = function(){{}};
+        const _toasts = [];
+        const _statusMessages = [];
+        const _openedFiles = [];
+        global.showToast = function(message){{ _toasts.push(message); }};
+        global.setStatus = function(message){{ _statusMessages.push(message); }};
+        global.openFile = function(path){{ _openedFiles.push(path); }};
+        global.switchWorkspacePanelTab = function(){{}};
+        global.li = function(){{ return ''; }};
+        global.fileIcon = function(){{ return ''; }};
+        global._showFileContextMenu = function(){{}};
+        global._setWsDragData = function(){{}};
+        global._clearWsDragData = function(){{}};
+        global._clearWorkspaceMoveDragOver = function(){{}};
+        global._bindWorkspaceMoveDropTarget = function(){{}};
+        global._bindWorkspaceOsUploadDropTarget = function(){{}};
+        global.deleteWorkspaceFile = function(){{}};
+        global.deleteWorkspaceDir = function(){{}};
+        global.loadDir = function(){{}};
+        global.authorizeWorkspaceEscapeNavigation = function(){{ return Promise.resolve(null); }};
         global.t = function(key){{ return key; }};
         global.$ = function(id){{ return id === 'fileTree' ? _fakeBox : null; }};
         global.clearPreview = function(){{}};
@@ -280,6 +300,82 @@ def test_append_by_cursor(tmp_path):
           await staleLoad;
           assert.strictEqual(S._dirCursor, 'new-cursor',
             'stale continuation must not clear a newer cursor');
+
+          // ── test 6: expired escape continuation surfaces localized recovery ──
+          S.session = {{session_id:'escape-sid',workspace:'/ws'}};
+          S.activeProfile = 'profile-a';
+          S.currentDir = 'escape';
+          S._dirCursor = 'expired-cursor';
+          S._dirHasMore = true;
+          S._escapeGrants = {{
+            escape:{{sessionId:'escape-sid',path:'escape',token:'expired',
+              expiresAt:Date.now()+60000}}
+          }};
+          _apiResponses.push(Promise.reject({{status:403}}));
+          await _loadMoreDir();
+          assert.strictEqual(S._dirCursor, null,
+            'expired escape continuation must clear its unusable cursor');
+          assert(!S._escapeGrants.escape,
+            'expired escape continuation must discard the grant');
+          assert(_toasts.includes('external_link_grant_expired'),
+            'expired escape continuation must show the localized recovery key');
+
+          // ── test 7: child prefetch cannot overwrite a newer cache ─────
+          const fsUi = require('fs');
+          const uiCode = fsUi.readFileSync('{ui_js_path}', 'utf8');
+          function extractFunction(source, name){{
+            const marker = 'function ' + name + '(';
+            const start = source.indexOf(marker);
+            if(start < 0) throw new Error('missing ' + name);
+            const brace = source.indexOf('{{', start);
+            let depth = 0;
+            for(let i=brace;i<source.length;i++){{
+              if(source[i]==='{{')depth++;
+              else if(source[i]==='}}' && --depth===0)return source.slice(start,i+1);
+            }}
+            throw new Error('unbalanced ' + name);
+          }}
+          vm.runInThisContext(extractFunction(uiCode, '_renderTreeItems'));
+          S.session = {{session_id:'cache-sid',workspace:'/ws'}};
+          S.activeProfile = 'profile-a';
+          S.currentDir = '.';
+          bumpWorkspaceTreeGen();
+          S._expandedDirs = new Set();
+          S._dirCache = {{}};
+          S._dirCacheVersions = Object.create(null);
+          const childDeferred = new Promise(resolve => {{ global._resolveChild = resolve; }});
+          _apiResponses.push(childDeferred);
+          const childContainer = {{
+            children:[],
+            appendChild(el){{ this.children.push(el); }}
+          }};
+          _renderTreeItems(childContainer, [
+            {{name:'child',path:'child',type:'dir'}}
+          ], 0);
+          const childLoad = childContainer.children[0].onclick({{stopPropagation(){{}}}});
+          S._dirCache = {{newer:['keep']}};
+          S._dirCacheVersions = Object.create(null);
+          global._resolveChild({{entries:[{{name:'stale',path:'child/stale'}}],has_more:false,cursor:null}});
+          await childLoad;
+          assert.deepStrictEqual(S._dirCache, {{newer:['keep']}},
+            'stale child prefetch must preserve the newer cache object');
+
+          // ── test 8: artifact lookup cannot open after profile switch ──
+          S.session = {{session_id:'artifact-before',workspace:'/ws'}};
+          S.activeProfile = 'profile-a';
+          bumpWorkspaceTreeGen();
+          const artifactDeferred = new Promise(resolve => {{ global._resolveArtifact = resolve; }});
+          _apiResponses.push(artifactDeferred);
+          const artifactLoad = openArtifactPath('artifact.txt');
+          S.session = {{session_id:'artifact-after',workspace:'/new-ws'}};
+          S.activeProfile = 'profile-b';
+          bumpWorkspaceTreeGen();
+          global._resolveArtifact({{entries:[{{name:'artifact.txt',path:'artifact.txt'}}],has_more:false,cursor:null}});
+          await artifactLoad;
+          assert.strictEqual(_openedFiles.length, 0,
+            'stale artifact lookup must not open in the newer session');
+          assert.strictEqual(_statusMessages.length, 0,
+            'stale artifact lookup must not report failure in the newer session');
 
           console.log('PASS');
         }}

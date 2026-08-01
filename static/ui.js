@@ -19825,7 +19825,8 @@ function renderFileTree(){
   const prevScrollTop=box?box.scrollTop:0;
   box.innerHTML='';
   // Cache current dir entries
-  S._dirCache[S.currentDir||'.']=S.entries;
+  if(typeof _workspaceSetDirCache==='function')_workspaceSetDirCache(S.currentDir||'.',S.entries);
+  else S._dirCache[S.currentDir||'.']=S.entries;
   // Show empty-state when no workspace is set or the directory is empty (#703)
   const emptyEl=$('wsEmptyState');
   const hasWorkspace=!!(S.session&&S.session.workspace);
@@ -19923,20 +19924,31 @@ function _remapWorkspaceCachesAfterMove(oldPath,newPath,isDir){
       }
     }
     if(S._dirCache[oldPath]){
-      S._dirCache[newPath]=S._dirCache[oldPath];
-      delete S._dirCache[oldPath];
+      if(typeof _workspaceSetDirCache==='function')_workspaceSetDirCache(newPath,S._dirCache[oldPath]);
+      else S._dirCache[newPath]=S._dirCache[oldPath];
+      if(typeof _workspaceDeleteDirCache==='function')_workspaceDeleteDirCache(oldPath);
+      else delete S._dirCache[oldPath];
     }
     for(const cachePath of Object.keys(S._dirCache)){
       if(cachePath.startsWith(oldPath+'/')){
         const remapped=newPath+cachePath.slice(oldPath.length);
-        S._dirCache[remapped]=S._dirCache[cachePath];
-        delete S._dirCache[cachePath];
+        if(typeof _workspaceSetDirCache==='function')_workspaceSetDirCache(remapped,S._dirCache[cachePath]);
+        else S._dirCache[remapped]=S._dirCache[cachePath];
+        if(typeof _workspaceDeleteDirCache==='function')_workspaceDeleteDirCache(cachePath);
+        else delete S._dirCache[cachePath];
       }
     }
     if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
   }
-  delete S._dirCache[_workspaceParentDir(oldPath)];
-  delete S._dirCache[_workspaceParentDir(newPath)];
+  const oldParent=_workspaceParentDir(oldPath);
+  const newParent=_workspaceParentDir(newPath);
+  if(typeof _workspaceDeleteDirCache==='function'){
+    _workspaceDeleteDirCache(oldParent);
+    _workspaceDeleteDirCache(newParent);
+  }else{
+    delete S._dirCache[oldParent];
+    delete S._dirCache[newParent];
+  }
   if(typeof _previewCurrentPath!=='undefined'&&_previewCurrentPath){
     if(_previewCurrentPath===oldPath)_previewCurrentPath=newPath;
     else if(_previewCurrentPath.startsWith(oldPath+'/'))_previewCurrentPath=newPath+_previewCurrentPath.slice(oldPath.length);
@@ -20121,11 +20133,17 @@ function _renderTreeItems(container, entries, depth){
                 const parent=item.path.includes('/')?item.path.substring(0,item.path.lastIndexOf('/')):'.';
                 const newPath=parent==='.'?newName:parent+'/'+newName;
                 S._expandedDirs.add(newPath);
-                if(S._dirCache[item.path]){S._dirCache[newPath]=S._dirCache[item.path];delete S._dirCache[item.path];}
+                if(S._dirCache[item.path]){
+                  if(typeof _workspaceSetDirCache==='function')_workspaceSetDirCache(newPath,S._dirCache[item.path]);
+                  else S._dirCache[newPath]=S._dirCache[item.path];
+                  if(typeof _workspaceDeleteDirCache==='function')_workspaceDeleteDirCache(item.path);
+                  else delete S._dirCache[item.path];
+                }
                 if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
               }
               // Invalidate cache and re-render
-              delete S._dirCache[S.currentDir];
+              if(typeof _workspaceDeleteDirCache==='function')_workspaceDeleteDirCache(S.currentDir);
+              else delete S._dirCache[S.currentDir];
               await loadDir(S.currentDir);
             }catch(err){showToast(t('rename_failed')+err.message);}
           }
@@ -20186,10 +20204,18 @@ function _renderTreeItems(container, entries, depth){
           if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
           // Fetch children if not cached
           if(!S._dirCache[item.path]){
+            const owner=typeof _workspaceCaptureRequestOwner==='function'
+              ? _workspaceCaptureRequestOwner(item.path,item.path,false,true) : null;
             try{
               const route=_workspaceRouteForPath(item.path,'list');
-              S._dirCache[item.path]=await _fetchAllPages(route);
-            }catch(e2){S._dirCache[item.path]=[];}
+              const entries=await _fetchAllPages(route);
+              if(owner&&(!_workspaceRequestOwnerIsCurrent(owner)||S._dirCache[item.path]!==undefined))return;
+              if(owner) _workspaceSetDirCache(item.path,entries);
+              else S._dirCache[item.path]=entries;
+            }catch(e2){
+              if(owner&&!_workspaceRequestOwnerIsCurrent(owner))return;
+              if(typeof _workspaceShowListingFailure==='function')_workspaceShowListingFailure(e2,item.path);
+            }
           }
           renderFileTree();
         }
@@ -20251,7 +20277,8 @@ async function deleteWorkspaceDir(relPath, name){
     showToast(t('deleted')+name);
     // Remove from expanded dirs cache
     if(S._expandedDirs){S._expandedDirs.delete(relPath);if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();}
-    delete S._dirCache[relPath];
+    if(typeof _workspaceDeleteDirCache==='function')_workspaceDeleteDirCache(relPath);
+    else delete S._dirCache[relPath];
     await loadDir(S.currentDir);
   }catch(e){setStatus(t('delete_failed')+e.message);}
 }
@@ -20426,10 +20453,16 @@ async function _inlineRenameFileItem(item){
       const parent=item.path.includes('/')?item.path.substring(0,item.path.lastIndexOf('/')):'.';
       const newPath=parent==='.'?newName:parent+'/'+newName;
       S._expandedDirs.add(newPath);
-      if(S._dirCache[item.path]){S._dirCache[newPath]=S._dirCache[item.path];delete S._dirCache[item.path];}
+      if(S._dirCache[item.path]){
+        if(typeof _workspaceSetDirCache==='function')_workspaceSetDirCache(newPath,S._dirCache[item.path]);
+        else S._dirCache[newPath]=S._dirCache[item.path];
+        if(typeof _workspaceDeleteDirCache==='function')_workspaceDeleteDirCache(item.path);
+        else delete S._dirCache[item.path];
+      }
       if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
     }
-    delete S._dirCache[S.currentDir];
+    if(typeof _workspaceDeleteDirCache==='function')_workspaceDeleteDirCache(S.currentDir);
+    else delete S._dirCache[S.currentDir];
     await loadDir(S.currentDir);
   }catch(err){showToast(t('rename_failed')+err.message);}
 }
@@ -20478,7 +20511,8 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
   try{
     await api('/api/file/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath,content:''})});
     showToast(t('created')+name.trim());
-    delete S._dirCache[targetDir || '.'];
+    if(typeof _workspaceDeleteDirCache==='function')_workspaceDeleteDirCache(targetDir || '.');
+    else delete S._dirCache[targetDir || '.'];
     await loadDir(S.currentDir);
     openFile(relPath);
   }catch(e){setStatus(t('create_failed')+e.message);}
@@ -20511,7 +20545,8 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
   try{
     await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath})});
     showToast(t('folder_created')+name.trim());
-    delete S._dirCache[targetDir || '.'];
+    if(typeof _workspaceDeleteDirCache==='function')_workspaceDeleteDirCache(targetDir || '.');
+    else delete S._dirCache[targetDir || '.'];
     await loadDir(S.currentDir);
     const absPath=S.session.workspace?(targetDir==='.'?`${S.session.workspace}/${name.trim()}`:`${S.session.workspace}/${targetDir}/${name.trim()}`):null;
     if(absPath){

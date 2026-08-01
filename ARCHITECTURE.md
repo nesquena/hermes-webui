@@ -366,9 +366,17 @@ safe_resolve(root, requested):
     - Raises ValueError on path traversal (../../etc/passwd)
 
 list_dir(workspace, rel='.'):
-    - Calls safe_resolve, then iterdir()
-    - Sorts: directories first, then files, case-insensitive alpha within each group
-    - Returns up to 200 entries with {name, path, type, size}
+    - Calls safe_resolve, then scans the selected directory through the anchored
+      dir_fd path when available, or the path-based fallback on Windows and other
+      platforms without dir_fd support.
+    - Applies the existing containment, blocked-path, symlink, and reachability
+      checks to every scanned candidate.
+    - Retains only 201 candidates while scanning, sorts that bounded retained set,
+      and returns a page of 200 entries with {name, path, type, size}, has_more,
+      and an opaque signed cursor for the next stable ordering slice. The scan
+      itself remains proportional to the directory size; the bound applies to
+      retained candidates and final sorting, not directory traversal or per-entry
+      validation work.
 
 read_file_content(workspace, rel):
     - Calls safe_resolve

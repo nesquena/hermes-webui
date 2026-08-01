@@ -456,6 +456,7 @@ const LOCALES = {
     workspace_empty_dir: 'This workspace is empty.',
     load_more_entries: 'Load more…',
     workspace_listing_expired: 'Directory listing expired. Refresh to see all files.',
+    workspace_listing_failed: 'Could not load directory contents. Try again.',
     workspace_show_hidden_files: 'Show hidden files',
     workspace_show_hidden_files_desc: 'Include .DS_Store, .git, node_modules, and other hidden / system files in the file tree.',
     workspace_panel_show: 'Show workspace panel',
