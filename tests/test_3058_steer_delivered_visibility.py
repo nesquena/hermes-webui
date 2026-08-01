@@ -340,7 +340,7 @@ def test_3058_idle_session_restore_projects_the_browser_cache_into_the_settled_s
         + _function(_read(MESSAGES_JS), "_settledAnchorSourceEventFromRow")
         + "\n"
         + helper
-        + f"\nconst messages=[{{role:'assistant',content:'final answer'}}];"
+        + "\nconst messages=[{role:'assistant',content:'final answer'}];"
         + f"const changed=_restoreDeliveredSteersIntoSettledMessages(messages,'{OWNER_SID}',[{json.dumps(record)}]);"
         + "console.log(JSON.stringify({changed,stream:messages[0]._anchor_stream_id,rows:messages[0]._anchor_activity_scene.activity_rows.map(r=>[r.source_event_type,r.local_id,r.text])}));"
     )

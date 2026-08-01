@@ -1655,9 +1655,10 @@ async function send(){
       }
     });
     optimisticMessages=[...S.messages];
-    INFLIGHT[activeSid]=_preserveDeliveredSteerCacheForNewInflight(activeSid,{messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]});
+    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+    INFLIGHT[activeSid]=_preserveDeliveredSteerCacheForNewInflight(activeSid,INFLIGHT[activeSid]);
     if(typeof saveInflightState==='function'){
-      _saveInflightWithDeliveredSteerCache(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[]});
+      saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[],deliveredSteers:INFLIGHT[activeSid].deliveredSteers||[]});
     }
     _runOptionalPreStartUiStep('renderSessionListFromCache.initial', ()=>{
       if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
@@ -1703,7 +1704,8 @@ async function send(){
     try{console.warn('[webui] pre-start optimistic UI failed; continuing to /api/chat/start', message);}catch(_){ }
     if(!S.messages.includes(userMsg)) S.messages.push(userMsg);
     optimisticMessages=[...S.messages];
-    INFLIGHT[activeSid]=_preserveDeliveredSteerCacheForNewInflight(activeSid,{messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]});
+    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+    INFLIGHT[activeSid]=_preserveDeliveredSteerCacheForNewInflight(activeSid,INFLIGHT[activeSid]);
     try{setBusy(true);}catch(_){S.busy=true;}
     if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
     S.activeStreamId=null;
@@ -1882,12 +1884,13 @@ async function send(){
       upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
     }
     if(!INFLIGHT[activeSid]){
-    INFLIGHT[activeSid]=_preserveDeliveredSteerCacheForNewInflight(activeSid,{messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]});
+      INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+      INFLIGHT[activeSid]=_preserveDeliveredSteerCacheForNewInflight(activeSid,INFLIGHT[activeSid]);
     }
     const currentInflight=INFLIGHT[activeSid];
     markInflight(activeSid, streamId);
     if(typeof saveInflightState==='function'){
-      _saveInflightWithDeliveredSteerCache(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[]});
+      saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[],deliveredSteers:currentInflight.deliveredSteers||[]});
     }
     // Refresh session list so background streaming indicators appear immediately for the
     // session that was just started and any others that may already be running.
@@ -7034,7 +7037,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     try{
       const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
-      if(!_ownsCurrentStream()){
+      if(typeof _ownsCurrentStream==='function'&&!_ownsCurrentStream()){
         _closeSource(source);
         return returnStatus?'stale':false;
       }
@@ -7068,6 +7071,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         clearLiveToolCards();if(!assistantText)removeThinking();
         S.session=session;
         const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
+        if(S.session&&S.session.session_id){
+          try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+          if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+        }
         const _currentMessages=Array.isArray(S.messages)?S.messages:[];
         const _currentVisibleMessages=_filterRecoveryControlMessages(_currentMessages || []);
         const _stagedMessages=_carryForwardEphemeralTurnFields(_currentMessages, _nextMsgs3018);
@@ -7093,10 +7100,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _attachProjectedAnchorSceneToLastAssistant(S.messages);
         _clearOwnerInflightState();
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
-        if(S.session&&S.session.session_id){
-          try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
-          if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
-        }
         const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
         if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
         const hasMessageToolMetadata=S.messages.some(m=>{
@@ -7206,11 +7209,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Reattach path can carry stale stream ids after server restart; preflight
     // status avoids opening a dead SSE URL that will 404 in the console.
     let replayOnly=false;
+    let replayParams='';
     if(reconnecting){
       try{
         const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
         if(!st.active&&st.replay_available){
           replayOnly=true;
+          replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
         }else if(!st.active){
           const hasSteerRecovery=!!(
             (INFLIGHT[activeSid]&&Array.isArray(INFLIGHT[activeSid].deliveredSteers)&&INFLIGHT[activeSid].deliveredSteers.length)
@@ -7249,7 +7254,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }catch(_){}
     }
-    const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
+    replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
     _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();
 

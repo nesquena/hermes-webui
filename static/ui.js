@@ -9097,9 +9097,14 @@ function saveInflightState(sid, state){
     all[sid]=entry;
     _writeInflightStateMap(all);
   }catch(err){
-    // Keep the previous recovery map intact when the browser quota is already
-    // exhausted; clearing it would erase unrelated delivered-steer records.
+    // Retry with the current entry after dropping an oversized recovery map.
     if(!_isStorageQuotaError(err)) return;
+    try{
+      localStorage.removeItem(INFLIGHT_STATE_KEY);
+      _writeInflightStateMap({[sid]:entry});
+    }catch(_){
+      try{localStorage.removeItem(INFLIGHT_STATE_KEY);}catch(__){}
+    }
   }
 }
 function loadInflightState(sid, streamId){

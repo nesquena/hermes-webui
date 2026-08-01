@@ -952,7 +952,7 @@ function _purgeStaleInflightEntries() {
     if (!s.is_streaming) {
       // A delivered steer remains browser-owned until the anchor scene write
       // succeeds, so an idle sidebar refresh must not purge its recovery copy.
-      if(_inflightHasVisibleLiveState(INFLIGHT[sid])&&
+      if(typeof _inflightHasVisibleLiveState==='function'&&_inflightHasVisibleLiveState(INFLIGHT[sid])&&
           Array.isArray(INFLIGHT[sid].deliveredSteers)&&INFLIGHT[sid].deliveredSteers.length){
         continue;
       }
@@ -2040,6 +2040,8 @@ async function loadSession(sid){
   let activeStreamId=S.session.active_stream_id||null;
   let settledDeliveredSteers=[];
   if(!activeStreamId){
+    S.busy=false;
+    S.activeStreamId=null;
     const localDeliveredSteers=INFLIGHT[sid]&&Array.isArray(INFLIGHT[sid].deliveredSteers)
       ? INFLIGHT[sid].deliveredSteers
       : [];
@@ -2050,7 +2052,9 @@ async function loadSession(sid){
     settledDeliveredSteers=localDeliveredSteers.length?localDeliveredSteers:storedDeliveredSteers;
   }
   const preserveSettledDeliveredSteers=()=>{
-    _preserveSettledDeliveredSteersForRecovery(sid,settledDeliveredSteers);
+    if(typeof _preserveSettledDeliveredSteersForRecovery==='function'){
+      _preserveSettledDeliveredSteersForRecovery(sid,settledDeliveredSteers);
+    }
   };
   // If the server says the session is idle, reset browser-side streaming flags
   // NOW — BEFORE _acknowledgeSessionVisit() below (whose sidebar repaint would
