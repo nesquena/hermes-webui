@@ -1469,7 +1469,7 @@ def test_agent_delegation_invokes_official_entry_point(tmp_path, monkeypatch):
     monkeypatch.setattr(updates.subprocess, 'run', fake_subprocess_run)
     monkeypatch.setattr(
         updates, '_ensure_gateway_restart_for_agent_update',
-        lambda: (True, {'status': 'completed'}),
+        lambda *args, **kwargs: (True, {'status': 'completed'}),
     )
     monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
 
@@ -1510,7 +1510,7 @@ def test_agent_update_failure_propagates(tmp_path, monkeypatch):
 
     def _make_gateway_spy(called):
         # bind called as a parameter for the same reason
-        return lambda: called.append(1) or (True, {'status': 'completed'})
+        return lambda *args, **kwargs: called.append(1) or (True, {'status': 'completed'})
 
     for reason_text, rc in failure_reasons:
         monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
@@ -1577,6 +1577,26 @@ def test_agent_update_failure_keeps_late_updater_detail(tmp_path, monkeypatch):
         '  ⚠️  Config format update failed: invalid schema\n✓ Update complete!\n',
         '⚠️  Config format update failed:',
     ),
+    (
+        '  ✗ Auto-restore FAILED — restored copy also failed integrity\n✓ Update complete!\n',
+        '✗ Auto-restore FAILED',
+    ),
+    (
+        '  ✗ Auto-restore file copy failed: access denied\n✓ Update complete!\n',
+        '✗ Auto-restore file copy failed:',
+    ),
+    (
+        '⚠ Venv still unhealthy after repair: ImportError: broken\n✓ Update complete!\n',
+        '⚠ Venv still unhealthy after repair:',
+    ),
+    (
+        '⚠ Lazy-refresh recovery incomplete — run `hermes` again\n✓ Update complete!\n',
+        '⚠ Lazy-refresh recovery incomplete',
+    ),
+    (
+        '⚠ Update incomplete — some gateway units were not restarted:\n✓ Update complete!\n',
+        '⚠ Update incomplete — some gateway units were not restarted:',
+    ),
 ])
 def test_agent_zero_exit_refusal_and_caught_failure_do_not_report_success(
     tmp_path, monkeypatch, output, marker,
@@ -1594,7 +1614,7 @@ def test_agent_zero_exit_refusal_and_caught_failure_do_not_report_success(
     )
     monkeypatch.setattr(
         updates, '_ensure_gateway_restart_for_agent_update',
-        lambda: gateway_called.append(1) or (True, {'status': 'completed'}),
+        lambda *args, **kwargs: gateway_called.append(1) or (True, {'status': 'completed'}),
     )
 
     result = updates._apply_update_inner('agent')
@@ -1643,7 +1663,7 @@ def test_agent_output_is_decoded_as_utf8_with_replacement(tmp_path, monkeypatch)
     monkeypatch.setattr(updates.subprocess, 'run', fake_run)
     monkeypatch.setattr(
         updates, '_ensure_gateway_restart_for_agent_update',
-        lambda: (True, {'status': 'completed'}),
+        lambda *args, **kwargs: (True, {'status': 'completed'}),
     )
     monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
 
@@ -1686,15 +1706,17 @@ def test_agent_uses_passive_gateway_observation_after_official_restart(
     agent_dir = _agent_tmp(tmp_path)
     agent_exe = _make_hermes_exe(agent_dir)
     restart_calls = []
+    snapshots = iter([
+        {'pid': 100, 'start_time': 10, 'version': '0.18.0', 'health': 'running'},
+        {'pid': 101, 'start_time': 11, 'version': '0.19.0', 'health': 'running'},
+    ])
 
     monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
     monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
     monkeypatch.setattr(updates.subprocess, 'run', lambda cmd, **kwargs: _fake_proc())
     monkeypatch.setattr(updates, 'get_active_profile_name', lambda: 'default')
-    monkeypatch.setattr(
-        updates, 'get_active_profile_gateway_running_pid',
-        lambda profile: 4242,
-    )
+    monkeypatch.setattr(updates, '_gateway_observation_snapshot', lambda profile: next(snapshots))
+    monkeypatch.setattr(updates, '_agent_source_version', lambda agent_dir: '0.19.0')
     monkeypatch.setattr(
         updates, 'restart_active_profile_gateway',
         lambda **kwargs: restart_calls.append(kwargs),
@@ -1709,11 +1731,62 @@ def test_agent_uses_passive_gateway_observation_after_official_restart(
     assert restart_calls == []
 
 
+def test_agent_passive_observation_rejects_surviving_old_gateway(tmp_path, monkeypatch):
+    """A live PID is insufficient when it is the pre-update gateway."""
+    previous = {'pid': 100, 'start_time': 10, 'version': '0.18.0', 'health': 'running'}
+    monkeypatch.setattr(
+        updates, '_gateway_observation_snapshot',
+        lambda profile: dict(previous),
+    )
+    monkeypatch.setattr(updates, '_AGENT_GATEWAY_OBSERVATION_TIMEOUT_S', 0)
+
+    ok, result = updates._ensure_gateway_restart_for_agent_update(
+        previous_snapshot=previous,
+        expected_version='0.19.0',
+    )
+
+    assert ok is False
+    assert 'pre-update gateway identity' in result['message']
+
+
+@pytest.mark.parametrize(
+    'snapshot,fragment',
+    [
+        (
+            {'pid': 101, 'start_time': 11, 'version': '0.18.0', 'health': 'running'},
+            'different Agent version',
+        ),
+        (
+            {'pid': 101, 'start_time': 11, 'version': '0.19.0', 'health': 'stopped'},
+            'replacement gateway is not healthy',
+        ),
+    ],
+)
+def test_agent_passive_observation_rejects_bad_replacement_state(
+    tmp_path, monkeypatch, snapshot, fragment,
+):
+    """Replacement identity alone cannot bypass version or health checks."""
+    previous = {'pid': 100, 'start_time': 10, 'version': '0.18.0', 'health': 'running'}
+    monkeypatch.setattr(updates, '_gateway_observation_snapshot', lambda profile: snapshot)
+    monkeypatch.setattr(updates, '_AGENT_GATEWAY_OBSERVATION_TIMEOUT_S', 0)
+
+    ok, result = updates._ensure_gateway_restart_for_agent_update(
+        previous_snapshot=previous,
+        expected_version='0.19.0',
+    )
+
+    assert ok is False
+    assert fragment in result['message']
+
+
 def test_agent_update_lock_conflict_preserves_recovery_affordance(tmp_path, monkeypatch):
     """An official updater lock failure still reaches clear-lock recovery."""
     agent_dir = _agent_tmp(tmp_path)
     agent_exe = _make_hermes_exe(agent_dir)
-    lock_error = "fatal: Unable to create '.git/index.lock': File exists"
+    lock_error = (
+        '✗ Another Hermes update is already running (PID 1234, started 4s ago).\n'
+        '  .hermes-update-in-progress'
+    )
 
     monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
     monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
@@ -1728,6 +1801,90 @@ def test_agent_update_lock_conflict_preserves_recovery_affordance(tmp_path, monk
     assert result['ok'] is False, result
     assert result['lock_conflict'] is True, result
     assert lock_error in result['message'], result
+    assert result['lock_recovery']['marker_path'].endswith('.hermes-update-in-progress')
+
+
+def test_apply_clear_lock_agent_retries_after_official_marker_is_gone(tmp_path, monkeypatch):
+    """Agent lock recovery invokes the official updater for non-Git roots."""
+    agent_dir = tmp_path / 'agent'
+    agent_dir.mkdir()
+    marker = tmp_path / '.hermes-update-in-progress'
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_agent_update_lock_path', lambda: marker)
+    monkeypatch.setattr(
+        updates, '_agent_update_lock_state',
+        lambda: {'path': marker, 'holder': None, 'present': False},
+    )
+    monkeypatch.setattr(
+        updates, '_apply_update_inner',
+        lambda target, channel: {'ok': True, 'target': target},
+    )
+
+    result = updates.apply_clear_lock('agent')
+
+    assert result['ok'] is True
+    assert result['target'] == 'agent'
+    assert result['lock_recovery']['action'] == 'no-lock-found'
+
+
+def test_agent_non_git_root_still_invokes_official_updater(tmp_path, monkeypatch):
+    """Supported ZIP and pip-style roots must reach the official command."""
+    agent_dir = tmp_path / 'agent'
+    agent_dir.mkdir()
+    agent_exe = _make_hermes_exe(agent_dir)
+    calls = []
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
+    monkeypatch.setattr(
+        updates.subprocess, 'run',
+        lambda cmd, **kwargs: calls.append(list(cmd)) or _fake_proc(),
+    )
+    monkeypatch.setattr(
+        updates, '_ensure_gateway_restart_for_agent_update',
+        lambda *args, **kwargs: (True, {'status': 'completed'}),
+    )
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['ok'] is True, result
+    assert calls and calls[0][-2:] == ['update', '--yes']
+
+
+def test_apply_force_update_agent_restarts_active_gateway(tmp_path, monkeypatch):
+    """Force recovery must actively restart the Agent gateway once."""
+    agent_dir = tmp_path / 'agent'
+    (agent_dir / '.git').mkdir(parents=True)
+    calls = []
+
+    def fake_git(args, cwd, timeout=10):
+        if args[0] == 'fetch':
+            return '', True
+        if args[:2] == ['rev-parse', '--abbrev-ref']:
+            return 'origin/master', True
+        if args[0] in {'checkout', 'clean', 'reset'}:
+            return '', True
+        return '', True
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_run_git', fake_git)
+    monkeypatch.setattr(updates, '_select_apply_compare_ref', lambda *args, **kwargs: 'origin/master')
+    monkeypatch.setattr(
+        updates, 'restart_active_profile_gateway',
+        lambda **kwargs: calls.append(kwargs) or {'status': 'completed'},
+    )
+    monkeypatch.setattr(
+        updates, '_ensure_gateway_restart_for_agent_update',
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError('force path must actively restart')),
+    )
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+
+    result = updates.apply_force_update('agent')
+
+    assert result['ok'] is True, result
+    assert result['gateway_restart'] == 'completed'
+    assert calls == [{'profile': 'default'}]
 
 
 def test_response_before_replacement_ordering(tmp_path, monkeypatch):
@@ -1745,7 +1902,7 @@ def test_response_before_replacement_ordering(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         updates, '_ensure_gateway_restart_for_agent_update',
-        lambda: (True, {'status': 'completed'}),
+        lambda *args, **kwargs: (True, {'status': 'completed'}),
     )
     monkeypatch.setattr(
         updates,
@@ -1782,7 +1939,7 @@ def test_post_restart_health_gate(tmp_path, monkeypatch):
     # Healthy replacement — expect success.
     monkeypatch.setattr(
         updates, '_ensure_gateway_restart_for_agent_update',
-        lambda: (True, {'status': 'completed'}),
+        lambda *args, **kwargs: (True, {'status': 'completed'}),
     )
     ok_result = updates._apply_update_inner('agent')
     assert ok_result['ok'] is True, ok_result
@@ -1790,7 +1947,7 @@ def test_post_restart_health_gate(tmp_path, monkeypatch):
     # Unhealthy replacement — expect failure surfaced, not swallowed.
     monkeypatch.setattr(
         updates, '_ensure_gateway_restart_for_agent_update',
-        lambda: (False, {'status': 'failed', 'message': 'gateway did not start'}),
+        lambda *args, **kwargs: (False, {'status': 'failed', 'message': 'gateway did not start'}),
     )
     fail_result = updates._apply_update_inner('agent')
     assert fail_result['ok'] is False, fail_result
@@ -1802,7 +1959,7 @@ def test_post_restart_health_gate(tmp_path, monkeypatch):
     # healthy, so reporting ok=True would be premature.
     monkeypatch.setattr(
         updates, '_ensure_gateway_restart_for_agent_update',
-        lambda: (True, {'status': 'in_progress'}),
+        lambda *args, **kwargs: (True, {'status': 'in_progress'}),
     )
     in_progress_result = updates._apply_update_inner('agent')
     assert in_progress_result['ok'] is False, (
@@ -1875,7 +2032,7 @@ def test_update_target_matrix(scenario, setup, expected_ok, expected_msg_fragmen
             _gstatus = setup.get('gateway_status', 'completed')
             monkeypatch.setattr(
                 updates, '_ensure_gateway_restart_for_agent_update',
-                lambda: (_gok, {'status': _gstatus,
+                lambda *args, **kwargs: (_gok, {'status': _gstatus,
                                 'message': 'restart error' if not _gok else ''}),
             )
 

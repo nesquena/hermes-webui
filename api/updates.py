@@ -25,7 +25,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from api.agent_health import get_active_profile_gateway_running_pid
-from api.gateway_restart import _resolve_hermes_command
+from api.gateway_restart import _resolve_hermes_command, restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import PYTHON_EXE, REPO_ROOT, STREAMS, STREAMS_LOCK
 
@@ -61,7 +61,7 @@ _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'ssl certificate problem',
 )
 # These markers mirror the current Agent updater source at
-# hermes_cli/main.py:10271-10379 and config.py:657-683. The completion line is
+# hermes_cli/update_cmd.py and hermes_cli/update_lock.py. The completion line is
 # the updater's explicit transaction output; refusal/failure lines remain
 # failures even when the CLI catches an exception and exits zero.
 _AGENT_UPDATE_COMPLETION_MARKER = "✓ Update complete!"
@@ -75,6 +75,20 @@ _AGENT_UPDATE_FAILURE_MARKERS = (
     "⚠ npm workspace install failed",
     "⚠ Desktop build failed",
     "⚠️  Config format update failed:",
+    "✗ Auto-restore FAILED",
+    "✗ Auto-restore file copy failed:",
+    "⚠ Venv still unhealthy after repair:",
+    "⚠ Lazy refresh failed unexpectedly:",
+    "⚠ Lazy refresh failed; rerun `hermes update` once resolved.",
+    "⚠ Lazy-refresh recovery incomplete",
+    "⚠ Update partially complete — Node.js dependencies",
+    "⚠ Update incomplete — some gateway units were not restarted:",
+    "⚠ Gateway restart failed:",
+)
+_AGENT_UPDATE_LOCK_MARKERS = (
+    ".hermes-update-in-progress",
+    "another hermes update is already running",
+    "update is already running",
 )
 _AGENT_GATEWAY_OBSERVATION_TIMEOUT_S = 10.0
 _AGENT_GATEWAY_OBSERVATION_POLL_S = 0.25
@@ -256,7 +270,39 @@ def _is_git_lock_error(output: str) -> bool:
     if not output:
         return False
     lower_out = output.lower()
-    return any(sig in lower_out for sig in _GIT_LOCK_SIGNATURES)
+    return any(sig in lower_out for sig in _GIT_LOCK_SIGNATURES) or any(
+        sig in lower_out for sig in _AGENT_UPDATE_LOCK_MARKERS
+    )
+
+
+def _agent_update_lock_path() -> Path | None:
+    """Return the marker path used by the official Agent updater."""
+    try:
+        from hermes_cli.update_lock import update_marker_path
+
+        return Path(update_marker_path())
+    except Exception:
+        hermes_home = os.getenv('HERMES_HOME')
+        return Path(hermes_home) / '.hermes-update-in-progress' if hermes_home else None
+
+
+def _agent_update_lock_state(path: Path | None = None) -> dict:
+    """Read the official lock without deleting a live marker."""
+    path = path or _agent_update_lock_path()
+    if path is None:
+        return {'path': None, 'holder': None, 'present': False}
+    holder = None
+    try:
+        from hermes_cli.update_lock import read_live_update
+
+        holder = read_live_update(path=path)
+    except Exception:
+        holder = None
+    try:
+        present = path.exists()
+    except OSError:
+        present = True
+    return {'path': path, 'holder': holder, 'present': present}
 
 
 def _inventory_locks(path: Path) -> dict:
@@ -336,11 +382,52 @@ def apply_clear_lock(target: str) -> dict:
             path = REPO_ROOT
         elif target == 'agent':
             path = _AGENT_DIR
+            if path is None:
+                return {'ok': False, 'message': 'Hermes Agent installation was not found'}
+
+            # The official updater uses this shared marker for every install
+            # layout, including ZIP and pip-style roots without .git.
+            lock_state = _agent_update_lock_state()
+            lock_path = lock_state.get('path')
+            if lock_state.get('holder') is not None or lock_state.get('present'):
+                manual_command = f"rm -f {lock_path}" if lock_path else 'Retry after the Hermes updater exits'
+                holder = lock_state.get('holder')
+                holder_detail = (
+                    f' (PID {holder.pid} is still running)'
+                    if holder is not None else ''
+                )
+                return {
+                    'ok': False,
+                    'message': (
+                        'The official Hermes update lock is still present'
+                        f'{holder_detail}. Confirm that no Hermes updater is '
+                        'running, remove the marker manually, then click Retry. '
+                        f'Run: {manual_command}'
+                    ),
+                    'lock_held': True,
+                    'lock_conflict': True,
+                    'target': target,
+                    'manual_command': manual_command,
+                    'well_known_lock_path': str(lock_path) if lock_path else None,
+                }
         else:
             return {'ok': False, 'message': f'Unknown target: {target}'}
 
-        if path is None or not (path / '.git').exists():
+        if path is None or (target == 'webui' and not (path / '.git').exists()):
             return {'ok': False, 'message': 'Not a git repository'}
+
+        if target == 'agent':
+            with _cache_lock:
+                _update_cache['checked_at'] = 0
+            retry_result = dict(_apply_update_inner(target, _read_update_channel()))
+            retry_result['lock_recovery'] = {
+                'action': 'no-lock-found',
+                'manual_command': (
+                    f'rm -f {lock_state["path"]}'
+                    if lock_state.get('path') else ''
+                ),
+            }
+            return retry_result
 
         inv = _inventory_locks(path)
         manual_command = f"rm -f {inv['well_known_lock_path']}"
@@ -1838,7 +1925,10 @@ def _schedule_restart(delay: float = 2.0) -> None:
     threading.Thread(target=_do, daemon=True).start()
 
 
-def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
+def _ensure_gateway_restart_for_agent_update(
+    previous_snapshot: dict | None = None,
+    expected_version: str | None = None,
+) -> tuple[bool, dict]:
     """Passively observe the active-profile gateway after Agent-owned restart.
 
     Returns:
@@ -1849,18 +1939,40 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
     target_profile = str(get_active_profile_name() or "default").strip() or "default"
     deadline = time.monotonic() + _AGENT_GATEWAY_OBSERVATION_TIMEOUT_S
     while True:
-        gateway_pid = get_active_profile_gateway_running_pid(profile=target_profile)
-        if gateway_pid is not None:
+        snapshot = _gateway_observation_snapshot(target_profile)
+        gateway_pid = snapshot.get('pid')
+        identity_changed = previous_snapshot is None or (
+            gateway_pid != previous_snapshot.get('pid')
+            or snapshot.get('start_time') != previous_snapshot.get('start_time')
+        )
+        health_ok = snapshot.get('health') in (None, 'running')
+        version_ok = (
+            expected_version is None
+            or snapshot.get('version') is None
+            or snapshot.get('version') == expected_version
+        )
+        if gateway_pid is not None and identity_changed and health_ok and version_ok:
             return True, {
                 "status": "completed",
                 "observation": "passive",
                 "gateway_pid": gateway_pid,
+                "gateway_start_time": snapshot.get('start_time'),
+                "gateway_version": snapshot.get('version') or expected_version,
+                "gateway_health": snapshot.get('health') or 'pid-alive',
             }
         if time.monotonic() >= deadline:
+            if gateway_pid is not None and not identity_changed:
+                detail = 'the pre-update gateway identity is still running'
+            elif gateway_pid is not None and not version_ok:
+                detail = 'the gateway reported a different Agent version'
+            elif gateway_pid is not None and not health_ok:
+                detail = 'the replacement gateway is not healthy'
+            else:
+                detail = 'no healthy replacement gateway was observed'
             return False, {
                 "status": "failed",
                 "observation": "passive",
-                "message": "Active-profile gateway did not become healthy after the Agent updater completed",
+                "message": f'Active-profile gateway check failed: {detail}',
             }
         time.sleep(_AGENT_GATEWAY_OBSERVATION_POLL_S)
 
@@ -1913,9 +2025,9 @@ def apply_force_update(target: str, channel=None) -> dict:
             # Channel is WebUI-only — the Agent always uses the default channel.
             channel = DEFAULT_UPDATE_CHANNEL
             # Force-update intentionally does NOT delegate to `hermes update
-            # --yes`.  The official updater refuses diverged or conflict
+            # --yes`. The official updater refuses diverged or conflict
             # checkouts and cannot recover from them, which is the only reason
-            # the user reaches this path.  git fetch + reset --hard is the
+            # the user reaches this path. git fetch + reset --hard is the
             # correct recovery tool here.
         else:
             return {'ok': False, 'message': f'Unknown target: {target}'}
@@ -2006,7 +2118,10 @@ def apply_force_update(target: str, channel=None) -> dict:
             _update_cache['checked_at'] = 0
 
         if target == 'agent':
-            gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
+            gateway_result = restart_active_profile_gateway(
+                profile=str(get_active_profile_name() or 'default').strip() or 'default'
+            )
+            gateway_ok = gateway_result.get('status') == 'completed'
             if not gateway_ok:
                 return {
                     'ok': False,
@@ -2098,14 +2213,60 @@ def _find_agent_executable(agent_dir: Path):
     return None
 
 
+def _agent_source_version(agent_dir: Path | None) -> str | None:
+    """Read the installed Agent version without importing mutable modules."""
+    if agent_dir is None:
+        return None
+    version_file = agent_dir / 'hermes_cli' / '__init__.py'
+    try:
+        source = version_file.read_text(encoding='utf-8')
+    except (OSError, UnicodeDecodeError):
+        return None
+    match = re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", source)
+    return match.group(1) if match else None
+
+
+def _gateway_observation_snapshot(profile: str) -> dict:
+    """Read active gateway identity and health from the Agent-owned files."""
+    snapshot = {
+        'pid': get_active_profile_gateway_running_pid(profile=profile),
+        'start_time': None,
+        'version': None,
+        'health': None,
+    }
+    try:
+        from api.agent_health import _gateway_status_module, _read_gateway_runtime_status
+        from api.profiles import get_hermes_home_for_profile
+
+        home = Path(get_hermes_home_for_profile(profile))
+        status = _gateway_status_module()
+        runtime = _read_gateway_runtime_status(status, home / 'gateway.pid')
+        if isinstance(runtime, dict):
+            snapshot['start_time'] = runtime.get('start_time')
+            snapshot['health'] = runtime.get('gateway_state')
+            for key in ('version', 'hermes_version', 'agent_version'):
+                value = runtime.get(key)
+                if isinstance(value, str) and value:
+                    snapshot['version'] = value
+                    break
+    except Exception:
+        pass
+    if snapshot['pid'] is not None and snapshot['start_time'] is None:
+        try:
+            from gateway.status import get_process_start_time
+
+            snapshot['start_time'] = get_process_start_time(snapshot['pid'])
+        except Exception:
+            pass
+    return snapshot
+
+
 def _agent_update_failure_detail(output: str) -> str:
-    """Keep a sanitized tail of official updater output for the browser."""
+    """Sanitize all updater output before retaining its diagnostic tail."""
     if not output:
         return "(no output from updater)"
-    return (
-        _sanitize_git_diagnostic(output[-500:], limit=500)
-        or "(no output from updater)"
-    )
+    sanitized = _sanitize_git_diagnostic(output, limit=max(len(output), 1))
+    return sanitized[-500:] or "(no output from updater)"
 
 
 def _agent_update_output_failure(output: str) -> str | None:
@@ -2128,8 +2289,8 @@ def _apply_agent_update_inner():
     sequence when the official entry point is unavailable.
     """
     agent_dir = Path(_AGENT_DIR) if _AGENT_DIR is not None else None
-    if agent_dir is None or not (agent_dir / '.git').exists():
-        return {'ok': False, 'message': 'Not a git repository'}
+    if agent_dir is None or not agent_dir.exists():
+        return {'ok': False, 'message': 'Hermes Agent installation was not found'}
 
     agent_exe = _find_agent_executable(agent_dir)
     if agent_exe is None:
@@ -2141,6 +2302,10 @@ def _apply_agent_update_inner():
                 'No fallback to a local git sequence is attempted.'
             ),
         }
+
+    target_profile = str(get_active_profile_name() or 'default').strip() or 'default'
+    previous_gateway = _gateway_observation_snapshot(target_profile)
+    expected_version = _agent_source_version(agent_dir)
 
     try:
         # --yes suppresses every interactive prompt (stash restore:
@@ -2190,6 +2355,13 @@ def _apply_agent_update_inner():
         }
         if _is_git_lock_error(combined):
             response['lock_conflict'] = True
+            lock_state = _agent_update_lock_state()
+            if lock_state.get('path') is not None:
+                response['lock_recovery'] = {
+                    'action': 'clear-lock-retry',
+                    'marker_path': str(lock_state['path']),
+                    'manual_command': f"rm -f {lock_state['path']}",
+                }
         return response
 
     # Invalidate before the gateway gate so any early-return path below still
@@ -2197,10 +2369,13 @@ def _apply_agent_update_inner():
     with _cache_lock:
         _update_cache['checked_at'] = 0
 
-    # The Agent's subprocess already restarts all gateways before it exits
-    # (hermes_cli/main.py:10462). Observe the active profile without issuing a
-    # second restart, then gate success on the passive health result.
-    gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
+    # The Agent's subprocess already restarts all gateways before it exits.
+    # Observe the active profile without issuing a second restart, and require
+    # replacement identity, version compatibility, and health before success.
+    gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update(
+        previous_snapshot=previous_gateway,
+        expected_version=expected_version,
+    )
     if not gateway_ok:
         return {
             'ok': False,
