@@ -1383,6 +1383,7 @@ function _showSteerIndicator(text){
   if(typeof scrollToBottom==='function') scrollToBottom();
 }
 
+
 function _showSteerRecovery(msg, explicitSteer, fallback) {
   const inner = document.getElementById('msgInner');
   if (!inner) return;
@@ -1548,6 +1549,125 @@ async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot){
   return base?`${base}\n\n${note}`:note;
 }
 
+// #3058 slice 3: a delivered steer belongs in the running turn's causal timeline,
+// not in a transient DOM node. Record it on the owning stream's assistant-turn
+// anchor, which already carries that timeline through settlement, replay hydration
+// and session re-entry. WebUI observed delivery only; nothing here claims more.
+function _steerDeliveredTextFingerprint(text){
+  // djb2. It only has to keep two distinct steers apart, not resist an attacker.
+  let h=5381;
+  const s=String(text||'');
+  for(let i=0;i<s.length;i+=1) h=(((h<<5)+h)^s.charCodeAt(i))>>>0;
+  return h.toString(36);
+}
+const _steerDeliveredOrdinalByStream = new Map();
+function _nextSteerDeliveredOrdinal(ownerSid, ownerStreamId){
+  // A page-lifetime counter restarts at 0 on reload, so the first steer after a
+  // mid-run refresh would reuse a replayed record's identity, dedupe against it,
+  // and leave the user reading the previous steer's text. The ordinal has to be a
+  // property of the run, so seed it from the INFLIGHT cache, which is what
+  // survives the reload.
+  const key=String(ownerStreamId);
+  let highest=_steerDeliveredOrdinalByStream.get(key)||0;
+  try{
+    if(typeof INFLIGHT!=='undefined'&&INFLIGHT[ownerSid]&&Array.isArray(INFLIGHT[ownerSid].deliveredSteers)){
+      for(const record of INFLIGHT[ownerSid].deliveredSteers){
+        const payload=record&&record.payload;
+        if(!payload||String(payload.stream_id||'')!==key) continue;
+        const n=Number(payload.ordinal)||0;
+        if(n>highest) highest=n;
+      }
+    }
+  }catch(_){}
+  const next=highest+1;
+  // One entry per stream this page steered; evict oldest so it can't grow.
+  if(_steerDeliveredOrdinalByStream.size>=64&&!_steerDeliveredOrdinalByStream.has(key)){
+    _steerDeliveredOrdinalByStream.delete(_steerDeliveredOrdinalByStream.keys().next().value);
+  }
+  _steerDeliveredOrdinalByStream.set(key,next);
+  return next;
+}
+function _recordDeliveredSteer(ownerSid, ownerStreamId, originalMsg, filesSnapshot){
+  if(!ownerSid||!ownerStreamId||typeof window==='undefined') return false;
+  const anchorApi=window.HermesAssistantTurnAnchors;
+  const registries=window._liveAnchorRegistries;
+  if(!anchorApi||typeof anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return false;
+  if(!registries||typeof registries.get!=='function') return false;
+  // A missing entry means "no anchor available for this run", never "the run is
+  // dead" — the caller degrades to the legacy indicator. ownerStreamId was captured
+  // before the await, so it can never address another run's registry.
+  const registry=registries.get(ownerStreamId);
+  if(!registry) return false;
+  const ordinal=_nextSteerDeliveredOrdinal(ownerSid,ownerStreamId);
+  const text=_steerIndicatorText(originalMsg,filesSnapshot);
+  const files=(Array.isArray(filesSnapshot)?filesSnapshot:[])
+    .map(f=>String((f&&(f.name||f.filename||f.path))||'').trim())
+    .filter(Boolean);
+  const sourceEvent={
+    source_event_type:'steer_delivered',
+    seq:`steer-${ordinal}`,
+    created_at:Date.now()/1000,
+    payload:{
+      // local_id is what makes replay idempotent: the anchor dedupes on
+      // local:[session, sourceType, local_id, seq]. Replay re-applies this exact
+      // record, so it always dedupes; the fingerprint is what keeps two DISTINCT
+      // steers apart if no cache existed to seed the ordinal from.
+      local_id:`steer:${ownerStreamId}:${ordinal}:${_steerDeliveredTextFingerprint(text)}`,
+      // Read back by _nextSteerDeliveredOrdinal to reseed after a reload.
+      stream_id:String(ownerStreamId),
+      ordinal,
+      status:'delivered',
+      text,
+      files,
+      delivered:true,
+      origin:'webui',
+    },
+  };
+  let accepted=false;
+  try{
+    // Seal the in-flight prose segment first, so the settled scene reads
+    // assistant -> steer -> assistant instead of merging the steer into the run
+    // of prose that preceded it.
+    if(typeof window._sealLiveAnchorProseSegmentForStream==='function'){
+      window._sealLiveAnchorProseSegmentForStream(ownerStreamId);
+    }
+    const result=anchorApi.applyAssistantTurnAnchorSourceEvent(
+      registry,
+      sourceEvent,
+      {session_id:ownerSid,stream_id:ownerStreamId}
+    );
+    // registry-level outcome: the event was stored, or was already stored.
+    accepted=!!(result&&(result.applied||result.reason==='duplicate'));
+  }catch(err){
+    if(typeof console!=='undefined'&&console.warn) console.warn('steer delivery record failed',err);
+    return false;
+  }
+  if(!accepted) return false;
+  // Pre-settlement the browser-owned durable surface is INFLIGHT; the anchor scene
+  // itself is only persisted at settlement. Replay on reattach is idempotent.
+  try{
+    if(typeof INFLIGHT!=='undefined'&&INFLIGHT[ownerSid]){
+      const cached=Array.isArray(INFLIGHT[ownerSid].deliveredSteers)?INFLIGHT[ownerSid].deliveredSteers:[];
+      cached.push(sourceEvent);
+      INFLIGHT[ownerSid].deliveredSteers=cached;
+      if(typeof saveInflightState==='function') saveInflightState(ownerSid,INFLIGHT[ownerSid]);
+    }
+  }catch(err){
+    if(typeof console!=='undefined'&&console.warn) console.warn('steer delivery inflight mirror failed',err);
+  }
+  return true;
+}
+function _repaintDeliveredSteer(ownerSid, ownerStreamId){
+  if(typeof window==='undefined') return false;
+  if(typeof window._renderLiveAnchorActivitySceneForStream!=='function') return false;
+  try{
+    return !!window._renderLiveAnchorActivitySceneForStream(ownerStreamId,ownerSid);
+  }catch(err){
+    if(typeof console!=='undefined'&&console.warn) console.warn('steer delivery repaint failed',err);
+    return false;
+  }
+}
+
 async function _trySteer(msg, explicitSteer){
   let result=null;
   const originalMsg=String(msg||'').trim();
@@ -1606,11 +1726,12 @@ async function _trySteer(msg, explicitSteer){
     // the upload/API await, which is fine: we're clearing the OWNER's draft).
     _steerUploadCache=null; // delivered — invalidate the retry cache
     if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
-    // Show a transient steer indicator in the chat (NOT in S.messages — it must
-    // survive the done event's S.messages=d.session.messages replacement).
-    // The indicator self-removes when the turn completes (done/cancel/error
-    // all call renderMessages which rebuilds msgInner). Only mutate the visible
-    // tray/DOM if the user is still looking at the owning session.
+    // Record the delivery on the owning run's assistant-turn anchor. Recording is
+    // owner-scoped, not viewer-scoped: it runs even when the user switched away
+    // during the await, because the row belongs to the owner's turn either way.
+    const recorded=_recordDeliveredSteer(ownerSid,ownerStreamId,originalMsg,pendingFilesSnapshot);
+    // Only mutate the visible tray/DOM if the user is still looking at the owning
+    // session.
     if(_steerOwnerIsCurrent(ownerSid)){
       // Remove ONLY the files we captured+delivered, by object identity, so any
       // files staged during the upload/API await are preserved (#5459 gate).
@@ -1619,7 +1740,17 @@ async function _trySteer(msg, explicitSteer){
         const _remaining=S.pendingFiles.filter(f=>!_delivered.has(f));
         if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
       }
-      _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
+      // The user always gets feedback. Recording makes the row durable, but the
+      // repaint still declines on several live paths (no projectable scene, a stream
+      // replaced during the steer await, simplified tool calling off, transparent
+      // mode with nothing renderable), and master always showed something. So fall
+      // back on a failed repaint too, not only on a failed record. The legacy
+      // indicator is strictly degraded: NOT in S.messages, so it survives the done
+      // event's S.messages replacement, and it self-removes when renderMessages
+      // rebuilds msgInner, by which point the durable row paints from the scene.
+      if(!recorded||!_repaintDeliveredSteer(ownerSid,ownerStreamId)){
+        _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
+      }
     }
     showToast(t('cmd_steer_delivered'),2500);
     return true;

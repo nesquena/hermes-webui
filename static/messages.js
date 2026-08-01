@@ -2635,10 +2635,64 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _anchorReasoningFlushed=false;
   let _anchorLocalSeq=0;
   if(_anchorRegistryMap&&_anchorRegistry) _anchorRegistryMap.set(streamId,_anchorRegistry);
+  if(typeof window!=='undefined'&&_anchorRegistry){
+    // #3058 slice 3: commands.js records a delivered steer straight onto this
+    // stream's anchor and needs the in-flight prose segment sealed first, exactly
+    // the way the interim_assistant path seals it, so the settled scene reads
+    // assistant -> steer -> assistant.
+    const _sealers=window._liveAnchorProseSealers||(window._liveAnchorProseSealers=new Map());
+    _sealers.set(String(streamId),function(){
+      // Flush before the boundary. Bare recordActivityBoundary/_resetAssistantSegment
+      // is what master uses only on switched-away branches; here a delta still sitting
+      // in the deferred render would never reach live-prose:{stream}:{segmentSeq}, and
+      // _resetAssistantSegment then moves segmentStart past it, so the settled Worklog
+      // loses the text between the last flush and the steer.
+      const parsed=(typeof _parseStreamState==='function')?_parseStreamState():null;
+      if(String((parsed&&parsed.displayText)||'').trim()||assistantRow){
+        ensureAssistantRow(true);
+        _flushPendingSegmentRender({force:true});
+      }
+      recordActivityBoundary();
+      _resetAssistantSegment();
+      return true;
+    });
+    // One stable entry point dispatching over the per-stream map. A bare closure in
+    // a single window slot would leave the newest attach owning it, so a steer to a
+    // concurrently running older stream would hit the stale-id guard and silently
+    // not seal, and the last closure would be retained for the life of the page.
+    window._sealLiveAnchorProseSegmentForStream=function(requestedStreamId){
+      const map=window._liveAnchorProseSealers;
+      const seal=map&&map.get(String(requestedStreamId||''));
+      return typeof seal==='function'?!!seal():false;
+    };
+  }
+  // Re-apply delivered-steer records cached in INFLIGHT so a reattach before
+  // settlement rebuilds the row. Idempotent through each record's local_id.
+  if(_anchorRegistry&&_anchorApi&&typeof _anchorApi.applyAssistantTurnAnchorSourceEvent==='function'){
+    const _cachedDeliveredSteers=(INFLIGHT[activeSid]&&Array.isArray(INFLIGHT[activeSid].deliveredSteers))
+      ? INFLIGHT[activeSid].deliveredSteers
+      : [];
+    for(const _cachedSteer of _cachedDeliveredSteers){
+      if(!_cachedSteer||typeof _cachedSteer!=='object') continue;
+      try{
+        _anchorApi.applyAssistantTurnAnchorSourceEvent(
+          _anchorRegistry,
+          _cachedSteer,
+          {session_id:activeSid,stream_id:streamId}
+        );
+      }catch(err){
+        if(typeof console!=='undefined'&&console.warn) console.warn('delivered steer replay failed',err);
+      }
+    }
+  }
   function _scheduleAnchorRegistryCleanup(delayMs=600000){
     if(!_anchorRegistryMap||!_anchorRegistry) return;
     setTimeout(()=>{
-      if(_anchorRegistryMap.get(streamId)===_anchorRegistry) _anchorRegistryMap.delete(streamId);
+      if(_anchorRegistryMap.get(streamId)!==_anchorRegistry) return;
+      _anchorRegistryMap.delete(streamId);
+      // The seal closure retains this whole attachLiveStream scope, so it expires
+      // on the same identity-guarded path as the registry it seals into.
+      if(typeof window!=='undefined'&&window._liveAnchorProseSealers) window._liveAnchorProseSealers.delete(String(streamId));
     },delayMs);
   }
   // Backstop: schedule an identity-guarded cleanup at creation so this shadow
@@ -3699,6 +3753,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     for(const row of rows){
       if(!row||typeof row!=='object') continue;
       const role=String(row.role||'');
+      // #3058: a turn whose only non-prose activity is a delivered steer must still
+      // show a Worklog, or the steer vanishes at settle. Gated on the source event
+      // type, NOT on the role and NOT on control rows generally — a broader clause
+      // would let a bare approval/clarify row promote all-prose turns, the exact
+      // regression this guard exists to prevent.
+      if(String(row.source_event_type||'')==='steer_delivered') return true;
       if(role==='tool'||role==='thinking') return true;
       if(role==='lifecycle'){
         const source=String(row.source_event_type||'');

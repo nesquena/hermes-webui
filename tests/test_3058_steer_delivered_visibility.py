@@ -1,0 +1,843 @@
+"""#3058 slice 3: a delivered steer stays in the assistant turn's timeline.
+
+Every behavioral row here executes the real extracted functions — the anchor
+module under node's ``vm``, the two worklog gates and the render-side row
+builder as extracted sources — rather than inspecting them as text.
+"""
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parent.parent
+ANCHORS_JS = REPO / "static" / "assistant_turn_anchors.js"
+COMMANDS_JS = REPO / "static" / "commands.js"
+MESSAGES_JS = REPO / "static" / "messages.js"
+SESSIONS_JS = REPO / "static" / "sessions.js"
+UI_JS = REPO / "static" / "ui.js"
+I18N_JS = REPO / "static" / "i18n.js"
+STYLE_CSS = REPO / "static" / "style.css"
+NODE = shutil.which("node")
+
+STEER_TEXT = "focus on the reconnect path, not the parser"
+OWNER_SID = "sid-3058"
+OWNER_STREAM = "stream-3058"
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _function(source: str, name: str) -> str:
+    start = source.index(f"function {name}(")
+    brace = source.index("{", start)
+    depth = 0
+    for pos in range(brace, len(source)):
+        if source[pos] == "{":
+            depth += 1
+        elif source[pos] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : pos + 1]
+    raise AssertionError(f"could not extract {name}")
+
+
+def _balanced(source: str, brace: int) -> str:
+    depth = 0
+    for pos in range(brace, len(source)):
+        if source[pos] == "{":
+            depth += 1
+        elif source[pos] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[brace : pos + 1]
+    raise AssertionError("unbalanced block")
+
+
+def _block_after(source: str, marker: str) -> str:
+    """The balanced `{...}` that follows `marker`.
+
+    Lets a test drive code that only exists inside a closure — the INFLIGHT
+    restore literal in `loadSession`, the seal registered by `attachLiveStream` —
+    instead of asserting against a paraphrase of it.
+    """
+    start = source.index(marker)
+    return _balanced(source, source.index("{", start + len(marker) - 1))
+
+
+def _run_node(script: str) -> dict:
+    assert NODE, "node is required for the #3058 anchor harness"
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+# The real _recordDeliveredSteer, _repaintDeliveredSteer and _steerIndicatorText
+# from static/commands.js, plus the accepted branch of _trySteer reproduced as a
+# thin driver around them so the harness runs the shipped producer code.
+_STEER_DRIVER = """
+function _steerOwnerIsCurrent(sid){ return sid===CURRENT_SID; }
+const INFLIGHT = {"sid-3058": {messages: []}};
+const SAVED_INFLIGHT = [];
+function saveInflightState(sid, state){ SAVED_INFLIGHT.push([sid, JSON.parse(JSON.stringify(state))]); }
+const SESSION_QUEUES = {};
+const RENDERED_INDICATORS = [];
+function _showSteerIndicator(text){ RENDERED_INDICATORS.push(text); }
+function queueSessionMessage(sid, entry){
+  SESSION_QUEUES[sid] = SESSION_QUEUES[sid] || [];
+  SESSION_QUEUES[sid].push(entry);
+}
+"""
+
+
+def _anchor_harness_prelude() -> str:
+    commands = _read(COMMANDS_JS)
+    return (
+        "const fs=require('fs');const vm=require('vm');\n"
+        f"const src=fs.readFileSync({json.dumps(str(ANCHORS_JS))},'utf8');\n"
+        "const sandbox={window:{}};vm.createContext(sandbox);\n"
+        "vm.runInContext(src,sandbox,{filename:'assistant_turn_anchors.js'});\n"
+        "const api=sandbox.window.HermesAssistantTurnAnchors;\n"
+        "global.window=sandbox.window;\n"
+        "window._liveAnchorRegistries=new Map();\n"
+        + _STEER_DRIVER
+        + _function(commands, "_steerIndicatorText")
+        + "\n"
+        + _function(commands, "_steerDeliveredTextFingerprint")
+        + "\n"
+        "const _steerDeliveredOrdinalByStream=new Map();\n"
+        + _function(commands, "_nextSteerDeliveredOrdinal")
+        + "\n"
+        + _function(commands, "_recordDeliveredSteer")
+        + "\n"
+        + _function(commands, "_repaintDeliveredSteer")
+        + "\n"
+        f"const OWNER_SID={json.dumps(OWNER_SID)};\n"
+        f"const OWNER_STREAM={json.dumps(OWNER_STREAM)};\n"
+        "let CURRENT_SID=OWNER_SID;\n"
+        "function newRegistry(streamId){\n"
+        "  const registry=api.createAssistantTurnAnchorRegistry({session_id:OWNER_SID,stream_id:streamId||OWNER_STREAM,run_id:'run-3058'});\n"
+        "  window._liveAnchorRegistries.set(streamId||OWNER_STREAM,registry);\n"
+        "  return registry;\n"
+        "}\n"
+        "function prose(registry,seq,text){\n"
+        "  return api.applyAssistantTurnAnchorSourceEvent(registry,{\n"
+        "    source_event_type:'token',seq:seq,local_id:'live-prose:'+OWNER_STREAM+':'+seq,text:text,status:'running',\n"
+        "  },{session_id:OWNER_SID,stream_id:OWNER_STREAM});\n"
+        "}\n"
+        "function scene(registry,mode){\n"
+        "  return api.projectAssistantTurnAnchorActivityScene(registry,{mode:mode||'compact_worklog'});\n"
+        "}\n"
+    )
+
+
+# ---------------------------------------------------------------- classification
+
+
+def test_3058_steer_delivered_is_classified_as_a_control_boundary_activity():
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "console.log(JSON.stringify({\n"
+        "  steer:api.classifyAssistantTurnAnchorSourceEvent('steer_delivered'),\n"
+        "  leftover:api.classifyAssistantTurnAnchorSourceEvent('pending_steer_leftover'),\n"
+        "  unknown:api.classifyAssistantTurnAnchorSourceEvent('steer_delivered_typo'),\n"
+        "}));"
+    )
+    # Base (master) has no entry, so the type falls through to the excluded default
+    # the `unknown` probe still demonstrates.
+    assert out["unknown"]["classification"] == "excluded"
+    assert out["steer"] == {"classification": "activity", "kind": "control_boundary", "source": "client"}
+    assert out["leftover"]["source"] == "sse", "the SSE-side sibling must keep its own source"
+
+
+# ------------------------------------------------------------ role projection
+
+
+def test_3058_delivered_steer_projects_a_user_row_and_other_controls_stay_control():
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const registry=newRegistry();\n"
+        + f"_recordDeliveredSteer(OWNER_SID,OWNER_STREAM,{json.dumps(STEER_TEXT)},[]);\n"
+        "api.applyAssistantTurnAnchorSourceEvent(registry,{source_event_type:'approval',seq:41,local_id:'a1',text:'Approve?'},{session_id:OWNER_SID,stream_id:OWNER_STREAM});\n"
+        "api.applyAssistantTurnAnchorSourceEvent(registry,{source_event_type:'clarify',seq:42,local_id:'c1',text:'Which one?'},{session_id:OWNER_SID,stream_id:OWNER_STREAM});\n"
+        "const rows=scene(registry).activity_rows.map(r=>({source:r.source_event_type,kind:r.kind,role:r.role,hint:r.display_hint,hints:r.display_hints,status:r.status,text:r.text,local_id:r.local_id}));\n"
+        "console.log(JSON.stringify({rows}));"
+    )
+    rows = {row["source"]: row for row in out["rows"]}
+    steer = rows["steer_delivered"]
+    assert steer["role"] == "user"
+    assert steer["kind"] == "control_boundary"
+    assert steer["hint"] == "user_message"
+    assert steer["hints"] == {"compact_worklog": "user_message", "transparent_stream": "user_message"}
+    assert steer["status"] == "delivered"
+    assert steer["text"] == STEER_TEXT
+    assert steer["local_id"].startswith(f"steer:{OWNER_STREAM}:1:")
+    assert rows["approval"]["role"] == "control"
+    assert rows["clarify"]["role"] == "control"
+
+
+# ------------------------------------------------------------------- live row
+
+
+def test_3058_recording_a_delivery_yields_exactly_one_delivered_row():
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const registry=newRegistry();\n"
+        "const before=scene(registry).activity_rows.length;\n"
+        + f"const recorded=_recordDeliveredSteer(OWNER_SID,OWNER_STREAM,{json.dumps(STEER_TEXT)},[]);\n"
+        "const rows=scene(registry).activity_rows;\n"
+        "console.log(JSON.stringify({before,recorded,rows:rows.map(r=>({source:r.source_event_type,status:r.status,payload:r.payload}))}));"
+    )
+    assert out["before"] == 0, "base: no anchor row exists before the delivery is recorded"
+    assert out["recorded"] is True
+    assert len(out["rows"]) == 1
+    assert out["rows"][0]["status"] == "delivered"
+    assert out["rows"][0]["payload"]["delivered"] is True
+    assert out["rows"][0]["payload"]["origin"] == "webui"
+    assert "applied" not in out["rows"][0]["payload"]
+
+
+def test_3058_no_registry_means_no_record_and_the_legacy_indicator_is_the_fallback():
+    out = _run_node(
+        _anchor_harness_prelude()
+        + f"const recorded=_recordDeliveredSteer(OWNER_SID,'stream-with-no-registry',{json.dumps(STEER_TEXT)},[]);\n"
+        + f"if(!recorded) _showSteerIndicator(_steerIndicatorText({json.dumps(STEER_TEXT)},[]));\n"
+        "console.log(JSON.stringify({recorded,indicators:RENDERED_INDICATORS}));"
+    )
+    assert out["recorded"] is False
+    assert out["indicators"] == [STEER_TEXT], "exactly one of the two paths renders"
+
+
+# -------------------------------------------------------------------- ordering
+
+
+def test_3058_delivered_steer_sits_between_the_prose_segments_it_interrupted():
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const registry=newRegistry();\n"
+        "prose(registry,1,'first half of the answer');\n"
+        + f"_recordDeliveredSteer(OWNER_SID,OWNER_STREAM,{json.dumps(STEER_TEXT)},[]);\n"
+        "prose(registry,2,'second half of the answer');\n"
+        "console.log(JSON.stringify({rows:scene(registry).activity_rows.map(r=>[r.role,r.text])}));"
+    )
+    assert out["rows"] == [
+        ["prose", "first half of the answer"],
+        ["user", STEER_TEXT],
+        ["prose", "second half of the answer"],
+    ]
+
+
+# ---------------------------------------------------------- replay idempotence
+
+
+def test_3058_replaying_the_same_delivery_never_produces_a_second_row():
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const registry=newRegistry();\n"
+        + f"_recordDeliveredSteer(OWNER_SID,OWNER_STREAM,{json.dumps(STEER_TEXT)},[]);\n"
+        "const cached=JSON.parse(JSON.stringify(SAVED_INFLIGHT.length?SAVED_INFLIGHT[0][1].deliveredSteers:[]));\n"
+        "const recordedEvent=window._liveAnchorRegistries.get(OWNER_STREAM).anchor.activity_events[0];\n"
+        "// 1) the identical source event applied twice, carrying the identity the\n"
+        "// producer actually minted rather than a hand-written guess at it\n"
+        "api.applyAssistantTurnAnchorSourceEvent(registry,{source_event_type:'steer_delivered',seq:'steer-1',payload:{local_id:recordedEvent.payload.local_id,status:'delivered',text:recordedEvent.payload.text,delivered:true,origin:'webui',files:[]}},{session_id:OWNER_SID,stream_id:OWNER_STREAM});\n"
+        "const afterDouble=scene(registry).activity_rows.length;\n"
+        "// 2) the INFLIGHT replay path onto a NEW registry for a reattached stream\n"
+        "const replayRegistry=newRegistry('stream-3058-reattached');\n"
+        "for(const ev of cached) api.applyAssistantTurnAnchorSourceEvent(replayRegistry,ev,{session_id:OWNER_SID,stream_id:'stream-3058-reattached'});\n"
+        "for(const ev of cached) api.applyAssistantTurnAnchorSourceEvent(replayRegistry,ev,{session_id:OWNER_SID,stream_id:'stream-3058-reattached'});\n"
+        "console.log(JSON.stringify({cachedCount:cached.length,afterDouble,replayRows:scene(replayRegistry).activity_rows.length,replayStatus:scene(replayRegistry).activity_rows.map(r=>r.status)}));"
+    )
+    assert out["cachedCount"] == 1, "one delivery mirrors exactly one INFLIGHT record"
+    assert out["afterDouble"] == 1
+    assert out["replayRows"] == 1
+    assert out["replayStatus"] == ["delivered"]
+
+
+# ------------------------------------------------------------ worklog-worthiness
+
+
+def _worklog_gate_probe(scene_rows: list[dict]) -> dict:
+    generation = _function(_read(MESSAGES_JS), "_anchorSceneHasWorklogWorthyRows")
+    render = _function(_read(UI_JS), "_anchorSceneSceneHasWorklogWorthyRows")
+    return _run_node(
+        "const window={isFinalAnswerOnlyMode:()=>false};\n"
+        + generation
+        + "\n"
+        + render
+        + "\n"
+        + f"const scene={{version:'activity_scene_v1',mode:'compact_worklog',activity_rows:{json.dumps(scene_rows)}}};\n"
+        "console.log(JSON.stringify({generation:_anchorSceneHasWorklogWorthyRows(scene),render:_anchorSceneSceneHasWorklogWorthyRows(scene)}));"
+    )
+
+
+_PROSE_ROW = {"role": "prose", "source_event_type": "token", "text": "a long plain answer"}
+_TERMINAL_ROW = {"role": "terminal", "source_event_type": "done", "text": ""}
+
+
+def test_3058_a_turn_whose_only_non_prose_row_is_the_steer_is_worklog_worthy():
+    steer_row = {"role": "user", "source_event_type": "steer_delivered", "status": "delivered", "text": STEER_TEXT}
+    without = _worklog_gate_probe([_PROSE_ROW, _TERMINAL_ROW])
+    with_steer = _worklog_gate_probe([_PROSE_ROW, steer_row, _TERMINAL_ROW])
+    # Base behavior (the same scene minus the steer row): both gates false, which is
+    # exactly why the steer vanished at settle.
+    assert without == {"generation": False, "render": False}
+    assert with_steer == {"generation": True, "render": True}
+
+
+@pytest.mark.parametrize("source", ["approval", "clarify", "goal_continue", "pending_steer_leftover"])
+def test_3058_the_worklog_clause_does_not_widen_to_other_control_rows(source):
+    control_row = {"role": "control", "source_event_type": source, "status": "pending", "text": "waiting"}
+    assert _worklog_gate_probe([_PROSE_ROW, control_row, _TERMINAL_ROW]) == {
+        "generation": False,
+        "render": False,
+    }
+
+
+# ------------------------------------------ INFLIGHT pre-settlement recovery cache
+
+
+def test_3058_delivered_steers_survive_inflight_compaction_bounded_to_twenty():
+    compact = _function(_read(UI_JS), "_compactInflightState")
+    out = _run_node(
+        "function _getInflightStateLimits(){return {messages:50,toolCalls:50,stringChars:100000,maxSessions:5,jsonChars:1000000};}\n"
+        "function _truncateInflightValue(value){return value;}\n"
+        + compact
+        + "\n"
+        "const many=Array.from({length:25},(_,i)=>({source_event_type:'steer_delivered',seq:'steer-'+(i+1),payload:{local_id:'steer:s:'+(i+1),status:'delivered',text:'t'+(i+1)}}));\n"
+        "const kept=_compactInflightState({messages:[],deliveredSteers:many});\n"
+        "const none=_compactInflightState({messages:[]});\n"
+        "console.log(JSON.stringify({count:kept.deliveredSteers.length,first:kept.deliveredSteers[0].payload.local_id,last:kept.deliveredSteers[19].payload.local_id,none:none.deliveredSteers}));"
+    )
+    assert out["count"] == 20
+    assert out["first"] == "steer:s:6"
+    assert out["last"] == "steer:s:25"
+    assert out["none"] == []
+
+
+_CACHED_STEER = {
+    "source_event_type": "steer_delivered",
+    "seq": "steer-1",
+    "payload": {
+        "local_id": f"steer:{OWNER_STREAM}:1:abc123",
+        "stream_id": OWNER_STREAM,
+        "ordinal": 1,
+        "status": "delivered",
+        "text": STEER_TEXT,
+        "files": [],
+        "delivered": True,
+        "origin": "webui",
+    },
+}
+
+
+def test_3058_the_reload_restore_path_carries_the_delivered_steer_cache():
+    """`_compactInflightState` writing the field is not enough to survive a reload.
+
+    `loadSession` restores INFLIGHT through an explicit field whitelist. A field
+    written by the compactor but absent from that whitelist is a cache nothing
+    ever reads, so the record dies at the refresh it exists to survive.
+    """
+    restore = _block_after(_read(SESSIONS_JS), "INFLIGHT[sid]={")
+    out = _run_node(
+        "const INFLIGHT={};const sid='sid-3058';\n"
+        f"const stored={json.dumps({'streamId': OWNER_STREAM, 'messages': [], 'deliveredSteers': [_CACHED_STEER]})};\n"
+        f"INFLIGHT[sid]={restore};\n"
+        "console.log(JSON.stringify({restored:INFLIGHT[sid].deliveredSteers,"
+        "missing:INFLIGHT[sid].deliveredSteers===undefined}));"
+    )
+    assert out["missing"] is False, "loadSession's whitelist drops the delivered-steer cache"
+    assert out["restored"] == [_CACHED_STEER]
+
+
+def test_3058_a_server_snapshot_recovery_keeps_the_browser_only_delivered_steers():
+    """The other way the cache can be dropped: replaced rather than not read.
+
+    `_selectLiveRecoveryInflight` can hand back the server run-journal snapshot
+    wholesale. A delivered steer is observed at the browser's steer response and
+    never reaches that journal, so the snapshot can never carry it back.
+    """
+    sessions = _read(SESSIONS_JS)
+    out = _run_node(
+        _function(sessions, "_inflightHasVisibleLiveState")
+        + "\n"
+        + _function(sessions, "_selectLiveRecoveryInflight")
+        + "\n"
+        f"const cached={json.dumps([_CACHED_STEER])};\n"
+        f"const local={{streamId:{json.dumps(OWNER_STREAM)},messages:[{{role:'assistant',content:'half an answer',_live:true}}],"
+        "toolCalls:[],lastAssistantText:'half an answer',lastRunJournalSeq:4,deliveredSteers:cached};\n"
+        f"const server={{streamId:{json.dumps(OWNER_STREAM)},messages:[{{role:'assistant',content:'half an answer',_live:true}}],"
+        "toolCalls:[],lastAssistantText:'half an answer',lastRunJournalSeq:9,journalSnapshot:true};\n"
+        f"const chosen=_selectLiveRecoveryInflight(local,server,{json.dumps(OWNER_STREAM)});\n"
+        "// A snapshot for a DIFFERENT stream must not inherit this stream's records.\n"
+        "const otherStream=_selectLiveRecoveryInflight({...local,streamId:'stream-old'},server,"
+        f"{json.dumps(OWNER_STREAM)});\n"
+        "console.log(JSON.stringify({fromJournal:!!chosen.journalSnapshot,seq:chosen.lastRunJournalSeq,"
+        "steers:chosen.deliveredSteers||null,otherStreamSteers:otherStream.deliveredSteers||null}));"
+    )
+    assert out["fromJournal"] is True, "the journal still wins the projection"
+    assert out["seq"] == 9
+    assert out["steers"] == [_CACHED_STEER]
+    assert out["otherStreamSteers"] is None
+
+
+def test_3058_a_steer_sent_after_a_mid_run_reload_is_recorded_and_not_deduped_away():
+    """Identity must be a property of the run, not of the page.
+
+    A page-lifetime ordinal restarts at 0 on reload, so the first steer after a
+    refresh would mint the identity a replayed record already holds, dedupe
+    against it, and leave the user reading the *previous* steer's text while the
+    toast says delivered.
+    """
+    second = "and stop touching the parser"
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const registry=newRegistry();\n"
+        + f"_recordDeliveredSteer(OWNER_SID,OWNER_STREAM,{json.dumps(STEER_TEXT)},[]);\n"
+        "const persisted=JSON.parse(JSON.stringify(SAVED_INFLIGHT[SAVED_INFLIGHT.length-1][1].deliveredSteers));\n"
+        "// --- browser reload: module globals are gone, the run is still live ---\n"
+        "_steerDeliveredOrdinalByStream.clear();\n"
+        "INFLIGHT[OWNER_SID]={messages:[],deliveredSteers:persisted};\n"
+        "const reattached=newRegistry();\n"
+        "for(const ev of persisted) api.applyAssistantTurnAnchorSourceEvent(reattached,ev,{session_id:OWNER_SID,stream_id:OWNER_STREAM});\n"
+        + f"const recorded=_recordDeliveredSteer(OWNER_SID,OWNER_STREAM,{json.dumps(second)},[]);\n"
+        "const rows=scene(reattached).activity_rows;\n"
+        "console.log(JSON.stringify({recorded,texts:rows.map(r=>r.text),"
+        "ids:rows.map(r=>r.local_id),cached:INFLIGHT[OWNER_SID].deliveredSteers.length}));"
+    )
+    assert out["recorded"] is True
+    assert out["texts"] == [STEER_TEXT, second], "the post-reload steer must be its own row"
+    assert len(set(out["ids"])) == 2, "the two deliveries must not share an identity"
+    assert out["cached"] == 2
+
+
+def test_3058_replaying_a_cached_delivery_after_a_reload_still_yields_one_row():
+    """The other half of the same invariant: seeding must not break idempotence."""
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const registry=newRegistry();\n"
+        + f"_recordDeliveredSteer(OWNER_SID,OWNER_STREAM,{json.dumps(STEER_TEXT)},[]);\n"
+        "const persisted=JSON.parse(JSON.stringify(SAVED_INFLIGHT[SAVED_INFLIGHT.length-1][1].deliveredSteers));\n"
+        "_steerDeliveredOrdinalByStream.clear();\n"
+        "INFLIGHT[OWNER_SID]={messages:[],deliveredSteers:persisted};\n"
+        "const reattached=newRegistry();\n"
+        "for(let pass=0;pass<3;pass+=1){\n"
+        "  for(const ev of persisted) api.applyAssistantTurnAnchorSourceEvent(reattached,ev,{session_id:OWNER_SID,stream_id:OWNER_STREAM});\n"
+        "}\n"
+        "console.log(JSON.stringify({rows:scene(reattached).activity_rows.length}));"
+    )
+    assert out["rows"] == 1
+
+
+# --------------------------------------------------------------- the seal bridge
+
+
+def test_3058_the_producer_seals_the_live_prose_segment_before_recording():
+    """The bridge exists so the settled scene reads assistant -> steer -> assistant.
+
+    Driving the real `_recordDeliveredSteer` with the sealer present is the only
+    way to see the guard at its call site actually fire; a harness that never
+    defines the global short-circuits it and proves nothing.
+    """
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const CALLS=[];\n"
+        "const registry=newRegistry();\n"
+        "prose(registry,1,'first half of the answer');\n"
+        "// Recording the row count at seal time is what pins the ORDER: the seal has\n"
+        "// to run while the steer row does not exist yet.\n"
+        "window._sealLiveAnchorProseSegmentForStream=function(id){\n"
+        "  CALLS.push(['seal',id,scene(registry).activity_rows.length]);return true;\n"
+        "};\n"
+        + f"const recorded=_recordDeliveredSteer(OWNER_SID,OWNER_STREAM,{json.dumps(STEER_TEXT)},[]);\n"
+        "console.log(JSON.stringify({recorded,calls:CALLS,after:scene(registry).activity_rows.length}));"
+    )
+    assert out["recorded"] is True
+    assert out["calls"] == [["seal", OWNER_STREAM, 1]], "the seal runs once, before the row is applied"
+    assert out["after"] == 2
+
+
+def test_3058_the_seal_flushes_pending_prose_before_recording_the_boundary():
+    """A bare boundary + reset loses whatever the deferred render had not written.
+
+    `_resetAssistantSegment` moves `segmentStart` past the unflushed delta and
+    `_flushPendingSegmentRender` early-returns once `assistantBody` is null, so
+    without the flush the settled Worklog silently drops the prose between the
+    last frame and the steer.
+    """
+    seal = _block_after(_read(MESSAGES_JS), "_sealers.set(String(streamId),function()")
+    out = _run_node(
+        "const CALLS=[];\n"
+        "const streamId='stream-3058';\n"
+        "let assistantRow=null;\n"
+        "function _parseStreamState(){return {displayText:'half an answer not yet flushed'};}\n"
+        "function ensureAssistantRow(){CALLS.push('ensureAssistantRow');assistantRow={};}\n"
+        "function _flushPendingSegmentRender(opts){CALLS.push('flush:'+JSON.stringify(opts));}\n"
+        "function recordActivityBoundary(){CALLS.push('recordActivityBoundary');}\n"
+        "function _resetAssistantSegment(){CALLS.push('_resetAssistantSegment');assistantRow=null;}\n"
+        + "const seal=function()"
+        + seal
+        + ";\n"
+        "const ok=seal();\n"
+        "console.log(JSON.stringify({ok,calls:CALLS}));"
+    )
+    assert out["ok"] is True
+    assert out["calls"] == [
+        "ensureAssistantRow",
+        'flush:{"force":true}',
+        "recordActivityBoundary",
+        "_resetAssistantSegment",
+    ]
+    assert out["calls"].index("flush:{\"force\":true}") < out["calls"].index("recordActivityBoundary")
+
+
+def test_3058_the_seal_is_per_stream_and_expires_with_the_registry_it_seals_into():
+    """One window slot would let the newest attach silently disown older streams.
+
+    This repo runs concurrent live streams, and recording is owner-scoped by
+    design, so a steer to an older still-running stream has to reach that
+    stream's own seal. The closure retains the whole `attachLiveStream` scope, so
+    it must also expire on the registry's identity-guarded cleanup.
+    """
+    cleanup = _function(_read(MESSAGES_JS), "_scheduleAnchorRegistryCleanup")
+    out = _run_node(
+        "const window={_liveAnchorProseSealers:new Map()};\n"
+        "const SEALED=[];\n"
+        "window._liveAnchorProseSealers.set('stream-a',()=>{SEALED.push('a');return true;});\n"
+        "window._liveAnchorProseSealers.set('stream-b',()=>{SEALED.push('b');return true;});\n"
+        "// the dispatcher installed by the newest attach, addressing the older stream\n"
+        "function dispatch(requestedStreamId){\n"
+        "  const map=window._liveAnchorProseSealers;\n"
+        "  const seal=map&&map.get(String(requestedStreamId||''));\n"
+        "  return typeof seal==='function'?!!seal():false;\n"
+        "}\n"
+        "const olderStreamSealed=dispatch('stream-a');\n"
+        "const timers=[];\n"
+        "function setTimeout(fn){timers.push(fn);}\n"
+        "const _anchorRegistryMap=new Map();\n"
+        "const _anchorRegistry={id:'reg-a'};\n"
+        "const streamId='stream-a';\n"
+        "_anchorRegistryMap.set('stream-a',_anchorRegistry);\n"
+        + cleanup
+        + "\n"
+        "_scheduleAnchorRegistryCleanup(1);\n"
+        "timers.forEach(fn=>fn());\n"
+        "console.log(JSON.stringify({olderStreamSealed,sealed:SEALED,"
+        "remaining:[...window._liveAnchorProseSealers.keys()],"
+        "registries:[..._anchorRegistryMap.keys()]}));"
+    )
+    assert out["olderStreamSealed"] is True
+    assert out["sealed"] == ["a"], "the dispatcher must reach the addressed stream, not the newest one"
+    assert out["remaining"] == ["stream-b"], "the expired stream's seal must not outlive its registry"
+    assert out["registries"] == []
+
+
+def test_3058_a_steer_to_an_unknown_stream_seals_nothing_rather_than_the_wrong_run():
+    out = _run_node(
+        "const window={_liveAnchorProseSealers:new Map()};\n"
+        "const SEALED=[];\n"
+        "window._liveAnchorProseSealers.set('stream-b',()=>{SEALED.push('b');return true;});\n"
+        "function dispatch(requestedStreamId){\n"
+        "  const map=window._liveAnchorProseSealers;\n"
+        "  const seal=map&&map.get(String(requestedStreamId||''));\n"
+        "  return typeof seal==='function'?!!seal():false;\n"
+        "}\n"
+        "console.log(JSON.stringify({gone:dispatch('stream-a'),empty:dispatch(''),sealed:SEALED}));"
+    )
+    assert out["gone"] is False
+    assert out["empty"] is False
+    assert out["sealed"] == []
+
+
+# ---------------------------------------------------------- feedback is guaranteed
+
+
+def test_3058_a_declined_repaint_still_shows_the_user_something():
+    """`_repaintDeliveredSteer` returns false on several live paths.
+
+    Master always painted the transient indicator, so a recorded-but-unpainted
+    delivery must fall back to it rather than leaving the transcript unchanged
+    behind a "Steer delivered" toast.
+    """
+    commands = _read(COMMANDS_JS)
+    feedback = commands[commands.index("if(!recorded||!_repaintDeliveredSteer(") :]
+    feedback = feedback[: feedback.index("\n      }") + len("\n      }")]
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const registry=newRegistry();\n"
+        "// the scene cannot be projected right now, so the repaint declines\n"
+        "window._renderLiveAnchorActivitySceneForStream=function(){return false;};\n"
+        + f"const originalMsg={json.dumps(STEER_TEXT)};const pendingFilesSnapshot=[];\n"
+        "const ownerSid=OWNER_SID;const ownerStreamId=OWNER_STREAM;\n"
+        + "const recorded=_recordDeliveredSteer(ownerSid,ownerStreamId,originalMsg,pendingFilesSnapshot);\n"
+        + feedback
+        + "\n"
+        "console.log(JSON.stringify({recorded,rows:scene(registry).activity_rows.length,indicators:RENDERED_INDICATORS}));"
+    )
+    assert out["recorded"] is True, "the record is durable even when the repaint declines"
+    assert out["rows"] == 1
+    assert out["indicators"] == [STEER_TEXT], "the user is never left with no feedback at all"
+
+
+# ------------------------------------------------- leftover / failure preservation
+
+
+def test_3058_the_gateway_queued_leftover_branch_records_no_delivery():
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const registry=newRegistry();\n"
+        "// gateway_steer_queued: one editable Queue entry, no anchor record.\n"
+        + f"queueSessionMessage(OWNER_SID,{{text:{json.dumps(STEER_TEXT)},files:[]}});\n"
+        "console.log(JSON.stringify({queue:SESSION_QUEUES[OWNER_SID],rows:scene(registry).activity_rows.length,inflight:SAVED_INFLIGHT.length,indicators:RENDERED_INDICATORS.length}));"
+    )
+    assert len(out["queue"]) == 1
+    assert out["rows"] == 0, "no delivered row for a gateway-queued steer"
+    assert out["inflight"] == 0
+    assert out["indicators"] == 0
+
+
+def test_3058_a_rejected_steer_records_nothing_and_never_reaches_a_queue():
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const registry=newRegistry();\n"
+        "const result={accepted:false,fallback:'no_active_run'};\n"
+        + f"const recorded=result.accepted?_recordDeliveredSteer(OWNER_SID,OWNER_STREAM,{json.dumps(STEER_TEXT)},[]):false;\n"
+        "console.log(JSON.stringify({recorded,rows:scene(registry).activity_rows.length,queue:SESSION_QUEUES[OWNER_SID]||[],inflight:SAVED_INFLIGHT.length}));"
+    )
+    assert out["recorded"] is False
+    assert out["rows"] == 0
+    assert out["queue"] == []
+    assert out["inflight"] == 0
+
+
+# --------------------------------------------------------------- attachments
+
+
+def test_3058_the_delivered_row_carries_the_captured_file_snapshot_only():
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const registry=newRegistry();\n"
+        "const captured=[{name:'spec.md'},{name:'trace.log'}];\n"
+        "const stagedDuringAwait=[{name:'late.png'}];\n"
+        "const tray=captured.concat(stagedDuringAwait);\n"
+        + f"_recordDeliveredSteer(OWNER_SID,OWNER_STREAM,{json.dumps(STEER_TEXT)},captured);\n"
+        "const delivered=new Set(captured);\n"
+        "const remaining=tray.filter(f=>!delivered.has(f)).map(f=>f.name);\n"
+        "const row=scene(registry).activity_rows[0];\n"
+        "console.log(JSON.stringify({files:row.payload.files,text:row.text,remaining}));"
+    )
+    assert out["files"] == ["spec.md", "trace.log"]
+    assert out["text"] == STEER_TEXT
+    assert out["remaining"] == ["late.png"], "files staged during the await stay in the tray"
+
+
+def test_3058_an_attachment_only_steer_still_carries_readable_text():
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const registry=newRegistry();\n"
+        "_recordDeliveredSteer(OWNER_SID,OWNER_STREAM,'',[{name:'spec.md'}]);\n"
+        "console.log(JSON.stringify({row:scene(registry).activity_rows[0]}));"
+    )
+    assert out["row"]["text"] == "Attached files: spec.md"
+    assert out["row"]["role"] == "user"
+
+
+# ------------------------------------------------------- render / negative space
+
+
+def _render_row_node(row: dict, settled: bool = True) -> dict:
+    """Build the real _anchorSceneNodeForRow output for a row, in a DOM-less shim."""
+    builder = _function(_read(UI_JS), "_anchorSceneNodeForRow")
+    return _run_node(
+        """
+const attrs=new WeakMap();
+function el(tag){
+  const node={tagName:tag,className:'',children:[],textContent:'',dataset:{},
+    setAttribute(k,v){attrs.get(this)[k]=String(v);},
+    getAttribute(k){return attrs.get(this)[k]??null;},
+    appendChild(c){this.children.push(c);return c;},
+    querySelector(){return null;},querySelectorAll(){return [];}};
+  attrs.set(node,{});
+  return node;
+}
+const document={createElement:el};
+const window={};
+function esc(v){return String(v);}
+function renderMd(v){return String(v);}
+function t(key){return key==='steer_delivered'?'Steer delivered':key;}
+function _activityStatusNode(spec){const n=el('div');n.className='activity-status';n.textContent=String(spec&&spec.label||'');return n;}
+function _thinkingActivityNode(){return el('div');}
+function buildToolCard(){return el('div');}
+"""
+        + builder
+        + "\n"
+        + f"const node=_anchorSceneNodeForRow({json.dumps(row)},{{settled:{'true' if settled else 'false'}}});\n"
+        "function dump(n){return n?{tag:n.tagName,cls:n.className,attrs:attrs.get(n),text:n.textContent,children:n.children.map(dump)}:null;}\n"
+        "console.log(JSON.stringify({node:dump(node)}));"
+    )
+
+
+_STEER_ROW = {
+    "role": "user",
+    "kind": "control_boundary",
+    "source_event_type": "steer_delivered",
+    "status": "delivered",
+    "row_id": "run-3058:steer-1",
+    "local_id": f"steer:{OWNER_STREAM}:1",
+    "text": STEER_TEXT,
+    "payload": {"delivered": True, "origin": "webui", "files": ["spec.md"], "status": "delivered"},
+}
+
+
+def test_3058_the_settled_delivered_row_renders_as_a_user_message_with_no_affordances():
+    node = _render_row_node(_STEER_ROW)["node"]
+    assert node is not None
+    assert node["attrs"]["data-role"] == "user"
+    assert node["attrs"]["data-steer-delivery"] == "delivered"
+    assert node["attrs"]["data-anchor-row-role"] == "user"
+    assert node["attrs"]["data-anchor-source-event-type"] == "steer_delivered"
+    assert node["attrs"]["data-anchor-local-id"] == f"steer:{OWNER_STREAM}:1"
+    texts = [child["text"] for child in node["children"]]
+    assert "Steer delivered" in texts
+    assert STEER_TEXT in texts
+    assert "spec.md" in texts
+    # negative space: no interactive affordance of any kind is attached.
+    assert not any(child["tag"] == "button" for child in node["children"])
+    flat = json.dumps(node)
+    for affordance in ("edit", "retry", "fork", "delete", "queue"):
+        assert affordance not in flat.lower(), f"{affordance!r} affordance leaked onto the delivered row"
+
+
+def test_3058_a_control_row_still_renders_through_the_control_branch():
+    control = dict(_STEER_ROW, role="control", source_event_type="approval", text="Approve?")
+    node = _render_row_node(control)["node"]
+    # The shim's _activityStatusNode stands in for the control branch, so a control
+    # row producing that node is positive evidence it took that branch rather than
+    # being swept into the new user branch.
+    assert node is not None
+    assert node["cls"] == "activity-status"
+    assert node["attrs"].get("data-steer-delivery") is None
+
+
+@pytest.mark.parametrize("source_event_type", ["", "user_message", "approval", "steer_delivered_typo"])
+def test_3058_a_user_role_row_without_the_steer_source_type_gets_no_steer_markup(source_event_type):
+    """The row builder keys on provenance, not on the role.
+
+    `_hydrateAnchorRegistryFromActivityScene` passes a row's own
+    `source_event_type` through verbatim, and a newer client could project some
+    other `role:'user'` row, so a role-only branch would stamp the hardcoded
+    "Steer delivered" label onto rows this slice knows nothing about.
+    """
+    row = dict(_STEER_ROW, source_event_type=source_event_type)
+    node = _render_row_node(row)["node"]
+    flat = json.dumps(node or {})
+    assert "steer-delivered" not in flat
+    assert "Steer delivered" not in flat
+
+
+# ---------------------------------------------------- server sanitize / hydrate
+
+
+def test_3058_the_delivered_row_survives_sanitize_persist_and_hydrate_unchanged():
+    from api.routes import _hydrate_anchor_activity_scenes, _sanitize_anchor_activity_scene
+
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "final_answer": "done",
+        "activity_rows": [
+            {"role": "prose", "source_event_type": "token", "text": "first half"},
+            _STEER_ROW,
+            {"role": "prose", "source_event_type": "token", "text": "second half"},
+        ],
+    }
+    sanitized = _sanitize_anchor_activity_scene(scene)
+    assert sanitized["activity_rows"][1] == _STEER_ROW
+
+    messages = [{"role": "user", "content": "go"}, {"role": "assistant", "content": "done"}]
+    hydrated = _hydrate_anchor_activity_scenes(
+        messages, {"k": {"message_index": 1, "message_ref": "", "scene": sanitized}}
+    )
+    hydrated_scene = hydrated[1].get("_anchor_activity_scene")
+    assert hydrated_scene is not None
+    assert hydrated_scene["activity_rows"][1]["source_event_type"] == "steer_delivered"
+    assert hydrated_scene["activity_rows"][1]["status"] == "delivered"
+    assert hydrated_scene["activity_rows"][1]["payload"]["files"] == ["spec.md"]
+
+
+def test_3058_a_virtualized_turn_rebuilds_the_row_from_the_scene_not_from_a_dom_node():
+    """The row must survive a transcript rebuild that retains no DOM at all.
+
+    This is the reproduction row's observable consequence: at base the settled
+    transcript has nothing to rebuild from, because the steer only ever existed as
+    a `.steer-indicator` node that `renderMessages` discards.
+    """
+    from api.routes import _hydrate_anchor_activity_scenes, _sanitize_anchor_activity_scene
+
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "final_answer": "done",
+        "activity_rows": [
+            {"role": "prose", "source_event_type": "token", "text": "first half"},
+            _STEER_ROW,
+        ],
+    }
+    persisted = _sanitize_anchor_activity_scene(scene)
+    messages = [{"role": "user", "content": "go"}, {"role": "assistant", "content": "done"}]
+    hydrated = _hydrate_anchor_activity_scenes(
+        messages, {"k": {"message_index": 1, "message_ref": "", "scene": persisted}}
+    )
+    rebuilt_scene = hydrated[1]["_anchor_activity_scene"]
+    # A window with no retained live turn: the only input is the message's scene.
+    gates = _worklog_gate_probe(rebuilt_scene["activity_rows"])
+    assert gates == {"generation": True, "render": True}
+    node = _render_row_node(rebuilt_scene["activity_rows"][1])["node"]
+    assert node["attrs"]["data-steer-delivery"] == "delivered"
+    assert node["attrs"]["data-anchor-local-id"] == f"steer:{OWNER_STREAM}:1"
+
+
+# ------------------------------------------------------------- no applied claim
+
+
+CHANGED_SOURCES = {
+    "assistant_turn_anchors.js": ANCHORS_JS,
+    "commands.js": COMMANDS_JS,
+    "messages.js": MESSAGES_JS,
+    "ui.js": UI_JS,
+    "style.css": STYLE_CSS,
+    "i18n.js": I18N_JS,
+}
+
+
+def test_3058_no_surface_added_by_this_slice_claims_applied_consumed_or_handled():
+    forbidden = ("applied", "consumed", "handled")
+    for name, path in CHANGED_SOURCES.items():
+        for line in _read(path).splitlines():
+            if "steer_delivered" not in line and "steer-delivered" not in line and "steerDelivered" not in line:
+                continue
+            if "deliveredSteers" in line and "steer_delivered" not in line:
+                continue
+            lowered = line.lower()
+            for word in forbidden:
+                assert word not in lowered, f"{name}: {word!r} claim on a steer surface: {line.strip()}"
+
+
+def test_3058_every_locale_block_carries_the_steer_delivered_label():
+    import re
+
+    src = _read(I18N_JS)
+    blocks = list(re.finditer(r"^  ('[^']+'|[A-Za-z][A-Za-z0-9_-]*): \{$", src, re.MULTILINE))
+    end = src.index("\n};", blocks[-1].start())
+    assert len(blocks) >= 14
+    for index, match in enumerate(blocks):
+        stop = blocks[index + 1].start() if index + 1 < len(blocks) else end
+        block = src[match.start() : stop]
+        locale = match.group(1).strip("'")
+        assert re.search(r"^\s+steer_delivered: '", block, re.MULTILINE), (
+            f"locale {locale!r} is missing the steer_delivered label"
+        )
+        assert "cmd_steer_delivered" in block

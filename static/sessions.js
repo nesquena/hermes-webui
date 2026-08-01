@@ -1082,10 +1082,20 @@ function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeSt
   const serverId=String(serverLiveSnapshot.streamId||'').trim();
   const activeId=requestedActiveId||serverId;
   const selectDurableSnapshot=()=>{
-    if(activeId&&localId===activeId&&Array.isArray(localInflight.todos)&&localInflight.todoStateMeta){
-      return {...serverLiveSnapshot,todos:localInflight.todos,todoStateMeta:localInflight.todoStateMeta};
+    const carried={};
+    if(activeId&&localId===activeId){
+      if(Array.isArray(localInflight.todos)&&localInflight.todoStateMeta){
+        carried.todos=localInflight.todos;
+        carried.todoStateMeta=localInflight.todoStateMeta;
+      }
+      // #3058: a delivered steer is observed at the browser's steer response, never
+      // on the run journal, so the server snapshot cannot carry it. Same stream, so
+      // the local records still describe this run; dropping them loses the row.
+      if(Array.isArray(localInflight.deliveredSteers)&&localInflight.deliveredSteers.length){
+        carried.deliveredSteers=localInflight.deliveredSteers;
+      }
     }
-    return serverLiveSnapshot;
+    return Object.keys(carried).length?{...serverLiveSnapshot,...carried}:serverLiveSnapshot;
   };
   if(requestedActiveId&&serverId&&serverId!==requestedActiveId){
     return localId===requestedActiveId?localInflight:null;
@@ -2062,6 +2072,10 @@ async function loadSession(sid){
         lastRunJournalEventId:String(stored.lastRunJournalEventId||''),
         journalReplayFromStart:!!stored.journalReplayFromStart,
         anchorActivityScene:(stored.anchorActivityScene&&stored.anchorActivityScene.version==='activity_scene_v1')?stored.anchorActivityScene:null,
+        // #3058: the delivered-steer records are browser-observed, so this cache is
+        // their only copy until settlement writes the anchor scene. This whitelist
+        // is what a reload reads, so omitting the field loses the row permanently.
+        deliveredSteers:Array.isArray(stored.deliveredSteers)?stored.deliveredSteers:[],
         currentActivityBurstId:Number(stored.currentActivityBurstId||0)||0,
         currentLiveSegmentSeq:Number(stored.currentLiveSegmentSeq||0)||0,
         activityBurstAnchors:Array.isArray(stored.activityBurstAnchors)?stored.activityBurstAnchors:[],
