@@ -10142,7 +10142,10 @@ async function applyClearUpdateLock(btn){
       if(errEl){errEl.style.display='none';errEl.textContent='';}
       if(typeof _showUpdateBanner==='function'&&window._updateData) _showUpdateBanner(window._updateData,target);
       const applyBtn=$('btnApplyUpdate');
-      if(applyBtn){applyBtn.disabled=true;applyBtn.style.display='none';}
+      const otherTarget=target==='webui'?'agent':'webui';
+      const otherInfo=window._updateData?.[otherTarget];
+      const otherTargetCanApply=!!(otherInfo&&otherInfo.behind>0&&!(otherTarget==='webui'&&otherInfo.manual_update));
+      if(applyBtn&&!otherTargetCanApply){applyBtn.disabled=true;applyBtn.style.display='none';}
       const targetLabel=target==='webui'?'WebUI':'Agent';
       const noUpdateMessage=_lt('update_no_change','No update was applied for {0}.',targetLabel);
       showToast(noUpdateMessage,10000,'info');
@@ -10350,10 +10353,10 @@ async function forceUpdate(btn){
     // _updateApplyInFlight intentionally stays true: the page will reload, and clearing
     // it here would open a double-submit window while _waitForServerThenReload is pending.
   }catch(e){
-    btn.style.display='none';
-    btn.dataset.target='';
     if(errEl){errEl.textContent=_lt('update_force_failed','Force update failed: ')+e.message;errEl.style.display='block';}
     btn.disabled=false;btn.textContent=forceLabel;
+    btn.style.display='inline-block';
+    btn.dataset.target=target;
     window._updateApplyInFlight=false;
   }
 }

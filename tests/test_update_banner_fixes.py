@@ -3474,13 +3474,13 @@ def _run_mixed_apply_lock_conflict(payload):
     return json.loads(r.stdout)
 
 
-def _run_force_update(update_data, target, confirm, api_response):
+def _run_force_update(update_data, target, confirm, api_response, raises=False):
     """Run forceUpdate(btn) in Node.js; return {api_calls, error_text, toast_shown, msg_text, banner_visible, force_btn_visible}."""
     src = read('static/ui.js')
     i18n_fn = extract_js_function(src, '_i18nUpdateText')
     fn = extract_js_function(src, 'forceUpdate')
     payload_json = json.dumps(update_data)
-    api_json = json.dumps(api_response)
+    response_js = 'throw new Error("connection lost")' if raises else 'return ' + json.dumps(api_response)
     confirm_js = 'true' if confirm else 'false'
     target_json = json.dumps(target)
     script = (
@@ -3500,7 +3500,7 @@ def _run_force_update(update_data, target, confirm, api_response):
         'global.showConfirmDialog=async()=>' + confirm_js + ';'
         'global.api=async(url,opts)=>{'
         '_calls.push({url,body:JSON.parse((opts&&opts.body)||"{}") });'
-        'return ' + api_json + ';};'
+        + response_js + ';};'
         'global.showToast=()=>{_toast=true;};'
         'global._waitForServerThenReload=async()=>{};'
         'global._readHealthServerIdentity=async()=>null;'
@@ -3518,6 +3518,7 @@ def _run_force_update(update_data, target, confirm, api_response):
         'apply_btn_visible:_el.btnApplyUpdate.style.display!=="none",'
         'apply_btn_disabled:_el.btnApplyUpdate.disabled,'
         'force_btn_visible:_el.btnForceUpdate.style.display!=="none",'
+        'force_target:_el.btnForceUpdate.dataset.target,'
         'btn_disabled:_btn.disabled,'
         'toast_shown:_toast,'
         'in_flight:!!window._updateApplyInFlight,'
@@ -3994,6 +3995,21 @@ class TestDirtyInstallRecovery:
         assert not result['apply_btn_visible']
         assert result['apply_btn_disabled']
 
+    def test_force_transport_exception_keeps_retryable_recovery_control(self):
+        result = _run_force_update(
+            update_data=_REPRO_PAYLOADS['dirty_current'],
+            target='webui',
+            confirm=True,
+            api_response={},
+            raises=True,
+        )
+        assert result['error_visible']
+        assert 'connection lost' in result['error_text'].lower()
+        assert result['force_btn_visible']
+        assert not result['btn_disabled']
+        assert result['force_target'] == 'webui'
+        assert not result['in_flight']
+
     def test_restart_holds_in_flight_guard(self):
         """P2.1: in_flight guard must stay true after a successful restart trigger."""
         payload = _REPRO_PAYLOADS['dirty_current']
@@ -4446,6 +4462,38 @@ class TestUpdateRecoveryResponseLifecycle:
         assert result['force_target'] == 'agent'
         assert not result['apply_visible']
         assert result['apply_disabled']
+
+    @pytest.mark.parametrize('target, update_data, expected_force_target', [
+        (
+            'agent',
+            {
+                'webui': {'behind': 2, 'dirty': False, 'channel': 'stable'},
+                'agent': {'behind': 0, 'dirty': True},
+            },
+            'agent',
+        ),
+        (
+            'webui',
+            {
+                'webui': {'behind': 0, 'dirty': True, 'channel': 'stable'},
+                'agent': {'behind': 2, 'dirty': False},
+            },
+            'webui',
+        ),
+    ])
+    def test_clear_lock_up_to_date_preserves_other_target_apply(
+        self, target, update_data, expected_force_target
+    ):
+        result = _run_clear_lock_response(
+            {'ok': True, 'up_to_date': True},
+            target=target,
+            update_data=update_data,
+        )
+        assert result['apply_visible']
+        assert not result['apply_disabled']
+        assert result['force_visible']
+        assert not result['force_disabled']
+        assert result['force_target'] == expected_force_target
 
     def test_fresh_banner_reset_clears_previous_update_error(self):
         result = _run_show_update_banner({
