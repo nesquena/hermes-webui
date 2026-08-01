@@ -11978,10 +11978,13 @@ def cancel_stream(stream_id: str) -> bool:
                             stamp_message_source(_user_turn, _pending_source)
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
+                            _recovery_context = getattr(_cs, 'context_messages', None)
+                            if not isinstance(_recovery_context, list):
+                                _recovery_context = None
                             _assign_stable_message_ids(
                                 [_user_turn],
                                 _msgs_for_recovery,
-                                getattr(_cs, 'context_messages', None),
+                                _recovery_context,
                             )
                             _msgs_for_recovery.append(_user_turn)
                 except Exception:
