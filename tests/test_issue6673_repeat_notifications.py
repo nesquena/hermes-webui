@@ -106,9 +106,22 @@ navigator = {
     getRegistration: () => Promise.reject(new Error('registration rejected')),
   },
 };
-"""
+                """
                 if delivery == "rejected-service-worker"
-                else "navigator = {};"
+                else (
+                    """
+navigator = {
+  serviceWorker: {
+    getRegistration: () => Promise.resolve({
+      active: {},
+      showNotification: () => Promise.reject(new Error('showNotification rejected')),
+    }),
+  },
+};
+"""
+                    if delivery == "rejected-show-notification"
+                    else "navigator = {};"
+                )
             )
         )
     )
@@ -166,7 +179,7 @@ def _send(title: str, body: str, *, sid: str | None = FIXTURE["sid"]) -> dict:
     return {"title": title, "body": body, "options": options}
 
 
-def test_reported_two_test_clicks_request_second_toast_with_stable_tag():
+def test_public_sender_repeats_same_session_toast_with_stable_tag():
     result = _driver(
         delivery="service-worker",
         sends=[
@@ -209,7 +222,7 @@ def test_direct_fallback_preserves_payload():
     assert call["options"]["data"]["url"] == FIXTURE["expected_url"]
 
 
-def test_direct_delivery_renotifies_repeated_constructor_calls():
+def test_reported_two_test_clicks_request_second_toast_with_stable_tag():
     result = _driver(
         delivery="direct",
         sends=[
@@ -223,6 +236,19 @@ def test_direct_delivery_renotifies_repeated_constructor_calls():
     assert result["toasts"] == 2
     assert result["entryCount"] == 1
     assert result["tags"] == [FIXTURE["expected_tag"]]
+
+
+def test_direct_fallback_when_show_notification_rejects():
+    result = _driver(
+        delivery="rejected-show-notification",
+        sends=[_send("Clarification needed", "Choose a value.")],
+        via_public_sender=True,
+    )
+
+    call = result["calls"][0]
+    assert call["method"] == "direct"
+    assert call["options"]["tag"] == FIXTURE["expected_tag"]
+    assert call["options"]["renotify"] is True
 
 
 def test_public_sender_awaits_delivery_after_permission_grant():
