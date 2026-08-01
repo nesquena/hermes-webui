@@ -14,10 +14,10 @@ SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 
 
 def _function_body(name: str, source: str = UI_JS) -> str:
-    marker = f"function {name}"
+    marker = f"async function {name}"
     start = source.find(marker)
     if start < 0:
-        marker = f"async function {name}"
+        marker = f"function {name}"
         start = source.index(marker)
     brace = source.index("{", start)
     depth = 0
