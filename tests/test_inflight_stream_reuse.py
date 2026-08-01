@@ -1586,3 +1586,89 @@ assert.strictEqual(users5.length, 1,
 """
     result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_timestamp_sync_after_start_dedupes_same_turn_user():
+    """When /api/chat/start returns pending_started_at, the optimistic user
+    row's _ts must be synchronised to that server stamp so that
+    _sameTranscriptMessage matches it against the persisted user row.
+
+    Regression for #6649 round 3: without sync, the optimistic _ts
+    (client Date.now) and persisted timestamp (server started_at) differ
+    by network delay, and the strict-timestamp branch prevents text
+    fallback, re-introducing the duplicate.
+    """
+    assert NODE, "node not on PATH"
+    start = SESSIONS_JS.find("function _messageComparableText")
+    end = SESSIONS_JS.find("// Load older messages", start)
+    assert start != -1 and end != -1
+    helper_src = SESSIONS_JS[start:end]
+    script = f"""
+const assert = require('assert');
+{helper_src}
+
+// Simulate the real send path:
+// 1. Client creates optimistic row with _ts = clientTime (e.g. 1000.0)
+// 2. Server returns pending_started_at = serverTime (e.g. 1000.2)
+// 3. After sync: userMsg._ts = 1000.2 (matches persisted timestamp)
+
+// Before sync: timestamps differ -> _sameTranscriptMessage returns false
+let persistedUser = {{role:'user', content:'hello', timestamp:1000.2}};
+let optimisticBefore = {{role:'user', content:'hello', _ts:1000.0}};
+let matchBefore = _sameTranscriptMessage(persistedUser, optimisticBefore);
+assert.strictEqual(matchBefore, false,
+  'Before sync: different timestamps should NOT match (strict branch)');
+
+// After sync: timestamps equal -> _sameTranscriptMessage returns true
+let optimisticAfter = {{role:'user', content:'hello', _ts:1000.2}};
+let matchAfter = _sameTranscriptMessage(persistedUser, optimisticAfter);
+assert.strictEqual(matchAfter, true,
+  'After sync: equal timestamps should match (same turn)');
+
+// Full merge scenario: base has [user, completed assistant],
+// inflight has [user (synced), live assistant] -> should dedup to 1 user
+let base = [
+  {{role:'user', content:'hello', timestamp:1000.2}},
+  {{role:'assistant', content:'answer'}},
+];
+let inflight = [
+  {{role:'user', content:'hello', _ts:1000.2}},
+  {{role:'assistant', _live:true, content:'answer live'}},
+];
+base = _dropCurrentTurnAssistantMessages(base);
+let merged = _mergeInflightTailMessages(base, inflight);
+let users = merged.filter(m => m.role === 'user');
+assert.strictEqual(users.length, 1,
+  'After sync+merge: expected 1 user (deduped), got ' + users.length);
+
+// Without sync: timestamps differ -> 2 users (bug scenario)
+let baseBug = [
+  {{role:'user', content:'hello', timestamp:1000.2}},
+  {{role:'assistant', content:'answer'}},
+];
+let inflightBug = [
+  {{role:'user', content:'hello', _ts:1000.0}},
+  {{role:'assistant', _live:true, content:'answer live'}},
+];
+baseBug = _dropCurrentTurnAssistantMessages(baseBug);
+let mergedBug = _mergeInflightTailMessages(baseBug, inflightBug);
+let usersBug = mergedBug.filter(m => m.role === 'user');
+assert.strictEqual(usersBug.length, 2,
+  'Without sync: expected 2 users (bug), got ' + usersBug.length);
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_message_js_syncs_user_msg_ts_to_server_stamp():
+    """Verify static/messages.js assigns the server-returned
+    pending_started_at to userMsg._ts in the /api/chat/start callback."""
+    src = MESSAGES_JS
+    pattern = r"pending_started_at\s*=\s*startData\.pending_started_at"
+    matches = list(re.finditer(pattern, src))
+    assert len(matches) >= 1, "Could not find pending_started_at assignment"
+    for m in matches:
+        window = src[m.start():m.start() + 600]
+        if "userMsg._ts" in window and "startData.pending_started_at" in window:
+            return
+    raise AssertionError("userMsg._ts not synced to startData.pending_started_at near assignment")

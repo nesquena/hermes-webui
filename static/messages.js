@@ -1860,6 +1860,15 @@ async function send(){
 
     if(S.session&&typeof startData.pending_started_at==='number'){
       S.session.pending_started_at=startData.pending_started_at;
+      // Synchronise the optimistic user row's timestamp to the server-issued
+      // start stamp so that _sameTranscriptMessage can match it against the
+      // persisted user row (which receives the same server stamp). Without
+      // this, the two timestamps differ by network/scheduling delay and the
+      // strict-timestamp branch prevents text fallback, re-introducing the
+      // duplicate user row this PR fixes.
+      if(userMsg && typeof userMsg==='object'){
+        userMsg._ts=startData.pending_started_at;
+      }
     }
     if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
     else if(typeof appendThinking==='function') appendThinking('',{pending:true});
