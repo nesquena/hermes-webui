@@ -51,6 +51,7 @@ def _artifact_bundle():
         "_normalizeArtifactFilePath",
         "_normalizeArtifactMediaRef",
         "_normalizeArtifactWorkspacePath",
+        "_normalizeArtifactOpenPath",
         "_parseArtifactJson",
         "_artifactToolId",
         "_artifactToolName",
@@ -101,6 +102,7 @@ def _render_harness(payload, workspace="/workspace"):
         const _workspacePathExists = async () => true;
         const openFile = path => window.opened = [...(window.opened || []), path];
         const setStatus = () => {{}};
+        const _workspaceArtifactDisclosureState = Object.create(null);
         {_artifact_bundle()}
         renderSessionArtifacts();
       </script>
@@ -126,7 +128,7 @@ def test_grouped_sections_use_real_workspace_panel_and_safe_actions():
         page.locator(".workspace-artifact-item").first.click()
         assert page.evaluate("() => window.opened") == ["src/app.py"]
         media_link = page.locator(".workspace-artifact-link").filter(has_text="shot.png")
-        assert media_link.get_attribute("href").startswith("api/media?path=")
+        assert media_link.get_attribute("href").startswith("api/media?path=%2Ftmp%2Fshot.png&")
         assert "session_id=ui-proof" in media_link.get_attribute("href")
         with page.expect_popup() as popup_info:
             page.locator(".workspace-artifact-link").first.click()
@@ -190,7 +192,7 @@ def test_windows_file_media_uses_relative_drive_path_on_existing_media_route():
         page = browser.new_page(viewport={"width": 480, "height": 320})
         page.set_content(_render_harness(payload, workspace=r"C:\work"))
         media_link = page.locator(".workspace-artifact-link").first
-        assert media_link.get_attribute("href").startswith("api/media?path=chart.png&")
+        assert media_link.get_attribute("href").startswith("api/media?path=C%3A%2Fwork%2Fchart.png&")
         assert "session_id=ui-proof" in media_link.get_attribute("href")
         browser.close()
 
@@ -207,4 +209,38 @@ def test_windows_workspace_prefix_is_removed_before_file_action():
         page.set_content(_render_harness(payload, workspace=r"C:\work"))
         page.locator(".workspace-artifact-item").first.click()
         assert page.evaluate("() => window.opened") == ["src/app.py"]
+        browser.close()
+
+
+def test_open_artifact_path_keeps_shared_deep_link_normalization():
+    playwright = pytest.importorskip("playwright.sync_api")
+    payload = {"tool_calls": [], "messages": []}
+    with playwright.sync_playwright() as api:
+        browser = api.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page(viewport={"width": 480, "height": 320})
+        page.set_content(_render_harness(payload, workspace=r"C:\work"))
+        for path, expected in (
+            ("dist/report.html", "dist/report.html"),
+            ("node_modules/pkg/README.md", "node_modules/pkg/README.md"),
+            ("../shared/lib.py", "../shared/lib.py"),
+        ):
+            page.evaluate("async path => { window.opened = []; await openArtifactPath(path); }", path)
+            assert page.evaluate("() => window.opened") == [expected]
+        browser.close()
+
+
+def test_category_disclosure_state_survives_artifact_rerender():
+    playwright = pytest.importorskip("playwright.sync_api")
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    with playwright.sync_playwright() as api:
+        browser = api.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page(viewport={"width": 480, "height": 320})
+        page.set_content(_render_harness(payload))
+        first = page.locator(".workspace-artifact-group").first
+        assert first.get_attribute("open") == ""
+        first.locator("summary").click()
+        assert first.get_attribute("open") is None
+        page.wait_for_timeout(10)
+        page.evaluate("() => renderSessionArtifacts()")
+        assert page.locator(".workspace-artifact-group").first.get_attribute("open") is None
         browser.close()

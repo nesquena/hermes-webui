@@ -321,6 +321,7 @@ async function authorizeWorkspaceEscapeNavigation(item){
 let _workspacePanelActiveTab = 'files';
 let _renderSessionArtifactsTimer = null;
 let _workspaceTodosLastRenderedHash = null;
+const _workspaceArtifactDisclosureState = Object.create(null);
 
 function _setWorkspacePanelTabDataset(){
   const panel = document.querySelector('.rightpanel');
@@ -514,6 +515,24 @@ function _normalizeArtifactWorkspacePath(value, allowExtensionless=true){
   return comparablePath.startsWith(prefix) ? path.slice(workspace.length + 1) : path;
 }
 
+function _normalizeArtifactOpenPath(value){
+  if(typeof value !== 'string') return '';
+  let path = value.trim().replace(/\\/g, '/');
+  path = path.replace(/^~\//,'').replace(/^\.\/+/,'');
+  const workspace = typeof S !== 'undefined' && S.session && typeof S.session.workspace === 'string'
+    ? S.session.workspace.replace(/\\/g, '/').replace(/\/+$/,'')
+    : '';
+  if(workspace){
+    const caseInsensitive = /^[a-z]:\//i.test(workspace);
+    const comparablePath = caseInsensitive ? path.toLowerCase() : path;
+    const comparableWorkspace = caseInsensitive ? workspace.toLowerCase() : workspace;
+    if(comparablePath === comparableWorkspace) return '.';
+    const prefix = `${comparableWorkspace}/`;
+    if(comparablePath.startsWith(prefix)) path = path.slice(workspace.length + 1);
+  }
+  return path || '.';
+}
+
 function _parseArtifactJson(value){
   if(value && typeof value === 'object') return value;
   if(typeof value !== 'string') return null;
@@ -699,21 +718,19 @@ function _artifactCandidatesFromToolCall(tc){
 
 function _artifactToolResultPayload(message){
   if(!message || typeof message !== 'object') return null;
-  if(message.role === 'tool') return {
-    result: message.content,
-    output: message.output,
-    snippet: message.snippet,
-    preview: message.preview,
-  };
-  if(!Array.isArray(message.content)) return null;
-  const results = message.content.filter(block => block && block.type === 'tool_result');
-  if(!results.length) return null;
-  return results.map(block => ({
+  const payload = block => ({
     result: block.content,
     output: block.output,
     snippet: block.snippet,
     preview: block.preview,
-  }));
+  });
+  if(Array.isArray(message.content)){
+    const results = message.content.filter(block => block && block.type === 'tool_result');
+    if(results.length === 1) return payload(results[0]);
+    if(results.length > 1) return results.map(payload);
+  }
+  if(message.role === 'tool') return payload(message);
+  return null;
 }
 
 function _artifactToolResultsById(messages){
@@ -783,7 +800,7 @@ function collectSessionArtifacts(){
     if(!tc || typeof tc !== 'object') return;
     const result = toolResultsById.get(_artifactToolId(tc));
     const fakeTc = {...tc};
-    if(result) Object.assign(fakeTc, result);
+    if(result) Object.assign(fakeTc, Array.isArray(result) ? {result} : result);
     for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a, a.kind || _artifactToolName(tc) || source || 'tool');
   };
   // Source 1: session-level tool call summaries (may be empty when messages
@@ -894,12 +911,12 @@ function renderSessionArtifacts(){
   };
   const artifactMediaHref = (ref) => {
     if(/^https?:/i.test(ref)) return _normalizeArtifactUrl(ref);
-    const path = _normalizeArtifactWorkspacePath(
-      _normalizeArtifactFilePath(ref) || String(ref || ''),
-      true,
-    );
+    const path = _normalizeArtifactFilePath(ref) || _normalizeArtifactTarget(ref, true);
     if(!path || !S.session || !S.session.session_id) return '';
-    return `api/media?path=${encodeURIComponent(path)}&session_id=${encodeURIComponent(S.session.session_id)}`;
+    const workspace = _normalizeArtifactPath(S.session.workspace, true);
+    const isAbsolute = path.startsWith('/') || /^[a-z]:\//i.test(path);
+    const routePath = !isAbsolute && workspace ? `${workspace}/${path}` : path;
+    return `api/media?path=${encodeURIComponent(routePath)}&session_id=${encodeURIComponent(S.session.session_id)}`;
   };
   const renderItem = item => {
     const path = displayPath(item.path);
@@ -922,8 +939,14 @@ function renderSessionArtifacts(){
     const labelKey = categoryLabels[category];
     const label = t(labelKey);
     const labelText = label === labelKey ? categoryLabelFallbacks[category] : label;
-    return `<details class="workspace-artifact-group" data-artifact-category="${category}" open><summary class="workspace-artifact-group-title"><span data-i18n="${labelKey}">${esc(labelText)}</span><span class="workspace-artifacts-count">${categoryItems.length}</span></summary><div class="workspace-artifact-group-items">${categoryItems.map(renderItem).join('')}</div></details>`;
+    return `<details class="workspace-artifact-group" data-artifact-category="${category}"><summary class="workspace-artifact-group-title"><span data-i18n="${labelKey}">${esc(labelText)}</span><span class="workspace-artifacts-count">${categoryItems.length}</span></summary><div class="workspace-artifact-group-items">${categoryItems.map(renderItem).join('')}</div></details>`;
   }).join('');
+  for(const group of root.querySelectorAll('.workspace-artifact-group')){
+    group.open = _workspaceArtifactDisclosureState[group.dataset.artifactCategory] !== false;
+    group.addEventListener('toggle', () => {
+      _workspaceArtifactDisclosureState[group.dataset.artifactCategory] = group.open;
+    });
+  }
 }
 
 async function _workspacePathExists(path){
@@ -939,8 +962,7 @@ async function _workspacePathExists(path){
 async function openArtifactPath(path){
   if(!path) return;
   switchWorkspacePanelTab('files');
-  let rel = _normalizeArtifactWorkspacePath(path, true);
-  if(!rel) rel = '.';
+  const rel = _normalizeArtifactOpenPath(path);
   try{
     if(!(await _workspacePathExists(rel))){
       setStatus(t('file_open_failed'));

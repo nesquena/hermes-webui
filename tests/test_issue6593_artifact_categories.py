@@ -249,6 +249,23 @@ def test_session_tool_call_summaries_join_settled_tool_results_by_provider_id():
     ]
 
 
+def test_tool_result_payload_handles_content_blocks_without_numeric_merge_keys():
+    payload = {
+        "tool_calls": [{"id": "array-result", "name": "web_extract", "args": {}}],
+        "messages": [{
+            "role": "tool",
+            "tool_call_id": "array-result",
+            "content": [{
+                "type": "tool_result",
+                "content": '{"results":[{"url":"https://example.com/array-result"}]}',
+            }],
+        }],
+    }
+    assert [item["path"] for item in _collect(payload)] == [
+        "https://example.com/array-result"
+    ]
+
+
 def test_windows_file_media_keeps_drive_semantics_in_the_projection():
     items = _collect({
         "tool_calls": [],
