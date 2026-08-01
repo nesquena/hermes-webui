@@ -20966,10 +20966,16 @@ def _provisional_title_from_prompt(prompt: str, fallback: str = "Untitled") -> s
 
 
 def _session_start_workspace_for_child(source) -> str:
+    source_workspace = _current_workspace_for_child(source)
     return str(
         getattr(source, "session_start_workspace", None)
-        or getattr(source, "workspace", get_last_workspace())
+        or source_workspace
     )
+
+
+def _current_workspace_for_child(source) -> str:
+    source_workspace = getattr(source, "workspace", None)
+    return str(source_workspace if source_workspace is not None else get_last_workspace())
 
 
 def _prepare_chat_start_session_for_stream(
@@ -21860,7 +21866,7 @@ def _handle_session_compression_recovery_start(handler, body):
             copied_session = Session(
                 session_id=uuid.uuid4().hex[:12],
                 title=title,
-                workspace=getattr(source, "workspace", get_last_workspace()),
+                workspace=_current_workspace_for_child(source),
                 session_start_workspace=_session_start_workspace_for_child(source),
                 model=getattr(source, "model", None),
                 model_provider=getattr(source, "model_provider", None),
@@ -26085,10 +26091,17 @@ def _handle_session_import(handler, body):
     except (TypeError, ValueError) as e:
         return bad(handler, str(e))
     model = body.get("model", DEFAULT_MODEL)
+    session_start_workspace_raw = body.get("session_start_workspace", workspace)
+    if not isinstance(session_start_workspace_raw, (str, Path)):
+        return bad(handler, "session_start_workspace must be a path string")
+    try:
+        session_start_workspace = str(resolve_trusted_workspace(session_start_workspace_raw))
+    except (TypeError, ValueError) as e:
+        return bad(handler, str(e))
     s = Session(
         title=title,
         workspace=workspace,
-        session_start_workspace=body.get("session_start_workspace") or workspace,
+        session_start_workspace=session_start_workspace,
         model=model,
         messages=messages,
         tool_calls=body.get("tool_calls", []),

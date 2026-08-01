@@ -363,6 +363,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert "Final visible assistant replies" in system_msg["content"]
     assert f"Workspace: {session_start_workspace}" in system_msg["content"]
     assert f"Workspace: {str(tmp_path.resolve())}" not in system_msg["content"]
+    assert "This tag is the single authoritative source of the active workspace" in system_msg["content"]
     assert "Need script" in system_msg["content"]
     # The moved session/delivery context must be present in the system prompt.
     assert "Connected Platforms:" in system_msg["content"]

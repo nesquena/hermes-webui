@@ -1621,11 +1621,16 @@ class Session:
             needed = {'session_id', 'title', 'created_at', 'updated_at'}
             if not needed.issubset(parsed.keys()):
                 return cls.load(sid)
-            if not parsed.get('session_start_workspace'):
-                return cls.load(sid)
             parsed['messages'] = []
             parsed['tool_calls'] = []
             session = cls(**parsed)
+            if not parsed.get('session_start_workspace'):
+                migration_lock = _get_session_agent_lock(sid)
+                if not migration_lock.acquire(blocking=False):
+                    session._metadata_message_count = _parse_nonnegative_int(parsed.get('message_count'))
+                    session._loaded_metadata_only = True
+                    return session
+                migration_lock.release()
             sidecar_message_count = _parse_nonnegative_int(parsed.get('message_count'))
             index_message_count = None
             if sidecar_message_count is None:
@@ -4154,8 +4159,17 @@ def _persist_legacy_session_start_workspace(path, data, *, session_id, expected_
     try:
         if _sidecar_stat_signature(path) != expected_sig:
             return None
-        migrated = dict(data)
-        migrated['session_start_workspace'] = str(Path(workspace).expanduser().resolve())
+        session_start_workspace = str(Path(workspace).expanduser().resolve())
+        migrated = {}
+        inserted = False
+        for key, value in data.items():
+            if not inserted and key in {'messages', 'anchor_activity_scenes'}:
+                migrated['session_start_workspace'] = session_start_workspace
+                inserted = True
+            if key != 'session_start_workspace':
+                migrated[key] = value
+        if not inserted:
+            migrated['session_start_workspace'] = session_start_workspace
         tmp = path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
         try:
             with open(tmp, 'w', encoding='utf-8') as handle:

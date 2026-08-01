@@ -910,6 +910,13 @@ def _run_gateway_chat_streaming(
         if not _use_runs_api and runs_api_pending_marked:
             _finish_gateway_run_starting(stream_id, result="fallback")
             runs_api_pending_marked = False
+        workspace_ctx = ""
+        try:
+            from api.streaming import _workspace_context_prefix
+
+            workspace_ctx = _workspace_context_prefix(str(workspace))
+        except Exception:
+            logger.debug("Failed to build Gateway workspace prefix", exc_info=True)
         try:
             from api.streaming import (
                 _load_webui_prefill_context,
@@ -917,7 +924,6 @@ def _run_gateway_chat_streaming(
                 _normalize_prefill_messages_before_user_turn,
                 _public_prefill_context_status,
                 _webui_session_workspace_prompts,
-                _workspace_context_prefix,
             )
 
             prefill_context = _load_webui_prefill_context(cfg)
@@ -926,11 +932,16 @@ def _run_gateway_chat_streaming(
             # the ephemeral system prompt rather than a prefill `user` message.
             # The gateway-backed path must build the SAME system prompt so that
             # context is not silently dropped on Gateway-routed WebUI chats.
-            _gateway_system_prompt = _webui_session_workspace_prompts(
+            _workspace_prompts = _webui_session_workspace_prompts(
                 s,
                 workspace=workspace,
                 config_data=cfg,
-            )["ephemeral_system_prompt"]
+            )
+            _gateway_system_prompt = (
+                _workspace_prompts["system_prompt"]
+                + "\n\n"
+                + _workspace_prompts["ephemeral_system_prompt"]
+            )
             prefill_messages = _prefill_messages_with_webui_context(prefill_context, cfg)
             prefill_messages = _normalize_prefill_messages_before_user_turn(prefill_messages)
             prefill_messages = [
@@ -1007,7 +1018,6 @@ def _run_gateway_chat_streaming(
                 # Scope Gateway long-term continuity to this WebUI conversation
                 # without exposing the browser's auth cookie or CSRF material.
                 headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
-            workspace_ctx = _workspace_context_prefix(str(workspace))
             message_content: Any = workspace_ctx + str(msg_text or "")
             if attachments:
                 try:

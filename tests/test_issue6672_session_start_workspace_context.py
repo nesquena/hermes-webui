@@ -1,6 +1,7 @@
 """Regression coverage for the session-start workspace prompt authority."""
 
 import json
+import queue
 from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
@@ -132,6 +133,50 @@ def test_explicit_path_legacy_load_persists_session_start_workspace(tmp_path, mo
     assert loaded.session_start_workspace == str((tmp_path / "imported-workspace").resolve())
     persisted = json.loads(path.read_text(encoding="utf-8"))
     assert persisted["session_start_workspace"] == loaded.session_start_workspace
+
+    keys = list(persisted)
+    assert keys.index("session_start_workspace") < keys.index("messages")
+
+
+def test_explicit_path_legacy_load_stays_bounded_while_session_lock_is_owned(tmp_path, monkeypatch):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    sid = "issue6672explicit-lock"
+    path = session_dir / f"{sid}.json"
+    path.write_text(json.dumps(_legacy_payload(sid, tmp_path / "workspace")), encoding="utf-8")
+    lock = models._get_session_agent_lock(sid)
+    assert lock.acquire(blocking=False)
+    try:
+        loaded = models._load_session_from_path(path)
+    finally:
+        lock.release()
+    assert loaded.session_start_workspace == str((tmp_path / "workspace").resolve())
+    assert "session_start_workspace" not in json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_metadata_only_legacy_load_does_not_full_parse_while_session_lock_is_owned(tmp_path, monkeypatch):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    sid = "issue6672metadata-lock"
+    path = session_dir / f"{sid}.json"
+    path.write_text(json.dumps(_legacy_payload(sid, tmp_path / "workspace")), encoding="utf-8")
+    lock = models._get_session_agent_lock(sid)
+    assert lock.acquire(blocking=False)
+    try:
+        loaded = models.Session.load_metadata_only(sid)
+    finally:
+        lock.release()
+    assert loaded._loaded_metadata_only is True
+    assert loaded.messages == []
+    assert loaded.session_start_workspace == loaded.workspace
+    assert "session_start_workspace" not in json.loads(path.read_text(encoding="utf-8"))
 
 
 def test_legacy_migration_skips_a_changed_sidecar(tmp_path, monkeypatch):
@@ -267,6 +312,42 @@ def test_session_import_export_preserves_session_start_workspace(tmp_path, monke
 
     assert imported.session_start_workspace == str(initial.resolve())
     assert Session.load(imported.session_id).session_start_workspace == str(initial.resolve())
+
+
+def test_session_import_rejects_invalid_session_start_workspace_type(tmp_path, monkeypatch):
+    from api import models, routes
+
+    _isolate_session_store(tmp_path, monkeypatch)
+    captured = {}
+    monkeypatch.setattr(routes, "bad", lambda _handler, message: captured.update(message=message) or captured)
+    result = routes._handle_session_import(
+        object(),
+        {
+            "messages": [],
+            "workspace": str(tmp_path),
+            "session_start_workspace": 1234,
+        },
+    )
+    assert result is captured
+    assert "must be a path string" in captured["message"]
+    assert not models.SESSIONS
+
+
+def test_session_import_rejects_untrusted_session_start_workspace(tmp_path, monkeypatch):
+    from api import routes
+
+    _isolate_session_store(tmp_path, monkeypatch)
+    captured = {}
+    monkeypatch.setattr(routes, "bad", lambda _handler, message: captured.update(message=message) or captured)
+    routes._handle_session_import(
+        object(),
+        {
+            "messages": [],
+            "workspace": str(tmp_path),
+            "session_start_workspace": "C:\\Windows",
+        },
+    )
+    assert "outside the user home directory" in captured["message"].lower()
 
 
 def test_session_lineage_variants_inherit_the_session_start_workspace(tmp_path):
@@ -451,6 +532,92 @@ def test_workspace_prompt_helper_keeps_sync_and_gateway_consumers_on_same_author
     assert str(changed.resolve()) not in prompts["system_prompt"]
     assert str(changed.resolve()) not in prompts["ephemeral_system_prompt"]
     assert str(changed.resolve()).replace("\\", "\\\\") in prompts["workspace_ctx"]
+
+
+def test_child_workspace_fallback_is_lazy(tmp_path, monkeypatch):
+    from api import routes
+
+    source = SimpleNamespace(
+        workspace=str(tmp_path / "current"),
+        session_start_workspace=str(tmp_path / "initial"),
+    )
+    monkeypatch.setattr(routes, "get_last_workspace", lambda: (_ for _ in ()).throw(
+        AssertionError("fallback workspace should not be evaluated")
+    ))
+    assert routes._session_start_workspace_for_child(source) == source.session_start_workspace
+
+
+def test_run_agent_streaming_composes_frozen_context_through_production_worker(tmp_path, monkeypatch):
+    from api import streaming
+    from api.models import Session
+
+    initial = tmp_path / "initial-workspace"
+    changed = tmp_path / "changed-workspace"
+    session = Session(session_id="issue6672worker", workspace=initial, messages=[])
+    session.workspace = str(changed.resolve())
+    session.active_stream_id = "issue6672worker-stream"
+    session.pending_started_at = None
+    session.pending_user_message = None
+    session.pending_attachments = []
+    session.profile = None
+    session.personality = None
+    session.save = lambda *args, **kwargs: None
+
+    captured = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self.context_compressor = None
+            self.ephemeral_system_prompt = None
+            self.stream_delta_callback = kwargs.get("stream_delta_callback")
+            self.tool_progress_callback = kwargs.get("tool_progress_callback")
+            self.reasoning_callback = kwargs.get("reasoning_callback")
+            self.clarify_callback = kwargs.get("clarify_callback")
+
+        def run_conversation(self, **kwargs):
+            captured.update(kwargs)
+            return {"messages": [], "final_response": "done", "completed": True}
+
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: session)
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
+    monkeypatch.setattr(streaming, "resolve_model_provider", lambda *_args, **_kwargs: ("test-model", "test-provider", None))
+    monkeypatch.setattr(streaming, "_maybe_schedule_title_refresh", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "get_state_db_session_messages", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(streaming, "reconciled_state_db_messages_for_session", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(streaming, "_new_turn_context_from_messages", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(streaming, "_deduplicate_context_messages", lambda messages: messages)
+    monkeypatch.setattr(streaming, "_sanitize_messages_for_api", lambda messages, **_kwargs: messages)
+    monkeypatch.setattr(streaming, "_drain_webui_process_notifications", lambda *args, **kwargs: [])
+    monkeypatch.setattr(streaming, "_build_native_multimodal_message", lambda prefix, text, *_args, **_kwargs: prefix + text)
+    monkeypatch.setattr(streaming, "_persistent_state_snapshot", lambda *_args: {})
+    monkeypatch.setattr(streaming, "_accept_pending_async_delegations", lambda *args, **kwargs: [])
+    monkeypatch.setattr(streaming, "_merge_display_messages_after_agent_result", lambda *args, **kwargs: [])
+    monkeypatch.setattr(streaming, "_compact_session_image_parts_for_persistence", lambda *_args: None)
+    monkeypatch.setattr(streaming, "_restore_reasoning_metadata", lambda *_args: None)
+    monkeypatch.setattr(streaming, "_assign_stable_message_ids", lambda *_args: None)
+    monkeypatch.setattr(streaming, "_restore_display_reasoning_metadata", lambda *_args: None)
+    monkeypatch.setattr(streaming, "_dedupe_replayed_context_messages", lambda *_args: [])
+    monkeypatch.setattr(streaming, "_active_turn_identity", None, raising=False)
+    monkeypatch.setattr(streaming, "load_settings", lambda: {})
+    monkeypatch.setattr(streaming, "get_config", lambda: {})
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda *_args: {})
+    monkeypatch.setattr(streaming, "_save_streaming_checkpoint", lambda *_args: None)
+    monkeypatch.setattr(streaming, "_maybe_run_auto_compression", lambda *_args, **_kwargs: None, raising=False)
+    monkeypatch.setattr(streaming, "_finalize_stream_session", lambda *_args, **_kwargs: None, raising=False)
+    streaming.STREAMS[session.active_stream_id] = queue.Queue()
+    try:
+        streaming._run_agent_streaming(
+            session_id=session.session_id,
+            msg_text="hello",
+            model="test-model",
+            model_provider="test-provider",
+            workspace=str(changed),
+            stream_id=session.active_stream_id,
+        )
+    finally:
+        streaming.STREAMS.pop(session.active_stream_id, None)
+    assert captured["system_message"] == streaming._webui_workspace_system_prompt(str(initial.resolve()))
+    assert captured["user_message"] == streaming._workspace_context_prefix(str(changed)) + "hello"
 
 
 def test_sync_chat_consumer_uses_frozen_context_and_current_turn_prefix(tmp_path, monkeypatch):
