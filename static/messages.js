@@ -8934,6 +8934,7 @@ function startBackgroundPolling(parentSid, taskId, prompt){
             hideBackgroundBadge(taskId);
             delete _bgPollTimers[taskId];
             const msg={role:'assistant',content:`**${t('bg_label')}** ${prompt.slice(0,80)}\n\n${res.answer||t('bg_no_answer')}`,'_background':true,_ts:Date.now()/1000};
+            if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
             S.messages.push(msg);
             renderMessages({preserveScroll:true});
             showToast(t('bg_complete'));
