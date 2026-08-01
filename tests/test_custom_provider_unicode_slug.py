@@ -203,6 +203,41 @@ class TestRouteFallbackParity:
 
         assert config._custom_provider_slug_from_name("") == _custom_provider_slug_for_context("") == ""
 
+    def test_exception_fallback_matches_canonical_vectors(self, monkeypatch):
+        """When the import fails, the except-branch fallback must produce
+        the same result as the canonical helper for all parity vectors."""
+        from api.routes import _custom_provider_slug_for_context
+
+        # Force the import inside _custom_provider_slug_for_context to fail
+        # so the except-branch fallback is exercised.
+        import api.config as _cfg
+
+        original = _cfg._custom_provider_slug_from_name
+        monkeypatch.setattr(_cfg, "_custom_provider_slug_from_name", None)
+
+        vectors = [
+            ("a:b", "custom:a:b"),
+            ("a   b", "custom:a---b"),
+            ("---hello---", "custom:---hello---"),
+            ("a\tb", "custom:a\tb"),
+            ("我的提供商", "custom:我的提供商"),
+            ("我的Proxy服务器", "custom:我的proxy服务器"),
+            ("My Provider", "custom:my-provider"),
+            ("基元律动", "custom:基元律动"),
+            ("", ""),
+        ]
+
+        for name, expected in vectors:
+            got = _custom_provider_slug_for_context(name)
+            assert got == expected, (
+                f"Fallback mismatch for {name!r}: expected {expected!r}, got {got!r}"
+            )
+            # Also verify it matches what the canonical helper would produce
+            assert got == original(name), (
+                f"Fallback diverges from canonical for {name!r}: "
+                f"fallback={got!r} vs canonical={original(name)!r}"
+            )
+
 
 # ── Integration: resolve_custom_provider_connection ───────────────────────────
 

@@ -6520,20 +6520,12 @@ def _custom_provider_slug_for_context(name: object) -> str:
 
         return _custom_provider_slug_from_name(name)
     except Exception:
-        import unicodedata
-
         raw = str(name or "").strip().lower()
         if not raw:
             return ""
         if raw.startswith("custom:"):
             return raw
-        raw = unicodedata.normalize("NFC", raw)
-        # Replace only colon and whitespace with hyphens
-        slug = re.sub(r"[:\s]+", "-", raw).strip("-")
-        slug = re.sub(r"-{2,}", "-", slug)
-        if not slug:
-            return ""
-        return f"custom:{slug}"
+        return "custom:" + raw.replace(" ", "-")
 
 
 def _providers_match_for_context(config_key: object, requested_provider: str) -> bool:
@@ -20021,13 +20013,13 @@ def _handle_live_models(handler, parsed):
                     except Exception as _fetch_err:
                         logger.debug("Live fetch from custom provider failed: %s", _fetch_err)
 
-                # If live fetch succeeded, merge with config entries (live takes
-                # priority).  If live fetch failed, fall back to config-only list.
+                # If live fetch succeeded, filter to only models configured in
+                # custom_providers config — live fetch returns ALL models the
+                # key has access to, but for proxy gateways like New-API that
+                # may include hundreds of unrelated models from other channels.
                 if ids:
-                    _live_set = set(ids)
-                    for _cid in _config_ids:
-                        if _cid not in _live_set:
-                            ids.append(_cid)
+                    _configured_set = set(_config_ids)
+                    ids = [mid for mid in ids if mid in _configured_set]
                 else:
                     ids = list(_config_ids)
 
