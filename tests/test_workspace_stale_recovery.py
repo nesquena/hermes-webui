@@ -207,10 +207,10 @@ def test_list_dir_recovers_missing_implicit_session_workspace(monkeypatch, tmp_p
     monkeypatch.setattr(routes, "get_session", lambda _sid: session)
     monkeypatch.setattr(routes, "get_last_workspace", lambda: str(fallback))
 
-    def fake_list_dir(workspace_path, rel_path):
+    def fake_list_dir(workspace_path, rel_path, cursor=None):
         captured["workspace"] = workspace_path
         captured["rel_path"] = rel_path
-        return []
+        return {"entries": [], "has_more": False, "cursor": None}
 
     monkeypatch.setattr(routes, "list_dir", fake_list_dir)
     monkeypatch.setattr(routes, "dir_signature", lambda *_args: "sig")
@@ -225,6 +225,8 @@ def test_list_dir_recovers_missing_implicit_session_workspace(monkeypatch, tmp_p
     assert str(fallback.resolve()) in sidecar.read_text(encoding="utf-8")
     assert payload == {
         "entries": [],
+        "has_more": False,
+        "cursor": None,
         "signature": "sig",
         "path": ".",
         "workspace": str(fallback.resolve()),
@@ -256,9 +258,9 @@ def test_list_recovery_stays_bound_when_global_fallback_changes(
     monkeypatch.setattr(
         routes, "get_last_workspace", lambda: selected["workspace"]
     )
-    def capture_list(workspace_path, _rel):
+    def capture_list(workspace_path, _rel, cursor=None):
         captured["listed"] = workspace_path
-        return []
+        return {"entries": [], "has_more": False, "cursor": None}
 
     monkeypatch.setattr(routes, "list_dir", capture_list)
     monkeypatch.setattr(routes, "dir_signature", lambda *_args: "sig")
@@ -440,9 +442,9 @@ def test_list_dir_preserves_remote_workspace_rejection(
         calls["fallback"] += 1
         return fallback_path
 
-    def fake_list_dir(*_args):
+    def fake_list_dir(*_args, **_kwargs):
         calls["list_dir"] += 1
-        return []
+        return {"entries": [], "has_more": False, "cursor": None}
 
     monkeypatch.setattr(routes, "get_last_workspace", fallback)
     monkeypatch.setattr(routes, "list_dir", fake_list_dir)

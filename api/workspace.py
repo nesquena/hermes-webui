@@ -7,7 +7,9 @@ profile has its own workspace configuration.  State files live at
 ``{profile_home}/webui_state/last_workspace.txt``.  The global STATE_DIR
 paths are used as fallback when no profile module is available.
 """
+import base64
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -27,6 +29,52 @@ logger = logging.getLogger(__name__)
 _ESCAPE_AUTH_TTL_SECONDS = 300
 _ESCAPE_AUTH_LOCK = threading.Lock()
 _ESCAPE_AUTH_TOKENS: dict[str, dict[str, str | int | float]] = {}
+
+_LIST_DIR_PAGE_SIZE = 200
+# Process-scoped secret; cursors issued before a restart are invalid after (correct: stale
+# cursors from a restarted server are rejected, not silently followed).
+_LIST_DIR_CURSOR_SECRET: bytes = secrets.token_bytes(32)
+
+
+def _encode_list_cursor(resolved_path: Path, last_key: tuple) -> str:
+    """Return a tamper-evident, opaque cursor encoding the sort key of the last returned entry."""
+    path_str = str(resolved_path)
+    k = [int(last_key[0]), int(last_key[1]), str(last_key[2])]
+    payload = json.dumps({'k': k, 'p': path_str}, sort_keys=True, separators=(',', ':'))
+    sig = hmac.new(_LIST_DIR_CURSOR_SECRET, payload.encode('utf-8'), 'sha256').hexdigest()
+    token = json.dumps({'k': k, 'p': path_str, 's': sig}, sort_keys=True, separators=(',', ':'))
+    return base64.urlsafe_b64encode(token.encode('utf-8')).decode('ascii')
+
+
+def _decode_list_cursor(cursor: str, expected_resolved: 'Path') -> tuple:
+    """Validate and decode a cursor; raise ValueError on tampering or cross-directory use.
+
+    Returns a sort-key tuple (not_is_link: bool, is_file: bool, name_lower: str).
+    """
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode('ascii') + b'==').decode('utf-8')
+        token = json.loads(raw)
+        path_str = str(token['p'])
+        k = token['k']
+        if not isinstance(k, list) or len(k) != 3:
+            raise ValueError("invalid cursor")
+        not_link = bool(k[0])
+        is_file = bool(k[1])
+        name_lower = str(k[2])
+        sig = str(token['s'])
+    except (KeyError, TypeError, IndexError, ValueError):
+        raise ValueError("invalid cursor")
+    except Exception:
+        raise ValueError("invalid cursor")
+    payload = json.dumps({'k': k, 'p': path_str}, sort_keys=True, separators=(',', ':'))
+    expected_sig = hmac.new(
+        _LIST_DIR_CURSOR_SECRET, payload.encode('utf-8'), 'sha256'
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected_sig):
+        raise ValueError("invalid cursor")
+    if path_str != str(expected_resolved):
+        raise ValueError("cursor is for a different directory")
+    return (not_link, is_file, name_lower)
 
 from api.config import (
     WORKSPACES_FILE as _GLOBAL_WS_FILE,
@@ -1273,64 +1321,60 @@ def rename_anchored(root: Path, source: Path, dest: Path) -> None:
         os.close(src_parent_fd)
 
 
-def list_dir(workspace: Path, rel: str='.'):
+def list_dir(workspace: Path, rel: str = '.', cursor: str | None = None) -> dict:
+    """List up to _LIST_DIR_PAGE_SIZE entries from a workspace directory.
+
+    Returns a dict with keys:
+      ``entries``  – list of entry dicts for this page
+      ``has_more`` – True when entries past this page exist
+      ``cursor``   – opaque continuation token (str) when has_more, else None
+    Raises ValueError for an invalid or cross-directory cursor.
+    """
     target = safe_resolve_ws(workspace, rel)
     if not target.is_dir():
         raise FileNotFoundError(f"Not a directory: {rel}")
     ws_resolved = workspace.resolve()
     target_resolved = target.resolve()
-    entries = []
 
-    def _process(name, is_symlink, raw_link, lstat_result, reachable):
-        """Append one directory entry. ``raw_link`` is the os.readlink() result
-        for symlinks (else None); ``lstat_result`` is an os.stat_result obtained
-        with follow_symlinks=False (else None); ``reachable`` is False when a
-        follow_symlinks=True stat raised (broken target or symlink loop)."""
+    last_key = None
+    if cursor is not None:
+        last_key = _decode_list_cursor(cursor, target_resolved)
+
+    def _process_entry(name, is_symlink, raw_link, lstat_result, reachable) -> dict | None:
+        """Build and return one directory entry dict, or None to skip."""
         if is_symlink:
             if raw_link is None:
-                return
+                return None
             # A symlink whose follow-stat raised (ELOOP / broken target) can never
-            # be opened — filter it. This catches mutual/self loops portably across
-            # Python versions where Path.resolve() loop handling differs (3.11
-            # raises RuntimeError, 3.13 can return a path), so do not rely on
-            # resolve() raising for cycle detection.
+            # be opened — filter it.
             if not reachable:
-                return
+                return None
             try:
                 link_target = (target_resolved / raw_link).resolve()
             except (OSError, RuntimeError):
-                return
+                return None
             # Cycle detection: skip if symlink points back to current dir or root.
             if link_target == target_resolved or link_target == ws_resolved:
-                return
+                return None
             try:
                 target_resolved.relative_to(link_target)
-                return  # target is under link_target — ancestor → cycle
+                return None  # target is under link_target — ancestor → cycle
             except ValueError:
                 pass
             # Tag symlinks whose resolved target escapes the workspace root.
-            # Previously silently dropped; now emitted with target_outside_workspace=True
-            # so the workspace tree can show the link exists (display-only — the
-            # read/list gate in safe_resolve_ws / open_anchored_fd still blocks
-            # navigation through it).
             target_outside_workspace = False
             try:
                 link_target.relative_to(ws_resolved)
             except ValueError:
                 target_outside_workspace = True
             if _is_blocked_system_path(link_target):
-                return
+                return None
             display_path = name
             if rel and rel != '.':
                 display_path = rel + '/' + display_path
             mtime_ns = lstat_result.st_mtime_ns if lstat_result is not None else None
             if target_outside_workspace:
-                # #4581 hardening: a display-only escape-target symlink must NOT
-                # disclose where it points. Emit ONLY display-safe fields — never
-                # the resolved outside path, target-derived is_dir, or target size
-                # (the row exists to show the link is present; navigation/read
-                # through it stays blocked by safe_resolve_ws/open_anchored_fd).
-                entry = {
+                return {
                     'name': name,
                     'path': display_path,
                     'type': 'symlink',
@@ -1338,7 +1382,6 @@ def list_dir(workspace: Path, rel: str='.'):
                     'target_outside_workspace': True,
                     'mtime_ns': mtime_ns,
                 }
-                entries.append(entry)
             else:
                 is_dir = link_target.is_dir()
                 entry = {
@@ -1355,7 +1398,7 @@ def list_dir(workspace: Path, rel: str='.'):
                         entry['size'] = link_target.stat().st_size
                     except OSError:
                         entry['size'] = None
-                entries.append(entry)
+                return entry
         else:
             entry_path = name
             if rel and rel != '.':
@@ -1369,20 +1412,18 @@ def list_dir(workspace: Path, rel: str='.'):
                 size = None
                 mtime_ns = None
                 is_dir_entry = False
-            entries.append({
+            return {
                 'name': name,
                 'path': entry_path,
                 'type': 'dir' if is_dir_entry else 'file',
                 'size': size,
                 'mtime_ns': mtime_ns,
-            })
+            }
+
+    page_entries: list = []
+    has_more = False
 
     if _DIR_FD_OK:
-        # #3398 TOCTOU hardening (Linux/macOS): open the directory via an anchored
-        # openat-walk (O_NOFOLLOW on every component) and enumerate via the verified
-        # fd (os.scandir(fd) + fd-relative fstatat/readlinkat), so a path component
-        # swapped to an escaping symlink after safe_resolve_ws() cannot redirect the
-        # listing.
         def _sort_key_de(de):
             try:
                 is_link = de.is_symlink()
@@ -1402,8 +1443,10 @@ def list_dir(workspace: Path, rel: str='.'):
             if not stat.S_ISDIR(st.st_mode):
                 raise FileNotFoundError(f"Not a directory: {rel}")
             with os.scandir(dir_fd) as scan:
-                scandir_entries = sorted(scan, key=_sort_key_de)
-            for de in scandir_entries:
+                keyed = sorted(((de, _sort_key_de(de)) for de in scan), key=lambda x: x[1])
+            for de, sk in keyed:
+                if last_key is not None and sk <= last_key:
+                    continue
                 name = de.name
                 is_symlink = de.is_symlink()
                 raw_link = None
@@ -1416,16 +1459,19 @@ def list_dir(workspace: Path, rel: str='.'):
                     lst = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
                 except OSError:
                     lst = None
-                # reachable: follow-stat succeeds (filters ELOOP/broken symlinks).
                 reachable = True
                 if is_symlink:
                     try:
                         os.stat(name, dir_fd=dir_fd, follow_symlinks=True)
                     except OSError:
                         reachable = False
-                _process(name, is_symlink, raw_link, lst, reachable)
-                if len(entries) >= 200:
-                    break
+                entry = _process_entry(name, is_symlink, raw_link, lst, reachable)
+                if entry is not None:
+                    page_entries.append(entry)
+                    if len(page_entries) > _LIST_DIR_PAGE_SIZE:
+                        has_more = True
+                        page_entries.pop()
+                        break
         finally:
             try:
                 os.close(dir_fd)
@@ -1446,7 +1492,9 @@ def list_dir(workspace: Path, rel: str='.'):
                     pass
             return (not is_link, is_file, p.name.lower())
 
-        for item in sorted(target.iterdir(), key=_sort_key_p):
+        for item, sk in sorted(((item, _sort_key_p(item)) for item in target.iterdir()), key=lambda x: x[1]):
+            if last_key is not None and sk <= last_key:
+                continue
             name = item.name
             is_symlink = item.is_symlink()
             raw_link = None
@@ -1459,17 +1507,30 @@ def list_dir(workspace: Path, rel: str='.'):
                 lst = item.lstat()
             except OSError:
                 lst = None
-            # reachable: follow-stat succeeds (filters ELOOP/broken symlinks).
             reachable = True
             if is_symlink:
                 try:
                     os.stat(str(item), follow_symlinks=True)
                 except OSError:
                     reachable = False
-            _process(name, is_symlink, raw_link, lst, reachable)
-            if len(entries) >= 200:
-                break
-    return entries
+            entry = _process_entry(name, is_symlink, raw_link, lst, reachable)
+            if entry is not None:
+                page_entries.append(entry)
+                if len(page_entries) > _LIST_DIR_PAGE_SIZE:
+                    has_more = True
+                    page_entries.pop()
+                    break
+
+    page = page_entries  # already bounded to _LIST_DIR_PAGE_SIZE
+    if has_more and page:
+        last = page[-1]
+        last_is_link = last.get('type') == 'symlink'
+        last_is_file = last.get('type') == 'file'
+        last_key_out = (not last_is_link, last_is_file, last['name'].lower())
+        next_cursor = _encode_list_cursor(target_resolved, last_key_out)
+    else:
+        next_cursor = None
+    return {'entries': page, 'has_more': has_more, 'cursor': next_cursor}
 
 
 def dir_signature(workspace: Path, rel: str = '.', entries: list[dict] | None = None) -> str:
@@ -1480,7 +1541,7 @@ def dir_signature(workspace: Path, rel: str = '.', entries: list[dict] | None = 
     mtimes, and symlink targets. It intentionally does not read file contents.
     """
     if entries is None:
-        entries = list_dir(workspace, rel)
+        entries = list_dir(workspace, rel)['entries']
     payload = []
     for entry in entries:
         payload.append({
@@ -1678,7 +1739,7 @@ def list_authorized_escape_dir(workspace: Path, session_id: str, token: str, rel
     resolved = resolve_authorized_escape_request(workspace, session_id, token, rel)
     external_root = resolved["external_root"]
     external_rel = resolved["external_rel"]
-    entries = list_dir(external_root, external_rel)
+    entries = list_dir(external_root, external_rel)['entries']
     surface_path = resolved["surface_path"]
     external_root_resolved = external_root.resolve()
     for entry in entries:

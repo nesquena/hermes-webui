@@ -16978,11 +16978,15 @@ def _handle_list_dir(handler, parsed):
                 )
                 workspace = Path(persisted.workspace)
         rel_path = qs.get("path", ["."])[0]
-        entries = list_dir(Path(workspace), rel_path)
+        cursor = qs.get("cursor", [None])[0] or None
+        result = list_dir(Path(workspace), rel_path, cursor=cursor)
+        entries = result["entries"]
         return j(
             handler,
             {
                 "entries": entries,
+                "has_more": result["has_more"],
+                "cursor": result["cursor"],
                 "signature": dir_signature(Path(workspace), rel_path, entries),
                 "path": rel_path,
                 "workspace": str(workspace),

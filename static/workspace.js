@@ -609,14 +609,28 @@ function renderSessionArtifacts(){
   }).join('');
 }
 
+// Follow all cursor pages and return the union of entries.
+async function _fetchAllPages(baseUrl){
+  let entries=[];
+  let cursor=null;
+  do{
+    const url=cursor?baseUrl+'&cursor='+encodeURIComponent(cursor):baseUrl;
+    const data=await api(url);
+    entries=entries.concat(data.entries||[]);
+    cursor=(data.has_more&&data.cursor)?data.cursor:null;
+  }while(cursor);
+  return entries;
+}
+
 async function _workspacePathExists(path){
   if(!S.session||!path) return false;
   const parts=String(path).split('/').filter(Boolean);
   const name=parts.pop();
   if(!name) return false;
   const dir=parts.length?parts.join('/'):'.';
-  const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dir)}`);
-  return (data.entries||[]).some(entry=>entry&&((entry.path===path)||entry.name===name));
+  const baseUrl=`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dir)}`;
+  const allEntries=await _fetchAllPages(baseUrl);
+  return allEntries.some(entry=>entry&&((entry.path===path)||entry.name===name));
 }
 
 async function openArtifactPath(path){
@@ -732,6 +746,8 @@ async function loadDir(path, opts={}){
       S._dirCache={};
       _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
+    // Reset cursor state on every fresh loadDir call; continuation appends via _loadMoreDir.
+    S._dirCursor=null;S._dirHasMore=false;
     S.currentDir=path||'.';
     const data=await api(
       _workspaceRouteForPath(path, 'list') ||
@@ -746,6 +762,7 @@ async function loadDir(path, opts={}){
       if(typeof syncTerminalButton==='function')syncTerminalButton();
       showToast(t('workspace_recovered_notice',S.session.workspace),5000,'warning');
     }
+    S._dirCursor=data.cursor||null;S._dirHasMore=!!(data.has_more);
     S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
     // #2673 — refresh Artifacts tab when its source data (the file tree) updates.
     if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
@@ -756,8 +773,8 @@ async function loadDir(path, opts={}){
       const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);
       if(pending.length){
         const results=await Promise.all(pending.map(dirPath=>
-          api(_workspaceRouteForPath(dirPath, 'list'))
-            .then(dc=>({dirPath,entries:dc.entries||[]}))
+          _fetchAllPages(_workspaceRouteForPath(dirPath, 'list'))
+            .then(entries=>({dirPath,entries}))
             .catch(()=>({dirPath,entries:[]}))
         ));
         if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
@@ -791,6 +808,64 @@ function refreshWorkspacePanel(){
   if(!S.session)return;
   const targetDir = S.currentDir || '.';
   loadDir(targetDir,{refreshExpanded:true});
+}
+
+// Append a "load more" row to the file tree when the current dir has a next page.
+// Called after every renderFileTree() via the wrapper below.
+function _renderLoadMoreRow(){
+  const box=typeof $==='function'?$('fileTree'):null;
+  if(!box)return;
+  const existing=box.querySelector('.ws-load-more-row');
+  if(existing)existing.remove();
+  if(!S._dirHasMore||!S._dirCursor)return;
+  const row=document.createElement('div');
+  row.className='ws-load-more-row file-item';
+  row.style.paddingLeft='8px';
+  row.textContent=t&&t('load_more_entries')||'Load more…';
+  row.setAttribute('role','button');
+  row.setAttribute('tabindex','0');
+  row.onclick=function(){_loadMoreDir();};
+  row.onkeydown=function(e){if(e.key==='Enter'||e.key===' ')_loadMoreDir();};
+  box.appendChild(row);
+}
+
+// Fetch and append the next page of entries for the current directory using the
+// server-issued cursor.  Session and tree-generation guards match loadDir's.
+async function _loadMoreDir(){
+  if(!S.session||!S._dirCursor||!S._dirHasMore)return;
+  const sessionId=S.session.session_id;
+  const treeGen=_wsTreeGen;
+  const cursor=S._dirCursor;
+  const path=S.currentDir||'.';
+  try{
+    const data=await api(
+      `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path)}&cursor=${encodeURIComponent(cursor)}`
+    );
+    if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen||(S.currentDir||'.')!==path)return;
+    // Append only entries not already present (dedup by path for mutation safety).
+    const seen=new Set(S.entries.map(function(e){return e.path;}));
+    const fresh=(data.entries||[]).filter(function(e){return !seen.has(e.path);});
+    S.entries=S.entries.concat(fresh);
+    S._dirCursor=data.cursor||null;
+    S._dirHasMore=!!(data.has_more);
+    renderFileTree();
+  }catch(e){
+    if(e&&e.status===404){
+      // Server restarted; cursor is invalid. Clear stale state so the tree is consistent.
+      S._dirCursor=null;S._dirHasMore=false;
+      renderFileTree();
+      if(typeof showToast==='function')showToast('Directory listing expired. Refresh to see all files.',4000,'warning');
+    }else{
+      console.warn('loadMoreDir',e);
+    }
+  }
+}
+
+// Wrap renderFileTree so _renderLoadMoreRow() fires after every tree repaint,
+// including hidden-file toggle, expand/collapse, and refresh paths in ui.js.
+if(typeof renderFileTree==='function'){
+  const _origRenderFileTree=renderFileTree;
+  renderFileTree=function(){_origRenderFileTree();_renderLoadMoreRow();};
 }
 
 async function _refreshGitBadge(){

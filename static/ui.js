@@ -20187,8 +20187,8 @@ function _renderTreeItems(container, entries, depth){
           // Fetch children if not cached
           if(!S._dirCache[item.path]){
             try{
-              const data=await api(_workspaceRouteForPath(item.path, 'list'));
-              S._dirCache[item.path]=data.entries||[];
+              const route=_workspaceRouteForPath(item.path,'list');
+              S._dirCache[item.path]=await _fetchAllPages(route);
             }catch(e2){S._dirCache[item.path]=[];}
           }
           renderFileTree();
