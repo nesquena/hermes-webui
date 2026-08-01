@@ -13661,7 +13661,7 @@ def handle_get(handler, parsed) -> bool:
             except Exception:
                 resolved = None
             if isinstance(resolved, dict) and resolved.get("success") is True:
-                recorded = _record_session_skill_provenance(
+                _record_session_skill_provenance(
                     qs.get("session_id", [""])[0],
                     handler,
                     resolved.get("name"),
