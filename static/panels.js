@@ -7093,7 +7093,6 @@ async function switchToProfile(name) {
     // model patch above (don't touch a session about to be replaced).
     if (S.session && !sessionInProgress) {
       S.session.profile = data.active || name;
-      if (typeof window._voiceLeaseResume === 'function') window._voiceLeaseResume();
     }
     if (typeof refreshProfileTransitionReasoningChip === 'function') {
       refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider);
@@ -7191,9 +7190,10 @@ async function switchToProfile(name) {
         // doesn't strand (#4662 Opus gate).
         clearWorkspaceTreeSkeleton();
       }
-      if (typeof window._voiceLeaseResume === 'function') window._voiceLeaseResume();
       showToast(t('profile_switched', name));
     }
+
+    if (!sessionInProgress && typeof window._voiceLeaseResume === 'function') window._voiceLeaseResume();
 
     await _profileSwitchPanelLoad();
     _refreshProfileSwitchBackground(_switchGen);

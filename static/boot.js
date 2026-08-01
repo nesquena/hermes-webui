@@ -1729,6 +1729,13 @@ window.renderTranscript=function(container, messages, opts){
 
   window._voiceLeasePrepareSubmission=_voiceLeasePrepareSubmission;
   window._voiceLeaseBind=_voiceLeaseBind;
+  window._voiceLeaseRetargetOwner=(fromSid,toSid,streamId)=>{
+    const lease=_voiceLease;
+    if(!lease||!lease.owner||lease.owner.sid!==String(fromSid||'')
+      ||lease.owner.streamId!==String(streamId||'')) return false;
+    lease.owner.sid=String(toSid||'');
+    return true;
+  };
   window._voiceLeaseSettleLocal=_voiceLeaseSettleLocal;
   window._voiceLeaseSettleOwner=(sid,streamId,outcome)=>{
     const lease=_voiceLease;
@@ -2146,6 +2153,7 @@ window.renderTranscript=function(container, messages, opts){
     const lease=_voiceLease;
     if(!lease||lease.settled) return;
     if(!lease.owner){
+      if(lease.submitted&&_voiceManualPending===lease) return;
       if(!_voiceBusy()) _scheduleVoiceRestart(lease,0);
       return;
     }
@@ -2166,7 +2174,10 @@ window.renderTranscript=function(container, messages, opts){
     _setButtonTooltip(modeBtn, t('voice_mode_toggle_active'));
     showToast(t('voice_mode_active'),1500);
     // If the agent is busy, wait — state will be 'thinking' and we'll detect completion
-    if(typeof S!=='undefined'&&S.busy){
+    if(typeof S!=='undefined'&&_voiceBusy()){
+      const activeSid=S.session&&S.session.session_id;
+      const activeStreamId=S.activeStreamId||(S.session&&S.session.active_stream_id);
+      if(activeSid&&activeStreamId) _voiceLease.owner={sid:String(activeSid),streamId:String(activeStreamId)};
       _setState('thinking');
       return;
     }
@@ -2408,7 +2419,6 @@ $('modelSelect').onchange=async()=>{
   if(typeof _rememberPendingSessionModel==='function') _rememberPendingSessionModel(S.session.session_id,modelState.model,modelState.model_provider);
   S.session.model=modelState.model;
   S.session.model_provider=modelState.model_provider||null;
-  if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
   if(typeof syncModelChip==='function') syncModelChip();
   if(typeof syncReasoningChip==='function') syncReasoningChip();
   syncTopbar();
@@ -2416,18 +2426,25 @@ $('modelSelect').onchange=async()=>{
   if(typeof showToast==='function'){
     showToast(t('model_scope_toast')||'Applies to this conversation from your next message.', 3000);
   }
-  const data=await api('/api/session/update',{method:'POST',body:JSON.stringify({
-    session_id:S.session.session_id,
-    workspace:S.session.workspace,
-    model:modelState.model,
-    model_provider:modelState.model_provider||null,
-  })});
+  let data;
+  try{
+    data=await api('/api/session/update',{method:'POST',body:JSON.stringify({
+      session_id:S.session.session_id,
+      workspace:S.session.workspace,
+      model:modelState.model,
+      model_provider:modelState.model_provider||null,
+    })});
+  }catch(e){
+    if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+    throw e;
+  }
   // NOTE: do NOT clear the pending explicit-pick marker here. It must survive until
   // the NEXT send() consumes it, otherwise the normal "pick → session-update → send"
   // flow loses the explicit-pick signal before /api/chat/start runs and the server
   // re-reverts a cross-family pick (the #3737 bug, Codex catch). send() clears it
   // after reading a matching pending pick. (#3739/#3737)
   _applySessionContextMetadataUpdate(data);
+  if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
   // Warn if selected model belongs to a different provider than what Hermes is configured for
   if(typeof _checkProviderMismatch==='function'){
     const warn=_checkProviderMismatch(selectedModel);
