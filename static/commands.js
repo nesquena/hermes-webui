@@ -1657,28 +1657,24 @@ function _recordDeliveredSteer(ownerSid, ownerStreamId, originalMsg, filesSnapsh
   try{
     if(typeof INFLIGHT!=='undefined'&&INFLIGHT){
       const existing=INFLIGHT[ownerSid];
-      const existingStreamId=String(existing&&existing.streamId||'');
-      let cacheCompatible=true;
-      // A session can retain a stale registry while a replacement stream owns
-      // the session. Never append the old stream's record to that new cache.
-      if(existing&&existingStreamId&&existingStreamId!==String(ownerStreamId)){
-        const activeOwner=typeof S!=='undefined'&&S&&(
-          S.activeStreamId||(S.session&&S.session.active_stream_id)
-        );
-        if(String(activeOwner||'')!==String(ownerStreamId)) cacheCompatible=false;
-      }
-      if(cacheCompatible){
-        const cache=(existing&&(!existingStreamId||String(existingStreamId)===String(ownerStreamId)))
-          ? existing
-          : {streamId:String(ownerStreamId),deliveredSteers:[]};
-        const cached=Array.isArray(cache.deliveredSteers)?cache.deliveredSteers:[];
-        cached.push(sourceEvent);
-        cache.streamId=String(ownerStreamId);
-        cache.deliveredSteers=cached;
-        INFLIGHT[ownerSid]=cache;
-        if(typeof saveInflightState==='function') saveInflightState(ownerSid,cache);
-        mirrored=true;
-      }
+      // A session can retain replacement-stream state while a late accepted
+      // response belongs to the retired stream. Keep both records in the one
+      // session cache; reattach and settlement filter by each record's stream.
+      const cache=existing||{streamId:String(ownerStreamId),deliveredSteers:[]};
+      const cached=Array.isArray(cache.deliveredSteers)?cache.deliveredSteers:[];
+      const sourceLocalId=String(sourceEvent.local_id||sourceEvent.payload&&sourceEvent.payload.local_id||'');
+      const duplicate=cached.some(record=>{
+        const recordLocalId=String(record&&(
+          record.local_id||record.payload&&record.payload.local_id||''
+        ));
+        return sourceLocalId&&recordLocalId===sourceLocalId;
+      });
+      if(!duplicate) cached.push(sourceEvent);
+      if(!cache.streamId) cache.streamId=String(ownerStreamId);
+      cache.deliveredSteers=cached;
+      INFLIGHT[ownerSid]=cache;
+      if(typeof saveInflightState==='function') saveInflightState(ownerSid,cache);
+      mirrored=true;
     }
   }catch(err){
     if(typeof console!=='undefined'&&console.warn) console.warn('steer delivery inflight mirror failed',err);

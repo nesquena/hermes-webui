@@ -223,6 +223,20 @@ def test_3058_no_registry_keeps_the_accepted_delivery_in_recovery_cache():
     assert out["indicators"] == []
 
 
+def test_3058_terminal_owner_cleanup_preserves_cache_only_delivery_state():
+    clear_owner = _function(_read(MESSAGES_JS), "_clearOwnerInflightState")
+    out = _run_node(
+        "const activeSid='sid-3058';const streamId='stream-3058';"
+        "const S={activeStreamId:streamId};const cached={streamId,deliveredSteers:[{stream_id:streamId,payload:{local_id:'steer:stream-3058:1'}}],messages:[{role:'assistant',content:'partial'}]};"
+        "const INFLIGHT={[activeSid]:cached};const SAVED=[];let cleared=0;"
+        "function _isActiveSession(){return true;}function saveInflightState(sid,state){SAVED.push([sid,state]);}"
+        "function clearInflightState(){cleared+=1;}function _clearActivePaneInflightIfOwner(){}function _resumeSessionStreamAfterLiveChat(){}"
+        + clear_owner
+        + "_clearOwnerInflightState();console.log(JSON.stringify({cache:INFLIGHT[activeSid].deliveredSteers.length,stream:INFLIGHT[activeSid].streamId,saved:SAVED.length,cleared}));"
+    )
+    assert out == {"cache": 1, "stream": "stream-3058", "saved": 1, "cleared": 0}
+
+
 # -------------------------------------------------------------------- ordering
 
 
@@ -286,6 +300,18 @@ def test_3058_accepted_response_stream_id_owns_the_record_after_a_stream_replace
     assert out == {"old": 0, "new": 1, "indicators": []}
 
 
+def test_3058_late_accepted_delivery_is_kept_without_polluting_the_replacement_cache():
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "INFLIGHT[OWNER_SID]={streamId:'stream-b',deliveredSteers:[]};"
+        + f"const recorded=_recordDeliveredSteer(OWNER_SID,'stream-a',{json.dumps(STEER_TEXT)},[]);"
+        + "console.log(JSON.stringify({recorded,owner:INFLIGHT[OWNER_SID].streamId,records:INFLIGHT[OWNER_SID].deliveredSteers.map(r=>[r.payload.stream_id,r.payload.local_id])}));"
+    )
+    assert out["recorded"] is True
+    assert out["owner"] == "stream-b"
+    assert out["records"] == [["stream-a", "steer:stream-a:1"]]
+
+
 def test_3058_idle_session_restore_projects_the_browser_cache_into_the_settled_scene():
     helper = _function(_read(MESSAGES_JS), "_restoreDeliveredSteersIntoSettledMessages")
     stream = "stream-3058-settled"
@@ -338,6 +364,17 @@ def test_3058_idle_restore_does_not_guess_across_multiple_unidentified_assistant
         + f"\nconst messages=[{{role:'assistant',content:'older'}},{{role:'assistant',content:'newer'}}];const changed=_restoreDeliveredSteersIntoSettledMessages(messages,'{OWNER_SID}',[{json.dumps(record)}]);console.log(JSON.stringify({{changed,attached:messages.filter(m=>m._anchor_activity_scene).length}}));"
     )
     assert out == {"changed": False, "attached": 0}
+
+
+def test_3058_current_turn_response_check_ignores_historical_assistants():
+    helper = _function(_read(MESSAGES_JS), "_hasCurrentTurnAssistantResponse")
+    out = _run_node(
+        helper
+        + "const historical=[{role:'assistant',content:'old answer'},{role:'user',content:'new request'}];"
+        + "const current=[...historical,{role:'assistant',content:'new answer'}];"
+        + "console.log(JSON.stringify({historical:_hasCurrentTurnAssistantResponse(historical,''),current:_hasCurrentTurnAssistantResponse(current,'')}));"
+    )
+    assert out == {"historical": False, "current": True}
 
 
 def test_3058_idle_restore_matches_identity_preserves_other_layers_and_orders_by_time():
@@ -573,6 +610,29 @@ def test_3058_token_persistence_keeps_the_delivered_steer_cache():
     assert out["steers"] == [_CACHED_STEER]
 
 
+def test_3058_anchor_post_does_not_clear_a_later_same_stream_delivery():
+    persist = _function(_read(MESSAGES_JS), "_persistSettledAnchorScene")
+    source_event = dict(_CACHED_STEER, local_id="steer:stream-3058:1")
+    later_event = dict(_CACHED_STEER, local_id="steer:stream-3058:2", payload=dict(_CACHED_STEER["payload"], local_id="steer:stream-3058:2"))
+    scene = {"activity_rows": [{"source_event_type": "steer_delivered", "local_id": source_event["local_id"], "text": STEER_TEXT, "payload": source_event["payload"]}]}
+    out = _run_node(
+        "const activeSid='sid-3058';const streamId='stream-3058';const INFLIGHT={[activeSid]:{streamId,deliveredSteers:[%s]}};"
+        "const saves=[];function saveInflightState(sid,state){saves.push(JSON.parse(JSON.stringify(state)));}"
+        "function clearInflightState(){}function _anchorSceneMessageOffsetForPersist(){return 0;}"
+        "function _anchorSceneAbsoluteMessageIndexForPersist(index){return index;}function _anchorSceneMessageRef(){return 'message-1';}"
+        "let _persistAnchorSceneWarned=false;let resolvePost;const post=new Promise(resolve=>{resolvePost=resolve;});function api(){return post;}"
+        % json.dumps(source_event)
+        + _function(_read(MESSAGES_JS), "_deliveredSteerStreamId")
+        + _function(_read(MESSAGES_JS), "_settledAnchorSourceEventFromRow")
+        + persist
+        + f"_persistSettledAnchorScene({{role:'assistant',content:'done'}},{json.dumps(scene)},0);"
+        + f"INFLIGHT[activeSid].deliveredSteers.push({json.dumps(later_event)});resolvePost({{}});"
+        + "Promise.resolve().then(()=>console.log(JSON.stringify({remaining:INFLIGHT[activeSid].deliveredSteers.map(r=>r.local_id),saves:saves.length})));"
+    )
+    assert out["remaining"] == [later_event["local_id"]]
+    assert out["saves"] >= 1
+
+
 def test_3058_reattach_replays_only_records_owned_by_the_attached_stream():
     replay = _block_after(
         _read(MESSAGES_JS),
@@ -590,6 +650,24 @@ def test_3058_reattach_replays_only_records_owned_by_the_attached_stream():
         + "\nconsole.log(JSON.stringify({rows:scene(_anchorRegistry).activity_rows.map(r=>r.text)}));"
     )
     assert out["rows"] == [STEER_TEXT]
+
+
+def test_3058_reattach_hydrates_persisted_rows_before_cached_deliveries():
+    replay = _block_after(
+        _read(MESSAGES_JS),
+        "if(_anchorRegistry&&_anchorApi&&typeof _anchorApi.applyAssistantTurnAnchorSourceEvent==='function'){",
+    )
+    cached = dict(_CACHED_STEER, created_at=200)
+    out = _run_node(
+        _anchor_harness_prelude()
+        + "const _anchorApi=api;const activeSid=OWNER_SID;const streamId=OWNER_STREAM;"
+        + "const _anchorRegistry=api.createAssistantTurnAnchorRegistry({session_id:activeSid,stream_id:streamId,run_id:'run-3058'});"
+        + "api.applyAssistantTurnAnchorSourceEvent(_anchorRegistry,{source_event_type:'token',seq:1,created_at:100,local_id:'prose-1',text:'before',status:'completed'},{session_id:activeSid,stream_id:streamId});"
+        + f"INFLIGHT[activeSid]={{deliveredSteers:[{json.dumps(cached)}]}};"
+        + replay
+        + "console.log(JSON.stringify({rows:api.projectAssistantTurnAnchorActivityScene(_anchorRegistry,{mode:'compact_worklog'}).activity_rows.map(r=>r.text)}));"
+    )
+    assert out["rows"] == ["before", STEER_TEXT]
 
 
 def test_3058_a_steer_sent_after_a_mid_run_reload_is_recorded_and_not_deduped_away():

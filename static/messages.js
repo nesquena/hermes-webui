@@ -2330,8 +2330,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _clearOwnerInflightState(){
     if(_isActiveSession() && S.activeStreamId!==streamId) return;
-    delete INFLIGHT[activeSid];
-    clearInflightState(activeSid);
+    const existing=INFLIGHT[activeSid];
+    const existingStreamId=String(existing&&existing.streamId||'');
+    if(existing&&existingStreamId&&existingStreamId!==String(streamId)) return;
+    const deliveredSteers=existing&&Array.isArray(existing.deliveredSteers)
+      ? existing.deliveredSteers
+      : [];
+    if(deliveredSteers.length){
+      // The anchor registry may already be gone when terminal cleanup runs. Keep
+      // the browser-only delivery cache until settled projection or reload consumes it.
+      INFLIGHT[activeSid]={streamId:existingStreamId||String(streamId),deliveredSteers};
+      if(typeof saveInflightState==='function') saveInflightState(activeSid,INFLIGHT[activeSid]);
+    }else{
+      delete INFLIGHT[activeSid];
+      clearInflightState(activeSid);
+    }
     _clearActivePaneInflightIfOwner();
     _resumeSessionStreamAfterLiveChat(activeSid);
   }
@@ -2489,10 +2502,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeCleanupReduceMotionListener();
     _smdEndParser();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-    _clearOwnerInflightState();
     _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
     _clearStreamNotificationBackground(activeSid, streamId);
     _flushReasoningToAnchor();
+    if(_isActiveSession()) _attachProjectedAnchorSceneToLastAssistant(S.messages);
+    _clearOwnerInflightState();
     _scheduleAnchorRegistryCleanup();
     _clearAnchorProseIncrementalNode();
     _clearApprovalForOwner();
@@ -2817,6 +2831,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return typeof seal==='function'?!!seal():false;
     };
   }
+  // Hydrate the persisted scene before replaying newer browser-only delivery
+  // records, so the reattached timeline keeps its original event order.
+  _hydrateAnchorRegistryFromActivityScene(INFLIGHT[activeSid]&&INFLIGHT[activeSid].anchorActivityScene);
   // Re-apply delivered-steer records cached in INFLIGHT so a reattach before
   // settlement rebuilds the row. Idempotent through each record's local_id.
   if(_anchorRegistry&&_anchorApi&&typeof _anchorApi.applyAssistantTurnAnchorSourceEvent==='function'){
@@ -3881,16 +3898,33 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         .map((row,index)=>_settledAnchorSourceEventFromRow(row,streamId,null,index))
         .filter(Boolean)
       : [];
+    const deliveryCacheKey=(record)=>{
+      const payload=record&&record.payload&&typeof record.payload==='object'?record.payload:{};
+      const recordStream=String(record&&record.stream_id||payload.stream_id||'');
+      const localId=String(record&&record.local_id||payload.local_id||record&&record.event_id||payload.event_id||'');
+      return `${recordStream}|${localId}`;
+    };
+    const persistedDeliveryKeys=new Set(deliveredSteers.map(deliveryCacheKey));
     if(deliveredSteers.length&&typeof INFLIGHT!=='undefined'&&INFLIGHT){
       const existing=INFLIGHT[activeSid];
-      if(!existing||!existing.streamId||String(existing.streamId)===String(streamId)){
-        INFLIGHT[activeSid]={streamId:String(streamId),deliveredSteers};
-        if(typeof saveInflightState==='function') saveInflightState(activeSid,INFLIGHT[activeSid]);
-      }
+      const existingRecords=existing&&Array.isArray(existing.deliveredSteers)?existing.deliveredSteers:[];
+      const retainedOtherStreams=existingRecords.filter(record=>_deliveredSteerStreamId(record)!==String(streamId));
+      INFLIGHT[activeSid]={
+        ...(existing||{}),
+        streamId:String(existing&&existing.streamId||streamId),
+        deliveredSteers:[...retainedOtherStreams,...deliveredSteers],
+      };
+      if(typeof saveInflightState==='function') saveInflightState(activeSid,INFLIGHT[activeSid]);
     }
     const clearPersistedDeliveryCache=()=>{
       const pending=typeof INFLIGHT!=='undefined'&&INFLIGHT?INFLIGHT[activeSid]:null;
-      if(!pending||String(pending.streamId||'')!==String(streamId)||!Array.isArray(pending.deliveredSteers)) return;
+      if(!pending||!Array.isArray(pending.deliveredSteers)) return;
+      const retained=pending.deliveredSteers.filter(record=>!persistedDeliveryKeys.has(deliveryCacheKey(record)));
+      if(retained.length){
+        pending.deliveredSteers=retained;
+        if(typeof saveInflightState==='function') saveInflightState(activeSid,pending);
+        return;
+      }
       delete INFLIGHT[activeSid];
       if(typeof clearInflightState==='function') clearInflightState(activeSid);
     };
@@ -3963,14 +3997,42 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       || (Array.isArray(scene&&scene.side_effects)&&scene.side_effects.length)
     );
   }
+  function _hasCurrentTurnAssistantResponse(messages, assistantText){
+    if(String(assistantText||'').trim()) return true;
+    if(!Array.isArray(messages)) return false;
+    let lastUserIndex=-1;
+    for(let i=messages.length-1;i>=0;i-=1){
+      if(messages[i]&&messages[i].role==='user'){
+        lastUserIndex=i;
+        break;
+      }
+    }
+    for(let i=lastUserIndex+1;i<messages.length;i+=1){
+      const message=messages[i];
+      if(message&&message.role==='assistant'&&String(message.content||'').trim()) return true;
+    }
+    return false;
+  }
   function _attachProjectedAnchorSceneToLastAssistant(messages, targetMessage=null, targetIndex=null){
     if(!_anchorRegistry||!Array.isArray(messages)) return false;
+    const projectedScene=_projectLiveAnchorActivityScene();
+    const projectedRows=Array.isArray(projectedScene&&projectedScene.activity_rows)
+      ? projectedScene.activity_rows
+      : [];
+    const hasDeliveredSteer=projectedRows.some(row=>row&&row.source_event_type==='steer_delivered');
     let lastAsst=targetMessage;
     let lastAsstIndex=Number.isInteger(targetIndex)?targetIndex:-1;
     if(lastAsst){
       if(lastAsstIndex<0||messages[lastAsstIndex]!==lastAsst) return false;
     }else{
-      for(let i=messages.length-1;i>=0;i--){
+      let lastUserIndex=-1;
+      for(let i=messages.length-1;i>=0;i-=1){
+        if(messages[i]&&messages[i].role==='user'){
+          lastUserIndex=i;
+          break;
+        }
+      }
+      for(let i=messages.length-1;i>lastUserIndex;i-=1){
         const candidate=messages[i];
         if(candidate&&candidate.role==='assistant'){
           lastAsst=candidate;
@@ -3979,8 +4041,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }
     }
+    if(!lastAsst&&hasDeliveredSteer){
+      messages.push({role:'assistant',content:''});
+      lastAsst=messages[messages.length-1];
+      lastAsstIndex=messages.length-1;
+    }
     if(!lastAsst) return false;
-    const projectedScene=_projectLiveAnchorActivityScene();
     const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
     const hasOwnedOutcomes=_anchorSceneHasOwnedOutcomes(scene);
     if(scene&&Array.isArray(scene.activity_rows)&&(scene.activity_rows.length||hasOwnedOutcomes)){
@@ -4441,8 +4507,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _anchorRegistry._hydrated_activity_scene_key=sceneKey;
     return true;
   }
-  _hydrateAnchorRegistryFromActivityScene(INFLIGHT[activeSid]&&INFLIGHT[activeSid].anchorActivityScene);
-
   function _mergeSettledToolCallsWithLiveMetadata(rawCalls){
     const liveCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
     const byTid=new Map();
@@ -6294,7 +6358,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           clearLiveToolCards({preserveDom:true});
           S.busy=false;
           // No-reply guard (#373): if agent returned nothing, show inline error
-          if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
+          if(!_hasCurrentTurnAssistantResponse(S.messages,assistantText)){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
           _attachProjectedAnchorSceneToLastAssistant(S.messages);
           if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
           if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
@@ -6951,7 +7015,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _streamFadeCleanupReduceMotionListener();
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-      _clearOwnerInflightState();
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup();
       _closeSource(source);
@@ -6991,6 +7054,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           : _stagedMessages;
         S.messages=_filterRecoveryControlMessages(_resolvedMessages || []);
         _attachProjectedAnchorSceneToLastAssistant(S.messages);
+        _clearOwnerInflightState();
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
         if(S.session&&S.session.session_id){
           try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
@@ -7116,7 +7180,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             || (_anchorRegistry&&Array.isArray(_anchorRegistry.anchor&&_anchorRegistry.anchor.activity_events)&&
               _anchorRegistry.anchor.activity_events.some(event=>event&&event.source_event_type==='steer_delivered'))
           );
-          if(hasSteerRecovery&&!S.messages.some(message=>message&&message.role==='assistant')){
+          if(hasSteerRecovery&&!_hasCurrentTurnAssistantResponse(S.messages,'')){
             S.messages.push({role:'assistant',content:''});
           }
           if(hasSteerRecovery) _attachProjectedAnchorSceneToLastAssistant(S.messages);

@@ -2279,6 +2279,11 @@ async function loadSession(sid){
       return;
     }
 
+    // Re-read ownership before consuming the idle snapshot. A stream can start
+    // for this session while the message request is awaiting; its recovery cache
+    // must take the live path instead of being projected as a stale idle scene.
+    activeStreamId = activeStreamId || ((S.activeStreamId && S.session && S.session.session_id===sid) ? S.activeStreamId : null);
+
     // Restore any queued message that survived page refresh or tab restore.
     if(typeof queueSessionMessage==='function'){
       try{
@@ -2306,7 +2311,7 @@ async function loadSession(sid){
 
     // Reconstruct tool calls from message metadata, or fall back to session-level summary.
     // (hasMessageToolMetadata already computed inside _ensureMessagesLoaded; S.toolCalls set there.)
-    if(settledDeliveredSteers.length&&typeof _restoreDeliveredSteersIntoSettledMessages==='function'){
+    if(!activeStreamId&&settledDeliveredSteers.length&&typeof _restoreDeliveredSteersIntoSettledMessages==='function'){
       const restoredSettledSteers=_restoreDeliveredSteersIntoSettledMessages(S.messages,sid,settledDeliveredSteers);
       if(restoredSettledSteers){
         if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
