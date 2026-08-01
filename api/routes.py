@@ -12203,6 +12203,21 @@ def handle_get(handler, parsed) -> bool:
             "passkey_feature_flag": passkey_flag,
             "auth_disabled_acknowledged": bool(load_settings().get("auth_disabled_acknowledged")) if not auth_enabled else False,
         }
+        # SPA clients (hermes-svelte-ui) are served by their own node process and
+        # never see the `__CSRF_TOKEN_JSON__` substitution done for the bundled
+        # index shell, so they read the session-bound token from here. Safe to
+        # expose over GET: the response carries no CORS allow-origin header, so
+        # another origin cannot read it, and the token is still required on every
+        # unsafe method alongside the same-origin check.
+        if logged_in:
+            from api.auth import csrf_token_for_session, parse_cookie
+
+            cookie_val = parse_cookie(handler) or getattr(
+                handler, "_trusted_auth_session_cookie_value", None
+            )
+            if cookie_val:
+                payload["csrf_token"] = csrf_token_for_session(cookie_val) or ""
+
         if is_trusted_auth_enabled() or (session_info and session_info.get("auth_type") == "trusted"):
             payload["trusted_auth_enabled"] = True
         if session_info and session_info.get("auth_type") == "trusted":
@@ -18527,7 +18542,9 @@ def _handle_tts(handler, parsed):
                                 return ip
                 return getattr(h, "client_address", ("unknown",))[0]
 
-            def check(self, handler, session_cookie=None):
+            def check(self, handler, session_cookie=None, window=None):
+                """window overrides the default for engines with no upstream quota."""
+                effective = self.window if window is None else window
                 key = self._get_client_key(handler)
                 if session_cookie and "." in str(session_cookie):
                     key = str(session_cookie).split(".", 1)[0]
@@ -18538,7 +18555,7 @@ def _handle_tts(handler, parsed):
                         cutoff = now - (self.window * 10)
                         self._hits = {k: v for k, v in self._hits.items() if v > cutoff}
                     last = self._hits.get(key, 0)
-                    if now - last < self.window:
+                    if now - last < effective:
                         return False
                     self._hits[key] = now
                     return True
@@ -18546,10 +18563,70 @@ def _handle_tts(handler, parsed):
         _handle_tts._tts_limiter = _TtsRateLimiter(window_seconds=2.0)
 
     limiter = _handle_tts._tts_limiter
-    if not limiter.check(handler, cv):
+    # The 2 s window exists to bound spend and upstream throttling on the paid
+    # cloud engines. Kokoro is a local CPU synth with no quota, and a 2 s gate
+    # would stall sentence-chunked playback, so it gets a short window that
+    # still bounds a runaway client.
+    _limit_window = 0.4 if engine == "kokoro" else None
+    if not limiter.check(handler, cv, window=_limit_window):
         logger.warning("TTS rate limit hit for client=%s", limiter._get_client_key(handler))
         from api.helpers import bad as _bad
         return _bad(handler, "rate limit exceeded — please wait", 429)
+
+    # ── Kokoro TTS (local neural synth on loopback) ──────────────────────
+    if engine == "kokoro":
+        base = os.getenv("HERMES_WEBUI_KOKORO_URL", "http://127.0.0.1:5090").strip().rstrip("/")
+        # This path deliberately skips the SSRF pinning used for the external
+        # engines because the target is loopback. That is only safe while the
+        # host cannot be influenced by the request body — it comes from env
+        # only, and is re-checked here.
+        _kb = urlsplit(base)
+        if _kb.scheme != "http" or _kb.hostname not in ("127.0.0.1", "localhost", "::1"):
+            logger.error("Kokoro URL must be loopback http, got %r", base)
+            from api.helpers import bad as _bad
+            return _bad(handler, "kokoro endpoint misconfigured", 500)
+
+        k_voice = voice if re.fullmatch(r"[a-z]{2}_[a-z]+", voice or "") else "bm_george"
+        try:
+            k_speed = float(data.get("speed", 1.0))
+        except (TypeError, ValueError):
+            k_speed = 1.0
+        k_speed = max(0.5, min(2.0, k_speed))
+
+        payload = json.dumps({"text": text, "voice": k_voice, "speed": k_speed}).encode("utf-8")
+        req = Request(
+            base + "/tts",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            opener = build_opener(ProxyHandler({}))  # never route loopback via a proxy
+            with opener.open(req, timeout=60) as resp:
+                audio_data = _buffer_tts_audio_response(resp)
+        except (HTTPError, URLError) as exc:
+            logger.warning("Kokoro TTS unreachable at %s: %s", base, exc)
+            from api.helpers import bad as _bad
+            return _bad(handler, "Kokoro TTS server is not responding", 503)
+        except ValueError:
+            logger.warning("Kokoro TTS returned an invalid response", exc_info=True)
+            from api.helpers import bad as _bad
+            return _bad(handler, "Kokoro TTS generation failed", 502)
+        except Exception:
+            logger.exception("Kokoro TTS generation failed")
+            from api.helpers import bad as _bad
+            return _bad(handler, "Kokoro TTS generation failed", 500)
+
+        handler.send_response(200)
+        handler.send_header("Content-Type", "audio/wav")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(audio_data)))
+        handler.end_headers()
+        try:
+            handler.wfile.write(audio_data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        return True
 
     # ── ElevenLabs TTS ──────────────────────────────────────────────────
     if engine == "elevenlabs":
