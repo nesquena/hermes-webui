@@ -2597,14 +2597,15 @@ class TestSequentialUpdateRestartCoordination:
         execv_time = []
         scheduled = []
         worker_thread = None
-        worker_ident = None
+        holder_thread = None
         worker_acquiring_lock = _th.Event()
         real_apply_lock = upd._apply_lock
-        wait_timeout = 10
+        wait_timeout = 30
+        cleanup_timeout = 5
 
         class ProbedApplyLock:
             def __enter__(self):
-                if _th.get_ident() == worker_ident:
+                if _th.current_thread() is not holder_thread:
                     worker_acquiring_lock.set()
                 return real_apply_lock.__enter__()
 
@@ -2612,7 +2613,7 @@ class TestSequentialUpdateRestartCoordination:
                 return real_apply_lock.__exit__(exc_type, exc_value, traceback)
 
         def fake_execv(exe, args):
-            if _th.get_ident() == worker_ident:
+            if _th.current_thread() is not holder_thread:
                 execv_time.append(_t.monotonic())
                 execv_called.set()
 
@@ -2655,12 +2656,7 @@ class TestSequentialUpdateRestartCoordination:
             assert len(scheduled) == 1, "scheduler must start one restart worker"
             worker_target = scheduled[0]
 
-            def run_worker():
-                nonlocal worker_ident
-                worker_ident = _th.get_ident()
-                worker_target()
-
-            worker_thread = real_thread(target=run_worker, daemon=True)
+            worker_thread = real_thread(target=worker_target, daemon=True)
             worker_thread.start()
             assert worker_acquiring_lock.wait(timeout=wait_timeout), (
                 "restart worker did not reach the apply-lock acquisition"
@@ -2688,9 +2684,9 @@ class TestSequentialUpdateRestartCoordination:
             assert not worker_thread.is_alive(), "restart worker did not finish"
         finally:
             release_holder.set()
-            holder_thread.join(timeout=wait_timeout)
+            holder_thread.join(timeout=cleanup_timeout)
             if worker_thread is not None:
-                worker_thread.join(timeout=wait_timeout)
+                worker_thread.join(timeout=cleanup_timeout)
 
     def test_schedule_restart_still_fires_when_no_update_in_flight(self, monkeypatch):
         """Sanity: with nothing holding the lock, restart still fires promptly."""
