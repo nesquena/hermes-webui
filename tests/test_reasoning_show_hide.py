@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for /reasoning show|hide slash command and show_thinking setting.
 
 Covers:
@@ -242,9 +243,9 @@ class TestReasoningCommand:
         assert "arg==='off'" in fn, "off alias missing"
 
     def test_cmd_reasoning_i18n_key_exists(self):
-        i18n = read('static/i18n.js')
+        i18n = locale_source_text()
         assert 'cmd_reasoning' in i18n, (
-            "i18n.js must define the cmd_reasoning key"
+            "split locale bundles must define the cmd_reasoning key"
         )
 
     def test_cmd_reasoning_posts_api_endpoints_not_gets(self):

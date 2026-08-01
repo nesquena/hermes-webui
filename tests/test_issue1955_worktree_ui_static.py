@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 from pathlib import Path
 
 
@@ -40,7 +41,7 @@ def test_session_sidebar_renders_worktree_indicator():
 
 def test_worktree_indicator_styles_and_i18n_exist():
     css = read("static/style.css")
-    i18n = read("static/i18n.js")
+    i18n = locale_source_text()
     assert ".session-worktree-indicator" in css
     assert "workspace_new_worktree_conversation" in i18n
     assert "session_worktree_badge" in i18n

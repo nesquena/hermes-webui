@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression coverage for the Settings-side max_tokens bridge."""
 
 import io
@@ -394,7 +395,7 @@ def test_settings_panel_wires_max_tokens_for_dirty_state_and_manual_save():
 
     panels_js = (pathlib.Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
     index_html = (pathlib.Path(__file__).parent.parent / "static" / "index.html").read_text(encoding="utf-8")
-    i18n_js = (pathlib.Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+    I18N_SOURCE = locale_source_text()
 
     load_block = _function_block(panels_js, "loadSettingsPanel")
     load_idx = load_block.find("$('settingsMaxTokens')")
@@ -432,7 +433,7 @@ def test_settings_panel_wires_max_tokens_for_dirty_state_and_manual_save():
 
     assert 'id="settingsMaxTokens"' in index_html
     assert 'data-i18n-placeholder="settings_placeholder_max_tokens_none"' in index_html
-    assert "settings_label_max_tokens" in i18n_js
-    assert "settings_desc_max_tokens" in i18n_js
-    assert "settings_placeholder_max_tokens_none" in i18n_js
-    assert "settings_placeholder_max_tokens_fallback" in i18n_js
+    assert "settings_label_max_tokens" in I18N_SOURCE
+    assert "settings_desc_max_tokens" in I18N_SOURCE
+    assert "settings_placeholder_max_tokens_none" in I18N_SOURCE
+    assert "settings_placeholder_max_tokens_fallback" in I18N_SOURCE

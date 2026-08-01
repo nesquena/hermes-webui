@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 import re
 from pathlib import Path
 
@@ -10,7 +11,7 @@ def _read_static(name):
 
 
 def _locale_blocks():
-    text = _read_static("i18n.js")
+    text = locale_source_text()
     matches = list(re.finditer(r"^  '?([A-Za-z]{2}(?:-[A-Za-z]+)?)'?: \{", text, re.M))
     assert matches, "could not find locale blocks"
     blocks = {}

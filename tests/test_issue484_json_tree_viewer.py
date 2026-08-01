@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for issue #484 — collapsible JSON/YAML tree viewer.
 
 The original feature hardcoded the default view: valid JSON/YAML fenced blocks
@@ -243,7 +244,7 @@ class TestTreeCSS:
 
 class TestTreeI18n:
     def test_i18n_keys_present(self):
-        with open("static/i18n.js", "r", encoding="utf-8") as f:
+        with io.StringIO(locale_source_text()) as f:
             content = f.read()
         for key in ("tree_view", "raw_view"):
             count = content.count(key)
@@ -251,7 +252,7 @@ class TestTreeI18n:
 
     def test_structured_code_setting_i18n_keys_present(self):
         """The new settings labels/options/help text must exist in i18n."""
-        with open("static/i18n.js", "r", encoding="utf-8") as f:
+        with io.StringIO(locale_source_text()) as f:
             content = f.read()
         for key in (
             "settings_label_structured_code",

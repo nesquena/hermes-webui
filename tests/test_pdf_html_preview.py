@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for #480 (PDF first-page preview) and #482 (HTML iframe sandbox).
 
 Validates that the MEDIA: restore block in ui.js produces the correct
@@ -327,7 +328,7 @@ class TestI18nKeys:
     HTML_KEYS = ['html_loading', 'html_too_large', 'html_error', 'html_open_full', 'html_sandbox_label']
 
     def _find_locale_block(self, locale):
-        with open('static/i18n.js', encoding="utf-8") as f:
+        with io.StringIO(locale_source_text()) as f:
             content = f.read()
         start = content.find(f"'{locale}':")
         if start < 0:

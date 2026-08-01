@@ -1,6 +1,7 @@
 """Regression tests for #3691: provider-agnostic model-picker overflow groups."""
 
 from __future__ import annotations
+from tests.i18n_locale_loader import locale_source_text
 
 import json
 import shutil
@@ -17,7 +18,7 @@ import api.config as config
 
 REPO = Path(__file__).resolve().parents[1]
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
@@ -78,11 +79,11 @@ def test_show_all_row_uses_i18n_key():
     assert "t('model_show_all_models',hiddenCount)" in UI_JS, (
         "The synthetic overflow row must use an i18n key instead of hardcoded English."
     )
-    assert I18N_JS.count("model_show_all_models:") >= 10, (
+    assert I18N_SOURCE.count("model_show_all_models:") >= 10, (
         "model_show_all_models should be defined across the shipped locale blocks."
     )
-    assert "Mostrar todos los {0} modelos" in I18N_JS
-    assert "Afficher tous les {0} modèles" in I18N_JS
+    assert "Mostrar todos los {0} modelos" in I18N_SOURCE
+    assert "Afficher tous les {0} modèles" in I18N_SOURCE
 
 
 def test_openrouter_overflow_preserves_hidden_tail(monkeypatch):

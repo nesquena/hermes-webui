@@ -1,13 +1,14 @@
 """Static coverage for script (no_agent) cron jobs in Tasks UI."""
 
 from __future__ import annotations
+from tests.i18n_locale_loader import locale_source_text
 
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def test_cron_script_job_helpers_exist():
@@ -55,7 +56,7 @@ def test_cron_script_job_styles_exist():
 
 
 def test_cron_script_job_i18n_keys_exist_in_every_locale():
-    locale_count = I18N_JS.count("cron_last_output:")
+    locale_count = I18N_SOURCE.count("cron_last_output:")
     assert locale_count >= 9
     for key in (
         "cron_mode_agent",
@@ -69,4 +70,4 @@ def test_cron_script_job_i18n_keys_exist_in_every_locale():
         "cron_script_badge_title",
         "cron_workdir_label",
     ):
-        assert I18N_JS.count(f"{key}:") >= locale_count, key
+        assert I18N_SOURCE.count(f"{key}:") >= locale_count, key

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -5,7 +6,7 @@ UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 CONFIG_PY = (REPO / "api" / "config.py").read_text(encoding="utf-8")
 
@@ -79,8 +80,8 @@ def test_session_jump_buttons_are_i18n_localized_in_text_tooltip_and_aria():
         "settings_desc_session_jump_buttons": "Show floating Start and End buttons while reading long session histories.",
     }
     for key in english_literals:
-        assert I18N_JS.count(f"{key}:") >= 8, f"missing locale entries for {key}"
+        assert I18N_SOURCE.count(f"{key}:") >= 8, f"missing locale entries for {key}"
     for key, value in english_literals.items():
-        assert I18N_JS.count(f"{key}: '{value}'") == 1, f"non-English locale still uses English literal for {key}"
-    assert "document.querySelectorAll('[data-i18n-aria-label]')" in I18N_JS
-    assert "el.setAttribute('aria-label', val)" in I18N_JS
+        assert I18N_SOURCE.count(f"{key}: '{value}'") == 1, f"non-English locale still uses English literal for {key}"
+    assert "document.querySelectorAll('[data-i18n-aria-label]')" in I18N_SOURCE
+    assert "el.setAttribute('aria-label', val)" in I18N_SOURCE

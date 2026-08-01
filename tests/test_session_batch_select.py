@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Test: session batch select mode functions exist in sessions.js (#568)"""
 import re
 
@@ -169,7 +170,7 @@ def test_boot_does_not_drop_zero_message_inflight_session():
 
 def test_batch_select_i18n_keys():
     """Verify all batch select i18n keys exist in all locales."""
-    with open('static/i18n.js', encoding="utf-8") as f:
+    with io.StringIO(locale_source_text()) as f:
         src = f.read()
     required_keys = [
         'session_select_mode',
@@ -193,7 +194,7 @@ def test_batch_select_i18n_keys():
             else:
                 pattern = rf"{locale}\s*:.*?{key}"
             # Simpler check: just verify the key string with colon exists
-            assert f"{key}:" in src, f"Missing i18n key '{key}' in i18n.js"
+            assert f"{key}:" in src, f"Missing i18n key '{key}' in split locale bundles"
     # Count occurrences - each key should appear in all 7 locales
     for key in required_keys:
         count = src.count(f"{key}:")
@@ -202,7 +203,7 @@ def test_batch_select_i18n_keys():
 
 def test_i18n_string_placeholder_interpolation_supported():
     """String-valued translations with {0} placeholders should interpolate args."""
-    with open('static/i18n.js', encoding="utf-8") as f:
+    with io.StringIO(locale_source_text()) as f:
         src = f.read()
     assert "String(val).replace(/\\{(\\d+)\\}/g" in src, \
         "t() must interpolate {0}-style placeholders for string-valued translations"

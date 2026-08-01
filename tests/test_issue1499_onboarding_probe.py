@@ -27,6 +27,7 @@ discovered data was indistinguishable from user-entered data after persist).
 """
 
 from __future__ import annotations
+from tests.i18n_locale_loader import locale_source_text
 
 import json
 import threading
@@ -396,14 +397,14 @@ class TestIssue1499OnboardingProbe:
         from api.onboarding import PROBE_ERROR_CODES
         # If you add a new error code, also add an i18n key
         # `onboarding_probe_error_<code>` to all 9 locale blocks in
-        # static/i18n.js (search for `onboarding_probe_error_`).
+        # static/split locale bundles (search for `onboarding_probe_error_`).
         expected = {
             "invalid_url", "dns", "connect_refused", "timeout",
             "http_4xx", "http_5xx", "parse", "unreachable",
         }
         assert set(PROBE_ERROR_CODES) == expected, (
             f"PROBE_ERROR_CODES drift: got {set(PROBE_ERROR_CODES)}, "
-            f"expected {expected}. Update static/i18n.js if you intentionally "
+            f"expected {expected}. Update static/split locale bundles if you intentionally "
             f"changed this set."
         )
 

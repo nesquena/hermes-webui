@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 from collections import Counter
 from pathlib import Path
 import re
@@ -76,14 +77,14 @@ def extract_locale_block(src: str, locale_key: str) -> str:
 
 
 def test_chinese_locale_block_exists():
-    src = read(REPO / "static" / "i18n.js")
+    src = locale_source_text()
     assert "\n  zh: {" in src
     assert "_lang: 'zh'" in src
     assert "_speech: 'zh-CN'" in src
 
 
 def test_chinese_locale_includes_representative_translations():
-    src = read(REPO / "static" / "i18n.js")
+    src = locale_source_text()
     # Each tuple is a list of acceptable source forms for the same translation —
     # either escape-encoded `\uXXXX` form or literal CJK characters. They produce
     # the same runtime string; do not pin source encoding.
@@ -99,12 +100,12 @@ def test_chinese_locale_includes_representative_translations():
     ]
     for alts in expected_alternatives:
         assert any(alt in src for alt in alts), (
-            f"None of the expected forms found in i18n.js: {alts!r}"
+            f"None of the expected forms found in split locale bundles: {alts!r}"
         )
 
 
 def test_chinese_locale_covers_english_keys():
-    src = read(REPO / "static" / "i18n.js")
+    src = locale_source_text()
     key_pattern = re.compile(r"^\s{4}([a-zA-Z0-9_]+):", re.MULTILINE)
     en_keys = set(key_pattern.findall(extract_locale_block(src, "en")))
     zh_keys = set(key_pattern.findall(extract_locale_block(src, "zh")))
@@ -114,7 +115,7 @@ def test_chinese_locale_covers_english_keys():
 
 
 def test_chinese_locale_has_no_duplicate_keys():
-    src = read(REPO / "static" / "i18n.js")
+    src = locale_source_text()
     key_pattern = re.compile(r"^\s{4}([a-zA-Z0-9_]+):", re.MULTILINE)
     keys = key_pattern.findall(extract_locale_block(src, "zh"))
     duplicates = sorted(k for k, count in Counter(keys).items() if count > 1)
@@ -128,7 +129,7 @@ def test_traditional_chinese_mcp_and_tree_labels_are_not_cyrillic():
     "Дерево", and "Исходный".  Those labels show up under JSON/YAML code
     block tree toggles and Settings → System → MCP Servers for zh-TW users.
     """
-    src = read(REPO / "static" / "i18n.js")
+    src = locale_source_text()
     start = src.index("  'zh-Hant': {")
     end = src.index("\n  pt:", start)
     block = src[start:end]

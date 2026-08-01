@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 import json
 import shutil
 import subprocess
@@ -8,7 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS_PATH = ROOT / "static" / "sessions.js"
 SESSIONS_JS = SESSIONS_JS_PATH.read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
@@ -111,9 +112,9 @@ def test_copy_link_i18n_keys_have_english_and_german_labels():
         "session_link_copied",
         "session_link_copy_failed",
     ]:
-        assert I18N_JS.count(key) >= 2, f"{key} should be defined in English and German"
-    assert "Copy conversation link" in I18N_JS
-    assert "Unterhaltungslink kopieren" in I18N_JS
+        assert I18N_SOURCE.count(key) >= 2, f"{key} should be defined in English and German"
+    assert "Copy conversation link" in I18N_SOURCE
+    assert "Unterhaltungslink kopieren" in I18N_SOURCE
 
 
 def test_rendered_session_reference_is_internal_link():

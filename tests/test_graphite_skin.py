@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Graphite skin registration and neutral workbench palette."""
 
 from pathlib import Path
@@ -7,14 +8,14 @@ CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 CONFIG_PY = (REPO / "api" / "config.py").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def test_graphite_skin_is_registered_end_to_end():
     assert "{name:'Graphite'" in BOOT_JS
     assert "graphite:1" in INDEX_HTML
     assert '"graphite"' in CONFIG_PY
-    assert "/graphite/" in I18N_JS
+    assert "/graphite/" in I18N_SOURCE
 
 
 def test_graphite_skin_defines_light_and_dark_palettes():

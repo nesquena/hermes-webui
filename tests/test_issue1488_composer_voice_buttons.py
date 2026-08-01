@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for #1488 — composer voice buttons (dictation vs voice mode).
 
 The composer footer shows two voice-related buttons that look identical and
@@ -17,6 +18,8 @@ share the same tooltip ("Voice input") in master. This module pins the fix:
    string was identical to the dictation tooltip and caused the bug.
 """
 import re
+
+from tests.i18n_locale_loader import locale_block, locale_codes, locale_key_names
 
 
 def _src(name: str) -> str:
@@ -114,7 +117,7 @@ class TestComposerVoiceButtonHTML:
 
 
 class TestComposerVoiceButtonI18n:
-    """i18n.js must define the four new keys and remove the stale voice_toggle."""
+    """The split locale bundles must define the four new keys."""
 
     REQUIRED_KEYS = (
         "voice_dictate",
@@ -123,34 +126,28 @@ class TestComposerVoiceButtonI18n:
         "voice_mode_toggle_active",
     )
 
-    LOCALES = ("en", "fr", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "tr", "pl", "vi", "cs")
+    LOCALES = tuple(locale_codes())
 
     def test_legacy_voice_toggle_key_removed(self):
         """The old key whose string was 'Voice input' caused the duplicate-
-        tooltip bug. It must no longer appear in i18n.js."""
-        src = _src("i18n.js")
+        tooltip bug. It must no longer appear in split locale bundles."""
+        src = "\n".join(locale_block(locale) for locale in self.LOCALES)
         # Match the property name only (not strings that happen to mention it).
         leftover = re.findall(r'\bvoice_toggle\s*:', src)
         assert not leftover, (
-            f"Stale voice_toggle: key still in i18n.js ({len(leftover)} "
+            f"Stale voice_toggle: key still in split locale bundles ({len(leftover)} "
             f"occurrences). Replace with voice_mode_toggle / voice_dictate."
         )
 
     def test_all_locales_define_new_keys(self):
         """Every locale block must define all 4 new composer voice-button keys."""
-        src = _src("i18n.js")
         for key in self.REQUIRED_KEYS:
-            count = len(re.findall(rf'\b{re.escape(key)}\s*:', src))
-            assert count == len(self.LOCALES), (
-                f"i18n key {key!r} appears {count} times — expected one per "
-                f"locale ({len(self.LOCALES)} locales: {self.LOCALES}). "
-                f"Each locale block must define all four composer voice keys."
-            )
+            missing = [locale for locale in self.LOCALES if key not in locale_key_names(locale)]
+            assert not missing, f"i18n key {key!r} missing from locales: {missing}"
 
     def test_english_dictate_label_is_dictate(self):
         """English voice_dictate must read 'Dictate' (not 'Voice input')."""
-        src = _src("i18n.js")
-        # Find the en block (first occurrence of voice_dictate is in en)
+        src = locale_block("en")
         m = re.search(r"\bvoice_dictate\s*:\s*'([^']+)'", src)
         assert m, "voice_dictate key not found"
         assert m.group(1) == "Dictate", \
@@ -159,7 +156,7 @@ class TestComposerVoiceButtonI18n:
     def test_english_voice_mode_label_is_voice_mode(self):
         """English voice_mode_toggle must read 'Voice mode' — matches
         ChatGPT/Gemini convention (industry-standard label)."""
-        src = _src("i18n.js")
+        src = locale_block("en")
         # Find the FIRST voice_mode_toggle in the file (en block) but skip
         # _active suffix variant — use a lookahead to assert no _active.
         m = re.search(r"\bvoice_mode_toggle\s*:\s*'([^']+)'", src)
@@ -171,7 +168,7 @@ class TestComposerVoiceButtonI18n:
 class TestVoiceModePreferenceGate:
     """boot.js must hide btnVoiceMode by default, surface it via Preferences."""
 
-    LOCALES = ("en", "fr", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "tr", "pl", "vi", "cs")
+    LOCALES = tuple(locale_codes())
 
     def test_voice_mode_pref_is_localstorage_backed(self):
         """The pref reads from localStorage key 'hermes-voice-mode-button'."""
@@ -211,13 +208,9 @@ class TestVoiceModePreferenceGate:
 
     def test_settings_pane_has_voice_mode_i18n_keys(self):
         """The two new pref-label i18n keys must exist in every locale."""
-        src = _src("i18n.js")
         for key in ("settings_label_voice_mode", "settings_desc_voice_mode"):
-            count = len(re.findall(rf'\b{re.escape(key)}\s*:', src))
-            assert count == len(self.LOCALES), (
-                f"Preferences i18n key {key!r} appears {count} times — "
-                f"expected {len(self.LOCALES)} (one per locale)."
-            )
+            missing = [locale for locale in self.LOCALES if key not in locale_key_names(locale)]
+            assert not missing, f"Preferences i18n key {key!r} missing from: {missing}"
 
     def test_panels_js_wires_voice_mode_pref(self):
         """panels.js must read the checkbox state, persist to localStorage,

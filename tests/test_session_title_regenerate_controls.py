@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression coverage for manual session title regeneration controls (#3106)."""
 
 from pathlib import Path
@@ -7,7 +8,7 @@ import api.streaming as streaming
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 STREAMING_PY = (ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
 CHANGELOG = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
@@ -44,7 +45,7 @@ def test_regenerate_title_i18n_and_changelog_entries_exist():
         "session_title_regenerated",
         "session_title_regenerate_failed",
     ]:
-        assert key in I18N_JS
+        assert key in I18N_SOURCE
     assert "session action menu can regenerate conversation titles" in CHANGELOG
     assert "#3106" in CHANGELOG
 

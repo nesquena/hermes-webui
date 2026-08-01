@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression tests for default_message_mode (PR #1062, closes #720).
 
 Pins the wiring for the three modes (queue / interrupt / steer):
@@ -21,7 +22,7 @@ UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 # ── Backend: setting registration + enum validation ─────────────────────
@@ -517,14 +518,14 @@ class TestI18nKeys:
     def test_each_key_appears_at_least_six_times(self):
         """Each key should appear once per locale (en, ru, es, de, zh, zh-Hant) = 6 occurrences minimum."""
         for key in self.REQUIRED_KEYS:
-            count = I18N_JS.count(f"{key}:")
+            count = I18N_SOURCE.count(f"{key}:")
             assert count >= 6, (
                 f"i18n key {key!r} appears {count} times; expected ≥6 (one per locale block)"
             )
 
     def test_key_count_total(self):
         """17 keys × 6 locales = 102 minimum occurrences across the file."""
-        total = sum(I18N_JS.count(f"{key}:") for key in self.REQUIRED_KEYS)
+        total = sum(I18N_SOURCE.count(f"{key}:") for key in self.REQUIRED_KEYS)
         assert total >= 17 * 6, (
             f"Total i18n occurrences = {total}; expected ≥ {17*6}"
         )

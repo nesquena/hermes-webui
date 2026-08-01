@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Test: CSV table rendering (#485)"""
 import re
 from pathlib import Path
@@ -165,7 +166,7 @@ def test_csv_line_ending_normalization():
 
 def test_csv_i18n_keys():
     """Verify CSV i18n keys exist in all 7 locales."""
-    with open('static/i18n.js', encoding="utf-8") as f:
+    with io.StringIO(locale_source_text()) as f:
         src = f.read()
     required_keys = ['csv_loading', 'csv_too_large', 'csv_no_data', 'csv_error']
     for key in required_keys:
