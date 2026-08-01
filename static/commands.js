@@ -1595,13 +1595,7 @@ function _recordDeliveredSteer(ownerSid, ownerStreamId, originalMsg, filesSnapsh
   if(!ownerSid||!ownerStreamId||typeof window==='undefined') return false;
   const anchorApi=window.HermesAssistantTurnAnchors;
   const registries=window._liveAnchorRegistries;
-  if(!anchorApi||typeof anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return false;
-  if(!registries||typeof registries.get!=='function') return false;
-  // A missing entry means "no anchor available for this run", never "the run is
-  // dead" — the caller degrades to the legacy indicator. ownerStreamId was captured
-  // before the await, so it can never address another run's registry.
-  const registry=registries.get(ownerStreamId);
-  if(!registry) return false;
+  const registry=registries&&typeof registries.get==='function'?registries.get(ownerStreamId):null;
   const ordinal=_nextSteerDeliveredOrdinal(ownerSid,ownerStreamId);
   const text=_steerIndicatorText(originalMsg,filesSnapshot);
   const files=(Array.isArray(filesSnapshot)?filesSnapshot:[])
@@ -1612,8 +1606,8 @@ function _recordDeliveredSteer(ownerSid, ownerStreamId, originalMsg, filesSnapsh
     seq:`steer-${ordinal}`,
     created_at:Date.now()/1000,
     session_id:String(ownerSid),
-    turn_id:String((registry.anchor&&registry.anchor.identity&&registry.anchor.identity.turn_id)||''),
-    run_id:String((registry.anchor&&registry.anchor.identity&&registry.anchor.identity.run_id)||''),
+    turn_id:String((registry&&registry.anchor&&registry.anchor.identity&&registry.anchor.identity.turn_id)||''),
+    run_id:String((registry&&registry.anchor&&registry.anchor.identity&&registry.anchor.identity.run_id)||''),
     payload:{
       // local_id is the run-owned ordinal identity required by the anchor
       // contract. The ordinal is reseeded from both INFLIGHT and the live
@@ -1633,50 +1627,63 @@ function _recordDeliveredSteer(ownerSid, ownerStreamId, originalMsg, filesSnapsh
   let accepted=false;
   // The seal is a best-effort rendering boundary. A DOM or teardown race must
   // not prevent the registry from recording the accepted delivery.
-  try{
-    // Seal the in-flight prose segment first, so the settled scene reads
-    // assistant -> steer -> assistant instead of merging the steer into the run
-    // of prose that preceded it.
-    if(typeof window._sealLiveAnchorProseSegmentForStream==='function'){
-      window._sealLiveAnchorProseSegmentForStream(ownerStreamId);
+  if(registry&&anchorApi&&typeof anchorApi.applyAssistantTurnAnchorSourceEvent==='function'){
+    try{
+      // Seal the in-flight prose segment first, so the settled scene reads
+      // assistant -> steer -> assistant instead of merging the steer into the run
+      // of prose that preceded it.
+      if(typeof window._sealLiveAnchorProseSegmentForStream==='function'){
+        window._sealLiveAnchorProseSegmentForStream(ownerStreamId);
+      }
+    }catch(err){
+      if(typeof console!=='undefined'&&console.warn) console.warn('steer delivery seal failed',err);
     }
-  }catch(err){
-    if(typeof console!=='undefined'&&console.warn) console.warn('steer delivery seal failed',err);
+    try{
+      const result=anchorApi.applyAssistantTurnAnchorSourceEvent(
+        registry,
+        sourceEvent,
+        {session_id:ownerSid,stream_id:ownerStreamId}
+      );
+      // registry-level outcome: the event was stored, or was already stored.
+      accepted=!!(result&&(result.applied||result.reason==='duplicate'));
+    }catch(err){
+      if(typeof console!=='undefined'&&console.warn) console.warn('steer delivery record failed',err);
+      return false;
+    }
   }
-  try{
-    const result=anchorApi.applyAssistantTurnAnchorSourceEvent(
-      registry,
-      sourceEvent,
-      {session_id:ownerSid,stream_id:ownerStreamId}
-    );
-    // registry-level outcome: the event was stored, or was already stored.
-    accepted=!!(result&&(result.applied||result.reason==='duplicate'));
-  }catch(err){
-    if(typeof console!=='undefined'&&console.warn) console.warn('steer delivery record failed',err);
-    return false;
-  }
-  if(!accepted) return false;
   // Pre-settlement the browser-owned durable surface is INFLIGHT; the anchor scene
   // itself is only persisted at settlement. Replay on reattach is idempotent.
+  let mirrored=false;
   try{
     if(typeof INFLIGHT!=='undefined'&&INFLIGHT){
       const existing=INFLIGHT[ownerSid];
       const existingStreamId=String(existing&&existing.streamId||'');
+      let cacheCompatible=true;
       // A session can retain a stale registry while a replacement stream owns
       // the session. Never append the old stream's record to that new cache.
-      if(existing&&existingStreamId&&existingStreamId!==String(ownerStreamId)) return true;
-      const cache=existing||{streamId:String(ownerStreamId),deliveredSteers:[]};
-      const cached=Array.isArray(cache.deliveredSteers)?cache.deliveredSteers:[];
-      cached.push(sourceEvent);
-      cache.streamId=String(ownerStreamId);
-      cache.deliveredSteers=cached;
-      INFLIGHT[ownerSid]=cache;
-      if(typeof saveInflightState==='function') saveInflightState(ownerSid,cache);
+      if(existing&&existingStreamId&&existingStreamId!==String(ownerStreamId)){
+        const activeOwner=typeof S!=='undefined'&&S&&(
+          S.activeStreamId||(S.session&&S.session.active_stream_id)
+        );
+        if(String(activeOwner||'')!==String(ownerStreamId)) cacheCompatible=false;
+      }
+      if(cacheCompatible){
+        const cache=(existing&&(!existingStreamId||String(existingStreamId)===String(ownerStreamId)))
+          ? existing
+          : {streamId:String(ownerStreamId),deliveredSteers:[]};
+        const cached=Array.isArray(cache.deliveredSteers)?cache.deliveredSteers:[];
+        cached.push(sourceEvent);
+        cache.streamId=String(ownerStreamId);
+        cache.deliveredSteers=cached;
+        INFLIGHT[ownerSid]=cache;
+        if(typeof saveInflightState==='function') saveInflightState(ownerSid,cache);
+        mirrored=true;
+      }
     }
   }catch(err){
     if(typeof console!=='undefined'&&console.warn) console.warn('steer delivery inflight mirror failed',err);
   }
-  return true;
+  return accepted||mirrored;
 }
 function _repaintDeliveredSteer(ownerSid, ownerStreamId){
   if(typeof window==='undefined') return false;

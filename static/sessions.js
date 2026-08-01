@@ -1679,6 +1679,8 @@ async function _switchProfileForSessionLoad(profile){
 
 function _preserveSettledDeliveredSteersForRecovery(sid, records){
   if(!sid||!Array.isArray(records)||!records.length) return false;
+  const existing=INFLIGHT[sid];
+  if(existing&&existing.streamId) return false;
   INFLIGHT[sid]={streamId:null,deliveredSteers:records};
   if(typeof saveInflightState==='function') saveInflightState(sid,INFLIGHT[sid]);
   return true;
@@ -2307,6 +2309,7 @@ async function loadSession(sid){
     if(settledDeliveredSteers.length&&typeof _restoreDeliveredSteersIntoSettledMessages==='function'){
       const restoredSettledSteers=_restoreDeliveredSteersIntoSettledMessages(S.messages,sid,settledDeliveredSteers);
       if(restoredSettledSteers){
+        if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
         delete INFLIGHT[sid];
         if(typeof clearInflightState==='function') clearInflightState(sid);
       }

@@ -18435,7 +18435,7 @@ function _hideLiveActivityForFinalAnswerOnly(){
   const turn=$('liveAssistantTurn');
   const inner=_assistantTurnBlocks(turn);
   if(inner){
-    inner.querySelectorAll('.transparent-event-row,.agent-activity-thinking,.wl-reason,#liveRunStatus,.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid],[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
+    inner.querySelectorAll('.transparent-event-row,.agent-activity-thinking,.wl-reason,#liveRunStatus,.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid],[data-live-assistant="1"],[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
   }
   const legacyThinking=$('thinkingRow');
   if(legacyThinking) legacyThinking.remove();

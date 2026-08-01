@@ -212,15 +212,15 @@ def test_3058_recording_a_delivery_yields_exactly_one_delivered_row():
     assert "applied" not in out["rows"][0]["payload"]
 
 
-def test_3058_no_registry_means_no_record_and_the_legacy_indicator_is_the_fallback():
+def test_3058_no_registry_keeps_the_accepted_delivery_in_recovery_cache():
     out = _run_node(
         _anchor_harness_prelude()
         + f"const recorded=_recordDeliveredSteer(OWNER_SID,'stream-with-no-registry',{json.dumps(STEER_TEXT)},[]);\n"
-        + f"if(!recorded) _showSteerIndicator(_steerIndicatorText({json.dumps(STEER_TEXT)},[]));\n"
-        "console.log(JSON.stringify({recorded,indicators:RENDERED_INDICATORS}));"
+        "console.log(JSON.stringify({recorded,cache:INFLIGHT[OWNER_SID].deliveredSteers.length,indicators:RENDERED_INDICATORS}));"
     )
-    assert out["recorded"] is False
-    assert out["indicators"] == [STEER_TEXT], "exactly one of the two paths renders"
+    assert out["recorded"] is True
+    assert out["cache"] == 1
+    assert out["indicators"] == []
 
 
 # -------------------------------------------------------------------- ordering
@@ -314,13 +314,30 @@ def test_3058_idle_session_restore_projects_the_browser_cache_into_the_settled_s
         + _function(_read(MESSAGES_JS), "_settledAnchorSourceEventFromRow")
         + "\n"
         + helper
-        + f"\nconst messages=[{{role:'assistant',content:'final answer',_anchor_activity_scene:{{version:'activity_scene_v1',identity:{{stream_id:'{stream}'}}}}}}];"
+        + f"\nconst messages=[{{role:'assistant',content:'final answer'}}];"
         + f"const changed=_restoreDeliveredSteersIntoSettledMessages(messages,'{OWNER_SID}',[{json.dumps(record)}]);"
         + "console.log(JSON.stringify({changed,stream:messages[0]._anchor_stream_id,rows:messages[0]._anchor_activity_scene.activity_rows.map(r=>[r.source_event_type,r.local_id,r.text])}));"
     )
     assert out["changed"] is True
     assert out["stream"] == stream
     assert out["rows"] == [["steer_delivered", f"steer:{stream}:1", STEER_TEXT]]
+
+
+def test_3058_idle_restore_does_not_guess_across_multiple_unidentified_assistants():
+    helper = _function(_read(MESSAGES_JS), "_restoreDeliveredSteersIntoSettledMessages")
+    stream = "stream-3058-stale"
+    record = {"source_event_type": "steer_delivered", "stream_id": stream, "payload": {"stream_id": stream, "local_id": f"steer:{stream}:1", "text": STEER_TEXT}}
+    out = _run_node(
+        "const fs=require('fs');const vm=require('vm');"
+        f"const src=fs.readFileSync({json.dumps(str(ANCHORS_JS))},'utf8');const sandbox={{window:{{}}}};vm.createContext(sandbox);vm.runInContext(src,sandbox);global.window=sandbox.window;"
+        + _function(_read(MESSAGES_JS), "_deliveredSteerStreamId")
+        + "\n"
+        + _function(_read(MESSAGES_JS), "_settledAnchorSourceEventFromRow")
+        + "\n"
+        + helper
+        + f"\nconst messages=[{{role:'assistant',content:'older'}},{{role:'assistant',content:'newer'}}];const changed=_restoreDeliveredSteersIntoSettledMessages(messages,'{OWNER_SID}',[{json.dumps(record)}]);console.log(JSON.stringify({{changed,attached:messages.filter(m=>m._anchor_activity_scene).length}}));"
+    )
+    assert out == {"changed": False, "attached": 0}
 
 
 def test_3058_idle_restore_matches_identity_preserves_other_layers_and_orders_by_time():
