@@ -2601,7 +2601,9 @@ class TestSequentialUpdateRestartCoordination:
         class RecordingThread(real_thread):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
-                restart_threads.append(self)
+                target = kwargs.get('target')
+                if target is not None and getattr(target, '__name__', '') == '_do':
+                    restart_threads.append(self)
 
         def fake_execv(exe, args):
             if _th.current_thread() is restart_threads[0]:
