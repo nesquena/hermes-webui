@@ -10024,10 +10024,20 @@ async function applyUpdates(){
   if(btn){btn.disabled=true;btn.textContent=updateText('update_updating','Updating\u2026');}
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';errEl.textContent='';}
-  // Hide any leftover force-update button from a prior conflict so a fresh
-  // retry starts clean (otherwise stale state points at the wrong target).
+  // Reset stale force state, but retain recovery for a dirty sibling target.
+  // Apply can process multiple targets, and a lock conflict on one target must
+  // not remove the destructive recovery action for another target.
   const forceBtnReset=$('btnForceUpdate');
-  if(forceBtnReset){forceBtnReset.disabled=true;forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
+  const dirtyState=typeof _updateDirtyState==='function'?_updateDirtyState(window._updateData):null;
+  if(forceBtnReset&&dirtyState?.hasDirty){
+    forceBtnReset.disabled=false;
+    forceBtnReset.style.display='inline-block';
+    forceBtnReset.dataset.target=dirtyState.dirtyTarget;
+  } else if(forceBtnReset){
+    forceBtnReset.disabled=true;
+    forceBtnReset.style.display='none';
+    forceBtnReset.dataset.target='';
+  }
   const clearLockBtnReset=$('btnClearUpdateLock');
   if(clearLockBtnReset){clearLockBtnReset.disabled=true;clearLockBtnReset.style.display='none';clearLockBtnReset.dataset.target='';}
   const targets=[];
@@ -10112,6 +10122,15 @@ function _showUpdateError(target,res){
     forceBtn.dataset.target=target;
     forceBtn.disabled=false;
     forceBtn.style.display='inline-block';
+  } else if(forceBtn&&res.lock_conflict&&window._updateData){
+    const siblingTarget=target==='webui'?'agent':'webui';
+    const {webuiDirty,agentDirty}=_updateDirtyState(window._updateData);
+    const siblingDirty=siblingTarget==='webui'?webuiDirty:agentDirty;
+    if(siblingDirty){
+      forceBtn.dataset.target=siblingTarget;
+      forceBtn.disabled=false;
+      forceBtn.style.display='inline-block';
+    }
   }
   if(clearLockBtn){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
   // Show "Clear lock and retry update" when the only failure was a stale

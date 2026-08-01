@@ -3465,8 +3465,9 @@ def _run_mixed_apply_lock_conflict(payload):
         + ';_showUpdateBanner(window._updateData);'
         + 'await applyUpdates();'
         + 'const afterFailure={visible:_el.btnClearUpdateLock.style.display!=="none",disabled:_el.btnClearUpdateLock.disabled,target:_el.btnClearUpdateLock.dataset.target};'
+        + 'const afterFailureForce={visible:_el.btnForceUpdate.style.display!=="none",disabled:_el.btnForceUpdate.disabled,target:_el.btnForceUpdate.dataset.target};'
         + '_showUpdateBanner({webui:{behind:0,dirty:false},agent:{behind:0,dirty:false}});'
-        + 'process.stdout.write(JSON.stringify({afterFailure,afterRender:{visible:_el.btnClearUpdateLock.style.display!=="none",disabled:_el.btnClearUpdateLock.disabled,target:_el.btnClearUpdateLock.dataset.target}}));'
+        + 'process.stdout.write(JSON.stringify({afterFailure,afterFailureForce,afterRender:{visible:_el.btnClearUpdateLock.style.display!=="none",disabled:_el.btnClearUpdateLock.disabled,target:_el.btnClearUpdateLock.dataset.target}}));'
         + '})()'
     )
     r = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', timeout=15)
@@ -3887,6 +3888,27 @@ class TestDirtyInstallRecovery:
             'target': '',
         }
 
+    def test_lock_conflict_preserves_dirty_sibling_force_through_apply_path(self):
+        """A failed target must not hide another target's dirty-install recovery."""
+        state = _run_mixed_apply_lock_conflict({
+            'webui': {
+                'behind': 0,
+                'dirty': True,
+                'channel': 'stable',
+            },
+            'agent': {'behind': 2, 'dirty': False},
+        })
+        assert state['afterFailure'] == {
+            'visible': True,
+            'disabled': False,
+            'target': 'agent',
+        }
+        assert state['afterFailureForce'] == {
+            'visible': True,
+            'disabled': False,
+            'target': 'webui',
+        }
+
     def test_manual_webui_dirty_agent_shows_force_for_agent(self):
         """P1.2: manual/no-git WebUI must not suppress a dirty agent's recovery affordance."""
         payload = _REPRO_PAYLOADS['manual_webui_dirty_agent']
@@ -4298,6 +4320,7 @@ def _run_apply_response_sequence(responses):
     """Run applyUpdates() with ordered API responses and capture terminal UI state."""
     src = read('static/ui.js')
     ui_fns = '\n'.join([
+        extract_js_function(src, '_updateDirtyState'),
         extract_js_function(src, '_i18nUpdateText'),
         extract_js_function(src, '_showUpdateError'),
         extract_js_function(src, 'applyUpdates'),
@@ -4308,11 +4331,11 @@ def _run_apply_response_sequence(responses):
         'let _apiIndex=0;let _reloads=0;let _toast=null;'
         'const _el={'
         'btnApplyUpdate:{style:{display:"inline-block"},disabled:false,textContent:"Update Now",dataset:{}},'
-        'btnForceUpdate:{style:{display:"inline-block"},disabled:false,textContent:"Force update",dataset:{target:"webui"}},'
+        'btnForceUpdate:{style:{display:"none"},disabled:true,textContent:"Force update",dataset:{target:""}},'
         'btnClearUpdateLock:{style:{display:"inline-block"},disabled:false,textContent:"Clear lock",dataset:{target:"agent"}},'
         'updateError:{style:{display:"none"},textContent:""},'
         '};'
-        'global.window={_updateData:{webui:{behind:2,dirty:true,channel:"stable"}},_updateApplyInFlight:false};'
+        'global.window={_updateData:{webui:{behind:0,dirty:true,channel:"stable"},agent:{behind:2,dirty:false}},_updateApplyInFlight:false};'
         'global.$=(id)=>_el[id]||null;'
         'function t(k){return k;}'
         'global.api=async()=>(' + json.dumps(responses) + ')[_apiIndex++];'
@@ -4447,6 +4470,16 @@ class TestUpdateRecoveryResponseLifecycle:
         assert not result['force_disabled']
         assert result['force_target'] == 'webui'
         assert not result['in_flight']
+
+    def test_apply_lock_conflict_preserves_dirty_sibling_force_recovery(self):
+        result = _run_apply_response_sequence([{
+            'ok': False,
+            'lock_conflict': True,
+            'message': 'stale lock',
+        }])
+        assert result['clear_visible']
+        assert result['clear_target'] == 'agent'
+        assert result['force_visible']
 
     def test_clear_lock_up_to_date_preserves_failed_agent_target_when_both_are_dirty(self):
         result = _run_clear_lock_response(
