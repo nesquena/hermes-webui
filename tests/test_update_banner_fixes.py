@@ -1941,31 +1941,56 @@ class TestSequentialUpdateRestartCoordination:
         monkeypatch.setattr(upd, '_wait_until_restart_safe', lambda *a, **k: {'restart_blocked': False})
         monkeypatch.setattr(os, 'execv', fake_execv)
 
-        # Hold _apply_lock from another thread (simulating an in-flight
-        # second update) for 0.4 s.
-        release_time = []
+        # Instrument the real lock so the test can observe the restart thread
+        # attempting its acquire without relying on elapsed-time scheduling.
+        real_lock = upd._apply_lock
+        acquire_count = 0
+        acquire_count_lock = _th.Lock()
         lock_held = _th.Event()
+        restart_waiting = _th.Event()
+        release = _th.Event()
+        release_time = []
+
+        class ObservedLock:
+            def __enter__(self):
+                nonlocal acquire_count
+                with acquire_count_lock:
+                    acquire_count += 1
+                    attempt = acquire_count
+                if attempt == 1:
+                    lock_held.set()
+                else:
+                    restart_waiting.set()
+                real_lock.acquire()
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                real_lock.release()
+
+        monkeypatch.setattr(upd, '_apply_lock', ObservedLock())
 
         def holder():
             with upd._apply_lock:
-                lock_held.set()
-                _t.sleep(0.4)
+                release.wait(timeout=2)
                 release_time.append(_t.monotonic())
 
         holder_thread = _th.Thread(target=holder, daemon=True)
         holder_thread.start()
         lock_held.wait(timeout=2)
 
-        # Schedule a restart with a short delay. The lock is held;
-        # the restart thread should block on it.
-        upd._schedule_restart(delay=0.05)
-        _t.sleep(0.15)
+        # Schedule a restart with no timing window. The lock is held, and the
+        # restart thread must reach the blocking acquire before release.
+        upd._schedule_restart(delay=0)
+        assert restart_waiting.wait(timeout=2), (
+            "restart thread never attempted the lock"
+        )
         assert not execv_called.is_set(), (
             "execv called while _apply_lock was still held by another "
             "thread — restart must wait for in-flight updates to finish"
         )
 
         # Let the holder release.
+        release.set()
         holder_thread.join(timeout=2)
         assert release_time, "holder didn't release the lock"
 
