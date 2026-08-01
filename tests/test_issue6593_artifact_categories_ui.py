@@ -63,6 +63,7 @@ def _artifact_bundle():
         "_artifactCandidatesFromToolCall",
         "_artifactToolResultPayload",
         "_artifactToolResultsById",
+        "_artifactToolSources",
         "collectSessionArtifacts",
         "renderSessionArtifacts",
     )
@@ -130,6 +131,7 @@ def test_grouped_sections_use_real_workspace_panel_and_safe_actions():
         media_link = page.locator(".workspace-artifact-link").filter(has_text="shot.png")
         assert media_link.get_attribute("href").startswith("api/media?path=%2Ftmp%2Fshot.png&")
         assert "session_id=ui-proof" in media_link.get_attribute("href")
+        assert "inline=1" in media_link.get_attribute("href")
         with page.expect_popup() as popup_info:
             page.locator(".workspace-artifact-link").first.click()
         popup = popup_info.value
@@ -194,6 +196,7 @@ def test_windows_file_media_uses_relative_drive_path_on_existing_media_route():
         media_link = page.locator(".workspace-artifact-link").first
         assert media_link.get_attribute("href").startswith("api/media?path=C%3A%2Fwork%2Fchart.png&")
         assert "session_id=ui-proof" in media_link.get_attribute("href")
+        assert "inline=1" in media_link.get_attribute("href")
         browser.close()
 
 
@@ -244,3 +247,9 @@ def test_category_disclosure_state_survives_artifact_rerender():
         page.evaluate("() => renderSessionArtifacts()")
         assert page.locator(".workspace-artifact-group").first.get_attribute("open") is None
         browser.close()
+
+
+def test_session_loading_owns_artifact_rerender_after_message_replacement():
+    sessions = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
+    assert "S.messages = msgs;\n  if(typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();" in sessions
+    assert "S.messages = nextMessages;\n    _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);\n    if(typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();" in sessions

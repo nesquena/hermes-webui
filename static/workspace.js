@@ -752,6 +752,14 @@ function _artifactToolResultsById(messages){
   return results;
 }
 
+function _artifactToolSources(){
+  const sources = [];
+  if(typeof S !== 'undefined' && Array.isArray(S.toolCalls)) sources.push(S.toolCalls);
+  if(typeof S !== 'undefined' && Array.isArray(S._settledLiveToolMetadata)) sources.push(S._settledLiveToolMetadata);
+  if(typeof S !== 'undefined' && S.session && Array.isArray(S.session.tool_calls)) sources.push(S.session.tool_calls);
+  return sources.flatMap(source => source);
+}
+
 const _turnMutatedPreviewPaths = new Set();
 
 function resetTurnWorkspaceMutations(){
@@ -803,9 +811,9 @@ function collectSessionArtifacts(){
     if(result) Object.assign(fakeTc, Array.isArray(result) ? {result} : result);
     for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a, a.kind || _artifactToolName(tc) || source || 'tool');
   };
-  // Source 1: session-level tool call summaries (may be empty when messages
-  // carry their own tool metadata — see _syncToolCallsForLoadedMessages).
-  for(const tc of (S.toolCalls || [])){
+  // Session summaries remain authoritative when the visible message window is
+  // truncated or _syncToolCallsForLoadedMessages clears the live projection.
+  for(const tc of _artifactToolSources()){
     processToolCall(tc, 'tool_summary');
   }
   // Source 2 & 3: message-level data — both text-mined diffs and structured
@@ -831,6 +839,8 @@ function collectSessionArtifacts(){
         push(a, a.kind);
       }
     }
+    // Structured tool metadata is owned by assistant messages only.
+    if(messageRole !== 'assistant') continue;
     // Structured tool_calls array (OpenAI format: {function:{name,arguments}}).
     for(const toolCalls of [msg.tool_calls, msg._partial_tool_calls]){
       if(!Array.isArray(toolCalls)) continue;
@@ -902,6 +912,18 @@ function renderSessionArtifacts(){
     web: 'workspace_artifact_category_web',
     media: 'workspace_artifact_category_media',
   };
+  const sourceLabels = {
+    diff: 'workspace_artifact_source_diff',
+    write_file: 'workspace_artifact_source_write_file',
+    patch: 'workspace_artifact_source_patch',
+    edit_file: 'workspace_artifact_source_edit_file',
+    create_file: 'workspace_artifact_source_create_file',
+    read_file: 'workspace_artifact_source_read_file',
+    search_files: 'workspace_artifact_source_search_files',
+    web_page: 'workspace_artifact_source_web_page',
+    web_result: 'workspace_artifact_source_web_result',
+    media: 'workspace_artifact_source_media',
+  };
   const categoryOrder = ARTIFACT_CATEGORY_ORDER;
   const categoryLabelFallbacks = {
     modified: 'Modified Files',
@@ -916,7 +938,7 @@ function renderSessionArtifacts(){
     const workspace = _normalizeArtifactPath(S.session.workspace, true);
     const isAbsolute = path.startsWith('/') || /^[a-z]:\//i.test(path);
     const routePath = !isAbsolute && workspace ? `${workspace}/${path}` : path;
-    return `api/media?path=${encodeURIComponent(routePath)}&session_id=${encodeURIComponent(S.session.session_id)}`;
+    return `api/media?path=${encodeURIComponent(routePath)}&session_id=${encodeURIComponent(S.session.session_id)}&inline=1`;
   };
   const renderItem = item => {
     const path = displayPath(item.path);
@@ -924,8 +946,10 @@ function renderSessionArtifacts(){
     const directory = (parts.head || parts.tail)
       ? `<div class="workspace-artifact-directory"><span class="workspace-artifact-directory-head">${esc(parts.head)}</span><span class="workspace-artifact-directory-tail">${esc(parts.tail)}</span></div>`
       : '';
-    const source = item.source ? esc(String(item.source).replace(/_/g, ' ')) : esc(t('workspace_artifact_source_session') || 'session');
-    const sourceAttrs = item.source ? '' : ' data-i18n="workspace_artifact_source_session"';
+    const sourceKey = sourceLabels[item.source] || (item.source ? '' : 'workspace_artifact_source_session');
+    const sourceValue = sourceKey ? t(sourceKey) : (item.source ? String(item.source).replace(/_/g, ' ') : categoryLabelFallbacks[item.category] || 'session');
+    const source = esc(sourceValue);
+    const sourceAttrs = sourceKey ? ` data-i18n="${sourceKey}"` : '';
     const contents = `<div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div>`;
     if(item.category === 'web' || item.category === 'media'){
       const url = item.category === 'web' ? _normalizeArtifactUrl(item.path) : artifactMediaHref(item.path);

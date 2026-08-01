@@ -61,6 +61,7 @@ def _collect(payload):
         "_artifactCandidatesFromToolCall",
         "_artifactToolResultPayload",
         "_artifactToolResultsById",
+        "_artifactToolSources",
         "collectSessionArtifacts",
     )
     functions = "\n".join(consts) + "\n" + "\n".join(
@@ -69,13 +70,15 @@ def _collect(payload):
         if f"function {name}(" in WORKSPACE_JS
     )
     driver = (
-        "const S = { toolCalls: JSON.parse(process.argv[1]), "
-        "messages: JSON.parse(process.argv[2]), session: { workspace: '/workspace' } };\n"
+        "const toolCalls = JSON.parse(process.argv[1]); "
+        "const messages = JSON.parse(process.argv[2]); "
+        "const sessionToolCalls = JSON.parse(process.argv[3]); "
+        "const S = { toolCalls, messages, session: { workspace: '/workspace', tool_calls: sessionToolCalls } };\n"
         + functions
         + "\nprocess.stdout.write(JSON.stringify(collectSessionArtifacts()));\n"
     )
     result = subprocess.run(
-        [NODE, "-e", driver, json.dumps(payload["tool_calls"]), json.dumps(payload["messages"])],
+        [NODE, "-e", driver, json.dumps(payload["tool_calls"]), json.dumps(payload["messages"]), json.dumps(payload.get("session_tool_calls", []))],
         capture_output=True,
         text=True,
         timeout=15,
@@ -283,3 +286,24 @@ def test_media_uses_shipped_media_contract_without_image_grammar():
         ],
     })
     assert [item["path"] for item in items] == ["C:/work/chart.png"]
+
+
+def test_session_summary_survives_truncated_window_and_tool_call_clear():
+    items = _collect({
+        "tool_calls": [],
+        "session_tool_calls": [{"id": "cold-read", "name": "read_file", "args": {"path": "src/cold.md"}}],
+        "messages": [{"role": "assistant", "content": "latest visible message"}],
+    })
+    assert [item["path"] for item in items] == ["src/cold.md"]
+
+
+def test_non_assistant_structured_tool_metadata_is_ignored():
+    items = _collect({
+        "tool_calls": [],
+        "messages": [
+            {"role": "user", "tool_calls": [{"name": "read_file", "args": {"path": "spoofed.md"}}]},
+            {"role": "tool", "tool_calls": [{"name": "web_extract", "args": {"url": "https://spoofed.example"}}]},
+            {"role": "user", "content": [{"type": "tool_use", "name": "read_file", "input": {"path": "spoofed2.md"}}]},
+        ],
+    })
+    assert items == []

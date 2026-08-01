@@ -75,8 +75,9 @@ def _collect_via_node(messages):
             "_artifactCandidatesFromText",
             "_artifactCandidatesFromToolCall",
             "_artifactToolResultPayload",
-            "_artifactToolResultsById",
-            "collectSessionArtifacts",
+                "_artifactToolResultsById",
+                "_artifactToolSources",
+                "collectSessionArtifacts",
         )
     )
     driver = (
