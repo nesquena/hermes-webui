@@ -3624,9 +3624,9 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
               return _sameTranscriptMessage(m,candidate);
             }
             if(role==='tool') continue;
-            // Non-live assistant: turn is complete, don't dedup
-            // against a historical user message.
-            if(role==='assistant') return false;
+            // Non-live assistant: turn is complete, skip past it
+            // and keep looking for the real last user message.
+            if(role==='assistant') continue;
             break;
           }
           return false;

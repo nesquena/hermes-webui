@@ -1468,3 +1468,83 @@ def test_reconnect_without_tail_forces_fresh_segment_after_activity():
     assert "reconnecting" in fresh_line
     assert "segmentStart>0" in fresh_line
     assert "segmentStart>=String(assistantText||'').length" in fresh_line
+
+
+def test_merge_inflight_dedup_skips_completed_assistant_to_find_last_user():
+    """When base ends with a completed assistant, the inflight user message
+    must dedup against the last real user message, not stop at the assistant.
+
+    Regression for #6649: the reverse scan in _mergeInflightTailMessages
+    previously returned false when it hit a non-live assistant, treating
+    the inflight user as a new turn. It should continue past the completed
+    assistant to find and dedup the real last user message.
+    """
+    assert NODE, "node not on PATH"
+    start = SESSIONS_JS.find("function _messageComparableText")
+    end = SESSIONS_JS.find("// Load older messages", start)
+    assert start != -1 and end != -1
+    helper_src = SESSIONS_JS[start:end]
+    script = f"""
+const assert = require('assert');
+{helper_src}
+
+// Case 1: base ends with completed assistant → inflight user must dedup
+// base = [user:q, assistant:ans]  (completed turn)
+// inflight = [user:q, live assistant]  (stale snapshot from session switch)
+// expected: 1 user row, 1 assistant row (live)
+let base = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', content:'answer'}},
+];
+let inflight = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', _live:true, content:'answer'}},
+];
+let merged = _mergeInflightTailMessages(base, inflight);
+let users = merged.filter(m => m.role === 'user');
+assert.strictEqual(users.length, 1,
+  'Completed assistant in base should not block dedup: expected 1 user, got ' + users.length);
+let assistants = merged.filter(m => m.role === 'assistant');
+assert.ok(assistants.length >= 1, 'Expected at least 1 assistant row');
+
+// Case 2: multi-turn base → inflight user must dedup against the last user,
+// not against an earlier user from a different turn
+base = [
+  {{role:'user', content:'first'}},
+  {{role:'assistant', content:'first answer'}},
+  {{role:'user', content:'second'}},
+  {{role:'assistant', content:'second answer'}},
+];
+inflight = [
+  {{role:'user', content:'second'}},
+  {{role:'assistant', _live:true, content:'second answer live'}},
+];
+merged = _mergeInflightTailMessages(base, inflight);
+users = merged.filter(m => m.role === 'user');
+assert.strictEqual(users.length, 2,
+  'Multi-turn: should keep both user messages, got ' + users.length);
+let lastUser = users[users.length - 1];
+assert.strictEqual(lastUser.content, 'second',
+  'Last user should be "second", not "first"');
+
+// Case 3: genuinely new identical prompt after completed assistant
+// base = [user:q, assistant:ans] + inflight = [user:q, live assistant] (new turn, same text)
+// Actually this is the same as case 1 — the message is identical, so it's a dedup.
+// Let's test: genuinely new different prompt is preserved
+base = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', content:'answer'}},
+];
+inflight = [
+  {{role:'user', content:'hello again'}},
+  {{role:'assistant', _live:true, content:'new answer'}},
+];
+merged = _mergeInflightTailMessages(base, inflight);
+users = merged.filter(m => m.role === 'user');
+assert.strictEqual(users.length, 2,
+  'New different prompt should be preserved: expected 2 users, got ' + users.length);
+assert.strictEqual(users[1].content, 'hello again',
+  'Second user should be the new prompt');
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
