@@ -14390,7 +14390,7 @@ def handle_post(handler, parsed) -> bool:
                 # so `+ " (copy)"` doesn't TypeError.
                 title=(session.title or "Untitled") + " (copy)",
                 workspace=session.workspace,
-                session_start_workspace=getattr(session, "session_start_workspace", session.workspace),
+                session_start_workspace=_session_start_workspace_for_child(session),
                 model=session.model,
                 model_provider=session.model_provider,
                 messages=copy.deepcopy(session.messages),
@@ -15205,7 +15205,7 @@ def handle_post(handler, parsed) -> bool:
         )
         branch = Session(
             workspace=source.workspace,
-            session_start_workspace=getattr(source, "session_start_workspace", source.workspace),
+            session_start_workspace=_session_start_workspace_for_child(source),
             model=source.model,
             model_provider=getattr(source, "model_provider", None),
             profile=getattr(source, "profile", None),
@@ -20965,6 +20965,13 @@ def _provisional_title_from_prompt(prompt: str, fallback: str = "Untitled") -> s
     return title_from([{"role": "user", "content": text}], fallback) or fallback
 
 
+def _session_start_workspace_for_child(source) -> str:
+    return str(
+        getattr(source, "session_start_workspace", None)
+        or getattr(source, "workspace", get_last_workspace())
+    )
+
+
 def _prepare_chat_start_session_for_stream(
     s,
     *,
@@ -21854,11 +21861,7 @@ def _handle_session_compression_recovery_start(handler, body):
                 session_id=uuid.uuid4().hex[:12],
                 title=title,
                 workspace=getattr(source, "workspace", get_last_workspace()),
-                session_start_workspace=getattr(
-                    source,
-                    "session_start_workspace",
-                    getattr(source, "workspace", get_last_workspace()),
-                ),
+                session_start_workspace=_session_start_workspace_for_child(source),
                 model=getattr(source, "model", None),
                 model_provider=getattr(source, "model_provider", None),
                 messages=[],
@@ -22498,12 +22501,12 @@ def _handle_chat_sync(handler, body):
                 _sanitize_messages_for_api,
                 _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
-                _webui_workspace_system_prompt,
-                _workspace_context_prefix,
+                _webui_session_workspace_prompts,
             )
-            workspace_ctx = _workspace_context_prefix(str(s.workspace))
+            _workspace_prompts = _webui_session_workspace_prompts(s, workspace=workspace)
+            workspace_ctx = _workspace_prompts["workspace_ctx"]
             workspace_system_msg = (
-                _webui_workspace_system_prompt(s.session_start_workspace) + "\n\n"
+                _workspace_prompts["system_prompt"] + "\n\n"
                 f"{_WEBUI_PROGRESS_PROMPT}\n\n"
                 "WebUI external-notes/durable-memory policy: Do not copy or dump this browser transcript "
                 "into external notes or durable memory by default. Write or update durable "

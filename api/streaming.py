@@ -771,6 +771,34 @@ def _webui_ephemeral_system_prompt(
     return "\n\n".join(part for part in parts if part)
 
 
+def _webui_session_workspace_prompts(
+    session,
+    *,
+    workspace: Optional[str] = None,
+    personality_prompt: Optional[str] = None,
+    config_data: Optional[dict] = None,
+) -> dict[str, str]:
+    """Build session-start prompts while retaining the current-turn workspace."""
+    current_workspace = str(workspace or getattr(session, "workspace", "") or "")
+    session_start_workspace = str(
+        getattr(session, "session_start_workspace", None) or current_workspace
+    )
+    return {
+        "workspace_ctx": _workspace_context_prefix(current_workspace),
+        "system_prompt": _webui_workspace_system_prompt(session_start_workspace),
+        "ephemeral_system_prompt": _webui_ephemeral_system_prompt(
+            personality_prompt,
+            surface_context={
+                "source": "webui",
+                "session_id": getattr(session, "session_id", None),
+                "profile": getattr(session, "profile", None),
+                "workspace": session_start_workspace,
+            },
+            config_data=config_data,
+        ),
+    }
+
+
 _SECRET_SHAPED_RE = re.compile(
     r"(?i)(api[_-]?key|token|password|secret)\s*[:=]\s*[^\s]+|"
     r"\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b|"
@@ -9428,8 +9456,9 @@ def _run_agent_streaming(
 
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
-            workspace_ctx = _workspace_context_prefix(str(s.workspace))
-            workspace_system_msg = _webui_workspace_system_prompt(s.session_start_workspace)
+            _workspace_prompts = _webui_session_workspace_prompts(s, workspace=workspace)
+            workspace_ctx = _workspace_prompts["workspace_ctx"]
+            workspace_system_msg = _workspace_prompts["system_prompt"]
             # Resolve personality prompt from config.yaml agent.personalities
             # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)
             _personality_prompt = None
@@ -9452,16 +9481,12 @@ def _run_agent_streaming(
             # (agent's own mechanism). This preserves any selected personality
             # while making long tool runs emit real user-visible interim text
             # through interim_assistant_callback instead of frontend guesses.
-            agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(
-                _personality_prompt,
-                surface_context={
-                    'source': 'webui',
-                    'session_id': session_id,
-                    'profile': getattr(s, 'profile', None),
-                    'workspace': s.session_start_workspace,
-                },
+            agent.ephemeral_system_prompt = _webui_session_workspace_prompts(
+                s,
+                workspace=workspace,
+                personality_prompt=_personality_prompt,
                 config_data=_cfg,
-            )
+            )["ephemeral_system_prompt"]
             _pending_started_at = getattr(s, 'pending_started_at', None)
             meter().set_pending_started_at(stream_id, _pending_started_at)
             # Normal chat-start sets pending_started_at before spawning this thread;

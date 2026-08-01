@@ -1117,6 +1117,13 @@ def _load_session_from_path(path: Path) -> "Session | None":
         data = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
         return None
+    if not data.get('session_start_workspace'):
+        _persist_legacy_session_start_workspace(
+            path,
+            data,
+            session_id=data.get('session_id'),
+            expected_sig=_sidecar_stat_signature(path),
+        )
     data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
     return Session(**data)
 
@@ -1545,11 +1552,19 @@ class Session:
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         _legacy_session_start_workspace = not data.get('session_start_workspace')
         session = cls(**data)
+        _legacy_facts_expected_sig = _pre_read_sig
         if _legacy_session_start_workspace:
-            try:
-                session.save(touch_updated_at=False, skip_index=True)
-            except Exception:
-                logger.debug("Failed to persist session-start workspace for %s", sid, exc_info=True)
+            _legacy_facts_expected_sig = None
+            _migration_lock = _get_session_agent_lock(sid)
+            if _migration_lock.acquire(blocking=False):
+                try:
+                    if _sidecar_stat_signature(p) == _pre_read_sig:
+                        session.save(touch_updated_at=False, skip_index=True)
+                        _legacy_facts_expected_sig = _sidecar_stat_signature(p)
+                except Exception:
+                    logger.debug("Failed to persist session-start workspace for %s", sid, exc_info=True)
+                finally:
+                    _migration_lock.release()
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
@@ -1575,7 +1590,7 @@ class Session:
                         sid,
                         len(getattr(session, 'messages', None) or []),
                         _anchor_scene_index_from_records(getattr(session, 'anchor_activity_scenes', None)),
-                        expected_sig=_pre_read_sig,
+                        expected_sig=_legacy_facts_expected_sig,
                     )
                 except Exception:
                     logger.debug("legacy sidecar facts cache populate failed for %s", sid, exc_info=True)
@@ -4123,6 +4138,43 @@ def _sidecar_stat_signature(path):
         return None
     return (str(path), int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))),
             int(st.st_size), int(getattr(st, 'st_ctime_ns', int(st.st_ctime * 1_000_000_000))))
+
+
+def _persist_legacy_session_start_workspace(path, data, *, session_id, expected_sig):
+    """Persist the inferred session-start workspace without clobbering a writer."""
+    if not is_safe_session_id(session_id) or expected_sig is None:
+        return None
+    workspace = data.get('workspace')
+    if not workspace:
+        return None
+    lock = _get_session_agent_lock(session_id)
+    if not lock.acquire(blocking=False):
+        return None
+    try:
+        if _sidecar_stat_signature(path) != expected_sig:
+            return None
+        migrated = dict(data)
+        migrated['session_start_workspace'] = str(Path(workspace).expanduser().resolve())
+        tmp = path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+        try:
+            with open(tmp, 'w', encoding='utf-8') as handle:
+                json.dump(migrated, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            _safe_replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+        return _sidecar_stat_signature(path)
+    except Exception:
+        try:
+            if 'tmp' in locals():
+                tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        logger.debug("Failed to persist explicit-path session-start workspace for %s", session_id, exc_info=True)
+        return None
+    finally:
+        lock.release()
 
 
 def _legacy_sidecar_facts_get(sid):

@@ -319,6 +319,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
 
     s = new_session()
+    session_start_workspace = s.session_start_workspace
     stream_id = "stream-gateway-test"
     s.active_stream_id = stream_id
     s.pending_user_message = "Say hello"
@@ -360,6 +361,8 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     system_msg = payload["messages"][0]
     assert system_msg["role"] == "system"
     assert "Final visible assistant replies" in system_msg["content"]
+    assert f"Workspace: {session_start_workspace}" in system_msg["content"]
+    assert f"Workspace: {str(tmp_path.resolve())}" not in system_msg["content"]
     assert "Need script" in system_msg["content"]
     # The moved session/delivery context must be present in the system prompt.
     assert "Connected Platforms:" in system_msg["content"]
@@ -368,7 +371,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     # terminal user-role prefill before the actual browser user turn.
     assert [m["content"] for m in payload["messages"][1:]] == [
         "prefill summary",
-        "Say hello",
+        f"[Workspace::v1: {str(tmp_path.resolve()).replace(chr(92), chr(92) + chr(92))}]\nSay hello",
     ]
     assert [m["role"] for m in payload["messages"]] == ["system", "assistant", "user"]
     events = []
@@ -999,7 +1002,10 @@ def test_gateway_chat_worker_normalizes_prefill_slice_before_system_prefix(tmp_p
     assert captured["normalizer_input"] == prefill_raw
     payload_messages = captured["body"]["messages"]
     assert [m["role"] for m in payload_messages] == ["system", "assistant", "user"]
-    assert [m["content"] for m in payload_messages[1:]] == ["prefill summary", "Say hello"]
+    assert [m["content"] for m in payload_messages[1:]] == [
+        "prefill summary",
+        f"[Workspace::v1: {str(tmp_path.resolve()).replace(chr(92), chr(92) + chr(92))}]\nSay hello",
+    ]
 
 
 def test_gateway_chat_worker_backfills_context_only_turns_into_display(tmp_path, monkeypatch):
@@ -1264,8 +1270,14 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     assert "Final visible assistant replies" in captured["body"]["messages"][0]["content"]
     image_payload = captured["body"]["messages"][1]
     assert image_payload["role"] == "user"
-    assert image_payload["content"][0] == {"type": "text", "text": "What is in this image?"}
-    assert content[0] == {"type": "text", "text": "What is in this image?"}
+    assert image_payload["content"][0] == {
+        "type": "text",
+        "text": streaming._workspace_context_prefix(str(tmp_path)) + "What is in this image?",
+    }
+    assert content[0] == {
+        "type": "text",
+        "text": streaming._workspace_context_prefix(str(tmp_path)) + "What is in this image?",
+    }
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 

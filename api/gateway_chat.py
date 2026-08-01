@@ -486,15 +486,18 @@ def _run_gateway_runs_api_streaming(
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
             headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
-        message_content: Any = str(msg_text or "")
+        from api.streaming import _workspace_context_prefix
+
+        workspace_ctx = _workspace_context_prefix(str(workspace))
+        message_content: Any = workspace_ctx + str(msg_text or "")
         if attachments:
             try:
                 from api.streaming import _build_native_multimodal_message
 
-                message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg)
+                message_content = _build_native_multimodal_message(workspace_ctx, str(msg_text or ""), attachments, str(workspace), cfg=cfg)
             except Exception:
                 logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
-                message_content = str(msg_text or "")
+                message_content = workspace_ctx + str(msg_text or "")
         from api.streaming import _strip_oob_blocks
 
         instructions_parts = []
@@ -913,7 +916,8 @@ def _run_gateway_chat_streaming(
                 _prefill_messages_with_webui_context,
                 _normalize_prefill_messages_before_user_turn,
                 _public_prefill_context_status,
-                _webui_ephemeral_system_prompt,
+                _webui_session_workspace_prompts,
+                _workspace_context_prefix,
             )
 
             prefill_context = _load_webui_prefill_context(cfg)
@@ -922,16 +926,11 @@ def _run_gateway_chat_streaming(
             # the ephemeral system prompt rather than a prefill `user` message.
             # The gateway-backed path must build the SAME system prompt so that
             # context is not silently dropped on Gateway-routed WebUI chats.
-            _gateway_system_prompt = _webui_ephemeral_system_prompt(
-                None,
-                surface_context={
-                    "source": "webui",
-                    "session_id": session_id,
-                    "profile": getattr(s, "profile", None),
-                    "workspace": s.workspace if s is not None else str(workspace),
-                },
+            _gateway_system_prompt = _webui_session_workspace_prompts(
+                s,
+                workspace=workspace,
                 config_data=cfg,
-            )
+            )["ephemeral_system_prompt"]
             prefill_messages = _prefill_messages_with_webui_context(prefill_context, cfg)
             prefill_messages = _normalize_prefill_messages_before_user_turn(prefill_messages)
             prefill_messages = [
@@ -1008,15 +1007,16 @@ def _run_gateway_chat_streaming(
                 # Scope Gateway long-term continuity to this WebUI conversation
                 # without exposing the browser's auth cookie or CSRF material.
                 headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
-            message_content: Any = str(msg_text or "")
+            workspace_ctx = _workspace_context_prefix(str(workspace))
+            message_content: Any = workspace_ctx + str(msg_text or "")
             if attachments:
                 try:
                     from api.streaming import _build_native_multimodal_message
 
-                    message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg)
+                    message_content = _build_native_multimodal_message(workspace_ctx, str(msg_text or ""), attachments, str(workspace), cfg=cfg)
                 except Exception:
                     logger.debug("Failed to build gateway multimodal attachment payload", exc_info=True)
-                    message_content = str(msg_text or "")
+                    message_content = workspace_ctx + str(msg_text or "")
             body = {
                 "model": model or "default",
                 "stream": True,
