@@ -488,3 +488,104 @@ def test_settings_locale_continuations_recheck_current_settlement():
     assert "const pendingLanguage=langSel.value;" in PANELS_JS
     assert "_settingsLocaleSettlementIsCurrent(localeResult)" in PANELS_JS
     assert "const requestedLanguage=(selector&&selector.value)" in PANELS_JS
+
+
+def _function_source(src: str, name: str) -> str:
+    async_token = f"async function {name}("
+    start = src.find(async_token)
+    if start < 0:
+        start = src.index(f"function {name}(")
+    brace = src.index("{", start)
+    depth = 0
+    for index in range(brace, len(src)):
+        if src[index] == "{":
+            depth += 1
+        elif src[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : index + 1]
+    raise AssertionError(f"unclosed function {name}")
+
+
+def test_settings_post_serializes_after_locale_settlement_and_ignores_stale_success():
+    sources = [
+        _function_source(PANELS_JS, "_settleSettingsLocale"),
+        _function_source(PANELS_JS, "_settingsLocaleCommitIsCurrent"),
+        _function_source(PANELS_JS, "_commitSettingsLocale"),
+        _function_source(PANELS_JS, "_postSettingsAtLocaleCommit"),
+        _function_source(PANELS_JS, "_autosavePreferencesSettings"),
+    ]
+    combined_sources = "let _settingsLocalePostInFlight=null; let _settingsPreferencesAutosaveRetryPayload=null; let _settingsHermesDefaultModelOnOpen=''; let _settingsHermesDefaultModelProviderOnOpen=null;\n" + "\n".join(sources)
+    script = textwrap.dedent(
+        f"""
+        (async () => {{
+        const vm = require('vm');
+        const selector = {{value: 'de'}};
+        let active = 'de';
+        let generation = 1;
+        let serverLanguage = 'en';
+        let releasePost;
+        const requests = [];
+        const storage = {{}};
+        const ctx = {{
+          console,
+          selector,
+          $: (id) => id === 'settingsLanguage' ? selector : null,
+          localStorage: {{getItem: (key) => storage[key] || null, setItem: (key, value) => storage[key] = String(value)}},
+          getActiveLocale: () => active,
+          getLocaleActivationGeneration: () => generation,
+          activateLocale: async (requested) => ({{status: 'applied', requested, active, generation}}),
+          api: (path, options) => {{
+            const body = JSON.parse(options.body);
+            requests.push(body.language);
+            serverLanguage = body.language;
+            return new Promise((resolve) => {{ releasePost = () => resolve({{language: body.language}}); }});
+          }},
+          _setPreferencesAutosaveStatus: () => {{}},
+          _applyWorkspaceTodosTabVisibility: () => {{}},
+          _settingsLocalePostInFlight: null,
+          _settingsPreferencesAutosaveRetryPayload: null,
+          _settingsHermesDefaultModelOnOpen: '',
+          _settingsHermesDefaultModelProviderOnOpen: null,
+          _settingsDirty: false,
+          window: {{}},
+          document: {{querySelector: () => null}},
+        }};
+        vm.createContext(ctx);
+        vm.runInContext({json.dumps(combined_sources)}, ctx);
+        const first = vm.runInContext("_autosavePreferencesSettings({{language: 'de'}})", ctx);
+        await new Promise((resolve) => setImmediate(resolve));
+        generation = 2;
+        active = 'fr';
+        selector.value = 'fr';
+        const newerSettlement = vm.runInContext("_settleSettingsLocale('fr', selector)", ctx);
+        let newerSettled = false;
+        newerSettlement.then(() => newerSettled = true);
+        await Promise.resolve();
+        const blockedBeforePostRelease = !newerSettled;
+        releasePost();
+        await first;
+        await newerSettlement;
+        const second = vm.runInContext("_autosavePreferencesSettings({{language: 'fr'}})", ctx);
+        await new Promise((resolve) => setImmediate(resolve));
+        releasePost();
+        await second;
+        process.stdout.write(JSON.stringify({{blockedBeforePostRelease, requests, selector: selector.value, serverLanguage}}));
+        }})();
+        """
+    )
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8")
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    result = json.loads(proc.stdout)
+    assert result == {
+        "blockedBeforePostRelease": True,
+        "requests": ["de", "fr"],
+        "selector": "fr",
+        "serverLanguage": "fr",
+    }
+
+
+def test_settings_save_paths_use_the_same_locale_commit_boundary():
+    assert PANELS_JS.count("_postSettingsAtLocaleCommit(") >= 3
+    assert PANELS_JS.count("_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)") >= 3
+    assert "if(localeResult&&localeResult.status==='superseded'&&settingsLanguageSelector" in PANELS_JS

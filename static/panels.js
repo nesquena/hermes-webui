@@ -7480,6 +7480,7 @@ let _settingsAppearanceAutosaveTimer = null;
 let _settingsAppearanceAutosaveRetryPayload = null;
 let _settingsPreferencesAutosaveTimer = null;
 let _settingsPreferencesAutosaveRetryPayload = null;
+let _settingsLocalePostInFlight = null;
 
 // ── Sidebar tab visibility/order ────────────────────────────────────────────
 const _ALWAYS_VISIBLE_TABS = new Set(['chat','settings']);
@@ -8784,10 +8785,12 @@ async function _autosavePreferencesSettings(payload){
   try{
     const selector=$('settingsLanguage');
     const requestedLanguage=(selector&&selector.value)||((typeof getActiveLocale==='function')?getActiveLocale():(payload&&payload.language));
-    const localeResult=await _settleSettingsLocale(requestedLanguage,selector);
-    if(localeResult&&localeResult.status==='superseded') return;
-    if(payload&&localeResult) payload={...payload,language:localeResult.active};
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const localeCommit=await _commitSettingsLocale(requestedLanguage,selector,payload);
+    if(!localeCommit) return;
+    if(payload) payload={...payload,language:localeCommit.active};
+    const settingsLocaleGeneration=localeCommit.generation;
+    const saved=await _postSettingsAtLocaleCommit(payload);
+    if(!_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)) return;
     if(payload&&payload.terminal_auto_expand_on_output!==undefined){
       window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
     }
@@ -8869,12 +8872,37 @@ async function _autosavePreferencesSettings(payload){
 }
 
 async function _settleSettingsLocale(requested,selector){
+  if(_settingsLocalePostInFlight) await _settingsLocalePostInFlight;
   if(typeof activateLocale!=='function') return {status:'applied',requested,active:requested||'en',fallback:false};
   const result=await activateLocale(requested||'en');
   if(result&&result.status==='superseded') return result;
   const active=(typeof getActiveLocale==='function')?getActiveLocale():(result&&result.active)||'en';
   if(selector) selector.value=active;
   return {...(result||{}),active};
+}
+
+async function _commitSettingsLocale(requested,selector,payload){
+  const result=await _settleSettingsLocale(requested,selector);
+  if(result&&result.status==='superseded') return null;
+  const generation=result&&result.generation;
+  if(!_settingsLocaleCommitIsCurrent(generation)) return null;
+  const active=(typeof getActiveLocale==='function')?getActiveLocale():(result&&result.active)||'en';
+  if(selector) selector.value=active;
+  if(payload) payload.language=active;
+  return {active,generation};
+}
+
+function _settingsLocaleCommitIsCurrent(generation){
+  return typeof getLocaleActivationGeneration!=='function' || generation===undefined || generation===getLocaleActivationGeneration();
+}
+
+function _postSettingsAtLocaleCommit(payload){
+  const request=api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+  const barrier=request.catch(()=>undefined);
+  _settingsLocalePostInFlight=barrier;
+  return request.finally(()=>{
+    if(_settingsLocalePostInFlight===barrier) _settingsLocalePostInFlight=null;
+  });
 }
 
 function _settingsLocaleSettlementIsCurrent(result){
@@ -9121,7 +9149,9 @@ async function loadSettingsPanel(){
     // Keep settings modal and current page strings in sync with the resolved locale.
     const settingsLanguageSelector=document.getElementById('settingsLanguage');
     const localeResult=await _settleSettingsLocale(resolvedLanguage,settingsLanguageSelector);
-    if(localeResult&&localeResult.status==='superseded') return;
+    if(localeResult&&localeResult.status==='superseded'&&settingsLanguageSelector&&typeof getActiveLocale==='function'){
+      settingsLanguageSelector.value=getActiveLocale();
+    }
     // Populate model dropdown from /api/models + live model fetch (#872)
     const modelSel=$('settingsModel');
     if(modelSel){
@@ -12535,14 +12565,13 @@ async function saveSettings(andClose){
   Object.assign(body,_structuredCodeViewFromUi());
   Object.assign(body,_composerControlVisibilityPayload());
   body.composer_control_order=_getComposerControlOrder();
-  body.language=(typeof getActiveLocale==='function')?getActiveLocale():language;
-  const localeResult=await _settleSettingsLocale(
+  const localeCommit=await _commitSettingsLocale(
     (($('settingsLanguage')||{}).value)||((typeof getActiveLocale==='function')?getActiveLocale():language),
-    $('settingsLanguage')
+    $('settingsLanguage'),
+    body
   );
-  if(localeResult&&localeResult.status==='superseded') return;
-  if(!_settingsLocaleSettlementIsCurrent(localeResult)) return;
-  if(localeResult) body.language=localeResult.active;
+  if(!localeCommit) return;
+  const settingsLocaleGeneration=localeCommit.generation;
   body.show_token_usage=showTokenUsage;
   const maxTokensField=$('settingsMaxTokens');
   if(maxTokensField){
@@ -12595,7 +12624,8 @@ async function saveSettings(andClose){
     const payload={...body,_set_password:pw.trim()};
     if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
     try{
-      const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+      const saved=await _postSettingsAtLocaleCommit(payload);
+      if(!_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)) return;
       if(modelChanged && model){
         try{
           await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
@@ -12625,7 +12655,8 @@ async function saveSettings(andClose){
     }catch(e){showToast(t('settings_save_failed')+e.message);return;}
   }
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+    const saved=await _postSettingsAtLocaleCommit(body);
+    if(!_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)) return;
     if(modelChanged && model){
       try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
