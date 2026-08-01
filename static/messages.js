@@ -2250,7 +2250,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       content:'**Connection interrupted:** The browser lost the live SSE connection before the response finished. If the worker completed, reopening this session should restore the settled transcript.',
     });
   }
-  function _setActivePaneIdleIfOwner(voiceOutcome){
+  function _setActivePaneIdleIfOwner(voiceOutcome={success:false}){
     if(_isActiveSession()||!S.session||!INFLIGHT[S.session.session_id]){
       if(S.session&&S.session.session_id===activeSid&&S.session.active_stream_id===streamId){
         S.session.active_stream_id=null;
@@ -2367,7 +2367,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       renderMessages({preserveScroll:true});
     }
     renderSessionList();
-    _setActivePaneIdleIfOwner({success:false});
+    if(typeof window==='undefined') _setActivePaneIdleIfOwner();
+    else _setActivePaneIdleIfOwner({success:false});
     _closeSource(source);
   }
   async function _runStreamEndRecovery(source){
@@ -6125,7 +6126,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(isActiveSession) _queueDrainSid=activeSid;
         renderSessionList();
-        _setActivePaneIdleIfOwner({success:true});
+        if(typeof window!=='undefined'&&typeof window._voiceModeActive==='function'&&window._voiceModeActive()){
+          _setActivePaneIdleIfOwner({success:true});
+        }else{
+          _setActivePaneIdleIfOwner();
+        }
         playNotificationSound();
         // #4416: notify if the tab was hidden at ANY point during this stream
         // (not just at done-receive time, which a throttled background-tab SSE
@@ -6405,7 +6410,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
         trackBackgroundError(activeSid,_errTitle,d.message||'Error');
       }
-      _setActivePaneIdleIfOwner({success:false});
+      if(typeof window==='undefined') _setActivePaneIdleIfOwner();
+      else _setActivePaneIdleIfOwner({success:false});
       renderSessionList(); // clear streaming indicator immediately on apperror
     });
 
@@ -6637,7 +6643,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       })();
       renderSessionList();
-      _setActivePaneIdleIfOwner({success:false});
+      if(typeof window==='undefined') _setActivePaneIdleIfOwner();
+      else _setActivePaneIdleIfOwner({success:false});
     });
 
     for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
@@ -6790,7 +6797,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(_isActiveSession()) _queueDrainSid=activeSid;
       renderSessionList();
-      _setActivePaneIdleIfOwner({success:false});
+      if(typeof window==='undefined') _setActivePaneIdleIfOwner();
+      else _setActivePaneIdleIfOwner({success:false});
       return returnStatus?'restored':true;
     }catch(_){
       return returnStatus?'error':false;
@@ -6864,7 +6872,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         trackBackgroundError(activeSid,_errTitle,'Connection interrupted');
       }
     }
-    _setActivePaneIdleIfOwner({success:false});
+    if(typeof window==='undefined') _setActivePaneIdleIfOwner();
+    else _setActivePaneIdleIfOwner({success:false});
   }
 
   (async()=>{
@@ -6895,7 +6904,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             clearLiveToolCards();
             removeThinking();
             if(_isActiveSession()) _queueDrainSid=activeSid;
-            _setActivePaneIdleIfOwner({success:false});
+            if(typeof window==='undefined') _setActivePaneIdleIfOwner();
+            else _setActivePaneIdleIfOwner({success:false});
             renderMessages({preserveScroll:true});
             if(_wasFollowingAtReconnectDead && typeof scrollToBottom==='function') scrollToBottom();
             renderSessionList();

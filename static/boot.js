@@ -56,7 +56,7 @@ async function cancelStream(reason){
     S.activeStreamId=null;
     if(S.session&&S.session.session_id===sid&&S.session.active_stream_id===streamId) S.session.active_stream_id=null;
     setBusy(false);
-    if(typeof window._voiceLeaseSettleOwner==='function') window._voiceLeaseSettleOwner(sid,streamId,{success:false});
+    if(typeof window!=='undefined'&&typeof window._voiceLeaseSettleOwner==='function') window._voiceLeaseSettleOwner(sid,streamId,{success:false});
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
     // /api/chat/cancel only exposes `cancelled:bool`, so we cannot
@@ -90,7 +90,7 @@ async function cancelSessionStream(session){
     if(S.session) S.session.active_stream_id=null;
     clearInflight();
     setBusy(false);
-    if(typeof window._voiceLeaseSettleOwner==='function') window._voiceLeaseSettleOwner(sid,streamId,{success:false});
+    if(typeof window!=='undefined'&&typeof window._voiceLeaseSettleOwner==='function') window._voiceLeaseSettleOwner(sid,streamId,{success:false});
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
   }
