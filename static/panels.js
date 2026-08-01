@@ -11958,6 +11958,7 @@ async function checkUpdatesNow(channelOverride){
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
     const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:60000});
     if(data.disabled){
+      if(typeof _showUpdateBanner==='function') _showUpdateBanner({});
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
       const errorParts=[];
@@ -12004,6 +12005,7 @@ async function checkUpdatesNow(channelOverride){
         if(status){status.textContent=t('settings_local_changes_detected');status.style.color='var(--accent)';}
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
       } else if(noGitParts.length){
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner({});
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
       } else {
         if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
