@@ -11,6 +11,7 @@ import gzip
 import hashlib
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -242,3 +243,20 @@ def test_fallback_summary_has_all_sections():
         assert section in text
     assert SID in text
     assert "modèle auxiliaire indisponible" in text
+
+
+def test_mobile_context_panel_contains_squash_action():
+    """Mobile must expose squash below the Context card, not only in the
+    desktop composer footer where narrow-layout CSS hides it."""
+    repo = Path(__file__).resolve().parent.parent
+    html = (repo / "static" / "index.html").read_text(encoding="utf-8")
+    css = (repo / "static" / "style.css").read_text(encoding="utf-8")
+    js = (repo / "static" / "panels.js").read_text(encoding="utf-8")
+
+    context_pos = html.index('id="composerMobileContextAction"')
+    squash_pos = html.index('id="composerMobileSquashBtn"')
+    panel_end = html.index("</div>", squash_pos)
+    assert context_pos < squash_pos < panel_end
+    assert 'onclick="closeMobileComposerConfig();squashConversation()"' in html
+    assert "composer-mobile-config-panel .composer-mobile-squash-action{flex:1 0 100%;width:100%" in css
+    assert "$('composerMobileSquashBtn')" in js

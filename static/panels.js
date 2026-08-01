@@ -4871,8 +4871,8 @@ async function squashConversation() {
     focusCancel: true,
   });
   if(!_sqConfirmed) return;
-  const btn = $('btnSquash');
-  if(btn) btn.classList.add('squash-running');
+  const buttons = [$('btnSquash'), $('composerMobileSquashBtn')].filter(Boolean);
+  buttons.forEach(btn => btn.classList.add('squash-running'));
   showToast(t('squash_started'), 4000);
   try {
     const start = await api('/api/session/squash', {method:'POST', timeoutMs: 30000,
@@ -4893,7 +4893,7 @@ async function squashConversation() {
   } catch(e) {
     showToast(t('squash_failed') + e.message, 7000, 'error');
   } finally {
-    if(btn) btn.classList.remove('squash-running');
+    buttons.forEach(btn => btn.classList.remove('squash-running'));
   }
 }
 

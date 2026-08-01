@@ -14,7 +14,6 @@ disk updated_at proves an external shrink and forces a reload. In-process
 shrinks mutate the same cached object before saving, so they can never produce
 that combination; active/pending sessions are never reloaded by this path.
 """
-import json
 import time
 
 import api.models as M

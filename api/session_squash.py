@@ -378,7 +378,9 @@ def _apply_squash(session, sid: str, summary: str) -> dict:
     try:
         persisted = json.loads(session_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError) as exc:
-        raise SquashError(f"post-squash verification failed (unreadable sidecar: {exc})", 500)
+        raise SquashError(
+            f"post-squash verification failed (unreadable sidecar: {exc})", 500
+        ) from exc
     ok = (
         len(persisted.get("messages") or []) == 1
         and (persisted.get("messages") or [{}])[0].get("_squash_summary") is True
@@ -422,7 +424,7 @@ def start_squash_job(sid: str, *, confirm_session_id: str | None, summary: str |
     try:
         meta = get_session(sid, metadata_only=True)
     except KeyError:
-        raise SquashError("Session not found", 404)
+        raise SquashError("Session not found", 404) from None
     if getattr(meta, "read_only", False):
         raise SquashError("read-only sessions cannot be squashed", 400)
     if _busy_fields(meta):
