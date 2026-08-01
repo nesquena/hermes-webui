@@ -14,7 +14,7 @@ PANELS_JS   = (STATIC / "panels.js").read_text(encoding="utf-8")
 CONFIG_PY   = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
 
 # Number of locale blocks in i18n.js: en, it, ja, ru, es, de, zh, zh-Hant, pt, ko, fr, tr
-LOCALE_COUNT = 12
+LOCALE_COUNT = 16
 
 
 def _css_rule_body(selector):

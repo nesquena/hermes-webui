@@ -434,8 +434,8 @@ class TestAuxiliaryModelsI18n:
         """Count of each key should equal the number of supported locales."""
         for key in self.REQUIRED_KEYS:
             count = I18N_JS.count(f"{key}:")
-            assert count == 15, (
-                f"i18n key '{key}' found {count} times — expected 15 (one per locale)"
+            assert count == 16, (
+                f"i18n key '{key}' found {count} times — expected 16 (one per locale)"
             )
 
     def test_session_search_aux_task_i18n_keys_removed(self):
