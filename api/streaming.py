@@ -3489,12 +3489,38 @@ def _detect_title_language(text: str) -> str:
     return ''
 
 
+# Unicode-name keywords for alphabetic characters outside the fast ordinal
+# ranges below. Checked in order. This is how half-width katakana, full-width
+# Latin, ligatures, polytonic Greek, and presentation forms land in their real
+# script instead of being dropped or mistaken for foreign text.
+_SCRIPT_NAME_KEYWORDS = (
+    ('KATAKANA', 'cjk'),
+    ('HIRAGANA', 'cjk'),
+    ('HANGUL', 'cjk'),
+    ('IDEOGRAPH', 'cjk'),
+    ('LATIN', 'latin'),
+    ('CYRILLIC', 'cyrillic'),
+    ('ARABIC', 'arabic'),
+    ('HEBREW', 'hebrew'),
+    ('GREEK', 'greek'),
+    ('DEVANAGARI', 'devanagari'),
+    ('THAI', 'thai'),
+    ('GEORGIAN', 'georgian'),
+    ('ARMENIAN', 'armenian'),
+)
+
+
 def _script_counts(text: str) -> dict:
     """Return per-script alphabetic character counts for *text*.
 
     Buckets: ``latin``, ``cjk`` (Han/Hiragana/Katakana/Hangul), ``cyrillic``,
-    ``arabic``, ``hebrew``, ``greek``, ``devanagari``. Non-alphabetic and
-    unclassified characters are ignored.
+    ``arabic``, ``hebrew``, ``greek``, ``devanagari``, ``thai``,
+    ``georgian``, ``armenian``, and ``other``. Common ranges are matched by
+    ordinal for speed; everything alphabetic outside them is classified by
+    its Unicode character name. Nothing alphabetic is dropped: a letter no
+    keyword recognizes counts as ``other``, so a title written in an
+    unclassified script is still visible to drift detection instead of
+    vanishing from the denominator.
     """
     counts: dict[str, int] = {}
     for ch in str(text or ''):
@@ -3520,7 +3546,12 @@ def _script_counts(text: str) -> dict:
         elif 0x0900 <= o <= 0x097F:
             bucket = 'devanagari'
         else:
-            continue
+            name = unicodedata.name(ch, '')
+            bucket = 'other'
+            for keyword, mapped in _SCRIPT_NAME_KEYWORDS:
+                if keyword in name:
+                    bucket = mapped
+                    break
         counts[bucket] = counts.get(bucket, 0) + 1
     return counts
 
@@ -3552,10 +3583,8 @@ def _dominant_script(text: str) -> str:
 # test_title_generation_source_has_no_cjk_literals), so a pin written in its
 # own script is not mapped. Diacritics are folded before lookup.
 #
-# Two kinds of language are missing on purpose. Thai, Georgian and Armenian
-# have no ``_script_counts`` bucket, so script validation cannot see their
-# characters at all. Serbian is written in both Cyrillic and Latin, so
-# neither bucket can be asserted. Anything unmapped falls back to
+# Serbian is missing on purpose: it is written in both Cyrillic and Latin,
+# so neither bucket can be asserted. Anything unmapped falls back to
 # conversation-based validation.
 _TITLE_LANGUAGE_SCRIPTS = {
     # latin
@@ -3589,6 +3618,9 @@ _TITLE_LANGUAGE_SCRIPTS = {
     'greek': 'greek', 'el': 'greek',
     'hindi': 'devanagari', 'marathi': 'devanagari', 'nepali': 'devanagari',
     'hi': 'devanagari',
+    'thai': 'thai', 'th': 'thai',
+    'georgian': 'georgian', 'ka': 'georgian',
+    'armenian': 'armenian', 'hy': 'armenian',
 }
 
 
