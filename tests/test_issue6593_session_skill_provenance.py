@@ -80,6 +80,24 @@ def test_path_shaped_skill_identifiers_match_agent_lookup_guards():
         assert normalize_skill_provenance({value: 1}) == {}
 
 
+def test_opaque_skill_identifiers_preserve_agent_names_and_reject_qualified_paths():
+    valid = {
+        "中文 技能": 1,
+        "category/analysis skill": 2,
+        "plugin:分析助手": 1,
+    }
+    assert normalize_skill_provenance(valid) == valid
+
+    rejected = {
+        "plugin:C:/private": 1,
+        "plugin:/absolute": 1,
+        "plugin:../outside": 1,
+        "tool_calls": 1,
+        "function_result": 1,
+    }
+    assert normalize_skill_provenance(rejected) == {}
+
+
 def test_bundle_resolver_preserves_its_existing_loaded_skills_response(monkeypatch):
     agent_pkg = ModuleType("agent")
     skill_bundles = ModuleType("agent.skill_bundles")
@@ -165,7 +183,7 @@ def test_bundle_route_records_session_and_separates_session_errors(monkeypatch):
     monkeypatch.setattr(routes, "j", lambda _handler, payload, **kwargs: response.update(payload) or True)
 
     assert routes.handle_post(handler, parsed) is True
-    assert session.skill_provenance == {"bundle-skill": 2}
+    assert session.skill_provenance == {"bundle-skill": 2, "重复": 1}
     assert saved == [{"touch_updated_at": False, "skip_index": True}]
     assert response["loaded_skills"] == ["bundle-skill", "bundle-skill", "重复"]
 
@@ -282,8 +300,9 @@ def test_aggregate_skill_usage_contract_is_unchanged(monkeypatch):
 
 
 def test_session_skill_service_normalizes_and_projects_without_io():
-    assert normalize_skill_provenance({"alpha": 2, "bad name": 3}) == {"alpha": 2}
-    assert compact_skill_provenance({"alpha": 2, "bad name": 3}) == {"alpha": 2}
+    expected = {"alpha": 2, "valid name": 3}
+    assert normalize_skill_provenance(expected) == expected
+    assert compact_skill_provenance(expected) == expected
 
 
 def test_identifier_cap_is_enforced():

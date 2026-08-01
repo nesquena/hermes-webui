@@ -106,9 +106,18 @@ def _record_streaming_skill_provenance(session, session_id, tool_name, function_
     if not skill_names:
         return False
     with _get_session_agent_lock(session_id):
-        if not session.record_server_skill_names(skill_names):
+        # The callback closes over the Session that started the turn. Delete
+        # removes that sidecar and cache entry under this same lock, so resolve
+        # the owner again before mutating or saving any object.
+        try:
+            current_session = get_session(session_id)
+        except KeyError:
             return False
-        session.save(touch_updated_at=False, skip_index=True)
+        if current_session is None or str(getattr(current_session, "session_id", "")) != str(session_id):
+            return False
+        if not current_session.record_server_skill_names(skill_names):
+            return False
+        current_session.save(touch_updated_at=False, skip_index=True)
     return True
 
 

@@ -20636,6 +20636,7 @@ async function uploadPendingFiles(options={}){
   _uploadPendingFilesUpdateProgress(sessionId,0);
   const total=pendingFiles.length;
   for(let i=0;i<total;i++){
+    if(!_uploadPendingFilesCurrentSession(sessionId))break;
     const f=pendingFiles[i];
     try{
       if(f&&f.size>MAX_UPLOAD_BYTES)throw new Error(_uploadTooLargeMessage(f));
@@ -20644,6 +20645,7 @@ async function uploadPendingFiles(options={}){
       const isArchive=_ARCHIVE_EXTS.test(f.name);
       const url=new URL(isArchive?'api/upload/extract':'api/upload',document.baseURI||location.href).href;
       const res=await fetch(url,{method:'POST',credentials:'include',body:fd});
+      if(!_uploadPendingFilesCurrentSession(sessionId))break;
       if(_redirectIfUnauth(res)) return;
       if(!res.ok){const err=await res.text();throw new Error(err);}
       const data=await res.json();

@@ -129,3 +129,20 @@ def test_directive_only_consumed_by_matching_session():
         "send() must not clear a newer pending directive created while awaiting"
     assert "[FORCED SKILL CONTEXT: ${_forcedSkillName}]" in src, \
         "send() must prepend deterministic forced-skill content before the user message"
+
+
+def test_send_payload_keeps_session_context_atomic_across_awaits():
+    src = read("static/messages.js")
+    assert "function _sendSessionSnapshot(sid)" in src
+    assert "let _sendInProgressContext = null;" in src
+    assert "uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid" in src
+    assert src.count("if(!_sendSessionSnapshot(activeSid)){_clearStaleSend(activeSid);return;}") >= 2
+    assert "session_id:_chatSession.session_id" in src
+    assert "workspace:_chatSession.workspace" in src
+    assert "profile:_chatSession.profile" in src
+    assert "staleError.code='SESSION_CHANGED'" in src
+
+
+def test_upload_stops_owner_work_after_session_switch():
+    src = read("static/ui.js")
+    assert "if(!_uploadPendingFilesCurrentSession(sessionId))break;" in src

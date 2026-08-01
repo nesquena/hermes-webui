@@ -4,27 +4,72 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Mapping
 from pathlib import PurePosixPath, PureWindowsPath
 
 MAX_SKILL_IDENTIFIERS = 64
 MAX_SKILL_IDENTIFIER_LENGTH = 128
 MAX_SKILL_COUNT = 1_000_000
-_SKILL_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
+_QUALIFIED_NAMESPACE = re.compile(r"^[A-Za-z0-9_-]+$")
+_RAW_TOOL_INTERNAL_IDENTIFIERS = frozenset({
+    "args",
+    "arguments",
+    "content",
+    "error",
+    "function_result",
+    "loaded_skills",
+    "missing_skills",
+    "name",
+    "result",
+    "result body",
+    "success",
+    "tool",
+    "tool_call",
+    "tool_calls",
+})
+
+
+def _has_path_component(value: str, component: str) -> bool:
+    return component in PurePosixPath(value).parts or component in PureWindowsPath(value).parts
+
+
+def _has_qualified_path(name: str) -> bool:
+    if ":" not in name:
+        return False
+    namespace, remainder = name.split(":", 1)
+    if not namespace or not _QUALIFIED_NAMESPACE.fullmatch(namespace) or not remainder:
+        return True
+    # Qualified plugin/category names are opaque identifiers. A drive or an
+    # absolute remainder is a path disguised as a namespace-qualified name.
+    return (
+        ":" in remainder
+        or PurePosixPath(remainder).is_absolute()
+        or PureWindowsPath(remainder).is_absolute()
+        or PureWindowsPath(remainder).drive
+        or _has_path_component(remainder, "..")
+        or _has_path_component(remainder, ".")
+    )
 
 
 def normalize_skill_identifier(value) -> str | None:
     if not isinstance(value, str):
         return None
     name = value.strip()
-    if len(name) > MAX_SKILL_IDENTIFIER_LENGTH or not _SKILL_IDENTIFIER.fullmatch(name):
+    if (
+        not name
+        or len(name) > MAX_SKILL_IDENTIFIER_LENGTH
+        or any(unicodedata.category(char).startswith("C") for char in name)
+        or name.casefold() in _RAW_TOOL_INTERNAL_IDENTIFIERS
+    ):
         return None
     if (
         PurePosixPath(name).is_absolute()
         or PureWindowsPath(name).is_absolute()
         or PureWindowsPath(name).drive
-        or ".." in PurePosixPath(name).parts
-        or ".." in PureWindowsPath(name).parts
+        or _has_path_component(name, "..")
+        or _has_path_component(name, ".")
+        or _has_qualified_path(name)
     ):
         return None
     return name
