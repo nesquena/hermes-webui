@@ -6290,6 +6290,7 @@ function startGatewaySSE(){
               // Capture active session ID before async fetch — race guard.
               // If the user switches sessions while the fetch is in-flight, discard the result.
               const activeSid = S.session.session_id;
+              const replacementTicket = _captureTranscriptReplacement();
               api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(S.session))})
                 .then(res=>{
                   if(!S.session || S.session.session_id !== activeSid) return;
@@ -6306,20 +6307,22 @@ function startGatewaySSE(){
                     if (typeof window._carryForwardEphemeralTurnFields === 'function') {
                       _nextToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], next);
                     }
-                    S.messages = _nextToAssign;
-                    if(S.session && S.session.session_id === activeSid){
-                      S.session.message_count = next.length;
-                      const newest = next.length ? next[next.length - 1] : null;
-                      const newestTs = Number((newest && (newest.timestamp || newest._ts)) || 0);
-                      if(newestTs){
-                        S.session.last_message_at = newestTs;
-                        S.session.updated_at = newestTs;
+                    _commitTranscriptReplacement(replacementTicket, () => {
+                      S.messages = _nextToAssign;
+                      if(S.session && S.session.session_id === activeSid){
+                        S.session.message_count = next.length;
+                        const newest = next.length ? next[next.length - 1] : null;
+                        const newestTs = Number((newest && (newest.timestamp || newest._ts)) || 0);
+                        if(newestTs){
+                          S.session.last_message_at = newestTs;
+                          S.session.updated_at = newestTs;
+                        }
                       }
-                    }
-                    if(S.messages.length !== prev){
-                      renderMessages({preserveScroll:true});
-                      if(typeof highlightCode==='function') highlightCode();
-                    }
+                      if(S.messages.length !== prev){
+                        renderMessages({preserveScroll:true});
+                        if(typeof highlightCode==='function') highlightCode();
+                      }
+                    });
                   }
                 })
                 .catch(()=>{ /* ignore — next poll will retry */ });
