@@ -373,10 +373,12 @@ def test_append_by_cursor(tmp_path):
           S._dirHasMore = true;
           S._escapeGrants = {{
             escape:{{sessionId:'escape-sid',path:'escape',token:'expired',
-              expiresAt:Date.now()+60000}}
+              expiresAt:Date.now()-60000}}
           }};
           _apiResponses.push(Promise.reject({{status:403}}));
           await _loadMoreDir();
+          assert(_apiUrls[_apiUrls.length-1].includes('/api/escape/list?'),
+            'an expired client grant must retain the authorized continuation route');
           assert.strictEqual(S._dirCursor, null,
             'expired escape continuation must clear its unusable cursor');
           assert(!S._escapeGrants.escape,
@@ -445,9 +447,11 @@ def test_append_by_cursor(tmp_path):
           S.session = {{session_id:'artifact-403',workspace:'/ws'}};
           S.activeProfile = 'profile-a';
           S._escapeGrants = {{escape:{{sessionId:'artifact-403',path:'escape',token:'bad',
-            expiresAt:Date.now()+60000}}}};
+            expiresAt:Date.now()-60000}}}};
           _apiResponses.push(Promise.reject({{status:403}}));
           await openArtifactPath('escape/artifact.txt');
+          assert(_apiUrls[_apiUrls.length-1].includes('/api/escape/list?'),
+            'artifact existence must retain the authorized route for an expired grant');
           assert(!S._escapeGrants.escape,
             'artifact 403 must discard the unusable escape grant');
           assert(_toasts.includes('external_link_grant_expired'),

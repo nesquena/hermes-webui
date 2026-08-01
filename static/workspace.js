@@ -197,10 +197,6 @@ function _workspaceEscapeGrantForPath(path){
   for(const root of Object.keys(grants)){
     const grant = grants[root];
     if(!grant || grant.sessionId !== sessionId) continue;
-    if(grant.expiresAt && Date.now() >= grant.expiresAt){
-      delete grants[root];
-      continue;
-    }
     if(!_isSameOrChildPath(root, normalizedPath)) continue;
     if(!best || root.length > best.root.length) best = {root, grant};
   }
@@ -928,7 +924,7 @@ function _renderLoadMoreRow(){
   const row=document.createElement('div');
   row.className='ws-load-more-row file-item';
   row.style.paddingLeft='8px';
-  row.textContent=t&&t('load_more_entries')||'Load more…';
+  row.textContent=t&&t('load_more_entries',S.entries.length)||`Showing ${S.entries.length} entries — Load more…`;
   row.setAttribute('role','button');
   row.setAttribute('tabindex','0');
   row.onclick=function(){_loadMoreDir();};

@@ -235,6 +235,8 @@ def test_load_more_row_appears_when_has_more(width):
         page.set_content(_build_harness(_PAGE_ONE, has_more=True, cursor="test-cursor"))
         rows = page.locator(".ws-load-more-row")
         assert rows.count() == 1, "load-more row must appear when S._dirHasMore=true"
+        row_text = rows.inner_text()
+        assert str(len(_PAGE_ONE)) in row_text, "load-more row must show the current entry count"
     finally:
         browser.close()
         pw.stop()

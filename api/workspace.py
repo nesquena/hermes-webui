@@ -1577,6 +1577,19 @@ def dir_signature(workspace: Path, rel: str = '.', entries: list[dict] | None = 
                 'st_dev': getattr(child_stat, 'st_dev', None),
                 'st_ino': getattr(child_stat, 'st_ino', None),
             })
+            if stat.S_ISLNK(child_stat.st_mode):
+                try:
+                    target_stat = child.stat(follow_symlinks=True)
+                except OSError:
+                    target_stat = None
+                children[-1]['target'] = None if target_stat is None else {
+                    'mode': target_stat.st_mode,
+                    'size': target_stat.st_size,
+                    'mtime_ns': getattr(target_stat, 'st_mtime_ns', None),
+                    'ctime_ns': getattr(target_stat, 'st_ctime_ns', None),
+                    'st_dev': getattr(target_stat, 'st_dev', None),
+                    'st_ino': getattr(target_stat, 'st_ino', None),
+                }
     payload = {
         'workspace': str(Path(workspace).resolve()),
         'path': str(target),

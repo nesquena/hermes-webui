@@ -40,6 +40,23 @@ def _extract_async_function(source: str, name: str) -> str:
     raise AssertionError(f"could not find balanced function body for {name}")
 
 
+def _extract_function(source: str, name: str) -> str:
+    marker = f"function {name}("
+    start = source.find(marker)
+    assert start >= 0, f"{name} not found"
+    brace = source.find("{", start)
+    depth = 0
+    for idx in range(brace, len(source)):
+        char = source[idx]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : idx + 1]
+    raise AssertionError(f"could not find balanced function body for {name}")
+
+
 def _run_node(script: str) -> dict:
     assert NODE is not None
     result = subprocess.run(
@@ -51,13 +68,19 @@ def _run_node(script: str) -> dict:
 @pytest.mark.skipif(NODE is None, reason="node is required")
 def test_list_recovery_updates_authoritative_workspace_and_visible_controls():
     load_dir = _extract_async_function(WORKSPACE_JS, "loadDir")
+    capture_request_owner = _extract_function(WORKSPACE_JS, "_workspaceCaptureRequestOwner")
+    capture_dir_request_owner = _extract_function(WORKSPACE_JS, "_workspaceCaptureDirRequestOwner")
+    request_owner_is_current = _extract_function(WORKSPACE_JS, "_workspaceRequestOwnerIsCurrent")
     script = f"""
 const events=[];
 const S={{session:{{session_id:'sid-1',workspace:'/deleted'}},_dirCache:{{old:true}}}};
 let _wsTreeGen=0;
+let _wsDirRequestGen=0;
+let _wsArtifactRequestGen=0;
 function bumpWorkspaceTreeGen(){{_wsTreeGen+=1;return _wsTreeGen;}}
+function _workspaceResetDirCache(){{S._dirCache={{}};}}
 function _restoreExpandedDirs(){{events.push(['restore',S.session.workspace]);}}
-function _workspaceRouteForPath(){{return '';}}
+function _workspaceRouteForPath(){{return '/api/list';}}
 async function api(){{return {{entries:[{{name:'a'}}],workspace:'/fallback-a',workspace_recovered:true}};}}
 function renderBreadcrumb(){{events.push(['breadcrumb',S.session.workspace]);}}
 function renderFileTree(){{events.push(['tree',S.session.workspace]);}}
@@ -68,6 +91,9 @@ function syncTerminalButton(){{events.push(['terminal',S.session.workspace]);}}
 function showToast(message,duration,kind){{events.push(['toast',message,duration,kind]);}}
 function t(key,path){{return key+':'+path;}}
 function _refreshGitBadge(){{}}
+{capture_request_owner}
+{capture_dir_request_owner}
+{request_owner_is_current}
 {load_dir}
 (async()=>{{
   await loadDir('.');
@@ -94,6 +120,9 @@ function _refreshGitBadge(){{}}
 @pytest.mark.skipif(NODE is None, reason="node is required")
 def test_explicit_workspace_switch_invalidates_an_inflight_recovery_response():
     load_dir = _extract_async_function(WORKSPACE_JS, "loadDir")
+    capture_request_owner = _extract_function(WORKSPACE_JS, "_workspaceCaptureRequestOwner")
+    capture_dir_request_owner = _extract_function(WORKSPACE_JS, "_workspaceCaptureDirRequestOwner")
+    request_owner_is_current = _extract_function(WORKSPACE_JS, "_workspaceRequestOwnerIsCurrent")
     switch_workspace = _extract_async_function(PANELS_JS, "switchToWorkspace")
     script = f"""
 const events=[];
@@ -103,12 +132,15 @@ const S={{
   messages:[],busy:false,_dirCache:{{}},_expandedDirs:new Set()
 }};
 let _wsTreeGen=0;
+let _wsDirRequestGen=0;
+let _wsArtifactRequestGen=0;
 let listCalls=0;
 let resolveOldList;
 const oldList=new Promise(resolve=>{{resolveOldList=resolve;}});
 function bumpWorkspaceTreeGen(){{_wsTreeGen+=1;return _wsTreeGen;}}
+function _workspaceResetDirCache(){{S._dirCache={{}};}}
 function _restoreExpandedDirs(){{}}
-function _workspaceRouteForPath(){{return '';}}
+function _workspaceRouteForPath(){{return '/api/list';}}
 async function api(path){{
   if(path.startsWith('/api/list')){{
     listCalls+=1;
@@ -134,6 +166,9 @@ function setStatus(message){{events.push(['status',message]);}}
 function getWorkspaceFriendlyName(path){{return path;}}
 function $(id){{return null;}}
 let _currentPanel='workspace';
+{capture_request_owner}
+{capture_dir_request_owner}
+{request_owner_is_current}
 {load_dir}
 {switch_workspace}
 (async()=>{{

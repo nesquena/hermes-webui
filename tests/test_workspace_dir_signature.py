@@ -28,3 +28,15 @@ def test_directory_signature_is_stable_across_pages(tmp_path):
 
     assert page_one and page_two
     assert dir_signature(tmp_path, ".", page_one) == dir_signature(tmp_path, ".", page_two)
+
+
+def test_directory_signature_includes_followed_symlink_target_metadata(tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("one", encoding="utf-8")
+    link = tmp_path / "target-link.txt"
+    link.symlink_to(target)
+
+    before = dir_signature(tmp_path)
+    target.write_text("changed target contents", encoding="utf-8")
+
+    assert dir_signature(tmp_path) != before
