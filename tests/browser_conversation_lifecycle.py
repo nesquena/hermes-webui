@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -1039,7 +1040,13 @@ def main() -> int:
             }
         print("OK  hard reload: transcript-backed Anchor scene preserves settled parity")
 
-        assert gateway.request_body and gateway.request_body.get("input") == PROMPT, gateway.request_body
+        request_input = gateway.request_body.get("input") if gateway.request_body else None
+        assert isinstance(request_input, str) and request_input.endswith(PROMPT), gateway.request_body
+        workspace_prefixes = re.findall(
+            r"\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*",
+            request_input,
+        )
+        assert len(workspace_prefixes) == 1, gateway.request_body
         if errors:
             raise AssertionError(f"unexpected browser errors: {errors!r}")
         context.close()
