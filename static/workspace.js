@@ -429,7 +429,7 @@ const ARTIFACT_CATEGORY_ORDER = Object.freeze(['modified','read','web','media'])
 const ARTIFACT_CATEGORY_LIMITS = Object.freeze({modified:50, read:50, web:50, media:50});
 
 function _normalizeArtifactPath(path, allowExtensionless=false){
-  if(!path) return '';
+  if(typeof path !== 'string' || !path) return '';
   path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'').replace(/\\/g,'/');
   if(!path || path.length > 240 || path.includes('://')) return '';
   if(/^[a-z][a-z0-9+.-]*:/i.test(path) && !/^[a-z]:[\\/]/i.test(path)) return '';
@@ -492,6 +492,7 @@ function _normalizeArtifactMediaRef(value){
   if(typeof value !== 'string') return '';
   const candidate = value.trim().replace(/^[`"'(<]+|[`"'\]>,.;:]+$/g,'');
   if(!candidate) return '';
+  if(/^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=_-]+$/i.test(candidate)) return candidate;
   if(/^file:\/\//i.test(candidate)){
     const localPath = _normalizeArtifactFilePath(candidate);
     if(!localPath) return '';
@@ -932,6 +933,7 @@ function renderSessionArtifacts(){
     media: 'Inline Media',
   };
   const artifactMediaHref = (ref) => {
+    if(/^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=_-]+$/i.test(ref)) return ref;
     if(/^https?:/i.test(ref)) return _normalizeArtifactUrl(ref);
     const path = _normalizeArtifactFilePath(ref) || _normalizeArtifactTarget(ref, true);
     if(!path || !S.session || !S.session.session_id) return '';
@@ -946,8 +948,8 @@ function renderSessionArtifacts(){
     const directory = (parts.head || parts.tail)
       ? `<div class="workspace-artifact-directory"><span class="workspace-artifact-directory-head">${esc(parts.head)}</span><span class="workspace-artifact-directory-tail">${esc(parts.tail)}</span></div>`
       : '';
-    const sourceKey = sourceLabels[item.source] || (item.source ? '' : 'workspace_artifact_source_session');
-    const sourceValue = sourceKey ? t(sourceKey) : (item.source ? String(item.source).replace(/_/g, ' ') : categoryLabelFallbacks[item.category] || 'session');
+    const sourceKey = sourceLabels[item.source] || 'workspace_artifact_source_session';
+    const sourceValue = t(sourceKey);
     const source = esc(sourceValue);
     const sourceAttrs = sourceKey ? ` data-i18n="${sourceKey}"` : '';
     const contents = `<div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div>`;

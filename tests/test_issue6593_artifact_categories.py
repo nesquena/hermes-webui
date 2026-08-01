@@ -131,6 +131,20 @@ def test_extensionless_read_targets_and_path_traversal_boundaries():
     assert [item["path"] for item in items] == ["LICENSE", "Makefile", "Dockerfile"]
 
 
+def test_malformed_read_and_search_paths_are_rejected_without_stringification():
+    items = _collect({
+        "tool_calls": [
+            {"name": "read_file", "args": {"path": {"path": "spoofed.md"}}},
+            {"name": "search_files", "result": {
+                "files": [{"path": "spoofed.py"}],
+                "matches": [{"path": {"path": "spoofed2.py"}}],
+            }},
+        ],
+        "messages": [],
+    })
+    assert items == []
+
+
 def test_search_files_projects_paths_from_grouped_match_text():
     items = _collect({
         "tool_calls": [{
@@ -286,6 +300,16 @@ def test_media_uses_shipped_media_contract_without_image_grammar():
         ],
     })
     assert [item["path"] for item in items] == ["C:/work/chart.png"]
+
+
+def test_shipped_data_image_media_reference_stays_in_media_category():
+    items = _collect({
+        "tool_calls": [],
+        "messages": [{"role": "assistant", "content": "MEDIA:data:image/png;base64,AAAA"}],
+    })
+    assert [(item["category"], item["path"]) for item in items] == [
+        ("media", "data:image/png;base64,AAAA")
+    ]
 
 
 def test_session_summary_survives_truncated_window_and_tool_call_clear():

@@ -183,6 +183,31 @@ def test_category_labels_load_through_real_ru_and_de_locales():
         browser.close()
 
 
+def test_source_metadata_uses_locale_keys_for_non_english_sources():
+    playwright = pytest.importorskip("playwright.sync_api")
+    payload = {
+        "tool_calls": [{"name": "read_file", "args": {"path": "src/app.py"}}],
+        "messages": [{"role": "assistant", "content": "MEDIA:data:image/png;base64,AAAA"}],
+    }
+    with playwright.sync_playwright() as api:
+        browser = api.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page(viewport={"width": 480, "height": 320})
+        page.set_content(_render_harness(payload))
+        page.evaluate("locale => { setLocale(locale); applyLocaleToDOM(); }", "ru")
+        source_text = page.locator(".workspace-artifact-meta").all_text_contents()
+        expected = [
+            page.evaluate("key => t(key)", "workspace_artifact_source_read_file"),
+            page.evaluate("key => t(key)", "workspace_artifact_source_media"),
+        ]
+        assert source_text == expected
+        assert page.locator(".workspace-artifact-meta").evaluate_all(
+            "nodes => nodes.map(node => node.dataset.i18n)"
+        ) == ["workspace_artifact_source_read_file", "workspace_artifact_source_media"]
+        media_link = page.locator(".workspace-artifact-link").filter(has_text="AAAA")
+        assert media_link.get_attribute("href") == "data:image/png;base64,AAAA"
+        browser.close()
+
+
 def test_windows_file_media_uses_relative_drive_path_on_existing_media_route():
     playwright = pytest.importorskip("playwright.sync_api")
     payload = {
