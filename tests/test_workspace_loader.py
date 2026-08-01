@@ -14,6 +14,35 @@ import textwrap
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
+# Capture real subprocess primitives at import time, before any fixture patches them.
+_real_subprocess_popen = subprocess.Popen
+_real_subprocess_run = subprocess.run
+
+
+@pytest.fixture(scope="session", autouse=True)
+def test_server():
+    """Pure unit tests; no running server needed."""
+
+
+@pytest.fixture(autouse=True)
+def cleanup_test_sessions():
+    """No-op override: these unit tests create no server sessions to clean up."""
+    yield []
+
+
+@pytest.fixture(autouse=True)
+def _block_popen(monkeypatch):
+    """Block accidental server spawns.
+
+    This file legitimately needs subprocess to run the Node.js harness, so the
+    fixture restores both Popen and run to their real implementations rather than
+    raising.  The guard still fires for any file that does NOT restore them and
+    ends up calling Popen unexpectedly.
+    """
+    monkeypatch.setattr(subprocess, "Popen", _real_subprocess_popen)
+    monkeypatch.setattr(subprocess, "run", _real_subprocess_run)
+
+
 WORKSPACE_JS = REPO / "static" / "workspace.js"
 
 

@@ -610,14 +610,24 @@ function renderSessionArtifacts(){
 }
 
 // Follow all cursor pages and return the union of entries.
+// Caps at 500 pages to prevent infinite loops from a misbehaving server.
+const _FETCH_ALL_PAGES_MAX=500;
 async function _fetchAllPages(baseUrl){
   let entries=[];
   let cursor=null;
+  let pages=0;
   do{
     const url=cursor?baseUrl+'&cursor='+encodeURIComponent(cursor):baseUrl;
     const data=await api(url);
     entries=entries.concat(data.entries||[]);
-    cursor=(data.has_more&&data.cursor)?data.cursor:null;
+    const next=(data.has_more&&data.cursor)?data.cursor:null;
+    if(next===cursor) break; // same cursor twice — server bug; stop
+    cursor=next;
+    pages++;
+    if(pages>=_FETCH_ALL_PAGES_MAX){
+      console.warn('_fetchAllPages: page cap reached; returning partial results');
+      break;
+    }
   }while(cursor);
   return entries;
 }
@@ -629,8 +639,20 @@ async function _workspacePathExists(path){
   if(!name) return false;
   const dir=parts.length?parts.join('/'):'.';
   const baseUrl=`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dir)}`;
-  const allEntries=await _fetchAllPages(baseUrl);
-  return allEntries.some(entry=>entry&&((entry.path===path)||entry.name===name));
+  // Short-circuit: check each page as it arrives instead of collecting all pages.
+  let cursor=null;
+  let pages=0;
+  do{
+    const url=cursor?baseUrl+'&cursor='+encodeURIComponent(cursor):baseUrl;
+    const data=await api(url);
+    if((data.entries||[]).some(e=>e&&(e.path===path||e.name===name))) return true;
+    const next=(data.has_more&&data.cursor)?data.cursor:null;
+    if(next===cursor) break;
+    cursor=next;
+    pages++;
+    if(pages>=_FETCH_ALL_PAGES_MAX) break;
+  }while(cursor);
+  return false;
 }
 
 async function openArtifactPath(path){

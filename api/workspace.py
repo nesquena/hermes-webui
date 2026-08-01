@@ -1735,11 +1735,18 @@ def resolve_authorized_escape_request(workspace: Path, session_id: str, token: s
     }
 
 
-def list_authorized_escape_dir(workspace: Path, session_id: str, token: str, rel: str) -> dict:
+def list_authorized_escape_dir(
+    workspace: Path,
+    session_id: str,
+    token: str,
+    rel: str,
+    cursor: str | None = None,
+) -> dict:
     resolved = resolve_authorized_escape_request(workspace, session_id, token, rel)
     external_root = resolved["external_root"]
     external_rel = resolved["external_rel"]
-    entries = list_dir(external_root, external_rel)['entries']
+    page = list_dir(external_root, external_rel, cursor)
+    entries = page["entries"]
     surface_path = resolved["surface_path"]
     external_root_resolved = external_root.resolve()
     for entry in entries:
@@ -1758,6 +1765,8 @@ def list_authorized_escape_dir(workspace: Path, session_id: str, token: str, rel
     return {
         "path": resolved["request_path"],
         "entries": entries,
+        "has_more": page["has_more"],
+        "cursor": page["cursor"],
         "signature": dir_signature(external_root, external_rel, entries),
         "virtual_root": surface_path,
         "read_only": True,

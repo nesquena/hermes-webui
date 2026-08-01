@@ -17058,8 +17058,9 @@ def _handle_escape_list_dir(handler, parsed):
     except KeyError:
         return bad(handler, "Session not found", 404)
     rel_path = qs.get("path", ["."])[0]
+    cursor = qs.get("cursor", [None])[0]
     try:
-        payload = list_authorized_escape_dir(Path(s.workspace), sid, token, rel_path)
+        payload = list_authorized_escape_dir(Path(s.workspace), sid, token, rel_path, cursor)
         return j(handler, payload)
     except FileNotFoundError as exc:
         return bad(handler, _sanitize_error(exc), 404)
