@@ -105,7 +105,31 @@ navigator = {
 };
 """
         if delivery == "service-worker"
-        else "navigator = {};"
+        else (
+            """
+navigator = {
+  serviceWorker: {
+    getRegistration: () => Promise.resolve({
+      active: null,
+      showNotification: (title, options) =>
+        recordNotification('service-worker', title, options),
+    }),
+  },
+};
+"""
+            if delivery == "inactive-service-worker"
+            else (
+                """
+navigator = {
+  serviceWorker: {
+    getRegistration: () => Promise.reject(new Error('registration rejected')),
+  },
+};
+"""
+                if delivery == "rejected-service-worker"
+                else "navigator = {};"
+            )
+        )
     )
     return _run_node(
         f"""
@@ -114,7 +138,7 @@ let navigator = {{}};
 {show_notification}
 {send_notification}
 {registration}
-globalThis.S = {{session: {{session_id: {json.dumps(FIXTURE['sid'])}}}}};
+globalThis.S = {{session: {{}}}};
 globalThis.location = {{
   origin: 'https://webui.test',
   href: 'https://webui.test/',
@@ -128,12 +152,15 @@ globalThis.Notification = function(title, options) {{
   return recordNotification('direct', title, options);
 }};
 globalThis.Notification.permission = {json.dumps(permission)};
+globalThis.window.Notification = globalThis.Notification;
+globalThis.t = key => key;
 {delivery_setup}
 
 (async () => {{
   for (const send of {json.dumps(sends)}) {{
     if ({json.dumps(via_public_sender)}) {{
-      sendBrowserNotification(send.title, send.body, {{...send.options, force: true}});
+      await sendBrowserNotification(send.title, send.body, {{...send.options, force: true}});
+      await new Promise(resolve => setImmediate(resolve));
     }} else {{
       await _showPwaNotification(send.title, send.body, send.options);
     }}
@@ -164,6 +191,7 @@ def test_reported_two_test_clicks_request_second_toast_with_stable_tag():
             _send(FIXTURE["title"], FIXTURE["body"]),
             _send(FIXTURE["title"], "The task finished again."),
         ],
+        via_public_sender=True,
     )
 
     assert result["toasts"] == 2
@@ -199,6 +227,36 @@ def test_direct_fallback_preserves_payload():
     assert call["options"]["data"]["url"] == FIXTURE["expected_url"]
 
 
+def test_direct_delivery_renotifies_repeated_constructor_calls():
+    result = _driver(
+        delivery="direct",
+        sends=[
+            _send(FIXTURE["title"], FIXTURE["body"]),
+            _send(FIXTURE["title"], "The task finished again."),
+        ],
+        via_public_sender=True,
+    )
+
+    assert [call["method"] for call in result["calls"]] == ["direct", "direct"]
+    assert result["toasts"] == 2
+    assert result["entryCount"] == 1
+    assert result["tags"] == [FIXTURE["expected_tag"]]
+
+
+@pytest.mark.parametrize("delivery", ["inactive-service-worker", "rejected-service-worker"])
+def test_direct_fallback_when_service_worker_registration_unavailable(delivery: str):
+    result = _driver(
+        delivery=delivery,
+        sends=[_send("Clarification needed", "Choose a value.")],
+        via_public_sender=True,
+    )
+
+    call = result["calls"][0]
+    assert call["method"] == "direct"
+    assert call["options"]["tag"] == FIXTURE["expected_tag"]
+    assert call["options"]["renotify"] is True
+
+
 def test_categories_and_denial_keep_existing_behavior():
     result = _driver(
         delivery="service-worker",
@@ -231,3 +289,14 @@ def test_grouping_keeps_one_notification_entry():
 
     assert result["entryCount"] == 1
     assert result["tags"] == [FIXTURE["expected_tag"]]
+
+
+def test_missing_session_id_uses_generic_grouping_tag():
+    result = _driver(
+        delivery="direct",
+        sends=[_send("Approval required", "Approve the tool call.", sid=None)],
+    )
+
+    call = result["calls"][0]
+    assert call["options"]["tag"] == FIXTURE["generic_tag"]
+    assert call["options"]["data"]["url"] == FIXTURE["generic_url"]
