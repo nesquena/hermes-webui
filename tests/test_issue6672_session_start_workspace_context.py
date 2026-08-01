@@ -19,6 +19,33 @@ def _legacy_payload(session_id, workspace, *, messages=None):
     }
 
 
+def _isolate_session_store(tmp_path, monkeypatch):
+    from api import models, routes
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    sessions = OrderedDict()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", sessions)
+    monkeypatch.setattr(routes, "SESSIONS", sessions)
+    return session_dir, sessions
+
+
+def _invoke_post_route(monkeypatch, path, body):
+    from api import routes
+
+    captured = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: body)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, **_kwargs: captured.update(
+        payload=payload, status=status
+    ) or payload)
+    routes.handle_post(SimpleNamespace(command="POST"), SimpleNamespace(path=path))
+    return captured
+
+
 def test_reported_mid_session_switch_keeps_streaming_composer_prefix(tmp_path):
     from api import streaming
     from api.models import Session
@@ -300,6 +327,113 @@ def test_session_lineage_variants_inherit_the_session_start_workspace(tmp_path):
         routes._session_start_workspace_for_child(variant) == str(initial.resolve())
         for variant in variants
     )
+
+
+def test_duplicate_route_constructs_child_with_frozen_workspace(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.models import Session
+
+    session_dir, sessions = _isolate_session_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_args, **_kwargs: None)
+    initial = tmp_path / "initial-workspace"
+    changed = tmp_path / "changed-workspace"
+    source = Session(
+        session_id="issue6672-duplicate-route",
+        workspace=changed,
+        session_start_workspace=initial,
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    source.save(skip_index=True)
+    sessions[source.session_id] = source
+
+    captured = _invoke_post_route(
+        monkeypatch,
+        "/api/session/duplicate",
+        {"session_id": source.session_id},
+    )
+
+    child_id = captured["payload"]["session"]["session_id"]
+    child = models.Session.load(child_id)
+    assert captured["status"] == 200
+    assert child.session_id != source.session_id
+    assert child.workspace == str(changed)
+    assert child.session_start_workspace == str(initial)
+    assert (session_dir / f"{child_id}.json").exists()
+
+
+def test_fork_route_constructs_child_with_frozen_workspace(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.models import Session
+
+    session_dir, sessions = _isolate_session_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_args, **_kwargs: None)
+    initial = tmp_path / "initial-workspace"
+    changed = tmp_path / "changed-workspace"
+    source = Session(
+        session_id="issue6672-fork-route",
+        workspace=changed,
+        session_start_workspace=initial,
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    source.save(skip_index=True)
+    sessions[source.session_id] = source
+
+    captured = _invoke_post_route(
+        monkeypatch,
+        "/api/session/branch",
+        {"session_id": source.session_id, "keep_count": 1},
+    )
+
+    child_id = captured["payload"]["session_id"]
+    child = models.Session.load(child_id)
+    assert captured["status"] == 200
+    assert child.parent_session_id == source.session_id
+    assert child.workspace == str(changed)
+    assert child.session_start_workspace == str(initial)
+    assert (session_dir / f"{child_id}.json").exists()
+
+
+def test_compression_recovery_constructs_child_with_frozen_workspace(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.compression_recovery import stamp_compression_exhausted_recovery
+    from api.models import Session
+
+    session_dir, sessions = _isolate_session_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_args, **_kwargs: None)
+    initial = tmp_path / "initial-workspace"
+    changed = tmp_path / "changed-workspace"
+    source = Session(
+        session_id="issue6672-compression-route",
+        workspace=changed,
+        session_start_workspace=initial,
+        profile="default",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    stamp_compression_exhausted_recovery(source, message="Context length exceeded.")
+    source.save(skip_index=True)
+    sessions[source.session_id] = source
+
+    handler = SimpleNamespace()
+    captured = {}
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200, **_kwargs: captured.update(
+            payload=payload, status=status
+        ) or payload,
+    )
+    routes._handle_session_compression_recovery_start(handler, {"session_id": source.session_id})
+
+    child_id = captured["payload"]["session"]["session_id"]
+    child = models.Session.load(child_id)
+    assert captured["status"] == 200
+    assert child.parent_session_id == source.session_id
+    assert child.compression_recovery_source_session_id == source.session_id
+    assert child.workspace == str(changed)
+    assert child.session_start_workspace == str(initial)
+    assert (session_dir / f"{child_id}.json").exists()
 
 
 def test_workspace_prompt_helper_keeps_sync_and_gateway_consumers_on_same_authority(tmp_path):

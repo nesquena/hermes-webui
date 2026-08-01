@@ -468,7 +468,7 @@ def test_gateway_runs_api_streaming_parses_real_run_events():
     run_body = json.loads(run_req.data.decode("utf-8"))
     assert run_req.full_url == "http://gw:8642/v1/runs"
     assert run_req.get_header("Authorization") == "Bearer secret"
-    assert run_body["input"] == "hi"
+    assert run_body["input"] == "[Workspace::v1: /tmp]\nhi"
     assert run_body["instructions"] == "system prompt"
     assert run_body["conversation_history"] == [{"role": "assistant", "content": "earlier reply"}]
     assert run_body["provider"] == "anthropic"
