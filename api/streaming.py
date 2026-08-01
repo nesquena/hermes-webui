@@ -6420,6 +6420,7 @@ def _merge_display_messages_after_agent_result(
             and (
                 _message_identity(merged[-1]) == current_user_key
                 or _looks_like_current_user_turn(merged[-1], msg_text)
+                or current_user_already_checkpointed
             )
         ):
             # Eager session-save mode can checkpoint the current user turn
@@ -7015,6 +7016,11 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     stamp_message_source(recovered, pending_source)
     if pending_attachments:
         recovered['attachments'] = pending_attachments
+    _assign_stable_message_ids(
+        [recovered],
+        getattr(session, "messages", None),
+        getattr(session, "context_messages", None),
+    )
     session.messages.append(recovered)
     # Mirror to context_messages so the _recovered flag survives the state.db
     # round-trip (#4283).  state.db has no _recovered column, so without this
@@ -11972,6 +11978,11 @@ def cancel_stream(stream_id: str) -> bool:
                             stamp_message_source(_user_turn, _pending_source)
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
+                            _assign_stable_message_ids(
+                                [_user_turn],
+                                _msgs_for_recovery,
+                                getattr(_cs, 'context_messages', None),
+                            )
                             _msgs_for_recovery.append(_user_turn)
                 except Exception:
                     logger.debug(

@@ -8909,6 +8909,36 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     return sidecar_messages
 
 
+def _regeneration_display_messages(session) -> list:
+    """Build the same full display coordinate space served by GET /api/session."""
+    cli_meta = (
+        _lookup_cli_session_metadata(session.session_id)
+        if _session_requires_cli_metadata_lookup(session)
+        else {}
+    )
+    is_messaging_session = (
+        _is_messaging_session_record(session)
+        or _is_messaging_session_record(cli_meta)
+    )
+    if is_messaging_session:
+        return _merged_session_messages_for_display(
+            session,
+            get_cli_session_messages(session.session_id),
+        )
+    state_db_messages = get_state_db_session_messages(
+        session.session_id,
+        profile=getattr(session, "profile", None),
+        limit=_state_db_backstop_limit_for_display(session, None),
+    )
+    display_messages = merge_session_messages_append_only(
+        _webui_sidecar_lineage_messages_for_display(session),
+        state_db_messages,
+        truncation_watermark=getattr(session, "truncation_watermark", None),
+        truncation_boundary=getattr(session, "truncation_boundary", None),
+    )
+    return _merged_webui_lineage_messages_for_display(session, display_messages)
+
+
 class _RegenerationTargetConflict(ValueError):
     """A browser regeneration claim no longer names the retained server row."""
 
@@ -8923,21 +8953,7 @@ def _display_keep_count_to_session_keep(
     regenerate_target=None,
 ) -> int:
     """Translate the GET /api/session display prefix into child-local storage."""
-    cli_meta = (
-        _lookup_cli_session_metadata(session.session_id)
-        if _session_requires_cli_metadata_lookup(session)
-        else {}
-    )
-    is_messaging_session = (
-        _is_messaging_session_record(session)
-        or _is_messaging_session_record(cli_meta)
-    )
-    cli_messages = (
-        get_cli_session_messages(session.session_id)
-        if is_messaging_session
-        else []
-    )
-    display_messages = _merged_session_messages_for_display(session, cli_messages)
+    display_messages = _regeneration_display_messages(session)
     if display_keep_count > len(display_messages):
         raise _RegenerationTargetConflict(
             "Regeneration target is no longer available in this session."
@@ -9014,9 +9030,12 @@ def _public_session_messages(messages) -> list:
         if not isinstance(message, dict):
             public.append(message)
             continue
-        row = copy.deepcopy(message)
-        row.pop("_active_turn_token", None)
-        public.append(row)
+        if "_active_turn_token" not in message:
+            public.append(message)
+        else:
+            row = dict(message)
+            row.pop("_active_turn_token", None)
+            public.append(row)
     return public
 
 
@@ -9065,7 +9084,7 @@ def _regeneration_target_row(session, target) -> dict:
         )
     retained = matches[0]
 
-    display = _merged_session_messages_for_display(session)
+    display = _regeneration_display_messages(session)
     if len(display) != display_keep_count or display_index >= len(display):
         raise _RegenerationTargetConflict(
             "Session changed while regeneration was being prepared."
@@ -9851,6 +9870,7 @@ from api.streaming import (
     _run_agent_streaming,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
+    _assign_stable_message_ids,
     generate_session_title_for_session,
     _compact_for_echo_compare,
     _strip_compact_echo_suffix,
@@ -15340,7 +15360,7 @@ def handle_post(handler, parsed) -> bool:
         from api.config import _evict_session_agent
         _evict_session_agent(body["session_id"])
         return j(
-            handler, {"ok": True, "session": s.compact() | {"messages": s.messages}}
+            handler, {"ok": True, "session": s.compact() | {"messages": _public_session_messages(s.messages)}}
         )
 
     if parsed.path == "/api/session/branch":
@@ -21152,6 +21172,11 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
         user_msg["timestamp"] = float(started_at)
     if attachments:
         user_msg["attachments"] = list(attachments)
+    _assign_stable_message_ids(
+        [user_msg],
+        existing,
+        getattr(s, "context_messages", None),
+    )
     s.messages.append(user_msg)
     # The new user turn is now committed to messages (#3831): advance the
     # truncation watermark to the new message's timestamp so that
@@ -21483,9 +21508,10 @@ def _start_chat_stream_for_session(
                         "code": exc.code,
                         "_status": 409,
                     }
-                msg = prepared_turn["message"]
-                attachments = prepared_turn["attachments"]
-                source = prepared_turn["source"]
+                if isinstance(prepared_turn, dict):
+                    msg = prepared_turn["message"]
+                    attachments = prepared_turn["attachments"]
+                    source = prepared_turn["source"]
                 break
         if needs_stale_cleanup:
             diag.stage("stale_stream_cleanup") if diag else None
@@ -21669,6 +21695,12 @@ def _start_run(
     )
 
     if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
+        if regenerate_target is not None and runtime_adapter_runner_enabled():
+            return {
+                "error": "Regeneration is not supported by the runner backend.",
+                "code": "stale_regeneration_target",
+                "_status": 409,
+            }
         def _legacy_start_run(request: StartRunRequest) -> dict:
             return _start_chat_stream_for_session(
                 s,

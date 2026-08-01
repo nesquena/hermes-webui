@@ -1663,6 +1663,7 @@ async function send(){
       if(String(_priorId)!==String(_regenTarget.message_id)
          || _prior.timestamp!==_regenTarget.timestamp) {
         _sendInProgress = false; _sendInProgressSid = null;
+        setStatus(t('regen_stale_target'));
         return;
       }
       userMsg = Object.assign({}, _prior, {_pending: true});
@@ -1675,6 +1676,7 @@ async function send(){
       // non-user row at the captured index): fail closed — do not append into the
       // wrong session (#6611).
       _sendInProgress = false; _sendInProgressSid = null;
+      setStatus(t('regen_stale_target'));
       return;
     } else {
       S.messages.push(userMsg);

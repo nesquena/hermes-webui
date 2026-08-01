@@ -790,14 +790,18 @@ def _settle_gateway_public_error(
     public_error,
 ):
     """Persist one terminal turn, then retain the gateway-specific wire error."""
-    settled = _settle_gateway_terminal_error(
-        session_id,
-        stream_id,
-        workspace,
-        model,
-        model_provider,
-        terminal_error,
-    )
+    try:
+        settled = _settle_gateway_terminal_error(
+            session_id,
+            stream_id,
+            workspace,
+            model,
+            model_provider,
+            terminal_error,
+        )
+    except Exception:
+        logger.debug("Failed to settle gateway terminal error; returning public error", exc_info=True)
+        return dict(public_error or {})
     if settled is None:
         return None
     payload = dict(public_error or {})

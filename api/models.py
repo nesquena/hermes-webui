@@ -935,6 +935,12 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
     stamp_message_source(recovered, pending_source)
     if session.pending_attachments:
         recovered['attachments'] = list(session.pending_attachments)
+    from api.streaming import _assign_stable_message_ids
+    _assign_stable_message_ids(
+        [recovered],
+        getattr(session, "messages", None),
+        getattr(session, "context_messages", None),
+    )
     session.messages.append(recovered)
     _append_recovered_turn_to_context(session, recovered)
     # The new user turn is now committed to messages (#3831): advance the

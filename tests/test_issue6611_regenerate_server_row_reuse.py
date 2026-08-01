@@ -246,6 +246,57 @@ def test_public_terminal_payload_strips_internal_token_but_disk_retains_it():
     assert "_active_turn_token" in loaded.messages[0]
 
 
+def test_recovered_pending_user_rows_receive_regeneration_identity():
+    session = _session(messages=[])
+    session.pending_user_message = "failed prompt"
+    session.pending_started_at = 1700000200.5
+    session.pending_user_source = "webui"
+
+    assert streaming._materialize_pending_user_turn_before_error(session) is True
+    recovered = session.messages[0]
+    assert recovered["role"] == "user"
+    assert recovered["id"] is not None
+
+    restart = _session(session_id="restart-recovered", messages=[])
+    restart.pending_user_message = "restart prompt"
+    restart.pending_started_at = 1700000300.5
+    restart.pending_user_source = "webui"
+    recovered = models._append_recovered_pending_turn(restart)
+    assert recovered is restart.messages[0]
+    assert recovered["id"] is not None
+
+
+def test_display_mapping_includes_state_db_rows_used_by_session_get(monkeypatch):
+    session = _session(
+        session_id="state-db-display",
+        messages=[{"id": "u1", "role": "user", "content": "one", "timestamp": 1.0}],
+    )
+    state_rows = [
+        session.messages[0],
+        {"id": "a1", "role": "assistant", "content": "answer", "timestamp": 2.0},
+    ]
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *args, **kwargs: state_rows)
+    display = routes._regeneration_display_messages(session)
+    assert [row["id"] for row in display] == ["u1", "a1"]
+    target = {
+        "session_id": session.session_id,
+        "message_id": "u1",
+        "timestamp": 1.0,
+        "display_index": 0,
+        "display_keep_count": 2,
+    }
+    assert routes._regeneration_target_row(session, target)["id"] == "u1"
+    assert routes._display_keep_count_to_session_keep(session, 2, target) == 1
+
+
+def test_display_truncate_response_strips_active_turn_token():
+    session = _session()
+    _prepare(session, _target(session))
+    public = routes._public_session_messages(session.messages)
+    assert "_active_turn_token" not in public[0]
+    assert "_active_turn_token" in session.messages[0]
+
+
 def test_get_session_route_redacts_internal_token(monkeypatch):
     session = _session()
     _prepare(session, _target(session))
@@ -330,6 +381,64 @@ def test_runtime_adapter_legacy_closure_forwards_regeneration_target(monkeypatch
 
     assert response["stream_id"] == "adapter-stream"
     assert captured["regenerate_target"] == target
+
+
+def test_runtime_adapter_runner_rejects_regeneration_claim(monkeypatch):
+    import api.runtime_adapter as runtime_adapter
+
+    session = _session(session_id="runner-regen")
+    target = _target(session)
+    monkeypatch.setattr(runtime_adapter, "runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr(runtime_adapter, "runtime_adapter_runner_enabled", lambda: True)
+
+    response = routes._start_run(
+        session,
+        msg="same prompt",
+        attachments=[],
+        workspace=session.workspace,
+        model=session.model,
+        model_provider=None,
+        normalized_model=False,
+        source="webui",
+        route="/api/chat/start",
+        regenerate_target=target,
+    )
+
+    assert response == {
+        "error": "Regeneration is not supported by the runner backend.",
+        "code": "stale_regeneration_target",
+        "_status": 409,
+    }
+
+
+def test_local_settlement_deduplicates_echoed_user_after_intermediate_tool_rows():
+    session = _session(messages=FIXTURE["transcript"][:1])
+    _prepare(session, _target(session))
+    session.messages.extend(
+        [
+            {"role": "assistant", "content": "tool call", "timestamp": 1700000101.0},
+            {"role": "tool", "content": "tool result", "timestamp": 1700000102.0},
+        ]
+    )
+    previous_display = copy.deepcopy(session.messages)
+    previous_context = copy.deepcopy(session.context_messages)
+    identity = streaming._active_turn_authority(session, "regen-stream", "same prompt")
+    result = previous_context + [
+        {"role": "user", "content": "same prompt", "timestamp": 1700000100.875},
+        {"role": "assistant", "content": "new answer", "timestamp": 1700000103.0},
+    ]
+
+    streaming._settle_result_messages(
+        session,
+        previous_display,
+        previous_context,
+        result,
+        "same prompt",
+        "webui",
+        identity,
+    )
+
+    assert len([row for row in session.messages if row.get("role") == "user"]) == 1
 
 
 def test_provider_history_drops_token_row_without_touching_earlier_identical_prompt():
