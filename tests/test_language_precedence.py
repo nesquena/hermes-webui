@@ -628,7 +628,7 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
           let generation = 1;
           const requests = [];
           let applyCount = 0;
-          let supersedeNext = false;
+          let releasePost;
           let saveMode = true;
           const ctx = {{
             console,
@@ -639,16 +639,14 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
             getActiveLocale: () => active,
             getLocaleActivationGeneration: () => generation,
             activateLocale: async (requested) => {{
-              if (supersedeNext) {{ supersedeNext = false; generation++; return {{status: 'superseded', requested, active, generation: generation - 1}}; }}
-              return {{status: 'applied', requested, active: requested, generation}};
+              if (requested !== active) {{ generation++; active = requested; }}
+              return {{status: 'applied', requested, active, generation}};
             }},
             api: (path, options) => {{
               if (options && options.method === 'POST') {{
                 const body = JSON.parse(options.body);
                 requests.push(body);
-                generation++;
-                active = 'fr';
-                return Promise.resolve({{...body, language: body.language}});
+                return new Promise((resolve) => {{ releasePost = () => resolve({{...body, language: body.language}}); }});
               }}
               return Promise.resolve({{language: 'de', theme: 'dark', skin: 'default'}});
             }},
@@ -702,27 +700,30 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
           vm.runInContext({json.dumps(combined_sources)}, ctx);
 
           const normal = vm.runInContext("saveSettings(false)", ctx);
-          await normal;
+          await new Promise((resolve) => setImmediate(resolve));
+          const selectorChange = vm.runInContext("_settleSettingsLocale('fr', $('settingsLanguage'))", ctx);
+          await new Promise((resolve) => setImmediate(resolve));
+          const normalHeld = requests.length === 1;
+          releasePost();
+          await Promise.all([normal, selectorChange]);
+          const normalAfter = selector.value;
+
           elements.settingsPassword.value = 'secret';
           const password = vm.runInContext("saveSettings(false)", ctx);
-          await password;
-
-          selector.value = 'fr';
-          supersedeNext = true;
-          const selectorSettlement = await vm.runInContext("_settleSettingsLocale('fr', $('settingsLanguage'))", ctx);
-          const selectorAfter = selector.value;
-
+          await new Promise((resolve) => setImmediate(resolve));
           selector.value = 'de';
+          const passwordSelectorChange = vm.runInContext("_settleSettingsLocale('de', $('settingsLanguage'))", ctx);
+          await new Promise((resolve) => setImmediate(resolve));
+          const passwordHeld = requests.length === 2;
+          releasePost();
+          await Promise.all([password, passwordSelectorChange]);
+          const passwordAfter = selector.value;
+
           saveMode = false;
-          supersedeNext = true;
           await vm.runInContext("loadSettingsPanel()", ctx);
           const loadAfter = selector.value;
-
-          const applied = vm.runInContext("_applySavedSettingsUi({{}}, {{language: 'de'}}, {{language: 'de'}})", ctx);
-          supersedeNext = true;
-          await applied;
-          const uiAfter = {{selector: selector.value, applyCount}};
-          process.stdout.write(JSON.stringify({{requests, selectorSettlement, selectorAfter, loadAfter, uiAfter}}));
+          const uiAfter = await vm.runInContext("(async () => {{ const body={{language:'fr'}}; await _applySavedSettingsUi({{}}, body, {{language:'fr'}}); return {{selector: $('settingsLanguage').value, bodyLanguage: body.language}}; }})()", ctx);
+          process.stdout.write(JSON.stringify({{requests, normalHeld, passwordHeld, normalAfter, passwordAfter, loadAfter, uiAfter}}));
         }})()
         """
     )
@@ -732,7 +733,10 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
     assert [request["language"] for request in result["requests"]] == ["de", "fr"]
     assert result["requests"][0]["language"] == "de"
     assert result["requests"][1]["language"] == "fr"
-    assert result["selectorSettlement"]["status"] == "superseded"
-    assert result["selectorAfter"] == "fr"
+    assert result["normalHeld"] is True
+    assert result["passwordHeld"] is True
+    assert result["normalAfter"] == "fr"
+    assert result["passwordAfter"] == "de"
     assert result["loadAfter"] == "de"
-    assert result["uiAfter"]["selector"] == "fr"
+    assert result["uiAfter"]["selector"] == "de"
+    assert result["uiAfter"]["bodyLanguage"] == "de"
