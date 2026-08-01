@@ -26088,6 +26088,7 @@ def _handle_session_import(handler, body):
     s = Session(
         title=title,
         workspace=workspace,
+        session_start_workspace=body.get("session_start_workspace") or workspace,
         model=model,
         messages=messages,
         tool_calls=body.get("tool_calls", []),

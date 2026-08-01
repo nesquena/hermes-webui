@@ -1114,6 +1114,7 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
 def _load_session_from_path(path: Path) -> "Session | None":
     """Load a session from an explicit JSON path without consulting SESSION_DIR."""
     try:
+        _pre_read_sig = _sidecar_stat_signature(path)
         data = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
         return None
@@ -1122,7 +1123,7 @@ def _load_session_from_path(path: Path) -> "Session | None":
             path,
             data,
             session_id=data.get('session_id'),
-            expected_sig=_sidecar_stat_signature(path),
+            expected_sig=_pre_read_sig,
         )
     data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
     return Session(**data)

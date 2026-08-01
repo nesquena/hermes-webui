@@ -3,6 +3,8 @@
 import json
 from collections import OrderedDict
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import urlparse
 
 
 def _legacy_payload(session_id, workspace, *, messages=None):
@@ -89,7 +91,10 @@ def test_session_start_workspace_round_trips_and_legacy_sidecar_freezes_once(tmp
 def test_explicit_path_legacy_load_persists_session_start_workspace(tmp_path, monkeypatch):
     from api import models
 
-    path = tmp_path / "imported-session.json"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    path = session_dir / "issue6672explicit.json"
     path.write_text(
         json.dumps(_legacy_payload("issue6672explicit", tmp_path / "imported-workspace")),
         encoding="utf-8",
@@ -106,7 +111,10 @@ def test_legacy_migration_skips_a_changed_sidecar(tmp_path, monkeypatch):
     from api import models
 
     sid = "issue6672race"
-    path = tmp_path / f"{sid}.json"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    path = session_dir / f"{sid}.json"
     path.write_text(json.dumps(_legacy_payload(sid, tmp_path / "old-workspace")), encoding="utf-8")
     concurrent = _legacy_payload(sid, tmp_path / "concurrent-workspace")
     calls = {"count": 0}
@@ -117,10 +125,10 @@ def test_legacy_migration_skips_a_changed_sidecar(tmp_path, monkeypatch):
             candidate.write_text(json.dumps(concurrent), encoding="utf-8")
         return ("before",) if calls["count"] == 1 else ("after",)
 
-    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
     monkeypatch.setattr(models, "_sidecar_stat_signature", signature_with_concurrent_write)
 
-    loaded = models.Session.load(sid)
+    loaded = models._load_session_from_path(path)
 
     assert loaded.workspace == str((tmp_path / "old-workspace").resolve())
     persisted = json.loads(path.read_text(encoding="utf-8"))
@@ -130,27 +138,108 @@ def test_legacy_migration_skips_a_changed_sidecar(tmp_path, monkeypatch):
 
 def test_current_turn_workspace_remains_authoritative_for_file_ops(tmp_path, monkeypatch):
     from api import models
+    from api import routes
     from api.models import Session
 
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
-    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    sessions = OrderedDict()
+    monkeypatch.setattr(models, "SESSIONS", sessions)
+    monkeypatch.setattr(routes, "SESSIONS", sessions)
     initial = tmp_path / "initial-workspace"
     changed = tmp_path / "changed-workspace"
     changed.mkdir()
     session = Session(session_id="issue6672fileops", workspace=initial)
     session.save(skip_index=True)
+    sessions[session.session_id] = session
     session.workspace = str(changed.resolve())
     session.save(skip_index=True)
 
-    authorized = models.get_session_for_file_ops(session.session_id)
-    marker = Path(authorized.workspace) / "authorized-write.txt"
-    marker.write_text("changed workspace", encoding="utf-8")
+    marker = changed / "authorized-write.txt"
+    marker.write_text("initial", encoding="utf-8")
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
+    result = routes._handle_file_save(
+        object(),
+        {
+            "session_id": session.session_id,
+            "path": marker.name,
+            "content": "changed workspace",
+        },
+    )
 
-    assert authorized.workspace == str(changed.resolve())
+    assert result["ok"] is True
     assert marker.read_text(encoding="utf-8") == "changed workspace"
+
+
+def test_session_import_export_preserves_session_start_workspace(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    sessions = OrderedDict()
+    monkeypatch.setattr(models, "SESSIONS", sessions)
+    monkeypatch.setattr(routes, "SESSIONS", sessions)
+    monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: Path(value).resolve())
+
+    initial = tmp_path / "initial-workspace"
+    current = tmp_path / "current-workspace"
+    current.mkdir()
+    source = Session(
+        session_id="issue6672export",
+        workspace=current,
+        session_start_workspace=initial,
+        messages=[{"role": "user", "content": "hello"}],
+        profile="default",
+    )
+    source.save(skip_index=True)
+    sessions[source.session_id] = source
+
+    class ExportHandler:
+        def __init__(self):
+            self.headers = {}
+            self.wfile = SimpleNamespace(write=self._write)
+            self.body = b""
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, name, value):
+            self.headers[name] = value
+
+        def end_headers(self):
+            pass
+
+        def _write(self, data):
+            self.body += data
+
+    export_handler = ExportHandler()
+    monkeypatch.setattr(routes, "get_session", lambda _sid: source)
+    routes._handle_session_export(
+        export_handler,
+        urlparse(f"/api/session/export?session_id={source.session_id}"),
+    )
+    exported = json.loads(export_handler.body)
+    assert exported["session_start_workspace"] == str(initial.resolve())
+
+    imported_payload = {}
+
+    def capture_json(_handler, payload, **_kwargs):
+        imported_payload.update(payload)
+        return payload
+
+    monkeypatch.setattr(routes, "j", capture_json)
+    routes._handle_session_import(object(), exported)
+    imported = sessions[imported_payload["session"]["session_id"]]
+
+    assert imported.session_start_workspace == str(initial.resolve())
+    assert Session.load(imported.session_id).session_start_workspace == str(initial.resolve())
 
 
 def test_session_lineage_variants_inherit_the_session_start_workspace(tmp_path):
@@ -235,17 +324,21 @@ def test_sync_chat_consumer_uses_frozen_context_and_current_turn_prefix(tmp_path
     import api.oauth
     from api import routes
     from api import streaming
+    from api import models
     from api.models import Session
 
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
-    monkeypatch.setattr(api.config, "SESSION_DIR", session_dir)
-    monkeypatch.setattr(api.config, "SESSION_INDEX_FILE", session_dir / "_index.json")
-    monkeypatch.setattr(api.config, "SESSIONS", {})
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    sessions = OrderedDict()
+    monkeypatch.setattr(models, "SESSIONS", sessions)
+    monkeypatch.setattr(routes, "SESSIONS", sessions)
     initial = tmp_path / "initial-workspace"
     changed = tmp_path / "changed-workspace"
     session = Session(session_id="issue6672sync", workspace=initial, messages=[])
     session.save(skip_index=True)
+    sessions[session.session_id] = session
     captured = {}
 
     class FakeAgent:

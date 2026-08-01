@@ -1484,6 +1484,7 @@ def test_gateway_runs_api_body_includes_session_id():
                 )
         assert "/v1/runs" in captured["url"]
         assert captured["body"]["session_id"] == "sess-stable-uuid"
+        assert captured["body"]["input"] == "[Workspace::v1: /tmp]\nhi"
     finally:
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
