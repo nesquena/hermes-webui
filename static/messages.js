@@ -1820,7 +1820,7 @@ async function send(){
     explicitPickForPostStart=_explicitPick;
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:_chatSession.session_id,message:msgText,
-      model:_modelState.model,workspace:_chatSession.workspace,
+      model:S.session.model,workspace:_chatSession.workspace,
       model_provider:_modelState.model_provider,
       profile:_chatSession.profile,
       explicit_model_pick:_explicitPick||undefined,

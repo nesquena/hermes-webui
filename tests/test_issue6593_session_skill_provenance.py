@@ -9,6 +9,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from urllib.parse import urlencode
 
+import pytest
 import api.commands as commands
 import api.routes as routes
 from api.models import Session
@@ -209,6 +210,10 @@ def test_provenance_save_failure_does_not_break_content_or_bundle_resolution(mon
 
 
 def test_linked_file_route_survives_provenance_save_failure(monkeypatch, tmp_path):
+    pytest.importorskip(
+        "tools.skills_tool",
+        reason="hermes-agent tools package is unavailable in this environment",
+    )
     session = Session(session_id="issue6593-linked-save-failure", profile="default")
     session.save = lambda **kwargs: (_ for _ in ()).throw(OSError("disk unavailable"))
     skill_dir = tmp_path / "review"
