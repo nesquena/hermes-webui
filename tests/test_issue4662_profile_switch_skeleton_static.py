@@ -365,12 +365,17 @@ class TestSwitchRaceGuards:
         assert bump_idx < wsskel_idx, (
             "the unconditional bump must precede the panel-gated showWorkspaceTreeSkeleton"
         )
-        # loadDir captures + re-checks the generation after BOTH awaited /api/list points
+        # loadDir captures + re-checks the shared owner after BOTH awaited /api/list points
         ld = WORKSPACE[WORKSPACE.index("async function loadDir("):]
         ld = ld[: ld.index("\nfunction refreshWorkspacePanel(")]
-        assert "const treeGen=_wsTreeGen" in ld, "loadDir must capture the tree generation at call time"
-        assert ld.count("treeGen!==_wsTreeGen") >= 2, (
-            "loadDir must re-check the tree generation after BOTH awaited /api/list points "
+        assert "let owner=_workspaceCaptureDirRequestOwner(requestPath)" in ld, (
+            "loadDir must capture a mutable shared request owner at call time"
+        )
+        assert ld.count("_workspaceCaptureDirRequestOwner(requestPath)") >= 2, (
+            "loadDir must recapture ownership after workspace recovery"
+        )
+        assert ld.count("_workspaceRequestOwnerIsCurrent(owner)") >= 2, (
+            "loadDir must re-check the shared owner after BOTH awaited /api/list points "
             "(root render + expanded-dirs prefetch) and discard stale renders"
         )
 

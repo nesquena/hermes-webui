@@ -69,7 +69,7 @@ def test_resolve_chat_workspace_with_recovery_repairs_missing_implicit_workspace
 
     assert resolved == str(fallback.resolve())
     assert session.workspace == str(fallback.resolve())
-    assert str(fallback.resolve()) in sidecar.read_text(encoding="utf-8")
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["workspace"] == str(fallback.resolve())
 
 
 def test_chat_recovery_persistence_failure_fails_closed(monkeypatch, tmp_path):
@@ -207,10 +207,10 @@ def test_list_dir_recovers_missing_implicit_session_workspace(monkeypatch, tmp_p
     monkeypatch.setattr(routes, "get_session", lambda _sid: session)
     monkeypatch.setattr(routes, "get_last_workspace", lambda: str(fallback))
 
-    def fake_list_dir(workspace_path, rel_path):
+    def fake_list_dir(workspace_path, rel_path, cursor=None):
         captured["workspace"] = workspace_path
         captured["rel_path"] = rel_path
-        return []
+        return {"entries": [], "has_more": False, "cursor": None}
 
     monkeypatch.setattr(routes, "list_dir", fake_list_dir)
     monkeypatch.setattr(routes, "dir_signature", lambda *_args: "sig")
@@ -222,9 +222,11 @@ def test_list_dir_recovers_missing_implicit_session_workspace(monkeypatch, tmp_p
 
     assert captured == {"workspace": fallback.resolve(), "rel_path": "."}
     assert session.workspace == str(fallback.resolve())
-    assert str(fallback.resolve()) in sidecar.read_text(encoding="utf-8")
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["workspace"] == str(fallback.resolve())
     assert payload == {
         "entries": [],
+        "has_more": False,
+        "cursor": None,
         "signature": "sig",
         "path": ".",
         "workspace": str(fallback.resolve()),
@@ -256,9 +258,9 @@ def test_list_recovery_stays_bound_when_global_fallback_changes(
     monkeypatch.setattr(
         routes, "get_last_workspace", lambda: selected["workspace"]
     )
-    def capture_list(workspace_path, _rel):
+    def capture_list(workspace_path, _rel, cursor=None):
         captured["listed"] = workspace_path
-        return []
+        return {"entries": [], "has_more": False, "cursor": None}
 
     monkeypatch.setattr(routes, "list_dir", capture_list)
     monkeypatch.setattr(routes, "dir_signature", lambda *_args: "sig")
@@ -272,7 +274,7 @@ def test_list_recovery_stays_bound_when_global_fallback_changes(
     assert payload["workspace"] == str(fallback_a.resolve())
     assert session.workspace == str(fallback_a.resolve())
     assert captured["listed"] == fallback_a.resolve()
-    assert str(fallback_a.resolve()) in sidecar.read_text(encoding="utf-8")
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["workspace"] == str(fallback_a.resolve())
 
 
 def test_persisted_list_recovery_anchors_later_create_dir_to_fallback_a(
@@ -440,9 +442,9 @@ def test_list_dir_preserves_remote_workspace_rejection(
         calls["fallback"] += 1
         return fallback_path
 
-    def fake_list_dir(*_args):
+    def fake_list_dir(*_args, **_kwargs):
         calls["list_dir"] += 1
-        return []
+        return {"entries": [], "has_more": False, "cursor": None}
 
     monkeypatch.setattr(routes, "get_last_workspace", fallback)
     monkeypatch.setattr(routes, "list_dir", fake_list_dir)

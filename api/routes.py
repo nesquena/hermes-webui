@@ -16978,12 +16978,16 @@ def _handle_list_dir(handler, parsed):
                 )
                 workspace = Path(persisted.workspace)
         rel_path = qs.get("path", ["."])[0]
-        entries = list_dir(Path(workspace), rel_path)
+        cursor = qs.get("cursor", [None])[0] or None
+        result = list_dir(Path(workspace), rel_path, cursor=cursor)
+        entries = result["entries"]
         return j(
             handler,
             {
                 "entries": entries,
-                "signature": dir_signature(Path(workspace), rel_path, entries),
+                "has_more": result["has_more"],
+                "cursor": result["cursor"],
+                "signature": dir_signature(Path(workspace), rel_path),
                 "path": rel_path,
                 "workspace": str(workspace),
                 "workspace_recovered": recovered,
@@ -17054,8 +17058,9 @@ def _handle_escape_list_dir(handler, parsed):
     except KeyError:
         return bad(handler, "Session not found", 404)
     rel_path = qs.get("path", ["."])[0]
+    cursor = qs.get("cursor", [None])[0]
     try:
-        payload = list_authorized_escape_dir(Path(s.workspace), sid, token, rel_path)
+        payload = list_authorized_escape_dir(Path(s.workspace), sid, token, rel_path, cursor)
         return j(handler, payload)
     except FileNotFoundError as exc:
         return bad(handler, _sanitize_error(exc), 404)

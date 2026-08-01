@@ -197,10 +197,6 @@ function _workspaceEscapeGrantForPath(path){
   for(const root of Object.keys(grants)){
     const grant = grants[root];
     if(!grant || grant.sessionId !== sessionId) continue;
-    if(grant.expiresAt && Date.now() >= grant.expiresAt){
-      delete grants[root];
-      continue;
-    }
     if(!_isSameOrChildPath(root, normalizedPath)) continue;
     if(!best || root.length > best.root.length) best = {root, grant};
   }
@@ -268,11 +264,17 @@ function _workspaceRouteForPathRel(path, kind, opts={}){
     params.set('token', grant.token);
     if(kind === 'raw' && opts.download) params.set('download', '1');
     if(kind === 'raw' && opts.inline) params.set('inline', '1');
+    if(kind === 'list' && opts.cursor) params.set('cursor', String(opts.cursor));
     if(kind === 'list') return `/api/escape/list?${params.toString()}`;
     if(kind === 'read') return `/api/escape/file/read?${params.toString()}`;
     if(kind === 'raw') return `/api/escape/file/raw?${params.toString()}`;
   }
-  if(kind === 'list') return `/api/list?session_id=${sessionId}&path=${encodeURIComponent(normalizedPath || '.')}`;
+  if(kind === 'list'){
+    const cursor = opts.cursor
+      ? `&cursor=${encodeURIComponent(String(opts.cursor))}`
+      : '';
+    return `/api/list?session_id=${sessionId}&path=${encodeURIComponent(normalizedPath || '.')}${cursor}`;
+  }
   if(kind === 'read') return `/api/file?session_id=${sessionId}&path=${encodeURIComponent(normalizedPath || '.')}`;
   if(kind === 'raw'){
     const extra = [];
@@ -609,14 +611,42 @@ function renderSessionArtifacts(){
   }).join('');
 }
 
+// Follow all cursor pages and return the union of entries.
+async function _fetchAllPages(baseUrl){
+  let entries=[];
+  let cursor=null;
+  do{
+    const url=cursor?baseUrl+'&cursor='+encodeURIComponent(cursor):baseUrl;
+    const data=await api(url);
+    entries=entries.concat(data.entries||[]);
+    if(!data.has_more) break;
+    if(!data.cursor||data.cursor===cursor) throw new Error('Directory listing cursor did not advance');
+    cursor=data.cursor;
+  }while(cursor);
+  return entries;
+}
+
 async function _workspacePathExists(path){
-  if(!S.session||!path) return false;
+  const owner=arguments.length>1&&arguments[1]
+    ? arguments[1] : _workspaceCaptureRequestOwner(path,null,true,false);
+  if(!S.session||!path||!_workspaceRequestOwnerIsCurrent(owner)) return false;
   const parts=String(path).split('/').filter(Boolean);
   const name=parts.pop();
   if(!name) return false;
   const dir=parts.length?parts.join('/'):'.';
-  const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dir)}`);
-  return (data.entries||[]).some(entry=>entry&&((entry.path===path)||entry.name===name));
+  const baseUrl=_workspaceRouteForPath(dir,'list');
+  let cursor=null;
+  do{
+    if(!_workspaceRequestOwnerIsCurrent(owner)) return false;
+    const url=cursor?baseUrl+'&cursor='+encodeURIComponent(cursor):baseUrl;
+    const data=await api(url);
+    if(!_workspaceRequestOwnerIsCurrent(owner)) return false;
+    if((data.entries||[]).some(e=>e&&(e.path===path||e.name===name))) return true;
+    if(!data.has_more) return false;
+    if(!data.cursor||data.cursor===cursor) throw new Error('Directory listing cursor did not advance');
+    cursor=data.cursor;
+  }while(cursor);
+  return false;
 }
 
 async function openArtifactPath(path){
@@ -631,15 +661,20 @@ async function openArtifactPath(path){
     else if(rel === ws.replace(/\/+$/,'')) rel = '.';
   }
   if(!rel) rel = '.';
+  const owner=_workspaceCaptureRequestOwner(rel,null,true,false);
   try{
-    if(!(await _workspacePathExists(rel))){
+    if(!(await _workspacePathExists(rel,owner))){
+      if(!_workspaceRequestOwnerIsCurrent(owner)) return;
       setStatus(t('file_open_failed'));
       return;
     }
-  }catch(_){
+  }catch(error){
+    if(!_workspaceRequestOwnerIsCurrent(owner)) return;
+    if(error&&error.status===403&&_workspaceShowListingFailure(error,rel)==='grant-expired') return;
     setStatus(t('file_open_failed'));
     return;
   }
+  if(!_workspaceRequestOwnerIsCurrent(owner)) return;
   openFile(rel);
 }
 
@@ -665,15 +700,93 @@ const _WS_SKELETON_ROWS = [
 // #4671 CORE: an empty-session profile switch REUSES the same session_id, so
 // loadDir()'s session_id guard alone can't reject a pre-switch /api/list response
 // that resolves after the new profile's loadDir('.') — it would paint the previous
-// workspace's files over the switched-to profile. switchToProfile() bumps this
-// UNCONDITIONALLY at switch start (even when the workspace panel is closed, since
-// loadDir('.') still runs then), so the stale response is rejected.
+// workspace's files over the switched-to profile. The shared owner also captures
+// the session object and active profile, so this remains safe when a profile
+// transition does not bump the tree generation.
 let _wsTreeGen = 0;
+let _wsDirRequestGen = 0;
+let _wsArtifactRequestGen = 0;
 function bumpWorkspaceTreeGen(){
   _wsTreeGen = (typeof _wsTreeGen === 'number' ? _wsTreeGen : 0) + 1;
   return _wsTreeGen;
 }
 if(typeof window!=='undefined') window.bumpWorkspaceTreeGen = bumpWorkspaceTreeGen;
+
+function _workspaceCacheVersions(){
+  if(!S._dirCacheVersions) S._dirCacheVersions=Object.create(null);
+  return S._dirCacheVersions;
+}
+function _workspaceCacheVersion(path){
+  return Number(_workspaceCacheVersions()[path]||0);
+}
+function _workspaceSetDirCache(path, entries){
+  if(!S._dirCache) S._dirCache={};
+  const versions=_workspaceCacheVersions();
+  versions[path]=_workspaceCacheVersion(path)+1;
+  S._dirCache[path]=entries;
+}
+function _workspaceDeleteDirCache(path){
+  const versions=_workspaceCacheVersions();
+  versions[path]=_workspaceCacheVersion(path)+1;
+  if(S._dirCache) delete S._dirCache[path];
+}
+function _workspaceResetDirCache(){
+  S._dirCache={};
+  S._dirCacheVersions=Object.create(null);
+}
+function _workspaceCaptureRequestOwner(path, cachePath, serial=false, requireCurrentDir=false){
+  const session=S.session;
+  return {
+    sessionRef:session,
+    sessionId:String(session&&session.session_id||''),
+    profile:String(S.activeProfile||(session&&session.profile)||'default'),
+    workspace:String(session&&session.workspace||''),
+    treeGen:_wsTreeGen,
+    currentDir:String(S.currentDir||'.'),
+    requireCurrentDir,
+    requestGen:serial?++_wsArtifactRequestGen:null,
+    dirRequestGen:null,
+    cacheRef:S._dirCache,
+    cachePath:cachePath==null?null:String(cachePath),
+    cacheVersion:cachePath==null?null:_workspaceCacheVersion(String(cachePath)),
+    path:path==null?null:String(path),
+  };
+}
+function _workspaceCaptureDirRequestOwner(path, requireCurrentDir=false){
+  const owner=_workspaceCaptureRequestOwner(path,null,false,requireCurrentDir);
+  owner.dirRequestGen=++_wsDirRequestGen;
+  return owner;
+}
+function _workspaceRequestOwnerIsCurrent(owner){
+  if(!owner||!S.session||S.session!==owner.sessionRef
+    ||String(S.session.session_id||'')!==owner.sessionId
+    ||String(S.activeProfile||(S.session&&S.session.profile)||'default')!==owner.profile
+    ||String(S.session.workspace||'')!==owner.workspace
+    ||_wsTreeGen!==owner.treeGen
+    ||(owner.requireCurrentDir&&String(S.currentDir||'.')!==owner.currentDir)
+    ||(owner.requestGen!==null&&owner.requestGen!==_wsArtifactRequestGen)
+    ||(owner.dirRequestGen!==null&&owner.dirRequestGen!==_wsDirRequestGen)) return false;
+  if(owner.cachePath!==null&&(
+    S._dirCache!==owner.cacheRef
+    ||_workspaceCacheVersion(owner.cachePath)!==owner.cacheVersion)) return false;
+  return true;
+}
+function _workspaceShowListingFailure(error, path){
+  const status=Number(error&&error.status||0);
+  const grant=typeof _workspaceEscapeGrantForPath==='function'
+    ? _workspaceEscapeGrantForPath(path) : null;
+  if(status===403&&grant){
+    _clearWorkspaceEscapeGrant(grant.path);
+    if(typeof showToast==='function')showToast(t('external_link_grant_expired'),5000,'error');
+    return 'grant-expired';
+  }
+  if(status===404){
+    if(typeof showToast==='function')showToast(t('workspace_listing_expired'),4000,'warning');
+    return 'expired';
+  }
+  if(typeof showToast==='function')showToast(t('workspace_listing_failed')||t('file_open_failed'),5000,'error');
+  return 'failed';
+}
 
 function showWorkspaceTreeSkeleton(){
   const tree = $('fileTree');
@@ -721,31 +834,31 @@ async function loadDir(path, opts={}){
   const preservePreview=!!(opts&&opts.preservePreview);
   const refreshExpanded=!!(opts&&opts.refreshExpanded);
   if(!S.session)return;
-  const sessionId=S.session.session_id;
-  const treeGen=_wsTreeGen;  // #4671: capture the workspace-tree generation. A profile
-                             // switch bumps it (bumpWorkspaceTreeGen), so a stale response
-                             // from the previous workspace — which would pass the session_id
-                             // guard because an empty-session switch reuses the same id — is
-                             // rejected here instead of painting the wrong profile's files.
+  const requestPath=path||'.';
+  let owner=_workspaceCaptureDirRequestOwner(requestPath);
   try{
     if(!path||path==='.'||refreshExpanded){
-      S._dirCache={};
+      _workspaceResetDirCache();
       _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
-    S.currentDir=path||'.';
-    const data=await api(
-      _workspaceRouteForPath(path, 'list') ||
-      `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path||'.')}`
-    );
-    if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
+    // Reset cursor state on every fresh loadDir call; continuation appends via _loadMoreDir.
+    S._dirCursor=null;S._dirHasMore=false;
+    S.currentDir=requestPath;
+    const route=_workspaceRouteForPath(requestPath, 'list');
+    if(!route)return;
+    const data=await api(route);
+    if(!_workspaceRequestOwnerIsCurrent(owner)||(S.currentDir||'.')!==requestPath)return;
     if(data.workspace_recovered&&data.workspace){
       S.session.workspace=String(data.workspace);
-      S._dirCache={};
+      _workspaceResetDirCache();
       _restoreExpandedDirs();
       if(typeof syncWorkspaceDisplays==='function')syncWorkspaceDisplays();
       if(typeof syncTerminalButton==='function')syncTerminalButton();
       showToast(t('workspace_recovered_notice',S.session.workspace),5000,'warning');
+      // Recovery changes workspace identity, so recapture ownership before expanded-directory prefetch.
+      owner=_workspaceCaptureDirRequestOwner(requestPath);
     }
+    S._dirCursor=data.cursor||null;S._dirHasMore=!!(data.has_more);
     S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
     // #2673 — refresh Artifacts tab when its source data (the file tree) updates.
     if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
@@ -755,13 +868,21 @@ async function loadDir(path, opts={}){
       const expanded=S._expandedDirs||new Set();
       const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);
       if(pending.length){
+        const owners=new Map(pending.map(dirPath=>[
+          dirPath,_workspaceCaptureRequestOwner(dirPath,dirPath,false,true)
+        ]));
         const results=await Promise.all(pending.map(dirPath=>
-          api(_workspaceRouteForPath(dirPath, 'list'))
-            .then(dc=>({dirPath,entries:dc.entries||[]}))
-            .catch(()=>({dirPath,entries:[]}))
+          _fetchAllPages(_workspaceRouteForPath(dirPath, 'list'))
+            .then(entries=>({dirPath,entries,error:null}))
+            .catch(error=>({dirPath,entries:null,error}))
         ));
-        if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
-        for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
+        if(!_workspaceRequestOwnerIsCurrent(owner)||(S.currentDir||'.')!==requestPath)return;
+        for(const {dirPath,entries,error} of results){
+          const owner=owners.get(dirPath);
+          if(!_workspaceRequestOwnerIsCurrent(owner))continue;
+          if(error){_workspaceShowListingFailure(error,dirPath);continue;}
+          _workspaceSetDirCache(dirPath,entries);
+        }
       }
       if(expanded.size>0)renderFileTree();
     }
@@ -775,9 +896,10 @@ async function loadDir(path, opts={}){
       await refreshOpenPreviewIfMutated();
     }
     // Fetch git info for workspace root (non-blocking)
-    if(!path||path==='.') _refreshGitBadge();
+    if(!requestPath||requestPath==='.') _refreshGitBadge();
   }catch(e){
-    const grant = _workspaceEscapeGrantForPath(path);
+    if(!_workspaceRequestOwnerIsCurrent(owner)||(S.currentDir||'.')!==requestPath)return;
+    const grant = _workspaceEscapeGrantForPath(requestPath);
     if(grant && e && e.status===403){
       _clearWorkspaceEscapeGrant(grant.path);
       showToast(t('external_link_grant_expired') || t('file_open_failed'), 5000, 'error');
@@ -791,6 +913,72 @@ function refreshWorkspacePanel(){
   if(!S.session)return;
   const targetDir = S.currentDir || '.';
   loadDir(targetDir,{refreshExpanded:true});
+}
+
+// Append a "load more" row to the file tree when the current dir has a next page.
+// Called after every renderFileTree() via the wrapper below.
+function _renderLoadMoreRow(){
+  const box=typeof $==='function'?$('fileTree'):null;
+  if(!box)return;
+  const existing=box.querySelector('.ws-load-more-row');
+  if(existing)existing.remove();
+  if(!S._dirHasMore||!S._dirCursor)return;
+  const row=document.createElement('div');
+  row.className='ws-load-more-row file-item';
+  row.style.paddingLeft='8px';
+  row.textContent=t&&t('load_more_entries',S.entries.length)||`Showing ${S.entries.length} entries — Load more…`;
+  row.setAttribute('role','button');
+  row.setAttribute('tabindex','0');
+  row.onclick=function(){_loadMoreDir();};
+  row.onkeydown=function(e){
+    if(e.key==='Enter'||e.key===' '){
+      e.preventDefault();
+      _loadMoreDir();
+    }
+  };
+  box.appendChild(row);
+}
+
+// Fetch and append the next page of entries for the current directory using the
+// server-issued cursor.  Session and tree-generation guards match loadDir's.
+async function _loadMoreDir(){
+  if(!S.session||!S._dirCursor||!S._dirHasMore)return;
+  const cursor=S._dirCursor;
+  const path=S.currentDir||'.';
+  const owner=_workspaceCaptureDirRequestOwner(path,true);
+  try{
+    const route=_workspaceRouteForPath(path,'list',{cursor});
+    if(!route)return;
+    const data=await api(route);
+    if(!_workspaceRequestOwnerIsCurrent(owner)||S._dirCursor!==cursor)return;
+    // Append only entries not already present (dedup by path for mutation safety).
+    const seen=new Set(S.entries.map(function(e){return e.path;}));
+    const fresh=(data.entries||[]).filter(function(e){return !seen.has(e.path);});
+    S.entries=S.entries.concat(fresh);
+    S._dirCursor=data.cursor||null;
+    S._dirHasMore=!!(data.has_more);
+    renderFileTree();
+  }catch(e){
+    if(e&&_workspaceRequestOwnerIsCurrent(owner)&&S._dirCursor===cursor){
+      if(e.status===404||e.status===403){
+        // Restarted listings and expired escape grants cannot be retried with this cursor.
+        S._dirCursor=null;S._dirHasMore=false;
+        renderFileTree();
+        _workspaceShowListingFailure(e,path);
+      }else{
+        _workspaceShowListingFailure(e,path);
+      }
+    }else{
+      console.warn('loadMoreDir',e);
+    }
+  }
+}
+
+// Wrap renderFileTree so _renderLoadMoreRow() fires after every tree repaint,
+// including hidden-file toggle, expand/collapse, and refresh paths in ui.js.
+if(typeof renderFileTree==='function'){
+  const _origRenderFileTree=renderFileTree;
+  renderFileTree=function(){_origRenderFileTree();_renderLoadMoreRow();};
 }
 
 async function _refreshGitBadge(){
