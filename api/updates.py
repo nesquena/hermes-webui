@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -65,6 +66,9 @@ _FETCH_NETWORK_FAILURE_SIGNATURES = (
 # the updater's explicit transaction output; refusal/failure lines remain
 # failures even when the CLI catches an exception and exits zero.
 _AGENT_UPDATE_COMPLETION_MARKER = "✓ Update complete!"
+_AGENT_UPDATE_PARTIAL_REFRESH_FAILURE_RE = re.compile(
+    r"⚠\s+.+?(?:dependencies )?failed to refresh:"
+)
 _AGENT_UPDATE_FAILURE_MARKERS = (
     "Cannot update Hermes Agent:",
     "✗ Update failed",
@@ -329,6 +333,53 @@ def _agent_update_lock_state(path: Path | None = None) -> dict:
     return {'path': path, 'holder': holder, 'present': present}
 
 
+def _manual_remove_command(path: Path) -> str:
+    """Return a literal-path removal command for the operator's host shell."""
+    value = str(path)
+    if os.name == 'nt':
+        escaped = value.replace("'", "''")
+        return f"Remove-Item -LiteralPath '{escaped}' -Force"
+    return f'rm -f -- {shlex.quote(value)}'
+
+
+def _resolve_git_directories(path: Path) -> list[Path]:
+    """Resolve the worktree Git directory and its shared common directory."""
+    git_entry = path / '.git'
+    try:
+        if git_entry.is_dir():
+            git_dir = git_entry.resolve()
+        elif git_entry.is_file():
+            line = git_entry.read_text(encoding='utf-8').splitlines()[0].strip()
+            if not line.lower().startswith('gitdir:'):
+                return []
+            git_dir = Path(line[7:].strip())
+            if not git_dir.is_absolute():
+                git_dir = path / git_dir
+            git_dir = git_dir.resolve()
+        else:
+            return []
+    except (OSError, IndexError, UnicodeError):
+        return []
+
+    directories = [git_dir]
+    commondir_file = git_dir / 'commondir'
+    try:
+        if commondir_file.is_file():
+            common_dir = Path(commondir_file.read_text(encoding='utf-8').strip())
+            if not common_dir.is_absolute():
+                common_dir = git_dir / common_dir
+            common_dir = common_dir.resolve()
+        elif git_dir.parent.name == 'worktrees':
+            common_dir = git_dir.parent.parent.resolve()
+        else:
+            common_dir = None
+    except (OSError, UnicodeError):
+        common_dir = None
+    if common_dir is not None and common_dir not in directories:
+        directories.append(common_dir)
+    return directories
+
+
 def _inventory_locks(path: Path) -> dict:
     """Return a snapshot of lock files currently present under ``path/.git``.
 
@@ -342,46 +393,67 @@ def _inventory_locks(path: Path) -> dict:
     the response. Once the lock is gone, the user re-clicks Update Now
     and the normal non-destructive apply path runs.
     """
-    git_dir = path / '.git'
     out = {
         'well_known_lock_present': False,  # ``.git/index.lock`` exists?
         'well_known_lock_path': None,      # absolute path of ``.git/index.lock``
         'other_locks': [],                  # any other lock files, by relative path
     }
-    if not git_dir.exists():
+    git_dirs = _resolve_git_directories(path)
+    if not git_dirs:
         return out
-    well_known = git_dir / 'index.lock'
-    try:
-        out['well_known_lock_present'] = well_known.exists()
-    except OSError:
-        # Permission problem reading the directory -- treat conservatively.
-        out['well_known_lock_present'] = True
-    out['well_known_lock_path'] = str(well_known)
 
-    # Enumerate every other lock file under .git/ for diagnostic reporting.
+    index_locks = [git_dir / 'index.lock' for git_dir in git_dirs]
+    for well_known in index_locks:
+        try:
+            present = well_known.exists()
+        except OSError:
+            # Permission problem reading the directory -- treat conservatively.
+            present = True
+        if present:
+            out['well_known_lock_present'] = True
+            out['well_known_lock_path'] = str(well_known)
+            break
+    if out['well_known_lock_path'] is None:
+        out['well_known_lock_path'] = str(index_locks[0])
+
+    # Enumerate every other lock file under the private and common Git dirs.
     # We never touch them; this is purely an inventory.
+    other_locks = []
+    seen = set()
     try:
-        for entry in sorted(git_dir.rglob('*.lock')):
-            try:
-                rel = entry.relative_to(git_dir).as_posix()
-            except ValueError:
-                continue
-            if rel == 'index.lock':
-                continue
-            out['other_locks'].append(rel)
+        for git_dir in git_dirs:
+            for entry in sorted(git_dir.rglob('*.lock')):
+                if entry.name == 'index.lock':
+                    continue
+                if git_dir == git_dirs[0]:
+                    lock_name = entry.relative_to(git_dir).as_posix()
+                else:
+                    # A common-dir lock has no path relative to the worktree's
+                    # private Git dir; retain its absolute path for recovery.
+                    lock_name = str(entry)
+                if lock_name not in seen:
+                    seen.add(lock_name)
+                    other_locks.append(lock_name)
     except OSError:
         # rglob can fail on unreadable subtrees; skip quietly.
         pass
+    out['other_locks'] = sorted(other_locks)
     return out
 
 
 def _select_git_lock_path(path: Path, inventory: dict) -> Path | None:
     """Return an actually present Git lock, preserving non-index ownership."""
     if inventory.get('well_known_lock_present'):
-        return path / '.git' / 'index.lock'
+        lock_path = inventory.get('well_known_lock_path')
+        return Path(lock_path) if lock_path else None
     other_locks = inventory.get('other_locks') or []
     if other_locks:
-        return path / '.git' / other_locks[0]
+        candidate = Path(other_locks[0])
+        if candidate.is_absolute():
+            return candidate
+        git_dirs = _resolve_git_directories(path)
+        if git_dirs:
+            return git_dirs[0] / candidate
     return None
 
 
@@ -394,7 +466,15 @@ def _git_lock_recovery(path: Path, inventory: dict, diagnostic: str = '') -> dic
             relative = match.group(0)[5:].replace('\\', '/')
             candidate = Path(relative)
             if '..' not in candidate.parts:
-                lock_path = path / '.git' / candidate
+                fallback = None
+                for git_dir in _resolve_git_directories(path):
+                    candidate_path = git_dir / candidate
+                    fallback = fallback or candidate_path
+                    if candidate_path.exists():
+                        lock_path = candidate_path
+                        break
+                if lock_path is None:
+                    lock_path = fallback
     if lock_path is None:
         return {
             'lock_kind': 'git-unknown',
@@ -409,7 +489,7 @@ def _git_lock_recovery(path: Path, inventory: dict, diagnostic: str = '') -> dic
     return {
         'lock_kind': lock_kind,
         'git_lock_path': str(lock_path),
-        'manual_command': f'rm -f {lock_path}',
+        'manual_command': _manual_remove_command(lock_path),
     }
 
 
@@ -452,7 +532,10 @@ def apply_clear_lock(target: str) -> dict:
             lock_state = _agent_update_lock_state()
             lock_path = lock_state.get('path')
             if lock_state.get('holder') is not None or lock_state.get('present'):
-                manual_command = f"rm -f {lock_path}" if lock_path else 'Retry after the Hermes updater exits'
+                manual_command = (
+                    _manual_remove_command(lock_path)
+                    if lock_path else 'Retry after the Hermes updater exits'
+                )
                 holder = lock_state.get('holder')
                 holder_detail = (
                     f' (PID {holder.pid} is still running)'
@@ -504,7 +587,7 @@ def apply_clear_lock(target: str) -> dict:
             retry_result['lock_recovery'] = {
                 'action': 'no-lock-found',
                 'manual_command': (
-                    f'rm -f {lock_state["path"]}'
+                    _manual_remove_command(lock_state['path'])
                     if lock_state.get('path') else ''
                 ),
             }
@@ -513,7 +596,7 @@ def apply_clear_lock(target: str) -> dict:
         inv = _inventory_locks(path)
         git_recovery = _git_lock_recovery(path, inv)
         manual_command = (
-            f"rm -f {inv['well_known_lock_path']}"
+            _manual_remove_command(Path(inv['well_known_lock_path']))
             if not inv['well_known_lock_present'] and not inv['other_locks']
             else git_recovery['manual_command']
         )
@@ -2453,6 +2536,9 @@ def _agent_update_output_failure(output: str) -> str | None:
     for marker in _AGENT_UPDATE_FAILURE_MARKERS:
         if marker in output:
             return marker
+    partial_refresh_failure = _AGENT_UPDATE_PARTIAL_REFRESH_FAILURE_RE.search(output)
+    if partial_refresh_failure:
+        return partial_refresh_failure.group(0)
     if any(marker in output for marker in _AGENT_UPDATE_NOOP_MARKERS):
         return None
     if any(marker in output for marker in _AGENT_UPDATE_HANDOFF_MARKERS):
@@ -2528,6 +2614,10 @@ def _apply_agent_update_inner():
             encoding='utf-8',
             errors='replace',
             timeout=1800,
+            creationflags=(
+                subprocess.CREATE_NO_WINDOW
+                if sys.platform == 'win32' else 0
+            ),
         )
     except subprocess.TimeoutExpired:
         return {
@@ -2566,7 +2656,7 @@ def _apply_agent_update_inner():
                 response['lock_recovery'] = {
                     'action': 'clear-lock-retry',
                     'marker_path': str(lock_state['path']),
-                    'manual_command': f"rm -f {lock_state['path']}",
+                    'manual_command': _manual_remove_command(lock_state['path']),
                 }
                 response['lock_kind'] = 'official-update'
         elif _is_git_lock_error(combined):

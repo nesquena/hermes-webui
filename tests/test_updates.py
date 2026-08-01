@@ -1170,7 +1170,7 @@ def test_v2_probe_helpers_removed():
 # v2.2 dropped v2's fcntl-flock holder probe and os.remove path entirely.
 # ``apply_clear_lock`` is now inventory-only and manual-instruction: if
 # the lock is gone it re-runs the normal update; if the lock is present
-# it returns the exact ``rm`` command the operator must run. These tests
+# it returns the exact host-native command the operator must run. These tests
 # lock in that contract.
 
 
@@ -1232,6 +1232,36 @@ def test_inventory_locks_handles_missing_git_dir(tmp_path):
     }
 
 
+def test_inventory_locks_resolves_worktree_git_file_and_common_dir(tmp_path):
+    """Worktree locks must be found in both the private and common Git dirs."""
+    worktree = tmp_path / 'Agent Checkout With Spaces'
+    worktree.mkdir()
+    common_git = tmp_path / 'shared repo' / '.git'
+    worktree_git = common_git / 'worktrees' / 'agent'
+    worktree_git.mkdir(parents=True)
+    (worktree / '.git').write_text(
+        f'gitdir: {worktree_git}\n', encoding='utf-8'
+    )
+    (worktree_git / 'commondir').write_text('../..\n', encoding='utf-8')
+    private_lock = worktree_git / 'index.lock'
+    common_lock = common_git / 'FETCH_HEAD.lock'
+    private_lock.write_text('', encoding='utf-8')
+    common_lock.write_text('', encoding='utf-8')
+
+    inv = updates._inventory_locks(worktree)
+
+    assert inv['well_known_lock_present'] is True
+    assert inv['well_known_lock_path'] == str(private_lock)
+    assert str(common_lock) in inv['other_locks']
+
+    private_lock.unlink()
+    inv = updates._inventory_locks(worktree)
+    recovery = updates._git_lock_recovery(worktree, inv)
+    assert recovery['git_lock_path'] == str(common_lock)
+    if os.name == 'nt':
+        assert recovery['manual_command'] == updates._manual_remove_command(common_lock)
+
+
 def test_apply_clear_lock_with_no_lock_runs_normal_update(tmp_path, monkeypatch):
     """v2.2: when ``.git/index.lock`` is absent, apply_clear_lock re-runs
     the normal non-destructive apply path."""
@@ -1253,7 +1283,11 @@ def test_apply_clear_lock_with_no_lock_runs_normal_update(tmp_path, monkeypatch)
     assert result['ok'] is True, result
     assert result['lock_recovery']['action'] == 'no-lock-found'
     assert 'manual_command' in result['lock_recovery']
-    assert 'rm -f' in result['lock_recovery']['manual_command']
+    command = result['lock_recovery']['manual_command']
+    if os.name == 'nt':
+        assert command == updates._manual_remove_command(tmp_path / '.git' / 'index.lock')
+    else:
+        assert command.startswith('rm -f -- ')
 
 
 def test_apply_clear_lock_with_lock_present_returns_manual_instruction(tmp_path, monkeypatch):
@@ -1286,7 +1320,11 @@ def test_apply_clear_lock_with_lock_present_returns_manual_instruction(tmp_path,
     result = updates.apply_clear_lock('webui')
     assert result['ok'] is False
     assert result.get('lock_held') is True
-    assert result.get('manual_command', '').startswith('rm -f')
+    command = result.get('manual_command', '')
+    if os.name == 'nt':
+        assert command == updates._manual_remove_command(lock)
+    else:
+        assert command.startswith('rm -f -- ')
     assert result.get('well_known_lock_path') == str(lock)
     assert 'O_CREAT|O_EXCL' in result['message'], (
         "message must explain why the server cannot do this automatically"
@@ -1472,9 +1510,11 @@ def test_agent_delegation_invokes_official_entry_point(tmp_path, monkeypatch):
     agent_exe = _make_hermes_exe(agent_dir)
 
     subprocess_calls = []
+    subprocess_kwargs = []
 
     def fake_subprocess_run(cmd, **kwargs):
         subprocess_calls.append(list(cmd))
+        subprocess_kwargs.append(kwargs)
         return _fake_proc()
 
     monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
@@ -1499,6 +1539,11 @@ def test_agent_delegation_invokes_official_entry_point(tmp_path, monkeypatch):
         '--gateway must not be passed: it writes .update_exit_code into '
         'HERMES_HOME (gateway-watcher state) and skips SIGHUP protection'
     )
+    expected_flags = (
+        updates.subprocess.CREATE_NO_WINDOW
+        if _sys.platform == 'win32' else 0
+    )
+    assert subprocess_kwargs[0]['creationflags'] == expected_flags
 
 
 def test_agent_update_failure_propagates(tmp_path, monkeypatch):
@@ -1641,6 +1686,14 @@ def test_agent_update_failure_keeps_late_updater_detail(tmp_path, monkeypatch):
     (
         '⚠ Update incomplete — some gateway units were not restarted:\n✓ Update complete!\n',
         '⚠ Update incomplete — some gateway units were not restarted:',
+    ),
+    (
+        '⚠ feature-x failed to refresh: old lazy version retained\n✓ Update complete!\n',
+        'failed to refresh:',
+    ),
+    (
+        '⚠ openai dependencies failed to refresh: provider remains unchanged\n✓ Update complete!\n',
+        'dependencies failed to refresh:',
     ),
 ])
 def test_agent_zero_exit_refusal_and_caught_failure_do_not_report_success(
@@ -2131,7 +2184,7 @@ def test_agent_non_index_git_lock_preserves_reported_lock_path(tmp_path, monkeyp
 
     assert result['lock_kind'] == 'git-other'
     assert result['git_lock_path'].endswith('.git\\FETCH_HEAD.lock')
-    assert result['lock_recovery']['manual_command'].endswith('.git\\FETCH_HEAD.lock')
+    assert result['lock_recovery']['manual_command'] == updates._manual_remove_command(lock)
     assert '.git\\index.lock' not in result['lock_recovery']['manual_command']
 
 
@@ -2230,7 +2283,7 @@ def test_apply_clear_lock_agent_reports_non_index_git_lock(tmp_path, monkeypatch
     assert result['ok'] is False, result
     assert result['lock_kind'] == 'git-other'
     assert result['git_lock_path'].endswith('.git\\FETCH_HEAD.lock')
-    assert result['manual_command'].endswith('.git\\FETCH_HEAD.lock')
+    assert result['manual_command'] == updates._manual_remove_command(lock)
 
 
 def test_agent_non_git_root_still_invokes_official_updater(tmp_path, monkeypatch):

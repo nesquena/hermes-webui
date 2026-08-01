@@ -10114,10 +10114,10 @@ async function applyClearUpdateLock(btn){
 }
 function _renderLockManualInstruction(target, res){
   // Replace the inline `updateError` text with a richer block that shows
-  // the exact manual command and offers a one-click retry button. The
+  // the exact host-native command and offers a one-click retry button. The
   // "retry" handler re-invokes `applyClearUpdateLock`; this time, with
   // the lock gone, the server's success branch runs the normal apply.
-  const cmd = res.manual_command || ('rm -f ' + (res.git_lock_path || res.well_known_lock_path || '.git/index.lock'));
+  const cmd = res.manual_command || 'Inspect the checkout for the reported Git lock.';
   const errEl=$('updateError');
   if(!errEl){
     showToast('Lock present. Run: '+cmd);
