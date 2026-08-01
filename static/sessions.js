@@ -5381,10 +5381,16 @@ function _deferRenderSessionListFromCache(){
 let _touchSentinelObserver=null;
 let _touchBatchPending=false;
 let _sessionTouchGen=0; // generation token — bumped on profile/filter changes
-let _touchScrollFallbackRaf=0;
 let _touchBatchToken=0; // monotonic token for token-owned microtask work
 let _touchContinuousBatchScheduled=false;
-let _touchScrollHandler=null; // owner-qualified scroll listener for event-driven batch trigger
+// Single explicit scroll-owner record: {gen, list, handler, raf, token}.
+// Replaces the former split globals (_touchScrollHandler + _touchScrollFallbackRaf).
+// Every piece of scroll-trigger work — the scroll listener, the RAF handle,
+// and the token-owned microtask — belongs to ONE owner object. Old work can
+// only settle (clear/cancel) its own handle; teardown cancels only if the
+// current owner is the same object. This prevents a stale handler from
+// erasing bookkeeping for a newer installed owner.
+let _touchScrollOwner=null;
 // Canonical render state saved by renderSessionListFromCache after the initial
 // touch render. Contains the ordered flat session rows, group metadata, the
 // _renderOneSession closure, and the active session ID — everything needed to
@@ -5399,11 +5405,17 @@ let _touchRenderState=null;
 /// all teardown. Every piece of state is released here.
 function _invalidateTouchRender(){
   if(_touchSentinelObserver){_touchSentinelObserver.disconnect();_touchSentinelObserver=null;}
-  if(_touchScrollFallbackRaf){cancelAnimationFrame(_touchScrollFallbackRaf);_touchScrollFallbackRaf=0;}
-  if(_touchScrollHandler&&_sessionTouchListEl){
-    try{_sessionTouchListEl.removeEventListener('scroll',_touchScrollHandler,{passive:true});}catch(_){}
+  // Owner-qualified teardown: only remove the listener and cancel the RAF
+  // if the current _touchScrollOwner is the one we captured. A stale owner
+  // must not erase a newer installed owner's bookkeeping.
+  const owner=_touchScrollOwner;
+  if(owner){
+    if(owner.raf){cancelAnimationFrame(owner.raf);}
+    if(owner.handler&&owner.list){
+      try{owner.list.removeEventListener('scroll',owner.handler,{passive:true});}catch(_){}
+    }
   }
-  _touchScrollHandler=null;
+  _touchScrollOwner=null;
   _touchRenderState=null;
   _sessionTouchListEl=null;
   _sessionTouchLoadedCount=0;
@@ -5433,7 +5445,29 @@ function _ensureTouchSentinelObserver(list){
         _touchBatchPending=true;
         const capturedGen=gen;
         Promise.resolve().then(()=>{
+          // Revalidate the full ownership contract immediately before mutation:
+          // generation, list identity, token, loaded/total, and near-bottom
+          // geometry. The observer fired because the sentinel was intersecting,
+          // but a re-render or generation bump may have changed the list between
+          // the observer callback and this microtask.
           if(capturedGen!==_sessionTouchGen){
+            if(token===_touchBatchToken) _touchBatchPending=false;
+            return;
+          }
+          if(!_sessionTouchListEl) {
+            if(token===_touchBatchToken) _touchBatchPending=false;
+            return;
+          }
+          if(token!==_touchBatchToken) return;
+          const t=_sessionTouchTotalCount||0;
+          const l=_sessionTouchLoadedCount||0;
+          if(l>=t) {
+            if(token===_touchBatchToken) _touchBatchPending=false;
+            return;
+          }
+          const el=_sessionTouchListEl;
+          const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<200;
+          if(!nearBottom) {
             if(token===_touchBatchToken) _touchBatchPending=false;
             return;
           }
@@ -5766,7 +5800,7 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid,
   // Touch-mode exit: if we were previously in touch mode but no longer are,
   // invalidate all touch state (observer, RAF, pending, render state).
   if(!list||!_isTouchPrimary()){
-    if(_touchSentinelObserver||_touchRenderState||_touchScrollFallbackRaf||_touchBatchPending||_sessionTouchListEl){
+    if(_touchSentinelObserver||_touchRenderState||_touchScrollOwner||_touchBatchPending||_sessionTouchListEl){
       _invalidateTouchRender();
     }
     return;
@@ -5825,69 +5859,86 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid,
   // after one append (sentinel stays intersecting, no new transition fires),
   // so the scroll listener catches that case. Unlike the prior RAF poll, this
   // does NOT reschedule itself while idle — zero CPU/battery cost when the
-  // user is not scrolling. The continuous-batch microtask (scheduled after
-  // each successful append) handles the already-at-bottom case.
-  const fallbackGen=_sessionTouchGen;
+  // user is not scrolling.
+  //
+  // The scroll RAF is armed ONLY from an actual scroll event — there is NO
+  // setup-time RAF. The already-intersecting-sentinel case is handled by the
+  // continuous-batch microtask scheduled after each successful
+  // _appendTouchBatch(), which re-checks sentinel geometry and chains the
+  // next append without requiring a scroll event.
+  //
+  // All scroll-trigger state — the listener, the RAF handle, and the token —
+  // lives in ONE owner object. Each callback only settles its own owner's
+  // handle; teardown cancels only if the current owner is the same object.
+  const ownerGen=_sessionTouchGen;
+  const owner={gen:ownerGen, list:list, handler:null, raf:0, token:0};
   const scrollHandler=function(){
-    if(_sessionTouchGen!==fallbackGen){_touchScrollFallbackRaf=0;return;}
-    if(!_sessionTouchListEl||_sessionTouchListEl!==list){_touchScrollFallbackRaf=0;return;}
-    // Already-armed RAF coalesces scroll bursts — skip if pending.
-    if(_touchScrollFallbackRaf) return;
-    _touchScrollFallbackRaf=requestAnimationFrame(function(){
-      _touchScrollFallbackRaf=0; // clear handle — one-shot, no reschedule
-      if(_sessionTouchGen!==fallbackGen) return;
+    // The handler itself is owned: it only acts if _touchScrollOwner is
+    // still this exact owner object. A stale handler from a previous setup
+    // (after invalidation + re-setup) does not touch the newer owner's RAF.
+    if(_touchScrollOwner!==owner) return;
+    if(_sessionTouchGen!==ownerGen) return;
+    if(!_sessionTouchListEl||_sessionTouchListEl!==list) return;
+    // Coalesce: skip if a RAF is already armed for this owner.
+    if(owner.raf) return;
+    owner.raf=requestAnimationFrame(function(){
+      // Clear ONLY this owner's RAF handle — one-shot, no reschedule.
+      // If a newer owner has been installed, _touchScrollOwner !== owner
+      // and we must NOT zero the newer owner's handle.
+      if(_touchScrollOwner===owner) owner.raf=0;
+      // Full ownership revalidation: gen, list identity, loaded/total,
+      // near-bottom geometry. Only if ALL pass do we arm the microtask.
+      if(_touchScrollOwner!==owner) return;
+      if(_sessionTouchGen!==ownerGen) return;
       if(!_sessionTouchListEl||_sessionTouchListEl!==list) return;
       const el=_sessionTouchListEl;
       const t=_sessionTouchTotalCount||0;
       const l=_sessionTouchLoadedCount||0;
       if(l>=t) return;
       const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<200;
-      if(nearBottom&&!_touchBatchPending&&!_touchContinuousBatchScheduled){
-        const token=++_touchBatchToken;
-        _touchBatchPending=true;
-        const capturedGen=fallbackGen;
-        Promise.resolve().then(()=>{
-          if(capturedGen!==_sessionTouchGen){
-            if(token===_touchBatchToken) _touchBatchPending=false;
-            return;
-          }
-          try{_appendTouchBatch();}
-          finally{ if(token===_touchBatchToken) _touchBatchPending=false; }
-        });
-      }
+      if(!nearBottom) return;
+      if(_touchBatchPending||_touchContinuousBatchScheduled) return;
+      const token=++_touchBatchToken;
+      owner.token=token;
+      _touchBatchPending=true;
+      const capturedGen=ownerGen;
+      Promise.resolve().then(()=>{
+        // Revalidate the FULL ownership contract immediately before mutation:
+        // owner identity, generation, list identity, token, loaded/total,
+        // and near-bottom geometry. Only if ALL still hold do we append.
+        if(_touchScrollOwner!==owner) {
+          if(token===_touchBatchToken) _touchBatchPending=false;
+          return;
+        }
+        if(capturedGen!==_sessionTouchGen) {
+          if(token===_touchBatchToken) _touchBatchPending=false;
+          return;
+        }
+        if(!_sessionTouchListEl||_sessionTouchListEl!==list) {
+          if(token===_touchBatchToken) _touchBatchPending=false;
+          return;
+        }
+        if(token!==_touchBatchToken) return;
+        const t2=_sessionTouchTotalCount||0;
+        const l2=_sessionTouchLoadedCount||0;
+        if(l2>=t2) {
+          if(token===_touchBatchToken) _touchBatchPending=false;
+          return;
+        }
+        const el2=_sessionTouchListEl;
+        const nearBottom2=el2.scrollHeight-el2.scrollTop-el2.clientHeight<200;
+        if(!nearBottom2) {
+          if(token===_touchBatchToken) _touchBatchPending=false;
+          return;
+        }
+        try{_appendTouchBatch();}
+        finally{ if(token===_touchBatchToken) _touchBatchPending=false; }
+      });
     });
   };
-  _touchScrollHandler=scrollHandler;
+  owner.handler=scrollHandler;
+  _touchScrollOwner=owner;
   try{list.addEventListener('scroll',scrollHandler,{passive:true});}catch(_){}
-  // If the sentinel is already intersecting on setup (e.g. short list or the
-  // user is already at the bottom), arm one initial RAF to check — but do NOT
-  // reschedule. The continuous-batch chain from _appendTouchBatch handles
-  // subsequent appends.
-  if(loaded<total){
-    _touchScrollFallbackRaf=requestAnimationFrame(function(){
-      _touchScrollFallbackRaf=0;
-      if(_sessionTouchGen!==fallbackGen) return;
-      if(!_sessionTouchListEl||_sessionTouchListEl!==list) return;
-      const el=_sessionTouchListEl;
-      const t=_sessionTouchTotalCount||0;
-      const l=_sessionTouchLoadedCount||0;
-      if(l>=t) return;
-      const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<200;
-      if(nearBottom&&!_touchBatchPending&&!_touchContinuousBatchScheduled){
-        const token=++_touchBatchToken;
-        _touchBatchPending=true;
-        const capturedGen=fallbackGen;
-        Promise.resolve().then(()=>{
-          if(capturedGen!==_sessionTouchGen){
-            if(token===_touchBatchToken) _touchBatchPending=false;
-            return;
-          }
-          try{_appendTouchBatch();}
-          finally{ if(token===_touchBatchToken) _touchBatchPending=false; }
-        });
-      }
-    });
-  }
 }
 
 function _schedulePendingSessionListApply(){
