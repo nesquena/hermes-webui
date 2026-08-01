@@ -375,6 +375,44 @@ def _inventory_locks(path: Path) -> dict:
     return out
 
 
+def _select_git_lock_path(path: Path, inventory: dict) -> Path | None:
+    """Return an actually present Git lock, preserving non-index ownership."""
+    if inventory.get('well_known_lock_present'):
+        return path / '.git' / 'index.lock'
+    other_locks = inventory.get('other_locks') or []
+    if other_locks:
+        return path / '.git' / other_locks[0]
+    return None
+
+
+def _git_lock_recovery(path: Path, inventory: dict, diagnostic: str = '') -> dict:
+    """Build manual recovery details for the lock found by the inventory."""
+    lock_path = _select_git_lock_path(path, inventory)
+    if lock_path is None and diagnostic:
+        match = re.search(r"\.git[\\/][^'\"\s]+\.lock", diagnostic)
+        if match:
+            relative = match.group(0)[5:].replace('\\', '/')
+            candidate = Path(relative)
+            if '..' not in candidate.parts:
+                lock_path = path / '.git' / candidate
+    if lock_path is None:
+        return {
+            'lock_kind': 'git-unknown',
+            'git_lock_path': None,
+            'manual_command': (
+                'Inspect the Agent checkout for the Git lock reported by the '
+                'updater, remove it after confirming no Git process is running, '
+                'then retry'
+            ),
+        }
+    lock_kind = 'git-index' if lock_path.name == 'index.lock' else 'git-other'
+    return {
+        'lock_kind': lock_kind,
+        'git_lock_path': str(lock_path),
+        'manual_command': f'rm -f {lock_path}',
+    }
+
+
 def apply_clear_lock(target: str) -> dict:
     """Manual-instruction lock recovery for ``target``.
 
@@ -436,21 +474,22 @@ def apply_clear_lock(target: str) -> dict:
                     'lock_kind': 'official-update',
                 }
             git_inventory = _inventory_locks(path)
-            if git_inventory.get('well_known_lock_present'):
-                git_lock_path = git_inventory['well_known_lock_path']
+            if git_inventory.get('well_known_lock_present') or git_inventory.get('other_locks'):
+                git_recovery = _git_lock_recovery(path, git_inventory)
                 return {
                     'ok': False,
                     'message': (
-                        'A Git index lock is present in the Agent checkout. '
+                        'A Git lock is present in the Agent checkout. '
                         'Confirm that no Git process is running, remove the '
-                        f'lock manually, then click Retry. Run: rm -f {git_lock_path}'
+                        f'lock manually, then click Retry. Run: {git_recovery["manual_command"]}'
                     ),
                     'lock_held': True,
                     'lock_conflict': True,
                     'target': target,
-                    'manual_command': f'rm -f {git_lock_path}',
-                    'well_known_lock_path': git_lock_path,
-                    'lock_kind': 'git-index',
+                    'manual_command': git_recovery['manual_command'],
+                    'well_known_lock_path': git_inventory['well_known_lock_path'],
+                    'other_locks': git_inventory['other_locks'],
+                    **git_recovery,
                 }
         else:
             return {'ok': False, 'message': f'Unknown target: {target}'}
@@ -472,9 +511,14 @@ def apply_clear_lock(target: str) -> dict:
             return retry_result
 
         inv = _inventory_locks(path)
-        manual_command = f"rm -f {inv['well_known_lock_path']}"
+        git_recovery = _git_lock_recovery(path, inv)
+        manual_command = (
+            f"rm -f {inv['well_known_lock_path']}"
+            if not inv['well_known_lock_present'] and not inv['other_locks']
+            else git_recovery['manual_command']
+        )
 
-        if not inv['well_known_lock_present']:
+        if not inv['well_known_lock_present'] and not inv['other_locks']:
             # Lock is gone. Run the normal non-destructive update flow and
             # annotate the response with what we found for the user's
             # records. Pass the configured channel through — otherwise an
@@ -494,7 +538,7 @@ def apply_clear_lock(target: str) -> dict:
         # Lock is present. The server cannot prove it's safe to delete;
         # the only safe path is to ask the operator.
         message = (
-            'A git lock file (.git/index.lock) is present. The server does '
+            'A git lock file is present. The server does '
             'not delete locks automatically -- git uses O_CREAT|O_EXCL '
             'locking, which cannot be detected with advisory probes. To '
             'recover: confirm no other git process is running against '
@@ -508,6 +552,7 @@ def apply_clear_lock(target: str) -> dict:
             'target': target,
             'manual_command': manual_command,
             'well_known_lock_path': inv['well_known_lock_path'],
+            **git_recovery,
             'other_locks': inv['other_locks'],
         }
     finally:
@@ -1998,8 +2043,9 @@ def _schedule_restart(delay: float = 2.0) -> None:
 def _ensure_gateway_restart_for_agent_update(
     previous_snapshot: dict | None = None,
     expected_version: str | None = None,
+    restart_required: bool = False,
 ) -> tuple[bool, dict]:
-    """Passively observe the active-profile gateway after Agent-owned restart.
+    """Restart when the Agent hands off repair, then verify gateway health.
 
     Returns:
         (ok, restart_payload) where:
@@ -2007,6 +2053,14 @@ def _ensure_gateway_restart_for_agent_update(
         - restart_payload contains helper status fields for response shaping.
     """
     target_profile = str(get_active_profile_name() or "default").strip() or "default"
+    restart_result = {'status': 'not_required', 'observation': 'passive'}
+    if restart_required:
+        restart_result = restart_active_profile_gateway(profile=target_profile)
+        if restart_result.get('status') not in ('completed', 'in_progress'):
+            return False, {
+                **restart_result,
+                'observation': 'active',
+            }
     deadline = time.monotonic() + _AGENT_GATEWAY_OBSERVATION_TIMEOUT_S
     while True:
         snapshot = _gateway_observation_snapshot(target_profile)
@@ -2032,7 +2086,7 @@ def _ensure_gateway_restart_for_agent_update(
         if identity_changed and health_ok and version_ok:
             return True, {
                 "status": "completed",
-                "observation": "passive",
+                "observation": "active" if restart_required else "passive",
                 "gateway_pid": gateway_pid,
                 "gateway_start_time": start_time,
                 "gateway_version": version,
@@ -2055,8 +2109,9 @@ def _ensure_gateway_restart_for_agent_update(
                 detail = 'no healthy replacement gateway was observed'
             return False, {
                 "status": "failed",
-                "observation": "passive",
+                "observation": "active" if restart_required else "passive",
                 "message": f'Active-profile gateway check failed: {detail}',
+                **({'restart_status': restart_result.get('status')} if restart_required else {}),
             }
         time.sleep(_AGENT_GATEWAY_OBSERVATION_POLL_S)
 
@@ -2510,21 +2565,19 @@ def _apply_agent_update_inner():
         elif _is_git_lock_error(combined):
             response['lock_conflict'] = True
             inventory = _inventory_locks(agent_dir)
-            response['lock_kind'] = 'git-index'
+            git_recovery = _git_lock_recovery(agent_dir, inventory, combined)
+            response.update(git_recovery)
             response['lock_recovery'] = {
                 'action': 'clear-git-lock-retry',
                 'well_known_lock_path': inventory['well_known_lock_path'],
-                'manual_command': (
-                    f"rm -f {inventory['well_known_lock_path']}"
-                    if inventory['well_known_lock_path']
-                    else 'Remove the Agent checkout .git/index.lock, then retry'
-                ),
+                **git_recovery,
                 'other_locks': inventory['other_locks'],
             }
         return response
 
+    handoff = _agent_update_output_handoff(combined)
     noop_marker = _agent_update_output_noop(combined)
-    if noop_marker is not None:
+    if noop_marker is not None and not any(handoff.values()):
         with _cache_lock:
             _update_cache['checked_at'] = 0
         return {
@@ -2541,8 +2594,6 @@ def _apply_agent_update_inner():
             'gateway_restart': 'not_required',
         }
 
-    handoff = _agent_update_output_handoff(combined)
-
     # Invalidate before the gateway gate so any early-return path below still
     # reflects the newly-installed version rather than the pre-update state.
     with _cache_lock:
@@ -2555,6 +2606,7 @@ def _apply_agent_update_inner():
     gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update(
         previous_snapshot=previous_gateway,
         expected_version=expected_version,
+        restart_required=handoff['dependencies_repaired'] or handoff['restart_required'],
     )
     if not gateway_ok:
         non_git_install = not (agent_dir / '.git').exists()

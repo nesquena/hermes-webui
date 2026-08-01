@@ -9996,6 +9996,8 @@ async function applyUpdates(){
   }
   try{
     const stashConflictMessages=[];
+    const noOpTargets=[];
+    let restartScheduled=false;
     const baselineServerIdentity = await _readHealthServerIdentity();
     for(const target of targets){
       // Send the channel the CHECK reported for this target (what was actually
@@ -10012,12 +10014,22 @@ async function applyUpdates(){
         resetApplyButton(0);
         return;
       }
+      if(res.restart_scheduled===true) restartScheduled=true;
+      if(res.no_op===true) noOpTargets.push(target);
       if(res.stash_conflict){
         stashConflictMessages.push('Update applied ('+target+'): '+(res.message||'Local changes were preserved in git stash.'));
         if(errEl){errEl.textContent=stashConflictMessages.join('\n\n');errEl.style.display='block';}
       }
     }
     const stashConflictMessage=stashConflictMessages.join('\n\n');
+    if(!restartScheduled){
+      const noOpMessage=noOpTargets.length?'Already up to date.':'Update applied.';
+      showToast(stashConflictMessage||noOpMessage,stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
+      sessionStorage.removeItem('hermes-update-checked');
+      sessionStorage.removeItem('hermes-update-dismissed');
+      resetApplyButton(0);
+      return;
+    }
     showToast(stashConflictMessage||'Update applied — restarting…',stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
@@ -10101,7 +10113,7 @@ function _renderLockManualInstruction(target, res){
   // the exact manual command and offers a one-click retry button. The
   // "retry" handler re-invokes `applyClearUpdateLock`; this time, with
   // the lock gone, the server's success branch runs the normal apply.
-  const cmd = res.manual_command || ('rm -f ' + (res.well_known_lock_path || '.git/index.lock'));
+  const cmd = res.manual_command || ('rm -f ' + (res.git_lock_path || res.well_known_lock_path || '.git/index.lock'));
   const errEl=$('updateError');
   if(!errEl){
     showToast('Lock present. Run: '+cmd);
@@ -10109,14 +10121,17 @@ function _renderLockManualInstruction(target, res){
   }
   errEl.style.display='block';
   errEl.innerHTML='';
-  const markerPath = res.marker_path || res.well_known_lock_path || '';
+  const markerPath = res.marker_path || '';
   const agentLock = res.lock_kind === 'official-update'
     || markerPath.indexOf('.hermes-update-in-progress') !== -1;
+  const gitLockIsIndex = res.lock_kind === 'git-index';
   const intro=document.createElement('div');
   intro.style.marginBottom='6px';
   intro.textContent=agentLock
     ? 'The official Hermes Agent update lock is present. Confirm that no Agent updater is running, then run this command on the host:'
-    : 'A stale .git/index.lock is present. The server cannot remove it safely — please run this command on the host:';
+    : gitLockIsIndex
+      ? 'A stale .git/index.lock is present. The server cannot remove it safely — please run this command on the host:'
+      : 'A Git lock file is present. The server cannot remove it safely — please run this command on the host:';
   errEl.appendChild(intro);
   const code=document.createElement('pre');
   code.style.background='rgba(0,0,0,0.05)';

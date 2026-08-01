@@ -1213,6 +1213,17 @@ class TestUiJsUpdateBanner:
             "applyUpdates() must not use a fixed setTimeout reload — use _waitForServerThenReload()."
         )
 
+    def test_successful_noop_does_not_wait_for_webui_replacement(self):
+        """A backend no-op must finish the browser flow without restart polling."""
+        src = read('static/ui.js')
+        fn = extract_js_function(src, 'applyUpdates')
+        compact = re.sub(r'\s+', '', fn)
+        assert 'letrestartScheduled=false' in compact
+        assert 'if(!restartScheduled)' in compact
+        assert 'noOpTargets.push(target)' in compact
+        assert compact.index('if(!restartScheduled)') < compact.index('_waitForServerThenReload')
+        assert 'resetApplyButton(0)' in compact
+
     def test_wait_for_server_then_reload_is_defined(self):
         """_waitForServerThenReload() must actually exist — the original PR
         referenced it from applyUpdates()/forceUpdate() without defining it,

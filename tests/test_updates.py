@@ -1209,6 +1209,19 @@ def test_inventory_locks_lists_other_locks(tmp_path):
     ]
 
 
+def test_inventory_locks_identifies_only_non_index_locks(tmp_path):
+    """A ref lock must remain actionable when index.lock is absent."""
+    (tmp_path / '.git' / 'refs' / 'heads').mkdir(parents=True)
+    lock = tmp_path / '.git' / 'FETCH_HEAD.lock'
+    lock.write_text('')
+
+    inv = updates._inventory_locks(tmp_path)
+
+    assert inv['well_known_lock_present'] is False
+    assert inv['well_known_lock_path'] == str(tmp_path / '.git' / 'index.lock')
+    assert inv['other_locks'] == ['FETCH_HEAD.lock']
+
+
 def test_inventory_locks_handles_missing_git_dir(tmp_path):
     """When ``.git`` does not exist the inventory must still return a valid shape."""
     inv = updates._inventory_locks(tmp_path)
@@ -1680,6 +1693,64 @@ def test_agent_zero_exit_without_completion_marker_is_not_success(tmp_path, monk
     assert gateway_called == []
 
 
+def test_agent_restart_required_marker_precedes_official_noop(tmp_path, monkeypatch):
+    """Runtime repair must not be collapsed into an ordinary no-op."""
+    agent_dir = _agent_tmp(tmp_path)
+    agent_exe = _make_hermes_exe(agent_dir)
+    ensure_kwargs = []
+    output = (
+        '✓ Already up to date!\n'
+        '⚠ Restart required to finish the managed Python runtime repair.\n'
+    )
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
+    monkeypatch.setattr(updates.subprocess, 'run', lambda cmd, **kwargs: _fake_proc(stdout=output))
+    monkeypatch.setattr(
+        updates,
+        '_ensure_gateway_restart_for_agent_update',
+        lambda *args, **kwargs: ensure_kwargs.append(kwargs) or (
+            True, {'status': 'completed'}
+        ),
+    )
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['ok'] is True, result
+    assert result.get('no_op') is not True
+    assert result['restart_required'] is True
+    assert ensure_kwargs[0]['restart_required'] is True
+
+
+def test_dependency_repair_restarts_gateway_before_observation(monkeypatch):
+    """The WebUI owns the POSIX gateway handoff for runtime repair."""
+    snapshots = iter([
+        {'pid': 100, 'start_time': 10, 'version': '0.18.0', 'health': 'running'},
+        {'pid': 101, 'start_time': 11, 'version': '0.19.0', 'health': 'running'},
+    ])
+    restart_calls = []
+
+    monkeypatch.setattr(updates, 'get_active_profile_name', lambda: 'work')
+    monkeypatch.setattr(updates, '_gateway_observation_snapshot', lambda profile: next(snapshots))
+    monkeypatch.setattr(
+        updates,
+        'restart_active_profile_gateway',
+        lambda **kwargs: restart_calls.append(kwargs) or {'status': 'completed'},
+    )
+    monkeypatch.setattr(updates, '_AGENT_GATEWAY_OBSERVATION_TIMEOUT_S', 0)
+
+    ok, result = updates._ensure_gateway_restart_for_agent_update(
+        previous_snapshot=next(snapshots),
+        expected_version='0.19.0',
+        restart_required=True,
+    )
+
+    assert ok is True, result
+    assert result['observation'] == 'active'
+    assert restart_calls == [{'profile': 'work'}]
+
+
 @pytest.mark.parametrize(
     'output,expected',
     [
@@ -1759,6 +1830,7 @@ def test_agent_dependency_repair_hands_off_to_gateway_and_webui_restart(
     assert result['ok'] is True, result
     assert result['gateway_restart'] == 'completed'
     assert len(ensure_calls) == 1
+    assert ensure_calls[0][1]['restart_required'] is True
     assert schedule_calls == [1]
     for key, value in expected.items():
         assert result[key] is value
@@ -2003,6 +2075,30 @@ def test_agent_git_index_lock_is_not_reported_as_official_update_lock(tmp_path, 
     assert 'marker_path' not in result['lock_recovery']
 
 
+def test_agent_non_index_git_lock_preserves_reported_lock_path(tmp_path, monkeypatch):
+    """A FETCH_HEAD lock must not produce an unusable index.lock command."""
+    agent_dir = _agent_tmp(tmp_path)
+    agent_exe = _make_hermes_exe(agent_dir)
+    lock = agent_dir / '.git' / 'FETCH_HEAD.lock'
+    lock.write_text('')
+    git_lock_error = "fatal: cannot create '.git/FETCH_HEAD.lock': File exists."
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_resolve_hermes_command', lambda: str(agent_exe))
+    monkeypatch.setattr(
+        updates.subprocess,
+        'run',
+        lambda cmd, **kwargs: _fake_proc(returncode=1, stderr=git_lock_error),
+    )
+
+    result = updates._apply_update_inner('agent')
+
+    assert result['lock_kind'] == 'git-other'
+    assert result['git_lock_path'].endswith('.git\\FETCH_HEAD.lock')
+    assert result['lock_recovery']['manual_command'].endswith('.git\\FETCH_HEAD.lock')
+    assert '.git\\index.lock' not in result['lock_recovery']['manual_command']
+
+
 def test_agent_update_lock_contract_reads_live_holder_and_describes_it(tmp_path, monkeypatch):
     """The proof follows the Agent lock's current live-holder contract."""
     from hermes_cli import update_lock as agent_update_lock
@@ -2068,6 +2164,37 @@ def test_apply_clear_lock_agent_reports_git_index_lock_separately(tmp_path, monk
     assert result['lock_kind'] == 'git-index'
     assert result['well_known_lock_path'].endswith('.git\\index.lock')
     assert '.git\\index.lock' in result['manual_command']
+
+
+def test_apply_clear_lock_agent_reports_non_index_git_lock(tmp_path, monkeypatch):
+    """Agent clear-lock must stop on a present ref lock instead of retrying."""
+    agent_dir = tmp_path / 'agent'
+    (agent_dir / '.git').mkdir(parents=True)
+    lock = agent_dir / '.git' / 'FETCH_HEAD.lock'
+    lock.write_text('', encoding='utf-8')
+    marker = tmp_path / '.hermes-update-in-progress'
+
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_dir)
+    monkeypatch.setattr(updates, '_agent_update_lock_path', lambda: marker)
+    monkeypatch.setattr(
+        updates,
+        '_agent_update_lock_state',
+        lambda: {'path': marker, 'holder': None, 'present': False},
+    )
+    monkeypatch.setattr(
+        updates,
+        '_apply_update_inner',
+        lambda target, channel: (_ for _ in ()).throw(
+            AssertionError('non-index Git lock must not retry the updater')
+        ),
+    )
+
+    result = updates.apply_clear_lock('agent')
+
+    assert result['ok'] is False, result
+    assert result['lock_kind'] == 'git-other'
+    assert result['git_lock_path'].endswith('.git\\FETCH_HEAD.lock')
+    assert result['manual_command'].endswith('.git\\FETCH_HEAD.lock')
 
 
 def test_agent_non_git_root_still_invokes_official_updater(tmp_path, monkeypatch):
