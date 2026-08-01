@@ -168,6 +168,36 @@ def test_authorized_listing_keeps_nested_child_escape_display_only(tmp_path):
     assert "target" not in entries["nested-escape"]
 
 
+def test_authorized_listing_paginates_external_directory_with_read_only_rows(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    for index in range(201):
+        (outside / f"entry-{index:03d}.txt").write_text(str(index), encoding="utf-8")
+    (workspace / "escape").symlink_to(outside)
+
+    grant = authorize_escape_target(workspace, "sess-1", "escape")
+    first = list_authorized_escape_dir(workspace, "sess-1", grant["token"], "escape")
+    second = list_authorized_escape_dir(
+        workspace, "sess-1", grant["token"], "escape", first["cursor"]
+    )
+
+    assert len(first["entries"]) == 200
+    assert first["has_more"] is True
+    assert first["cursor"]
+    assert len(second["entries"]) == 1
+    assert second["has_more"] is False
+    assert second["cursor"] is None
+    assert first["read_only"] is True and second["read_only"] is True
+    all_entries = first["entries"] + second["entries"]
+    assert {entry["name"] for entry in all_entries} == {
+        f"entry-{index:03d}.txt" for index in range(201)
+    }
+    assert all(entry["path"].startswith("escape/") for entry in all_entries)
+    assert all(entry["escape_read_only"] is True for entry in all_entries)
+
+
 # ── TOCTOU hardening (#3398): a path that passes safe_resolve_ws() but is then
 #    swapped to an external symlink before the open must not read/list/write
 #    outside the workspace. The read/list/write paths use a portable anchored

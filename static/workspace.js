@@ -835,7 +835,7 @@ async function loadDir(path, opts={}){
   const refreshExpanded=!!(opts&&opts.refreshExpanded);
   if(!S.session)return;
   const requestPath=path||'.';
-  const owner=_workspaceCaptureDirRequestOwner(requestPath);
+  let owner=_workspaceCaptureDirRequestOwner(requestPath);
   try{
     if(!path||path==='.'||refreshExpanded){
       _workspaceResetDirCache();
@@ -855,6 +855,8 @@ async function loadDir(path, opts={}){
       if(typeof syncWorkspaceDisplays==='function')syncWorkspaceDisplays();
       if(typeof syncTerminalButton==='function')syncTerminalButton();
       showToast(t('workspace_recovered_notice',S.session.workspace),5000,'warning');
+      // Recovery changes workspace identity, so recapture ownership before expanded-directory prefetch.
+      owner=_workspaceCaptureDirRequestOwner(requestPath);
     }
     S._dirCursor=data.cursor||null;S._dirHasMore=!!(data.has_more);
     S.entries=data.entries||[];renderBreadcrumb();renderFileTree();

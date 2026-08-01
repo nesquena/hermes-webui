@@ -31,12 +31,14 @@ def test_directory_signature_is_stable_across_pages(tmp_path):
 
 
 def test_directory_signature_includes_followed_symlink_target_metadata(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
     target = tmp_path / "target.txt"
     target.write_text("one", encoding="utf-8")
-    link = tmp_path / "target-link.txt"
+    link = workspace / "target-link.txt"
     link.symlink_to(target)
 
-    before = dir_signature(tmp_path)
+    before = dir_signature(workspace)
     target.write_text("changed target contents", encoding="utf-8")
 
-    assert dir_signature(tmp_path) != before
+    assert dir_signature(workspace) != before

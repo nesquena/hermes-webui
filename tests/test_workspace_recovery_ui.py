@@ -68,20 +68,33 @@ def _run_node(script: str) -> dict:
 @pytest.mark.skipif(NODE is None, reason="node is required")
 def test_list_recovery_updates_authoritative_workspace_and_visible_controls():
     load_dir = _extract_async_function(WORKSPACE_JS, "loadDir")
+    fetch_all_pages = _extract_async_function(WORKSPACE_JS, "_fetchAllPages")
+    cache_versions = _extract_function(WORKSPACE_JS, "_workspaceCacheVersions")
+    cache_version = _extract_function(WORKSPACE_JS, "_workspaceCacheVersion")
+    set_dir_cache = _extract_function(WORKSPACE_JS, "_workspaceSetDirCache")
+    reset_dir_cache = _extract_function(WORKSPACE_JS, "_workspaceResetDirCache")
     capture_request_owner = _extract_function(WORKSPACE_JS, "_workspaceCaptureRequestOwner")
     capture_dir_request_owner = _extract_function(WORKSPACE_JS, "_workspaceCaptureDirRequestOwner")
     request_owner_is_current = _extract_function(WORKSPACE_JS, "_workspaceRequestOwnerIsCurrent")
     script = f"""
 const events=[];
-const S={{session:{{session_id:'sid-1',workspace:'/deleted'}},_dirCache:{{old:true}}}};
+const S={{session:{{session_id:'sid-1',workspace:'/deleted'}},_dirCache:{{old:true}},_expandedDirs:new Set(['expanded'])}};
 let _wsTreeGen=0;
 let _wsDirRequestGen=0;
 let _wsArtifactRequestGen=0;
 function bumpWorkspaceTreeGen(){{_wsTreeGen+=1;return _wsTreeGen;}}
-function _workspaceResetDirCache(){{S._dirCache={{}};}}
 function _restoreExpandedDirs(){{events.push(['restore',S.session.workspace]);}}
-function _workspaceRouteForPath(){{return '/api/list';}}
-async function api(){{return {{entries:[{{name:'a'}}],workspace:'/fallback-a',workspace_recovered:true}};}}
+function _workspaceRouteForPath(path){{return path==='expanded'?'/api/list?path=expanded':'/api/list';}}
+async function api(path){{
+  if(path==='/api/list') return {{entries:[{{name:'a'}}],workspace:'/fallback-a',workspace_recovered:true}};
+  if(path==='/api/list?path=expanded') return {{entries:[{{name:'restored-child'}}],has_more:false,cursor:null}};
+  throw new Error('unexpected api '+path);
+}}
+{fetch_all_pages}
+{cache_versions}
+{cache_version}
+{set_dir_cache}
+{reset_dir_cache}
 function renderBreadcrumb(){{events.push(['breadcrumb',S.session.workspace]);}}
 function renderFileTree(){{events.push(['tree',S.session.workspace]);}}
 function renderSessionArtifacts(){{}}
@@ -97,7 +110,7 @@ function _refreshGitBadge(){{}}
 {load_dir}
 (async()=>{{
   await loadDir('.');
-  process.stdout.write(JSON.stringify({{workspace:S.session.workspace,entries:S.entries,events,treeGen:_wsTreeGen}}));
+  process.stdout.write(JSON.stringify({{workspace:S.session.workspace,entries:S.entries,events,treeGen:_wsTreeGen,cache:S._dirCache}}));
 }})().catch(err=>{{console.error(err);process.exit(1);}});
 """
     payload = _run_node(script)
@@ -115,6 +128,7 @@ function _refreshGitBadge(){{}}
         "warning",
     ] in payload["events"]
     assert ["tree", "/fallback-a"] in payload["events"]
+    assert payload["cache"]["expanded"] == [{"name": "restored-child"}]
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required")
