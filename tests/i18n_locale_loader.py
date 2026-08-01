@@ -40,11 +40,20 @@ def locale_source_text() -> str:
         count=1,
         flags=re.DOTALL,
     )
+    helper_sources = []
+    for code in locale_codes():
+        source = locale_sources()[code]
+        if code == "en":
+            continue
+        register = re.search(r"registerLocale\(", source)
+        assert register, f"locale {code!r} is not registered"
+        helper_sources.append(source[: register.start()])
+
     blocks = []
     for code in locale_codes():
         key = f"'{code}'" if "-" in code else code
         blocks.append(f"  {key}: {{\n{locale_block(code)}\n  }},")
-    return runtime + "\nconst TEST_LOCALES = {\n" + "\n\n".join(blocks) + "\n};\n"
+    return runtime + "\n" + "\n".join(helper_sources) + "\nconst TEST_LOCALES = {\n" + "\n\n".join(blocks) + "\n};\n"
 
 
 def locale_codes() -> list[str]:
