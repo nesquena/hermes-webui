@@ -1261,9 +1261,12 @@ async function cmdGoal(args){
       if(r.effective_model)S.session.model=r.effective_model;
       if(r.effective_model_provider)S.session.model_provider=r.effective_model_provider;
     }
-    INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[],toolCalls:[]};
+    const priorDeliveredSteers=INFLIGHT[activeSid]&&Array.isArray(INFLIGHT[activeSid].deliveredSteers)
+      ? INFLIGHT[activeSid].deliveredSteers
+      : [];
+    INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[],toolCalls:[],deliveredSteers:priorDeliveredSteers};
     if(typeof markInflight==='function')markInflight(activeSid,r.stream_id);
-    if(typeof saveInflightState==='function')saveInflightState(activeSid,{streamId:r.stream_id,messages:INFLIGHT[activeSid].messages,uploaded:[],toolCalls:[]});
+    if(typeof saveInflightState==='function')saveInflightState(activeSid,{streamId:r.stream_id,messages:INFLIGHT[activeSid].messages,uploaded:[],toolCalls:[],deliveredSteers:priorDeliveredSteers});
     startApprovalPolling(activeSid);
     startClarifyPolling(activeSid);
     if(typeof _fetchYoloState==='function')_fetchYoloState(activeSid);
@@ -1468,10 +1471,17 @@ function _steerClearCurrentOwnerDeadRun(ownerSid, ownerStreamId){
   if(S.activeStreamId){S.activeStreamId=null;changed=true;}
   if(S.session&&S.session.active_stream_id){S.session.active_stream_id=null;changed=true;}
   if(typeof INFLIGHT!=='undefined'&&INFLIGHT&&INFLIGHT[ownerSid]){
-    delete INFLIGHT[ownerSid];
+    const pending=INFLIGHT[ownerSid];
+    const delivered=Array.isArray(pending.deliveredSteers)?pending.deliveredSteers:[];
+    if(delivered.length){
+      INFLIGHT[ownerSid]={...pending,streamId:null,deliveredSteers:delivered};
+      if(typeof saveInflightState==='function') saveInflightState(ownerSid,INFLIGHT[ownerSid]);
+    }else{
+      delete INFLIGHT[ownerSid];
+      if(typeof clearInflightState==='function') clearInflightState(ownerSid);
+    }
     changed=true;
   }
-  if(changed&&typeof clearInflightState==='function')clearInflightState(ownerSid);
   if(changed){
     // Finish the stale-busy cleanup idiom the rest of the app uses so a recovered
     // dead run leaves no lingering status line, elapsed timer, or streaming badge

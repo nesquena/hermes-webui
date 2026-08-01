@@ -846,8 +846,15 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   if (S.busy) { S.busy=false; changed=true; }
   if (S.activeStreamId) { S.activeStreamId=null; changed=true; }
   if (INFLIGHT&&INFLIGHT[sid]) {
-    delete INFLIGHT[sid];
-    if (typeof clearInflightState==='function') clearInflightState(sid);
+    const pending=INFLIGHT[sid];
+    const delivered=Array.isArray(pending.deliveredSteers)?pending.deliveredSteers:[];
+    if(delivered.length){
+      INFLIGHT[sid]={...pending,streamId:pending.streamId||null,deliveredSteers:delivered};
+      if(typeof saveInflightState==='function') saveInflightState(sid,INFLIGHT[sid]);
+    }else{
+      delete INFLIGHT[sid];
+      if (typeof clearInflightState==='function') clearInflightState(sid);
+    }
     changed=true;
   }
   if (S.session) {
@@ -1090,16 +1097,20 @@ function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeSt
   const activeId=requestedActiveId||serverId;
   const selectDurableSnapshot=()=>{
     const carried={};
+    // Delivered steers are browser-observed and can belong to a replaced
+    // stream, so carry every local record even when the journal snapshot owns
+    // a different active stream. Reattach filters records by stream later.
+    if(Array.isArray(localInflight.deliveredSteers)&&localInflight.deliveredSteers.length){
+      const hasActiveDelivery=!activeId||localInflight.deliveredSteers.some(record=>{
+        const payload=record&&record.payload&&typeof record.payload==='object'?record.payload:{};
+        return String(record&&record.stream_id||payload.stream_id||'')===activeId;
+      });
+      if(hasActiveDelivery) carried.deliveredSteers=localInflight.deliveredSteers;
+    }
     if(activeId&&localId===activeId){
       if(Array.isArray(localInflight.todos)&&localInflight.todoStateMeta){
         carried.todos=localInflight.todos;
         carried.todoStateMeta=localInflight.todoStateMeta;
-      }
-      // #3058: a delivered steer is observed at the browser's steer response, never
-      // on the run journal, so the server snapshot cannot carry it. Same stream, so
-      // the local records still describe this run; dropping them loses the row.
-      if(Array.isArray(localInflight.deliveredSteers)&&localInflight.deliveredSteers.length){
-        carried.deliveredSteers=localInflight.deliveredSteers;
       }
     }
     return Object.keys(carried).length?{...serverLiveSnapshot,...carried}:serverLiveSnapshot;

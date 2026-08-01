@@ -610,6 +610,8 @@ def test_3058_a_server_snapshot_recovery_keeps_the_browser_only_delivered_steers
     never reaches that journal, so the snapshot can never carry it back.
     """
     sessions = _read(SESSIONS_JS)
+    wrong_cached = dict(_CACHED_STEER)
+    wrong_cached["payload"] = dict(_CACHED_STEER["payload"], stream_id="stream-other")
     out = _run_node(
         _function(sessions, "_inflightHasVisibleLiveState")
         + "\n"
@@ -622,7 +624,7 @@ def test_3058_a_server_snapshot_recovery_keeps_the_browser_only_delivered_steers
         "toolCalls:[],lastAssistantText:'half an answer',lastRunJournalSeq:9,journalSnapshot:true};\n"
         f"const chosen=_selectLiveRecoveryInflight(local,server,{json.dumps(OWNER_STREAM)});\n"
         "// A snapshot for a DIFFERENT stream must not inherit this stream's records.\n"
-        "const otherStream=_selectLiveRecoveryInflight({...local,streamId:'stream-old'},server,"
+        f"const otherStream=_selectLiveRecoveryInflight({{...local,streamId:'stream-old',deliveredSteers:{json.dumps([wrong_cached])}}},server,"
         f"{json.dumps(OWNER_STREAM)});\n"
         "console.log(JSON.stringify({fromJournal:!!chosen.journalSnapshot,seq:chosen.lastRunJournalSeq,"
         "steers:chosen.deliveredSteers||null,otherStreamSteers:otherStream.deliveredSteers||null}));"

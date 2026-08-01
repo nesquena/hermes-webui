@@ -1657,7 +1657,7 @@ async function send(){
     optimisticMessages=[...S.messages];
     INFLIGHT[activeSid]=_preserveDeliveredSteerCacheForNewInflight(activeSid,{messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]});
     if(typeof saveInflightState==='function'){
-      saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[]});
+      _saveInflightWithDeliveredSteerCache(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[]});
     }
     _runOptionalPreStartUiStep('renderSessionListFromCache.initial', ()=>{
       if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
@@ -1887,7 +1887,7 @@ async function send(){
     const currentInflight=INFLIGHT[activeSid];
     markInflight(activeSid, streamId);
     if(typeof saveInflightState==='function'){
-      saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[]});
+      _saveInflightWithDeliveredSteerCache(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[]});
     }
     // Refresh session list so background streaming indicators appear immediately for the
     // session that was just started and any others that may already be running.
@@ -1909,6 +1909,15 @@ function _preserveDeliveredSteerCacheForNewInflight(sid, entry){
   const existing=typeof INFLIGHT!=='undefined'&&INFLIGHT?INFLIGHT[sid]:null;
   const records=existing&&Array.isArray(existing.deliveredSteers)?existing.deliveredSteers:[];
   return records.length?{...entry,deliveredSteers:records}:entry;
+}
+
+function _saveInflightWithDeliveredSteerCache(sid, state){
+  if(typeof saveInflightState!=='function') return;
+  const existing=typeof INFLIGHT!=='undefined'&&INFLIGHT?INFLIGHT[sid]:null;
+  const records=Array.isArray(state&&state.deliveredSteers)
+    ? state.deliveredSteers
+    : (existing&&Array.isArray(existing.deliveredSteers)?existing.deliveredSteers:[]);
+  saveInflightState(sid,{...(state||{}),deliveredSteers:records});
 }
 
 function _deliveredSteerStreamId(record){
