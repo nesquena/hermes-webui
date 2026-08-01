@@ -7191,6 +7191,7 @@ async function switchToProfile(name) {
         // doesn't strand (#4662 Opus gate).
         clearWorkspaceTreeSkeleton();
       }
+      if (typeof window._voiceLeaseResume === 'function') window._voiceLeaseResume();
       showToast(t('profile_switched', name));
     }
 

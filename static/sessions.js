@@ -1488,7 +1488,9 @@ async function newSession(flash, options={}){
     }
     if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false,preserveSubmission:preserveVoiceSubmission});
     S.session=data.session;S.messages=data.session.messages||[];
-    if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+    if(typeof _sendInProgress==='undefined'||!_sendInProgress){
+      if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+    }
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -1960,7 +1962,9 @@ async function loadSession(sid){
   }
   if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
   S.session=data.session;
-  if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+  if(typeof _sendInProgress==='undefined'||!_sendInProgress){
+    if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+  }
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.

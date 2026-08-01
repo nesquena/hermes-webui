@@ -729,8 +729,10 @@ async function cmdModel(args){
           }),
         });
         if(resp.ok){
+          if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
           S.session.model=q;
           S.session.model_provider=provider;
+          if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
           if(typeof syncTopbar==='function') syncTopbar();
           showToast(t('switched_to')+q);
           return;

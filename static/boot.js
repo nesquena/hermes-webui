@@ -1543,7 +1543,8 @@ window.renderTranscript=function(container, messages, opts){
   }
 
   function _voiceBusy(){
-    return typeof S!=='undefined'&&!!(S.busy||S.activeStreamId);
+    return typeof S!=='undefined'&&!!(S.busy||S.activeStreamId
+      ||(S.session&&S.session.active_stream_id));
   }
 
   function _newVoiceLease(){
@@ -1631,6 +1632,13 @@ window.renderTranscript=function(container, messages, opts){
     },delay);
   }
 
+  function _clearVoiceInterim(lease){
+    if(!lease||!lease.interimText) return;
+    const interim=lease.interimText;
+    lease.interimText='';
+    if(ta.value===interim){ta.value='';autoResize();}
+  }
+
   function _voiceLeaseSubmit(lease){
     if(!_voiceLeaseCurrent(lease)||lease.submitted) return;
     const text=String(lease.finalText||'').trim();
@@ -1644,8 +1652,21 @@ window.renderTranscript=function(container, messages, opts){
   }
 
   function _voiceLeasePrepareSubmission(){
-    const lease=_voiceLease;
-    if(!_voiceLeaseCurrent(lease)||lease.submitted) return null;
+    let lease=_voiceLease;
+    if(!_voiceModeActive) return null;
+    if(!lease){
+      lease=_newVoiceLease();
+      _voiceLease=lease;
+    }
+    if(lease&&(lease.submitted||lease.settled)){
+      if(lease.submitted&&!lease.settled) return null;
+      _clearVoiceLeaseTimers(lease);
+      _clearBrowserTtsRecovery();
+      if(typeof stopTTS==='function') stopTTS();
+      lease=_newVoiceLease();
+      _voiceLease=lease;
+    }
+    if(!_voiceLeaseCurrent(lease)) return null;
     _clearVoiceLeaseTimers(lease);
     _releaseVoiceRecognition(lease);
     lease.submitted=true;
@@ -1792,16 +1813,20 @@ window.renderTranscript=function(container, messages, opts){
 
     recognition.onend=()=>{
       if(!_voiceLeaseCurrent(lease,recognition)) return;
+      _clearVoiceInterim(lease);
       lease.recognition=null;
       if(lease.finalText&&lease.deadlineAt){
         const remaining=Math.max(0,lease.deadlineAt-Date.now());
         if(remaining===0) _voiceLeaseSubmit(lease);
         else _scheduleVoiceRestart(lease,0);
-      }else _scheduleVoiceRestart(lease,500);
+      }else{
+        _scheduleVoiceRestart(lease,500);
+      }
     };
 
     recognition.onerror=(event)=>{
       if(!_voiceLeaseCurrent(lease,recognition)) return;
+      _clearVoiceInterim(lease);
       lease.recognition=null;
       if(event.error==='no-speech'||event.error==='aborted'){
         _scheduleVoiceRestart(lease,800);
@@ -1818,7 +1843,9 @@ window.renderTranscript=function(container, messages, opts){
     };
 
     try{ recognition.start(); }catch(e){
+      try{recognition.abort();}catch(_){ }
       lease.recognition=null;
+      if(_recognition===recognition) _recognition=null;
       _scheduleVoiceRestart(lease,1000);
     }
   }
@@ -2044,6 +2071,7 @@ window.renderTranscript=function(container, messages, opts){
           if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          URL.revokeObjectURL(url);
           if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
         });
       })

@@ -1320,6 +1320,7 @@ async function send(){
     return;
   }
   _sendInProgress = true;
+  let streamId=null;
   try{
   const options=arguments[0]||{};
   const literalSlash=!!(options&&options.literalSlash);
@@ -1437,6 +1438,7 @@ async function send(){
         _pushedUser=true;
         renderMessages();
       }
+      if(typeof window._voiceLeasePrepareSubmission==='function') window._voiceLeasePrepareSubmission();
       // Run the handler directly (we already looked it up).  If it returns
       // false it's opting out — e.g. /reasoning <level> falls through so the
       // agent sees the raw text.  Roll back the echo push in that case so
@@ -1713,7 +1715,6 @@ async function send(){
   }
 
   // Start the agent via POST, get a stream_id back
-  let streamId=null;
   let postStartData;
   let modelStateForPostStart;
   let explicitPickForPostStart;

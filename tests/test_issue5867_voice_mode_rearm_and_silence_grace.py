@@ -22,6 +22,8 @@ def _voice_runtime():
 def _function_source(source: str, name: str) -> str:
     anchor = f"function {name}("
     start = source.index(anchor)
+    if source[max(0, start - 6):start] == "async ":
+        start -= 6
     paren_start = source.index("(", start)
     paren_depth = 1
     paren_end = paren_start + 1
@@ -119,6 +121,65 @@ console.log(JSON.stringify({ before, afterRestart, afterSend, settled, duplicate
 """
 
 
+PRODUCTION_HARNESS = r"""
+const source = Buffer.from('${SEND_B64}', 'base64').toString();
+const ownerSource = Buffer.from('${OWNER_B64}', 'base64').toString();
+const msg = { value: 'production voice text' };
+const elements = new Map([['msg', msg]]);
+const S = {
+  session: { session_id: 's1', workspace: 'D:/workspace', title: 'Untitled', model: 'model-1', profile: 'default' },
+  pendingFiles: [], messages: [], toolCalls: [], busy: false, activeStreamId: null,
+};
+const INFLIGHT = {};
+const ownerEvents = [];
+const bound = [];
+const windowObj = {
+  _defaultMessageMode: 'steer',
+  _voiceLeasePrepareSubmission() { bound.push({ type: 'prepare' }); },
+  _voiceLeaseBind(streamId, sid) { bound.push({ type: 'bind', streamId, sid }); },
+  _voiceLeaseSettleLocal() { bound.push({ type: 'local-settle' }); },
+};
+const element = () => ({ value: '', style: {}, options: [], classList: { add(){}, remove(){} }, querySelectorAll(){ return []; } });
+const $ = id => elements.get(id) || element();
+const noOp = () => {};
+const ownerFactory = new Function('window','_isActiveSession','S','INFLIGHT','setBusy','setComposerStatus','setStatus',
+  'return (' + ownerSource + ');');
+windowObj._voiceModeOnResponseComplete = outcome => ownerEvents.push(outcome);
+const owner = ownerFactory(windowObj, () => true, S, INFLIGHT, value => { S.busy = value; }, noOp, noOp);
+const scope = {
+  $, S, INFLIGHT, window: windowObj, document: { querySelector(){ return null; }, querySelectorAll(){ return []; } },
+  COMMANDS: [], parseCommand: () => null, _pendingSelections: [], _sendInProgress: false, _sendInProgressSid: null,
+  _composerTextWithPendingSelections: () => msg.value, _flushSelectionBlocksToComposer: noOp,
+  shouldInterceptCompressionRecoveryContinuation: () => false, isCompressionUiRunning: () => false,
+  _clearStaleBusyStateBeforeSend: noOp, _forcedSkillDirectivePending: null,
+  _clearComposerDraft: () => Promise.resolve(), uploadPendingFiles: async () => [],
+  setComposerStatus: noOp, autoResize: noOp, renderTray: noOp, clearLiveToolCards: noOp,
+  appendThinking: noOp, ensureLiveWorklogShell: noOp, setBusy: value => { S.busy = value; },
+  updateSendBtn: noOp, _runOptionalPreStartUiStep: (_name, fn) => fn(), _runOptionalPostStartUiStep: (_name, fn) => fn(),
+  saveInflightState: noOp, markInflight: noOp, renderSessionListFromCache: noOp, renderSessionList: noOp,
+  startApprovalPolling: noOp, startClarifyPolling: noOp, _fetchYoloState: noOp,
+  applySessionTitleUpdate: noOp, upsertActiveSessionForLocalTurn: noOp, _chatPayloadModelState: () => ({ model: 'model-1', model_provider: 'provider-1' }),
+  _readPendingSessionModel: () => null, _clearPendingSessionModel: noOp, _activeProvider: 'provider-1',
+  updateQueueBadge: noOp, _queueDrainSid: null, localStorage: { setItem(){}, getItem(){ return null; } },
+  api: async () => ({ stream_id: 'stream-1' }), attachLiveStream: (sid, streamId) => { bound.push({ type: 'attach', sid, streamId }); owner({ success: true }); },
+  clearInflightState: noOp, clearInflight: noOp, stopApprovalPolling: noOp, stopClarifyPolling: noOp,
+  hideApprovalCard: noOp, hideClarifyCard: noOp, removeThinking: noOp, clearOptimisticSessionStreaming: noOp,
+  showToast: noOp, setStatus: noOp, renderMessages: noOp, _appRootPath: () => '/', history: { replaceState: noOp },
+  _approvalSessionId: null, _clarifySessionId: null, _AGENT_COMMANDS_RUN_ON_WEBUI: new Set(),
+};
+const builtins = new Set(['Array','Boolean','Buffer','Date','Error','JSON','Map','Math','Number','Object','Promise','RegExp','Set','String','Symbol','URL','undefined','NaN','Infinity','isNaN','parseInt','encodeURIComponent','decodeURIComponent','setTimeout','clearTimeout','console']);
+for (const match of source.matchAll(/\b[A-Za-z_$][\w$]*\b/g)) {
+  const name = match[0];
+  if (!builtins.has(name) && !(name in scope)) scope[name] = noOp;
+}
+const send = new Function('scope', 'with(scope){ return (' + source + '); }')(scope);
+(async () => {
+  await send();
+  console.log(JSON.stringify({ bound, ownerEvents, streamId: S.activeStreamId, busy: S.busy, inProgress: scope._sendInProgress }));
+})().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
+"""
+
+
 def _run_runtime():
     encoded = base64.b64encode(_voice_runtime().encode()).decode()
     owner_encoded = base64.b64encode(OWNER_SOURCE.encode()).decode()
@@ -126,7 +187,17 @@ def _run_runtime():
         "${RUNTIME}", "${Buffer.from('" + encoded + "','base64').toString()}"
     )
     script = script.replace("${OWNER_B64}", owner_encoded)
-    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True)
+    result = subprocess.run([NODE], input=script, capture_output=True, text=True)
+    if result.returncode:
+        raise AssertionError(result.stderr)
+    return json.loads(result.stdout)
+
+
+def _run_production_send():
+    script = PRODUCTION_HARNESS.replace(
+        "${SEND_B64}", base64.b64encode(SEND_SOURCE.encode()).decode()
+    ).replace("${OWNER_B64}", base64.b64encode(OWNER_SOURCE.encode()).decode())
+    result = subprocess.run([NODE], input=script, capture_output=True, text=True)
     if result.returncode:
         raise AssertionError(result.stderr)
     return json.loads(result.stdout)
@@ -155,6 +226,17 @@ def test_voice_lease_ignores_duplicate_or_stale_owner_callbacks():
 def test_actual_messages_owner_seam_settles_voice_outcome_once():
     result = _run_runtime()
     assert result["ownerEvents"] == [{"success": False}]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_production_send_binds_and_settles_through_owner_seam():
+    result = _run_production_send()
+    assert [entry["type"] for entry in result["bound"]] == ["prepare", "bind", "attach"]
+    assert result["bound"][1] == {"type": "bind", "streamId": "stream-1", "sid": "s1"}
+    assert result["ownerEvents"] == [{"success": True}]
+    assert result["streamId"] == "stream-1"
+    assert result["busy"] is False
+    assert result["inProgress"] is False
 
 
 def test_production_send_and_stream_paths_share_the_lease_seams():
