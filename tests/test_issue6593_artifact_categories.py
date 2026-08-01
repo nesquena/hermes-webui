@@ -47,7 +47,9 @@ def _collect(payload):
         "_normalizeArtifactPath",
         "_normalizeArtifactUrl",
         "_normalizeArtifactTarget",
+        "_normalizeArtifactFilePath",
         "_normalizeArtifactMediaRef",
+        "_normalizeArtifactWorkspacePath",
         "_parseArtifactJson",
         "_artifactToolId",
         "_artifactToolName",
@@ -217,6 +219,42 @@ def test_settled_tool_results_are_correlated_by_provider_tool_id():
         "https://example.com/correlated",
         "https://example.com/anthropic",
     ]
+
+
+def test_session_tool_call_summaries_join_settled_tool_results_by_provider_id():
+    payload = {
+        "tool_calls": [
+            {"id": "summary-openai", "name": "web_extract", "args": {}},
+            {"id": "summary-anthropic", "name": "web_extract", "input": {}},
+        ],
+        "messages": [
+            {
+                "role": "tool",
+                "tool_call_id": "summary-openai",
+                "content": '{"results":[{"href":"https://example.com/session-summary"}]}',
+            },
+            {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "summary-anthropic",
+                    "content": '{"results":[{"url":"https://example.org/session-summary"}]}',
+                }],
+            },
+        ],
+    }
+    assert [item["path"] for item in _collect(payload)] == [
+        "https://example.com/session-summary",
+        "https://example.org/session-summary",
+    ]
+
+
+def test_windows_file_media_keeps_drive_semantics_in_the_projection():
+    items = _collect({
+        "tool_calls": [],
+        "messages": [{"role": "assistant", "content": "MEDIA:file:///C:/work/chart.png"}],
+    })
+    assert [item["path"] for item in items] == ["file:///C:/work/chart.png"]
 
 
 def test_media_uses_shipped_media_contract_without_image_grammar():

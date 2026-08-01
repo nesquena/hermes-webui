@@ -464,24 +464,54 @@ function _normalizeArtifactTarget(value, allowExtensionless=false){
   return /^(?:https?):/i.test(candidate) ? _normalizeArtifactUrl(candidate) : _normalizeArtifactPath(candidate, allowExtensionless);
 }
 
+function _normalizeArtifactFilePath(value){
+  if(typeof value !== 'string') return '';
+  const candidate = value.trim().replace(/^[`"'(<]+|[`"'\]>,.;:]+$/g,'');
+  if(!/^file:\/\//i.test(candidate)) return '';
+  const raw = candidate.replace(/^file:\/\//i,'');
+  let localPath = '';
+  const drive = raw.match(/^\/?([a-z]:)(?:[\\/]|$)(.*)$/i);
+  if(drive){
+    localPath = `${drive[1]}/${drive[2]}`;
+  }else{
+    try{
+      const parsed = new URL(candidate);
+      if(parsed.hostname) return '';
+      localPath = parsed.pathname || '';
+    }catch(_){
+      localPath = raw;
+    }
+  }
+  try{ localPath = decodeURIComponent(localPath); }catch(_){ return ''; }
+  localPath = localPath.replace(/^\/([a-z]:[\\/])/i,'$1');
+  return _normalizeArtifactPath(localPath, true);
+}
+
 function _normalizeArtifactMediaRef(value){
   if(typeof value !== 'string') return '';
   const candidate = value.trim().replace(/^[`"'(<]+|[`"'\]>,.;:]+$/g,'');
   if(!candidate) return '';
   if(/^file:\/\//i.test(candidate)){
-    let localPath = '';
-    try{
-      const parsed = new URL(candidate);
-      if(parsed.hostname) return '';
-      localPath = decodeURIComponent(parsed.pathname || '');
-    }catch(_){
-      try{ localPath = decodeURIComponent(candidate.replace(/^file:\/\//i,'')); }catch(__){ return ''; }
-    }
-    localPath = _normalizeArtifactPath(localPath, true);
+    const localPath = _normalizeArtifactFilePath(candidate);
     if(!localPath) return '';
     return `file://${localPath.startsWith('/') ? '' : '/'}${localPath}`;
   }
   return _normalizeArtifactTarget(candidate, true);
+}
+
+function _normalizeArtifactWorkspacePath(value, allowExtensionless=true){
+  const path = _normalizeArtifactPath(value, allowExtensionless);
+  if(!path) return '';
+  const workspace = typeof S !== 'undefined' && S.session
+    ? _normalizeArtifactPath(S.session.workspace, true)
+    : '';
+  if(!workspace) return path;
+  const caseInsensitive = /^[a-z]:\//i.test(workspace);
+  const comparablePath = caseInsensitive ? path.toLowerCase() : path;
+  const comparableWorkspace = caseInsensitive ? workspace.toLowerCase() : workspace;
+  if(comparablePath === comparableWorkspace) return '.';
+  const prefix = `${comparableWorkspace}/`;
+  return comparablePath.startsWith(prefix) ? path.slice(workspace.length + 1) : path;
 }
 
 function _parseArtifactJson(value){
@@ -759,7 +789,7 @@ function collectSessionArtifacts(){
   // Source 1: session-level tool call summaries (may be empty when messages
   // carry their own tool metadata — see _syncToolCallsForLoadedMessages).
   for(const tc of (S.toolCalls || [])){
-    for(const a of _artifactCandidatesFromToolCall(tc)) push(a, a.kind || tc.name || 'tool');
+    processToolCall(tc, 'tool_summary');
   }
   // Source 2 & 3: message-level data — both text-mined diffs and structured
   // tool_calls / tool_use content blocks that survive the S.toolCalls clear.
@@ -818,11 +848,25 @@ function renderSessionArtifacts(){
     return;
   }
   // Strip workspace prefix for display so long absolute paths don't clutter the list.
-  const ws = S.session && S.session.workspace;
-  const normWs = ws ? ws.replace(/\/+$/,'') + '/' : '';
   const displayPath = (p) => {
-    if(normWs && p.startsWith(normWs)) return p.slice(normWs.length);
-    return p;
+    if(/^https?:/i.test(p)) return p;
+    const filePath = typeof _normalizeArtifactFilePath === 'function'
+      ? _normalizeArtifactFilePath(p)
+      : '';
+    const rawPath = filePath || p;
+    const normalized = typeof _normalizeArtifactWorkspacePath === 'function'
+      ? _normalizeArtifactWorkspacePath(rawPath, true)
+      : (() => {
+        const fallbackPath = String(rawPath).replace(/\\/g, '/');
+        const fallbackWorkspace = String(S.session && S.session.workspace || '')
+          .replace(/\\/g, '/').replace(/\/+$/,'');
+        if(!fallbackWorkspace) return fallbackPath;
+        if(fallbackPath === fallbackWorkspace) return '.';
+        return fallbackPath.startsWith(`${fallbackWorkspace}/`)
+          ? fallbackPath.slice(fallbackWorkspace.length + 1)
+          : fallbackPath;
+      })();
+    return normalized || p;
   };
   const splitArtifactDisplayPath = (path) => {
     const slash = path.lastIndexOf('/');
@@ -850,17 +894,10 @@ function renderSessionArtifacts(){
   };
   const artifactMediaHref = (ref) => {
     if(/^https?:/i.test(ref)) return _normalizeArtifactUrl(ref);
-    let path = String(ref || '');
-    if(/^file:\/\//i.test(path)){
-      try{
-        const parsed = new URL(path);
-        if(parsed.hostname) return '';
-        path = decodeURIComponent(parsed.pathname || '');
-      }catch(_){
-        try{ path = decodeURIComponent(path.replace(/^file:\/\//i,'')); }catch(__){ return ''; }
-      }
-    }
-    path = _normalizeArtifactPath(path, true);
+    const path = _normalizeArtifactWorkspacePath(
+      _normalizeArtifactFilePath(ref) || String(ref || ''),
+      true,
+    );
     if(!path || !S.session || !S.session.session_id) return '';
     return `api/media?path=${encodeURIComponent(path)}&session_id=${encodeURIComponent(S.session.session_id)}`;
   };
@@ -882,8 +919,10 @@ function renderSessionArtifacts(){
   root.innerHTML = categoryOrder.map(category => {
     const categoryItems = items.filter(item => (item.category || 'modified') === category);
     if(!categoryItems.length) return '';
-    const label = t(categoryLabels[category]);
-    return `<details class="workspace-artifact-group" data-artifact-category="${category}" open><summary class="workspace-artifact-group-title"><span>${esc(label === categoryLabels[category] ? categoryLabelFallbacks[category] : label)}</span><span class="workspace-artifacts-count">${categoryItems.length}</span></summary><div class="workspace-artifact-group-items">${categoryItems.map(renderItem).join('')}</div></details>`;
+    const labelKey = categoryLabels[category];
+    const label = t(labelKey);
+    const labelText = label === labelKey ? categoryLabelFallbacks[category] : label;
+    return `<details class="workspace-artifact-group" data-artifact-category="${category}" open><summary class="workspace-artifact-group-title"><span data-i18n="${labelKey}">${esc(labelText)}</span><span class="workspace-artifacts-count">${categoryItems.length}</span></summary><div class="workspace-artifact-group-items">${categoryItems.map(renderItem).join('')}</div></details>`;
   }).join('');
 }
 
@@ -900,14 +939,7 @@ async function _workspacePathExists(path){
 async function openArtifactPath(path){
   if(!path) return;
   switchWorkspacePanelTab('files');
-  let rel = path.replace(/^~\//,'').replace(/^\.\/+/,'');
-  // Strip workspace prefix so /api/list receives a workspace-relative path.
-  const ws = S.session && S.session.workspace;
-  if(ws){
-    const normWs = ws.replace(/\/+$/,'') + '/';
-    if(rel.startsWith(normWs)) rel = rel.slice(normWs.length);
-    else if(rel === ws.replace(/\/+$/,'')) rel = '.';
-  }
+  let rel = _normalizeArtifactWorkspacePath(path, true);
   if(!rel) rel = '.';
   try{
     if(!(await _workspacePathExists(rel))){

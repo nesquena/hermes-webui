@@ -15,6 +15,7 @@ FIXTURE = REPO / "tests" / "fixtures" / "issue6593_artifact_categories.json"
 WORKSPACE_JS = (REPO / "static" / "workspace.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 
 
 def _function(source, name):
@@ -43,58 +44,63 @@ def _artifact_bundle():
             "ARTIFACT_CATEGORY_LIMITS",
         )
     )
-    functions = "\n".join(
-        _function(WORKSPACE_JS, name)
-        for name in (
-            "_normalizeArtifactPath",
-            "_normalizeArtifactUrl",
-            "_normalizeArtifactTarget",
-            "_normalizeArtifactMediaRef",
-            "_parseArtifactJson",
-            "_artifactToolId",
-            "_artifactToolName",
-            "_artifactToolArgs",
-            "_artifactResultValues",
-            "_artifactTextFromValue",
-            "_artifactPartialFieldValues",
-            "_artifactCandidatesFromText",
-            "_artifactCandidatesFromToolCall",
-            "_artifactToolResultPayload",
-            "_artifactToolResultsById",
-            "collectSessionArtifacts",
-            "renderSessionArtifacts",
-        )
+    function_names = (
+        "_normalizeArtifactPath",
+        "_normalizeArtifactUrl",
+        "_normalizeArtifactTarget",
+        "_normalizeArtifactFilePath",
+        "_normalizeArtifactMediaRef",
+        "_normalizeArtifactWorkspacePath",
+        "_parseArtifactJson",
+        "_artifactToolId",
+        "_artifactToolName",
+        "_artifactToolArgs",
+        "_artifactResultValues",
+        "_artifactTextFromValue",
+        "_artifactPartialFieldValues",
+        "_artifactCandidatesFromText",
+        "_artifactCandidatesFromToolCall",
+        "_artifactToolResultPayload",
+        "_artifactToolResultsById",
+        "collectSessionArtifacts",
+        "renderSessionArtifacts",
     )
+    functions = "\n".join(_function(WORKSPACE_JS, name) for name in function_names)
+    functions += "\nasync " + _function(WORKSPACE_JS, "openArtifactPath")
     return consts + "\n" + functions
 
 
-def _render_harness(payload):
+def _actual_rightpanel_html():
+    start = INDEX_HTML.index('<aside class="rightpanel">')
+    end = INDEX_HTML.index("</aside>", start) + len("</aside>")
+    return (
+        INDEX_HTML[start:end]
+        .replace(
+            '<aside class="rightpanel">',
+            '<aside class="rightpanel mobile-open" data-active-tab="artifacts">',
+        )
+        .replace('id="workspaceArtifacts" hidden', 'id="workspaceArtifacts"')
+    )
+
+
+def _render_harness(payload, workspace="/workspace"):
     return f"""
       <style>{STYLE_CSS} html, body {{ height: 100%; margin: 0; overflow: hidden; }} .rightpanel {{ height: 100vh; box-sizing: border-box; }}</style>
       <script>{I18N_JS}</script>
-      <aside class="rightpanel mobile-open" data-active-tab="artifacts">
-        <div class="panel-header">
-          <div class="workspace-panel-title-group"><span>Workspace</span></div>
-          <div class="panel-actions"></div>
-        </div>
-        <div class="workspace-panel-tabs" role="tablist" aria-label="Workspace panel views">
-          <button class="workspace-panel-tab" type="button" role="tab">Files</button>
-          <button class="workspace-panel-tab active" type="button" role="tab" aria-selected="true">
-            <span>Artifacts</span><span id="workspaceArtifactsCount" class="workspace-artifacts-count">0</span>
-          </button>
-        </div>
-        <div id="workspaceArtifacts" class="workspace-artifacts"></div>
-      </aside>
+      {_actual_rightpanel_html()}
       <script>
         const S = {json.dumps({
             "toolCalls": payload["tool_calls"],
             "messages": payload["messages"],
-            "session": {"workspace": "/workspace", "session_id": "ui-proof"},
+            "session": {"workspace": workspace, "session_id": "ui-proof"},
         })};
         const $ = id => document.getElementById(id);
         const esc = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;')
           .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-        const openArtifactPath = path => window.opened = [...(window.opened || []), path];
+        const switchWorkspacePanelTab = () => {{}};
+        const _workspacePathExists = async () => true;
+        const openFile = path => window.opened = [...(window.opened || []), path];
+        const setStatus = () => {{}};
         {_artifact_bundle()}
         renderSessionArtifacts();
       </script>
@@ -130,11 +136,19 @@ def test_grouped_sections_use_real_workspace_panel_and_safe_actions():
 
         for viewport in ((1280, 900), (768, 900), (400, 900), (480, 320)):
             page.set_viewport_size({"width": viewport[0], "height": viewport[1]})
+            page.locator(".rightpanel").evaluate(
+                "(node, narrow) => { node.style.setProperty('--mobile-rightpanel-width', narrow ? '210px' : ''); }",
+                viewport == (480, 320),
+            )
             assert_layout_sane(
                 page,
                 "#workspaceArtifacts",
                 checks=["overlap", "clip", "container-escape", "raw-string", "a11y"],
             )
+            if viewport == (480, 320):
+                assert page.locator(".workspace-artifact-group > summary").first.evaluate(
+                    "node => getComputedStyle(node).fontSize"
+                ) == "10px"
         page.locator(".workspace-artifact-item").first.focus()
         assert page.evaluate("() => document.activeElement.classList.contains('workspace-artifact-item')")
         page.locator(".workspace-artifact-group > summary").first.focus()
@@ -156,10 +170,41 @@ def test_category_labels_load_through_real_ru_and_de_locales():
         page = browser.new_page(viewport={"width": 480, "height": 320})
         page.set_content(_render_harness(payload))
         for locale, lang in (("ru", "ru-RU"), ("de", "de-DE")):
-            page.evaluate("locale => { setLocale(locale); renderSessionArtifacts(); }", locale)
+            page.evaluate("locale => { setLocale(locale); applyLocaleToDOM(); }", locale)
             assert page.locator("html").get_attribute("lang") == lang
             expected = [page.evaluate("key => t(key)", key) for key in keys]
             actual = page.locator(".workspace-artifact-group-title > span:first-child").all_text_contents()
             assert actual == expected
             assert all(value not in keys for value in actual)
+        browser.close()
+
+
+def test_windows_file_media_uses_relative_drive_path_on_existing_media_route():
+    playwright = pytest.importorskip("playwright.sync_api")
+    payload = {
+        "tool_calls": [],
+        "messages": [{"role": "assistant", "content": "MEDIA:file:///C:/work/chart.png"}],
+    }
+    with playwright.sync_playwright() as api:
+        browser = api.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page(viewport={"width": 480, "height": 320})
+        page.set_content(_render_harness(payload, workspace=r"C:\work"))
+        media_link = page.locator(".workspace-artifact-link").first
+        assert media_link.get_attribute("href").startswith("api/media?path=chart.png&")
+        assert "session_id=ui-proof" in media_link.get_attribute("href")
+        browser.close()
+
+
+def test_windows_workspace_prefix_is_removed_before_file_action():
+    playwright = pytest.importorskip("playwright.sync_api")
+    payload = {
+        "tool_calls": [{"name": "write_file", "args": {"path": r"C:\work\src\app.py"}}],
+        "messages": [],
+    }
+    with playwright.sync_playwright() as api:
+        browser = api.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page(viewport={"width": 480, "height": 320})
+        page.set_content(_render_harness(payload, workspace=r"C:\work"))
+        page.locator(".workspace-artifact-item").first.click()
+        assert page.evaluate("() => window.opened") == ["src/app.py"]
         browser.close()
