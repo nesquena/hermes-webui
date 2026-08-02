@@ -1908,11 +1908,21 @@ async function send(){
 
 const LIVE_STREAMS={};
 const LIVE_STREAM_TRANSPORT_AUTHORITY=Object.create(null);
+const LIVE_STREAM_TRANSPORT_SOURCE_GENERATION=new WeakMap();
 let LIVE_STREAM_TRANSPORT_GENERATION=0;
-if(typeof window!=='undefined') window._liveStreamTransportAuthority=LIVE_STREAM_TRANSPORT_AUTHORITY;
-function _releaseLiveStreamTransportAuthority(sid, source, generation){
+if(typeof window!=='undefined'){
+  window._liveStreamTransportAuthority=LIVE_STREAM_TRANSPORT_AUTHORITY;
+  window._liveStreamTransportSourceGeneration=LIVE_STREAM_TRANSPORT_SOURCE_GENERATION;
+  window._liveStreamTransportCapture=(sid,streamId)=>{
+    const live=LIVE_STREAMS[sid];
+    const authority=LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
+    if(!live||!authority||live.streamId!==String(streamId||'')||authority.streamId!==String(streamId||'')) return null;
+    return {source:live.source,generation:authority.generation};
+  };
+}
+function _releaseLiveStreamTransportAuthority(sid, generation){
   const authority=LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
-  if(authority&&authority.source===source&&authority.generation===generation){
+  if(authority&&authority.generation===generation){
     delete LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
   }
 }
@@ -1968,10 +1978,6 @@ function closeLiveStream(sessionId, streamId, source){
   if(!live) return;
   if(streamId&&live.streamId!==streamId) return;
   if(source&&live.source!==source) return;
-  const closedAuthority=LIVE_STREAM_TRANSPORT_AUTHORITY[sessionId]
-    && LIVE_STREAM_TRANSPORT_AUTHORITY[sessionId].source===live.source
-    ? {source:live.source,generation:LIVE_STREAM_TRANSPORT_AUTHORITY[sessionId].generation}
-    : null;
   // Snapshot the current live-turn DOM BEFORE tearing the stream down. The
   // per-event snapshot (snapshotLiveTurn) only fires on content/tool_complete
   // SSE events, so switching away during a quiet window (mid tool-exec, silent
@@ -1987,11 +1993,6 @@ function closeLiveStream(sessionId, streamId, source){
   if(typeof hideLiveRunStatus==='function') hideLiveRunStatus(sessionId);
   try{if(live.source&&live.source.readyState!==2)live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
-  if(closedAuthority){
-    setTimeout(()=>{
-      if(!LIVE_STREAMS[sessionId]) _releaseLiveStreamTransportAuthority(sessionId,closedAuthority.source,closedAuthority.generation);
-    },0);
-  }
   _resumeSessionStreamAfterLiveChat(sessionId);
   // closeLiveStream() is called during session-switch teardown for any session
   // the user is no longer viewing. The stream is still active on the server,
@@ -2179,11 +2180,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
-  function _ownsActiveStreamOrBackground(){
-    return !_isActiveSession() || S.activeStreamId===streamId;
+  function _ownsActiveStreamOrBackground(source){
+    if(!_isActiveSession()) return true;
+    if(S.activeStreamId!==streamId) return false;
+    const live=LIVE_STREAMS[activeSid];
+    const authority=LIVE_STREAM_TRANSPORT_AUTHORITY[activeSid];
+    const sourceGeneration=source&&LIVE_STREAM_TRANSPORT_SOURCE_GENERATION.get(source);
+    if(!authority||authority.streamId!==streamId||authority.generation!==_transportGeneration
+      ||sourceGeneration!==authority.generation) return false;
+    if(live&&live.source!==source) return false;
+    return true;
   }
   function _bailOutOfTerminalEventsFromStaleStream(source){
-    if(_ownsActiveStreamOrBackground()) return false;
+    if(_ownsActiveStreamOrBackground(source)) return false;
     // This stale stream no longer owns the session — schedule cleanup of ITS own
     // anchor registry (identity-guarded, so it can't clobber the newer stream's
     // registry for the same session) before closing. (Codex leak catch.)
@@ -2273,6 +2282,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
   }
   function _setActivePaneIdleIfOwner(voiceOutcome={success:false}, terminalSource=null, terminalGeneration=0){
+    const ownerSid=_setActivePaneIdleIfOwner._voiceOwnerSid||activeSid;
+    const ownerStreamId=_setActivePaneIdleIfOwner._voiceOwnerStreamId||streamId;
     if(_isActiveSession()||!S.session||!INFLIGHT[S.session.session_id]){
       if(S.session&&S.session.session_id===activeSid&&S.session.active_stream_id===streamId){
         S.session.active_stream_id=null;
@@ -2281,13 +2292,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       setComposerStatus('');
       if(typeof setStatus==='function') setStatus('');
       if(voiceOutcome&&typeof window._voiceModeOnResponseComplete==='function'){
-        window._voiceModeOnResponseComplete(activeSid,streamId,terminalSource,terminalGeneration,voiceOutcome);
+        window._voiceModeOnResponseComplete(ownerSid,ownerStreamId,terminalSource,terminalGeneration,voiceOutcome);
       }
     }
     if(terminalSource&&typeof _releaseLiveStreamTransportAuthority==='function'){
-      _releaseLiveStreamTransportAuthority(activeSid,terminalSource,terminalGeneration);
+      _releaseLiveStreamTransportAuthority(activeSid,terminalGeneration);
     }
   }
+  _setActivePaneIdleIfOwner._voiceOwnerSid=activeSid;
+  _setActivePaneIdleIfOwner._voiceOwnerStreamId=streamId;
   function persistInflightState(){
     const inflight=INFLIGHT[activeSid];
     if(!inflight||typeof saveInflightState!=='function') return;
@@ -5479,7 +5492,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     const generation=++LIVE_STREAM_TRANSPORT_GENERATION;
     _transportGeneration=generation;
-    const authority={streamId,source,generation};
+    LIVE_STREAM_TRANSPORT_SOURCE_GENERATION.set(source,generation);
+    const authority={streamId,generation};
     LIVE_STREAM_TRANSPORT_AUTHORITY[activeSid]=authority;
     LIVE_STREAMS[activeSid]={streamId,source,generation};
 
@@ -5607,7 +5621,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('reasoning',e=>{
       if(_terminalStateReached||_streamFinalized) return;
-      if(!_ownsActiveStreamOrBackground()) return;
+      if(!_ownsActiveStreamOrBackground(source)) return;
       const d=JSON.parse(e.data);
       const text=d.text||'';
       reasoningText += text;
@@ -5979,6 +5993,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }
           if(completedSid!==activeSid&&typeof window._voiceLeaseRetargetOwner==='function'){
             window._voiceLeaseRetargetOwner(activeSid,completedSid,_settledStreamId);
+            _setActivePaneIdleIfOwner._voiceOwnerSid=completedSid;
+            _setActivePaneIdleIfOwner._voiceOwnerStreamId=_settledStreamId;
           }
           const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
           if(

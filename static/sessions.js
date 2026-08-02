@@ -1491,9 +1491,6 @@ async function newSession(flash, options={}){
     }
     S.session=data.session;S.messages=data.session.messages||[];
     S._pendingSessionToolsets=null;
-    if(typeof _sendInProgress==='undefined'||!_sendInProgress){
-      if(typeof window!=='undefined'&&typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
-    }
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
@@ -1533,6 +1530,9 @@ async function newSession(flash, options={}){
     // conversation is still streaming in the background.
     S.busy=false;
     S.activeStreamId=null;
+    if(typeof _sendInProgress==='undefined'||!_sendInProgress){
+      if(typeof window!=='undefined'&&typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+    }
     updateSendBtn();
     setStatus('');
     setComposerStatus('');
@@ -1645,7 +1645,7 @@ function _sessionProfileMismatchFromError(e){
   return null;
 }
 
-async function _switchProfileForSessionLoad(profile){
+async function _switchProfileForSessionLoad(profile, options={}){
   const name=String(profile||'').trim();
   if(!name) throw new Error('missing profile');
   if(name===S.activeProfile) return;
@@ -1682,7 +1682,8 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
     _sessionListSkeletonActive=false;
     if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
-    if(typeof _sendInProgress==='undefined'||!_sendInProgress){
+    if((typeof options.isCurrentLoad!=='function'||options.isCurrentLoad())
+      &&(typeof _sendInProgress==='undefined'||!_sendInProgress)){
       if(typeof window!=='undefined'&&typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
     }
     throw switchErr;
@@ -1855,7 +1856,7 @@ async function loadSession(sid){
       }
       try{
         if(typeof showToast==='function') showToast(`Switching to ${profileMismatch.profile} profile for this session…`,2200);
-        await _switchProfileForSessionLoad(profileMismatch.profile);
+        await _switchProfileForSessionLoad(profileMismatch.profile,{isCurrentLoad:_isCurrentLoad});
         // Post-await stale-load guard (Codex): the profile switch above does a
         // network POST + session-list re-render, during which the user may have
         // navigated to a different session. If we no longer own the load, bail
@@ -1989,9 +1990,6 @@ async function loadSession(sid){
   }
   S.session=data.session;
   S._pendingSessionToolsets=null;
-  if(typeof _sendInProgress==='undefined'||!_sendInProgress){
-    if(typeof window!=='undefined'&&typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
-  }
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
@@ -2371,6 +2369,11 @@ async function loadSession(sid){
     });
   }
   if(typeof _renderPendingPromptsForActiveSession==='function') _renderPendingPromptsForActiveSession();
+
+  if((typeof _sendInProgress==='undefined'||!_sendInProgress)
+    &&typeof window!=='undefined'&&typeof window._voiceLeaseResume==='function'){
+    window._voiceLeaseResume();
+  }
 
   // Restore server-persisted composer draft (synced across clients + survives refresh).
   // Pass sid so _restoreComposerDraft can skip if this session is mid-load (guards

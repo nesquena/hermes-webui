@@ -136,6 +136,8 @@ const terminalOwnerEvents = ownerEvents.slice();
 ownerEvents.length = 0;
 const oldSource = {}, replacementSource = {};
 windowObj._liveStreamTransportAuthority = { s1: { streamId: 'stream-1', source: replacementSource, generation: 2 } };
+windowObj._liveStreamTransportSourceGeneration = new WeakMap();
+windowObj._liveStreamTransportSourceGeneration.set(replacementSource, 2);
 api.activate(); api.prepare(); api.bind('stream-1', 's1');
 api.complete('s1', 'stream-1', oldSource, 1, { success: false });
 const staleSourceState = api.state();
@@ -269,6 +271,95 @@ def _run_production_send():
     return json.loads(result.stdout)
 
 
+ATTACH_RACE_HARNESS = r"""
+const attachSource = Buffer.from('${ATTACH_B64}', 'base64').toString();
+const state = { sources: [], completionEvents: [] };
+class FakeEventSource {
+  static OPEN = 1;
+  constructor(url) { this.url = url; this.readyState = 0; this.handlers = {}; this.closed = false; state.sources.push(this); }
+  addEventListener(name, handler) { (this.handlers[name] ||= []).push(handler); }
+  close() { this.closed = true; this.readyState = 2; }
+  emit(name, event) { for (const handler of this.handlers[name] || []) handler(event); }
+}
+const noOp = () => {};
+const windowObj = {
+  _voiceLeaseAdoptStream() {},
+  _voiceModeOnResponseComplete(...args) { state.completionEvents.push(args); },
+};
+const documentObj = {
+  hidden: false, visibilityState: 'visible', baseURI: 'http://localhost/',
+  addEventListener() {}, hasFocus() { return true; }, querySelector() { return null; },
+  querySelectorAll() { return []; }, getElementById() { return null; },
+  createElement() { return { style: {}, dataset: {}, classList: { add() {}, remove() {} } }; },
+};
+const S = {
+  session: { session_id: 's1', active_stream_id: 'stream-1', pending_started_at: 1 },
+  messages: [], toolCalls: [], activeStreamId: 'stream-1', busy: true,
+};
+const INFLIGHT = { s1: { streamId: 'stream-1', messages: [], uploaded: [], toolCalls: [] } };
+const localStorage = { getItem() { return null; }, setItem() {}, removeItem() {} };
+const scope = {
+  window: windowObj, document: documentObj, location: { href: 'http://localhost/' },
+  S, INFLIGHT, EventSource: FakeEventSource, localStorage,
+  api: async () => ({ active: true }), setTimeout, clearTimeout,
+  requestAnimationFrame: callback => setTimeout(callback, 0),
+  cancelAnimationFrame: clearTimeout,
+  URL, encodeURIComponent, console,
+  _desktopBackgroundedForNotifications: false,
+  _sendInProgress: false, _sendInProgressSid: null,
+  setBusy: noOp, setComposerStatus: noOp, setStatus: noOp,
+  showLiveRunStatus: noOp, hideLiveRunStatus: noOp, _clearLiveRunStatusTimer: noOp,
+  snapshotLiveTurnHtmlForSession: noOp, _resumeSessionStreamAfterLiveChat: noOp,
+  _suspendSessionStreamForLiveChat: noOp, saveInflightState: noOp,
+  renderSessionList: noOp, renderMessages: noOp, clearInflight: noOp,
+  clearInflightState: noOp, resetTurnWorkspaceMutations: noOp, _resetStreamScrollFollow: noOp,
+  appendThinking: noOp, ensureLiveWorklogShell: noOp, updateSendBtn: noOp,
+  setComposerStatus: noOp, startApprovalPolling: noOp, startClarifyPolling: noOp,
+  _fetchYoloState: noOp, _clearLiveRunStatusTimer: noOp,
+  _voiceLeaseRetargetOwner: noOp,
+};
+const builtins = new Set(['Array','Boolean','Buffer','Date','Error','EventSource','JSON','Map','Math','Number','Object','Promise','RegExp','Set','String','Symbol','URL','WeakMap','undefined','NaN','Infinity','isNaN','parseInt','encodeURIComponent','decodeURIComponent','setTimeout','clearTimeout','console']);
+for (const match of attachSource.matchAll(/\b[A-Za-z_$][\w$]*\b/g)) {
+  const name = match[0];
+  if (!builtins.has(name) && !(name in scope)) scope[name] = noOp;
+}
+const attachFactory = new Function('scope', `with(scope){
+  const LIVE_STREAMS = {};
+  const LIVE_STREAM_TRANSPORT_AUTHORITY = Object.create(null);
+  const LIVE_STREAM_TRANSPORT_SOURCE_GENERATION = new WeakMap();
+  let LIVE_STREAM_TRANSPORT_GENERATION = 0;
+  function _releaseLiveStreamTransportAuthority(sid, generation) {
+    const authority = LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
+    if (authority && authority.generation === generation) delete LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
+  }
+  window._liveStreamTransportAuthority = LIVE_STREAM_TRANSPORT_AUTHORITY;
+  window._liveStreamTransportSourceGeneration = LIVE_STREAM_TRANSPORT_SOURCE_GENERATION;
+  return (${attachSource});
+}`);
+const attach = attachFactory(scope);
+(async () => {
+  attach('s1', 'stream-1', [], {});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const first = state.sources[0];
+  attach('s1', 'stream-1', [], { reconnecting: true });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const second = state.sources[1];
+  first.emit('done', { data: JSON.stringify({ status: 'completed' }) });
+  console.log(JSON.stringify({ sources: state.sources.length, oldClosed: first.closed, replacementOpen: !second.closed, completionEvents: state.completionEvents.length, generation: windowObj._liveStreamTransportAuthority.s1.generation }));
+})().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
+"""
+
+
+def _run_attach_transport_race() -> dict:
+    script = ATTACH_RACE_HARNESS.replace(
+        "${ATTACH_B64}", base64.b64encode(ATTACH_SOURCE.encode()).decode()
+    )
+    result = subprocess.run([NODE], input=script, capture_output=True, text=True)
+    if result.returncode:
+        raise AssertionError(result.stderr)
+    return json.loads(result.stdout)
+
+
 def _run_session_transition(source: str, setup: str, call: str) -> dict:
     encoded = base64.b64encode(source.encode()).decode()
     script = f"""
@@ -374,11 +465,23 @@ def test_production_send_and_stream_paths_share_the_lease_seams():
     assert "if(!streamId&&typeof window._voiceLeaseSettleLocal==='function') window._voiceLeaseSettleLocal();" in SEND_SOURCE
     assert ATTACH_SOURCE.count("_setActivePaneIdleIfOwner({success:true},source,_transportGeneration);") == 1
     assert ATTACH_SOURCE.count("_setActivePaneIdleIfOwner({success:false},source,_transportGeneration);") >= 5
-    assert "window._voiceModeOnResponseComplete(activeSid,streamId,terminalSource,terminalGeneration,voiceOutcome);" in OWNER_SOURCE
+    assert "window._voiceModeOnResponseComplete(ownerSid,ownerStreamId,terminalSource,terminalGeneration,voiceOutcome);" in OWNER_SOURCE
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_actual_attach_rejects_terminal_event_from_replaced_source():
+    result = _run_attach_transport_race()
+    assert result == {
+        "sources": 2,
+        "oldClosed": True,
+        "replacementOpen": True,
+        "completionEvents": 0,
+        "generation": 2,
+    }
 
 
 def test_change4_exact_terminal_and_parsed_slash_boundaries_are_behavioral_contracts():
-    assert "window._voiceModeOnResponseComplete(activeSid,streamId,terminalSource,terminalGeneration,voiceOutcome);" in OWNER_SOURCE
+    assert "window._voiceModeOnResponseComplete(ownerSid,ownerStreamId,terminalSource,terminalGeneration,voiceOutcome);" in OWNER_SOURCE
     parsed_boundary = SEND_SOURCE.index("const _parsedCmd=parseCommand(text);")
     prepare_boundary = SEND_SOURCE.index("_voiceLeasePrepareSubmission", parsed_boundary)
     command_dispatch = SEND_SOURCE.index("const _cmd=", parsed_boundary)

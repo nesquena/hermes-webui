@@ -1482,11 +1482,15 @@ function _steerOwnerStreamIsCurrent(ownerSid, ownerStreamId){
 
 function _steerClearCurrentOwnerDeadRun(ownerSid, ownerStreamId){
   if(!_steerOwnerStreamIsCurrent(ownerSid,ownerStreamId))return false;
+  const voiceTransport=typeof window!=='undefined'&&typeof window._liveStreamTransportCapture==='function'
+    ? window._liveStreamTransportCapture(ownerSid,ownerStreamId) : null;
   let changed=false;
   if(S.busy){S.busy=false;changed=true;}
   if(S.activeStreamId){S.activeStreamId=null;changed=true;}
   if(S.session&&S.session.active_stream_id){S.session.active_stream_id=null;changed=true;}
-  if(changed&&typeof window!=='undefined'&&typeof window._voiceLeaseSettleOwner==='function') window._voiceLeaseSettleOwner(ownerSid,ownerStreamId,{success:false});
+  if(changed&&typeof window!=='undefined'&&typeof window._voiceLeaseSettleOwner==='function'&&voiceTransport){
+    window._voiceLeaseSettleOwner(ownerSid,ownerStreamId,{success:false},voiceTransport.source,voiceTransport.generation);
+  }
   if(typeof INFLIGHT!=='undefined'&&INFLIGHT&&INFLIGHT[ownerSid]){
     delete INFLIGHT[ownerSid];
     changed=true;

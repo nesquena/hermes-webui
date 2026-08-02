@@ -18,6 +18,8 @@ async function cancelStream(reason){
   const sid = S.session && S.session.session_id;
   const streamId = S.activeStreamId;
   if(!streamId) return false;
+  const voiceTransport=typeof window!=='undefined'&&typeof window._liveStreamTransportCapture==='function'
+    ? window._liveStreamTransportCapture(sid,streamId) : null;
   // Interrupt provenance: log WHY the active run is being cancelled so operators
   // can tell an explicit Stop / interrupt from any other trigger when they see a
   // SIGINT/exit-code-130 in the backend logs. Only explicit user paths reach
@@ -56,7 +58,9 @@ async function cancelStream(reason){
     S.activeStreamId=null;
     if(S.session&&S.session.session_id===sid&&S.session.active_stream_id===streamId) S.session.active_stream_id=null;
     setBusy(false);
-    if(typeof window!=='undefined'&&typeof window._voiceLeaseSettleOwner==='function') window._voiceLeaseSettleOwner(sid,streamId,{success:false});
+    if(typeof window!=='undefined'&&typeof window._voiceLeaseSettleOwner==='function'&&voiceTransport){
+      window._voiceLeaseSettleOwner(sid,streamId,{success:false},voiceTransport.source,voiceTransport.generation);
+    }
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
     // /api/chat/cancel only exposes `cancelled:bool`, so we cannot
@@ -70,6 +74,8 @@ async function cancelSessionStream(session){
   const streamId = session&&session.active_stream_id;
   const sid = session&&session.session_id;
   if(!streamId||!sid) return false;
+  const voiceTransport=typeof window!=='undefined'&&typeof window._liveStreamTransportCapture==='function'
+    ? window._liveStreamTransportCapture(sid,streamId) : null;
   // Explicit sidebar "Stop response" — log provenance for the same reason as
   // cancelStream(). (#5345)
   if(typeof console !== 'undefined' && console.info){
@@ -90,7 +96,9 @@ async function cancelSessionStream(session){
     if(S.session) S.session.active_stream_id=null;
     clearInflight();
     setBusy(false);
-    if(typeof window!=='undefined'&&typeof window._voiceLeaseSettleOwner==='function') window._voiceLeaseSettleOwner(sid,streamId,{success:false});
+    if(typeof window!=='undefined'&&typeof window._voiceLeaseSettleOwner==='function'&&voiceTransport){
+      window._voiceLeaseSettleOwner(sid,streamId,{success:false},voiceTransport.source,voiceTransport.generation);
+    }
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
   }
@@ -1558,6 +1566,9 @@ window.renderTranscript=function(container, messages, opts){
     if(!_voiceModeActive) return;
     if(!_voiceLease) _voiceLease=_newVoiceLease();
     if(_voiceBusy()){
+      const sid=typeof S!=='undefined'&&S.session&&S.session.session_id;
+      const streamId=typeof S!=='undefined'&&(S.activeStreamId||(S.session&&S.session.active_stream_id));
+      if(sid&&streamId) _voiceLeaseAdoptStream(sid,streamId);
       _setState('thinking');
       return;
     }
@@ -1773,9 +1784,16 @@ window.renderTranscript=function(container, messages, opts){
     return true;
   };
   window._voiceLeaseSettleLocal=_voiceLeaseSettleLocal;
-  window._voiceLeaseSettleOwner=(sid,streamId,outcome)=>{
+  window._voiceLeaseSettleOwner=(sid,streamId,outcome,source,generation)=>{
     const lease=_voiceLease;
     if(!lease||!lease.owner||lease.owner.sid!==String(sid||'')||lease.owner.streamId!==String(streamId||'')) return false;
+    if(source){
+      const authority=typeof window!=='undefined'&&window._liveStreamTransportAuthority
+        ? window._liveStreamTransportAuthority[sid] : null;
+      const sourceGenerations=typeof window!=='undefined'&&window._liveStreamTransportSourceGeneration;
+      if(!authority||authority.streamId!==String(streamId||'')||authority.generation!==generation
+        ||!sourceGenerations||sourceGenerations.get(source)!==generation) return false;
+    }
     _voiceManualPending=null;
     return _voiceLeaseSettle(lease,outcome||{success:false});
   };
@@ -2191,10 +2209,12 @@ window.renderTranscript=function(container, messages, opts){
     if(!lease||lease.settled) return;
     const authority=typeof window!=='undefined'&&window._liveStreamTransportAuthority
       ? window._liveStreamTransportAuthority[activeSid] : null;
+    const sourceGenerations=typeof window!=='undefined'&&window._liveStreamTransportSourceGeneration;
     if(!authority||authority.streamId!==String(streamId||'')
-      ||authority.source!==source||authority.generation!==generation) return;
+      ||authority.generation!==generation||!sourceGenerations
+      ||sourceGenerations.get(source)!==generation) return;
     if(typeof window._voiceLeaseSettleOwner==='function'){
-      window._voiceLeaseSettleOwner(activeSid,streamId,outcome||{success:false});
+      window._voiceLeaseSettleOwner(activeSid,streamId,outcome||{success:false},source,generation);
     }
   };
   // ordinary autoReadLastAssistant remains owned by the normal done path;
