@@ -43,6 +43,9 @@ def test_identity_ignores_git_selector_environment(linked, monkeypatch):
     monkeypatch.setenv("GIT_DIR", str(repo / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(repo))
     monkeypatch.setenv("GIT_COMMON_DIR", str(repo / ".git"))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.worktree")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(repo))
     assert is_linked_worktree(wt) is True
 
 

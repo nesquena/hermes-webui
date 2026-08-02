@@ -22,8 +22,15 @@ def _clean_git_env() -> dict[str, str]:
         "GIT_INDEX_FILE",
         "GIT_OBJECT_DIRECTORY",
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_NOSYSTEM",
     ):
         env.pop(name, None)
+    for name in tuple(env):
+        if name.startswith("GIT_CONFIG_"):
+            env.pop(name, None)
     return env
 
 
