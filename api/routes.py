@@ -691,6 +691,22 @@ def _guard_request_worktree_ownership(handler, body=None) -> bool:
     return True
 
 
+def _guard_session_workspace_target(handler, session, target_workspace: str) -> bool:
+    """Prevent request payloads from switching a session into/out of a linked worktree."""
+    current = str(getattr(session, "workspace", "") or "")
+    if target_workspace == current:
+        return True
+    try:
+        from api.worktree_authority import is_linked_worktree
+        if is_linked_worktree(target_workspace) or (current and is_linked_worktree(current)):
+            bad(handler, "A linked-worktree session workspace is immutable", 409)
+            return False
+    except Exception as exc:
+        bad(handler, f"Unable to verify workspace ownership: {exc}", 409)
+        return False
+    return True
+
+
 def _active_skills_dir() -> Path:
     """Return the skills directory for the request's active Hermes profile.
 
@@ -15144,13 +15160,8 @@ def handle_post(handler, parsed) -> bool:
             new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
         except ValueError as e:
             return bad(handler, str(e))
-        if new_ws != old_ws:
-            try:
-                from api.worktree_authority import is_linked_worktree
-                if is_linked_worktree(new_ws) or is_linked_worktree(old_ws):
-                    return bad(handler, "A linked-worktree session workspace is immutable", 409)
-            except Exception as exc:
-                return bad(handler, f"Unable to verify workspace ownership: {exc}", 409)
+        if not _guard_session_workspace_target(handler, s, new_ws):
+            return True
         with _get_session_agent_lock(body["session_id"]):
             s.workspace = new_ws
             if "model" in body or "model_provider" in body:
@@ -22497,6 +22508,8 @@ def _handle_goal_command(handler, body):
             workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
         except ValueError as e:
             return bad(handler, str(e))
+        if not _guard_session_workspace_target(handler, s, workspace):
+            return True
         requested_model = body.get("model") or s.model
         requested_provider = (
             body.get("model_provider")
@@ -22548,6 +22561,8 @@ def _handle_goal_command(handler, body):
                 workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
             except ValueError as e:
                 return bad(handler, str(e))
+            if not _guard_session_workspace_target(handler, s, workspace):
+                return True
         if model is None:
             requested_model = body.get("model") or s.model
             requested_provider = (
@@ -22927,6 +22942,8 @@ def _handle_chat_sync(handler, body):
         workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
     except ValueError as e:
         return bad(handler, str(e))
+    if not _guard_session_workspace_target(handler, s, workspace):
+        return True
     with _get_session_agent_lock(s.session_id):
         s.workspace = workspace
         _sync_requested_provider = (
