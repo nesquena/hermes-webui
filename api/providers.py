@@ -425,7 +425,18 @@ def _entry_exhausted_ttl_seconds(error_code):
     if code == "401":
         return 5 * 60
     if code == "402":
-        return 2 * 60
+        # #6626: keep WebUI's eligibility decision tied to the installed
+        # runtime contract. The runtime routes 402 via
+        # credential_pool._exhausted_ttl() (120s when the new
+        # EXHAUSTED_TTL_402_SECONDS is present, 1h fallback otherwise).
+        # Hard-coding 120s here would let display/probe code mark an entry
+        # usable before CredentialPool.select() is willing to lease it on
+        # mixed-version installations.
+        try:
+            from agent.credential_pool import _exhausted_ttl as _runtime_exhausted_ttl
+            return _runtime_exhausted_ttl(int(code))
+        except Exception:
+            return 60 * 60
     return 60 * 60
 
 
@@ -826,7 +837,18 @@ def _entry_exhausted_ttl_seconds(error_code):
     if code == "401":
         return 5 * 60
     if code == "402":
-        return 2 * 60
+        # #6626: keep WebUI's eligibility decision tied to the installed
+        # runtime contract. The runtime routes 402 via
+        # credential_pool._exhausted_ttl() (120s when the new
+        # EXHAUSTED_TTL_402_SECONDS is present, 1h fallback otherwise).
+        # Hard-coding 120s here would let display/probe code mark an entry
+        # usable before CredentialPool.select() is willing to lease it on
+        # mixed-version installations.
+        try:
+            from agent.credential_pool import _exhausted_ttl as _runtime_exhausted_ttl
+            return _runtime_exhausted_ttl(int(code))
+        except Exception:
+            return 60 * 60
     return 60 * 60
 
 
