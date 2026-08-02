@@ -1561,6 +1561,7 @@ async function send(){
         }
       }
     }
+    // Directive ownership is cleared at its consume site: if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
     _voiceSlashFallsThrough=true;
     }finally{
       if(_voiceLocalLease&&!_voiceSlashFallsThrough&&!_voiceLocalDispatchSettled){
@@ -1625,7 +1626,10 @@ async function send(){
     const _pending=_forcedSkillDirectivePending;
     if(!_pending.sessionId||_pending.sessionId===activeSid){
       const _directivePayload = await _pending.promise;
-      if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
+      if(_forcedSkillDirectivePending===_pending){
+        _forcedSkillDirectivePending =
+          null;
+      }
       if(_directivePayload){
         const _directive = typeof _directivePayload==='string'
           ? _directivePayload
