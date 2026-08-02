@@ -35,7 +35,7 @@ def _call_restart(monkeypatch):
 
 
 def test_restart_route_rejects_unmanaged_webui_without_scheduling_helper(monkeypatch):
-    monkeypatch.setattr(routes, "_is_ctl_managed_webui", lambda: False)
+    monkeypatch.setattr(routes, "_ctl_can_restart_webui", lambda _pid: False)
     scheduled = []
     monkeypatch.setattr(routes, "_schedule_webui_restart", lambda: scheduled.append(True))
 
@@ -47,9 +47,15 @@ def test_restart_route_rejects_unmanaged_webui_without_scheduling_helper(monkeyp
 
 
 def test_restart_route_acknowledges_ctl_managed_webui_and_schedules_once(monkeypatch):
-    monkeypatch.setattr(routes, "_is_ctl_managed_webui", lambda: True)
+    monkeypatch.setattr(routes, "_ctl_can_restart_webui", lambda _pid: True)
+    monkeypatch.setattr(routes.os, "getpid", lambda: 4242)
     scheduled = []
-    monkeypatch.setattr(routes, "_schedule_webui_restart", lambda: scheduled.append(True))
+
+    def schedule(pid):
+        scheduled.append(pid)
+        return True
+
+    monkeypatch.setattr(routes, "_schedule_webui_restart", schedule)
 
     try:
         handler, payload = _call_restart(monkeypatch)
@@ -57,14 +63,14 @@ def test_restart_route_acknowledges_ctl_managed_webui_and_schedules_once(monkeyp
         routes._WEBUI_RESTART_LOCK.release()
 
     assert handler.status == 200
-    assert payload == {"status": "restarting"}
-    assert scheduled == [True]
+    assert payload == {"status": "restart_scheduled"}
+    assert scheduled == [4242]
 
 
 def test_restart_route_rejects_concurrent_restart_without_scheduling_helper(monkeypatch):
-    monkeypatch.setattr(routes, "_is_ctl_managed_webui", lambda: True)
+    monkeypatch.setattr(routes, "_ctl_can_restart_webui", lambda _pid: True)
     scheduled = []
-    monkeypatch.setattr(routes, "_schedule_webui_restart", lambda: scheduled.append(True))
+    monkeypatch.setattr(routes, "_schedule_webui_restart", lambda _pid: scheduled.append(True))
 
     assert routes._WEBUI_RESTART_LOCK.acquire(blocking=False)
     try:
@@ -77,7 +83,36 @@ def test_restart_route_rejects_concurrent_restart_without_scheduling_helper(monk
     assert scheduled == []
 
 
+def test_restart_route_refuses_windows_handoff_before_it_can_stop_the_server(monkeypatch):
+    monkeypatch.setattr(routes, "_is_windows_platform", lambda: True)
+    monkeypatch.setattr(routes, "_ctl_can_restart_webui", lambda _pid: True)
+    scheduled = []
+    monkeypatch.setattr(routes, "_schedule_webui_restart", lambda _pid: scheduled.append(True) or True)
+
+    handler, payload = _call_restart(monkeypatch)
+
+    assert handler.status == 409
+    assert payload["status"] == "unsupported"
+    assert scheduled == []
+
+
 def test_restart_helper_releases_lock_when_ctl_cannot_be_spawned(monkeypatch):
+    monkeypatch.setattr(routes.subprocess, "Popen", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("no bash")))
+
+    assert routes._WEBUI_RESTART_LOCK.acquire(blocking=False)
+    assert routes._schedule_webui_restart(4242) is False
+
+    assert routes._WEBUI_RESTART_LOCK.acquire(blocking=False), "failed helper must not permanently block retries"
+    routes._WEBUI_RESTART_LOCK.release()
+
+
+def test_restart_helper_passes_expected_pid_and_releases_lock_after_nonzero_exit(monkeypatch):
+    launched = {}
+
+    class _Process:
+        def wait(self):
+            return 7
+
     class _InlineThread:
         def __init__(self, *, target, **_kwargs):
             self.target = target
@@ -86,25 +121,13 @@ def test_restart_helper_releases_lock_when_ctl_cannot_be_spawned(monkeypatch):
             self.target()
 
     monkeypatch.setattr(routes.threading, "Thread", _InlineThread)
-    monkeypatch.setattr(routes.subprocess, "Popen", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("no bash")))
+    monkeypatch.setattr(routes.subprocess, "Popen", lambda args, **kwargs: launched.update(args=args, kwargs=kwargs) or _Process())
+    monkeypatch.setattr(routes.os, "getpid", lambda: 4242)
+    monkeypatch.setattr(routes.time, "sleep", lambda _seconds: None)
 
     assert routes._WEBUI_RESTART_LOCK.acquire(blocking=False)
-    routes._schedule_webui_restart()
+    assert routes._schedule_webui_restart(4242) is True
 
-    assert routes._WEBUI_RESTART_LOCK.acquire(blocking=False), "failed helper must not permanently block retries"
+    assert launched["args"][-2:] == ["--expected-pid", "4242"]
+    assert routes._WEBUI_RESTART_LOCK.acquire(blocking=False), "nonzero helper must not permanently block retries"
     routes._WEBUI_RESTART_LOCK.release()
-
-
-def test_ctl_managed_webui_requires_current_process_pid_in_pid_file(monkeypatch, tmp_path):
-    pid_file = tmp_path / "webui.pid"
-    monkeypatch.setenv("HERMES_WEBUI_PID_FILE", str(pid_file))
-    monkeypatch.setattr(routes.os, "getpid", lambda: 4242)
-
-    pid_file.write_text("4242\n", encoding="utf-8")
-    assert routes._is_ctl_managed_webui() is True
-
-    pid_file.write_text("4243\n", encoding="utf-8")
-    assert routes._is_ctl_managed_webui() is False
-
-    pid_file.write_text("not-a-pid\n", encoding="utf-8")
-    assert routes._is_ctl_managed_webui() is False

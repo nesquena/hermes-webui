@@ -11841,57 +11841,90 @@ def _shutdown_log_value(value, *, default: str = "unknown", max_len: int = 160) 
 _WEBUI_RESTART_LOCK = threading.Lock()
 
 
-def _webui_pid_file() -> Path:
-    """Return the ctl.sh PID-file location without interpreting ctl state."""
-    configured = os.environ.get("HERMES_WEBUI_PID_FILE")
-    if configured:
-        return Path(configured)
-    hermes_home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
-    return hermes_home / "webui.pid"
-
-
-def _is_ctl_managed_webui() -> bool:
-    """True only when ctl.sh recorded this exact server process as its daemon."""
-    try:
-        recorded_pid = int(_webui_pid_file().read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return False
-    return recorded_pid == os.getpid()
-
-
-def _schedule_webui_restart() -> None:
-    """Launch ctl.sh restart after this request response has left the server."""
+def _ctl_can_restart_webui(expected_pid: int) -> bool:
+    """Ask ctl.sh to prove ownership of the exact requesting daemon process."""
     repo_root = Path(__file__).resolve().parents[1]
+    try:
+        result = subprocess.run(
+            ["bash", str(repo_root / "ctl.sh"), "verify", "--expected-pid", str(expected_pid)],
+            cwd=str(repo_root),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        logger.exception("Unable to verify ctl.sh ownership for WebUI restart")
+        return False
+    return result.returncode == 0
 
-    def _restart():
+
+def _release_webui_restart_lock() -> None:
+    if _WEBUI_RESTART_LOCK.locked():
+        _WEBUI_RESTART_LOCK.release()
+
+
+def _is_windows_platform() -> bool:
+    """Whether this process runs on a Windows platform.
+
+    `ctl.sh` stops a Windows daemon with `taskkill /T`, which terminates its
+    whole descendant tree. A browser-launched helper is necessarily a descendant,
+    so there is no safe automatic handoff without an external supervisor.
+    """
+    return os.name == "nt"
+
+
+def _schedule_webui_restart(expected_pid: int) -> bool:
+    """Start a detached expected-PID handoff and monitor failures before shutdown."""
+    repo_root = Path(__file__).resolve().parents[1]
+    cmd = [
+        "bash",
+        str(repo_root / "ctl.sh"),
+        "restart",
+        "--delay",
+        "0.3",
+        "--expected-pid",
+        str(expected_pid),
+    ]
+    popen_kwargs = {
+        "cwd": str(repo_root),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "start_new_session": True,
+    }
+    try:
+        process = subprocess.Popen(cmd, **popen_kwargs)
+    except OSError:
+        _release_webui_restart_lock()
+        logger.exception("Unable to launch ctl.sh restart")
+        return False
+
+    def _monitor_restart() -> None:
         try:
-            time.sleep(0.3)
-            subprocess.Popen(
-                ["bash", str(repo_root / "ctl.sh"), "restart"],
-                cwd=str(repo_root),
-                start_new_session=True,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except OSError:
-            # The HTTP acknowledgement has already returned, so keep the
-            # current server usable and allow a subsequent retry if the helper
-            # itself could not be created.
-            _WEBUI_RESTART_LOCK.release()
-            logger.exception("Unable to launch ctl.sh restart")
+            exit_code = process.wait()
+            if exit_code != 0 and os.getpid() == expected_pid:
+                _release_webui_restart_lock()
+                logger.error("ctl.sh restart handoff failed before shutdown (exit code %s)", exit_code)
+        except Exception:
+            if os.getpid() == expected_pid:
+                _release_webui_restart_lock()
+            logger.exception("Unable to monitor ctl.sh restart handoff")
 
-    threading.Thread(target=_restart, name="webui-managed-restart", daemon=True).start()
+    threading.Thread(target=_monitor_restart, name="webui-managed-restart-monitor", daemon=True).start()
+    return True
 
 
 def _handle_restart(handler) -> bool:
-    """Restart only the daemon whose ownership is proven by ctl.sh's PID file."""
-    if not _is_ctl_managed_webui():
+    """Restart only the ctl.sh-owned daemon process that handled this request."""
+    expected_pid = os.getpid()
+    if _is_windows_platform():
         j(
             handler,
             {
                 "status": "unsupported",
-                "error": "Automatic restart is available only for servers started with ./ctl.sh start.",
+                "error": "Automatic restart is unavailable on Windows; restart the ctl.sh-managed server from a terminal.",
             },
             status=409,
         )
@@ -11903,14 +11936,22 @@ def _handle_restart(handler) -> bool:
             status=429,
         )
         return True
-    try:
-        j(handler, {"status": "restarting"})
-        _schedule_webui_restart()
+    if not _ctl_can_restart_webui(expected_pid):
+        _release_webui_restart_lock()
+        j(
+            handler,
+            {
+                "status": "unsupported",
+                "error": "Automatic restart is available only for servers started with ./ctl.sh start.",
+            },
+            status=409,
+        )
         return True
-    except Exception:
-        _WEBUI_RESTART_LOCK.release()
-        logger.exception("Unable to schedule managed WebUI restart")
-        return False
+    if not _schedule_webui_restart(expected_pid):
+        j(handler, {"status": "failed", "error": "Unable to schedule the managed server restart."}, status=500)
+        return True
+    j(handler, {"status": "restart_scheduled"})
+    return True
 
 
 def _handle_shutdown(handler) -> bool:
