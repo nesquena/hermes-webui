@@ -44,6 +44,23 @@ Follow that checklist's safety rules:
 
 ## Contribution style
 
+### Final reporting
+
+After implementing, validating, publishing, or deploying a change, keep the
+user-facing final report short and outcome-focused. Lead with what was
+delivered and its real status, then use at most 3-6 bullets for:
+
+- the main behavior implemented;
+- the verified delivery state (local, pushed, PR, deployed, as applicable);
+- any remaining blocker or material risk;
+- one useful link or exact SHA only when needed for traceability.
+
+Do not reproduce the execution journal. Omit routine commands, exhaustive test
+lists, file inventories, branch/worktree details, intermediate failures already
+resolved, and repeated evidence unless the user explicitly asks for them or a
+failure/risk requires diagnosis. Validation remains thorough; only its final
+presentation is compressed.
+
 - Keep one logical change per PR; split unrelated refactors or cleanup.
 - Read `docs/CONTRACTS.md` and the linked contract/RFC for the touched
   subsystem before editing.
