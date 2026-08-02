@@ -686,7 +686,7 @@ def _guard_request_worktree_ownership(handler, body=None) -> bool:
         from api.worktree_authority import assert_session_owner
         assert_session_owner(session)
     except Exception as exc:
-        bad(handler, f"Worktree write refused: {exc}", status=409)
+        bad(handler, f"Worktree write refused: {exc}", 409)
         return False
     return True
 

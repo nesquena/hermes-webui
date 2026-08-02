@@ -208,9 +208,14 @@ def default_authority() -> WorktreeAuthority:
 
 
 def assert_workspace_owner(workspace: str | Path, session_id: str) -> None:
-    if not is_linked_worktree(workspace):
+    workspace_path = Path(workspace).expanduser()
+    # Legacy/test sidecars may store a relative placeholder such as ".". Never
+    # reinterpret it relative to the WebUI service checkout as a linked writer.
+    if not workspace_path.is_absolute():
         return
-    default_authority().assert_owner(workspace, str(session_id or ""))
+    if not is_linked_worktree(workspace_path):
+        return
+    default_authority().assert_owner(workspace_path, str(session_id or ""))
 
 
 def assert_session_owner(session) -> None:
