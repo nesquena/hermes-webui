@@ -10,9 +10,17 @@ Two root causes fixed in static/workspace.js:
 
    The fix reuses the proven prefix-strip pattern from openArtifactPath()
    (workspace.js:585-593): after stripping ~/ and ./ prefixes, strip the
-   S.session.workspace prefix from absolute paths. Crucially, this strip
-   happens BEFORE the `if(!/[./]/.test(path))` guard so that extension-less
-   root files like "Makefile" are not dropped.
+   S.session.workspace prefix from absolute paths. The strip is platform-aware
+   (maintainer review #5752):
+     - Windows-style absolutes (drive letter / backslash UNC) fold backslashes
+       and strip the workspace prefix case-insensitively;
+     - POSIX absolutes keep backslash and colon as legal filename characters
+       and strip exact-case;
+     - a forward-slash "//" prefix is NOT treated as Windows evidence (POSIX
+       permits "//" at path start);
+     - extension-less root files (Makefile/LICENSE/Dockerfile) are no longer
+       rejected by a bare-name guard, so structured mutator args and patch
+       headers naming them stay trackable.
 
    Note: terminal/execute_code tools also modify files but their args are
    shell/script bodies, not structured file paths. Tracking mutations from
@@ -74,9 +82,12 @@ def _normalize_via_node(paths, workspace="/Users/test/ws"):
     """Drive _normalizeArtifactPath with a stubbed S.session.workspace."""
     ignore_re = _extract_const("ARTIFACT_IGNORE_RE")
     fn = _extract_fn("_normalizeArtifactPath")
+    helpers = "\n".join(
+        _extract_fn(n) for n in ("_isWindowsStylePath", "_stripWorkspacePrefix")
+    )
     driver = (
         f"const S = {{ session: {{ workspace: {json.dumps(workspace)} }} }};\n"
-        + ignore_re + "\n" + fn + "\n"
+        + ignore_re + "\n" + helpers + "\n" + fn + "\n"
         + "const out = JSON.parse(process.argv[1]).map(_normalizeArtifactPath);\n"
         + "process.stdout.write(JSON.stringify(out));\n"
     )
@@ -94,6 +105,8 @@ def _candidates_via_node(tc, workspace="/Users/test/ws"):
     fns = "\n".join(
         _extract_fn(n)
         for n in (
+            "_isWindowsStylePath",
+            "_stripWorkspacePrefix",
             "_normalizeArtifactPath",
             "_artifactCandidatesFromText",
             "_artifactCandidatesFromToolCall",
@@ -242,6 +255,157 @@ class TestNormalizeArtifactPathAbsolute:
         assert "config/settings.json" in paths, (
             f"patch with absolute path must produce a relative candidate "
             f"that matches the preview path; got {paths}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Maintainer review #5752: platform-aware path canonicalization edges
+# (drive-letter / backslash-UNC only, POSIX keeps \ and :, no bare-name
+# rejection for extension-less root files)
+# ---------------------------------------------------------------------------
+
+class TestNormalizeArtifactPathPlatformEdges:
+    def test_extensionless_root_file_absolute_stays_visible(self):
+        """Absolute /Users/test/ws/Makefile must normalize to bare 'Makefile'.
+
+        Maintainer edge 1: the old `if(!/[./]/.test(path))` bare-name guard
+        dropped extension-less root files (Makefile/LICENSE/Dockerfile) after
+        prefix stripping, so their previews could never match a mutation.
+        """
+        ws = "/Users/test/ws"
+        out = _normalize_via_node(
+            [f"{ws}/Makefile", f"{ws}/LICENSE", f"{ws}/Dockerfile"],
+            workspace=ws,
+        )
+        assert out == ["Makefile", "LICENSE", "Dockerfile"], (
+            f"Extension-less workspace-root files must survive normalization; "
+            f"got {out}"
+        )
+
+    def test_extensionless_root_file_bare_relative_stays_visible(self):
+        """A bare relative 'Makefile' preview path must not be rejected."""
+        out = _normalize_via_node(["Makefile", "LICENSE"], workspace="/Users/test/ws")
+        assert out == ["Makefile", "LICENSE"], (
+            f"Bare relative extension-less names must survive normalization; "
+            f"got {out}"
+        )
+
+    def test_posix_forward_slash_prefix_not_treated_as_windows(self):
+        """POSIX '//'-prefixed absolute must not be treated as a Windows UNC.
+
+        Maintainer edge 2: a generic forward-slash '//' is a legal POSIX path
+        start, not evidence of Windows. Such a path outside the workspace must
+        fail closed ('') rather than be folded or mis-stripped.
+        """
+        ws = "/Users/test/ws"
+        out = _normalize_via_node(["//server/share/foo.py", "//Users/test/ws/foo.py"], workspace=ws)
+        assert out == ["", ""], (
+            f"POSIX //-prefixed paths must fail closed, not be treated as "
+            f"Windows UNC; got {out}"
+        )
+
+    def test_posix_backslash_kept_as_filename_character(self):
+        """POSIX file names may legally contain '\\' — must not be folded.
+
+        Maintainer edge 3: folding backslashes unconditionally would turn a
+        file literally named 'a\\b.py' into 'a/b.py', breaking preview-match.
+        """
+        ws = "/Users/test/ws"
+        out = _normalize_via_node(
+            [f"{ws}/a\\b.py", "a\\b.py"],
+            workspace=ws,
+        )
+        assert out == ["a\\b.py", "a\\b.py"], (
+            f"POSIX backslash must survive as a filename character; got {out}"
+        )
+
+    def test_windows_unc_absolute_strips_workspace_prefix(self):
+        """Backslash UNC absolute \\\\server\\share\\ws\\foo.py → foo.py.
+
+        Maintainer edge 4: canonical backslash UNC roots are Windows absolutes
+        and must strip the workspace prefix.
+        """
+        ws = "\\\\server\\share\\ws"
+        out = _normalize_via_node(
+            [f"{ws}\\foo.py", "foo/bar.py"],
+            workspace=ws,
+        )
+        assert out == ["foo.py", "foo/bar.py"], (
+            f"UNC absolute path with workspace prefix must canonicalize; got {out}"
+        )
+
+    def test_windows_unc_strips_case_insensitively(self):
+        """UNC workspace \\\\SERVER\\Share\\WS must match \\\\server\\share\\ws\\…."""
+        ws = "\\\\SERVER\\Share\\WS"
+        out = _normalize_via_node(
+            ["\\\\server\\share\\ws\\foo.py"],
+            workspace=ws,
+        )
+        assert out == ["foo.py"], (
+            f"UNC workspace prefix must strip case-insensitively; got {out}"
+        )
+
+    def test_windows_drive_letter_strips_case_insensitively(self):
+        """Drive-letter workspace C:\\Users\\Test\\WS must match c:\\users\\test\\ws\\…."""
+        ws = "C:\\Users\\Test\\WS"
+        out = _normalize_via_node(
+            ["c:\\users\\test\\ws\\foo.py"],
+            workspace=ws,
+        )
+        assert out == ["foo.py"], (
+            f"Drive-letter workspace prefix must strip case-insensitively; got {out}"
+        )
+
+    def test_windows_path_outside_workspace_fails_closed(self):
+        """Windows absolute outside the workspace must return '' (no false positive)."""
+        ws = "C:\\Users\\test\\ws"
+        out = _normalize_via_node(
+            ["D:\\other\\project\\foo.py"],
+            workspace=ws,
+        )
+        assert out == [""], (
+            f"Windows absolute outside workspace must fail closed; got {out}"
+        )
+
+    def test_write_file_extensionless_root_matches_preview(self):
+        """write_file with absolute /Users/test/ws/Makefile must produce the
+        bare 'Makefile' candidate so the root-file preview can refresh."""
+        ws = "/Users/test/ws"
+        tc = {
+            "name": "write_file",
+            "args": {"path": f"{ws}/Makefile"},
+        }
+        paths = _candidates_via_node(tc, workspace=ws)
+        assert "Makefile" in paths, (
+            f"write_file on an extension-less root file must produce a "
+            f"matching candidate; got {paths}"
+        )
+
+    def test_strip_workspace_prefix_returns_original_when_outside(self):
+        """_stripWorkspacePrefix must return the input unchanged when the path
+        is outside the workspace — display keeps the raw path, mutation
+        tracking fails closed via its caller."""
+        ws = "/Users/test/ws"
+        assert NODE is not None  # module is skipped when node is missing
+        ignore_re = _extract_const("ARTIFACT_IGNORE_RE")
+        helpers = "\n".join(
+            _extract_fn(n) for n in ("_isWindowsStylePath", "_stripWorkspacePrefix")
+        )
+        driver = (
+            f"const S = {{ session: {{ workspace: {json.dumps(ws)} }} }};\n"
+            + helpers + "\n"
+            + "const out = JSON.parse(process.argv[1]).map(_stripWorkspacePrefix);\n"
+            + "process.stdout.write(JSON.stringify(out));\n"
+        )
+        r = subprocess.run(
+            [NODE, "-e", driver, json.dumps([f"{ws}/foo.py", "/outside/x.py", "rel.py"])],
+            capture_output=True, text=True, timeout=15,
+        )
+        assert r.returncode == 0, f"node failed: {r.stderr}"
+        out = json.loads(r.stdout)
+        assert out == ["foo.py", "/outside/x.py", "rel.py"], (
+            f"_stripWorkspacePrefix must strip under-workspace paths and leave "
+            f"others untouched; got {out}"
         )
 
 

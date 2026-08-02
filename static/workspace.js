@@ -392,6 +392,39 @@ const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|_
 // Canonical Hermes mutators plus MCP filesystem aliases that can create/edit files.
 const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);
 
+// A path is Windows-style when it starts with a drive letter ("C:/" or
+// "C:\") or a backslash UNC root ("\\server\share"). A forward-slash "//"
+// prefix is deliberately NOT evidence of Windows — POSIX permits "//" at the
+// start of a path, and mistaking it for UNC would fold legal POSIX file names
+// and mis-strip case-sensitive prefixes (maintainer review #5752, edges 2-3).
+function _isWindowsStylePath(p){
+  return /^[A-Za-z]:[\\/]/.test(p) || /^\\\\/.test(p);
+}
+
+// Strip the S.session.workspace prefix so an absolute tool path and a relative
+// preview path compare equal ("/Users/x/ws/foo.py" vs "foo.py", #5747).
+// Windows workspaces strip case-insensitively (Windows paths are
+// case-insensitive); POSIX keeps exact case. Returns the stripped path when
+// under the workspace, otherwise the input unchanged — callers decide what
+// "outside the workspace" means (mutation tracking fails closed, display
+// keeps the raw path).
+function _stripWorkspacePrefix(path){
+  if(typeof S==='undefined' || !S.session || !S.session.workspace) return path;
+  const ws = String(S.session.workspace);
+  const normWs = ws.replace(/\\/g,'/').replace(/\/+$/,'') + '/';
+  const isWindows = _isWindowsStylePath(ws);
+  // Fold backslashes only for Windows workspaces — on POSIX, `\` is a legal
+  // filename character and must survive (maintainer review #5752, edge 3).
+  const normPath = isWindows ? path.replace(/\\/g,'/') : path;
+  if(isWindows){
+    if(normPath.toLowerCase().startsWith(normWs.toLowerCase()))
+      return normPath.slice(normWs.length);
+  } else if(normPath.startsWith(normWs)){
+    return normPath.slice(normWs.length);
+  }
+  return path;
+}
+
 function _normalizeArtifactPath(path){
   if(!path) return '';
   path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
@@ -402,24 +435,25 @@ function _normalizeArtifactPath(path){
   // preview stale (#3262 / pre-release regression-gate finding).
   path = path.replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
   if(!path) return '';
-  // Strip workspace prefix from absolute paths so they compare equal to relative
-  // preview paths. Tools like write_file/patch pass absolute paths
-  // ("/Users/x/ws/foo/bar.py") while the preview uses "foo/bar.py" — without
-  // this they never match and the preview stays stale (#5747).
-  // Also handle Windows-style absolute paths (C:\Users\...) — normalize
-  // backslashes to forward slashes first so both platforms match (#5747).
-  const normAbsPath = path.replace(/\\/g,'/');
-  const isAbsPath = normAbsPath.startsWith('/') || /^[A-Za-z]:\//.test(normAbsPath);
-  if(isAbsPath && typeof S!=='undefined' && S.session && S.session.workspace){
-    const normWs = String(S.session.workspace).replace(/\\/g,'/').replace(/\/+$/,'') + '/';
-    if(normAbsPath.startsWith(normWs)) path = normAbsPath.slice(normWs.length);
+  // Windows-style absolutes fold backslashes for matching; POSIX keeps `\` (and
+  // `:`) as legal filename characters, so they must survive verbatim.
+  const isWindows = _isWindowsStylePath(path);
+  const normPath = isWindows ? path.replace(/\\/g,'/') : path;
+  if(isWindows || normPath.startsWith('/')){
+    // Strip the workspace prefix from absolute paths so they compare equal to
+    // relative preview paths (#5747). An absolute path not under the workspace
+    // (or no workspace set) can never match a relative preview path — bail out
+    // to avoid false candidates.
+    const stripped = _stripWorkspacePrefix(normPath);
+    if(stripped === normPath) return '';
+    path = stripped;
   }
-  // An absolute path that was not under the workspace (or no workspace is set)
-  // can never match a relative preview path — bail out to avoid false candidates.
-  if(path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path)) return '';
   if(!path) return '';
   if(ARTIFACT_IGNORE_RE.test(path)) return '';
-  if(!/[./]/.test(path)) return '';
+  // No bare-name rejection here: structured mutator args and patch headers can
+  // legitimately name extension-less root files (Makefile, LICENSE,
+  // Dockerfile), and rejecting them made valid previews unmatchable
+  // (maintainer review #5752, edge 1).
   return path;
 }
 
@@ -565,11 +599,9 @@ function renderSessionArtifacts(){
     return;
   }
   // Strip workspace prefix for display so long absolute paths don't clutter the list.
-  const ws = S.session && S.session.workspace;
-  const normWs = ws ? ws.replace(/\/+$/,'') + '/' : '';
   const displayPath = (p) => {
-    if(normWs && p.startsWith(normWs)) return p.slice(normWs.length);
-    return p;
+    const rel = _stripWorkspacePrefix(p);
+    return rel !== p ? rel : p;
   };
   root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(displayPath(item.path))}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
 }
@@ -591,9 +623,8 @@ async function openArtifactPath(path){
   // Strip workspace prefix so /api/list receives a workspace-relative path.
   const ws = S.session && S.session.workspace;
   if(ws){
-    const normWs = ws.replace(/\/+$/,'') + '/';
-    if(rel.startsWith(normWs)) rel = rel.slice(normWs.length);
-    else if(rel === ws.replace(/\/+$/,'')) rel = '.';
+    rel = _stripWorkspacePrefix(rel);
+    if(rel === ws.replace(/\/+$/,'')) rel = '.';
   }
   if(!rel) rel = '.';
   try{
