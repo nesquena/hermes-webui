@@ -863,6 +863,31 @@
   /* Image lightbox */
   :root[data-skin="nous"] .img-lightbox-close:hover{background:rgba(70,130,180,.4);}
   :root.dark[data-skin="nous"] .img-lightbox-close:hover{background:rgba(70,130,180,.4);}
+  /* ── Nous Blue skin (matches the Hermes desktop app's 'nous' theme) ── */
+  :root[data-skin="nousblue"]{
+    --bg:#F8FAFF;--sidebar:#F3F7FF;--border:rgba(0,83,253,.22);--border2:rgba(0,83,253,.18);
+    --text:#17171A;--muted:#666678;--accent:#0053FD;--blue:#0053FD;--gold:#0053FD;--code-bg:#F2F6FF;
+    --surface:#FFFFFF;--topbar-bg:rgba(255,255,255,.98);--main-bg:rgba(255,255,255,.5);
+    --focus-ring:rgba(0,83,253,.3);--focus-glow:rgba(0,83,253,.08);
+    --input-bg:rgba(0,83,253,.04);--hover-bg:rgba(0,83,253,.05);
+    --strong:#17171A;--em:#666678;--code-text:#1540B1;--code-inline-bg:rgba(0,83,253,.08);--pre-text:#17171A;
+    --accent-hover:#0044D6;--accent-bg:rgba(0,83,253,.06);--accent-bg-strong:rgba(0,83,253,.12);--accent-text:#0044D6;
+    --error:#C72E4D;--success:#3D8B40;--warning:#E68A00;--info:#0053FD;
+    --surface-subtle:rgba(0,83,253,.03);--surface-subtle-hover:rgba(0,83,253,.05);
+    --border-subtle:rgba(0,83,253,.10);--border-muted:rgba(0,83,253,.16);
+  }
+  :root.dark[data-skin="nousblue"]{
+    --bg:#0D2F86;--sidebar:#09286F;--border:#3158AD;--border2:rgba(255,230,203,.16);
+    --text:#FFE6CB;--muted:#B5C7F3;--accent:#FFE6CB;--blue:#C3D4FF;--gold:#FFE6CB;--code-bg:#123A96;
+    --surface:#12378F;--topbar-bg:rgba(13,47,134,.98);--main-bg:rgba(13,47,134,.5);
+    --focus-ring:rgba(255,230,203,.35);--focus-glow:rgba(255,230,203,.08);
+    --input-bg:rgba(255,255,255,.06);--hover-bg:rgba(255,255,255,.08);
+    --strong:#FFE6CB;--em:#E0E8FF;--code-text:#C3D4FF;--code-inline-bg:rgba(255,230,203,.10);--pre-text:#FFE6CB;
+    --accent-hover:#FFF0DC;--accent-bg:rgba(255,230,203,.08);--accent-bg-strong:rgba(255,230,203,.14);--accent-text:#0D2F86;
+    --error:#EF5350;--success:#4CAF50;--warning:#FFA726;--info:#C3D4FF;
+    --surface-subtle:rgba(255,255,255,.04);--surface-subtle-hover:rgba(255,255,255,.06);
+    --border-subtle:rgba(255,255,255,.08);--border-muted:rgba(255,255,255,.14);
+  }
   :root[data-skin="nous"] .img-lightbox-nav:hover{background:rgba(70,130,180,.5);}
   :root.dark[data-skin="nous"] .img-lightbox-nav:hover{background:rgba(70,130,180,.5);}
   /* Diff blocks */
