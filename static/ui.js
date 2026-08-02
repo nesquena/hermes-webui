@@ -19835,6 +19835,11 @@ function renderFileTree(){
     return;
   }
   if(emptyEl) emptyEl.style.display='none';
+  // Keep the tree hidden while a preview is open: loadDir() re-runs
+  // renderFileTree() when the agent's stream settles (turn completion),
+  // which used to un-hide the tree and stack it above the still-visible
+  // preview area, throwing the reader out of the preview.
+  if(typeof _previewCurrentPath!=='undefined'&&_previewCurrentPath){ box.style.display='none'; return; }
   box.style.display='';
   const visibleEntries=_visibleWorkspaceEntries(S.entries);
   if(!visibleEntries.length){
