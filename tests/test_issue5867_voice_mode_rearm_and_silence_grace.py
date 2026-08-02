@@ -131,7 +131,7 @@ const ownerFactory = new Function('activeSid','streamId','source','window','_isA
   "const _transportGeneration=1; return (" + Buffer.from('${OWNER_B64}', 'base64').toString() + ");");
 const owner = ownerFactory('s1', 'stream-1', source, windowObj, () => true, S, { s1: {} }, () => { S.busy = false; }, () => {}, () => {});
 S.busy = true;
-owner({ success: false });
+owner({ success: false }, source, 1);
 const terminalOwnerEvents = ownerEvents.slice();
 ownerEvents.length = 0;
 const oldSource = {}, replacementSource = {};
@@ -187,9 +187,10 @@ const _locale = { _speech: 'en-US' };
 const element = () => ({ value: '', style: {}, options: [], classList: { add(){}, remove(){} }, querySelectorAll(){ return []; } });
 const $ = id => elements.get(id) || element();
 const noOp = () => {};
-const ownerFactory = new Function('activeSid','streamId','window','_isActiveSession','S','INFLIGHT','setBusy','setComposerStatus','setStatus',
-  'const source={}; const _transportGeneration=1; return (' + ownerSource + ');');
-const owner = ownerFactory('s1', 'stream-1', windowObj, () => true, S, INFLIGHT, value => { S.busy = value; }, noOp, noOp);
+const streamSource = {};
+const ownerFactory = new Function('activeSid','streamId','source','window','_isActiveSession','S','INFLIGHT','setBusy','setComposerStatus','setStatus',
+  'const _transportGeneration=1; return (' + ownerSource + ');');
+const owner = ownerFactory('s1', 'stream-1', streamSource, windowObj, () => true, S, INFLIGHT, value => { S.busy = value; }, noOp, noOp);
 const scope = {
   $, S, INFLIGHT, window: windowObj, document: documentObj,
   COMMANDS: [], parseCommand: () => null, _pendingSelections: [], _sendInProgress: false, _sendInProgressSid: null,
@@ -208,7 +209,7 @@ const scope = {
   api: async () => ({ stream_id: 'stream-1' }), attachLiveStream: (sid, streamId) => {
     bound.push({ type: 'attach', sid, streamId });
     S.activeStreamId=null; S.session.active_stream_id=null; delete INFLIGHT[sid];
-    owner({ success: true });
+    owner({ success: true }, streamSource, 1);
   },
   clearInflightState: noOp, clearInflight: noOp, stopApprovalPolling: noOp, stopClarifyPolling: noOp,
   hideApprovalCard: noOp, hideClarifyCard: noOp, removeThinking: noOp, clearOptimisticSessionStreaming: noOp,
@@ -297,6 +298,34 @@ const fn=new Function('scope','with(scope){{return ('+source+');}}')(scope);
     return json.loads(result.stdout)
 
 
+def _run_profile_model_race() -> dict:
+    encoded = base64.b64encode(PROFILE_SOURCE.encode()).decode()
+    script = f"""
+const source=Buffer.from('{encoded}','base64').toString();
+const makeEl=()=>({{style:{{}},classList:{{add(){{}},remove(){{}}}},disabled:false,value:'',options:[],querySelectorAll(){{return [];}}}});
+const scope={{
+  window:{{_activeProvider:'old-provider',_defaultModel:'old-model',_voiceLeaseInvalidate(){{}},_voiceLeaseCaptureContext(){{return {{sid:'s1',contextId:1}};}},_voiceLeaseContextCurrent(){{return true;}},_voiceLeaseResume(){{}}}},
+  document:{{hidden:false,visibilityState:'visible',querySelector(){{return null;}},querySelectorAll(){{return []; }},createElement:makeEl}},
+  location:{{href:'http://localhost/'}},history:{{replaceState(){{}}}},localStorage:{{getItem(){{return null;}},setItem(){{}},removeItem(){{}}}},
+  S:{{session:{{session_id:'s1',workspace:'w',model:'old-model',model_provider:'old-provider',profile:'default'}},messages:[],pendingFiles:[],toolCalls:[],busy:false,activeStreamId:null,activeProfile:'default'}},
+  _profileSwitchGeneration:0,_profileSwitchOpeningExistingSession:false,_workspacePanelMode:'closed',_sendInProgress:false,
+  _profileMatchesActiveProfile:()=>true,
+  $:()=>makeEl(),
+  api:async()=>{{scope.S.session.model='new-model';scope.S.session.model_provider='new-provider';return {{active:'other',is_default:false,default_model:'old-model',default_model_provider:'old-provider'}};}},
+  renderSessionList:async()=>{{}},renderSessionListFromCache(){{}},loadDir:async()=>{{}},
+  setTimeout,clearTimeout,
+}};
+const builtins=new Set(['Array','Boolean','Buffer','Date','Error','JSON','Map','Math','Number','Object','Promise','RegExp','Set','String','Symbol','URL','undefined','NaN','Infinity','isNaN','parseInt','encodeURIComponent','decodeURIComponent','setTimeout','clearTimeout','console']);
+for(const match of source.matchAll(/\\b[A-Za-z_$][\\w$]*\\b/g)){{const name=match[0];if(!builtins.has(name)&&!(name in scope))scope[name]=()=>{{}};}}
+const fn=new Function('scope','with(scope){{return ('+source+');}}')(scope);
+(async()=>{{await fn('other');console.log(JSON.stringify({{model:scope.S.session.model,provider:scope.S.session.model_provider,profile:scope.S.session.profile}}));}})().catch(error=>{{console.error(error.stack||error);process.exitCode=1;}});
+"""
+    result = subprocess.run([NODE], input=script, capture_output=True, text=True)
+    if result.returncode:
+        raise AssertionError(result.stderr)
+    return json.loads(result.stdout)
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_voice_lease_composes_endpoint_restart_and_exact_terminal_settlement():
     result = _run_runtime()
@@ -343,13 +372,13 @@ def test_production_send_and_stream_paths_share_the_lease_seams():
     assert "if(typeof window._voiceLeasePrepareSubmission==='function') window._voiceLeasePrepareSubmission();" in SEND_SOURCE
     assert "if(streamId&&typeof window._voiceLeaseBind==='function') window._voiceLeaseBind(streamId,activeSid);" in SEND_SOURCE
     assert "if(!streamId&&typeof window._voiceLeaseSettleLocal==='function') window._voiceLeaseSettleLocal();" in SEND_SOURCE
-    assert ATTACH_SOURCE.count("_setActivePaneIdleIfOwner({success:true});") == 1
-    assert ATTACH_SOURCE.count("_setActivePaneIdleIfOwner({success:false});") >= 5
-    assert "window._voiceModeOnResponseComplete(activeSid,streamId,source,_transportGeneration,voiceOutcome);" in OWNER_SOURCE
+    assert ATTACH_SOURCE.count("_setActivePaneIdleIfOwner({success:true},source,_transportGeneration);") == 1
+    assert ATTACH_SOURCE.count("_setActivePaneIdleIfOwner({success:false},source,_transportGeneration);") >= 5
+    assert "window._voiceModeOnResponseComplete(activeSid,streamId,terminalSource,terminalGeneration,voiceOutcome);" in OWNER_SOURCE
 
 
 def test_change4_exact_terminal_and_parsed_slash_boundaries_are_behavioral_contracts():
-    assert "window._voiceModeOnResponseComplete(activeSid,streamId,source,_transportGeneration,voiceOutcome);" in OWNER_SOURCE
+    assert "window._voiceModeOnResponseComplete(activeSid,streamId,terminalSource,terminalGeneration,voiceOutcome);" in OWNER_SOURCE
     parsed_boundary = SEND_SOURCE.index("const _parsedCmd=parseCommand(text);")
     prepare_boundary = SEND_SOURCE.index("_voiceLeasePrepareSubmission", parsed_boundary)
     command_dispatch = SEND_SOURCE.index("const _cmd=", parsed_boundary)
@@ -389,3 +418,9 @@ def test_same_session_model_transition_stays_inert_when_lease_context_is_superse
 def test_same_session_profile_transition_stays_inert_when_lease_context_is_superseded():
     result = _run_session_transition(PROFILE_SOURCE, "superseded", "fn('other')")
     assert result["resume"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_profile_transition_does_not_overwrite_newer_same_session_model():
+    result = _run_profile_model_race()
+    assert result == {"model": "new-model", "provider": "new-provider", "profile": "other"}

@@ -1910,6 +1910,12 @@ const LIVE_STREAMS={};
 const LIVE_STREAM_TRANSPORT_AUTHORITY=Object.create(null);
 let LIVE_STREAM_TRANSPORT_GENERATION=0;
 if(typeof window!=='undefined') window._liveStreamTransportAuthority=LIVE_STREAM_TRANSPORT_AUTHORITY;
+function _releaseLiveStreamTransportAuthority(sid, source, generation){
+  const authority=LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
+  if(authority&&authority.source===source&&authority.generation===generation){
+    delete LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
+  }
+}
 const _STREAM_NOTIFICATION_BACKGROUND={};
 
 // #4416: track whether the tab was hidden at ANY point during a live stream, so
@@ -1962,6 +1968,10 @@ function closeLiveStream(sessionId, streamId, source){
   if(!live) return;
   if(streamId&&live.streamId!==streamId) return;
   if(source&&live.source!==source) return;
+  const closedAuthority=LIVE_STREAM_TRANSPORT_AUTHORITY[sessionId]
+    && LIVE_STREAM_TRANSPORT_AUTHORITY[sessionId].source===live.source
+    ? {source:live.source,generation:LIVE_STREAM_TRANSPORT_AUTHORITY[sessionId].generation}
+    : null;
   // Snapshot the current live-turn DOM BEFORE tearing the stream down. The
   // per-event snapshot (snapshotLiveTurn) only fires on content/tool_complete
   // SSE events, so switching away during a quiet window (mid tool-exec, silent
@@ -1977,6 +1987,11 @@ function closeLiveStream(sessionId, streamId, source){
   if(typeof hideLiveRunStatus==='function') hideLiveRunStatus(sessionId);
   try{if(live.source&&live.source.readyState!==2)live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
+  if(closedAuthority){
+    setTimeout(()=>{
+      if(!LIVE_STREAMS[sessionId]) _releaseLiveStreamTransportAuthority(sessionId,closedAuthority.source,closedAuthority.generation);
+    },0);
+  }
   _resumeSessionStreamAfterLiveChat(sessionId);
   // closeLiveStream() is called during session-switch teardown for any session
   // the user is no longer viewing. The stream is still active on the server,
@@ -2257,7 +2272,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       content:'**Connection interrupted:** The browser lost the live SSE connection before the response finished. If the worker completed, reopening this session should restore the settled transcript.',
     });
   }
-  function _setActivePaneIdleIfOwner(voiceOutcome={success:false}){
+  function _setActivePaneIdleIfOwner(voiceOutcome={success:false}, terminalSource=null, terminalGeneration=0){
     if(_isActiveSession()||!S.session||!INFLIGHT[S.session.session_id]){
       if(S.session&&S.session.session_id===activeSid&&S.session.active_stream_id===streamId){
         S.session.active_stream_id=null;
@@ -2266,8 +2281,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       setComposerStatus('');
       if(typeof setStatus==='function') setStatus('');
       if(voiceOutcome&&typeof window._voiceModeOnResponseComplete==='function'){
-        window._voiceModeOnResponseComplete(activeSid,streamId,source,_transportGeneration,voiceOutcome);
+        window._voiceModeOnResponseComplete(activeSid,streamId,terminalSource,terminalGeneration,voiceOutcome);
       }
+    }
+    if(terminalSource&&typeof _releaseLiveStreamTransportAuthority==='function'){
+      _releaseLiveStreamTransportAuthority(activeSid,terminalSource,terminalGeneration);
     }
   }
   function persistInflightState(){
@@ -2374,8 +2392,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       renderMessages({preserveScroll:true});
     }
     renderSessionList();
-    if(typeof window==='undefined') _setActivePaneIdleIfOwner();
-    else _setActivePaneIdleIfOwner({success:false});
+    if(typeof window==='undefined') _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
+    else _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
     _closeSource(source);
   }
   async function _runStreamEndRecovery(source){
@@ -6138,9 +6156,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(isActiveSession) _queueDrainSid=activeSid;
         renderSessionList();
         if(typeof window!=='undefined'&&typeof window._voiceModeActive==='function'&&window._voiceModeActive()){
-          _setActivePaneIdleIfOwner({success:true});
+          _setActivePaneIdleIfOwner({success:true},source,_transportGeneration);
         }else{
-          _setActivePaneIdleIfOwner();
+          _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
         }
         playNotificationSound();
         // #4416: notify if the tab was hidden at ANY point during this stream
@@ -6421,8 +6439,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
         trackBackgroundError(activeSid,_errTitle,d.message||'Error');
       }
-      if(typeof window==='undefined') _setActivePaneIdleIfOwner();
-      else _setActivePaneIdleIfOwner({success:false});
+      if(typeof window==='undefined') _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
+      else _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
       renderSessionList(); // clear streaming indicator immediately on apperror
     });
 
@@ -6654,8 +6672,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       })();
       renderSessionList();
-      if(typeof window==='undefined') _setActivePaneIdleIfOwner();
-      else _setActivePaneIdleIfOwner({success:false});
+      if(typeof window==='undefined') _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
+      else _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
     });
 
     for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
@@ -6808,8 +6826,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(_isActiveSession()) _queueDrainSid=activeSid;
       renderSessionList();
-      if(typeof window==='undefined') _setActivePaneIdleIfOwner();
-      else _setActivePaneIdleIfOwner({success:false});
+      if(typeof window==='undefined') _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
+      else _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
       return returnStatus?'restored':true;
     }catch(_){
       return returnStatus?'error':false;
@@ -6883,8 +6901,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         trackBackgroundError(activeSid,_errTitle,'Connection interrupted');
       }
     }
-    if(typeof window==='undefined') _setActivePaneIdleIfOwner();
-    else _setActivePaneIdleIfOwner({success:false});
+    if(typeof window==='undefined') _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
+    else _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
   }
 
   (async()=>{
@@ -6915,8 +6933,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             clearLiveToolCards();
             removeThinking();
             if(_isActiveSession()) _queueDrainSid=activeSid;
-            if(typeof window==='undefined') _setActivePaneIdleIfOwner();
-            else _setActivePaneIdleIfOwner({success:false});
+            if(typeof window==='undefined') _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
+            else _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
             renderMessages({preserveScroll:true});
             if(_wasFollowingAtReconnectDead && typeof scrollToBottom==='function') scrollToBottom();
             renderSessionList();

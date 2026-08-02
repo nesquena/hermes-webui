@@ -6945,6 +6945,9 @@ async function switchToProfile(name) {
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
+  const _profileContextSid=String((S.session&&S.session.session_id)||'');
+  const _profileContextModel=String((S.session&&S.session.model)||'');
+  const _profileContextProvider=String((S.session&&S.session.model_provider)||'');
   const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
@@ -7021,6 +7024,11 @@ async function switchToProfile(name) {
       _resetCronUnreadForProfileSwitch();
     }
     const targetActiveProfile = S.activeProfile || 'default';
+    const _profileModelContextCurrent=()=>{
+      if(!_profileContextSid||!S.session||String(S.session.session_id)!==_profileContextSid) return true;
+      return String(S.session.model||'')===_profileContextModel
+        &&String(S.session.model_provider||'')===_profileContextProvider;
+    };
     let sessionProfileMatchesTarget = true;
     if (!sessionInProgress && S.session) {
       const currentSessionProfile = (typeof S.session.profile === 'string' && S.session.profile.trim())
@@ -7057,7 +7065,7 @@ async function switchToProfile(name) {
     if (data.default_model_provider) window._activeProvider = data.default_model_provider;
 
     // ── Apply model ────────────────────────────────────────────────────────
-    if (data.default_model) {
+    if (data.default_model && _profileModelContextCurrent()) {
       const sel = $('modelSelect');
       const providerId = data.default_model_provider || window._activeProvider || null;
       const existingDefaultOpt = sel ? Array.from(sel.options).find(o => o.value === data.default_model) : null;
