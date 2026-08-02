@@ -6377,6 +6377,51 @@ def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
     return model, None
 
 
+def _normalize_custom_qualified_session_model(
+    model: str,
+    provider: str | None,
+) -> tuple[str, str] | None:
+    """#6648: map session-persisted custom-provider formats to canonical slugs.
+
+    Sessions created with a named custom OpenAI-compatible provider persist the
+    model in forms the Hermes runtime cannot resolve:
+
+      - ``@custom:<slug>:<model>`` (qualifier ``custom:<slug>``)
+      - ``custom/<model>``        (slash form with a bare ``custom`` qualifier)
+
+    The runtime only knows the canonical provider slug (e.g. ``sensenova-primary``),
+    so the ``custom:`` prefix must be stripped. Returns ``(model, provider)``
+    normalized to ``<slug>/<bare>`` / ``<slug>`` when the qualifier matches a
+    NAMED ``custom_providers`` entry, else ``None`` (caller keeps current
+    behavior — e.g. endpoint-derived ``custom:<host>:<port>`` slugs stay as-is).
+    """
+    bare: str | None = None
+    qualifier: str | None = None
+    if model.startswith("@"):
+        bare, qualifier = _split_provider_qualified_model(model)
+        if not qualifier:
+            return None
+    elif model.lower().startswith("custom/"):
+        bare = model.split("/", 1)[1].strip()
+        qualifier = provider or "custom"
+    else:
+        return None
+    if not bare:
+        return None
+
+    try:
+        from api.config import _named_custom_provider_slug_for_provider
+    except Exception:
+        return None
+    slug = _named_custom_provider_slug_for_provider(qualifier)
+    if not slug:
+        return None
+    canonical = slug.removeprefix("custom:")
+    if not canonical:
+        return None
+    return f"{canonical}/{bare}", canonical
+
+
 def _model_matches_configured_default(
     session_model: str | None,
     cfg_default: str | None,
@@ -7099,6 +7144,16 @@ def _resolve_compatible_session_model_state(
     """
     model = str(model_id or "").strip()
     requested_provider = _clean_session_model_provider(model_provider)
+    # #6648: session-persisted custom-provider qualifiers ("@custom:<slug>:<model>"
+    # or "custom/<model>") carry the "custom:" prefix the Hermes runtime does not
+    # recognize — it only knows the canonical provider slug. Normalize to
+    # "<slug>/<bare_model>" (when the qualifier matches a named custom_providers
+    # entry) so chat/start routes in a single API call instead of exhausting the
+    # full fallback chain (10-30x slower). Runs before every fast path below so
+    # no branch can return the broken "@custom:..." form verbatim.
+    _custom_norm = _normalize_custom_qualified_session_model(model, requested_provider)
+    if _custom_norm is not None:
+        return _custom_norm[0], _custom_norm[1], True
     if model and requested_provider == "moa":
         return _moa_fast_path_model_state(model)
     if model and requested_provider and model.startswith(f"@{requested_provider}:"):
