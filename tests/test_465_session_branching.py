@@ -446,7 +446,7 @@ def test_branch_route_keeps_404_for_truly_missing_sessions(monkeypatch):
     assert cap["bad"] == ("Session not found", 404)
 
 
-def test_branch_route_slices_merged_display_view_not_raw_sidecar(monkeypatch):
+def test_branch_route_slices_merged_display_view_not_raw_sidecar(monkeypatch, tmp_path):
     """keep_count is an index into GET /api/session's merged display view.
 
     Compression-lineage stitching and the state.db append-only merge can make
@@ -485,7 +485,7 @@ def test_branch_route_slices_merged_display_view_not_raw_sidecar(monkeypatch):
     source = routes.Session(
         session_id="src-merged-1",
         title="Merged source",
-        workspace=".",
+        workspace=str(tmp_path),
         model="claude-sonnet",
         messages=list(raw_sidecar),
         context_messages=[],
