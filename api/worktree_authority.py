@@ -14,24 +14,8 @@ class WorktreeOwnershipError(RuntimeError):
 
 
 def _clean_git_env() -> dict[str, str]:
-    env = os.environ.copy()
-    for name in (
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_COMMON_DIR",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CONFIG_PARAMETERS",
-        "GIT_CONFIG_GLOBAL",
-        "GIT_CONFIG_SYSTEM",
-        "GIT_CONFIG_NOSYSTEM",
-    ):
-        env.pop(name, None)
-    for name in tuple(env):
-        if name.startswith("GIT_CONFIG_"):
-            env.pop(name, None)
-    return env
+    # Identity probes must be determined only by their explicit cwd.
+    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 
 
 def _git_value(root: Path, selector: str) -> str:

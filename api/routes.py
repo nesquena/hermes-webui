@@ -13663,6 +13663,8 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "stream_id required")
         if not _stream_id_visible_to_request_profile(handler, stream_id):
             return True
+        if not _guard_request_worktree_ownership(handler, body={"stream_id": stream_id}):
+            return True
         gateway_stop_blocked = False
         try:
             from api.gateway_chat import (
