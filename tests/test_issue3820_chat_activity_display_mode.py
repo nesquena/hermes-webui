@@ -111,7 +111,7 @@ def test_chat_activity_display_mode_supports_four_values():
     assert "function isCompactWorklogMode()" in UI_JS
     assert "mode==='compact_worklog'||mode==='transparent_stream'||mode==='transparent_live_compact_settled'||mode==='hide_all_activity'" in UI_JS
     assert "mode==='transparent_live_compact_settled'?'transparent_stream':mode" in UI_JS
-    assert "mode==='transparent_live_compact_settled'?'hide_all_activity':mode" in UI_JS
+    assert "mode==='transparent_live_compact_settled'?'transparent_stream':mode" in UI_JS
     assert "chatActivitySettledMode()==='transparent_stream'" in UI_JS
     assert "chatActivityMode()==='hide_all_activity'" in UI_JS
     assert "chatActivitySettledMode()==='compact_worklog'" in UI_JS

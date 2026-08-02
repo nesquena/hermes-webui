@@ -11282,16 +11282,15 @@ function chatActivityMode(){
   return window._transparentStream ? 'transparent_stream' : 'compact_worklog';
 }
 // transparent_live_compact_settled resolves per render path: activity streams
-// transparently while the turn runs, then settled history keeps only the final
-// answer once the turn completes or is reloaded. The name remains a persisted
-// compatibility value; its settled contract removes both tools and reasoning.
+// transparently while the turn runs, then settled history keeps assistant prose
+// (including interim comments) while removing tool and reasoning activity.
 function chatActivityLiveMode(){
   const mode=chatActivityMode();
   return mode==='transparent_live_compact_settled'?'transparent_stream':mode;
 }
 function chatActivitySettledMode(){
   const mode=chatActivityMode();
-  return mode==='transparent_live_compact_settled'?'hide_all_activity':mode;
+  return mode==='transparent_live_compact_settled'?'transparent_stream':mode;
 }
 function isTransparentLiveMode(){
   return chatActivityLiveMode()==='transparent_stream';
@@ -11309,6 +11308,7 @@ if(typeof window!=='undefined'){
   window.chatActivityMode=chatActivityMode;
   window.chatActivityLiveMode=chatActivityLiveMode;
   window.chatActivitySettledMode=chatActivitySettledMode;
+
   window.isTransparentLiveMode=isTransparentLiveMode;
   window.isTransparentStream=isTransparentStream;
   window.isFinalAnswerOnlyMode=isFinalAnswerOnlyMode;
@@ -12682,6 +12682,7 @@ function _appendWorklogStep(group, anchor, cards, thinkingText, opts){
 function _anchorSceneRowsForRendering(scene, opts){
   const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
   const settled=!!(opts&&opts.settled);
+  const proseOnly=settled&&typeof window!=='undefined'&&window._chatActivityDisplayMode==='transparent_live_compact_settled';
   const live=!settled;
   const out=[];
   const byKey=new Map();
@@ -12701,6 +12702,7 @@ function _anchorSceneRowsForRendering(scene, opts){
   };
   for(const row of rows){
     if(!row||typeof row!=='object') continue;
+    if(proseOnly&&(row.role==='tool'||row.role==='thinking')) continue;
     if(row.role==='terminal'&&row.source_event_type==='done') continue;
     if(_anchorSceneIsSettledSuccessfulCompression(row,settled)) continue;
     const text=String(row.text||'').trim();
@@ -17407,7 +17409,7 @@ function renderMessages(options){
       activityByTurn.forEach(state=>{
         _syncToolCallGroupSummary(state.group);
       });
-    }else if(isTransparentStream()){
+    }else if(isTransparentStream()&&chatActivityMode()!=='transparent_live_compact_settled'){
       // ── transparent_stream path: individual expandable event rows ──
       const transparentInsertCursors=new Map();
       // Per-turn dedup of echoed thinking text — mirrors the compact-worklog

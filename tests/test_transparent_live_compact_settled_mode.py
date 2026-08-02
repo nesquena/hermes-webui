@@ -1,9 +1,10 @@
 """Guard tests for the `transparent_live_compact_settled` chat activity mode.
 
 The fourth mode streams activity transparently while a turn runs, then removes
-settled tools and reasoning once the final answer is available. Resolution is
+settled tools and reasoning while preserving interim assistant comments once the final answer is available. Resolution is
 per render path: `chatActivityLiveMode()` maps it to `transparent_stream`,
-`chatActivitySettledMode()` maps it to `hide_all_activity`. The three existing
+`chatActivitySettledMode()` stays `transparent_stream`, with a prose-only settled
+filter. The three existing
 modes must keep their exact behavior on both paths.
 """
 
@@ -129,11 +130,11 @@ process.stdout.write(JSON.stringify(matrix));
         True, True, False, False,
     ]
     # The TLCS contract: raw mode is preserved, live resolves transparent,
-    # settled resolves to final-answer-only so tools and reasoning leave the
-    # transcript after conclusion.
+    # settled remains transparent so interim prose survives; a dedicated
+    # prose-only filter removes tools and reasoning after conclusion.
     assert result[MODE] == [
-        MODE, "transparent_stream", "hide_all_activity",
-        False, True, False, False,
+        MODE, "transparent_stream", "transparent_stream",
+        True, True, False, False,
     ]
     assert result["hide_all_activity"] == [
         "hide_all_activity", "hide_all_activity", "hide_all_activity",
@@ -242,7 +243,7 @@ process.stdout.write(JSON.stringify(matrix));
 
     assert result["compact_worklog"] == ["compact_worklog", "compact_worklog", "compact_worklog"]
     assert result["transparent_stream"] == ["transparent_stream", "transparent_stream", "transparent_stream"]
-    assert result[MODE] == [MODE, "transparent_stream", "hide_all_activity"]
+    assert result[MODE] == [MODE, "transparent_stream", "transparent_stream"]
     assert result["hide_all_activity"] == ["hide_all_activity", "hide_all_activity", "hide_all_activity"]
 
 
@@ -272,7 +273,7 @@ def test_tlcs_ui_js_call_sites_use_contextual_resolvers():
 
 
 def test_tlcs_settled_fallback_renders_neither_reasoning_nor_tools():
-    """Legacy settled rows must follow the same final-only contract.
+    """Legacy settled rows must follow the same prose-only contract.
 
     This pins the reported mobile failure: tools disappeared at settle, but one
     disclosure row per reasoning block remained and filled the transcript.
@@ -283,8 +284,17 @@ def test_tlcs_settled_fallback_renders_neither_reasoning_nor_tools():
     )[0]
 
     assert "if(isCompactWorklogMode()){" in activity_branch
-    assert "}else if(isTransparentStream()){" in activity_branch
+    assert "}else if(isTransparentStream()&&chatActivityMode()!=='transparent_live_compact_settled'){" in activity_branch
     assert "if(!isTransparentStream()){" not in activity_branch
+
+
+def test_tlcs_settled_scene_filter_keeps_interim_prose_only():
+    rows = UI_JS.split("function _anchorSceneRowsForRendering", 1)[1].split(
+        "function _anchorSceneIsSettledSuccessfulCompression", 1
+    )[0]
+
+    assert "const proseOnly=settled&&typeof window!=='undefined'&&window._chatActivityDisplayMode==='transparent_live_compact_settled';" in rows
+    assert "if(proseOnly&&(row.role==='tool'||row.role==='thinking')) continue;" in rows
 
 
 def test_tlcs_boot_and_panels_accept_the_fourth_value():
