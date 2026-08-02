@@ -13902,7 +13902,10 @@ function placeLiveRunStatusHost(){
   return _moveLiveRunStatusToTurnEnd(el);
 }
 function showLiveRunStatus(sid,opts){
-  if(typeof isCompactWorklogMode==='function'&&isCompactWorklogMode()){
+  // Pure compact mode owns the live status inside its worklog. The hybrid
+  // transparent-live/compact-settled mode must keep this footer visible while
+  // streaming; optional runtime metadata can enrich the same footer.
+  if(typeof chatActivityMode==='function'&&chatActivityMode()==='compact_worklog'){
     _liveRunStatusSessionId=sid;
     _liveRunStatusTokens=opts&&opts.tokens||null;
     const el=$('liveRunStatus');
@@ -13942,7 +13945,7 @@ function _syncLiveRunStatusAfterRender(){
   if(!sid||!S.activeStreamId||!S.busy) return;
   const timer=_liveRunStatusTimers[sid];
   const startedAt=(timer&&timer.startedAt)||((S.session&&S.session.pending_started_at)||Date.now()/1000);
-  if(typeof isCompactWorklogMode==='function'&&isCompactWorklogMode()){
+  if(typeof chatActivityMode==='function'&&chatActivityMode()==='compact_worklog'){
     const el=$('liveRunStatus');
     if(el){el.hidden=true;el.innerHTML='';}
     return;
