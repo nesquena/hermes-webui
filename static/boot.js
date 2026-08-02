@@ -2175,6 +2175,16 @@ function clearPreview(opts={}){
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
   _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
+  // Exit fullscreen if active
+  const rp=document.querySelector('.rightpanel');
+  if(rp){
+    rp.classList.remove('preview-fullscreen');
+    rp.style.height = '';
+    rp.style.maxHeight = '';
+  }
+  document.documentElement.classList.remove('preview-fullscreen-active');
+  // Hide zoom/fullscreen controls
+  if(typeof _showPreviewZoomControls==='function') _showPreviewZoomControls(false, false);
   if(closePanelAfter)closeWorkspacePanel();
   else if(keepPanelOpen&&_workspacePanelMode==='preview')openWorkspacePanel('browse');
   else syncWorkspacePanelUI();

@@ -12,6 +12,7 @@
     --radius-sm:4px;--radius-md:8px;--radius-card:8px;--radius-lg:12px;--radius-pill:999px;
     --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;
     --font-size-xs:11px;--font-size-sm:12px;--font-size-md:14px;
+    --preview-font-size:12px;
     --message-body-font-size:14px;--message-body-line-height:1.75;--message-code-font-size:12.5px;--message-pre-code-font-size:13px;--message-table-font-size:12px;
     --file-tree-toggle-width:10px;
     --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
@@ -25,9 +26,9 @@
   /* We override the px values directly on key containers since most of the     */
   /* stylesheet uses hardcoded px — changing :root font-size alone only affects */
   /* the small number of em/rem values.                                         */
-  :root[data-font-size="small"]{--message-body-font-size:12px;--message-code-font-size:10.5px;--message-pre-code-font-size:11px;--message-table-font-size:11px;font-size:12px;}
-  :root[data-font-size="large"]{--message-body-font-size:16px;--message-code-font-size:14.5px;--message-pre-code-font-size:15px;--message-table-font-size:14px;font-size:16px;}
-  :root[data-font-size="xlarge"]{--message-body-font-size:18px;--message-code-font-size:16px;--message-pre-code-font-size:16.5px;--message-table-font-size:16px;font-size:18px;}
+  :root[data-font-size="small"]{--message-body-font-size:12px;--message-code-font-size:10.5px;--message-pre-code-font-size:11px;--message-table-font-size:11px;font-size:12px;--preview-font-size:10px;}
+  :root[data-font-size="large"]{--message-body-font-size:16px;--message-code-font-size:14.5px;--message-pre-code-font-size:15px;--message-table-font-size:14px;font-size:16px;--preview-font-size:14px;}
+  :root[data-font-size="xlarge"]{--message-body-font-size:18px;--message-code-font-size:16px;--message-pre-code-font-size:16.5px;--message-table-font-size:16px;font-size:18px;--preview-font-size:16px;}
 
   /* Sidebar session list */
   :root[data-font-size="small"] .session-item { font-size: 11px; }
@@ -2897,7 +2898,7 @@
   .preview-area{flex:1;overflow:auto;padding:14px;flex-direction:column;gap:8px;display:none;opacity:0;transition:opacity .15s;}
   .preview-area.visible{display:flex;opacity:1;}
   .preview-path{font-size:11px;color:var(--muted);padding-bottom:8px;border-bottom:1px solid var(--border);flex-shrink:0;}
-  .preview-code{font-family:"SF Mono","Fira Code",ui-monospace,monospace;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;color:var(--pre-text);}
+  .preview-code{font-family:"SF Mono","Fira Code",ui-monospace,monospace;font-size:var(--preview-font-size,12px);line-height:1.6;white-space:pre-wrap;word-break:break-word;color:var(--pre-text);flex:1;min-height:0;}
   /* Workspace preview syntax highlighting (#3337): Prism's prism-tomorrow theme
      styles BOTH pre[class*="language-"] and code[class*="language-"] with its own
      gray background + padding. Prism propagates the language-* class onto the
@@ -2915,7 +2916,7 @@
   .preview-pdf-wrap{display:flex;flex:1;min-height:360px;border:1px solid var(--border2);border-radius:8px;overflow:hidden;background:#fff;}
   .preview-pdf-frame{width:100%;height:100%;min-height:70vh;border:none;background:#fff;}
   /* Markdown rendered preview */
-  .preview-md{font-size:13px;line-height:1.7;color:var(--text);flex:1;overflow-y:auto;min-height:0;}
+  .preview-md{font-size:var(--preview-font-size,13px);line-height:1.7;color:var(--text);flex:1;overflow-y:auto;min-height:0;}
   .preview-md p{margin-bottom:10px;}.preview-md p:last-child{margin-bottom:0;}
   .preview-md h1,.preview-md h2,.preview-md h3,.preview-md h4,.preview-md h5,.preview-md h6{font-weight:700;color:var(--strong,var(--text));line-height:1.3;}
   .preview-md h1{font-size:24px;margin:24px 0 12px;border-bottom:1px solid var(--border);padding-bottom:6px;}
@@ -2925,9 +2926,9 @@
   .preview-md h5{font-size:14px;margin:16px 0 6px;text-transform:uppercase;letter-spacing:0.04em;}
   .preview-md h6{font-size:13px;margin:14px 0 6px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;}
   .preview-md ul,.preview-md ol{margin:4px 0 10px 18px;}.preview-md li{margin-bottom:3px;}
-  .preview-md code{font-family:"SF Mono",ui-monospace,monospace;font-size:11.5px;background:var(--code-inline-bg);padding:1px 5px;border-radius:4px;color:var(--code-text);}
+  .preview-md code{font-family:"SF Mono",ui-monospace,monospace;font-size:calc(var(--preview-font-size,13px) - 1.5px);background:var(--code-inline-bg);padding:1px 5px;border-radius:4px;color:var(--code-text);}
   .preview-md pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;overflow-x:auto;margin:8px 0;}
-  .preview-md pre code{background:none;padding:0;color:var(--pre-text);font-size:11.5px;line-height:1.55;}
+  .preview-md pre code{background:none;padding:0;color:var(--pre-text);font-size:calc(var(--preview-font-size,13px) - 1.5px);line-height:1.55;}
   /* Keep original theme background — prevent prism-tomorrow from overriding --code-bg */
   .preview-md pre[class*="language-"],.preview-md pre code[class*="language-"]{background:var(--code-bg) !important;}
   /* Fix #1463: Prism YAML grammar collapses newlines inside token spans — force pre */
@@ -3468,10 +3469,10 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
 .session-list > div[style]{padding-left:12px;}
 
 /* Preview path bar: flex row with nice gap */
-.preview-path{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;overflow:hidden;min-width:0;}
+.preview-path{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;min-width:0;-webkit-overflow-scrolling:touch;scrollbar-width:thin;}
 .preview-path #previewPathText{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .preview-path #previewBadge{flex-shrink:0;white-space:nowrap;}
-.preview-path #btnCopyPreviewRelPath,.preview-path #btnDownloadFile,.preview-path #btnEditFile,.preview-path #btnRenderMarkdownAnyway{flex-shrink:0;white-space:nowrap;}
+.preview-path #btnCopyPreviewRelPath,.preview-path #btnDownloadFile,.preview-path #btnEditFile,.preview-path #btnRenderMarkdownAnyway,.preview-path #btnPreviewZoomOut,.preview-path #previewFontSizeLabel,.preview-path #btnPreviewZoomIn,.preview-path #btnPreviewFullscreen{flex-shrink:0;white-space:nowrap;}
 /* #5548: keep the preview-header action buttons from crushing the path / clipping
    Download+Edit on a narrow preview pane (worst with long RU/DE labels). The path
    text keeps priority (ellipsis above); the newest button (Copy relative path) drops
@@ -3481,9 +3482,28 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
 @container rightpanel (max-width:520px){
   .preview-path #btnCopyPreviewRelPath .preview-btn-label{display:none;}
 }
+.preview-badge.pdf{background:rgba(239,68,68,.12);color:#f87171;}
+.preview-badge.md{background:var(--accent-bg-strong);color:var(--accent-text);}
+.preview-badge.code{background:var(--hover-bg);color:var(--muted);}
 
 /* Preview badge typography */
 .preview-badge{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;}
+
+/* ── Preview fullscreen mode ───────────────────────────────────────────── */
+/* Entered via togglePreviewFullscreen() — the rightpanel expands to cover
+   the full viewport. The sidebar and main chat are hidden via
+   html.preview-fullscreen-active so only the file area is visible.
+   Internal elements keep their natural display state (file-tree hidden
+   when preview is showing, preview-area visible, etc.) — we only force
+   the container itself to fill the screen. */
+.rightpanel.preview-fullscreen{position:fixed;inset:0;z-index:200;width:100vw!important;min-width:100vw!important;max-width:100vw!important;height:100vh!important;height:100dvh!important;border-left:none;border-radius:0;container-type:normal;transform:none;opacity:1!important;pointer-events:auto!important;background:var(--sidebar);}
+html.preview-fullscreen-active .sidebar,
+html.preview-fullscreen-active .rail,
+html.preview-fullscreen-active .main-wrapper,
+html.preview-fullscreen-active .main{display:none!important;}
+html.preview-fullscreen-active .layout{grid-template-columns:1fr!important;}
+/* The edge toggle button shouldn't overlap fullscreen */
+html.preview-fullscreen-active .workspace-panel-edge-toggle{display:none!important;}
 
 /* Approval buttons: tab stops */
 .approval-btn:focus{outline:2px solid var(--blue);outline-offset:2px;}
