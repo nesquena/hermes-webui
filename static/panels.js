@@ -6986,13 +6986,14 @@ async function switchToProfile(name) {
     sessionInProgress = true;
   }
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+  let voiceContext=null;
 
   // #4671 CORE: the skeleton/embargo/generation setup is INSIDE the try so the
   // _switchGen-guarded finally always lifts the embargo — a throw in this synchronous
   // setup can't leak the embargo and freeze the sidebar (Codex re-gate 4).
   try {
     if (typeof window._voiceLeaseInvalidate === 'function') window._voiceLeaseInvalidate({rearm:false});
-    const voiceContext=typeof window._voiceLeaseCaptureContext==='function'
+    voiceContext=typeof window._voiceLeaseCaptureContext==='function'
       ? window._voiceLeaseCaptureContext() : null;
     // Invalidate any in-flight/queued session-list render BEFORE showing the skeleton,
     // so a pre-switch /api/sessions response (old profile's rows, issued before the

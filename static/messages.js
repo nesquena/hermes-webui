@@ -2051,9 +2051,6 @@ function closeOtherLiveStreams(activeSid){
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
-  if(typeof window!=='undefined'&&typeof window._voiceLeaseAdoptStream==='function'){
-    window._voiceLeaseAdoptStream(activeSid,streamId);
-  }
   const reconnecting=!!options.reconnecting;
   // #4416: start (or, on reconnect for the SAME stream, keep) tracking whether
   // the tab was hidden during this stream so the done-notification fires for a
@@ -2110,6 +2107,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       showLiveRunStatus(activeSid,{startedAt:_startedAt});
     }
     return;
+  }
+  if(typeof window!=='undefined'&&typeof window._voiceLeaseAdoptStream==='function'){
+    window._voiceLeaseAdoptStream(activeSid,streamId);
   }
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);

@@ -359,7 +359,12 @@ def _run_no_speech_restart():
 
 ATTACH_RACE_HARNESS = r"""
 const attachSource = Buffer.from('${ATTACH_B64}', 'base64').toString();
-const state = { sources: [], completionEvents: [] };
+const runtimeSource = Buffer.from('${RUNTIME_B64}', 'base64').toString();
+const state = { sources: [], completionEvents: [], starts: 0, aborts: 0 };
+function SpeechRecognition() {
+  const instance = { onresult: null, onend: null, onerror: null, start() { state.starts += 1; }, abort() { state.aborts += 1; } };
+  state.recognitions = state.recognitions || []; state.recognitions.push(instance); return instance;
+}
 class FakeEventSource {
   static OPEN = 1;
   constructor(url) { this.url = url; this.readyState = 0; this.handlers = {}; this.closed = false; state.sources.push(this); }
@@ -369,8 +374,8 @@ class FakeEventSource {
 }
 const noOp = () => {};
 const windowObj = {
-  _voiceLeaseAdoptStream() {},
   _voiceModeOnResponseComplete(...args) { state.completionEvents.push(args); },
+  SpeechRecognition,
 };
 const documentObj = {
   hidden: false, visibilityState: 'visible', baseURI: 'http://localhost/',
@@ -379,11 +384,16 @@ const documentObj = {
   createElement() { return { style: {}, dataset: {}, classList: { add() {}, remove() {} } }; },
 };
 const S = {
-  session: { session_id: 's1', active_stream_id: 'stream-1', pending_started_at: 1 },
-  messages: [], toolCalls: [], activeStreamId: 'stream-1', busy: true,
+  session: { session_id: 's1', active_stream_id: null, pending_started_at: 1 },
+  messages: [], toolCalls: [], activeStreamId: null, busy: false,
 };
 const INFLIGHT = { s1: { streamId: 'stream-1', messages: [], uploaded: [], toolCalls: [] } };
 const localStorage = { getItem() { return null; }, setItem() {}, removeItem() {} };
+const voiceElement = () => ({ style: {}, classList: { add() {}, remove() {} }, textContent: '', className: '', value: '' });
+const modeBtn = voiceElement(), bar = voiceElement(), indicator = voiceElement(), label = voiceElement(), micBtn = voiceElement(), ta = voiceElement();
+const voiceApi = new Function('window','document','SpeechRecognition','localStorage','modeBtn','bar','indicator','label','micBtn','ta','S','t','autoResize','_micOriginNeedsSecureContext','_deactivate','showToast','_setButtonTooltip','stopTTS','_locale','send','setTimeout','clearTimeout','Date','_speakResponse', runtimeSource + `
+return { activate() { _voiceModeActive = true; _voiceContextId += 1; _voiceLease = _newVoiceLease(); }, start: () => _startListening(_voiceLease), adopt: window._voiceLeaseAdoptStream, first: () => _voiceLease && _voiceLease.recognition, state: () => _voiceModeState, lease: () => _voiceLease };`)(windowObj, documentObj, SpeechRecognition, localStorage, modeBtn, bar, indicator, label, micBtn, { value: '' }, S, key => key, () => {}, () => false, () => {}, () => {}, () => {}, { _speech: 'en-US' }, () => {}, setTimeout, clearTimeout, Date, () => {});
+windowObj._voiceLeaseAdoptStream = (...args) => voiceApi.adopt(...args);
 const scope = {
   window: windowObj, document: documentObj, location: { href: 'http://localhost/' },
   S, INFLIGHT, EventSource: FakeEventSource, localStorage,
@@ -424,6 +434,8 @@ const attachFactory = new Function('scope', `with(scope){
 }`);
 const attach = attachFactory(scope);
 (async () => {
+  voiceApi.activate(); voiceApi.start();
+  S.activeStreamId = 'stream-1'; S.session.active_stream_id = 'stream-1'; S.busy = true;
   attach('s1', 'stream-1', [], {});
   await new Promise(resolve => setTimeout(resolve, 0));
   const first = state.sources[0];
@@ -431,7 +443,7 @@ const attach = attachFactory(scope);
   await new Promise(resolve => setTimeout(resolve, 0));
   const second = state.sources[1];
   first.emit('done', { data: JSON.stringify({ status: 'completed' }) });
-  console.log(JSON.stringify({ sources: state.sources.length, oldClosed: first.closed, replacementOpen: !second.closed, completionEvents: state.completionEvents.length, generation: windowObj._liveStreamTransportAuthority.s1.generation }));
+  console.log(JSON.stringify({ sources: state.sources.length, oldClosed: first.closed, replacementOpen: !second.closed, completionEvents: state.completionEvents.length, generation: windowObj._liveStreamTransportAuthority.s1.generation, starts: state.starts, aborts: state.aborts, state: voiceApi.state(), owner: voiceApi.lease().owner }));
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
 """
 
@@ -439,7 +451,7 @@ const attach = attachFactory(scope);
 def _run_attach_transport_race() -> dict:
     script = ATTACH_RACE_HARNESS.replace(
         "${ATTACH_B64}", base64.b64encode(ATTACH_SOURCE.encode()).decode()
-    )
+    ).replace("${RUNTIME_B64}", base64.b64encode(_voice_runtime().encode()).decode())
     result = subprocess.run([NODE], input=script, capture_output=True, text=True)
     if result.returncode:
         raise AssertionError(result.stderr)
@@ -580,6 +592,10 @@ def test_actual_attach_rejects_terminal_event_from_replaced_source():
         "replacementOpen": True,
         "completionEvents": 0,
         "generation": 2,
+        "starts": 1,
+        "aborts": 1,
+        "state": "thinking",
+        "owner": {"sid": "s1", "streamId": "stream-1"},
     }
 
 
