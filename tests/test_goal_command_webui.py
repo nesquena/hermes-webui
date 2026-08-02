@@ -655,3 +655,166 @@ def test_frontend_goal_sends_explicit_model_pick():
     assert "api('/api/goal'" in goal_fn
     assert "_isCrossProviderPick" in goal_fn
     assert "_readPendingSessionModel" in goal_fn
+
+
+def test_goal_kickoff_stamps_explicit_pick_signature(monkeypatch, tmp_path):
+    """#6703: /api/goal must stamp model_explicit_pick_signature on explicit picks.
+
+    Parity with /api/chat/start (#5979): the streaming resolver preserves a
+    custom-proxy vendor namespace on a cold catalog only when the persisted
+    signature matches the current routing context. Without the stamp, a first
+    /goal launch after a deliberate custom-provider pick loses the vendor
+    namespace and the provider reverts to the profile default mid-session.
+    """
+    from api import goals as webui_goals
+    from api import routes
+
+    class FakeState:
+        goal = "ship the feature"
+        status = "active"
+        turns_used = 0
+        max_turns = 20
+        last_verdict = None
+        last_reason = None
+        paused_reason = None
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.session_id = session_id
+            self.default_max_turns = default_max_turns
+
+        def set(self, goal):
+            state = FakeState()
+            state.goal = goal
+            return state
+
+    class FakeSession:
+        session_id = "sid-goal-sig"
+        profile = "default"
+        workspace = str(tmp_path)
+        model = "deepseek/deepseek-v4-flash"
+        model_provider = "deepseek"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+        active_stream_id = None
+        model_explicit_pick_signature = None
+
+    def fake_resolve(model, provider, **kwargs):
+        return model, provider, False
+
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fake_resolve)
+
+    def fake_start(session, **kwargs):
+        return {"stream_id": "goal-stream", "session_id": session.session_id, "pending_started_at": 123.0}
+
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", fake_start)
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+
+    session = FakeSession()
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
+
+    result = routes._handle_goal_command(
+        object(),
+        {
+            "session_id": "sid-goal-sig",
+            "args": "ship the feature",
+            "workspace": str(tmp_path),
+            "model": "deepseek/deepseek-v4-flash",
+            "model_provider": "deepseek",
+            "explicit_model_pick": True,
+        },
+    )
+
+    assert result["status"] == 200
+    from api.models import model_explicit_pick_signature as _mk_sig
+
+    assert session.model_explicit_pick_signature == _mk_sig("deepseek/deepseek-v4-flash", "deepseek")
+
+
+def test_goal_kickoff_does_not_stamp_signature_without_explicit_pick(monkeypatch, tmp_path):
+    """#6703: without the marker no signature is stamped (parity with chat/start)."""
+    from api import goals as webui_goals
+    from api import routes
+
+    class FakeState:
+        goal = "ship the feature"
+        status = "active"
+        turns_used = 0
+        max_turns = 20
+        last_verdict = None
+        last_reason = None
+        paused_reason = None
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.session_id = session_id
+            self.default_max_turns = default_max_turns
+
+        def set(self, goal):
+            state = FakeState()
+            state.goal = goal
+            return state
+
+    class FakeSession:
+        session_id = "sid-goal-nosig"
+        profile = "default"
+        workspace = str(tmp_path)
+        model = "deepseek/deepseek-v4-flash"
+        model_provider = "deepseek"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+        active_stream_id = None
+        model_explicit_pick_signature = "stale-previous-sig"
+
+    def fake_resolve(model, provider, **kwargs):
+        return model, provider, False
+
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fake_resolve)
+
+    def fake_start(session, **kwargs):
+        return {"stream_id": "goal-stream", "session_id": session.session_id, "pending_started_at": 123.0}
+
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", fake_start)
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+
+    session = FakeSession()
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
+
+    result = routes._handle_goal_command(
+        object(),
+        {
+            "session_id": "sid-goal-nosig",
+            "args": "ship the feature",
+            "workspace": str(tmp_path),
+            "model": "deepseek/deepseek-v4-flash",
+            "model_provider": "deepseek",
+        },
+    )
+
+    assert result["status"] == 200
+    # A non-explicit kickoff leaves any prior signature untouched (chat-start parity).
+    assert session.model_explicit_pick_signature == "stale-previous-sig"
+
+
+def test_frontend_goal_consumes_pending_model_marker():
+    """#6703: cmdGoal must consume the one-shot pending session-model marker.
+
+    Mirrors the chat/start path (messages.js) so a later /goal with an unchanged
+    dropdown isn't treated as an explicit pick.
+    """
+    goal_idx = COMMANDS_JS.find("function cmdGoal")
+    assert goal_idx != -1
+    goal_fn = COMMANDS_JS[goal_idx : COMMANDS_JS.find("\n}", goal_idx)]
+    assert "_clearPendingSessionModel(activeSid)" in goal_fn
+    assert "_pendingPickMatch && typeof _clearPendingSessionModel" in goal_fn

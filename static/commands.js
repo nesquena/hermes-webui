@@ -1246,6 +1246,11 @@ async function cmdGoal(args){
       && _goalModel !== _defaultModel
       && String(_goalProvider||'') !== String(_activeProvider||'');
     const _explicitPick=(_pendingPickMatch||_isCrossProviderPick)||undefined;
+    // Consume the pending explicit-pick marker for THIS goal kickoff only,
+    // mirroring the chat/start path (messages.js): the marker is recorded on
+    // modelSelect.onchange; clear it here once read so a later /goal with an
+    // unchanged dropdown isn't treated as an explicit pick.
+    if(_pendingPickMatch && typeof _clearPendingSessionModel==='function') _clearPendingSessionModel(activeSid);
     const r=await api('/api/goal',{method:'POST',body:JSON.stringify({
       session_id:activeSid,
       args:args||'',
