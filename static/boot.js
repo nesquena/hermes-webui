@@ -2175,14 +2175,11 @@ function clearPreview(opts={}){
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
   _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
-  // Exit fullscreen if active
-  const rp=document.querySelector('.rightpanel');
-  if(rp){
-    rp.classList.remove('preview-fullscreen');
-    rp.style.height = '';
-    rp.style.maxHeight = '';
+  // Exit fullscreen if active — route through the single lifecycle helper so
+  // listeners, inline sizing, classes, and the button presentation all reset.
+  if(typeof setPreviewFullscreen==='function'&&document.documentElement.classList.contains('preview-fullscreen-active')){
+    setPreviewFullscreen(false);
   }
-  document.documentElement.classList.remove('preview-fullscreen-active');
   // Hide zoom/fullscreen controls
   if(typeof _showPreviewZoomControls==='function') _showPreviewZoomControls(false, false);
   if(closePanelAfter)closeWorkspacePanel();
@@ -2393,6 +2390,15 @@ $('msg').addEventListener('keydown',e=>{
 });
 // B14: Cmd/Ctrl+K creates a new chat from anywhere
 document.addEventListener('keydown',async e=>{
+  // Escape exits preview fullscreen (before the command-dropdown handler,
+  // which is scoped to the composer and won't see a fullscreen panel anyway).
+  if(e.key==='Escape'&&document.documentElement.classList.contains('preview-fullscreen-active')){
+    if(typeof setPreviewFullscreen==='function'){
+      e.preventDefault();
+      setPreviewFullscreen(false);
+      return;
+    }
+  }
   // Cmd/Ctrl+B toggles desktop sidebar collapse (VS Code convention).
   // Skip when typing in an input/textarea/contenteditable so text-edit
   // shortcuts (e.g. bold in some embedded editors) are never stolen.

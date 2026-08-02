@@ -955,21 +955,29 @@ function _updatePreviewFsHeight(){
     panel.style.maxHeight = window.innerHeight + 'px';
   }
 }
-function togglePreviewFullscreen(){
+const _PREVIEW_FS_EXIT_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>';
+const _PREVIEW_FS_ENTER_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>';
+function _setPreviewFullscreenButtonState(active){
+  const btn = document.getElementById('btnPreviewFullscreen');
+  if(!btn) return;
+  btn.title = active ? 'Exit fullscreen' : 'Fullscreen';
+  btn.setAttribute('aria-label', active ? 'Exit fullscreen' : 'Fullscreen');
+  btn.innerHTML = active ? _PREVIEW_FS_EXIT_ICON : _PREVIEW_FS_ENTER_ICON;
+}
+/**
+ * Single entry/exit point for preview fullscreen. Every lifecycle path —
+ * the toolbar button, the document Escape handler, and clearPreview() —
+ * must go through here so listeners, inline sizing, classes, and button
+ * presentation can never drift out of sync.
+ */
+function setPreviewFullscreen(active){
   const panel = document.querySelector('.rightpanel');
   if(!panel) return;
-  const isFullscreen = panel.classList.toggle('preview-fullscreen');
-  const btn = document.getElementById('btnPreviewFullscreen');
-  if(btn){
-    const wrap = panel.classList.contains('preview-fullscreen');
-    btn.title = wrap ? 'Exit fullscreen' : 'Fullscreen';
-    btn.setAttribute('aria-label', wrap ? 'Exit fullscreen' : 'Fullscreen');
-    btn.innerHTML = wrap
-      ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>'
-      : '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>';
-  }
+  const isFullscreen = !!active;
+  panel.classList.toggle('preview-fullscreen', isFullscreen);
+  document.documentElement.classList.toggle('preview-fullscreen-active', isFullscreen);
+  _setPreviewFullscreenButtonState(isFullscreen);
   if(isFullscreen){
-    document.documentElement.classList.add('preview-fullscreen-active');
     // On mobile, 100vh can include browser chrome. Set explicit height via JS
     // for reliable full-viewport coverage; falls back to 100dvh in CSS.
     panel.style.height = window.innerHeight + 'px';
@@ -981,7 +989,6 @@ function togglePreviewFullscreen(){
       window.addEventListener('orientationchange', _previewFsResizeHandler);
     }
   } else {
-    document.documentElement.classList.remove('preview-fullscreen-active');
     panel.style.height = '';
     panel.style.maxHeight = '';
     if(_previewFsResizeHandler){
@@ -990,6 +997,11 @@ function togglePreviewFullscreen(){
       _previewFsResizeHandler = null;
     }
   }
+}
+function togglePreviewFullscreen(){
+  const panel = document.querySelector('.rightpanel');
+  if(!panel) return;
+  setPreviewFullscreen(!panel.classList.contains('preview-fullscreen'));
 }
 
 // ── Preview font-size zoom ──────────────────────────────────────────────────
@@ -1050,11 +1062,11 @@ function showPreview(mode){
   const openBtn=$('btnOpenInBrowser');
   if(openBtn) openBtn.style.display = (mode==='html'||mode==='pdf')?'inline-flex':'none';
   setLargeMarkdownForceRenderVisible(false);
-  // Show zoom/fullscreen controls for text-based previews; always show fullscreen for images/audio/video
+  // Show zoom controls for text-based previews; fullscreen is available for
+  // every preview mode (including iframe-backed HTML/PDF).
   const textModes = ['code','md','csv'];
   const showZoom = textModes.includes(mode);
-  const showFullscreen = mode!=='html' && mode!=='pdf'; // html/pdf have their own browser open
-  _showPreviewZoomControls(showZoom, showFullscreen);
+  _showPreviewZoomControls(showZoom, true);
 }
 
 function updateEditBtn(){
