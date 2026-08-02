@@ -1956,7 +1956,7 @@ async function loadSession(sid){
         && typeof startSessionStream === 'function') {
       startSessionStream(currentSid);
     }
-    if(currentSid===sid&&!_selfHealedCurrent&&_loadingSessionId===null
+    if(currentSid&&S.session&&S.session.session_id===currentSid&&!_selfHealedCurrent&&_loadingSessionId===null
       &&(typeof _sendInProgress==='undefined'||!_sendInProgress)
       &&(!_voiceLoadContext||typeof window._voiceLeaseContextCurrent!=='function'
         ||window._voiceLeaseContextCurrent(_voiceLoadContext))

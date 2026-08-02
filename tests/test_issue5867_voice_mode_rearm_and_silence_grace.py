@@ -467,7 +467,7 @@ def _run_session_transition(source: str, setup: str, call: str) -> dict:
     script = f"""
 const source=Buffer.from('{encoded}','base64').toString();
 const mode={json.dumps(setup)};
-const scope={{mode, window:{{}}, document:{{hidden:false,visibilityState:'visible'}}, location:{{href:'http://localhost/'}},
+const scope={{mode, currentSid:'s1', window:{{}}, document:{{hidden:false,visibilityState:'visible'}}, location:{{href:'http://localhost/'}},
   history:{{replaceState(){{}}}}, localStorage:{{getItem(){{return null;}},setItem(){{}},removeItem(){{}}}},
   S:{{session:mode==='cold'?null:{{session_id:'s1',workspace:'w',model:'m',profile:'default'}},messages:[],pendingFiles:[],toolCalls:[],busy:false,activeStreamId:null,activeProfile:'default'}},
   _loadingSessionId:null,_loadSessionGeneration:0,_sendInProgress:mode==='send',_newSessionInFlight:null,
@@ -622,6 +622,12 @@ def test_change4_shared_stream_adoption_and_duplicate_listener_guard_exist():
 def test_load_session_failure_recovers_only_the_surviving_voice_owner(mode, expected_resume):
     result = _run_session_transition(LOAD_SOURCE, mode, "fn('s1',{force:true})")
     assert result["resume"] == expected_resume
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_failed_switch_resumes_the_surviving_current_session_voice_owner():
+    result = _run_session_transition(LOAD_SOURCE, "current", "fn('s2',{force:true})")
+    assert result["resume"] == 1
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
