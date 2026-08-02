@@ -127,6 +127,42 @@ def _candidates_via_node(tc, workspace="/Users/test/ws"):
     return json.loads(r.stdout)
 
 
+def _note_mutations_via_node(tc, workspace="", preview="foo.py"):
+    """Drive the production caller chain: noteWorkspaceMutationsFromToolCall
+    → _artifactCandidatesFromToolCall → _normalizeArtifactPath, then check
+    whether the open preview is considered mutated."""
+    assert NODE is not None  # module is skipped when node is missing
+    consts = _extract_const("ARTIFACT_IGNORE_RE") + "\n" + _extract_const("ARTIFACT_MUTATION_TOOLS")
+    fns = "\n".join(
+        _extract_fn(n)
+        for n in (
+            "_isWindowsStylePath",
+            "_stripWorkspacePrefix",
+            "_canonicalizeRelativePath",
+            "_normalizeArtifactPath",
+            "_artifactCandidatesFromText",
+            "_artifactCandidatesFromToolCall",
+            "noteWorkspaceMutationsFromToolCall",
+            "_isOpenPreviewPathMutated",
+        )
+    )
+    driver = (
+        f"const S = {{ session: {{ workspace: {json.dumps(workspace)} }} }};\n"
+        + "const _turnMutatedPreviewPaths = new Set();\n"
+        + f"let _previewCurrentPath = {json.dumps(preview)};\n"
+        + consts + "\n" + fns + "\n"
+        + "noteWorkspaceMutationsFromToolCall(JSON.parse(process.argv[1]));\n"
+        + "const out = _isOpenPreviewPathMutated();\n"
+        + "process.stdout.write(JSON.stringify({mutated: [..._turnMutatedPreviewPaths], openMutated: out}));\n"
+    )
+    r = subprocess.run(
+        [NODE, "-e", driver, json.dumps(tc)],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert r.returncode == 0, f"node failed: {r.stderr}"
+    return json.loads(r.stdout)
+
+
 # ---------------------------------------------------------------------------
 # Fix 1: _normalizeArtifactPath strips workspace prefix from absolute paths
 # ---------------------------------------------------------------------------
@@ -542,6 +578,77 @@ class TestNormalizeArtifactPathPlatformEdges:
                 f"_stripWorkspacePrefix({path!r}) on workspace {ws!r} must "
                 f"yield {want!r}, got {got!r}"
             )
+
+    def test_no_workspace_windows_absolutes_fail_closed(self):
+        """Without workspace authority, every unambiguous absolute flavor —
+        drive-forward, drive-backslash, UNC — must fail closed rather than
+        survive as workspace-relative candidates (maintainer re-gate #5752,
+        must-fix)."""
+        out = _normalize_via_node(
+            ["C:/foo.py", "C:\\foo.py", "\\\\server\\share\\foo.py"],
+            workspace="",
+        )
+        assert out == ["", "", ""], (
+            f"No-workspace Windows absolutes must fail closed; got {out}"
+        )
+
+    def test_no_workspace_relative_controls_survive(self):
+        """Ordinary relative names must survive with no workspace set."""
+        out = _normalize_via_node(
+            ["foo.py", "sub/x.py", "foo\\bar.py"],
+            workspace="",
+        )
+        assert out == ["foo.py", "sub/x.py", "foo\\bar.py"], (
+            f"No-workspace relative names must survive; got {out}"
+        )
+
+    def test_windows_workspace_root_relative_and_drive_relative_fail_closed(self):
+        """Windows workspace: root-relative ('\\foo.py') and drive-relative
+        ('C:foo.py') absolutes must fail closed, not become workspace-relative
+        candidates (maintainer re-gate #5752, must-fix)."""
+        ws = "C:\\Users\\test\\ws"
+        out = _normalize_via_node(
+            ["\\foo.py", "C:foo.py"],
+            workspace=ws,
+        )
+        assert out == ["", ""], (
+            f"Windows root-relative and drive-relative inputs must fail "
+            f"closed; got {out}"
+        )
+
+    def test_windows_workspace_relative_controls_survive(self):
+        """Windows workspace: plain relative names and backslash-separated
+        relatives still normalize to forward-slash form."""
+        ws = "C:\\Users\\test\\ws"
+        out = _normalize_via_node(
+            ["foo.py", "foo\\bar.py"],
+            workspace=ws,
+        )
+        assert out == ["foo.py", "foo/bar.py"], (
+            f"Windows-relative names must survive and fold separators; got {out}"
+        )
+
+    def test_composed_mutation_to_preview_no_workspace_windows_absolute(self):
+        """Production chain: with no workspace, a write_file on a Windows
+        absolute must not enter the mutation set and must not mark the open
+        preview mutated (maintainer re-gate #5752, composed row)."""
+        tc = {"name": "write_file", "args": {"path": "C:/foo.py"}}
+        out = _note_mutations_via_node(tc, workspace="", preview="foo.py")
+        assert out == {"mutated": [], "openMutated": False}, (
+            f"No-workspace Windows absolute must not pollute the mutation "
+            f"set; got {out}"
+        )
+
+    def test_composed_mutation_to_preview_control_row(self):
+        """Control for the composed row: a valid workspace-relative mutation
+        through the same caller chain marks the open preview mutated."""
+        ws = "/Users/test/ws"
+        tc = {"name": "write_file", "args": {"path": f"{ws}/foo.py"}}
+        out = _note_mutations_via_node(tc, workspace=ws, preview="foo.py")
+        assert out == {"mutated": ["foo.py"], "openMutated": True}, (
+            f"Valid mutation must flow through the caller chain and mark the "
+            f"open preview; got {out}"
+        )
 
 
 # ---------------------------------------------------------------------------

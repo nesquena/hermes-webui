@@ -461,10 +461,21 @@ function _normalizeArtifactPath(path){
   // absolutes on a second pass.
   const ws = (typeof S!=='undefined' && S.session) ? S.session.workspace : null;
   const isWindows = !!ws && _isWindowsStylePath(String(ws));
-  if(isWindows){
+  if(!ws){
+    // No workspace authority: no absolute path can ever match a relative
+    // preview path, so reject every unambiguous absolute flavor before
+    // relative canonicalization (maintainer re-gate #5752). A bare leading
+    // backslash ("\foo.py") is ambiguous on POSIX, so it survives.
+    if(path.startsWith('/') || _isWindowsStylePath(path)) return '';
+  } else if(isWindows){
     const normPath = path.replace(/\\/g,'/');
-    // Windows absolute: drive letter, backslash UNC, or a leading '/'.
-    if(_isWindowsStylePath(path) || path.startsWith('/')){
+    // Rooted detection runs on the folded form: a single leading backslash
+    // ("\foo.py") is a Windows root-relative absolute, and drive-relative
+    // ("C:foo.py") is a Windows absolute without a separator — both must fail
+    // closed rather than survive as workspace-relative candidates.
+    const rooted = _isWindowsStylePath(path) || normPath.startsWith('/')
+      || /^[A-Za-z]:[^\\/]/.test(path);
+    if(rooted){
       // Strip the workspace prefix so they compare equal to relative preview
       // paths (#5747). An absolute path not under the workspace can never
       // match a relative preview path — bail out to avoid false candidates.
