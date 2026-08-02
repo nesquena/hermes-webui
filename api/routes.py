@@ -22879,22 +22879,32 @@ def _handle_chat_start(handler, body, diag=None):
 
 def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
     """Recover stale implicit session workspaces without hiding explicit errors."""
+    def _validated_target(candidate) -> str:
+        target = str(candidate)
+        current = str(getattr(s, "workspace", "") or "")
+        if target != current:
+            from api.worktree_authority import is_linked_worktree
+            if is_linked_worktree(target) or (current and is_linked_worktree(current)):
+                raise ValueError("A linked-worktree session workspace is immutable")
+        return target
+
     explicit = requested_workspace not in (None, "")
     if explicit:
-        return str(resolve_trusted_workspace(requested_workspace))
+        return _validated_target(resolve_trusted_workspace(requested_workspace))
     stored_workspace = getattr(s, "workspace", None)
     workspace, recovered = resolve_implicit_workspace_with_recovery(
         stored_workspace,
         get_last_workspace,
     )
     if not recovered:
-        return str(workspace)
+        return _validated_target(workspace)
+    workspace = _validated_target(workspace)
     persisted = persist_recovered_workspace_binding(
         s,
         workspace,
         expected_workspace=stored_workspace,
     )
-    return str(persisted.workspace)
+    return _validated_target(persisted.workspace)
 
 
 def _normalize_chat_attachments(raw_attachments):
