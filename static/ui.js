@@ -19835,15 +19835,17 @@ function renderFileTree(){
     return;
   }
   if(emptyEl) emptyEl.style.display='none';
-  // Keep the tree hidden while a preview is open: loadDir() re-runs
-  // renderFileTree() when the agent's stream settles (turn completion),
-  // which used to un-hide the tree and stack it above the still-visible
-  // preview area, throwing the reader out of the preview.
-  if(typeof _previewCurrentPath!=='undefined'&&_previewCurrentPath){ box.style.display='none'; return; }
-  box.style.display='';
+  // Keep the tree hidden while a preview is open, but still rebuild it:
+  // loadDir() has already refreshed the directory model before calling
+  // renderFileTree(), so skipping the rebuild here would leave a stale
+  // tree behind the preview that surfaces when the user closes it
+  // (clearPreview() only toggles display). Visibility is a presentation
+  // concern; the DOM rebuild must always reflect the current model.
+  const previewOpen=typeof _previewCurrentPath!=='undefined'&&!!_previewCurrentPath;
+  box.style.display=previewOpen?'none':'';
   const visibleEntries=_visibleWorkspaceEntries(S.entries);
   if(!visibleEntries.length){
-    if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display='flex';}
+    if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display=previewOpen?'none':'flex';}
     return;
   }
   _renderTreeItems(box, visibleEntries, 0);
