@@ -1388,6 +1388,13 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsProfileSwitchResume" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_profile_switch_resume">Resume last session when switching profile</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_profile_switch_resume">When on, switching profiles auto-resumes the target profile's most recent conversation instead of starting a blank chat. When off (default), every profile switch starts fresh so sessions never get cross-tagged.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsShowCliSessions" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_external_sessions">Show non-WebUI sessions</span>
               </label>
