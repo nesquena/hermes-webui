@@ -2051,6 +2051,24 @@ function closeOtherLiveStreams(activeSid){
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
+  // Keep this production entry point self-contained for focused harnesses that
+  // extract attachLiveStream without evaluating the module declarations above.
+  const _transportAuthority=typeof LIVE_STREAM_TRANSPORT_AUTHORITY!=='undefined'
+    ? LIVE_STREAM_TRANSPORT_AUTHORITY
+    : (typeof window!=='undefined'
+      ? (window._liveStreamTransportAuthority||(window._liveStreamTransportAuthority=Object.create(null)))
+      : Object.create(null));
+  const _transportSourceGeneration=typeof LIVE_STREAM_TRANSPORT_SOURCE_GENERATION!=='undefined'
+    ? LIVE_STREAM_TRANSPORT_SOURCE_GENERATION
+    : (typeof window!=='undefined'
+      ? (window._liveStreamTransportSourceGeneration||(window._liveStreamTransportSourceGeneration=new WeakMap()))
+      : new WeakMap());
+  const _nextTransportGeneration=()=>{
+    if(typeof LIVE_STREAM_TRANSPORT_GENERATION!=='undefined') return ++LIVE_STREAM_TRANSPORT_GENERATION;
+    const next=Number(typeof window!=='undefined'&&window._liveStreamTransportGeneration||0)+1;
+    if(typeof window!=='undefined') window._liveStreamTransportGeneration=next;
+    return next;
+  };
   if(typeof window!=='undefined'&&typeof window._voiceLeaseAdoptStream==='function'){
     window._voiceLeaseAdoptStream(activeSid,streamId);
   }
@@ -2101,7 +2119,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       (!reconnecting&&existingLive.source.readyState===EventSource.CONNECTING))
   ){
     _transportGeneration=existingLive.generation
-      ||(LIVE_STREAM_TRANSPORT_AUTHORITY[activeSid]&&LIVE_STREAM_TRANSPORT_AUTHORITY[activeSid].generation)
+      ||(_transportAuthority[activeSid]&&_transportAuthority[activeSid].generation)
       ||0;
     // Phase D: restore bottom run status on reattach after the Worklog shell
     // exists. There is no stale transport teardown in this branch.
@@ -2193,8 +2211,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _ownsCurrentTransport(source){
     const live=LIVE_STREAMS[activeSid];
-    const authority=LIVE_STREAM_TRANSPORT_AUTHORITY[activeSid];
-    const sourceGeneration=source&&LIVE_STREAM_TRANSPORT_SOURCE_GENERATION.get(source);
+    const authority=_transportAuthority[activeSid];
+    const sourceGeneration=source&&_transportSourceGeneration.get(source);
     return !!authority&&authority.streamId===streamId&&authority.generation===_transportGeneration
       &&sourceGeneration===authority.generation&&(!live||live.source===source);
   }
@@ -5502,11 +5520,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(existingLive&&existingLive.source&&existingLive.source!==source){
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
     }
-    const generation=++LIVE_STREAM_TRANSPORT_GENERATION;
+    const generation=_nextTransportGeneration();
     _transportGeneration=generation;
-    LIVE_STREAM_TRANSPORT_SOURCE_GENERATION.set(source,generation);
+    _transportSourceGeneration.set(source,generation);
     const authority={streamId,generation};
-    LIVE_STREAM_TRANSPORT_AUTHORITY[activeSid]=authority;
+    if(typeof LIVE_STREAM_TRANSPORT_AUTHORITY!=='undefined') LIVE_STREAM_TRANSPORT_AUTHORITY[activeSid]=authority;
+    else _transportAuthority[activeSid]=authority;
     LIVE_STREAMS[activeSid]={streamId,source,generation};
 
     // Note on #631 Bug B: the original PR description stated the server
@@ -5526,6 +5545,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('token',e=>{
       if(_terminalStateReached||_streamFinalized) return;
+      if(S.session&&S.session.session_id===activeSid&&S.activeStreamId!==streamId) return;
       if(!_ownsActiveStreamOrBackground(source)) return;
       const d=JSON.parse(e.data);
       assistantText+=d.text;
@@ -6781,7 +6801,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
-      if(!_ownsCurrentTransport(source)){
+      if(typeof _ownsCurrentTransport==='function'&&!_ownsCurrentTransport(source)){
         _closeSource(source);
         return returnStatus?'stale':false;
       }
@@ -6869,8 +6889,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(_isActiveSession()) _queueDrainSid=activeSid;
       renderSessionList();
-      if(typeof window==='undefined') _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
-      else _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
+      const _settledTransportGeneration=typeof _transportGeneration!=='undefined' ? _transportGeneration : 0;
+      _setActivePaneIdleIfOwner({success:false},source,_settledTransportGeneration);
       return returnStatus?'restored':true;
     }catch(_){
       return returnStatus?'error':false;

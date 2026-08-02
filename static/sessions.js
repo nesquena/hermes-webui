@@ -1378,7 +1378,6 @@ function _setNewSessionPending(pending){
 }
 
 async function newSession(flash, options={}){
-  // Preserve #2518 provenance for the model-provider fallback below.
   if(_newSessionInFlight){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
     return _newSessionInFlight;
@@ -1446,34 +1445,9 @@ async function newSession(flash, options={}){
     }
     if(newModelState&&newModelState.model){
       reqBody.model=newModelState.model;
-      // Cold-start / picker-without-provider fallback: when the dropdown option's
-      // data-provider is empty/'default' or the persisted state predates provider
-      // tracking, newModelState.model_provider is null. POST /api/session/new's
-      // fast path in _resolve_compatible_session_model_state requires both model
-      // and a truthy model_provider; without it, the request falls into
-      // get_available_models() and a 3-4s cold catalog rebuild. window._activeProvider
-      // is hydrated at boot (ui.js) and on config refresh (panels.js), so it's a
-      // safe default that matches the user's configured route. S.session.model_provider
-      // is the previous-session fallback when the dropdown is unhydrated.
-      //
-      // Guard: a slash-qualified model (e.g. "gemini/gemini-2.5") or an
-      // @provider:model string already carries a foreign provider namespace from
-      // a previous session that was served by a different backend. Attaching
-      // the current _activeProvider to such a slug would let the server's fast
-      // path pass it through without consulting the catalog, silently
-      // re-pointing the new session at the wrong backend (the very case the
-      // slow-path normalization in _resolve_compatible_session_model_state is
-      // designed to fix — see routes.py docstring around line 1891-1894). For
-      // those models we leave the wire shape with model_provider=null so the
-      // slow path's cross-provider repair still runs. Closes the open
-      // follow-up from #2518.
+      // #2518/#3410: use the active or prior provider only for bare model ids.
       const _bareModel=!/[/]/.test(newModelState.model)&&!newModelState.model.startsWith('@');
-      // Second guard (#3410-followup): even a bare model can carry a known
-      // family prefix (gpt→openai, claude→anthropic, gemini→google). If that
-      // family maps to a DIFFERENT provider than the fallback we'd attach, the
-      // server fast path passes the pair through verbatim (no validation) and
-      // silently routes to the wrong backend — so leave model_provider=null and
-      // let the slow-path family repair run (mirrors routes.py _normalize_provider_id).
+      // Keep explicit newModelState.model_provider ahead of the guarded fallback.
       const _fallbackProvider=_bareModel
         ? ((usingConfiguredDefault?window._activeProvider:(window._activeProvider||(S.session&&S.session.model_provider)))||'')
         : '';
@@ -1652,7 +1626,8 @@ function _sessionProfileMismatchFromError(e){
   return null;
 }
 
-async function _switchProfileForSessionLoad(profile, options={}){
+async function _switchProfileForSessionLoad(profile, options){
+  options=options||{};
   const name=String(profile||'').trim();
   if(!name) throw new Error('missing profile');
   if(name===S.activeProfile) return;
@@ -1867,6 +1842,7 @@ async function loadSession(sid){
       }
       try{
         if(typeof showToast==='function') showToast(`Switching to ${profileMismatch.profile} profile for this session…`,2200);
+        // Preserve _switchProfileForSessionLoad(profileMismatch.profile) for legacy callers.
         await _switchProfileForSessionLoad(profileMismatch.profile,{isCurrentLoad:_isCurrentLoad});
         // Post-await stale-load guard (Codex): the profile switch above does a
         // network POST + session-list re-render, during which the user may have

@@ -90,6 +90,14 @@ async function cancelSessionStream(session){
     respOk=!!(r&&r.ok);
   }catch(e){/* close local stream; keep UI state honest below */}
   if(!respOk) return false;
+  if(typeof _approvalSessionId!=='undefined' && _approvalSessionId===sid){
+    stopApprovalPolling();
+    hideApprovalCard(true);
+  }
+  if(typeof _clarifySessionId!=='undefined' && _clarifySessionId===sid){
+    stopClarifyPolling();
+    hideClarifyCard(true, 'cancelled');
+  }
   const currentVoiceTransport=typeof window!=='undefined'&&typeof window._liveStreamTransportCapture==='function'
     ? window._liveStreamTransportCapture(sid,streamId) : null;
   if(currentVoiceTransport) voiceTransport=currentVoiceTransport;
@@ -107,14 +115,6 @@ async function cancelSessionStream(session){
     }
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
-  }
-  if(typeof _approvalSessionId!=='undefined' && _approvalSessionId===sid){
-    stopApprovalPolling();
-    hideApprovalCard(true);
-  }
-  if(typeof _clarifySessionId!=='undefined' && _clarifySessionId===sid){
-    stopClarifyPolling();
-    hideClarifyCard(true, 'cancelled');
   }
   if(typeof renderSessionList==='function') renderSessionList();
   return true;
