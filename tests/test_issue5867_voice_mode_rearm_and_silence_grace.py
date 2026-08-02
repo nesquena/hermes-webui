@@ -119,9 +119,11 @@ const afterRestart = { starts: state.starts, recognizerChanged: api.first() !== 
 advance(500);
 const afterSend = { sends: state.sends, state: api.state() };
 api.prepare(); api.bind('stream-1', 's1');
+const wrongOwner = api.settle('old-session', 'old-stream', { success: false });
+const stale = api.settle('s1', 'stream-1', { success: false }, {}, 0);
+const beforeValidOwnerState = api.state();
 const settled = api.settle('s1', 'stream-1', { success: false });
 const duplicate = api.settle('s1', 'stream-1', { success: false });
-const stale = api.settle('old-session', 'old-stream', { success: false });
 const ownerEvents = [];
 const bootCompletion = windowObj._voiceModeOnResponseComplete;
 windowObj._voiceModeOnResponseComplete = (...args) => { ownerEvents.push(args); return bootCompletion(...args); };
@@ -142,7 +144,7 @@ api.activate(); api.prepare(); api.bind('stream-1', 's1');
 api.complete('s1', 'stream-1', oldSource, 1, { success: false });
 const staleSourceState = api.state();
 api.complete('s1', 'stream-1', replacementSource, 2, { success: false });
-console.log(JSON.stringify({ before, afterRestart, duplicateStart, afterSend, settled, duplicate, stale, finalState: api.state(), staleSourceState, aborts: state.aborts, ownerEvents: terminalOwnerEvents, transportEvents: ownerEvents }));
+console.log(JSON.stringify({ before, afterRestart, duplicateStart, afterSend, settled, duplicate, stale, wrongOwner, beforeValidOwnerState, finalState: api.state(), staleSourceState, aborts: state.aborts, ownerEvents: terminalOwnerEvents, transportEvents: ownerEvents }));
 """
 
 
@@ -162,7 +164,7 @@ const S = {
 const INFLIGHT = {};
 const bound = [];
 const completionEvents = [];
-const state = { starts: 0, recognitions: [] };
+const state = { starts: 0, aborts: 0, recognitions: [], localSettlements: [] };
 const windowObj = {
   _defaultMessageMode: 'steer',
 };
@@ -173,7 +175,7 @@ const localStorage = { getItem(key) { return ({
 })[key] || null; }, setItem(){} };
 function SpeechRecognition() {
   const instance = { onresult: null, onend: null, onerror: null,
-    start(){ state.starts += 1; }, abort(){} };
+    start(){ state.starts += 1; }, abort(){ state.aborts += 1; } };
   state.recognitions.push(instance); return instance;
 }
 const elementVoice = () => ({ style: {}, classList: { add(){}, remove(){} }, textContent: '', className: '', value: '' });
@@ -229,21 +231,23 @@ for (const match of source.matchAll(/\b[A-Za-z_$][\w$]*\b/g)) {
 }
 const send = new Function('scope', 'with(scope){ return (' + source + '); }')(scope);
 const speechSynthesis = { cancel(){}, speaking:false, getVoices(){ return []; }, speak(){} };
-const voiceFactory = new Function('window','document','SpeechRecognition','localStorage','modeBtn','bar','indicator','label','micBtn','ta','S','t','autoResize','_micOriginNeedsSecureContext','_deactivate','showToast','_setButtonTooltip','stopTTS','_locale','send','setTimeout','clearTimeout','Date','_voiceLeaseSettleOwner','speechSynthesis', runtimeSource + '\n' + completionSource + '\n' + speakSource + '\n' + activateSource + '\nreturn { activate:()=>_activate(), start:()=>_startListening(_voiceLease), first:()=>_voiceLease&&_voiceLease.recognition };');
+const voiceFactory = new Function('window','document','SpeechRecognition','localStorage','modeBtn','bar','indicator','label','micBtn','ta','S','t','autoResize','_micOriginNeedsSecureContext','_deactivate','showToast','_setButtonTooltip','stopTTS','_locale','send','setTimeout','clearTimeout','Date','_voiceLeaseSettleOwner','speechSynthesis', runtimeSource + '\n' + completionSource + '\n' + speakSource + '\n' + activateSource + '\nreturn { activate:()=>_activate(), start:()=>_startListening(_voiceLease), first:()=>_voiceLease&&_voiceLease.recognition, state:()=>_voiceModeState, lease:()=>_voiceLease, settleLocal:window._voiceLeaseSettleLocal };');
 const voiceApi = voiceFactory(windowObj, documentObj, SpeechRecognition, localStorage, modeBtn, bar, indicator, label, micBtn, msg, S, t, autoResize, _micOriginNeedsSecureContext, _deactivate, showToast, _setButtonTooltip, stopTTS, _locale, send, setTimeout, clearTimeout, Date, (...args)=>windowObj._voiceLeaseSettleOwner(...args), speechSynthesis);
 const originalPrepare=windowObj._voiceLeasePrepareSubmission;
-windowObj._voiceLeasePrepareSubmission=(...args)=>{ bound.push({ type: 'prepare' }); return originalPrepare(...args); };
+windowObj._voiceLeasePrepareSubmission=(...args)=>{ const lease=originalPrepare(...args)||voiceApi.lease(); bound.push({ type: 'prepare', leaseId: lease && lease.id }); return lease; };
 const originalBind=windowObj._voiceLeaseBind;
 windowObj._voiceLeaseBind=(streamId,sid)=>{ bound.push({ type: 'bind', streamId, sid }); return originalBind(streamId,sid); };
 const originalCompletion=windowObj._voiceModeOnResponseComplete;
 windowObj._voiceModeOnResponseComplete=(...args)=>{ completionEvents.push(args); return originalCompletion(...args); };
+const originalSettleLocal=windowObj._voiceLeaseSettleLocal;
+windowObj._voiceLeaseSettleLocal=(lease)=>{ state.localSettlements.push(lease && lease.id); return originalSettleLocal(lease); };
 voiceApi.activate();
 const recognition=voiceApi.first();
 recognition.onresult({ resultIndex: 0, results: [{ 0: { transcript: msg.value }, isFinal: true }] });
 recognition.onend();
 (async () => {
   await new Promise(resolve => setTimeout(resolve, 1150));
-  console.log(JSON.stringify({ bound, completionEvents, streamId: S.activeStreamId, busy: S.busy, inProgress: scope._sendInProgress, starts: state.starts, petCalls: state.petCalls || 0 }));
+  console.log(JSON.stringify({ bound, completionEvents, streamId: S.activeStreamId, busy: S.busy, inProgress: scope._sendInProgress, starts: state.starts, aborts: state.aborts, localSettlements: state.localSettlements, replacementId: state.replacementId || null, leaseId: voiceApi.lease().id, leaseSettled: voiceApi.lease().settled, finalState: voiceApi.state(), petCalls: state.petCalls || 0 }));
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
 """
 
@@ -275,7 +279,7 @@ def _run_production_send():
     return json.loads(result.stdout)
 
 
-def _run_production_local_pet():
+def _run_production_local_pet(replace_owner=False):
     script = PRODUCTION_HARNESS.replace(
         "const msg = { value: 'production voice text' };", "const msg = { value: '/pet' };"
     ).replace(
@@ -283,6 +287,11 @@ def _run_production_local_pet():
     ).replace(
         "_pendingSelections: [],", "_pendingSelections: [], handlePetSlashCommand: async () => { state.petCalls = (state.petCalls || 0) + 1; return { handled: true, message: 'pet response' }; },"
     )
+    if replace_owner:
+        script = script.replace(
+            "handlePetSlashCommand: async () => { state.petCalls = (state.petCalls || 0) + 1; return { handled: true, message: 'pet response' }; },",
+            "handlePetSlashCommand: async () => { state.petCalls = (state.petCalls || 0) + 1; await Promise.resolve(); const replacement=windowObj._voiceLeasePrepareSubmission({ replaceOwner: true }); state.replacementId=replacement && replacement.id; return { handled: true, message: 'pet response' }; },",
+        )
     script = script.replace(
         "${SEND_B64}", base64.b64encode(SEND_SOURCE.encode()).decode()
     ).replace("${OWNER_B64}", base64.b64encode(OWNER_SOURCE.encode()).decode())
@@ -364,7 +373,7 @@ def _run_no_speech_restart():
 ATTACH_RACE_HARNESS = r"""
 const attachSource = Buffer.from('${ATTACH_B64}', 'base64').toString();
 const runtimeSource = Buffer.from('${RUNTIME_B64}', 'base64').toString();
-const state = { sources: [], completionEvents: [], starts: 0, aborts: 0 };
+const state = { sources: [], completionEvents: [], starts: 0, aborts: 0, ownerSettlements: [], unhandled: [] };
 function SpeechRecognition() {
   const instance = { onresult: null, onend: null, onerror: null, start() { state.starts += 1; }, abort() { state.aborts += 1; } };
   state.recognitions = state.recognitions || []; state.recognitions.push(instance); return instance;
@@ -396,18 +405,23 @@ const localStorage = { getItem() { return null; }, setItem() {}, removeItem() {}
 const voiceElement = () => ({ style: {}, classList: { add() {}, remove() {} }, textContent: '', className: '', value: '' });
 const modeBtn = voiceElement(), bar = voiceElement(), indicator = voiceElement(), label = voiceElement(), micBtn = voiceElement(), ta = voiceElement();
 const voiceApi = new Function('window','document','SpeechRecognition','localStorage','modeBtn','bar','indicator','label','micBtn','ta','S','t','autoResize','_micOriginNeedsSecureContext','_deactivate','showToast','_setButtonTooltip','stopTTS','_locale','send','setTimeout','clearTimeout','Date','_speakResponse', runtimeSource + `
-return { activate() { _voiceModeActive = true; _voiceContextId += 1; _voiceLease = _newVoiceLease(); }, start: () => _startListening(_voiceLease), adopt: window._voiceLeaseAdoptStream, first: () => _voiceLease && _voiceLease.recognition, state: () => _voiceModeState, lease: () => _voiceLease };`)(windowObj, documentObj, SpeechRecognition, localStorage, modeBtn, bar, indicator, label, micBtn, { value: '' }, S, key => key, () => {}, () => false, () => {}, () => {}, () => {}, { _speech: 'en-US' }, () => {}, setTimeout, clearTimeout, Date, () => {});
+return { activate() { _voiceModeActive = true; _voiceContextId += 1; _voiceLease = _newVoiceLease(); }, start: () => _startListening(_voiceLease), adopt: window._voiceLeaseAdoptStream, complete: window._voiceModeOnResponseComplete, settle: window._voiceLeaseSettleOwner, first: () => _voiceLease && _voiceLease.recognition, state: () => _voiceModeState, lease: () => _voiceLease };`)(windowObj, documentObj, SpeechRecognition, localStorage, modeBtn, bar, indicator, label, micBtn, { value: '' }, S, key => key, () => {}, () => false, () => {}, () => {}, () => {}, { _speech: 'en-US' }, () => {}, setTimeout, clearTimeout, Date, () => {});
 windowObj._voiceLeaseAdoptStream = (...args) => voiceApi.adopt(...args);
+windowObj._voiceModeOnResponseComplete = (...args) => voiceApi.complete(...args);
+const originalOwnerSettlement = windowObj._voiceLeaseSettleOwner;
+windowObj._voiceLeaseSettleOwner = (...args) => { state.ownerSettlements.push(args); return originalOwnerSettlement(...args); };
+process.on('unhandledRejection', error => state.unhandled.push(String(error && error.stack || error)));
 const scope = {
   window: windowObj, document: documentObj, location: { href: 'http://localhost/' },
   S, INFLIGHT, EventSource: FakeEventSource, localStorage,
-  api: async () => ({ active: true }), setTimeout, clearTimeout,
+  api: async () => ({ active: false, replay_available: false }), setTimeout, clearTimeout,
   requestAnimationFrame: callback => setTimeout(callback, 0),
   cancelAnimationFrame: clearTimeout,
   URL, encodeURIComponent, console,
   _desktopBackgroundedForNotifications: false,
   _sendInProgress: false, _sendInProgressSid: null,
-  setBusy: noOp, setComposerStatus: noOp, setStatus: noOp,
+  setBusy: value => { S.busy = value; }, setComposerStatus: noOp, setStatus: noOp,
+  _isActiveSession: () => true,
   showLiveRunStatus: noOp, hideLiveRunStatus: noOp, _clearLiveRunStatusTimer: noOp,
   snapshotLiveTurnHtmlForSession: noOp, _resumeSessionStreamAfterLiveChat: noOp,
   _suspendSessionStreamForLiveChat: noOp, saveInflightState: noOp,
@@ -440,14 +454,11 @@ const attach = attachFactory(scope);
 (async () => {
   voiceApi.activate(); voiceApi.start();
   S.activeStreamId = 'stream-1'; S.session.active_stream_id = 'stream-1'; S.busy = true;
-  attach('s1', 'stream-1', [], {});
-  await new Promise(resolve => setTimeout(resolve, 0));
-  const first = state.sources[0];
+  voiceApi.adopt('s1', 'stream-1');
   attach('s1', 'stream-1', [], { reconnecting: true });
   await new Promise(resolve => setTimeout(resolve, 0));
-  const second = state.sources[1];
-  first.emit('done', { data: JSON.stringify({ status: 'completed' }) });
-  console.log(JSON.stringify({ sources: state.sources.length, oldClosed: first.closed, replacementOpen: !second.closed, completionEvents: state.completionEvents.length, generation: windowObj._liveStreamTransportAuthority.s1.generation, starts: state.starts, aborts: state.aborts, state: voiceApi.state(), owner: voiceApi.lease().owner }));
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  console.log(JSON.stringify({ sources: state.sources.length, completionEvents: state.completionEvents.length, ownerSettlements: state.ownerSettlements.length, starts: state.starts, aborts: state.aborts, state: voiceApi.state(), owner: voiceApi.lease().owner, activeStreamId: S.activeStreamId, sessionActiveStreamId: S.session.active_stream_id, busy: S.busy, unhandled: state.unhandled }));
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
 """
 
@@ -455,7 +466,7 @@ const attach = attachFactory(scope);
 def _run_attach_transport_race() -> dict:
     script = ATTACH_RACE_HARNESS.replace(
         "${ATTACH_B64}", base64.b64encode(ATTACH_SOURCE.encode()).decode()
-    ).replace("${RUNTIME_B64}", base64.b64encode(_voice_runtime().encode()).decode())
+    ).replace("${RUNTIME_B64}", base64.b64encode((_voice_runtime() + "\n" + VOICE_COMPLETE_SOURCE).encode()).decode())
     result = subprocess.run([NODE], input=script, capture_output=True, text=True)
     if result.returncode:
         raise AssertionError(result.stderr)
@@ -536,6 +547,8 @@ def test_voice_lease_ignores_duplicate_or_stale_owner_callbacks():
     assert result["settled"] is True
     assert result["duplicate"] is False
     assert result["stale"] is False
+    assert result["wrongOwner"] is False
+    assert result["beforeValidOwnerState"] == "thinking"
     assert result["aborts"] >= 1
     assert result["staleSourceState"] == "thinking"
 
@@ -566,9 +579,22 @@ def test_production_local_non_command_slash_uses_voice_transition():
     assert [entry["type"] for entry in result["bound"]] == ["prepare"]
     assert result["petCalls"] == 1
     assert result["completionEvents"] == []
+    assert result["aborts"] == 1
+    assert len(result["localSettlements"]) == 1
+    assert result["starts"] == 2
+    assert result["finalState"] == "listening"
     assert result["streamId"] is None
     assert result["busy"] is False
     assert result["inProgress"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_local_slash_finally_cannot_settle_a_replacement_voice_lease():
+    result = _run_production_local_pet(replace_owner=True)
+    assert result["petCalls"] == 1
+    assert len(result["localSettlements"]) == 1
+    assert result["localSettlements"][0] != result["replacementId"]
+    assert result["finalState"] == "thinking", result
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -581,25 +607,27 @@ def test_production_send_and_stream_paths_share_the_lease_seams():
     assert "_voiceLeasePrepareSubmission" not in SEND_SOURCE.split("if(!S.session)", 1)[0]
     assert "if(typeof window._voiceLeasePrepareSubmission==='function') window._voiceLeasePrepareSubmission();" in SEND_SOURCE
     assert "if(streamId&&typeof window._voiceLeaseBind==='function') window._voiceLeaseBind(streamId,activeSid);" in SEND_SOURCE
-    assert "if(!streamId&&typeof window._voiceLeaseSettleLocal==='function') window._voiceLeaseSettleLocal();" in SEND_SOURCE
+    assert "if(!streamId&&!_voiceLocalDispatchSettled&&typeof window._voiceLeaseSettleLocal==='function') window._voiceLeaseSettleLocal();" in SEND_SOURCE
     assert ATTACH_SOURCE.count("_setActivePaneIdleIfOwner({success:true},source,_transportGeneration);") == 1
     assert ATTACH_SOURCE.count("_setActivePaneIdleIfOwner({success:false},source,_transportGeneration);") >= 5
     assert "window._voiceModeOnResponseComplete(ownerSid,ownerStreamId,terminalSource,terminalGeneration,voiceOutcome);" in OWNER_SOURCE
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_actual_attach_rejects_terminal_event_from_replaced_source():
+def test_reconnecting_dead_stream_settles_exact_voice_owner_without_event_source():
     result = _run_attach_transport_race()
     assert result == {
-        "sources": 2,
-        "oldClosed": True,
-        "replacementOpen": True,
+        "sources": 0,
         "completionEvents": 0,
-        "generation": 2,
+        "ownerSettlements": 1,
         "starts": 1,
         "aborts": 1,
-        "state": "thinking",
+        "state": "listening",
         "owner": {"sid": "s1", "streamId": "stream-1"},
+        "activeStreamId": None,
+        "sessionActiveStreamId": None,
+        "busy": False,
+        "unhandled": [],
     }
 
 

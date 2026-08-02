@@ -1321,6 +1321,9 @@ async function send(){
   }
   _sendInProgress = true;
   let streamId=null;
+  let _voiceLocalLease=null;
+  let _voiceLocalDispatchSettled=false;
+  let _voiceSlashFallsThrough=false;
   try{
   const options=arguments[0]||{};
   const literalSlash=!!(options&&options.literalSlash);
@@ -1428,8 +1431,9 @@ async function send(){
   // would be [assistant, user] and the chat would show the response above
   // the user's own input — reverse chronological order (#840 ordering bug).
   if(text.startsWith('/')&&!S.pendingFiles.length&&!literalSlash){
+    try{
     const _parsedCmd=parseCommand(text);
-    if(_parsedCmd&&typeof window._voiceLeasePrepareSubmission==='function') window._voiceLeasePrepareSubmission();
+    if(_parsedCmd&&typeof window._voiceLeasePrepareSubmission==='function') _voiceLocalLease=window._voiceLeasePrepareSubmission();
     const _cmd=_parsedCmd?COMMANDS.find(c=>c.name===_parsedCmd.name):null;
     if(_cmd){
       let _pushedUser=false;
@@ -1555,6 +1559,13 @@ async function send(){
           renderMessages();
           $('msg').value='';autoResize();hideCmdDropdown();return;
         }
+      }
+    }
+    _voiceSlashFallsThrough=true;
+    }finally{
+      if(_voiceLocalLease&&!_voiceSlashFallsThrough&&!_voiceLocalDispatchSettled){
+        if(typeof window._voiceLeaseSettleLocal==='function') window._voiceLeaseSettleLocal(_voiceLocalLease);
+        _voiceLocalDispatchSettled=true;
       }
     }
   }
@@ -1901,7 +1912,7 @@ async function send(){
   attachLiveStream(activeSid, streamId, uploadedNames);
 
   }finally{
-    if(!streamId&&typeof window._voiceLeaseSettleLocal==='function') window._voiceLeaseSettleLocal();
+    if(!streamId&&!_voiceLocalDispatchSettled&&typeof window._voiceLeaseSettleLocal==='function') window._voiceLeaseSettleLocal();
     _sendInProgress=false; _sendInProgressSid=null;
   }
 }
@@ -6977,39 +6988,41 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // status avoids opening a dead SSE URL that will 404 in the console.
     let replayOnly=false;
     if(reconnecting){
+      let st;
       try{
-        const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
-        if(!st.active&&st.replay_available){
-          replayOnly=true;
-        }else if(!st.active){
-          _clearOwnerInflightState();
-          _clearApprovalForOwner();
-          _clearClarifyForOwner('terminal');
-          if(S.session&&S.session.session_id===activeSid){
-            // Follow-intent BEFORE removing live placeholders: a reader following
-            // the (now-dead) stream should stay pinned to the bottom as the
-            // thinking/tool placeholders are cleared, not be stranded mid-transcript
-            // by preserveScroll restoring a stale scrollTop after the height shrinks.
-            const _wasFollowingAtReconnectDead=((typeof _isMessagePaneNearBottom==='function')
-                ? _isMessagePaneNearBottom(1200)
-                : true)
-              && !((typeof _isMessageReaderUnpinned==='function')
-                ? _isMessageReaderUnpinned()
-                : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
-            S.activeStreamId=null;
-            clearLiveToolCards();
-            removeThinking();
-            if(_isActiveSession()) _queueDrainSid=activeSid;
-            if(typeof window==='undefined') _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
-            else _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
-            renderMessages({preserveScroll:true});
-            if(_wasFollowingAtReconnectDead && typeof scrollToBottom==='function') scrollToBottom();
-            renderSessionList();
-          }
-          _scheduleAnchorRegistryCleanup(120000);
-          return;
+        st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+      }catch(_){
+        st=null;
+      }
+      if(st&&!st.active&&st.replay_available){
+        replayOnly=true;
+      }else if(st&&!st.active){
+        _clearOwnerInflightState();
+        _clearApprovalForOwner();
+        _clearClarifyForOwner('terminal');
+        if(S.session&&S.session.session_id===activeSid){
+          // Follow-intent BEFORE removing live placeholders: a reader following
+          // the (now-dead) stream should stay pinned to the bottom as the
+          // thinking/tool placeholders are cleared, not be stranded mid-transcript
+          // by preserveScroll restoring a stale scrollTop after the height shrinks.
+          const _wasFollowingAtReconnectDead=((typeof _isMessagePaneNearBottom==='function')
+              ? _isMessagePaneNearBottom(1200)
+              : true)
+            && !((typeof _isMessageReaderUnpinned==='function')
+              ? _isMessageReaderUnpinned()
+              : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
+          S.activeStreamId=null;
+          clearLiveToolCards();
+          removeThinking();
+          if(_isActiveSession()) _queueDrainSid=activeSid;
+          _setActivePaneIdleIfOwner({success:false});
+          renderMessages({preserveScroll:true});
+          if(_wasFollowingAtReconnectDead && typeof scrollToBottom==='function') scrollToBottom();
+          renderSessionList();
         }
-      }catch(_){}
+        _scheduleAnchorRegistryCleanup(120000);
+        return;
+      }
     }
     const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
     _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));

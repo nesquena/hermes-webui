@@ -1746,8 +1746,9 @@ window.renderTranscript=function(container, messages, opts){
     return true;
   }
 
-  function _voiceLeaseSettleLocal(){
+  function _voiceLeaseSettleLocal(expectedLease=null){
     const lease=_voiceManualPending;
+    if(expectedLease&&lease!==expectedLease) return false;
     if(!lease||!_voiceLeaseCurrent(lease)) return;
     if(_voiceBusy()){
       lease.submitted=false;
@@ -2219,14 +2220,6 @@ window.renderTranscript=function(container, messages, opts){
   }
 
   window._voiceModeOnResponseComplete=function(activeSid,streamId,source,generation,outcome){
-    const lease=_voiceLease;
-    if(!lease||lease.settled) return;
-    const authority=typeof window!=='undefined'&&window._liveStreamTransportAuthority
-      ? window._liveStreamTransportAuthority[activeSid] : null;
-    const sourceGenerations=typeof window!=='undefined'&&window._liveStreamTransportSourceGeneration;
-    if(!authority||authority.streamId!==String(streamId||'')
-      ||authority.generation!==generation||!sourceGenerations
-      ||sourceGenerations.get(source)!==generation) return;
     if(typeof window._voiceLeaseSettleOwner==='function'){
       window._voiceLeaseSettleOwner(activeSid,streamId,outcome||{success:false},source,generation);
     }
