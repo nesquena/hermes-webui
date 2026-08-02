@@ -622,6 +622,11 @@ def handle_workspace_upload(handler):
             return j(handler, {'error': 'Session not found'}, status=404)
         if _reject_invisible_session(handler, session):
             return True
+        try:
+            from api.worktree_authority import assert_session_owner
+            assert_session_owner(session)
+        except Exception as exc:
+            return j(handler, {'error': f'Worktree write refused: {exc}'}, status=409)
 
         # Resolve workspace root from session
         workspace = resolve_trusted_workspace(session.workspace)

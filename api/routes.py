@@ -15144,6 +15144,13 @@ def handle_post(handler, parsed) -> bool:
             new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
         except ValueError as e:
             return bad(handler, str(e))
+        if new_ws != old_ws:
+            try:
+                from api.worktree_authority import is_linked_worktree
+                if is_linked_worktree(new_ws) or is_linked_worktree(old_ws):
+                    return bad(handler, "A linked-worktree session workspace is immutable", 409)
+            except Exception as exc:
+                return bad(handler, f"Unable to verify workspace ownership: {exc}", 409)
         with _get_session_agent_lock(body["session_id"]):
             s.workspace = new_ws
             if "model" in body or "model_provider" in body:
