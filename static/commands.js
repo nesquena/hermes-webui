@@ -720,6 +720,8 @@ async function cmdModel(args){
       const provider=q.slice(0,q.indexOf('/'));
       const contextSid=S.session.session_id;
       if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
+      const voiceContext=typeof window._voiceLeaseCaptureContext==='function'
+        ? window._voiceLeaseCaptureContext() : null;
       try{
         const resp=await fetch(new URL('api/session/update',document.baseURI||location.href).href,{
           method:'POST',
@@ -731,17 +733,25 @@ async function cmdModel(args){
           }),
         });
         if(resp.ok){
-          if(!S.session||S.session.session_id!==contextSid) return;
+          if(!S.session||S.session.session_id!==contextSid
+            ||(voiceContext&&typeof window._voiceLeaseContextCurrent==='function'
+              &&!window._voiceLeaseContextCurrent(voiceContext))) return;
           S.session.model=q;
           S.session.model_provider=provider;
-          if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+          if(typeof window._voiceLeaseResume==='function'
+            &&(!voiceContext||typeof window._voiceLeaseContextCurrent!=='function'
+              ||window._voiceLeaseContextCurrent(voiceContext))) window._voiceLeaseResume();
           if(typeof syncTopbar==='function') syncTopbar();
           showToast(t('switched_to')+q);
           return;
         }
-        if(S.session&&S.session.session_id===contextSid&&typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+        if(S.session&&S.session.session_id===contextSid&&typeof window._voiceLeaseResume==='function'
+          &&(!voiceContext||typeof window._voiceLeaseContextCurrent!=='function'
+            ||window._voiceLeaseContextCurrent(voiceContext))) window._voiceLeaseResume();
       }catch(_){
-        if(S.session&&S.session.session_id===contextSid&&typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+        if(S.session&&S.session.session_id===contextSid&&typeof window._voiceLeaseResume==='function'
+          &&(!voiceContext||typeof window._voiceLeaseContextCurrent!=='function'
+            ||window._voiceLeaseContextCurrent(voiceContext))) window._voiceLeaseResume();
         /* fall through to "no model match" */
       }
     }

@@ -1429,6 +1429,7 @@ async function send(){
   // the user's own input — reverse chronological order (#840 ordering bug).
   if(text.startsWith('/')&&!S.pendingFiles.length&&!literalSlash){
     const _parsedCmd=parseCommand(text);
+    if(_parsedCmd&&typeof window._voiceLeasePrepareSubmission==='function') window._voiceLeasePrepareSubmission();
     const _cmd=_parsedCmd?COMMANDS.find(c=>c.name===_parsedCmd.name):null;
     if(_cmd){
       let _pushedUser=false;
@@ -1438,7 +1439,6 @@ async function send(){
         _pushedUser=true;
         renderMessages();
       }
-      if(typeof window._voiceLeasePrepareSubmission==='function') window._voiceLeasePrepareSubmission();
       // Await handlers; the legacy opt-out predicate is if(_cmd.fn(_parsedCmd.args)===false).
       if(await _cmd.fn(_parsedCmd.args)===false){
         if(_pushedUser){S.messages.pop();renderMessages();}
@@ -1907,6 +1907,9 @@ async function send(){
 }
 
 const LIVE_STREAMS={};
+const LIVE_STREAM_TRANSPORT_AUTHORITY=Object.create(null);
+let LIVE_STREAM_TRANSPORT_GENERATION=0;
+if(typeof window!=='undefined') window._liveStreamTransportAuthority=LIVE_STREAM_TRANSPORT_AUTHORITY;
 const _STREAM_NOTIFICATION_BACKGROUND={};
 
 // #4416: track whether the tab was hidden at ANY point during a live stream, so
@@ -2021,6 +2024,9 @@ function closeOtherLiveStreams(activeSid){
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
+  if(typeof window!=='undefined'&&typeof window._voiceLeaseAdoptStream==='function'){
+    window._voiceLeaseAdoptStream(activeSid,streamId);
+  }
   const reconnecting=!!options.reconnecting;
   // #4416: start (or, on reconnect for the SAME stream, keep) tracking whether
   // the tab was hidden during this stream so the done-notification fires for a
@@ -2055,6 +2061,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(INFLIGHT[activeSid].currentLiveSegmentSeq===undefined) INFLIGHT[activeSid].currentLiveSegmentSeq=0;
   let assistantText='';
   let reasoningText='';
+  let _transportGeneration=0;
   if(S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId&&typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
   const existingLive=LIVE_STREAMS[activeSid];
   if(
@@ -2066,6 +2073,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       existingLive.source.readyState===EventSource.OPEN||
       (!reconnecting&&existingLive.source.readyState===EventSource.CONNECTING))
   ){
+    _transportGeneration=existingLive.generation
+      ||(LIVE_STREAM_TRANSPORT_AUTHORITY[activeSid]&&LIVE_STREAM_TRANSPORT_AUTHORITY[activeSid].generation)
+      ||0;
     // Phase D: restore bottom run status on reattach after the Worklog shell
     // exists. There is no stale transport teardown in this branch.
     if(reconnecting && S.activeStreamId && typeof showLiveRunStatus==='function'){
@@ -2256,7 +2266,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       setComposerStatus('');
       if(typeof setStatus==='function') setStatus('');
       if(voiceOutcome&&typeof window._voiceModeOnResponseComplete==='function'){
-        window._voiceModeOnResponseComplete(voiceOutcome);
+        window._voiceModeOnResponseComplete(activeSid,streamId,source,_transportGeneration,voiceOutcome);
       }
     }
   }
@@ -5449,7 +5459,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(existingLive&&existingLive.source&&existingLive.source!==source){
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
     }
-    LIVE_STREAMS[activeSid]={streamId,source};
+    const generation=++LIVE_STREAM_TRANSPORT_GENERATION;
+    _transportGeneration=generation;
+    const authority={streamId,source,generation};
+    LIVE_STREAM_TRANSPORT_AUTHORITY[activeSid]=authority;
+    LIVE_STREAMS[activeSid]={streamId,source,generation};
 
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting

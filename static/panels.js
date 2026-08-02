@@ -6989,6 +6989,8 @@ async function switchToProfile(name) {
   // setup can't leak the embargo and freeze the sidebar (Codex re-gate 4).
   try {
     if (typeof window._voiceLeaseInvalidate === 'function') window._voiceLeaseInvalidate({rearm:false});
+    const voiceContext=typeof window._voiceLeaseCaptureContext==='function'
+      ? window._voiceLeaseCaptureContext() : null;
     // Invalidate any in-flight/queued session-list render BEFORE showing the skeleton,
     // so a pre-switch /api/sessions response (old profile's rows, issued before the
     // switch) can't resolve, pass the generation guard, clear the skeleton flag, and
@@ -7193,7 +7195,9 @@ async function switchToProfile(name) {
       showToast(t('profile_switched', name));
     }
 
-    if (!sessionInProgress && typeof window._voiceLeaseResume === 'function') window._voiceLeaseResume();
+    if (!sessionInProgress && typeof window._voiceLeaseResume === 'function'
+      &&(!voiceContext||typeof window._voiceLeaseContextCurrent!=='function'
+        ||window._voiceLeaseContextCurrent(voiceContext))) window._voiceLeaseResume();
 
     await _profileSwitchPanelLoad();
     _refreshProfileSwitchBackground(_switchGen);
@@ -7201,7 +7205,9 @@ async function switchToProfile(name) {
 
   } catch (e) {
     if (_switchGen === _profileSwitchGeneration && (typeof _sendInProgress==='undefined'||!_sendInProgress)
-      && typeof window._voiceLeaseResume === 'function') window._voiceLeaseResume();
+      && typeof window._voiceLeaseResume === 'function'
+      &&(!voiceContext||typeof window._voiceLeaseContextCurrent!=='function'
+        ||window._voiceLeaseContextCurrent(voiceContext))) window._voiceLeaseResume();
     // Revert the optimistic name update on error
     if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
     if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;

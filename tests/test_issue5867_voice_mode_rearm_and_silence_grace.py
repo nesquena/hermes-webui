@@ -48,6 +48,12 @@ def _function_source(source: str, name: str) -> str:
 OWNER_SOURCE = _function_source(MESSAGES, "_setActivePaneIdleIfOwner")
 SEND_SOURCE = _function_source(MESSAGES, "send")
 ATTACH_SOURCE = _function_source(MESSAGES, "attachLiveStream")
+LOAD_SOURCE = _function_source(Path("static/sessions.js").read_text(encoding="utf-8"), "loadSession")
+NEW_SESSION_SOURCE = _function_source(Path("static/sessions.js").read_text(encoding="utf-8"), "newSession")
+PROFILE_SOURCE = _function_source(Path("static/panels.js").read_text(encoding="utf-8"), "switchToProfile")
+_model_handler_start = BOOT.index("$('modelSelect').onchange=async()=>{")
+MODEL_HANDLER_SOURCE = BOOT[_model_handler_start:BOOT.index("$('msg').addEventListener", _model_handler_start)]
+MODEL_HANDLER_SOURCE = MODEL_HANDLER_SOURCE.rstrip().removesuffix(';')
 _completion_start = BOOT.index("  window._voiceModeOnResponseComplete=function")
 VOICE_COMPLETE_SOURCE = BOOT[_completion_start:BOOT.index("  // ordinary autoReadLastAssistant", _completion_start)]
 SPEAK_SOURCE = _function_source(BOOT, "_speakResponse")
@@ -99,9 +105,11 @@ const _locale = { _speech: 'en-US' };
 const send = () => { state.sends += 1; };
 const _speakResponse = () => { state.speaks = (state.speaks || 0) + 1; };
 const api = new Function('window','document','SpeechRecognition','localStorage','modeBtn','bar','indicator','label','micBtn','ta','S','t','autoResize','_micOriginNeedsSecureContext','_deactivate','showToast','_setButtonTooltip','stopTTS','_locale','send','setTimeout','clearTimeout','Date','_speakResponse', `${RUNTIME}
-return { activate(){ _voiceModeActive=true; _voiceContextId+=1; _voiceLease={id:1,contextId:_voiceContextId,recognition:null,finalText:'',interimText:'',silenceTimer:null,restartTimer:null,deadlineAt:0,submitted:false,settled:false,owner:null}; }, start: () => _startListening(_voiceLease), first: () => _voiceLease && _voiceLease.recognition, prepare: () => window._voiceLeasePrepareSubmission(), bind: window._voiceLeaseBind, settle: window._voiceLeaseSettleOwner, state: () => _voiceModeState, lease: () => _voiceLease };`)(windowObj,document,SpeechRecognition,localStorage,modeBtn,bar,indicator,label,micBtn,ta,S,t,autoResize,_micOriginNeedsSecureContext,_deactivate,showToast,_setButtonTooltip,stopTTS,_locale,send,setTimer,clearTimer,{ now: () => now },_speakResponse);
+return { activate(){ _voiceModeActive=true; _voiceContextId+=1; _voiceLease={id:1,contextId:_voiceContextId,recognition:null,finalText:'',interimText:'',silenceTimer:null,restartTimer:null,deadlineAt:0,submitted:false,settled:false,owner:null}; }, start: () => _startListening(_voiceLease), first: () => _voiceLease && _voiceLease.recognition, prepare: () => window._voiceLeasePrepareSubmission(), bind: window._voiceLeaseBind, settle: window._voiceLeaseSettleOwner, complete: (...args) => window._voiceModeOnResponseComplete(...args), state: () => _voiceModeState, lease: () => _voiceLease };`)(windowObj,document,SpeechRecognition,localStorage,modeBtn,bar,indicator,label,micBtn,ta,S,t,autoResize,_micOriginNeedsSecureContext,_deactivate,showToast,_setButtonTooltip,stopTTS,_locale,send,setTimer,clearTimer,{ now: () => now },_speakResponse);
 api.activate(); api.start();
 const first = api.first();
+api.start();
+const duplicateStart = { starts: state.starts, recognizerChanged: api.first() !== first, aborts: state.aborts };
 first.onresult({ resultIndex: 0, results: [{ 0: { transcript: 'hello' }, isFinal: true }] });
 first.onend();
 const second = api.first();
@@ -115,13 +123,24 @@ const settled = api.settle('s1', 'stream-1', { success: false });
 const duplicate = api.settle('s1', 'stream-1', { success: false });
 const stale = api.settle('old-session', 'old-stream', { success: false });
 const ownerEvents = [];
-windowObj._voiceModeOnResponseComplete = outcome => ownerEvents.push(outcome);
-const ownerFactory = new Function('activeSid','streamId','window','_isActiveSession','S','INFLIGHT','setBusy','setComposerStatus','setStatus',
-  "return (" + Buffer.from('${OWNER_B64}', 'base64').toString() + ");");
-const owner = ownerFactory('s1', 'stream-1', windowObj, () => true, S, { s1: {} }, () => { S.busy = false; }, () => {}, () => {});
+const bootCompletion = windowObj._voiceModeOnResponseComplete;
+windowObj._voiceModeOnResponseComplete = (...args) => { ownerEvents.push(args); return bootCompletion(...args); };
+const source = {};
+const LIVE_STREAMS = { s1: { streamId: 'stream-1', source } };
+const ownerFactory = new Function('activeSid','streamId','source','window','_isActiveSession','S','INFLIGHT','setBusy','setComposerStatus','setStatus',
+  "const _transportGeneration=1; return (" + Buffer.from('${OWNER_B64}', 'base64').toString() + ");");
+const owner = ownerFactory('s1', 'stream-1', source, windowObj, () => true, S, { s1: {} }, () => { S.busy = false; }, () => {}, () => {});
 S.busy = true;
 owner({ success: false });
-console.log(JSON.stringify({ before, afterRestart, afterSend, settled, duplicate, stale, finalState: api.state(), aborts: state.aborts, ownerEvents }));
+const terminalOwnerEvents = ownerEvents.slice();
+ownerEvents.length = 0;
+const oldSource = {}, replacementSource = {};
+windowObj._liveStreamTransportAuthority = { s1: { streamId: 'stream-1', source: replacementSource, generation: 2 } };
+api.activate(); api.prepare(); api.bind('stream-1', 's1');
+api.complete('s1', 'stream-1', oldSource, 1, { success: false });
+const staleSourceState = api.state();
+api.complete('s1', 'stream-1', replacementSource, 2, { success: false });
+console.log(JSON.stringify({ before, afterRestart, duplicateStart, afterSend, settled, duplicate, stale, finalState: api.state(), staleSourceState, aborts: state.aborts, ownerEvents: terminalOwnerEvents, transportEvents: ownerEvents }));
 """
 
 
@@ -169,7 +188,7 @@ const element = () => ({ value: '', style: {}, options: [], classList: { add(){}
 const $ = id => elements.get(id) || element();
 const noOp = () => {};
 const ownerFactory = new Function('activeSid','streamId','window','_isActiveSession','S','INFLIGHT','setBusy','setComposerStatus','setStatus',
-  'return (' + ownerSource + ');');
+  'const source={}; const _transportGeneration=1; return (' + ownerSource + ');');
 const owner = ownerFactory('s1', 'stream-1', windowObj, () => true, S, INFLIGHT, value => { S.busy = value; }, noOp, noOp);
 const scope = {
   $, S, INFLIGHT, window: windowObj, document: documentObj,
@@ -210,7 +229,7 @@ windowObj._voiceLeasePrepareSubmission=(...args)=>{ bound.push({ type: 'prepare'
 const originalBind=windowObj._voiceLeaseBind;
 windowObj._voiceLeaseBind=(streamId,sid)=>{ bound.push({ type: 'bind', streamId, sid }); return originalBind(streamId,sid); };
 const originalCompletion=windowObj._voiceModeOnResponseComplete;
-windowObj._voiceModeOnResponseComplete=outcome=>{ completionEvents.push(outcome); return originalCompletion(outcome); };
+windowObj._voiceModeOnResponseComplete=(...args)=>{ completionEvents.push(args); return originalCompletion(...args); };
 voiceApi.activate();
 const recognition=voiceApi.first();
 recognition.onresult({ resultIndex: 0, results: [{ 0: { transcript: msg.value }, isFinal: true }] });
@@ -223,7 +242,7 @@ recognition.onend();
 
 
 def _run_runtime():
-    encoded = base64.b64encode(_voice_runtime().encode()).decode()
+    encoded = base64.b64encode((_voice_runtime() + "\n" + VOICE_COMPLETE_SOURCE).encode()).decode()
     owner_encoded = base64.b64encode(OWNER_SOURCE.encode()).decode()
     script = HARNESS.replace(
         "${RUNTIME}", "${Buffer.from('" + encoded + "','base64').toString()}"
@@ -249,6 +268,35 @@ def _run_production_send():
     return json.loads(result.stdout)
 
 
+def _run_session_transition(source: str, setup: str, call: str) -> dict:
+    encoded = base64.b64encode(source.encode()).decode()
+    script = f"""
+const source=Buffer.from('{encoded}','base64').toString();
+const mode={json.dumps(setup)};
+const scope={{mode, window:{{}}, document:{{hidden:false,visibilityState:'visible'}}, location:{{href:'http://localhost/'}},
+  history:{{replaceState(){{}}}}, localStorage:{{getItem(){{return null;}},setItem(){{}},removeItem(){{}}}},
+  S:{{session:mode==='cold'?null:{{session_id:'s1',workspace:'w',model:'m',profile:'default'}},messages:[],pendingFiles:[],toolCalls:[],busy:false,activeStreamId:null,activeProfile:'default'}},
+  _loadingSessionId:null,_loadSessionGeneration:0,_sendInProgress:mode==='send',_newSessionInFlight:null,
+  _voiceResumeCount:0,_voiceInvalidateCount:0,_metadataWrites:0,
+  $:()=>({{value:'',style:{{}},options:[],classList:{{add(){{}},remove(){{}}}},querySelectorAll(){{return [];}}}}),
+  api:async()=>{{if(mode==='stale') scope._loadingSessionId='other'; const e=Error('network');e.status=mode==='self'?404:500;throw e;}},
+  window:{{_voiceLeaseInvalidate(){{scope._voiceInvalidateCount++;}},_voiceLeaseCaptureContext(){{return {{sid:'s1',contextId:scope._voiceInvalidateCount}};}},_voiceLeaseContextCurrent(){{return mode!=='superseded';}},_voiceLeaseResume(){{scope._voiceResumeCount++;}},_clearPendingSelections(){{}}}},
+  setComposerStatus(){{}},showToast(){{}},renderSessionList(){{}},startSessionStream(){{}},stopSessionStream(){{}},
+  updateQueueBadge(){{}},clearLiveToolCards(){{}},renderMessages(){{}},syncTopbar(){{}},updateSendBtn(){{}},
+  setStatus(){{}},loadDir(){{return Promise.resolve();}},refreshSessionList(){{}},
+  _voiceLeaseSettleLocal(){{}},_applySessionContextMetadataUpdate(){{scope._metadataWrites++;}},
+}};
+const builtins=new Set(['Array','Boolean','Buffer','Date','Error','JSON','Map','Math','Number','Object','Promise','RegExp','Set','String','Symbol','URL','undefined','NaN','Infinity','isNaN','parseInt','encodeURIComponent','decodeURIComponent','setTimeout','clearTimeout','console']);
+for(const match of source.matchAll(/\\b[A-Za-z_$][\\w$]*\\b/g)){{const name=match[0];if(!builtins.has(name)&&!(name in scope))scope[name]=()=>{{}};}}
+const fn=new Function('scope','with(scope){{return ('+source+');}}')(scope);
+(async()=>{{try{{await ({call});}}catch(_){{}} console.log(JSON.stringify({{resume:scope._voiceResumeCount,invalidate:scope._voiceInvalidateCount,metadata:scope._metadataWrites,loading:scope._loadingSessionId}}));}})();
+"""
+    result = subprocess.run([NODE], input=script, capture_output=True, text=True)
+    if result.returncode:
+        raise AssertionError(result.stderr)
+    return json.loads(result.stdout)
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_voice_lease_composes_endpoint_restart_and_exact_terminal_settlement():
     result = _run_runtime()
@@ -257,6 +305,7 @@ def test_voice_lease_composes_endpoint_restart_and_exact_terminal_settlement():
     assert result["afterSend"] == {"sends": 1, "state": "thinking"}
     assert result["settled"] is True
     assert result["finalState"] == "listening"
+    assert result["duplicateStart"] == {"starts": 1, "recognizerChanged": False, "aborts": 0}
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -266,12 +315,15 @@ def test_voice_lease_ignores_duplicate_or_stale_owner_callbacks():
     assert result["duplicate"] is False
     assert result["stale"] is False
     assert result["aborts"] >= 1
+    assert result["staleSourceState"] == "thinking"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_actual_messages_owner_seam_settles_voice_outcome_once():
     result = _run_runtime()
-    assert result["ownerEvents"] == [{"success": False}]
+    assert result["ownerEvents"] == [["s1", "stream-1", {}, 1, {"success": False}]]
+    assert result["transportEvents"][0][3] == 1
+    assert result["transportEvents"][1][3] == 2
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -279,7 +331,7 @@ def test_production_send_binds_and_settles_through_owner_seam():
     result = _run_production_send()
     assert [entry["type"] for entry in result["bound"]] == ["prepare", "bind", "attach"]
     assert result["bound"][1] == {"type": "bind", "streamId": "stream-1", "sid": "s1"}
-    assert result["completionEvents"] == [{"success": True}]
+    assert result["completionEvents"] == [["s1", "stream-1", {}, 1, {"success": True}]]
     assert result["streamId"] is None
     assert result["busy"] is False
     assert result["inProgress"] is False
@@ -293,4 +345,47 @@ def test_production_send_and_stream_paths_share_the_lease_seams():
     assert "if(!streamId&&typeof window._voiceLeaseSettleLocal==='function') window._voiceLeaseSettleLocal();" in SEND_SOURCE
     assert ATTACH_SOURCE.count("_setActivePaneIdleIfOwner({success:true});") == 1
     assert ATTACH_SOURCE.count("_setActivePaneIdleIfOwner({success:false});") >= 5
-    assert "window._voiceModeOnResponseComplete(voiceOutcome);" in OWNER_SOURCE
+    assert "window._voiceModeOnResponseComplete(activeSid,streamId,source,_transportGeneration,voiceOutcome);" in OWNER_SOURCE
+
+
+def test_change4_exact_terminal_and_parsed_slash_boundaries_are_behavioral_contracts():
+    assert "window._voiceModeOnResponseComplete(activeSid,streamId,source,_transportGeneration,voiceOutcome);" in OWNER_SOURCE
+    parsed_boundary = SEND_SOURCE.index("const _parsedCmd=parseCommand(text);")
+    prepare_boundary = SEND_SOURCE.index("_voiceLeasePrepareSubmission", parsed_boundary)
+    command_dispatch = SEND_SOURCE.index("const _cmd=", parsed_boundary)
+    assert parsed_boundary < prepare_boundary < command_dispatch
+
+
+def test_change4_shared_stream_adoption_and_duplicate_listener_guard_exist():
+    assert "_voiceLeaseAdoptStream(activeSid,streamId)" in ATTACH_SOURCE
+    start_source = _function_source(BOOT, "_startListening")
+    assert "lease.recognition" in start_source.split("_clearBrowserTtsRecovery", 1)[0]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("mode,expected_resume", [("current", 1), ("stale", 0), ("self", 0), ("send", 0)])
+def test_load_session_failure_recovers_only_the_surviving_voice_owner(mode, expected_resume):
+    result = _run_session_transition(LOAD_SOURCE, mode, "fn('s1',{force:true})")
+    assert result["resume"] == expected_resume
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_session_failure_recovers_prior_owner_and_clears_cold_start_lease():
+    prior = _run_session_transition(NEW_SESSION_SOURCE, "prior", "fn(false)")
+    cold = _run_session_transition(NEW_SESSION_SOURCE, "cold", "fn(false)")
+    assert prior["resume"] == 1
+    assert cold["resume"] == 0
+    assert cold["invalidate"] == 2
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_same_session_model_transition_stays_inert_when_lease_context_is_superseded():
+    result = _run_session_transition(MODEL_HANDLER_SOURCE, "superseded", "fn()")
+    assert result["metadata"] == 0
+    assert result["resume"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_same_session_profile_transition_stays_inert_when_lease_context_is_superseded():
+    result = _run_session_transition(PROFILE_SOURCE, "superseded", "fn('other')")
+    assert result["resume"] == 0

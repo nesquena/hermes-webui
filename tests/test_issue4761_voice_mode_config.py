@@ -92,6 +92,6 @@ class TestBootJsVoiceSectionIntegrity:
 
     def test_voice_mode_uses_owned_completion(self):
         src = _boot_src()
-        assert "window._voiceModeOnResponseComplete=function(outcome)" in src, (
+        assert "window._voiceModeOnResponseComplete=function(activeSid,streamId,source,generation,outcome)" in src, (
             "voice mode must expose its exact-owner completion transition."
         )

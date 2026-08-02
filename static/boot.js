@@ -1564,6 +1564,15 @@ window.renderTranscript=function(container, messages, opts){
     _startListening(_voiceLease);
   }
 
+  function _voiceLeaseCaptureContext(){
+    return {sid:String((typeof S!=='undefined'&&S.session&&S.session.session_id)||''),contextId:_voiceContextId};
+  }
+
+  function _voiceLeaseContextCurrent(context){
+    return !!context&&context.contextId===_voiceContextId
+      &&String((typeof S!=='undefined'&&S.session&&S.session.session_id)||'')===String(context.sid||'');
+  }
+
   function _voiceLeaseCurrent(lease, recognizer){
     return _voiceModeActive&&_voiceLease===lease&&lease.contextId===_voiceContextId
       &&(!recognizer||lease.recognition===recognizer);
@@ -1698,6 +1707,29 @@ window.renderTranscript=function(container, messages, opts){
     _voiceManualPending=null;
   }
 
+  function _voiceLeaseAdoptStream(sid, streamId){
+    if(!_voiceModeActive||!sid||!streamId||!S.session||String(S.session.session_id)!==String(sid)) return false;
+    const current=_voiceLease;
+    if(current&&_voiceLeaseCurrent(current)&&current.owner
+      &&current.owner.sid===String(sid)&&current.owner.streamId===String(streamId)
+      &&!current.settled) return true;
+    if(current){
+      _clearVoiceLeaseTimers(current);
+      _releaseVoiceRecognition(current);
+      _clearBrowserTtsRecovery();
+      _revokeVoiceTtsUrls(current);
+      if(typeof stopTTS==='function') stopTTS();
+    }
+    const lease=_newVoiceLease();
+    lease.submitted=true;
+    lease.manual=true;
+    lease.owner={sid:String(sid),streamId:String(streamId)};
+    _voiceLease=lease;
+    _voiceManualPending=null;
+    _voiceModeState='thinking';
+    return true;
+  }
+
   function _voiceLeaseSettleLocal(){
     const lease=_voiceManualPending;
     if(!lease||!_voiceLeaseCurrent(lease)) return;
@@ -1730,6 +1762,9 @@ window.renderTranscript=function(container, messages, opts){
 
   window._voiceLeasePrepareSubmission=_voiceLeasePrepareSubmission;
   window._voiceLeaseBind=_voiceLeaseBind;
+  window._voiceLeaseAdoptStream=_voiceLeaseAdoptStream;
+  window._voiceLeaseCaptureContext=_voiceLeaseCaptureContext;
+  window._voiceLeaseContextCurrent=_voiceLeaseContextCurrent;
   window._voiceLeaseRetargetOwner=(fromSid,toSid,streamId)=>{
     const lease=_voiceLease;
     if(!lease||!lease.owner||lease.owner.sid!==String(fromSid||'')
@@ -1803,6 +1838,7 @@ window.renderTranscript=function(container, messages, opts){
     if(!_voiceModeActive||_voiceBusy()) return;
     lease=lease||_voiceLease;
     if(!_voiceLeaseCurrent(lease)) return;
+    if(lease.recognition) return;
     if(_micOriginNeedsSecureContext()){
       _deactivate();
       showToast(t('mic_insecure_origin'));
@@ -2150,15 +2186,16 @@ window.renderTranscript=function(container, messages, opts){
     }
   }
 
-  window._voiceModeOnResponseComplete=function(outcome){
+  window._voiceModeOnResponseComplete=function(activeSid,streamId,source,generation,outcome){
     const lease=_voiceLease;
     if(!lease||lease.settled) return;
-    if(!lease.owner){
-      if(lease.submitted&&_voiceManualPending===lease) return;
-      if(!_voiceBusy()) _scheduleVoiceRestart(lease,0);
-      return;
+    const authority=typeof window!=='undefined'&&window._liveStreamTransportAuthority
+      ? window._liveStreamTransportAuthority[activeSid] : null;
+    if(!authority||authority.streamId!==String(streamId||'')
+      ||authority.source!==source||authority.generation!==generation) return;
+    if(typeof window._voiceLeaseSettleOwner==='function'){
+      window._voiceLeaseSettleOwner(activeSid,streamId,outcome||{success:false});
     }
-    _voiceLeaseSettleOwner(lease.owner.sid,lease.owner.streamId,outcome||{success:false});
   };
   // ordinary autoReadLastAssistant remains owned by the normal done path;
   // voice completion enters through the exact terminal owner instead.
@@ -2407,6 +2444,8 @@ $('modelSelect').onchange=async()=>{
     ? _modelStateForSelect($('modelSelect'),selectedModel)
     : {model:selectedModel,model_provider:null};
   if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
+  const voiceContext=typeof window._voiceLeaseCaptureContext==='function'
+    ? window._voiceLeaseCaptureContext() : null;
   if(typeof clearProfileTransitionReasoningContext==='function') clearProfileTransitionReasoningContext();
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
@@ -2439,18 +2478,24 @@ $('modelSelect').onchange=async()=>{
   }catch(e){
     if((!contextSid&&(!S.session||!S.session.session_id))
       ||(S.session&&S.session.session_id===contextSid)){
-      if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+      if(typeof window._voiceLeaseResume==='function'
+        &&(!voiceContext||typeof window._voiceLeaseContextCurrent!=='function'
+          ||window._voiceLeaseContextCurrent(voiceContext))) window._voiceLeaseResume();
     }
     throw e;
   }
-  if(!S.session||S.session.session_id!==contextSid) return;
+  if(!S.session||S.session.session_id!==contextSid
+    ||(voiceContext&&typeof window._voiceLeaseContextCurrent==='function'
+      &&!window._voiceLeaseContextCurrent(voiceContext))) return;
   // NOTE: do NOT clear the pending explicit-pick marker here. It must survive until
   // the NEXT send() consumes it, otherwise the normal "pick → session-update → send"
   // flow loses the explicit-pick signal before /api/chat/start runs and the server
   // re-reverts a cross-family pick (the #3737 bug, Codex catch). send() clears it
   // after reading a matching pending pick. (#3739/#3737)
   _applySessionContextMetadataUpdate(data);
-  if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
+  if(typeof window._voiceLeaseResume==='function'
+    &&(!voiceContext||typeof window._voiceLeaseContextCurrent!=='function'
+      ||window._voiceLeaseContextCurrent(voiceContext))) window._voiceLeaseResume();
   // Warn if selected model belongs to a different provider than what Hermes is configured for
   if(typeof _checkProviderMismatch==='function'){
     const warn=_checkProviderMismatch(selectedModel);

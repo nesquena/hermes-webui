@@ -1383,6 +1383,7 @@ async function newSession(flash, options={}){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
     return _newSessionInFlight;
   }
+  const _priorVoiceSessionId=String((S.session&&S.session.session_id)||'');
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
     const preserveVoiceSubmission=!S.session;
@@ -1569,6 +1570,18 @@ async function newSession(flash, options={}){
   })();
   try{
     return await _newSessionInFlight;
+  }catch(e){
+    _newSessionInFlight=null;
+    _setNewSessionPending(false);
+    const _samePriorSession=!!_priorVoiceSessionId&&!!S.session
+      &&String(S.session.session_id)===_priorVoiceSessionId;
+    if(_samePriorSession&&(typeof _sendInProgress==='undefined'||!_sendInProgress)
+      &&typeof window._voiceLeaseResume==='function'){
+      window._voiceLeaseResume();
+    }else if(!_priorVoiceSessionId&&typeof window._voiceLeaseInvalidate==='function'){
+      window._voiceLeaseInvalidate({rearm:false});
+    }
+    throw e;
   }finally{
     _newSessionInFlight=null;
     _setNewSessionPending(false);
@@ -1721,6 +1734,8 @@ async function loadSession(sid){
     return;
   }
   if(typeof window!=='undefined'&&typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
+  const _voiceLoadContext=(typeof window!=='undefined'&&typeof window._voiceLeaseCaptureContext==='function')
+    ? window._voiceLeaseCaptureContext() : null;
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
@@ -1928,6 +1943,13 @@ async function loadSession(sid){
     if (currentSid && !_selfHealedCurrent && _loadingSessionId === null
         && typeof startSessionStream === 'function') {
       startSessionStream(currentSid);
+    }
+    if(currentSid===sid&&!_selfHealedCurrent&&_loadingSessionId===null
+      &&(typeof _sendInProgress==='undefined'||!_sendInProgress)
+      &&(!_voiceLoadContext||typeof window._voiceLeaseContextCurrent!=='function'
+        ||window._voiceLeaseContextCurrent(_voiceLoadContext))
+      &&typeof window._voiceLeaseResume==='function'){
+      window._voiceLeaseResume();
     }
     return;
   }
