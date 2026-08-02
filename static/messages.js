@@ -1926,6 +1926,17 @@ function _releaseLiveStreamTransportAuthority(sid, generation){
     delete LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
   }
 }
+function _retargetLiveStreamTransportAuthority(fromSid, toSid, streamId, generation){
+  const authority=LIVE_STREAM_TRANSPORT_AUTHORITY[fromSid];
+  if(!authority||authority.streamId!==String(streamId||'')||authority.generation!==generation) return false;
+  LIVE_STREAM_TRANSPORT_AUTHORITY[toSid]=authority;
+  delete LIVE_STREAM_TRANSPORT_AUTHORITY[fromSid];
+  return true;
+}
+if(typeof window!=='undefined'){
+  window._liveStreamTransportRelease=_releaseLiveStreamTransportAuthority;
+  window._liveStreamTransportRetarget=_retargetLiveStreamTransportAuthority;
+}
 const _STREAM_NOTIFICATION_BACKGROUND={};
 
 // #4416: track whether the tab was hidden at ANY point during a live stream, so
@@ -2296,7 +2307,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     if(terminalSource&&typeof _releaseLiveStreamTransportAuthority==='function'){
-      _releaseLiveStreamTransportAuthority(activeSid,terminalGeneration);
+      _releaseLiveStreamTransportAuthority(ownerSid,terminalGeneration);
     }
   }
   _setActivePaneIdleIfOwner._voiceOwnerSid=activeSid;
@@ -5991,10 +6002,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
             if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
           }
-          if(completedSid!==activeSid&&typeof window._voiceLeaseRetargetOwner==='function'){
-            window._voiceLeaseRetargetOwner(activeSid,completedSid,_settledStreamId);
-            _setActivePaneIdleIfOwner._voiceOwnerSid=completedSid;
-            _setActivePaneIdleIfOwner._voiceOwnerStreamId=_settledStreamId;
+          if(completedSid!==activeSid){
+            if(typeof window._liveStreamTransportRetarget==='function'){
+              window._liveStreamTransportRetarget(activeSid,completedSid,_settledStreamId,_transportGeneration);
+            }
+            if(typeof window._voiceLeaseRetargetOwner==='function'){
+              window._voiceLeaseRetargetOwner(activeSid,completedSid,_settledStreamId);
+              _setActivePaneIdleIfOwner._voiceOwnerSid=completedSid;
+              _setActivePaneIdleIfOwner._voiceOwnerStreamId=_settledStreamId;
+            }
           }
           const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
           if(

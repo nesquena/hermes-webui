@@ -1785,8 +1785,6 @@ window.renderTranscript=function(container, messages, opts){
   };
   window._voiceLeaseSettleLocal=_voiceLeaseSettleLocal;
   window._voiceLeaseSettleOwner=(sid,streamId,outcome,source,generation)=>{
-    const lease=_voiceLease;
-    if(!lease||!lease.owner||lease.owner.sid!==String(sid||'')||lease.owner.streamId!==String(streamId||'')) return false;
     if(source){
       const authority=typeof window!=='undefined'&&window._liveStreamTransportAuthority
         ? window._liveStreamTransportAuthority[sid] : null;
@@ -1794,8 +1792,19 @@ window.renderTranscript=function(container, messages, opts){
       if(!authority||authority.streamId!==String(streamId||'')||authority.generation!==generation
         ||!sourceGenerations||sourceGenerations.get(source)!==generation) return false;
     }
+    const lease=_voiceLease;
+    if(!lease||!lease.owner||lease.owner.sid!==String(sid||'')||lease.owner.streamId!==String(streamId||'')){
+      if(source&&typeof window!=='undefined'&&typeof window._liveStreamTransportRelease==='function'){
+        window._liveStreamTransportRelease(sid,generation);
+      }
+      return false;
+    }
     _voiceManualPending=null;
-    return _voiceLeaseSettle(lease,outcome||{success:false});
+    const settled=_voiceLeaseSettle(lease,outcome||{success:false});
+    if(source&&typeof window!=='undefined'&&typeof window._liveStreamTransportRelease==='function'){
+      window._liveStreamTransportRelease(sid,generation);
+    }
+    return settled;
   };
   window._voiceLeaseInvalidate=(options={})=>{
     _invalidateVoiceLease(options);
