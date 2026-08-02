@@ -5068,7 +5068,20 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         SESSIONS.move_to_end(s.session_id)
         _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
     if wt:
-        s.save()
+        try:
+            s.save()
+        except Exception:
+            with LOCK:
+                if SESSIONS.get(s.session_id) is s:
+                    SESSIONS.pop(s.session_id, None)
+            try:
+                default_authority().abandon_initial_claim(s.workspace, s.session_id)
+            except Exception:
+                logger.exception(
+                    "Failed to compensate worktree claim after session save failure: %s",
+                    s.session_id,
+                )
+            raise
     return s
 
 def _hide_from_default_sidebar(session: dict, *, show_cron: bool = False, show_webhook: bool = False, show_kanban: bool = False) -> bool:

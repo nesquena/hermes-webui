@@ -120,6 +120,31 @@ def test_failed_claim_leaves_no_in_memory_ghost(linked, tmp_path, monkeypatch):
     assert set(models.SESSIONS) == before
 
 
+def test_failed_initial_save_compensates_claim_and_cache(linked, tmp_path, monkeypatch):
+    import api.models as models
+    import api.worktree_authority as authority_module
+    from api.worktree_authority import WorktreeAuthority, WorktreeOwnershipError
+
+    repo, wt = linked
+    auth = WorktreeAuthority(tmp_path / "claims.sqlite3")
+    monkeypatch.setattr(authority_module, "default_authority", lambda: auth)
+    monkeypatch.setattr(models.Session, "save", lambda self, *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    before = set(models.SESSIONS)
+    with pytest.raises(OSError, match="disk full"):
+        models.new_session(
+            workspace=str(wt),
+            worktree_info={
+                "path": str(wt),
+                "branch": "linked",
+                "repo_root": str(repo),
+                "created_at": 1.0,
+            },
+        )
+    assert set(models.SESSIONS) == before
+    with pytest.raises(WorktreeOwnershipError, match="has no owner"):
+        auth.assert_owner(wt, "any")
+
+
 def test_release_requires_verified_worktree_removal(linked, tmp_path):
     from api.worktree_authority import WorktreeAuthority, WorktreeOwnershipError
     repo, wt = linked

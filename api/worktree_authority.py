@@ -175,6 +175,20 @@ class WorktreeAuthority:
                 raise WorktreeOwnershipError("worktree transfer source is not the owner")
             conn.commit()
 
+    def abandon_initial_claim(self, workspace, session_id: str) -> None:
+        """Drop a claim only while compensating a failed initial session save."""
+        identity, _, _ = self._identity(workspace)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute(
+                "DELETE FROM claims WHERE identity=? AND owner=?",
+                (identity, session_id),
+            ).rowcount
+            if changed != 1:
+                conn.rollback()
+                raise WorktreeOwnershipError("session is not the worktree owner")
+            conn.commit()
+
     def release_after_removal(self, identity: str, session_id: str, repo_root: str | Path) -> None:
         with self._connect() as conn:
             row = conn.execute(
