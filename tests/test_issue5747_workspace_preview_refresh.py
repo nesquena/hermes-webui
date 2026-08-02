@@ -62,6 +62,10 @@ def _extract_const(name: str) -> str:
 
 def _extract_fn(name: str) -> str:
     start = WORKSPACE_JS.index(f"function {name}(")
+    # Keep an "async " prefix when the source declares one (e.g.
+    # refreshOpenPreviewIfMutated) so extracted bodies with `await` stay legal.
+    if start > 0 and WORKSPACE_JS[start - 6 : start] == "async ":
+        start -= 6
     # Find the function body's opening brace by locating "){" — this avoids
     # matching braces inside default parameter values (e.g. opts={}).
     params_end = WORKSPACE_JS.index("){", start)
@@ -154,6 +158,50 @@ def _note_mutations_via_node(tc, workspace="", preview="foo.py"):
         + "noteWorkspaceMutationsFromToolCall(JSON.parse(process.argv[1]));\n"
         + "const out = _isOpenPreviewPathMutated();\n"
         + "process.stdout.write(JSON.stringify({mutated: [..._turnMutatedPreviewPaths], openMutated: out}));\n"
+    )
+    r = subprocess.run(
+        [NODE, "-e", driver, json.dumps(tc)],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert r.returncode == 0, f"node failed: {r.stderr}"
+    return json.loads(r.stdout)
+
+
+def _refresh_chain_via_node(tc, workspace="", preview="foo.py"):
+    """Drive the FULL production chain through the refresh sink:
+
+    _artifactCandidatesFromToolCall → noteWorkspaceMutationsFromToolCall →
+    _isOpenPreviewPathMutated → refreshOpenPreviewIfMutated → openFile spy.
+
+    openFile is spied (it touches the DOM); everything upstream is the real
+    extracted function. Returns the list of openFile(path, opts) calls."""
+    assert NODE is not None  # module is skipped when node is missing
+    consts = _extract_const("ARTIFACT_IGNORE_RE") + "\n" + _extract_const("ARTIFACT_MUTATION_TOOLS")
+    fns = "\n".join(
+        _extract_fn(n)
+        for n in (
+            "_isWindowsStylePath",
+            "_stripWorkspacePrefix",
+            "_canonicalizeRelativePath",
+            "_normalizeArtifactPath",
+            "_artifactCandidatesFromText",
+            "_artifactCandidatesFromToolCall",
+            "noteWorkspaceMutationsFromToolCall",
+            "_isOpenPreviewPathMutated",
+            "refreshOpenPreviewIfMutated",
+        )
+    )
+    driver = (
+        f"const S = {{ session: {{ workspace: {json.dumps(workspace)} }} }};\n"
+        + "const _turnMutatedPreviewPaths = new Set();\n"
+        + f"let _previewCurrentPath = {json.dumps(preview)};\n"
+        + "let _previewDirty = false;\n"
+        + "const openFileCalls = [];\n"
+        + "const openFile = async (path, opts) => { openFileCalls.push([path, opts]); };\n"
+        + consts + "\n" + fns + "\n"
+        + "noteWorkspaceMutationsFromToolCall(JSON.parse(process.argv[1]));\n"
+        + "(async () => { await refreshOpenPreviewIfMutated(); "
+        + "process.stdout.write(JSON.stringify(openFileCalls)); })();\n"
     )
     r = subprocess.run(
         [NODE, "-e", driver, json.dumps(tc)],
@@ -648,6 +696,30 @@ class TestNormalizeArtifactPathPlatformEdges:
         assert out == {"mutated": ["foo.py"], "openMutated": True}, (
             f"Valid mutation must flow through the caller chain and mark the "
             f"open preview; got {out}"
+        )
+
+    def test_composed_chain_no_workspace_windows_absolute_zero_open_file_calls(self):
+        """Full refresh sink: a no-workspace Windows-absolute mutation must
+        produce ZERO openFile calls — it never becomes a candidate, never
+        marks the preview mutated, and never reaches the refresh sink
+        (maintainer re-gate #5752, sink row)."""
+        tc = {"name": "write_file", "args": {"path": "C:/foo.py"}}
+        calls = _refresh_chain_via_node(tc, workspace="", preview="foo.py")
+        assert calls == [], (
+            f"No-workspace Windows absolute must not reach the refresh sink; "
+            f"got {calls}"
+        )
+
+    def test_composed_chain_valid_mutation_exactly_one_open_file_call(self):
+        """Full refresh sink: a valid workspace mutation must produce exactly
+        one openFile('foo.py', {bustCache:true}) call — the real refresh path
+        (maintainer re-gate #5752, sink row)."""
+        ws = "/Users/test/ws"
+        tc = {"name": "write_file", "args": {"path": f"{ws}/foo.py"}}
+        calls = _refresh_chain_via_node(tc, workspace=ws, preview="foo.py")
+        assert calls == [["foo.py", {"bustCache": True}]], (
+            f"Valid mutation must reach the refresh sink exactly once with "
+            f"bustCache; got {calls}"
         )
 
 
