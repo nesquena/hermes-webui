@@ -18,7 +18,7 @@ async function cancelStream(reason){
   const sid = S.session && S.session.session_id;
   const streamId = S.activeStreamId;
   if(!streamId) return false;
-  const voiceTransport=typeof window!=='undefined'&&typeof window._liveStreamTransportCapture==='function'
+  let voiceTransport=typeof window!=='undefined'&&typeof window._liveStreamTransportCapture==='function'
     ? window._liveStreamTransportCapture(sid,streamId) : null;
   // Interrupt provenance: log WHY the active run is being cancelled so operators
   // can tell an explicit Stop / interrupt from any other trigger when they see a
@@ -42,6 +42,9 @@ async function cancelStream(reason){
       console.warn('cancelStream: /api/chat/cancel request failed', e);
     }
   }
+  const currentVoiceTransport=typeof window!=='undefined'&&typeof window._liveStreamTransportCapture==='function'
+    ? window._liveStreamTransportCapture(sid,streamId) : null;
+  if(currentVoiceTransport) voiceTransport=currentVoiceTransport;
   // Active-session cancel should not tear down the current SSE transport before
   // the backend emits its terminal event; do that only for stale owner paths
   // where the user moved on to a different stream before this request
@@ -74,7 +77,7 @@ async function cancelSessionStream(session){
   const streamId = session&&session.active_stream_id;
   const sid = session&&session.session_id;
   if(!streamId||!sid) return false;
-  const voiceTransport=typeof window!=='undefined'&&typeof window._liveStreamTransportCapture==='function'
+  let voiceTransport=typeof window!=='undefined'&&typeof window._liveStreamTransportCapture==='function'
     ? window._liveStreamTransportCapture(sid,streamId) : null;
   // Explicit sidebar "Stop response" — log provenance for the same reason as
   // cancelStream(). (#5345)
@@ -87,6 +90,9 @@ async function cancelSessionStream(session){
     respOk=!!(r&&r.ok);
   }catch(e){/* close local stream; keep UI state honest below */}
   if(!respOk) return false;
+  const currentVoiceTransport=typeof window!=='undefined'&&typeof window._liveStreamTransportCapture==='function'
+    ? window._liveStreamTransportCapture(sid,streamId) : null;
+  if(currentVoiceTransport) voiceTransport=currentVoiceTransport;
   if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
   session.active_stream_id=null;
   delete INFLIGHT[sid];
