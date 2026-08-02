@@ -1384,10 +1384,14 @@ async function newSession(flash, options={}){
     return _newSessionInFlight;
   }
   const _priorVoiceSessionId=String((S.session&&S.session.session_id)||'');
+  let _newSessionVoiceContext=null;
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
     const preserveVoiceSubmission=!S.session;
     if(typeof window!=='undefined'&&typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false,preserveSubmission:preserveVoiceSubmission});
+    if(typeof window!=='undefined'&&typeof window._voiceLeaseCaptureContext==='function'){
+      _newSessionVoiceContext=window._voiceLeaseCaptureContext();
+    }
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -1575,7 +1579,10 @@ async function newSession(flash, options={}){
     _setNewSessionPending(false);
     const _samePriorSession=!!_priorVoiceSessionId&&!!S.session
       &&String(S.session.session_id)===_priorVoiceSessionId;
-    if(_samePriorSession&&(typeof _sendInProgress==='undefined'||!_sendInProgress)
+    const _voiceContextCurrent=!_newSessionVoiceContext
+      ||typeof window._voiceLeaseContextCurrent!=='function'
+      ||window._voiceLeaseContextCurrent(_newSessionVoiceContext);
+    if(_samePriorSession&&_voiceContextCurrent&&(typeof _sendInProgress==='undefined'||!_sendInProgress)
       &&typeof window._voiceLeaseResume==='function'){
       window._voiceLeaseResume();
     }else if(!_priorVoiceSessionId&&typeof window._voiceLeaseInvalidate==='function'){
@@ -1653,6 +1660,8 @@ async function _switchProfileForSessionLoad(profile, options={}){
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
   if(typeof window!=='undefined'&&typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
+  const voiceContext=typeof window!=='undefined'&&typeof window._voiceLeaseCaptureContext==='function'
+    ? window._voiceLeaseCaptureContext() : null;
   try{
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
     S.activeProfile=data.active||name;
@@ -1683,6 +1692,8 @@ async function _switchProfileForSessionLoad(profile, options={}){
     _sessionListSkeletonActive=false;
     if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
     if((typeof options.isCurrentLoad!=='function'||options.isCurrentLoad())
+      &&(!voiceContext||typeof window._voiceLeaseContextCurrent!=='function'
+        ||window._voiceLeaseContextCurrent(voiceContext))
       &&(typeof _sendInProgress==='undefined'||!_sendInProgress)){
       if(typeof window!=='undefined'&&typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
     }

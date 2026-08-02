@@ -190,6 +190,10 @@ const element = () => ({ value: '', style: {}, options: [], classList: { add(){}
 const $ = id => elements.get(id) || element();
 const noOp = () => {};
 const streamSource = {};
+windowObj._liveStreamTransportAuthority = { s1: { streamId: 'stream-1', generation: 1 } };
+windowObj._liveStreamTransportSourceGeneration = new WeakMap();
+windowObj._liveStreamTransportSourceGeneration.set(streamSource, 1);
+windowObj._liveStreamTransportRelease = noOp;
 const ownerFactory = new Function('activeSid','streamId','source','window','_isActiveSession','S','INFLIGHT','setBusy','setComposerStatus','setStatus',
   'const _transportGeneration=1; return (' + ownerSource + ');');
 const owner = ownerFactory('s1', 'stream-1', streamSource, windowObj, () => true, S, INFLIGHT, value => { S.busy = value; }, noOp, noOp);
