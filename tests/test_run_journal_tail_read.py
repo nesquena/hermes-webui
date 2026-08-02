@@ -14,6 +14,7 @@ tail read keeps them correct for a large COMPLETED run (its terminal marker
 lives at the end) without parsing the whole history.
 """
 import json
+import os
 
 from api.run_journal import (
     RunJournalWriter,
@@ -287,8 +288,10 @@ def test_oversized_record_summary_does_not_materialize_payload(tmp_path):
     size = path.stat().st_size
     read_bytes = min(size, _SESSION_REPLAY_MAX_BYTES)
     seek_pos = size - read_bytes
-    record_start = _find_record_start_before(path, seek_pos)
-    summary = _extract_boundary_record_summary(path, record_start)
+    with path.open("rb") as fh:
+        size_pinned = os.fstat(fh.fileno()).st_size
+        record_start = _find_record_start_before(fh, size_pinned, seek_pos)
+        summary = _extract_boundary_record_summary(fh, record_start)
     assert summary is not None
     # The summary fields are present...
     assert summary["terminal_state"] == "completed"
@@ -465,10 +468,11 @@ def test_preceding_event_recovery_is_bounded(tmp_path):
     )
     with open(path, "a", encoding="utf-8") as f:
         f.write(partial)
-    size = path.stat().st_size
-    seek = size - min(size, _SESSION_REPLAY_MAX_BYTES)
-    record_start = __import__("api.run_journal", fromlist=["_find_record_start_before"])._find_record_start_before(path, seek)
-    result = _read_last_complete_line_before(path, record_start)
+    with path.open("rb") as fh:
+        size_pinned = os.fstat(fh.fileno()).st_size
+        seek = size_pinned - min(size_pinned, _SESSION_REPLAY_MAX_BYTES)
+        record_start = __import__("api.run_journal", fromlist=["_find_record_start_before"])._find_record_start_before(fh, size_pinned, seek)
+        result = _read_last_complete_line_before(fh, size_pinned, record_start)
     assert result is not None
     # The preceding record's summary was extracted via bounded prefix, not materialized.
     assert result.get("_summary_extracted_from_oversized_record") is True, (
@@ -535,65 +539,103 @@ def test_ordinary_size_done_eof_no_newline_rejected_both_readers(tmp_path):
 # HTTP handler → 500. Each helper must return its safe fallback instead.
 
 
-def test_find_record_start_before_returns_fallback_if_file_deleted(tmp_path, monkeypatch):
-    """_find_record_start_before: stat succeeds, then open() raises — must
+def test_find_record_start_before_returns_fallback_if_handle_closed(tmp_path, monkeypatch):
+    """_find_record_start_before: fh read/seek raises — must
     return 0 (not let FileNotFoundError escape to the HTTP handler)."""
     import json as _json
-    from pathlib import Path
+    import os
     from api import run_journal
 
     p = tmp_path / "race.jsonl"
     p.write_bytes((_json.dumps({"seq": 1, "event": "done"}) + "\n").encode("utf-8"))
-    real_open = Path.open
 
-    def racing_open(self, *a, **kw):
-        if self == p:
-            raise FileNotFoundError(str(p))
-        return real_open(self, *a, **kw)
+    class RacingFileHandle:
+        def __init__(self, underlying):
+            self._underlying = underlying
+            self._original_read = underlying.read
+            self._original_seek = underlying.seek
+            self._should_race = True
 
-    monkeypatch.setattr(Path, "open", racing_open)
-    assert run_journal._find_record_start_before(p, 50) == 0
+        def read(self, *a, **kw):
+            if self._should_race:
+                raise FileNotFoundError("Simulated TOCTOU: file deleted after open")
+            return self._underlying.read(*a, **kw)
+
+        def seek(self, *a, **kw):
+            if self._should_race:
+                raise FileNotFoundError("Simulated TOCTOU: file deleted after open")
+            return self._underlying.seek(*a, **kw)
+
+        def fileno(self):
+            return self._underlying.fileno()
+
+    with p.open("rb") as raw_fh:
+        size = os.fstat(raw_fh.fileno()).st_size
+        racing_fh = RacingFileHandle(raw_fh)
+        result = run_journal._find_record_start_before(racing_fh, size, 50)
+
+    assert result == 0
 
 
-def test_rfind_byte_before_returns_fallback_if_file_deleted(tmp_path, monkeypatch):
-    """_rfind_byte_before: open() raises FileNotFoundError — must return None."""
+def test_rfind_byte_before_returns_fallback_if_handle_closed(tmp_path, monkeypatch):
+    """_rfind_byte_before: fh read/seek raises FileNotFoundError — must return None."""
     import json as _json
-    from pathlib import Path
     from api import run_journal
 
     p = tmp_path / "race.jsonl"
     p.write_bytes((_json.dumps({"seq": 1}) + "\n").encode("utf-8"))
-    real_open = Path.open
 
-    def racing_open(self, *a, **kw):
-        if self == p:
-            raise FileNotFoundError(str(p))
-        return real_open(self, *a, **kw)
+    class RacingFileHandle:
+        def __init__(self, underlying):
+            self._underlying = underlying
 
-    monkeypatch.setattr(Path, "open", racing_open)
-    assert run_journal._rfind_byte_before(p, b"\n", 50) is None
+        def read(self, *a, **kw):
+            raise FileNotFoundError("Simulated TOCTOU: file deleted after open")
+
+        def seek(self, *a, **kw):
+            raise FileNotFoundError("Simulated TOCTOU: file deleted after open")
+
+        def fileno(self):
+            return self._underlying.fileno()
+
+    with p.open("rb") as raw_fh:
+        racing_fh = RacingFileHandle(raw_fh)
+        result = run_journal._rfind_byte_before(racing_fh, b"\n", 50)
+
+    assert result is None
 
 
-def test_record_is_structurally_complete_returns_fallback_if_file_deleted(
+def test_record_is_structurally_complete_returns_fallback_if_handle_error(
     tmp_path, monkeypatch
 ):
-    """_record_is_structurally_complete: open() raises FileNotFoundError — must
+    """_record_is_structurally_complete: fh read/seek raises — must
     return False (not raise)."""
     import json as _json
-    from pathlib import Path
+    import os
     from api import run_journal
 
     p = tmp_path / "race.jsonl"
     p.write_bytes((_json.dumps({"seq": 1, "event": "done"}) + "\n").encode("utf-8"))
-    real_open = Path.open
 
-    def racing_open(self, *a, **kw):
-        if self == p:
-            raise FileNotFoundError(str(p))
-        return real_open(self, *a, **kw)
+    class RacingFileHandle:
+        def __init__(self, underlying):
+            self._underlying = underlying
 
-    monkeypatch.setattr(Path, "open", racing_open)
-    assert run_journal._record_is_structurally_complete(p, 0) is False
+        def read(self, *a, **kw):
+            raise FileNotFoundError("Simulated TOCTOU: file deleted after open")
+
+        def seek(self, *a, **kw):
+            raise FileNotFoundError("Simulated TOCTOU: file deleted after open")
+
+        def fileno(self):
+            return self._underlying.fileno()
+
+    with p.open("rb") as raw_fh:
+        size = os.fstat(raw_fh.fileno()).st_size
+        racing_fh = RacingFileHandle(raw_fh)
+        result = run_journal._record_is_structurally_complete(racing_fh, size, 0)
+
+    assert result is False
 
 
 def test_read_jsonl_tail_handles_file_deleted_during_boundary_scan(tmp_path, monkeypatch):
@@ -734,4 +776,283 @@ def test_blank_line_before_oversized_partial_done_recovers_preceding_event(tmp_p
     )
     assert recovery["event"] == "apperror", (
         f"recovery event type={recovery['event']} (expected apperror)"
+    )
+
+
+def test_tail_read_uses_single_generation_under_delete_recreate(tmp_path, monkeypatch):
+    """Regression (reviewer round 8): _read_jsonl_tail must open the journal ONCE
+    and pin the size via os.fstat so all recovery helpers read from ONE inode
+    generation. A delete-and-recreate between stages must never mix rows from
+    different generations — e.g. tail rows from inode A with boundary/predecessor
+    rows from inode B, producing impossible sequences like ``[100, 2]``.
+
+    This is a pure generation-isolation proof: the 1st ``Path.open("rb")`` of the
+    journal returns a real handle to inode-A content (token seq=1 + an oversized
+    crash-truncated done); every SUBSEQUENT open returns a BytesIO of inode-B
+    content (a completed run: done seq=100, terminal). With the single-open fix,
+    only inode-A is ever read → the tail reader reports seq=1 / running. With a
+    reopen bug, inode-B leaks in → seq=100 / terminal / mixed. The test asserts
+    the result is purely inode-A and records how many times the journal was
+    opened (must be exactly 1)."""
+    import io as _io
+    from pathlib import Path
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _read_jsonl_tail, _run_path
+
+    cap = _SESSION_REPLAY_MAX_BYTES
+    session_id = "session_single_gen"
+    run_id = "run_delete_recreate_race"
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # inode-A content: token seq=1, then a blank line, then an oversized
+    # crash-truncated done (no closing brace/newline). This forces the recovery
+    # helpers (boundary scan, structural check, predecessor scan) to run, which
+    # on the buggy multi-open code would each reopen the pathname.
+    token_a = {"version": 1, "event_id": f"{run_id}:1", "seq": 1,
+               "event": "token", "type": "token", "terminal": False,
+               "payload": {"text": "inode-A-token"}}
+    oversized_partial = (
+        '{"version":1,"event_id":"' + run_id + ':2","seq":2,'
+        '"event":"done","type":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"t":"' + "X" * (cap + 1000)
+    )  # no closing brace/newline — crash mid-write
+    inode_a_bytes = (json.dumps(token_a) + "\n").encode("utf-8") + b"\n" + oversized_partial.encode("utf-8")
+    path.write_bytes(inode_a_bytes)
+
+    # inode-B content (what a recreated file might hold): a COMPLETED run with a
+    # much higher seq, so any leak is unambiguous.
+    done_b = {"version": 1, "event_id": f"{run_id}:100", "seq": 100,
+              "event": "done", "type": "done", "terminal": True,
+              "terminal_state": "completed", "payload": {"text": "inode-B"}}
+    inode_b_bytes = (json.dumps(done_b) + "\n").encode("utf-8")
+
+    open_count = {"n": 0}
+    real_open = Path.open
+
+    def generation_pinned_open(self, *args, **kwargs):
+        if self == path and args and args[0] == "rb":
+            open_count["n"] += 1
+            if open_count["n"] == 1:
+                # First (and with the fix, ONLY) open: real inode-A handle.
+                return real_open(self, *args, **kwargs)
+            # Any subsequent open of the journal returns inode-B content. With the
+            # single-open fix this branch never executes; with a reopen bug it
+            # leaks inode-B rows into the result.
+            return _io.BytesIO(inode_b_bytes)
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", generation_pinned_open)
+
+    events, _malformed = _read_jsonl_tail(path, max_bytes=cap, max_rows=4096)
+    seqs = [e.get("seq") for e in events if isinstance(e, dict) and "seq" in e]
+
+    # The journal must be opened exactly ONCE (single-generation contract).
+    assert open_count["n"] == 1, (
+        f"journal must be opened exactly once (single inode generation); "
+        f"opened {open_count['n']} times — a reopen mixes generations"
+    )
+    # The result must be purely inode-A: the token (seq=1), running (no terminal).
+    # inode-B (seq=100, terminal) must NEVER appear.
+    assert 100 not in seqs, (
+        f"inode-B row leaked into inode-A result (mixed generation): seqs={seqs}. "
+        f"A reopen read the recreated file's completed-done as if it were the original."
+    )
+    assert any(s == 1 for s in seqs), (
+        f"inode-A token (seq=1) must be recovered; got seqs={seqs}"
+    )
+    for e in events:
+        if isinstance(e, dict):
+            assert not e.get("terminal"), (
+                f"a terminal event leaked from inode-B into the result: {e} "
+                f"— the oversized boundary was crash-truncated (inode-A, non-terminal)"
+            )
+
+
+def test_invalid_predecessor_rows_skipped_until_valid_event(tmp_path, monkeypatch):
+    """Regression (reviewer round 8): the backward predecessor scan must skip
+    blank, malformed-JSON, JSON-scalar, JSON-list, and consecutive mixed invalid
+    rows until it finds the preceding valid event dict. This is the reader-level
+    coverage the round-8 review asked for beyond the blank-line separator case.
+
+    Journal shape (a valid token, then a run of mixed invalid rows, then an
+    oversized crash-truncated done that forces the recovery path):
+        token(seq=1)
+        {not-json}        <- malformed
+        42                <- JSON scalar (non-dict)
+        [1,2]             <- JSON list (non-dict)
+                            <- blank line
+        <oversized partial done, no }/\n>
+
+    BOTH tail readers must recover the token (seq=1), report running, and emit
+    the recovery apperror. None of the invalid rows may be accepted as the
+    recovered event."""
+    import json as _json
+    from api.run_journal import (
+        _SESSION_REPLAY_MAX_BYTES,
+        _run_path,
+        _read_jsonl,
+        _summary_from_events,
+        stale_interrupted_event,
+    )
+
+    session_id = "session_invalid_pred"
+    run_id = "run_mixed_invalid"
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cap = _SESSION_REPLAY_MAX_BYTES
+
+    token_line = _json.dumps(
+        {"version": 1, "event_id": f"{run_id}:1", "seq": 1,
+         "event": "token", "type": "token", "terminal": False,
+         "payload": {"text": "the-valid-token"}}
+    )
+    oversized_partial = (
+        '{"version":1,"event_id":"' + run_id + ':2","seq":2,'
+        '"event":"done","type":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"t":"' + "X" * (cap + 1000)
+    )
+    # token, then a run of mixed invalid rows, then the oversized partial.
+    with path.open("wb") as fh:
+        fh.write((token_line + "\n").encode("utf-8"))
+        fh.write(b"{not-json}\n")     # malformed JSON
+        fh.write(b"42\n")             # JSON scalar (non-dict)
+        fh.write(b"[1,2]\n")          # JSON list (non-dict)
+        fh.write(b"\n")               # blank line
+        fh.write(oversized_partial.encode("utf-8"))  # crash-truncated, no newline
+
+    tail_summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    find_summary = find_run_summary(run_id, session_dir=tmp_path)
+    full_events, _ = _read_jsonl(path)
+    authoritative = _summary_from_events(session_id, run_id, full_events)
+
+    # Both tail readers recover the valid token (seq=1), agreeing with the full reader.
+    assert tail_summary["last_seq"] == 1, (
+        f"latest_run_summary last_seq={tail_summary['last_seq']} (expected 1) "
+        f"— an invalid predecessor row was accepted instead of skipped"
+    )
+    assert tail_summary["event_count"] == 1
+    assert tail_summary["last_seq"] == authoritative["last_seq"]
+    assert find_summary is not None
+    assert find_summary["last_seq"] == 1
+    assert find_summary["last_seq"] == authoritative["last_seq"]
+    # The oversized boundary was crash-truncated, so the run stays non-terminal.
+    for e in (tail_summary, find_summary):
+        assert not e.get("terminal"), "the oversized boundary was truncated (non-terminal)"
+
+    monkeypatch.setattr("api.run_journal._default_session_dir", lambda: tmp_path)
+    recovery = stale_interrupted_event(session_id, run_id)
+    assert recovery is not None, "stale recovery must emit apperror (run is running)"
+    assert recovery["event"] == "apperror"
+
+
+def test_oversized_malformed_predecessor_not_accepted_via_fabricated_prefix(tmp_path):
+    """Regression (reviewer round 8, point 5): an oversized predecessor that is
+    structurally INCOMPLETE (crash-truncated mid-payload — brace depth never
+    returns to 0) must NOT be accepted via _extract_boundary_record_summary's
+    fabricated prefix as if it were a valid terminal event. The structural-
+    completeness gate inside the backward scan must reject it and continue to
+    the preceding complete event.
+
+    Journal shape:
+        token(seq=1)
+        <oversized malformed done seq=2: has a newline terminator so it counts
+         as a complete LINE, but the JSON itself is structurally incomplete
+         (truncated mid-payload value), so _record_is_structurally_complete ->
+         False while _extract_boundary_record_summary fabricates a terminal
+         prefix from its head>
+        <oversized partial done seq=3: the crash-truncated boundary, no newline>
+
+    The scan for the predecessor of seq=3 hits the oversized seq=2 row first.
+    Without the gate it would accept seq=2's fabricated terminal prefix; with
+    the gate it skips seq=2 and recovers token(seq=1)."""
+    import os
+    from api.run_journal import (
+        _SESSION_REPLAY_MAX_BYTES,
+        _run_path,
+        _read_last_complete_line_before,
+    )
+
+    session_id = "session_oversized_malformed_pred"
+    run_id = "run_oversized_malformed_pred"
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cap = _SESSION_REPLAY_MAX_BYTES
+
+    token_line = '{"seq":1,"event":"token","payload":{"t":"valid"}}\n'
+    # Oversized malformed predecessor: newline-terminated (a complete line) but
+    # JSON structurally incomplete (no closing brace — truncated mid-value).
+    # Its head still fabricates a terminal 'done/seq=2' prefix.
+    oversized_malformed_pred = (
+        '{"version":1,"seq":2,"event":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"t":"' + "X" * (cap + 1000)
+        + "\n"  # newline terminator makes it a complete LINE, but JSON is broken
+    )
+    # Final crash-truncated boundary (no newline) — forces the recovery scan.
+    final_partial = (
+        '{"seq":3,"event":"done","terminal":true,"payload":{"t":"'
+        + "Y" * (cap + 1000)
+    )
+    token_bytes = token_line.encode("utf-8")
+    pred_bytes = oversized_malformed_pred.encode("utf-8")
+    with path.open("wb") as fh:
+        fh.write(token_bytes)
+        fh.write(pred_bytes)
+        fh.write(final_partial.encode("utf-8"))
+
+    final_start = len(token_bytes) + len(pred_bytes)
+    with path.open("rb") as fh:
+        size = os.fstat(fh.fileno()).st_size
+        result = _read_last_complete_line_before(fh, size, final_start)
+
+    # The oversized malformed predecessor (seq=2) must be SKIPPED via the gate;
+    # the valid token (seq=1) is recovered — never the fabricated terminal done.
+    assert result is not None, "the valid token (seq=1) must be recovered"
+    assert result.get("seq") == 1, (
+        f"expected seq=1 (the gate skipped the oversized malformed row); got "
+        f"seq={result.get('seq')} — the fabricated terminal prefix was accepted "
+        f"as if the structurally-incomplete row were valid"
+    )
+    assert not result.get("terminal"), (
+        "a non-terminal token must be recovered, not a fabricated terminal done"
+    )
+
+
+def test_backward_predecessor_scan_budget_bounds_the_scan(tmp_path):
+    """Regression (reviewer round 8, point 4): the backward predecessor scan
+    must have an explicit aggregate row/byte budget so it cannot walk to byte
+    zero across an arbitrarily long invalid-row streak. With a budget smaller
+    than the streak, the scan must STOP (return None) rather than scanning the
+    whole streak. With a budget large enough, it recovers the valid event."""
+    import os
+    from api.run_journal import (
+        _run_path,
+        _read_last_complete_line_before,
+    )
+
+    session_id = "session_budget"
+    run_id = "run_budget"
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # A valid token far back, then a long run of malformed rows (each ~20 bytes).
+    token = '{"seq":1,"event":"token","payload":{"t":"v"}}\n'
+    malformed_rows = b"{bad}\n" * 500  # 500 malformed rows (~6 bytes each)
+    with path.open("wb") as fh:
+        fh.write(token.encode("utf-8"))
+        fh.write(malformed_rows)
+
+    with path.open("rb") as fh:
+        size = os.fstat(fh.fileno()).st_size
+        # Tiny budget: cannot reach the token past 500 malformed rows.
+        tight = _read_last_complete_line_before(fh, size, size, budget=50)
+        # Large budget: reaches the token.
+        generous = _read_last_complete_line_before(fh, size, size, budget=10 * 1024 * 1024)
+
+    # Tight budget must STOP before reaching the token (budget gate fires).
+    assert tight is None, (
+        f"a 50-byte budget must not scan 500 malformed rows to the token; got {tight}"
+    )
+    # Generous budget must recover the token (seq=1).
+    assert generous is not None and generous.get("seq") == 1, (
+        f"a large budget must recover the valid token (seq=1); got {generous}"
     )
