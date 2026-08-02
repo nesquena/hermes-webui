@@ -10237,6 +10237,21 @@ def _run_agent_streaming(
                         SESSIONS[new_sid] = s
                         SESSIONS.move_to_end(new_sid)
                         _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+                    # Persist the new identity immediately. If this durability
+                    # boundary fails, atomically restore the old owner/cache so
+                    # restart can never leave a claim for a phantom continuation.
+                    try:
+                        s.save()
+                    except Exception:
+                        from api.worktree_authority import default_authority
+                        with LOCK:
+                            if SESSIONS.get(new_sid) is s:
+                                SESSIONS.pop(new_sid, None)
+                            s.session_id = old_sid
+                            SESSIONS[old_sid] = s
+                            SESSIONS.move_to_end(old_sid)
+                        default_authority().transfer(s.workspace, new_sid, old_sid)
+                        raise
                     # Migrate the per-session lock by aliasing new_sid to the
                     # held _agent_lock reference directly. Keep old_sid aliased
                     # too until the weak registry can reclaim both safely after

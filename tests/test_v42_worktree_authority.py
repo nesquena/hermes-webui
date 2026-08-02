@@ -150,7 +150,7 @@ def test_release_requires_verified_worktree_removal(linked, tmp_path):
     repo, wt = linked
     auth = WorktreeAuthority(tmp_path / "claims.sqlite3")
     identity = auth.claim(wt, "owner")
-    with pytest.raises(WorktreeOwnershipError, match="still registered"):
+    with pytest.raises(WorktreeOwnershipError, match="not been positively verified"):
         auth.release_after_removal(identity, "owner", repo)
     _git(repo, "worktree", "remove", str(wt))
     auth.release_after_removal(identity, "owner", repo)

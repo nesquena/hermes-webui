@@ -183,8 +183,8 @@ class WorktreeAuthority:
         git_dir = row[0]
         try:
             registered = subprocess.run(
-                ["git", "--git-dir", git_dir, "rev-parse", "--git-dir"],
-                cwd=Path(repo_root).resolve(),
+                ["git", "worktree", "list", "--porcelain"],
+                cwd=Path(repo_root).resolve(strict=True),
                 env=_clean_git_env(),
                 text=True,
                 capture_output=True,
@@ -193,8 +193,8 @@ class WorktreeAuthority:
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise WorktreeOwnershipError("unable to verify worktree removal") from exc
-        if registered.returncode == 0:
-            raise WorktreeOwnershipError("worktree is still registered")
+        if registered.returncode != 0 or Path(git_dir).exists():
+            raise WorktreeOwnershipError("worktree removal has not been positively verified")
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             changed = conn.execute(
