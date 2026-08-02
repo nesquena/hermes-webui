@@ -621,6 +621,9 @@ async function _workspacePathExists(path){
 
 async function openArtifactPath(path){
   if(!path) return;
+  // User-initiated file open from chat (workspace:// link or artifact click):
+  // clear any prior dismissal so the panel auto-opens to show this file.
+  if(typeof _workspacePanelUserDismissed!=='undefined') _workspacePanelUserDismissed=false;
   switchWorkspacePanelTab('files');
   let rel = path.replace(/^~\//,'').replace(/^\.\/+/,'');
   // Strip workspace prefix so /api/list receives a workspace-relative path.
