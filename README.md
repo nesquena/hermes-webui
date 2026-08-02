@@ -290,6 +290,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Control Center always opens on the Conversation tab; resets on close
 - Unsaved changes guard -- discard/save prompt when closing with unpersisted changes
 - Cron completion alerts -- toast notifications and unread badges scoped to the active profile on the Tasks tab and session sidebar
+- Persistent task registries -- the Tasks tab switches between chat-managed JSON task lists and scheduled jobs. Registry edits use revision checks, append-only history, verified backups, and atomic writes.
 - Background agent error alerts -- banner when a non-active session encounters an error
 
 ### Slash commands
@@ -627,7 +628,7 @@ ui.js             DOM helpers, renderMd, tool cards, context indicator
 workspace.js      File preview, file ops, git badge, central api() fetch wrapper
 sessions.js       Session CRUD, collapsible groups, search, reload recovery
 messages.js       send(), SSE handlers, live streaming, session recovery
-panels.js         Cron, skills, memory, profiles, settings (Control Center)
+panels.js         Task registries, cron, skills, memory, profiles, settings (Control Center)
 commands.js       Slash command autocomplete
 boot.js           Mobile nav, voice input, theme/skin boot, bfcache handler
 ```

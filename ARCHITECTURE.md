@@ -63,6 +63,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       profiles.py          Profile state management, hermes_cli wrapper
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
       routes.py            All GET + POST route handlers (if/elif dispatch, no decorators)
+      task_registries.py   Safe access to persistent Hermes task-list JSON registries
       startup.py           Startup helpers: auto_install_agent_deps()
       state_sync.py        /insights sync — message_count to the agent's state.db
       streaming.py         SSE engine, run_agent, cancel, compression, HERMES_HOME save/restore
@@ -76,7 +77,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       workspace.js         File preview, file ops, git badge, central api() fetch wrapper
       sessions.js          Session CRUD, list rendering, collapsible groups, search, SSE sync
       messages.js          send(), SSE event handlers, approval/clarify, transcript, recovery
-      panels.js            Cron, skills, memory, profiles, todo, settings (Control Center)
+      panels.js            Task registries, cron, skills, memory, profiles, todo, settings (Control Center)
       commands.js          Slash command registry, parser, autocomplete dropdown
       boot.js              Event wiring, mobile nav, voice input, theme/skin boot, bfcache handler
       onboarding.js        First-run wizard overlay, provider setup flow
@@ -141,6 +142,7 @@ Environment variables controlling behavior:
     HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT_TIMEOUT Optional script timeout in seconds (default 5, max 30)
     HERMES_WEBUI_PREFILL_CONTEXT_MAX_CHARS Optional parsed prefill budget in characters (default 12000, 0 disables)
     HERMES_HOME                    Base directory for Hermes state (~/.hermes by default)
+    HERMES_TASK_REGISTRY_DIR       Optional task-registry directory override (tests/legacy installs)
 
 Test isolation environment variables (set by conftest.py):
 

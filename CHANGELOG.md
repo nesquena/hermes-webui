@@ -17,6 +17,8 @@
 
 ### Added
 
+- **The Tasks tab can now edit the same persistent task lists Hermes uses in chat.** A new Lists/Scheduled switch keeps cron jobs available while exposing discovered `*-tasks.json` registries with search, status filters, creation, editing, completion/cancellation, and history. Browser writes go through authenticated WebUI routes; every mutation requires the current SHA-256 revision, appends history, creates and verifies a private backup, and atomically replaces the registry so concurrent chat and WebUI changes cannot silently overwrite each other.
+
 - **Each settled assistant turn's footer now shows the model that actually served it.** In transparent-stream mode the turn footer gains a compact model chip (e.g. `8s · claude-opus-4-8 · TTFT 640ms · …`), read *after* the turn completes so a mid-turn fallback shows the real model that answered rather than the one originally requested. The label renders exactly once per turn — a gateway/failover turn keeps its existing routing chip and the additive chip is suppressed — and the footer wraps gracefully at narrow widths and on mobile instead of stretching. The used-model is persisted with the session so it survives a reload. Thanks @franksong2702. (#6113, #6068)
 
 ### Fixed

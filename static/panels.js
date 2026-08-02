@@ -27,6 +27,13 @@ let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
 let _showAllCronProfiles = false;
 let _cronOtherProfileCount = 0;
+let _taskSource = 'registry'; // 'registry' | 'cron'
+let _taskRegistries = [];
+let _activeTaskRegistryId = null;
+let _taskRegistryData = null;
+let _taskRegistrySaving = false;
+let _taskRegistryRefreshTimer = null;
+let _taskRegistryShowCreate = false;
 let _currentWorkspaceDetail = null; // { path, name, is_default }
 let _workspaceMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _workspacePreFormDetail = null;
@@ -412,7 +419,7 @@ async function switchPanel(name, opts = {}) {
     });
   }
   // Lazy-load panel data
-  if (nextPanel === 'tasks') await loadCrons();
+  if (nextPanel === 'tasks') await loadCurrentTaskSource();
   if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
@@ -439,6 +446,416 @@ async function switchPanel(name, opts = {}) {
   else syncAppTitlebar();
   return true;
 }
+
+// ── Persistent task registries ───────────────────────────────────────────────
+
+function _taskRegistryText(key, fallback) {
+  const value = typeof t === 'function' ? t(key) : '';
+  return value && value !== key ? value : fallback;
+}
+
+function _taskRegistryStatusLabel(status) {
+  return _taskRegistryText('task_status_' + status, status || 'pending');
+}
+
+function _taskRegistryPriorityLabel(priority) {
+  return _taskRegistryText('task_priority_' + priority, priority || 'normal');
+}
+
+function _taskRegistrySetError(message) {
+  const box = $('taskRegistryError');
+  if (!box) return;
+  box.textContent = message || '';
+  box.hidden = !message;
+}
+
+function _taskRegistryDateTimeInput(value) {
+  if (!value) return '';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return '';
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: (_taskRegistryData && _taskRegistryData.timezone) || 'UTC', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(parsed).reduce((out, part) => { out[part.type] = part.value; return out; }, {});
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+  } catch (e) {
+    return '';
+  }
+}
+
+function _taskRegistryAwareDateTime(value) {
+  if (!value) return {ok: true, value: null};
+  const invalid = () => ({ok: false, error: _taskRegistryText('task_due_time_invalid', 'Choose a valid date and time in the task list timezone.')});
+  const ambiguous = () => ({ok: false, error: _taskRegistryText('task_due_time_ambiguous', 'This time occurs twice because of daylight saving time. Choose another time.')});
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return invalid();
+  const timezone = (_taskRegistryData && _taskRegistryData.timezone) || 'UTC';
+  const fields = value.match(/\d+/g).map(Number);
+  const wallTime = Date.UTC(fields[0], fields[1] - 1, fields[2], fields[3], fields[4]);
+  const normalized = new Date(wallTime);
+  if ([normalized.getUTCFullYear(), normalized.getUTCMonth() + 1, normalized.getUTCDate(), normalized.getUTCHours(), normalized.getUTCMinutes()]
+      .some((part, index) => part !== fields[index])) return invalid();
+  try {
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    });
+    const zonedParts = timestamp => formatter.formatToParts(new Date(timestamp)).reduce((out, part) => {
+      if (part.type !== 'literal') out[part.type] = Number(part.value);
+      return out;
+    }, {});
+    const matches = [];
+    for (let instant = wallTime - 26 * 60 * 60 * 1000; instant <= wallTime + 26 * 60 * 60 * 1000; instant += 60 * 1000) {
+      const parts = zonedParts(instant);
+      if ([parts.year, parts.month, parts.day, parts.hour, parts.minute]
+          .every((part, index) => part === fields[index])) matches.push(instant);
+    }
+    if (matches.length === 0) return invalid();
+    if (matches.length > 1) return ambiguous();
+    return {ok: true, value: new Date(matches[0]).toISOString()};
+  } catch (e) {
+    return invalid();
+  }
+}
+
+function _taskRegistryDeadline(task) {
+  if (task && task.due_at) {
+    const value = new Date(task.due_at);
+    if (!Number.isNaN(value.getTime())) {
+      return value.toLocaleString(undefined, {
+        timeZone: (_taskRegistryData && _taskRegistryData.timezone) || 'UTC', day: '2-digit', month: 'short',
+        hour: '2-digit', minute: '2-digit',
+      }) + ' ' + ((_taskRegistryData && _taskRegistryData.timezone) || 'UTC');
+    }
+  }
+  if (task && task.due_date) {
+    const value = new Date(task.due_date + 'T12:00:00Z');
+    if (!Number.isNaN(value.getTime())) return value.toLocaleDateString(undefined, {timeZone:'UTC'});
+  }
+  return (task && task.display_deadline) || _taskRegistryText('task_no_due_date', 'No due date');
+}
+
+function _taskRegistryFormHtml(task, mode) {
+  const item = task || {};
+  const prefix = mode === 'create' ? 'taskRegistryCreate' : 'taskRegistryEdit-' + esc(item.id || '');
+  const timezone = (_taskRegistryData && _taskRegistryData.timezone) || 'UTC';
+  const dueTimeLabel = _taskRegistryText('task_field_due_time', 'Exact time').replace(/\s*\((?:MSK|МСК)\)\s*$/, '');
+  return `<form class="task-registry-form" data-task-form="${esc(mode)}" data-task-id="${esc(item.id || '')}">
+    <label class="task-registry-form-wide"><span>${esc(_taskRegistryText('task_field_text', 'Task'))}</span><input id="${prefix}-text" name="text" required maxlength="2000" value="${esc(item.text || '')}"></label>
+    <label><span>${esc(_taskRegistryText('task_field_due_date', 'Due date'))}</span><input name="due_date" type="date" value="${esc(item.due_date || '')}"></label>
+    <label><span>${esc(dueTimeLabel)} (${esc(timezone)})</span><input name="due_at" type="datetime-local" value="${esc(_taskRegistryDateTimeInput(item.due_at))}"></label>
+    <label><span>${esc(_taskRegistryText('task_field_priority', 'Priority'))}</span><select name="priority">
+      ${['low','normal','high','urgent'].map(value => `<option value="${value}"${(item.priority || 'normal') === value ? ' selected' : ''}>${esc(_taskRegistryPriorityLabel(value))}</option>`).join('')}
+    </select></label>
+    <label class="task-registry-form-wide"><span>${esc(_taskRegistryText('task_field_notes', 'Notes'))}</span><textarea name="notes" maxlength="8000">${esc(item.notes || '')}</textarea></label>
+    <div class="task-registry-form-actions">
+      <button type="submit" class="btn primary">${esc(_taskRegistryText(mode === 'create' ? 'task_add' : 'save', mode === 'create' ? 'Add task' : 'Save'))}</button>
+      <button type="button" class="btn secondary" data-task-cancel>${esc(_taskRegistryText('cancel', 'Cancel'))}</button>
+    </div>
+  </form>`;
+}
+
+function _taskRegistryHistoryHtml(task) {
+  const history = Array.isArray(task && task.history) ? task.history.slice().reverse() : [];
+  if (!history.length) return '';
+  return `<details class="task-registry-history"><summary>${esc(_taskRegistryText('task_history', 'History'))} · ${history.length}</summary><div>${history.map(event =>
+    `<div><strong>${esc(event.action || 'updated')}</strong><span>${esc(event.changed_at || '')}</span></div>`
+  ).join('')}</div></details>`;
+}
+
+function _taskRegistryCardHtml(task) {
+  const closed = task.status === 'completed' || task.status === 'cancelled';
+  const priority = task.priority && task.priority !== 'normal'
+    ? `<span class="task-registry-priority ${esc(task.priority)}">${esc(_taskRegistryPriorityLabel(task.priority))}</span>` : '';
+  return `<article class="task-registry-card${closed ? ' closed' : ''}" data-task-id="${esc(task.id)}">
+    <div class="task-registry-card-row">
+      <div class="task-registry-card-main">
+        <div class="task-registry-card-text">${esc(task.text || '')}</div>
+        <div class="task-registry-card-meta"><span>${esc(_taskRegistryDeadline(task))}</span>${priority}${task.notes ? `<span>${esc(task.notes)}</span>` : ''}</div>
+      </div>
+      <div class="task-registry-card-actions">
+        <select data-task-status aria-label="${esc(_taskRegistryText('task_field_status', 'Status'))}">${['pending','in_progress','blocked','completed','cancelled'].map(value =>
+          `<option value="${value}"${task.status === value ? ' selected' : ''}>${esc(_taskRegistryStatusLabel(value))}</option>`
+        ).join('')}</select>
+        <button type="button" class="btn secondary" data-task-edit>${esc(_taskRegistryText('edit', 'Edit'))}</button>
+      </div>
+    </div>
+    <div class="task-registry-editor" hidden>${_taskRegistryFormHtml(task, 'edit')}</div>
+    ${_taskRegistryHistoryHtml(task)}
+  </article>`;
+}
+
+function _bindTaskRegistryContent() {
+  const content = $('taskRegistryContent');
+  if (!content) return;
+  content.querySelectorAll('[data-task-form]').forEach(form => {
+    const dueAtInput = form.elements.due_at;
+    dueAtInput.addEventListener('input', () => {
+      dueAtInput.setCustomValidity('');
+      _taskRegistrySetError('');
+    });
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      const dueAt = _taskRegistryAwareDateTime(dueAtInput.value);
+      dueAtInput.setCustomValidity(dueAt.ok ? '' : dueAt.error);
+      if (!dueAt.ok) {
+        _taskRegistrySetError(dueAt.error);
+        dueAtInput.reportValidity();
+        return;
+      }
+      _taskRegistrySetError('');
+      const payload = {
+        text: form.elements.text.value,
+        due_date: form.elements.due_date.value || null,
+        due_at: dueAt.value,
+        priority: form.elements.priority.value,
+        notes: form.elements.notes.value || null,
+      };
+      const mode = form.dataset.taskForm;
+      if (mode === 'create') createTaskRegistryTask(payload);
+      else updateTaskRegistryTask(form.dataset.taskId, payload);
+    });
+    const cancel = form.querySelector('[data-task-cancel]');
+    if (cancel) cancel.addEventListener('click', () => {
+      if (form.dataset.taskForm === 'create') {
+        _taskRegistryShowCreate = false;
+        renderTaskRegistryTasks();
+      } else {
+        const editor = form.closest('.task-registry-editor');
+        if (editor) editor.hidden = true;
+      }
+    });
+  });
+  content.querySelectorAll('.task-registry-card').forEach(card => {
+    const taskId = card.dataset.taskId;
+    const status = card.querySelector('[data-task-status]');
+    if (status) status.addEventListener('change', async () => {
+      const ok = await updateTaskRegistryTask(taskId, {status: status.value});
+      if (!ok) {
+        const persisted = (_taskRegistryData.tasks || []).find(task => task.id === taskId);
+        if (persisted) status.value = persisted.status;
+      }
+    });
+    const edit = card.querySelector('[data-task-edit]');
+    if (edit) edit.addEventListener('click', () => {
+      const editor = card.querySelector('.task-registry-editor');
+      if (editor) editor.hidden = !editor.hidden;
+    });
+  });
+}
+
+function renderTaskRegistryScopes() {
+  const box = $('taskRegistryScopes');
+  if (!box) return;
+  box.innerHTML = '';
+  if (!_taskRegistries.length) {
+    box.innerHTML = `<div class="task-registry-empty">${esc(_taskRegistryText('task_registry_none', 'No task registries found'))}</div>`;
+    return;
+  }
+  _taskRegistries.forEach(registry => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'task-registry-scope' + (registry.id === _activeTaskRegistryId ? ' active' : '');
+    const openCount = Number((registry.statuses || {}).pending || 0) + Number((registry.statuses || {}).in_progress || 0) + Number((registry.statuses || {}).blocked || 0);
+    button.innerHTML = `<span>${esc(registry.label)}</span><strong>${openCount}</strong>`;
+    button.addEventListener('click', () => loadTaskRegistry(registry.id));
+    box.appendChild(button);
+  });
+}
+
+function renderTaskRegistryTasks() {
+  const content = $('taskRegistryContent');
+  if (!content) return;
+  if (!_taskRegistryData) {
+    content.innerHTML = `<div class="task-registry-empty">${esc(_taskRegistryText('task_registry_none', 'No task registries found'))}</div>`;
+    return;
+  }
+  const query = String(($('taskRegistrySearch') && $('taskRegistrySearch').value) || '').trim().toLocaleLowerCase();
+  const filter = String(($('taskRegistryStatusFilter') && $('taskRegistryStatusFilter').value) || 'open');
+  const tasks = (Array.isArray(_taskRegistryData.tasks) ? _taskRegistryData.tasks : []).filter(task => {
+    if (filter === 'open' && (task.status === 'completed' || task.status === 'cancelled')) return false;
+    if (filter !== 'open' && filter !== 'all' && task.status !== filter) return false;
+    if (query && !String(task.text || '').toLocaleLowerCase().includes(query)) return false;
+    return true;
+  }).sort((a, b) => {
+    const aClosed = a.status === 'completed' || a.status === 'cancelled' ? 1 : 0;
+    const bClosed = b.status === 'completed' || b.status === 'cancelled' ? 1 : 0;
+    if (aClosed !== bClosed) return aClosed - bClosed;
+    return String(a.due_at || a.due_date || '9999').localeCompare(String(b.due_at || b.due_date || '9999'));
+  });
+  const create = _taskRegistryShowCreate ? _taskRegistryFormHtml({}, 'create') : '';
+  const list = tasks.length ? tasks.map(_taskRegistryCardHtml).join('')
+    : `<div class="task-registry-empty">${esc(_taskRegistryText('task_registry_filtered_empty', 'No tasks match these filters'))}</div>`;
+  content.innerHTML = create + `<div class="task-registry-list">${list}</div>`;
+  _bindTaskRegistryContent();
+}
+
+function _taskRegistryHasOpenDraft() {
+  const content = $('taskRegistryContent');
+  if (!content) return false;
+  if (_taskRegistryShowCreate) return true;
+  return Array.from(content.querySelectorAll('.task-registry-editor')).some(editor => !editor.hidden);
+}
+
+async function loadTaskRegistry(registryId, quiet=false, preserveDraft=false) {
+  if (!registryId) return;
+  if (!quiet) {
+    const content = $('taskRegistryContent');
+    if (content) content.innerHTML = `<div class="task-registry-loading">${esc(_taskRegistryText('loading', 'Loading...'))}</div>`;
+  }
+  try {
+    const data = await api('/api/task-registries/' + encodeURIComponent(registryId), {cache:'no-store'});
+    if (preserveDraft && _taskRegistryHasOpenDraft()) return;
+    _activeTaskRegistryId = registryId;
+    _taskRegistryData = data;
+    const title = $('taskRegistryTitle');
+    const subtitle = $('taskRegistrySubtitle');
+    if (title) title.textContent = data.label || _taskRegistryText('task_registry_title', 'Task lists');
+    if (subtitle) subtitle.textContent = `${(data.tasks || []).length} · ${data.timezone || ''}`;
+    _taskRegistrySetError('');
+    renderTaskRegistryScopes();
+    renderTaskRegistryTasks();
+  } catch (e) {
+    _taskRegistrySetError(e.message || String(e));
+  }
+}
+
+async function loadTaskRegistries(quiet=false) {
+  try {
+    const data = await api('/api/task-registries', {cache:'no-store'});
+    _taskRegistries = Array.isArray(data.registries) ? data.registries : [];
+    const selected = _activeTaskRegistryId && _taskRegistries.some(item => item.id === _activeTaskRegistryId)
+      ? _activeTaskRegistryId : (_taskRegistries[0] && _taskRegistries[0].id);
+    renderTaskRegistryScopes();
+    if (selected) await loadTaskRegistry(selected, quiet);
+    else {
+      _taskRegistryData = null;
+      renderTaskRegistryTasks();
+    }
+    if (!_taskRegistryRefreshTimer) {
+      _taskRegistryRefreshTimer = window.setInterval(() => {
+        if (_currentPanel === 'tasks' && _taskSource === 'registry' && !_taskRegistrySaving
+            && !_taskRegistryHasOpenDraft() && _activeTaskRegistryId) {
+          loadTaskRegistry(_activeTaskRegistryId, true, true);
+        }
+      }, 15000);
+    }
+  } catch (e) {
+    _taskRegistrySetError(e.message || String(e));
+  }
+}
+
+async function _mutateTaskRegistry(path, payload) {
+  if (!_taskRegistryData || _taskRegistrySaving) return false;
+  _taskRegistrySaving = true;
+  const main = $('taskRegistryMain');
+  if (main) main.classList.add('saving');
+  try {
+    await api(path, {method:'POST', body:JSON.stringify(payload)});
+    await loadTaskRegistries(true);
+    return true;
+  } catch (e) {
+    _taskRegistrySetError(e.message || String(e));
+    if (e && e.status === 409) {
+      const registryId = _activeTaskRegistryId;
+      try {
+        const fresh = await api('/api/task-registries/' + encodeURIComponent(registryId), {cache:'no-store'});
+        if (_activeTaskRegistryId === registryId) _taskRegistryData = fresh;
+      } catch (refreshError) {
+        _taskRegistrySetError(refreshError.message || String(refreshError));
+      }
+    }
+    return false;
+  } finally {
+    _taskRegistrySaving = false;
+    if (main) main.classList.remove('saving');
+  }
+}
+
+async function createTaskRegistryTask(task) {
+  const ok = await _mutateTaskRegistry(`/api/task-registries/${encodeURIComponent(_activeTaskRegistryId)}/tasks`, {
+    expected_revision: _taskRegistryData.revision, task,
+  });
+  if (ok) {
+    _taskRegistryShowCreate = false;
+    renderTaskRegistryTasks();
+    showToast(_taskRegistryText('task_added', 'Task added'));
+  }
+}
+
+async function updateTaskRegistryTask(taskId, changes) {
+  const ok = await _mutateTaskRegistry(`/api/task-registries/${encodeURIComponent(_activeTaskRegistryId)}/tasks/${encodeURIComponent(taskId)}/update`, {
+    expected_revision: _taskRegistryData.revision, changes,
+  });
+  if (ok) showToast(_taskRegistryText('task_updated', 'Task updated'));
+  return ok;
+}
+
+function _syncTaskSourceUi() {
+  const registry = _taskSource === 'registry';
+  const registryTab = $('taskSourceRegistryTab');
+  const cronTab = $('taskSourceCronTab');
+  if (registryTab) { registryTab.classList.toggle('active', registry); registryTab.setAttribute('aria-selected', String(registry)); }
+  if (cronTab) { cronTab.classList.toggle('active', !registry); cronTab.setAttribute('aria-selected', String(!registry)); }
+  if ($('taskRegistrySidebar')) $('taskRegistrySidebar').hidden = !registry;
+  if ($('cronTaskSidebar')) $('cronTaskSidebar').hidden = registry;
+  if ($('taskRegistryMain')) $('taskRegistryMain').hidden = !registry;
+  if ($('cronTaskDetailView')) $('cronTaskDetailView').hidden = registry;
+  const registryRefresh = $('taskSourceRefreshBtn');
+  const registryCreate = $('taskSourceCreateBtn');
+  const cronRefresh = $('cronRefreshBtn');
+  const cronCreate = $('cronCreateBtn');
+  if (registryRefresh) registryRefresh.style.display = registry ? '' : 'none';
+  if (registryCreate) registryCreate.style.display = registry ? '' : 'none';
+  if (cronRefresh) cronRefresh.style.display = registry ? 'none' : '';
+  if (cronCreate) cronCreate.style.display = registry ? 'none' : '';
+  if (registryCreate) {
+    const label = _taskRegistryText('task_add', 'Add task');
+    registryCreate.dataset.tooltip = label;
+    registryCreate.setAttribute('aria-label', label);
+  }
+}
+
+async function switchTaskSource(source) {
+  _taskSource = source === 'cron' ? 'cron' : 'registry';
+  try { localStorage.setItem('hermes-task-source', _taskSource); } catch (e) {}
+  _syncTaskSourceUi();
+  await loadCurrentTaskSource();
+}
+
+async function loadCurrentTaskSource() {
+  if (_taskSource === 'cron') return loadCrons();
+  return loadTaskRegistries();
+}
+
+async function refreshCurrentTaskSource(animate=false) {
+  const button = $('taskSourceRefreshBtn');
+  if (animate && button) { button.disabled = true; button.style.opacity = '0.5'; }
+  try {
+    if (_taskSource === 'cron') await loadCrons();
+    else await loadTaskRegistries(true);
+  } finally {
+    if (button) { button.disabled = false; button.style.opacity = ''; }
+  }
+}
+
+function createForCurrentTaskSource() {
+  if (_taskSource === 'cron') {
+    openCronCreate();
+    return;
+  }
+  if (!_taskRegistryData) return;
+  _taskRegistryShowCreate = true;
+  renderTaskRegistryTasks();
+  const input = $('taskRegistryCreate-text');
+  if (input) input.focus();
+}
+
+(function restoreTaskSource(){
+  try { _taskSource = localStorage.getItem('hermes-task-source') === 'cron' ? 'cron' : 'registry'; } catch (e) {}
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _syncTaskSourceUi, {once:true});
+  else _syncTaskSourceUi();
+})();
 
 // ── Cron panel ──
 function _isRecurringCronJob(job) {

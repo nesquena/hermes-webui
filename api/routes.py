@@ -11791,6 +11791,86 @@ def _handle_plugins(handler, parsed) -> bool:
         )
 
 
+def _task_registry_error(handler, exc) -> bool:
+    """Map task-registry domain errors onto the WebUI JSON error contract."""
+    from api.task_registries import (
+        RegistryConflict,
+        RegistryNotFound,
+        RegistryValidationError,
+        TaskNotFound,
+    )
+
+    if isinstance(exc, (RegistryNotFound, TaskNotFound)):
+        return bad(handler, str(exc), status=404)
+    if isinstance(exc, RegistryConflict):
+        return bad(handler, str(exc), status=409)
+    if isinstance(exc, RegistryValidationError):
+        return bad(handler, str(exc), status=400)
+    logger.exception("Task registry operation failed", exc_info=exc)
+    return bad(handler, "Task registry operation failed", status=500)
+
+
+def _task_registry_path_parts(path: str) -> list[str] | None:
+    """Return decoded segments below /api/task-registries, or None."""
+    prefix = "/api/task-registries"
+    if path == prefix:
+        return []
+    if not path.startswith(prefix + "/"):
+        return None
+    parts = [unquote(part) for part in path[len(prefix) + 1:].split("/")]
+    if any(not part or part in {".", ".."} or "/" in part or "\\" in part for part in parts):
+        return None
+    return parts
+
+
+def _handle_task_registry_get(handler, parsed) -> bool | None:
+    parts = _task_registry_path_parts(parsed.path)
+    if parts is None:
+        return None
+    from api.task_registries import RegistryError, TaskRegistryStore
+
+    try:
+        store = TaskRegistryStore()
+        if not parts:
+            return j(handler, {"registries": store.list_registries()})
+        if len(parts) == 1:
+            return j(handler, store.get_registry(parts[0]))
+        return None
+    except RegistryError as exc:
+        return _task_registry_error(handler, exc)
+    except Exception as exc:
+        return _task_registry_error(handler, exc)
+
+
+def _handle_task_registry_post(handler, parsed, body) -> bool | None:
+    parts = _task_registry_path_parts(parsed.path)
+    if parts is None:
+        return None
+    from api.task_registries import RegistryError, RegistryValidationError, TaskRegistryStore
+
+    try:
+        if len(parts) == 2 and parts[1] == "tasks":
+            if not isinstance(body, dict) or set(body) != {"expected_revision", "task"}:
+                raise RegistryValidationError("body must contain expected_revision and task")
+            result = TaskRegistryStore().create_task(
+                parts[0], body["task"], body["expected_revision"]
+            )
+            return j(handler, result, status=201)
+
+        if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "update":
+            if not isinstance(body, dict) or set(body) != {"expected_revision", "changes"}:
+                raise RegistryValidationError("body must contain expected_revision and changes")
+            result = TaskRegistryStore().update_task(
+                parts[0], parts[2], body["changes"], body["expected_revision"]
+            )
+            return j(handler, result)
+        return None
+    except RegistryError as exc:
+        return _task_registry_error(handler, exc)
+    except Exception as exc:
+        return _task_registry_error(handler, exc)
+
+
 _SHELL_ERROR_HTML = """<!doctype html>
 <html lang=\"en\">
 <head>
@@ -11983,6 +12063,10 @@ def handle_get(handler, parsed) -> bool:
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
     if proxy_result is not False:
         return proxy_result
+
+    task_registry_result = _handle_task_registry_get(handler, parsed)
+    if task_registry_result is not None:
+        return task_registry_result
 
     if parsed.path.startswith("/session/static/"):
         # Strip the leading "/session" so _serve_static() sees a path that
@@ -14006,6 +14090,10 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return True
+
+    task_registry_result = _handle_task_registry_post(handler, parsed, body)
+    if task_registry_result is not None:
+        return task_registry_result
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
