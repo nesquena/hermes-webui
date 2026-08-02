@@ -1722,8 +1722,7 @@ window.renderTranscript=function(container, messages, opts){
     if(!_voiceModeActive||!sid||!streamId||!S.session||String(S.session.session_id)!==String(sid)) return false;
     const current=_voiceLease;
     if(current&&_voiceLeaseCurrent(current)&&current.owner
-      &&current.owner.sid===String(sid)&&current.owner.streamId===String(streamId)
-      &&!current.settled) return true;
+      &&current.owner.sid===String(sid)&&current.owner.streamId===String(streamId)) return !current.settled;
     if(current){
       _clearVoiceLeaseTimers(current);
       _releaseVoiceRecognition(current);

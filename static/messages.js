@@ -2051,6 +2051,9 @@ function closeOtherLiveStreams(activeSid){
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
+  if(typeof window!=='undefined'&&typeof window._voiceLeaseAdoptStream==='function'){
+    window._voiceLeaseAdoptStream(activeSid,streamId);
+  }
   const reconnecting=!!options.reconnecting;
   // #4416: start (or, on reconnect for the SAME stream, keep) tracking whether
   // the tab was hidden during this stream so the done-notification fires for a
@@ -2107,9 +2110,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       showLiveRunStatus(activeSid,{startedAt:_startedAt});
     }
     return;
-  }
-  if(typeof window!=='undefined'&&typeof window._voiceLeaseAdoptStream==='function'){
-    window._voiceLeaseAdoptStream(activeSid,streamId);
   }
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
@@ -2191,16 +2191,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
-  function _ownsActiveStreamOrBackground(source){
-    if(!_isActiveSession()) return true;
-    if(S.activeStreamId!==streamId) return false;
+  function _ownsCurrentTransport(source){
     const live=LIVE_STREAMS[activeSid];
     const authority=LIVE_STREAM_TRANSPORT_AUTHORITY[activeSid];
     const sourceGeneration=source&&LIVE_STREAM_TRANSPORT_SOURCE_GENERATION.get(source);
-    if(!authority||authority.streamId!==streamId||authority.generation!==_transportGeneration
-      ||sourceGeneration!==authority.generation) return false;
-    if(live&&live.source!==source) return false;
-    return true;
+    return !!authority&&authority.streamId===streamId&&authority.generation===_transportGeneration
+      &&sourceGeneration===authority.generation&&(!live||live.source===source);
+  }
+  function _ownsActiveStreamOrBackground(source){
+    if(!_isActiveSession()) return _ownsCurrentTransport(source);
+    if(S.activeStreamId!==streamId) return false;
+    return _ownsCurrentTransport(source);
   }
   function _bailOutOfTerminalEventsFromStaleStream(source){
     if(_ownsActiveStreamOrBackground(source)) return false;
@@ -6537,6 +6538,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`);
         const _probeReconnect=async(attempt=0)=>{
           if(_terminalStateReached || _streamFinalized) return;
+          if(!_ownsCurrentTransport(source)) return;
           if(!_isSessionCurrentPane(activeSid)) return;
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
@@ -6553,6 +6555,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }catch(_){
             if(_deferStreamErrorIfOffline()) return;
           }
+          if(!_ownsCurrentTransport(source)) return;
           if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
@@ -6575,6 +6578,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             // _handleStreamError after 8s.
             _restoreTimedOut=true;
             if(!_terminalStateReached&&!_streamFinalized){
+              if(!_ownsCurrentTransport(source)) return;
               if(_deferStreamErrorIfOffline()) return;
               if(_deferStreamErrorIfPageHidden(source)) return;
               _flushReasoningToAnchor();
@@ -6596,6 +6600,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(_restoreTimedOut) return; // timer already fired _handleStreamError
           clearTimeout(_restoreTimer);
           if(_terminalStateReached||_streamFinalized) return;
+          if(!_ownsCurrentTransport(source)) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
           _flushReasoningToAnchor();
@@ -6867,6 +6872,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _handleStreamError(source){
+    if(!_ownsCurrentTransport(source)){
+      _closeSource(source);
+      return;
+    }
     if(_isActiveSession() && S.activeStreamId!==streamId){
       _closeSource(source);
       return;

@@ -2268,6 +2268,13 @@ async function loadSession(sid){
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
       if (_isCurrentLoad()) _loadingSessionId = null;
+      if(S.session&&S.session.session_id===sid
+        &&(typeof _sendInProgress==='undefined'||!_sendInProgress)
+        &&(!_voiceLoadContext||typeof window._voiceLeaseContextCurrent!=='function'
+          ||window._voiceLeaseContextCurrent(_voiceLoadContext))
+        &&typeof window._voiceLeaseResume==='function'){
+        window._voiceLeaseResume();
+      }
       return;
     }
     // Stale? A newer loadSession() call has already started (#1060).
