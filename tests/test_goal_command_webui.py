@@ -485,3 +485,173 @@ def test_frontend_goal_evaluating_state_uses_calm_composer_indicator():
     assert "if(goalState==='evaluating')" in MESSAGES_JS
     assert "setComposerStatus(goalEvaluatingMessage);" in MESSAGES_JS
     assert "return;" in MESSAGES_JS
+
+
+def test_goal_kickoff_forwards_explicit_model_pick_to_resolver(monkeypatch, tmp_path):
+    """#6703: /api/goal must carry explicit_model_pick to the model resolver.
+
+    Without it a persisted cross-provider pick (e.g. provider1:model1 chosen
+    for the session) is treated as stale by _resolve_compatible_session_model_state
+    and "repaired" back to the profile default mid-session, switching the
+    provider while /goal runs.
+    """
+    from api import goals as webui_goals
+    from api import routes
+
+    class FakeState:
+        goal = "ship the feature"
+        status = "active"
+        turns_used = 0
+        max_turns = 20
+        last_verdict = None
+        last_reason = None
+        paused_reason = None
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.session_id = session_id
+            self.default_max_turns = default_max_turns
+
+        def set(self, goal):
+            state = FakeState()
+            state.goal = goal
+            return state
+
+    class FakeSession:
+        session_id = "sid-goal-explicit"
+        profile = "default"
+        workspace = str(tmp_path)
+        model = "deepseek/deepseek-v4-flash"
+        model_provider = "deepseek"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+        active_stream_id = None
+
+    resolver_kwargs = {}
+
+    def fake_resolve(model, provider, **kwargs):
+        resolver_kwargs.update(kwargs)
+        return model, provider, False
+
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fake_resolve)
+
+    started = []
+
+    def fake_start(session, **kwargs):
+        started.append(kwargs)
+        return {"stream_id": "goal-stream", "session_id": session.session_id, "pending_started_at": 123.0}
+
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", fake_start)
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+
+    result = routes._handle_goal_command(
+        object(),
+        {
+            "session_id": "sid-goal-explicit",
+            "args": "ship the feature",
+            "workspace": str(tmp_path),
+            "model": "deepseek/deepseek-v4-flash",
+            "model_provider": "deepseek",
+            "explicit_model_pick": True,
+        },
+    )
+
+    assert result["status"] == 200
+    assert started and started[0]["model"] == "deepseek/deepseek-v4-flash"
+    assert started[0]["model_provider"] == "deepseek"
+    # The explicit-pick marker must reach the resolver so the persisted
+    # cross-provider model is honored instead of reverted to the default.
+    assert resolver_kwargs.get("explicit_model_pick") is True
+
+
+def test_goal_kickoff_defaults_explicit_model_pick_false(monkeypatch, tmp_path):
+    """#6703: without the marker the resolver receives explicit_model_pick=False."""
+    from api import goals as webui_goals
+    from api import routes
+
+    class FakeState:
+        goal = "ship the feature"
+        status = "active"
+        turns_used = 0
+        max_turns = 20
+        last_verdict = None
+        last_reason = None
+        paused_reason = None
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.session_id = session_id
+            self.default_max_turns = default_max_turns
+
+        def set(self, goal):
+            state = FakeState()
+            state.goal = goal
+            return state
+
+    class FakeSession:
+        session_id = "sid-goal-default"
+        profile = "default"
+        workspace = str(tmp_path)
+        model = "gpt-5.5"
+        model_provider = "openai-codex"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+        active_stream_id = None
+
+    resolver_kwargs = {}
+
+    def fake_resolve(model, provider, **kwargs):
+        resolver_kwargs.update(kwargs)
+        return model, provider, False
+
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fake_resolve)
+
+    started = []
+
+    def fake_start(session, **kwargs):
+        started.append(kwargs)
+        return {"stream_id": "goal-stream", "session_id": session.session_id, "pending_started_at": 123.0}
+
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", fake_start)
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+
+    result = routes._handle_goal_command(
+        object(),
+        {
+            "session_id": "sid-goal-default",
+            "args": "ship the feature",
+            "workspace": str(tmp_path),
+            "model": "gpt-5.5",
+            "model_provider": "openai-codex",
+        },
+    )
+
+    assert result["status"] == 200
+    assert resolver_kwargs.get("explicit_model_pick") is False
+
+
+def test_frontend_goal_sends_explicit_model_pick():
+    """#6703: cmdGoal must include explicit_model_pick in the /api/goal payload.
+
+    Mirrors the chat/start marker (messages.js) so the server honors a
+    persisted cross-provider session pick instead of reverting to the default.
+    """
+    goal_idx = COMMANDS_JS.find("function cmdGoal")
+    assert goal_idx != -1
+    goal_fn = COMMANDS_JS[goal_idx : COMMANDS_JS.find("\n}", goal_idx)]
+    assert "explicit_model_pick:_explicitPick" in goal_fn
+    assert "api('/api/goal'" in goal_fn
+    assert "_isCrossProviderPick" in goal_fn
+    assert "_readPendingSessionModel" in goal_fn

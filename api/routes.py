@@ -21970,6 +21970,7 @@ def _handle_goal_command(handler, body):
         and not stream_running
     )
     workspace = model = model_provider = normalized_model = None
+    explicit_model_pick = bool(body.get("explicit_model_pick"))
     previous_goal_state = None
     if will_kickoff:
         try:
@@ -21982,6 +21983,11 @@ def _handle_goal_command(handler, body):
             if "model_provider" in body
             else getattr(s, "model_provider", None)
         )
+        # #6703: carry the explicit-pick marker through goal kickoffs. The
+        # frontend marks a session-level provider/model choice as explicit (same
+        # signal /api/chat/start receives); without it the model resolver treats
+        # a persisted cross-provider pick as stale and "repairs" it back to the
+        # profile default, silently switching providers mid-session.
         _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
         model, model_provider, normalized_model = _resolve_compatible_session_model_state(
             requested_model,
@@ -21989,6 +21995,7 @@ def _handle_goal_command(handler, body):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
+            explicit_model_pick=explicit_model_pick,
         )
         previous_goal_state = goal_state_snapshot(s.session_id, profile_home=profile_home)
 
@@ -22041,6 +22048,7 @@ def _handle_goal_command(handler, body):
                 profile_provider=_pp_provider,
                 profile_default_model=_pp_default,
                 profile_config=_pp_cfg,
+                explicit_model_pick=explicit_model_pick,
             )
         stream_response = _start_chat_stream_for_session(
             s,
