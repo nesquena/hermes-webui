@@ -1,9 +1,9 @@
 """Guard tests for the `transparent_live_compact_settled` chat activity mode.
 
-The fourth mode streams activity transparently while a turn runs, then folds
-settled history into the Compact Worklog ("Trace: N tools"). Resolution is
+The fourth mode streams activity transparently while a turn runs, then removes
+settled tools and reasoning once the final answer is available. Resolution is
 per render path: `chatActivityLiveMode()` maps it to `transparent_stream`,
-`chatActivitySettledMode()` maps it to `compact_worklog`. The three existing
+`chatActivitySettledMode()` maps it to `hide_all_activity`. The three existing
 modes must keep their exact behavior on both paths.
 """
 
@@ -129,10 +129,11 @@ process.stdout.write(JSON.stringify(matrix));
         True, True, False, False,
     ]
     # The TLCS contract: raw mode is preserved, live resolves transparent,
-    # settled resolves compact.
+    # settled resolves to final-answer-only so tools and reasoning leave the
+    # transcript after conclusion.
     assert result[MODE] == [
-        MODE, "transparent_stream", "compact_worklog",
-        False, True, False, True,
+        MODE, "transparent_stream", "hide_all_activity",
+        False, True, False, False,
     ]
     assert result["hide_all_activity"] == [
         "hide_all_activity", "hide_all_activity", "hide_all_activity",
@@ -241,7 +242,7 @@ process.stdout.write(JSON.stringify(matrix));
 
     assert result["compact_worklog"] == ["compact_worklog", "compact_worklog", "compact_worklog"]
     assert result["transparent_stream"] == ["transparent_stream", "transparent_stream", "transparent_stream"]
-    assert result[MODE] == [MODE, "transparent_stream", "compact_worklog"]
+    assert result[MODE] == [MODE, "transparent_stream", "hide_all_activity"]
     assert result["hide_all_activity"] == ["hide_all_activity", "hide_all_activity", "hide_all_activity"]
 
 
@@ -268,6 +269,22 @@ def test_tlcs_ui_js_call_sites_use_contextual_resolvers():
     # Settled semantics preserved: the settled renderer and the live->settled
     # transition helpers still gate on the settled resolver.
     assert UI_JS.count("if(isTransparentStream())") >= 3
+
+
+def test_tlcs_settled_fallback_renders_neither_reasoning_nor_tools():
+    """Legacy settled rows must follow the same final-only contract.
+
+    This pins the reported mobile failure: tools disappeared at settle, but one
+    disclosure row per reasoning block remained and filled the transcript.
+    """
+    render_messages = UI_JS.split("function renderMessages", 1)[1]
+    activity_branch = render_messages.split("const byActivity = new Map();", 1)[1].split(
+        "for(const [rawIdx,seg] of assistantSegments)", 1
+    )[0]
+
+    assert "if(isCompactWorklogMode()){" in activity_branch
+    assert "}else if(isTransparentStream()){" in activity_branch
+    assert "if(!isTransparentStream()){" not in activity_branch
 
 
 def test_tlcs_boot_and_panels_accept_the_fourth_value():

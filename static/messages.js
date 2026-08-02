@@ -2857,14 +2857,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return 'compact_worklog';
   }
   // transparent_live_compact_settled resolves per render path: the live scene
-  // streams transparently, the persisted/settled scene folds to Compact Worklog.
+  // streams transparently, then persisted/settled history keeps the final answer
+  // only so both tool and reasoning rows leave the transcript after conclusion.
   function _anchorSceneLiveMode(){
     const mode=_anchorSceneActiveMode();
     return mode==='transparent_live_compact_settled'?'transparent_stream':mode;
   }
   function _anchorSceneSettledMode(){
     const mode=_anchorSceneActiveMode();
-    return mode==='transparent_live_compact_settled'?'compact_worklog':mode;
+    return mode==='transparent_live_compact_settled'?'hide_all_activity':mode;
   }
   function _anchorSceneRowDisplayHintForMode(row, sceneMode){
     const hints=row&&typeof row==='object'&&row.display_hints&&typeof row.display_hints==='object'

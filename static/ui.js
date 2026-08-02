@@ -11282,15 +11282,16 @@ function chatActivityMode(){
   return window._transparentStream ? 'transparent_stream' : 'compact_worklog';
 }
 // transparent_live_compact_settled resolves per render path: activity streams
-// transparently while the turn runs, then settled history collapses into the
-// Compact Worklog ("Trace: N tools") once the turn completes or is reloaded.
+// transparently while the turn runs, then settled history keeps only the final
+// answer once the turn completes or is reloaded. The name remains a persisted
+// compatibility value; its settled contract removes both tools and reasoning.
 function chatActivityLiveMode(){
   const mode=chatActivityMode();
   return mode==='transparent_live_compact_settled'?'transparent_stream':mode;
 }
 function chatActivitySettledMode(){
   const mode=chatActivityMode();
-  return mode==='transparent_live_compact_settled'?'compact_worklog':mode;
+  return mode==='transparent_live_compact_settled'?'hide_all_activity':mode;
 }
 function isTransparentLiveMode(){
   return chatActivityLiveMode()==='transparent_stream';
@@ -17359,7 +17360,7 @@ function renderMessages(options){
       if(Number.isFinite(burstA)&&Number.isFinite(burstB)&&burstA!==burstB) return burstA-burstB;
       return a.aIdx-b.aIdx;
     });
-    if(!isTransparentStream()){
+    if(isCompactWorklogMode()){
       for(const entry of activityOrder){
         const {aIdx,segmentSeq,burstId,cards,thinkingIdx,includeAnchorReason}=entry;
         if(aIdx<assistantIdxs[0]) continue;
@@ -17406,7 +17407,7 @@ function renderMessages(options){
       activityByTurn.forEach(state=>{
         _syncToolCallGroupSummary(state.group);
       });
-    }else{
+    }else if(isTransparentStream()){
       // ── transparent_stream path: individual expandable event rows ──
       const transparentInsertCursors=new Map();
       // Per-turn dedup of echoed thinking text — mirrors the compact-worklog
