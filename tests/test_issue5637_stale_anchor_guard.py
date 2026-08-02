@@ -176,6 +176,7 @@ function _recentMessageTouchScrollIntent(){{return false;}}
 function _restoreMessageScrollSnapshotSameFrameFallback(){{}}
 function requestAnimationFrame(callback){{callbacks.push(callback);}}
 function chatActivityMode(){{return 'compact_worklog';}}
+function chatActivityLiveMode(){{return chatActivityMode();}}
 function isSimplifiedToolCalling(){{return true;}}
 const S={{session:{{session_id:'sid-1',pending_started_at:1}},activeStreamId:'stream-1'}};
 function _anchorSceneRowsForRendering(){{return [];}}
