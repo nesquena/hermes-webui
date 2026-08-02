@@ -1055,6 +1055,9 @@
                 <button type="button" class="chat-activity-mode-btn" data-chat-activity-mode="transparent_stream" onclick="_pickChatActivityDisplayMode('transparent_stream')">
                   <span data-i18n="settings_option_transparent_stream">Transparent Stream</span>
                 </button>
+                <button type="button" class="chat-activity-mode-btn" data-chat-activity-mode="transparent_live_compact_settled" onclick="_pickChatActivityDisplayMode('transparent_live_compact_settled')">
+                  <span data-i18n="settings_option_transparent_live_compact_settled">Live → Compact</span>
+                </button>
                 <button type="button" class="chat-activity-mode-btn" data-chat-activity-mode="hide_all_activity" onclick="_pickChatActivityDisplayMode('hide_all_activity')">
                   <span data-i18n="settings_option_final_answer_only">Final answer only</span>
                 </button>
@@ -1062,9 +1065,10 @@
               <select id="settingsChatActivityDisplayMode" style="display:none">
                 <option value="compact_worklog" data-i18n="settings_option_compact_worklog">Compact Worklog</option>
                 <option value="transparent_stream" data-i18n="settings_option_transparent_stream">Transparent Stream</option>
+                <option value="transparent_live_compact_settled" data-i18n="settings_option_transparent_live_compact_settled">Live → Compact</option>
                 <option value="hide_all_activity" data-i18n="settings_option_final_answer_only">Final answer only</option>
               </select>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_chat_activity_display_mode">Compact Worklog groups supporting activity into a quiet summary. Transparent Stream keeps each thinking/tool event as its own chronological expandable row. Final answer only hides activity rows while keeping the final answer visible.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_chat_activity_display_mode">Compact Worklog groups supporting activity into a quiet summary. Transparent Stream keeps each thinking/tool event as its own chronological expandable row. Live → Compact streams activity while the turn runs, then folds it into a Compact Worklog once the turn settles. Final answer only hides activity rows while keeping the final answer visible.</div>
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:8px">
                 <input type="checkbox" id="settingsTransparentEventTimestamps" checked onchange="_pickTransparentEventTimestamps(this.checked)" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_transparent_stream_event_timestamps">Show Transparent Stream event timestamps</span>
