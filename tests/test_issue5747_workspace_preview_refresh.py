@@ -83,7 +83,7 @@ def _normalize_via_node(paths, workspace="/Users/test/ws"):
     ignore_re = _extract_const("ARTIFACT_IGNORE_RE")
     fn = _extract_fn("_normalizeArtifactPath")
     helpers = "\n".join(
-        _extract_fn(n) for n in ("_isWindowsStylePath", "_stripWorkspacePrefix")
+        _extract_fn(n) for n in ("_isWindowsStylePath", "_stripWorkspacePrefix", "_canonicalizeRelativePath")
     )
     driver = (
         f"const S = {{ session: {{ workspace: {json.dumps(workspace)} }} }};\n"
@@ -107,6 +107,7 @@ def _candidates_via_node(tc, workspace="/Users/test/ws"):
         for n in (
             "_isWindowsStylePath",
             "_stripWorkspacePrefix",
+            "_canonicalizeRelativePath",
             "_normalizeArtifactPath",
             "_artifactCandidatesFromText",
             "_artifactCandidatesFromToolCall",
@@ -389,7 +390,7 @@ class TestNormalizeArtifactPathPlatformEdges:
         assert NODE is not None  # module is skipped when node is missing
         ignore_re = _extract_const("ARTIFACT_IGNORE_RE")
         helpers = "\n".join(
-            _extract_fn(n) for n in ("_isWindowsStylePath", "_stripWorkspacePrefix")
+            _extract_fn(n) for n in ("_isWindowsStylePath", "_stripWorkspacePrefix", "_canonicalizeRelativePath")
         )
         driver = (
             f"const S = {{ session: {{ workspace: {json.dumps(ws)} }} }};\n"
@@ -407,6 +408,140 @@ class TestNormalizeArtifactPathPlatformEdges:
             f"_stripWorkspacePrefix must strip under-workspace paths and leave "
             f"others untouched; got {out}"
         )
+
+    def test_posix_drive_lookalike_relative_survives_repeated_normalization(self):
+        """POSIX workspace: /Users/test/ws/C:/foo.py and bare C:/foo.py are
+        legal POSIX names and must survive, including a second normalization
+        pass (composed candidate → mutation-set → open-preview re-normalizes
+        the same value — maintainer re-gate #5752, blocker 1)."""
+        ws = "/Users/test/ws"
+        out = _normalize_via_node(
+            [f"{ws}/C:/foo.py", "C:/foo.py"],
+            workspace=ws,
+        )
+        assert out == ["C:/foo.py", "C:/foo.py"], (
+            f"POSIX drive-lookalike relative names must survive normalization; "
+            f"got {out}"
+        )
+        # Idempotency: a second pass over the normalized value must not drop it.
+        out2 = _normalize_via_node(out, workspace=ws)
+        assert out2 == out, (
+            f"Repeated normalization must be idempotent for drive lookalikes; "
+            f"got {out2} after {out}"
+        )
+
+    def test_posix_workspace_root_with_literal_backslash(self):
+        """A POSIX workspace root may itself contain a literal backslash
+        (/tmp/a\\b) — it must not be folded before flavor is decided
+        (maintainer re-gate #5752, blocker 3)."""
+        ws = "/tmp/a\\b"
+        out = _normalize_via_node(
+            [f"{ws}/file.py"],
+            workspace=ws,
+        )
+        assert out == ["file.py"], (
+            f"POSIX workspace root with a literal backslash must still strip; "
+            f"got {out}"
+        )
+
+    def test_posix_dotdot_escape_fails_closed(self):
+        """Absolute path that lexically starts under the workspace but resolves
+        outside it must fail closed (maintainer re-gate #5752, blocker 2)."""
+        ws = "/Users/test/ws"
+        out = _normalize_via_node(
+            [f"{ws}/../outside/foo.py", f"{ws}/a/../../x.py"],
+            workspace=ws,
+        )
+        assert out == ["", ""], (
+            f"Dot-dot escapes from the workspace must fail closed; got {out}"
+        )
+
+    def test_windows_dotdot_escape_fails_closed(self):
+        """Windows absolute with '..' escaping the workspace must fail closed."""
+        ws = "C:\\Users\\test\\ws"
+        out = _normalize_via_node(
+            [f"{ws}\\..\\outside\\foo.py"],
+            workspace=ws,
+        )
+        assert out == [""], (
+            f"Windows dot-dot escape must fail closed; got {out}"
+        )
+
+    def test_in_workspace_dotdot_canonicalizes(self):
+        """In-workspace '..' segments canonicalize so they still match the
+        resolved preview path (/ws/sub/../x.py → x.py)."""
+        ws = "/Users/test/ws"
+        out = _normalize_via_node(
+            [f"{ws}/sub/../x.py", f"{ws}/./x.py"],
+            workspace=ws,
+        )
+        assert out == ["x.py", "x.py"], (
+            f"In-workspace dot-dot segments must canonicalize, not drop; got {out}"
+        )
+
+    def test_sibling_prefix_workspace_not_confused(self):
+        """/Users/test/ws2 must not match a /Users/test/ws workspace prefix and
+        vice versa (sibling-prefix boundary)."""
+        out = _normalize_via_node(
+            ["/Users/test/ws2/x.py", "/Users/test/ws/x.py"],
+            workspace="/Users/test/ws",
+        )
+        assert out == ["", "x.py"], (
+            f"Sibling workspace prefixes must not cross-match; got {out}"
+        )
+        out2 = _normalize_via_node(
+            ["/Users/test/ws/x.py"],
+            workspace="/Users/test/ws2",
+        )
+        assert out2 == [""], (
+            f"Workspace /ws2 must not strip /ws paths; got {out2}"
+        )
+
+    def test_write_file_drive_lookalike_candidate_survives(self):
+        """write_file with absolute /Users/test/ws/C:/foo.py must produce the
+        'C:/foo.py' candidate (legal POSIX name), not drop it as a bogus
+        Windows absolute."""
+        ws = "/Users/test/ws"
+        tc = {
+            "name": "write_file",
+            "args": {"path": f"{ws}/C:/foo.py"},
+        }
+        paths = _candidates_via_node(tc, workspace=ws)
+        assert "C:/foo.py" in paths, (
+            f"write_file on a POSIX drive-lookalike name must produce a "
+            f"matching candidate; got {paths}"
+        )
+
+    def test_strip_workspace_prefix_windows_drive_and_unc_descendants(self):
+        """Display/open parity: _stripWorkspacePrefix must strip accepted
+        drive and UNC descendants on a Windows workspace (used by both
+        displayPath and openArtifactPath)."""
+        assert NODE is not None  # module is skipped when node is missing
+        helpers = "\n".join(
+            _extract_fn(n) for n in ("_isWindowsStylePath", "_stripWorkspacePrefix")
+        )
+        cases = [
+            ("C:\\Users\\test\\ws", "C:\\Users\\test\\ws\\foo.py", "foo.py"),
+            ("C:\\Users\\test\\ws", "c:\\users\\test\\ws\\sub\\x.py", "sub/x.py"),
+            ("\\\\server\\share\\ws", "\\\\server\\share\\ws\\foo.py", "foo.py"),
+        ]
+        for ws, path, want in cases:
+            driver = (
+                f"const S = {{ session: {{ workspace: {json.dumps(ws)} }} }};\n"
+                + helpers + "\n"
+                + "const out = _stripWorkspacePrefix(JSON.parse(process.argv[1])[0]);\n"
+                + "process.stdout.write(JSON.stringify(out));\n"
+            )
+            r = subprocess.run(
+                [NODE, "-e", driver, json.dumps([path])],
+                capture_output=True, text=True, timeout=15,
+            )
+            assert r.returncode == 0, f"node failed: {r.stderr}"
+            got = json.loads(r.stdout)
+            assert got == want, (
+                f"_stripWorkspacePrefix({path!r}) on workspace {ws!r} must "
+                f"yield {want!r}, got {got!r}"
+            )
 
 
 # ---------------------------------------------------------------------------

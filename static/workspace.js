@@ -392,29 +392,31 @@ const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|_
 // Canonical Hermes mutators plus MCP filesystem aliases that can create/edit files.
 const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);
 
-// A path is Windows-style when it starts with a drive letter ("C:/" or
+// A path string is Windows-style when it starts with a drive letter ("C:/" or
 // "C:\") or a backslash UNC root ("\\server\share"). A forward-slash "//"
 // prefix is deliberately NOT evidence of Windows — POSIX permits "//" at the
-// start of a path, and mistaking it for UNC would fold legal POSIX file names
-// and mis-strip case-sensitive prefixes (maintainer review #5752, edges 2-3).
+// start of a path (maintainer review #5752, edges 2-3).
 function _isWindowsStylePath(p){
   return /^[A-Za-z]:[\\/]/.test(p) || /^\\\\/.test(p);
 }
 
 // Strip the S.session.workspace prefix so an absolute tool path and a relative
 // preview path compare equal ("/Users/x/ws/foo.py" vs "foo.py", #5747).
-// Windows workspaces strip case-insensitively (Windows paths are
-// case-insensitive); POSIX keeps exact case. Returns the stripped path when
-// under the workspace, otherwise the input unchanged — callers decide what
-// "outside the workspace" means (mutation tracking fails closed, display
-// keeps the raw path).
+// Path flavor is decided from the workspace STRING, never from the candidate:
+// a POSIX workspace may legally contain backslashes (so its string is never
+// rewritten) and treats drive/UNC lookalikes as plain file names; a Windows
+// workspace folds separators and strips case-insensitively. Returns the
+// stripped path when under the workspace, otherwise the input unchanged —
+// callers decide what "outside the workspace" means (mutation tracking fails
+// closed, display keeps the raw path).
 function _stripWorkspacePrefix(path){
   if(typeof S==='undefined' || !S.session || !S.session.workspace) return path;
   const ws = String(S.session.workspace);
-  const normWs = ws.replace(/\\/g,'/').replace(/\/+$/,'') + '/';
+  // Flavor must be known BEFORE normalizing: a POSIX workspace root may
+  // contain a literal backslash, so its string is never rewritten
+  // (maintainer re-gate #5752, blocker 3).
   const isWindows = _isWindowsStylePath(ws);
-  // Fold backslashes only for Windows workspaces — on POSIX, `\` is a legal
-  // filename character and must survive (maintainer review #5752, edge 3).
+  const normWs = (isWindows ? ws.replace(/\\/g,'/') : ws).replace(/\/+$/,'') + '/';
   const normPath = isWindows ? path.replace(/\\/g,'/') : path;
   if(isWindows){
     if(normPath.toLowerCase().startsWith(normWs.toLowerCase()))
@@ -423,6 +425,23 @@ function _stripWorkspacePrefix(path){
     return normPath.slice(normWs.length);
   }
   return path;
+}
+
+// Resolve "." and ".." segments of a workspace-relative path. Returns null
+// when the path escapes the workspace root (a leading ".."), which callers
+// must treat as fail-closed; in-workspace segments ("a/../b.py") canonicalize
+// to their resolved form so they still match a preview (maintainer re-gate
+// #5752, blocker 2).
+function _canonicalizeRelativePath(path){
+  const out = [];
+  for(const part of String(path).split('/')){
+    if(!part || part === '.') continue;
+    if(part === '..'){
+      if(!out.length) return null;
+      out.pop();
+    } else out.push(part);
+  }
+  return out.join('/');
 }
 
 function _normalizeArtifactPath(path){
@@ -435,20 +454,42 @@ function _normalizeArtifactPath(path){
   // preview stale (#3262 / pre-release regression-gate finding).
   path = path.replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
   if(!path) return '';
-  // Windows-style absolutes fold backslashes for matching; POSIX keeps `\` (and
-  // `:`) as legal filename characters, so they must survive verbatim.
-  const isWindows = _isWindowsStylePath(path);
-  const normPath = isWindows ? path.replace(/\\/g,'/') : path;
-  if(isWindows || normPath.startsWith('/')){
-    // Strip the workspace prefix from absolute paths so they compare equal to
-    // relative preview paths (#5747). An absolute path not under the workspace
-    // (or no workspace set) can never match a relative preview path — bail out
-    // to avoid false candidates.
-    const stripped = _stripWorkspacePrefix(normPath);
-    if(stripped === normPath) return '';
+  // Path flavor is decided ONCE from the workspace, never per candidate: a
+  // POSIX workspace must treat "C:/foo.py" and leading-backslash lookalikes
+  // as legal POSIX file names (maintainer re-gate #5752, blocker 1), so they
+  // survive repeated normalization instead of being mis-read as Windows
+  // absolutes on a second pass.
+  const ws = (typeof S!=='undefined' && S.session) ? S.session.workspace : null;
+  const isWindows = !!ws && _isWindowsStylePath(String(ws));
+  if(isWindows){
+    const normPath = path.replace(/\\/g,'/');
+    // Windows absolute: drive letter, backslash UNC, or a leading '/'.
+    if(_isWindowsStylePath(path) || path.startsWith('/')){
+      // Strip the workspace prefix so they compare equal to relative preview
+      // paths (#5747). An absolute path not under the workspace can never
+      // match a relative preview path — bail out to avoid false candidates.
+      const stripped = _stripWorkspacePrefix(normPath);
+      if(stripped === normPath) return '';
+      path = stripped;
+    } else {
+      // Windows-relative paths still fold separators so "foo\bar.py" matches
+      // a "foo/bar.py" preview.
+      path = normPath;
+    }
+  } else if(path.startsWith('/')){
+    // POSIX absolute (or no workspace set): strip the workspace prefix; an
+    // absolute path outside the workspace can never match a relative preview
+    // path — bail out to avoid false candidates.
+    const stripped = _stripWorkspacePrefix(path);
+    if(stripped === path) return '';
     path = stripped;
   }
-  if(!path) return '';
+  // An absolute input that lexically starts under the workspace but resolves
+  // outside it (e.g. "/ws/../outside/x.py") must fail closed; in-workspace
+  // ".." segments ("/ws/a/../b.py") canonicalize so they still match.
+  const canon = _canonicalizeRelativePath(path);
+  if(!canon) return '';
+  path = canon;
   if(ARTIFACT_IGNORE_RE.test(path)) return '';
   // No bare-name rejection here: structured mutator args and patch headers can
   // legitimately name extension-less root files (Makefile, LICENSE,

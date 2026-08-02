@@ -58,7 +58,7 @@ def _normalize_via_node(paths):
     # extract those helpers first so the driver has them in scope.
     fn = "\n".join(
         _extract_fn_body(n)
-        for n in ("_isWindowsStylePath", "_stripWorkspacePrefix", "_normalizeArtifactPath")
+        for n in ("_isWindowsStylePath", "_stripWorkspacePrefix", "_canonicalizeRelativePath", "_normalizeArtifactPath")
     )
     driver = (
         ignore_re + "\n" + fn + "\n"

@@ -56,6 +56,7 @@ def _collect_via_node(messages):
         for n in (
             "_isWindowsStylePath",
             "_stripWorkspacePrefix",
+            "_canonicalizeRelativePath",
             "_normalizeArtifactPath",
             "_artifactCandidatesFromText",
             "_artifactCandidatesFromToolCall",
