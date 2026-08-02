@@ -1297,6 +1297,7 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
 }
 
 async function send(){
+  const autoGreeting=!!(arguments[0]&&arguments[0].autoGreeting);
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
   // _defaultMessageMode
@@ -1638,7 +1639,7 @@ async function send(){
   // upload window. _composerDraftClearPromise / _submittedDraftFilesForClear are
   // set there; nothing to re-declare here.
   const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
-  const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000,_pending:true};
+  const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000,_pending:true,...(autoGreeting?{_auto_greeting:true}: {})};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
@@ -1673,7 +1674,7 @@ async function send(){
     // Set provisional title from user message immediately so session appears
     // in the sidebar right away with a meaningful name. /api/chat/start persists
     // the server-side provisional title and may refine this optimistic text.
-    if(S.session&&(S.session.title==='Untitled'||!S.session.title)){
+    if(!autoGreeting&&S.session&&(S.session.title==='Untitled'||!S.session.title)){
       const provisionalTitle=displayText.slice(0,64);
       _runOptionalPreStartUiStep('applySessionTitleUpdate.provisional', ()=>{
         applySessionTitleUpdate(activeSid, provisionalTitle, {force:true, rememberProvisional:true});
@@ -1685,7 +1686,7 @@ async function send(){
           upsertActiveSessionForLocalTurn({title:provisionalTitle,messageCount:S.messages.length,timestampMs:Date.now()});
         }
       });
-    } else if(typeof upsertActiveSessionForLocalTurn==='function'){
+    } else if(!autoGreeting&&typeof upsertActiveSessionForLocalTurn==='function'){
       _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.titled', ()=>{
         upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
       });
