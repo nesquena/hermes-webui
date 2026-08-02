@@ -10167,6 +10167,11 @@ def _run_agent_streaming(
                     new_sid = _agent_sid
                     _compression_origin_session_id = old_sid
                     _compression_continuation_session_id = new_sid
+                    # Ownership follows the automatic continuation id atomically
+                    # before any cache/file mutation makes the new id writable.
+                    if getattr(s, "worktree_path", None):
+                        from api.worktree_authority import default_authority
+                        default_authority().transfer(s.workspace, old_sid, new_sid)
                     s.session_id = new_sid
                     # Carry profile identity across the compression boundary.
                     # Without this, s.profile stays None on the continuation

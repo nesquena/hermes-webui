@@ -669,6 +669,28 @@ def _guard_request_session_visibility(handler, parsed, body=None, method="GET") 
     return True
 
 
+def _guard_request_worktree_ownership(handler, body=None) -> bool:
+    """Fail closed before any POST can mutate a worktree-backed session."""
+    if not isinstance(body, dict):
+        return True
+    sid = str(body.get("session_id") or "").strip()
+    if not sid:
+        sid = _stream_id_owner_session_id(body.get("stream_id")) or ""
+    if not sid:
+        return True
+    try:
+        session = get_session(sid, metadata_only=True)
+    except KeyError:
+        return True
+    try:
+        from api.worktree_authority import assert_session_owner
+        assert_session_owner(session)
+    except Exception as exc:
+        bad(handler, f"Worktree write refused: {exc}", status=409)
+        return False
+    return True
+
+
 def _active_skills_dir() -> Path:
     """Return the skills directory for the request's active Hermes profile.
 
@@ -5244,6 +5266,12 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
     # materializing a writable sidecar would fork the title/state.
     if cli_meta.get("read_only") or _is_messaging_session_record(cli_meta):
         raise PermissionError("read-only imported session")
+
+    # Materialization may be the first WebUI object after a process restart.
+    # A linked workspace is writable only when its durable claim already names
+    # this exact continuation/session id.
+    from api.worktree_authority import assert_workspace_owner
+    assert_workspace_owner(get_last_workspace(), sid)
 
     # Preserve source metadata fields
     def _apply_source_meta(s):
@@ -14265,6 +14293,10 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return True
+    if not _guard_request_worktree_ownership(handler, body=body):
+        if diag:
+            diag.finish()
+        return True
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
@@ -14518,6 +14550,15 @@ def handle_post(handler, parsed) -> bool:
             )
         else:
             worktree_requested = _worktree_default_from_config(body.get("profile") or None)
+        if workspace and not worktree_requested:
+            try:
+                from api.worktree_authority import is_linked_worktree
+                if is_linked_worktree(workspace):
+                    return bad(handler, "A linked Git worktree requires its existing owner session; creating another writable session is refused.", status=409)
+            except ValueError:
+                raise
+            except Exception as e:
+                return bad(handler, f"Unable to verify Git worktree ownership: {e}", status=409)
         if worktree_requested:
             try:
                 from api.worktrees import create_worktree_for_workspace
@@ -14642,6 +14683,8 @@ def handle_post(handler, parsed) -> bool:
             if not session:
                 # 404, not 400 — missing resource, not a malformed request.
                 return bad(handler, "Session not found", status=404)
+            if getattr(session, "worktree_path", None):
+                return bad(handler, "Cannot duplicate a worktree conversation: it has one writable owner.", status=409)
 
             # Deep-copy mutable lists so the duplicate is *actually* independent.
             # `Session.__init__` does `self.messages = messages or []` — plain
@@ -15471,6 +15514,8 @@ def handle_post(handler, parsed) -> bool:
         source = _load_branch_source_or_refuse(handler, body["session_id"])
         if source is None:
             return True
+        if getattr(source, "worktree_path", None):
+            return bad(handler, "Cannot fork a worktree conversation: it has one writable owner.", status=409)
 
         keep_count = body.get("keep_count")
         if keep_count is not None:
@@ -15698,6 +15743,13 @@ def handle_post(handler, parsed) -> bool:
         return _handle_bg_task_complete_ack(handler, body)
 
     if parsed.path == "/api/chat/start":
+        try:
+            sid = str(body.get("session_id") or "")
+            if sid:
+                from api.worktree_authority import assert_session_owner
+                assert_session_owner(get_session(sid, metadata_only=True))
+        except Exception as e:
+            return bad(handler, f"Worktree write refused: {e}", status=409)
         return _handle_chat_start(handler, body, diag=diag)
 
     if parsed.path == "/api/chat":
@@ -15708,6 +15760,13 @@ def handle_post(handler, parsed) -> bool:
         return _handle_chat_steer(handler, body)
 
     if parsed.path == "/api/terminal/start":
+        try:
+            sid = str(body.get("session_id") or "")
+            if sid:
+                from api.worktree_authority import assert_session_owner
+                assert_session_owner(get_session(sid, metadata_only=True))
+        except Exception as e:
+            return bad(handler, f"Worktree terminal refused: {e}", status=409)
         return _handle_terminal_start(handler, body)
 
     if parsed.path == "/api/terminal/input":
@@ -16947,6 +17006,8 @@ def handle_patch(handler, parsed) -> bool:
     body = read_body(handler)
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PATCH"):
         return True
+    if not _guard_request_worktree_ownership(handler, body=body):
+        return True
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_toggle(handler, name, body)
@@ -16974,6 +17035,8 @@ def handle_delete(handler, parsed) -> bool:
         return proxy_result
     body = read_body(handler)
     if not _guard_request_session_visibility(handler, parsed, body=body, method="DELETE"):
+        return True
+    if not _guard_request_worktree_ownership(handler, body=body):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
@@ -17010,6 +17073,8 @@ def handle_put(handler, parsed) -> bool:
         return proxy_result
     body = read_body(handler)
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PUT"):
+        return True
+    if not _guard_request_worktree_ownership(handler, body=body):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
@@ -21184,6 +21249,8 @@ def _handle_btw(handler, body):
         s = get_session(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
+    if getattr(s, "worktree_path", None):
+        return bad(handler, "/btw cannot create a second writer in a linked worktree", 409)
     question = str(body["question"]).strip()
     if not question:
         return bad(handler, "question is required")
@@ -21245,6 +21312,8 @@ def _handle_background(handler, body):
         s = get_session(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
+    if getattr(s, "worktree_path", None):
+        return bad(handler, "/background cannot create a second writer in a linked worktree", 409)
     prompt = str(body["prompt"]).strip()
     if not prompt:
         return bad(handler, "prompt is required")
@@ -22280,6 +22349,8 @@ def _handle_session_compression_recovery_start(handler, body):
     if action != COMPRESSION_RECOVERY_ACTION_START_FOCUSED:
         return bad(handler, "Unsupported compression recovery action.", 409)
 
+    if getattr(source, "worktree_path", None):
+        return bad(handler, "Focused compression recovery from a worktree is refused because ownership cannot be transferred safely.", 409)
     created = False
     with _COMPRESSION_RECOVERY_START_LOCK:
         source_profile = getattr(source, "profile", None)
@@ -26485,6 +26556,13 @@ def _handle_session_import_cli(handler, body):
             },
         )
 
+    try:
+        from api.worktree_authority import is_linked_worktree
+        if is_linked_worktree(get_last_workspace()):
+            return bad(handler, "CLI import into a linked worktree is refused", 409)
+    except Exception as exc:
+        return bad(handler, f"Unable to verify CLI import workspace ownership: {exc}", 409)
+
     s = import_cli_session(
         sid,
         title,
@@ -26558,6 +26636,12 @@ def _handle_session_import(handler, body):
         workspace = str(resolve_trusted_workspace(body.get("workspace", str(DEFAULT_WORKSPACE))))
     except (TypeError, ValueError) as e:
         return bad(handler, str(e))
+    try:
+        from api.worktree_authority import is_linked_worktree
+        if is_linked_worktree(workspace):
+            return bad(handler, "Import into a linked worktree is refused: it already has one writer", 409)
+    except Exception as exc:
+        return bad(handler, f"Unable to verify imported workspace ownership: {exc}", 409)
     model = body.get("model", DEFAULT_MODEL)
     s = Session(
         title=title,

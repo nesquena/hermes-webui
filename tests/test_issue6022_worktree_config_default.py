@@ -45,6 +45,13 @@ def _post_session_new(tmp_path, monkeypatch, body, *, config_default, workspace_
         monkeypatch.setattr(
             worktrees, "create_worktree_for_workspace", lambda workspace: fake_worktree
         )
+        import api.worktree_authority as worktree_authority
+        monkeypatch.setattr(worktree_authority, "is_linked_worktree", lambda workspace: True)
+        monkeypatch.setattr(
+            worktree_authority,
+            "default_authority",
+            lambda: SimpleNamespace(claim=lambda workspace, session_id: "test-claim"),
+        )
     captured = {}
     monkeypatch.setattr(
         routes,

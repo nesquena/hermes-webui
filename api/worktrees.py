@@ -265,6 +265,11 @@ def remove_worktree_for_session(session, *, force: bool = False) -> dict:
     repo_root = getattr(session, "worktree_repo_root", None)
     if not repo_root:
         raise ValueError("Session missing worktree_repo_root")
+    from api.worktree_authority import canonical_worktree_identity, default_authority
+    ownership_identity = canonical_worktree_identity(worktree_path)
+    default_authority().assert_owner(
+        worktree_path, str(getattr(session, "session_id", ""))
+    )
 
     # Unlock the creation-time bookkeeping lock before removing (fail-soft).
     # The agent locks every worktree it creates (cli._setup_worktree), and git
@@ -301,6 +306,14 @@ def remove_worktree_for_session(session, *, force: bool = False) -> dict:
         )
     except Exception:
         pass
+
+    # A claim disappears only after Git proves the worktree registration was
+    # removed. This keeps crashes fail-closed rather than freeing a live tree.
+    default_authority().release_after_removal(
+        ownership_identity,
+        str(getattr(session, "session_id", "")),
+        repo_root,
+    )
 
     return {
         "ok": True,

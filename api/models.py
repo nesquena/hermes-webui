@@ -5041,6 +5041,14 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         worktree_created_at=wt.get('created_at') if wt else None,
         enabled_toolsets=enabled_toolsets,
     )
+    if wt:
+        # The durable claim must succeed before this id becomes visible in the
+        # in-memory cache or session index. A losing concurrent creator leaves
+        # no ghost session behind.
+        from api.worktree_authority import default_authority, is_linked_worktree
+        if not is_linked_worktree(s.workspace):
+            raise ValueError("worktree_info does not identify a linked Git worktree")
+        default_authority().claim(s.workspace, s.session_id)
     # #4985: defensive — auto-generated uuids don't collide with the
     # tombstone, but if a future caller ever passes an explicit id that
     # was previously pruned, clear the entry so the new session isn't
