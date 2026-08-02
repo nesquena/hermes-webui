@@ -3714,7 +3714,7 @@ def _assert_gateway_writeback_split(s, raw_command, expansion):
     )
 
 
-def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch):
+def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch, tmp_path):
     """Route-composed regression for the gateway seam (round-4 re-gate).
 
     Enters through _start_chat_stream_for_session with the raw slash command
@@ -3724,9 +3724,15 @@ def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch):
 
     Must fail if api/routes.py stops forwarding agent_message to the gateway
     worker (revert `if agent_message: worker_kwargs[...]`).
+
+    Session persistence is isolated under tmp_path and owned sessions are
+    dropped from models.SESSIONS in try/finally; the worker is awaited until
+    its stream channel and active-run registry are gone, so no shared state
+    leaks to later tests in the same pytest process (round-5 re-gate).
     """
     import time as _time
 
+    import api.config as config
     import api.gateway_chat as gateway_chat
     import api.models as models
     import api.routes as routes
@@ -3734,12 +3740,39 @@ def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch):
     raw_command = "/llm-wiki list pages"
     expansion = "[IMPORTANT: The user has invoked the llm-wiki skill...]\nfull skill body"
 
+    # Isolate session persistence under tmp_path: files and the session index
+    # live in tmp_path, so the daemon worker threads cannot touch real state.
+    sessions_dir = tmp_path / "webui-state" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    index_path = sessions_dir / "_index.json"
+    index_path.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(models, "SESSION_DIR", sessions_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", index_path)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_path)
+
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
     monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda *a, **k: None)
     monkeypatch.setattr(
         gateway_chat, "_gateway_reasoning_effort_for_request", lambda *a, **k: None
     )
+
+    owned_sids = []
+
+    def _wait_for_worker_finalization(stream_id):
+        """Wait until the daemon worker removed its stream channel and its
+        active-run registry row; the writeback (active_stream_id=None) alone
+        happens before the worker's final global cleanup."""
+        deadline = _time.time() + 10
+        while _time.time() < deadline:
+            with config.STREAMS_LOCK:
+                stream_gone = stream_id not in config.STREAMS
+            with config.ACTIVE_RUNS_LOCK:
+                run_gone = stream_id not in config.ACTIVE_RUNS
+            if stream_gone and run_gone:
+                return True
+            _time.sleep(0.05)
+        return False
 
     def _scenario(*, runs_api: bool):
         captured = {}
@@ -3782,6 +3815,7 @@ def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch):
             monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a, **k: False)
 
         s = models.new_session(workspace="/tmp", model="test-model")
+        owned_sids.append(s.session_id)
         s.save()
         routes._start_chat_stream_for_session(
             s,
@@ -3795,34 +3829,38 @@ def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch):
             source="webui",
             external_runtime_owned=True,
         )
-        # Wait for the gateway worker writeback (clears active_stream_id),
-        # reading the persisted session like a reloading client would.
-        deadline = _time.time() + 10
-        saved = s
-        while _time.time() < deadline:
-            try:
-                saved = models.get_session(s.session_id)
-            except Exception:
-                saved = s
-            if getattr(saved, "active_stream_id", None) is None:
-                break
-            _time.sleep(0.05)
-        return saved, captured
+        stream_id = getattr(s, "active_stream_id", None)
+        finalized = _wait_for_worker_finalization(stream_id)
+        assert finalized, (
+            f"gateway worker did not finalize stream {stream_id!r} in time"
+        )
+        # Read the persisted session like a reloading client would.
+        try:
+            return models.get_session(s.session_id), captured
+        except Exception:
+            return s, captured
 
-    # Runs API serializer.
-    s_runs, body_runs = _scenario(runs_api=True)
-    runs_input = body_runs["body"].get("input")
-    assert runs_input == expansion, (
-        f"Runs API input must be the resolved payload, got {str(runs_input)[:80]!r}"
-    )
-    assert raw_command not in runs_input
-    _assert_gateway_writeback_split(s_runs, raw_command, expansion)
+    try:
+        # Runs API serializer.
+        s_runs, body_runs = _scenario(runs_api=True)
+        runs_input = body_runs["body"].get("input")
+        assert runs_input == expansion, (
+            f"Runs API input must be the resolved payload, got {str(runs_input)[:80]!r}"
+        )
+        assert raw_command not in runs_input
+        _assert_gateway_writeback_split(s_runs, raw_command, expansion)
 
-    # chat/completions serializer.
-    s_cc, body_cc = _scenario(runs_api=False)
-    cc_user = body_cc["body"]["messages"][-1]
-    assert cc_user["role"] == "user"
-    assert cc_user["content"] == expansion, (
-        "chat/completions user message must be the resolved payload"
-    )
-    _assert_gateway_writeback_split(s_cc, raw_command, expansion)
+        # chat/completions serializer.
+        s_cc, body_cc = _scenario(runs_api=False)
+        cc_user = body_cc["body"]["messages"][-1]
+        assert cc_user["role"] == "user"
+        assert cc_user["content"] == expansion, (
+            "chat/completions user message must be the resolved payload"
+        )
+        _assert_gateway_writeback_split(s_cc, raw_command, expansion)
+    finally:
+        # Restore exact prestate: drop only the owned sessions from the
+        # in-memory registry (their files live under tmp_path).
+        with models.LOCK:
+            for sid in owned_sids:
+                models.SESSIONS.pop(sid, None)

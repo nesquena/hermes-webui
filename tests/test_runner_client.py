@@ -149,8 +149,10 @@ def test_runner_route_composed_forwarding_carries_resolved_skill(monkeypatch):
 
     monkeypatch.setattr(HttpRunnerClient, "_opener", lambda self: _FakeOpener(fake_urlopen))
 
-    s = models.new_session(workspace="/tmp", model="test-model")
-    s.save()
+    # Unregistered session: _start_run's runner path only reads the object, so
+    # no session file, index entry or SESSIONS registry row is created
+    # (round-5 re-gate: no shared state leaks to later tests).
+    s = models.Session(session_id="sess-route-composed", workspace="/tmp", model="test-model")
 
     result = routes._start_run(
         s,
