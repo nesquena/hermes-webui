@@ -100,22 +100,40 @@ def render_md(raw):
     def handle_ul(block):
         lines = block.strip().split("\n")
         out = "<ul>"
+        prev = 0
         for l in lines:
-            indent = bool(re.match(r"^ {2,}", l))
-            text = re.sub(r"^ {0,4}[-*+] ", "", l)
-            style = ' style="margin-left:16px"' if indent else ""
-            out += f"<li{style}>{inline_md(text)}</li>"
-        return out + "</ul>"
+            m = re.match(r"^( *)([-*+]) (.*)$", l)
+            if not m:
+                continue
+            depth = 0 if len(m.group(1)) < 2 else len(m.group(1)) // 2
+            if depth > prev:
+                out += "<ul>"
+            elif depth < prev:
+                out += "</ul>" * (prev - depth)
+            prev = depth
+            out += f"<li>{inline_md(m.group(3))}</li>"
+        out += "</ul>" * (prev + 1)
+        return out
 
     s = re.sub(r"((?:^(?:  )?[-*+] .+\n?)+)", lambda m: handle_ul(m.group()), s, flags=re.M)
 
     def handle_ol(block):
         lines = block.strip().split("\n")
         out = "<ol>"
+        prev = 0
         for l in lines:
-            text = re.sub(r"^ {0,4}\d+\. ", "", l)
-            out += f"<li>{inline_md(text)}</li>"
-        return out + "</ol>"
+            m = re.match(r"^( *)(\d+)\. (.*)$", l)
+            if not m:
+                continue
+            depth = 0 if len(m.group(1)) < 2 else len(m.group(1)) // 2
+            if depth > prev:
+                out += "<ol>"
+            elif depth < prev:
+                out += "</ol>" * (prev - depth)
+            prev = depth
+            out += f"<li>{inline_md(m.group(3))}</li>"
+        out += "</ol>" * (prev + 1)
+        return out
 
     s = re.sub(r"((?:^(?:  )?\d+\. .+\n?)+)", lambda m: handle_ol(m.group()), s, flags=re.M)
 
@@ -559,10 +577,12 @@ def test_ordered_list_code_spans(cleanup_test_sessions):
     assert "<code>npm start</code>" in out
 
 def test_indented_list_item_bold(cleanup_test_sessions):
-    """Bold inside indented (nested) list item."""
+    """Bold inside indented (nested) list item — nested items now build a
+    structural nested <ul> instead of a margin-left sibling (#6700)."""
     out = render_md("- top level\n  - **nested bold**")
     assert "<strong>nested bold</strong>" in out
-    assert "margin-left:16px" in out
+    assert "<ul><li><strong>nested bold</strong></li></ul>" in out
+    assert "margin-left:16px" not in out
 
 # --- Blockquote variants ---
 
