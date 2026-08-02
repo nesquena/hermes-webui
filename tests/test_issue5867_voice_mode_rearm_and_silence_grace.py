@@ -414,7 +414,7 @@ process.on('unhandledRejection', error => state.unhandled.push(String(error && e
 const scope = {
   window: windowObj, document: documentObj, location: { href: 'http://localhost/' },
   S, INFLIGHT, EventSource: FakeEventSource, localStorage,
-  api: async () => ({ active: false, replay_available: false }), setTimeout, clearTimeout,
+  api: async () => { const response = JSON.parse(Buffer.from('${STATUS_B64}', 'base64').toString()); if(response.replace){ S.activeStreamId='replacement'; S.session.active_stream_id='replacement'; } return response; }, setTimeout, clearTimeout,
   requestAnimationFrame: callback => setTimeout(callback, 0),
   cancelAnimationFrame: clearTimeout,
   URL, encodeURIComponent, console,
@@ -422,6 +422,7 @@ const scope = {
   _sendInProgress: false, _sendInProgressSid: null,
   setBusy: value => { S.busy = value; }, setComposerStatus: noOp, setStatus: noOp,
   _isActiveSession: () => true,
+  _isSessionCurrentPane: () => true,
   showLiveRunStatus: noOp, hideLiveRunStatus: noOp, _clearLiveRunStatusTimer: noOp,
   snapshotLiveTurnHtmlForSession: noOp, _resumeSessionStreamAfterLiveChat: noOp,
   _suspendSessionStreamForLiveChat: noOp, saveInflightState: noOp,
@@ -463,10 +464,11 @@ const attach = attachFactory(scope);
 """
 
 
-def _run_attach_transport_race() -> dict:
+def _run_attach_transport_race(status: dict | None = None) -> dict:
     script = ATTACH_RACE_HARNESS.replace(
         "${ATTACH_B64}", base64.b64encode(ATTACH_SOURCE.encode()).decode()
-    ).replace("${RUNTIME_B64}", base64.b64encode((_voice_runtime() + "\n" + VOICE_COMPLETE_SOURCE).encode()).decode())
+    ).replace("${RUNTIME_B64}", base64.b64encode((_voice_runtime() + "\n" + VOICE_COMPLETE_SOURCE).encode()).decode()
+    ).replace("${STATUS_B64}", base64.b64encode(json.dumps(status or {"active": False, "replay_available": False}).encode()).decode())
     result = subprocess.run([NODE], input=script, capture_output=True, text=True)
     if result.returncode:
         raise AssertionError(result.stderr)
@@ -620,13 +622,44 @@ def test_reconnecting_dead_stream_settles_exact_voice_owner_without_event_source
         "sources": 0,
         "completionEvents": 0,
         "ownerSettlements": 1,
-        "starts": 1,
+        "starts": 2,
         "aborts": 1,
         "state": "listening",
-        "owner": {"sid": "s1", "streamId": "stream-1"},
+        "owner": None,
         "activeStreamId": None,
         "sessionActiveStreamId": None,
         "busy": False,
+        "unhandled": [],
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("status", [{"active": True}, {"active": False, "replay_available": True}])
+def test_reconnecting_active_or_replay_stream_still_constructs_event_source(status):
+    result = _run_attach_transport_race(status)
+    assert result["sources"] == 1
+    assert result["ownerSettlements"] == 0
+    assert result["state"] == "thinking"
+    assert result["activeStreamId"] == "stream-1"
+    assert result["sessionActiveStreamId"] == "stream-1"
+    assert result["busy"] is True
+    assert result["unhandled"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_reconnecting_dead_result_cannot_clear_replacement_stream_after_status_await():
+    result = _run_attach_transport_race({"active": False, "replay_available": False, "replace": True})
+    assert result == {
+        "sources": 0,
+        "completionEvents": 0,
+        "ownerSettlements": 0,
+        "starts": 1,
+        "aborts": 1,
+        "state": "thinking",
+        "owner": {"sid": "s1", "streamId": "stream-1"},
+        "activeStreamId": "replacement",
+        "sessionActiveStreamId": "replacement",
+        "busy": True,
         "unhandled": [],
     }
 

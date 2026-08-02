@@ -1807,6 +1807,10 @@ window.renderTranscript=function(container, messages, opts){
     }
     _voiceManualPending=null;
     const settled=_voiceLeaseSettle(lease,outcome||{success:false});
+    if(settled&&!source&&!lease.restartTimer&&!_voiceBusy()){
+      _voiceLease=_newVoiceLease();
+      _startListening(_voiceLease);
+    }
     if(source&&typeof window!=='undefined'&&typeof window._liveStreamTransportRelease==='function'){
       window._liveStreamTransportRelease(sid,generation);
     }

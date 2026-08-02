@@ -6994,6 +6994,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){
         st=null;
       }
+      if(st&&(!_isSessionCurrentPane(activeSid)
+        ||S.activeStreamId!==streamId
+        ||!S.session
+        ||S.session.session_id!==activeSid
+        ||S.session.active_stream_id!==streamId)) return;
       if(st&&!st.active&&st.replay_available){
         replayOnly=true;
       }else if(st&&!st.active){
