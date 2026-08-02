@@ -59,3 +59,21 @@ def test_measurement_rerenders_are_bounded_per_virtual_window_cycle():
     assert "if(_messageVirtualMeasurementRetryCount>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS) return;" in UI_JS
     assert "_scheduleMessageVirtualMeasurementRefresh(virtualWindow);" in UI_JS
     assert "_markMessageVirtualMeasurementsSettled(virtualWindow);" in UI_JS
+
+
+def test_measurement_retry_budget_not_reset_by_cycle_key_change():
+    """#6654: the cycle-key branch of _scheduleMessageVirtualMeasurementRefresh
+    must record the new key but never reset _messageVirtualMeasurementRetryCount.
+    Resetting on key change lets WebKit's A->B->A->B metric oscillation renew
+    the two-render budget forever, keeping the rAF/measure loop alive."""
+    idx = UI_JS.index("function _scheduleMessageVirtualMeasurementRefresh(windowMetrics)")
+    end = UI_JS.index("function _markMessageVirtualMeasurementsSettled", idx)
+    body = UI_JS[idx:end]
+    # The key-change branch must only assign the key.
+    assert "if(_messageVirtualMeasurementCycleKey!==cycleKey){" in body
+    assert "_messageVirtualMeasurementRetryCount=0;" not in body, (
+        "cycle-key change must not reset the retry budget (issue #6654)"
+    )
+    # The budget guard and increment must still be present.
+    assert "if(_messageVirtualMeasurementRetryCount>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS) return;" in body
+    assert "_messageVirtualMeasurementRetryCount++;" in body

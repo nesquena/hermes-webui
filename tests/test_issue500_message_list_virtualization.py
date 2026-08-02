@@ -1141,3 +1141,86 @@ console.log(JSON.stringify({
     assert metrics["timerCleared"] is True, (
         "_clearMessageVirtualHeightCache must call clearTimeout on the pending settle timer"
     )
+
+
+def test_measurement_retry_budget_is_global_across_cycle_key_oscillation():
+    """#6654: _scheduleMessageVirtualMeasurementRefresh must NOT reset
+    _messageVirtualMeasurementRetryCount when _messageVirtualMeasurementCycleKey
+    changes. If WebKit alternates between two measured window-metric sets
+    (A -> B -> A -> B), each key transition used to reset the two-render budget,
+    so the rAF/geometry-measurement loop never terminated (~30% WebContent CPU).
+    The MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS budget must cap the whole
+    convergence burst globally; it resets only when measurement settles
+    (_markMessageVirtualMeasurementsSettled) or the cache/session resets
+    (_clearMessageVirtualHeightCache)."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+let scheduled = 0;
+let _messageVirtualMeasurementCycleKey = '';
+let _messageVirtualMeasurementRetryCount = 0;
+let _messageVirtualScrollActive = false;
+let _messageVirtualDeferredMeasurement = null;
+const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS = 2;
+function _messageVirtualMeasurementCycleKeyFor(w) { return w.key; }
+function _scheduleMessageVirtualizedRender(force) { scheduled++; }
+function requestAnimationFrame(cb) { cb(); }
+eval(extractFunc('_scheduleMessageVirtualMeasurementRefresh'));
+// WebKit alternates between two adjacent window-metric keys across
+// getBoundingClientRect passes. Before the fix every key transition reset the
+// budget, so all four passes scheduled a re-render.
+for (const key of ['A','B','A','B']) {
+  _scheduleMessageVirtualMeasurementRefresh({ key: key });
+}
+console.log(JSON.stringify({
+  scheduled: scheduled,
+  retries: _messageVirtualMeasurementRetryCount,
+}));
+"""
+    metrics = json.loads(_run_node(source))
+    assert metrics["scheduled"] == 2, (
+        "cycle-key oscillation must not reset the retry budget: "
+        f"scheduled {metrics['scheduled']} re-renders (expected 2, the "
+        "MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS cap for the whole burst)"
+    )
+    assert metrics["retries"] == 2, (
+        "retry count must keep accumulating across key changes: "
+        f"ended at {metrics['retries']} (expected 2)"
+    )
+
+
+def test_measurement_retry_budget_still_caps_stable_key_burst():
+    """#6654 guard: with a stable cycle key the budget must still cap the burst
+    at MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS (the removed per-key reset
+    must not have weakened the stable-key path)."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+let scheduled = 0;
+let _messageVirtualMeasurementCycleKey = '';
+let _messageVirtualMeasurementRetryCount = 0;
+let _messageVirtualScrollActive = false;
+let _messageVirtualDeferredMeasurement = null;
+const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS = 2;
+function _messageVirtualMeasurementCycleKeyFor(w) { return w.key; }
+function _scheduleMessageVirtualizedRender(force) { scheduled++; }
+function requestAnimationFrame(cb) { cb(); }
+eval(extractFunc('_scheduleMessageVirtualMeasurementRefresh'));
+for (let i = 0; i < 6; i++) {
+  _scheduleMessageVirtualMeasurementRefresh({ key: 'A' });
+}
+// The budget is exhausted after two renders; a settled measurement resets it.
+_messageVirtualMeasurementRetryCount = 0;
+_scheduleMessageVirtualMeasurementRefresh({ key: 'A' });
+console.log(JSON.stringify({
+  scheduled: scheduled,
+  retries: _messageVirtualMeasurementRetryCount,
+}));
+"""
+    metrics = json.loads(_run_node(source))
+    assert metrics["scheduled"] == 3, (
+        "stable-key burst must stop at MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS "
+        f"and resume only after a budget reset: scheduled {metrics['scheduled']} "
+        "(expected 3: 2 capped + 1 after explicit reset)"
+    )
+    assert metrics["retries"] == 1, (
+        f"retry count after explicit reset must be 1, got {metrics['retries']}"
+    )
