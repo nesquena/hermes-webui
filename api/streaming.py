@@ -2640,7 +2640,38 @@ _pending_eviction_generations: set[int] = set()
 # Condition notified whenever a turn exits, so an acquisition blocked on an
 # active old generation's drain can proceed the moment it completes.
 _backend_generation_cond = threading.Condition(_backend_generation_lock)
-_turn_state = threading.local()  # thread-local backend generation for the running turn
+# The calling turn's captured backend generation, bound as a ContextVar so the
+# installed Agent's concurrent-tool workers inherit it.  The Agent dispatches
+# parallel-safe tool calls on child threads and propagates ContextVars
+# (contextvars.copy_context() in tools/thread_context.propagate_context_to_thread
+# — agent/tool_executor.py:931-944), NOT arbitrary thread-locals.  A private
+# threading.local() is therefore invisible inside tool workers, and acquisition
+# there fell back to the process-global per-task owner — so a concurrent
+# profile generation change could make file/code-exec validate against the
+# wrong owner and reuse state outside the calling turn's captured generation.
+_TURN_BACKEND_GENERATION: contextvars.ContextVar[int | None] = (
+    contextvars.ContextVar('webui_turn_backend_generation', default=None)
+)
+# Serializes validate/reuse/create into ONE authoritative acquisition
+# transaction for every guarded path (terminal / file / code-execution).  The
+# preflight-then-acquire shape (validate, release the registry lock, then call
+# the original acquirer) left an empty-slot window where a concurrent guarded
+# acquisition could install an env between the ownership check and the real
+# acquire; holding this guard-owned lock across validate + original makes the
+# decision and the reuse/create atomic with respect to all other guarded
+# acquisitions.  The agent's own non-reentrant _env_lock is never held across
+# the original call, so no deadlock is introduced.
+_backend_acquisition_lock = threading.Lock()
+
+
+def _get_turn_generation() -> int | None:
+    """The calling turn's captured backend generation (ContextVar).
+
+    Propagated into the Agent's concurrent tool workers via
+    ``contextvars.copy_context()``; None for non-WebUI callers and outside a
+    turn.
+    """
+    return _TURN_BACKEND_GENERATION.get()
 
 
 def _compute_backend_identity(profile_runtime_env: dict | None) -> str:
@@ -2681,25 +2712,17 @@ def _get_current_backend_generation() -> int:
         return _current_backend_generation
 
 
-def _register_turn_generation() -> None:
-    """Mark the current thread as executing a turn under the current generation.
-
-    Runs at turn startup (after identity invalidation).  The stale-generation
-    retire path consults this counter so it never tears down an environment a
-    concurrent turn is still using.
-    """
-    gen = _get_current_backend_generation()
-    _turn_state.backend_generation = gen
-    with _backend_generation_lock:
-        _active_turn_generations[gen] = _active_turn_generations.get(gen, 0) + 1
-
-
 def _unregister_turn_generation() -> None:
-    """Mark the current turn as finished; drain any deferred stale eviction."""
-    gen = getattr(_turn_state, 'backend_generation', None)
+    """Mark the current turn as finished; drain any deferred stale eviction.
+
+    Resets/decrements the SAME captured generation the turn registered under
+    (read from the ContextVar before it is cleared), so an unregister can
+    never touch another generation's active-use count.
+    """
+    gen = _get_turn_generation()
     if gen is None:
         return
-    _turn_state.backend_generation = None
+    _TURN_BACKEND_GENERATION.set(None)
     with _backend_generation_lock:
         remaining = _active_turn_generations.get(gen, 1) - 1
         if remaining > 0:
@@ -2756,14 +2779,17 @@ def _cleanup_environment_object(env) -> None:
         logger.debug('Failed to clean retired terminal env', exc_info=True)
 
 
-def _retire_generation_env(generation: int, task_key: str = 'default') -> None:
+def _retire_generation_env(generation: int | None, task_key: str = 'default') -> None:
     """Retire the live env tagged with *generation* on *task_key*.
 
     Compare-and-remove is atomic under the registry lock (``tt._env_lock``),
     and the exact removed object is cleaned up OUTSIDE the lock — closing the
     read/retire gap where a replacement installed under the same key could be
     torn down by a later by-key pop.  The env is only retired when its object
-    tag matches *generation*; a newer replacement is never touched.
+    tag matches *generation*; a newer replacement is never touched.  An
+    untagged env (``None`` tag) is retired when *generation* is ``None`` —
+    the fail-closed path a registered WebUI turn takes when it finds an env
+    with no provenance it must not reuse.
     """
     try:
         tt = importlib.import_module('tools.terminal_tool')
@@ -2775,8 +2801,9 @@ def _retire_generation_env(generation: int, task_key: str = 'default') -> None:
         if env is None:
             return
         env_gen = getattr(env, '_webui_backend_generation', None)
-        if env_gen is None or env_gen != generation:
-            # Replaced by a newer env — never retire it.
+        if env_gen != generation:
+            # Replaced by a newer env, or tagged with a different generation —
+            # never retire it.
             return
         # Compare-and-remove: this whole read/pop is one lock hold, so the
         # registry cannot change underneath us.
@@ -2795,68 +2822,31 @@ def _retire_generation_env(generation: int, task_key: str = 'default') -> None:
         )
 
 
-def _invalidate_stale_terminal_backend(profile_runtime_env: dict | None) -> None:
-    """Evict the cached terminal/file environment when the backend config changes.
+def _publish_backend_identity(profile_runtime_env: dict | None) -> int | None:
+    """Compare/publish the effective backend identity (generation lock held).
 
-    Called at turn startup, *after* _ENV_LOCK is released.  Uses a full backend
-    identity fingerprint (not just TERMINAL_ENV) and a generation counter so
-    that:
-      - SSH host A -> SSH host B (same TERMINAL_ENV=ssh) is detected
-      - The identity transition and the ownership registration are ATOMIC:
-        the new generation is published as the recorded owner in the same
-        lock hold as the bump, so no interleaved guard read can observe a
-        half-transitioned state (recorded owner still == old generation).
-      - The eviction targets only the exact stale generation, never an env
-        that another concurrent session has already replaced (compare-and-
-        remove, cleanup of the exact removed object outside the lock).
-      - An environment still executing an older turn is never torn down:
-        its retire is deferred until the last turn under that generation exits
-        (recorded in _pending_eviction_generations, drained by
-        _drain_pending_evictions).
+    CALLER MUST HOLD ``_backend_generation_lock``: this is the transition
+    half of the ONE begin transaction.  Returns the stale generation that must
+    be retired once no turn still runs under it, or None when the identity is
+    unchanged.  The identity compare, the generation bump, the owner
+    publication and the pending-eviction record happen in the same lock hold
+    as the turn's generation capture and active-use increment, so no
+    interleaved profile switch can observe a half-transitioned state or
+    retire a generation before the first turn publishes active use.
     """
     global _last_backend_identity, _current_backend_generation
-
     identity = _compute_backend_identity(profile_runtime_env)
-
-    with _backend_generation_lock:
-        if identity == _last_backend_identity:
-            return  # same config, nothing to do
-        _last_backend_identity = identity
-        stale_generation = _current_backend_generation
-        _current_backend_generation += 1
-        # ATOMIC transition + ownership registration: publish the new owner
-        # and record the pending stale generation under the same lock hold as
-        # the bump.  The old code deferred this publish until after the
-        # active-use check, so the guard kept comparing against the old
-        # recorded generation and let the new turn reuse the stale env.
-        _env_backend_generations['default'] = _current_backend_generation
-        _file_backend_generations['default'] = _current_backend_generation
-        _pending_eviction_generations.add(stale_generation)
-
-    logger.info(
-        'Terminal backend identity changed (gen %d -> %d): checking for stale env',
-        stale_generation,
-        stale_generation + 1,
-    )
-
-    if _active_turn_generations.get(stale_generation, 0) > 0:
-        # A turn is still executing under the stale generation — defer the
-        # retire until that turn exits (drained by _drain_pending_evictions).
-        logger.info(
-            'Deferring stale env retire (gen %s) — active turn still using it',
-            stale_generation,
-        )
-        return
-
-    try:
-        _retire_generation_env(stale_generation, 'default')
-        with _backend_generation_lock:
-            _pending_eviction_generations.discard(stale_generation)
-    except Exception:
-        logger.debug(
-            'Failed to invalidate stale terminal env',
-            exc_info=True,
-        )
+    if identity == _last_backend_identity:
+        return None  # same config, nothing to do
+    _last_backend_identity = identity
+    stale_generation = _current_backend_generation
+    _current_backend_generation += 1
+    # Publish the new owner in the SAME lock hold as the bump, and record the
+    # stale generation for deferred retire (compare-and-remove, exact object).
+    _env_backend_generations['default'] = _current_backend_generation
+    _file_backend_generations['default'] = _current_backend_generation
+    _pending_eviction_generations.add(stale_generation)
+    return stale_generation
 
 
 def _refresh_env_generation_tag() -> None:
@@ -2867,7 +2857,7 @@ def _refresh_env_generation_tag() -> None:
     side of the generation protocol: without it the invalidator has no
     recorded owner to compare against and can never retire a stale env.
 
-    The tag MUST be the calling turn's captured (thread-local) generation, NOT
+    The tag MUST be the calling turn's captured (ContextVar) generation, NOT
     the process-global current generation: a concurrent profile switch may
     already have bumped the global generation while this turn was still
     executing, and tagging this turn's env with that newer generation would
@@ -2878,7 +2868,7 @@ def _refresh_env_generation_tag() -> None:
 
         env = get_active_env('default')
         if env is not None:
-            gen = getattr(_turn_state, 'backend_generation', None)
+            gen = _get_turn_generation()
             if gen is None:
                 gen = _get_current_backend_generation()
             _mark_env_backend_generation('default', gen)
@@ -2930,11 +2920,15 @@ def _validate_backend_ownership(tt, effective_task_id: str, raw_task_id) -> None
     different backend generation, and never tears down an environment an
     active old-backend turn still owns:
 
-      * The expected owner is the CALLING TURN's captured (thread-local)
-        generation — carried immutably from turn setup — NOT the
-        process-global current generation (which a concurrent profile switch
-        may already have bumped past the env's tag).
+      * The expected owner is the CALLING TURN's captured (ContextVar)
+        generation — carried immutably from turn setup and propagated into the
+        Agent's concurrent tool workers — NOT the process-global current
+        generation (which a concurrent profile switch may already have bumped
+        past the env's tag) and NOT the recorded per-task owner (which a
+        concurrent switch may have moved past this turn's capture).
       * An env tagged with a different generation is never reused.
+      * An UNTAGGED env is never reused by a registered WebUI turn: it has no
+        provenance, so it is treated as stale and retired (fail-closed).
       * If turns still execute under that generation, the retire is deferred:
         we wait (bounded) for them to drain instead of tearing the env down
         mid-use.  The retire itself is a compare-and-remove that cleans up the
@@ -2942,7 +2936,7 @@ def _validate_backend_ownership(tt, effective_task_id: str, raw_task_id) -> None
         re-validates afterwards so a replacement installed while we waited is
         never reused or torn down either.
     """
-    turn_gen = getattr(_turn_state, 'backend_generation', None)
+    turn_gen = _get_turn_generation()
     # Untracked callers (non-WebUI flows) fall back to the recorded per-task
     # owner; registered WebUI turns always compare against their own captured
     # generation.
@@ -2959,9 +2953,13 @@ def _validate_backend_ownership(tt, effective_task_id: str, raw_task_id) -> None
             if env is None:
                 return
             env_gen = getattr(env, '_webui_backend_generation', None)
-            if env_gen is None or env_gen == expected:
+            if env_gen == expected:
                 return
-            if turn_gen is not None:
+            if env_gen is None and turn_gen is None:
+                # Non-WebUI caller (no captured turn generation): the agent's
+                # own registry is authoritative — accept untagged envs.
+                return
+            if turn_gen is not None and env_gen is not None:
                 with _backend_generation_lock:
                     _pending_eviction_generations.add(env_gen)
                     gen_active = _active_turn_generations.get(env_gen, 0) > 0
@@ -3006,22 +3004,57 @@ def _mark_file_backend_generation(task_key: str, generation: int) -> None:
 
 
 def _begin_turn_generation(profile_runtime_env: dict | None) -> None:
-    """Turn-setup entry: identity transition (non-fatal) then registration.
+    """Turn-setup entry: ONE generation-lock transaction, fail-closed.
 
-    Registration is GUARANTEED even when the identity transition fails, and
-    the production call site places this inside the same try whose finally
-    calls :func:`_end_turn_generation` — so a turn can never leak its
-    active-use registration, whatever the agent body does.
+    Under a single ``_backend_generation_lock`` hold the effective backend
+    identity is compared/published (via :func:`_publish_backend_identity`),
+    that exact generation is captured, bound to the calling turn's ContextVar,
+    and its active-use count is incremented — all BEFORE the lock is released.
+    No interleaved profile switch can therefore retire a generation between
+    the identity publish and the first active-use publication (the
+    split-begin race), and every acquisition inside this turn — including the
+    Agent's concurrent tool workers, which inherit the ContextVar — compares
+    against the exact generation captured here.
+
+    A failed identity transition is FAIL-CLOSED: the turn is refused (raises)
+    instead of continuing under an ambiguous owner.  The production call site
+    places this as the first statement of the try whose finally calls
+    :func:`_end_turn_generation`, so a raising body never leaks an active-use
+    registration (nothing was bound, so the finally's unregister no-ops).
     """
     try:
-        _invalidate_stale_terminal_backend(profile_runtime_env)
+        with _backend_generation_lock:
+            stale_generation = _publish_backend_identity(profile_runtime_env)
+            generation = _current_backend_generation
+            _TURN_BACKEND_GENERATION.set(generation)
+            _active_turn_generations[generation] = (
+                _active_turn_generations.get(generation, 0) + 1
+            )
     except Exception:
-        logger.debug(
-            'Terminal backend identity transition failed; continuing with '
-            'current generation',
+        # Fail-closed security boundary: never run a turn under an
+        # ambiguous/unknown backend owner.
+        logger.error(
+            'Terminal backend identity transition failed; refusing turn '
+            '(fail-closed)',
             exc_info=True,
         )
-    _register_turn_generation()
+        raise
+
+    if stale_generation is not None:
+        # Outside the lock: retire the exact stale env if no turn still runs
+        # under it (compare-and-remove; cleanup of the exact removed object).
+        # If an old-backend turn is still active the retire stays deferred in
+        # _pending_eviction_generations and is drained when that turn exits.
+        try:
+            if _active_turn_generations.get(stale_generation, 0) == 0:
+                _retire_generation_env(stale_generation, 'default')
+                with _backend_generation_lock:
+                    _pending_eviction_generations.discard(stale_generation)
+        except Exception:
+            logger.debug(
+                'Failed to retire stale terminal env after identity change',
+                exc_info=True,
+            )
 
 
 def _end_turn_generation() -> None:
@@ -3093,7 +3126,7 @@ def _install_terminal_env_generation_guard() -> None:
 
         def _wrapped_get_file_ops(task_id="default"):
             effective_task_id = tt._resolve_container_task_id(task_id)
-            turn_gen = getattr(_turn_state, 'backend_generation', None)
+            turn_gen = _get_turn_generation()
             _validate_backend_ownership(tt, effective_task_id, task_id)
             if turn_gen is not None:
                 _evict_stale_file_ops_cache_entry(ft, effective_task_id, turn_gen)
@@ -3119,7 +3152,7 @@ def _install_terminal_env_generation_guard() -> None:
 
         def _wrapped_get_or_create_env(task_id):
             effective_task_id = tt._resolve_container_task_id(task_id)
-            turn_gen = getattr(_turn_state, 'backend_generation', None)
+            turn_gen = _get_turn_generation()
             _validate_backend_ownership(tt, effective_task_id, task_id)
             result = original_get_or_create_env(task_id)
             if turn_gen is not None and result is not None:
@@ -3144,7 +3177,7 @@ def _install_terminal_env_generation_guard() -> None:
 
         def _wrapped_create_environment(*args, **kwargs):
             env = original_create_environment(*args, **kwargs)
-            turn_gen = getattr(_turn_state, 'backend_generation', None)
+            turn_gen = _get_turn_generation()
             if turn_gen is not None and env is not None:
                 try:
                     env._webui_backend_generation = turn_gen
