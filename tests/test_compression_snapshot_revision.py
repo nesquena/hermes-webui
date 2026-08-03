@@ -647,6 +647,7 @@ def test_stale_compression_snapshot_emits_actionable_error_without_replaying_tur
         "stale_flag",
         "stale_without_current_assistant",
         "stale_non_prefix_compacted",
+        "stale_non_prefix_without_current_user",
     ],
 )
 def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
@@ -702,7 +703,12 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
                     },
                 }
             if second_result != "recovered":
-                if second_result == "stale_non_prefix_compacted":
+                if second_result == "stale_non_prefix_without_current_user":
+                    stale_messages = [
+                        {"role": "user", "content": "unrelated historical user"},
+                        {"role": "assistant", "content": "historical answer"},
+                    ]
+                elif second_result == "stale_non_prefix_compacted":
                     # Compacted/replayed result that REPLACES the pre-call
                     # baseline instead of appending to it: historical
                     # assistant rows (including "prior answer") sit before the
@@ -733,7 +739,11 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
                     "final_response": (
                         ""
                         if second_result
-                        in ("stale_without_current_assistant", "stale_non_prefix_compacted")
+                        in (
+                            "stale_without_current_assistant",
+                            "stale_non_prefix_compacted",
+                            "stale_non_prefix_without_current_user",
+                        )
                         else "partial stale"
                     ),
                     "messages": stale_messages,
@@ -811,6 +821,7 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
         if second_result in (
             "stale_without_current_assistant",
             "stale_non_prefix_compacted",
+            "stale_non_prefix_without_current_user",
         ):
             assert not partials
             assert not any(

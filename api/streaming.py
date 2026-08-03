@@ -7223,10 +7223,21 @@ def _append_result_partial_on_error(
         # Compacted/replayed results can REPLACE the pre-call baseline instead
         # of appending to it; a numeric suffix slice can then expose a
         # historical assistant row as this turn's partial. Anchor on the
-        # current user turn instead — the same boundary rule used by
-        # _assistant_reply_added_after_current_turn — and fail closed when no
-        # current-user anchor exists.
-        current_user_idx = _find_current_user_turn(messages, msg_text)
+        # current user turn instead. This persistence path must require a
+        # positive exact match: _find_current_user_turn() deliberately falls
+        # back to the last arbitrary user row, which could misattribute a
+        # historical assistant row when the current turn is absent.
+        current_user_idx = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if isinstance(messages[index], dict)
+                and messages[index].get('role') == 'user'
+                and _normalize_user_text(_message_text(messages[index].get('content')))
+                == normalized_msg_text
+            ),
+            None,
+        )
         if current_user_idx is None:
             return None
         current_turn_rows = messages[current_user_idx + 1:]
