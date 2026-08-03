@@ -229,3 +229,200 @@ def test_issue6623_fresh_cancelled_run_still_deferred(tmp_path, monkeypatch):
 
     assert routes._clear_stale_stream_state(s) is False
     assert s.active_stream_id == stream_id
+
+
+def test_issue6623_delayed_cancel_finalizer_gated_by_stream_ownership():
+    """RE-GATE unit control: ``_finalize_cancelled_turn(..., stream_id=...)``
+    must no-op entirely (no clearing, no marker append, no save) once a
+    successor owns the session — while still finalizing when the session
+    points at the cancelled stream or at no stream at all."""
+    old_stream = "finalizer-old-stream"
+
+    # Successor owns the session -> the delayed finalizer must no-op.
+    s = Session(
+        session_id="finalizer-gate-successor",
+        messages=[{"role": "user", "content": "newer prompt"}],
+    )
+    s.active_stream_id = "newer-stream"
+    s.pending_user_message = "newer prompt"
+    s.pending_started_at = 456.0
+    s.save = Mock()
+    streaming._finalize_cancelled_turn(s, ephemeral=False, stream_id=old_stream)
+    assert s.active_stream_id == "newer-stream"
+    assert s.pending_user_message == "newer prompt"
+    s.save.assert_not_called()
+    assert streaming._session_has_cancel_marker(s) is False
+
+    # No stream owns the session (cancel_stream already cleared it, no
+    # successor) -> the finalizer may still persist the cancelled-turn marker.
+    s2 = Session(session_id="finalizer-gate-nostream", messages=[])
+    s2.active_stream_id = None
+    s2.save = Mock()
+    streaming._finalize_cancelled_turn(s2, ephemeral=False, stream_id=old_stream)
+    s2.save.assert_called_once()
+    assert s2.active_stream_id is None
+    assert streaming._session_has_cancel_marker(s2) is True
+
+    # Session still points at the cancelled stream -> the finalizer runs.
+    s3 = Session(session_id="finalizer-gate-owns", messages=[])
+    s3.active_stream_id = old_stream
+    s3.save = Mock()
+    streaming._finalize_cancelled_turn(s3, ephemeral=False, stream_id=old_stream)
+    s3.save.assert_called_once()
+    assert s3.active_stream_id is None
+    assert streaming._session_has_cancel_marker(s3) is True
+
+
+def test_issue6623_recent_cancel_not_reaped_despite_old_started_at(tmp_path, monkeypatch):
+    """RE-GATE control for the cancellation-age anchor: a just-cancelled turn
+    whose ORIGINAL started_at is far past the 180s unwind ceiling must NOT be
+    reaped (and a successor admitted) — cancel_stream() removes STREAMS
+    itself, so absence from STREAMS is not proof the worker is dead. The
+    reaping anchor for a phase="cancelling" row is the cancel time."""
+    import api.routes as routes
+
+    sid = "recent_cancel_old_start"
+    old_stream = "recent-cancel-old-start-stream"
+    config.register_active_run(
+        old_stream,
+        session_id=sid,
+        started_at=time.time() - 400.0,
+        phase="cancelling",
+        cancelled_at=time.time() - 5.0,
+    )
+
+    assert routes._active_run_stream_for_session(sid) == old_stream
+    assert old_stream in config.ACTIVE_RUNS
+
+
+def test_issue6623_stale_recovery_successor_survives_delayed_cancel_finalizer(
+    tmp_path, monkeypatch
+):
+    """RE-GATE production-composed regression (#6623): a long-running worker
+    that is cancelled, reaped by stale recovery, and superseded must not
+    clobber the successor when it finally returns from the provider boundary
+    and unwinds through the delayed cancel finalizer.
+
+    Sequence, all through real production code paths:
+
+    1. Old turn owns the session with an ACTIVE_RUNS row whose original
+       started_at is long past the 180s unwind ceiling.
+    2. cancel_stream() pops STREAMS, stamps phase="cancelling" + cancelled_at,
+       clears the session, writes the cancel marker, and saves.
+    3. The cancel stays outstanding past the 180s ceiling (worker stuck in
+       provider I/O) -> _active_run_stream_for_session() reaps the row and a
+       successor turn is admitted (active_stream_id/pending_* rotated, newer
+       user message appended, persisted).
+    4. The old worker is released from the provider boundary and runs the
+       delayed cancel finalizer under the session lock — exactly the call
+       sites at api/streaming.py:9686/9747.
+    5. The successor's active_stream_id, pending fields, messages, and saved
+       state must all survive.
+    """
+    import api.routes as routes
+
+    sid = "sess_stale_successor"
+    old_stream = "old-stale-cancelled-stream"
+    newer_stream = "newer-successor-stream"
+
+    s = Session(
+        session_id=sid,
+        title="Stale successor",
+        messages=[
+            {"role": "user", "content": "old prompt"},
+            {"role": "assistant", "content": "partial old answer"},
+        ],
+    )
+    s.active_stream_id = old_stream
+    s.pending_user_message = "old prompt"
+    s.pending_attachments = []
+    s.pending_started_at = 1000.0
+    s.pending_user_source = "webui"
+    s.save()
+    models.SESSIONS[sid] = s
+
+    config.register_stream_owner(old_stream, sid)
+    config.STREAMS[old_stream] = queue.Queue()
+    config.CANCEL_FLAGS[old_stream] = threading.Event()
+    config.register_active_run(
+        old_stream,
+        session_id=sid,
+        started_at=time.time() - 400.0,  # original run far past the 180s ceiling
+        phase="running",
+    )
+
+    # 2) Cancel through the real production path.
+    with patch("api.streaming.get_session", return_value=s):
+        assert streaming.cancel_stream(old_stream) is True
+    assert s.active_stream_id is None
+    assert streaming._session_has_cancel_marker(s)
+
+    # 3) Stale recovery: the cancel has been outstanding past the unwind
+    # ceiling (stuck worker never reached its finally) -> the run row is
+    # reaped and the successor may be admitted.
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS[old_stream]["cancelled_at"] = time.time() - 200.0
+    assert routes._active_run_stream_for_session(sid) is None
+    assert old_stream not in config.ACTIVE_RUNS
+
+    # Admit the successor the way the route layer does: under the session
+    # lock, rotate active_stream_id/pending_*, append the newer user turn,
+    # and persist.
+    _lock = streaming._get_session_agent_lock(sid)
+    with _lock:
+        s.active_stream_id = newer_stream
+        s.pending_user_message = "newer prompt"
+        s.pending_attachments = []
+        s.pending_started_at = 2000.0
+        s.pending_user_source = "webui"
+        s.messages.append(
+            {"role": "user", "content": "newer prompt", "timestamp": 2000}
+        )
+        s.save()
+    _messages_before_release = len(s.messages)
+
+    # 4) Release the old worker from the provider boundary; it unwinds through
+    # the delayed cancel finalizer under the session lock.
+    _errors = []
+    _release = threading.Event()
+
+    def _old_worker_return():
+        _release.wait()  # the provider boundary the worker was blocked in
+        try:
+            with _lock:
+                streaming._finalize_cancelled_turn(
+                    s, ephemeral=False, stream_id=old_stream
+                )
+        except Exception as exc:  # pragma: no cover - failure surface
+            _errors.append(exc)
+
+    _worker = threading.Thread(target=_old_worker_return, daemon=True)
+    _worker.start()
+    _release.set()
+    _worker.join(timeout=10)
+    assert not _worker.is_alive(), "old worker thread did not unwind"
+    assert not _errors
+
+    # 5) The successor's state must survive untouched.
+    assert s.active_stream_id == newer_stream
+    assert s.pending_user_message == "newer prompt"
+    assert s.pending_attachments == []
+    assert s.pending_started_at == 2000.0
+    assert s.pending_user_source == "webui"
+    assert len(s.messages) == _messages_before_release, (
+        "delayed cancel finalizer must not append anything over the successor turn"
+    )
+    assert any(
+        str(m.get("content", "")) == "newer prompt" and m.get("role") == "user"
+        for m in s.messages
+    )
+    # The persisted state survives on disk too.
+    disk = models.Session.load(sid)
+    assert disk.active_stream_id == newer_stream
+    assert disk.pending_user_message == "newer prompt"
+    assert disk.pending_started_at == 2000.0
+    assert disk.pending_user_source == "webui"
+    assert any(
+        str(m.get("content", "")) == "newer prompt" and m.get("role") == "user"
+        for m in disk.messages
+    )
