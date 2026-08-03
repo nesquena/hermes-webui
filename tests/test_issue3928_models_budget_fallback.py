@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 import time
 
 import pytest
@@ -489,3 +490,148 @@ def test_provider_models_list_of_dicts_without_id_does_not_collapse_catalog(
     assert any(mid.endswith("gpt-5.5") for mid in group_model_ids)
     assert any(mid.endswith("gpt-4.1") for mid in group_model_ids)
     assert any(mid.endswith("gpt-4o") for mid in group_model_ids)
+
+
+def test_stale_over_budget_rebuild_discarded_after_invalidation(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    """Regression for #6581: an in-flight rebuild must not republish after invalidation.
+
+    Provider cleanup now calls invalidate_models_cache() (api/providers.py).
+    An over-budget rebuild worker that started BEFORE the cleanup would
+    otherwise republish its stale catalog — resurrecting the just-removed
+    provider in memory and re-creating the on-disk cache, so the picker still
+    shows it (even across a restart). The generation/owner token must discard
+    the stale result, skip the disk write, and leave a newer rebuild's
+    in-progress flag untouched.
+    """
+    _configure_local_sources(
+        monkeypatch,
+        isolate_models_catalog_state["auth_store_path"],
+    )
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+
+    # The catalog the STALE worker builds (still contains the provider that
+    # the cleanup removes mid-flight).
+    stale_result = {
+        "active_provider": "openai-api",
+        "default_model": "gpt-5.5",
+        "configured_model_badges": {},
+        "groups": [
+            {
+                "provider": "OpenAI",
+                "provider_id": "openai-api",
+                "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+            }
+        ],
+        "aliases": {},
+    }
+    # The catalog the FRESH (post-removal) rebuild builds.
+    fresh_result = {
+        "active_provider": "anthropic",
+        "default_model": "claude-sonnet-4.6",
+        "configured_model_badges": {},
+        "groups": [
+            {
+                "provider": "Anthropic",
+                "provider_id": "anthropic",
+                "models": [
+                    {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6"}
+                ],
+            }
+        ],
+        "aliases": {},
+    }
+
+    stale_started = threading.Event()
+    release_stale = threading.Event()
+    fresh_started = threading.Event()
+    release_fresh = threading.Event()
+
+    def _stale_rebuild(_builder):
+        stale_started.set()
+        assert release_stale.wait(5)
+        return copy.deepcopy(stale_result)
+
+    def _fresh_rebuild(_builder):
+        fresh_started.set()
+        assert release_fresh.wait(5)
+        return copy.deepcopy(fresh_result)
+
+    rebuilds = iter([_stale_rebuild, _fresh_rebuild])
+
+    def _controlled_rebuild(_builder):
+        return next(rebuilds)(_builder)
+
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _controlled_rebuild)
+
+    disk_writes = []
+    monkeypatch.setattr(
+        cfg,
+        "_save_models_cache_to_disk",
+        lambda cache: disk_writes.append(copy.deepcopy(cache)),
+    )
+
+    def _rebuild_worker_threads():
+        return [
+            t for t in threading.enumerate() if t.name == "models-catalog-rebuild"
+        ]
+
+    baseline_workers = len(_rebuild_worker_threads())
+
+    # 1. Start a rebuild that exceeds the budget; its worker tries to publish
+    #    out-of-band once it finishes.
+    cfg.get_available_models()
+    assert stale_started.wait(5)
+    assert len(_rebuild_worker_threads()) == baseline_workers + 1
+
+    # 2. Provider cleanup (the _clean_provider_key_from_config path) removes
+    #    the provider and invalidates the model cache mid-flight.
+    cfg.invalidate_models_cache()
+    assert cfg._available_models_cache is None
+
+    # 3. A new caller triggers a FRESH rebuild against the post-removal
+    #    config; it now owns the in-progress flag.
+    cfg.get_available_models()
+    assert fresh_started.wait(5)
+    assert len(_rebuild_worker_threads()) == baseline_workers + 2
+    assert cfg._cache_build_in_progress is True
+
+    # 4. Let the STALE worker finish: its publish attempt must be discarded
+    #    (generation mismatch) — no memory publish, no disk write, and the
+    #    fresh rebuild's in-progress flag must survive.
+    release_stale.set()
+    deadline = time.monotonic() + 5
+    while (
+        time.monotonic() < deadline
+        and len(_rebuild_worker_threads()) > baseline_workers + 1
+    ):
+        time.sleep(0.01)
+    assert len(_rebuild_worker_threads()) == baseline_workers + 1
+    # The stale worker neither republished the removed provider...
+    assert cfg._available_models_cache is None
+    # ...nor cleared the fresh rebuild's in-progress state.
+    assert cfg._cache_build_in_progress is True
+
+    # 5. Let the FRESH worker finish: it publishes the post-removal catalog.
+    release_fresh.set()
+    deadline = time.monotonic() + 5
+    while (
+        time.monotonic() < deadline
+        and len(_rebuild_worker_threads()) > baseline_workers
+    ):
+        time.sleep(0.01)
+    assert len(_rebuild_worker_threads()) == baseline_workers
+    assert cfg._cache_build_in_progress is False
+    assert cfg._available_models_cache == fresh_result
+
+    # 6. The removed provider never reappeared — neither in memory nor in any
+    #    on-disk write.
+    provider_ids = [
+        group["provider_id"] for group in cfg._available_models_cache["groups"]
+    ]
+    assert "openai-api" not in provider_ids
+    assert disk_writes == [fresh_result], (
+        "the stale rebuild must not write its catalog to disk"
+    )
