@@ -101,6 +101,10 @@ const row = {{
   const restored = await _archiveSession(row, false);
   const restoredCalls = calls.splice(0).map(call => call.body);
   const restoreState = Object.fromEntries(_allSessions.map(s => [s.session_id, s.archived]));
+  const directTargets = {{
+    fork: _sessionArchiveTargets({{session_id:'fork', profile:'default', session_source:'fork'}}).map(s => s.session_id),
+    child: _sessionArchiveTargets({{session_id:'child', profile:'default', relationship_type:'child_session'}}).map(s => s.session_id),
+  }};
   console.log(JSON.stringify({{
     archived,
     restored,
@@ -108,6 +112,7 @@ const row = {{
     restoredCalls,
     archiveState,
     restoreState,
+    directTargets,
     savedPointer: local.get('hermes-webui-session') || null,
   }}));
 }})().catch(error => {{ console.error(error); process.exit(1); }});
@@ -136,4 +141,5 @@ const row = {{
         "unrelated": False,
     }
     assert result["restoreState"] == {key: False for key in result["archiveState"]}
+    assert result["directTargets"] == {"fork": ["fork"], "child": ["child"]}
     assert result["savedPointer"] is None

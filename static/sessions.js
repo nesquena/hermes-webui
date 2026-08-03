@@ -4865,8 +4865,9 @@ function _sessionArchiveTargets(session){
   const targets=[];
   for(const candidate of candidates){
     if(!candidate||!candidate.session_id||seen.has(candidate.session_id)) continue;
-    if(candidate.relationship_type==='child_session'||candidate.session_source==='fork') continue;
-    if(representativeProfile&&candidate.profile&&candidate.profile!==representativeProfile) continue;
+    const isRepresentative=candidate.session_id===session.session_id;
+    if(!isRepresentative&&(candidate.relationship_type==='child_session'||candidate.session_source==='fork')) continue;
+    if(!isRepresentative&&representativeProfile&&candidate.profile&&candidate.profile!==representativeProfile) continue;
     seen.add(candidate.session_id);
     targets.push(candidate);
   }
