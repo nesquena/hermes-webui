@@ -624,6 +624,33 @@ def test_qwen_prefixed_alias_reasoning_detection():
 
 # ── PR #6018: max/ultra coercion leak closures ───────────────────────────────
 
+def test_named_custom_provider_hints_keep_model_scoped_effort_ceilings(monkeypatch):
+    original = cfg.cfg.get("custom_providers")
+    monkeypatch.setitem(
+        cfg.cfg,
+        "custom_providers",
+        [{"name": "frontier-gw", "reasoning_efforts": ["high", "xhigh", "max", "ultra"]}],
+    )
+    try:
+        cases = (
+            ("@custom:frontier-gw:gpt-5.5", "xhigh", False),
+            ("@custom:frontier-gw:o3", "high", False),
+            ("@custom:frontier-gw:gpt-5.6-sol", "ultra", True),
+            ("@custom:frontier-gw:unknown-frontier-model", "ultra", True),
+        )
+        for model, expected, keeps_top_tiers in cases:
+            efforts = cfg.resolve_model_reasoning_efforts(model, provider_id="custom:frontier-gw")
+            assert ("max" in efforts and "ultra" in efforts) is keeps_top_tiers, model
+            assert cfg.coerce_reasoning_effort_for_model(
+                "ultra", model, provider_id="custom:frontier-gw"
+            ) == expected, model
+    finally:
+        if original is None:
+            cfg.cfg.pop("custom_providers", None)
+        else:
+            monkeypatch.setitem(cfg.cfg, "custom_providers", original)
+
+
 def test_custom_provider_default_denies_max_ultra_for_recognized_models():
     # Finding 1: a recognized reasoning-capable model family behind a custom /
     # unknown provider must NOT inherit the generic max/ultra tiers by default —
