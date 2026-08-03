@@ -45,6 +45,7 @@ def _isolate_sessions(tmp_path, monkeypatch):
     config.AGENT_INSTANCES.clear()
     config.ACTIVE_RUNS.clear()
     config.STREAM_SESSION_OWNERS.clear()
+    config.SESSION_WRITEBACK_OWNERS.clear()
     config.SESSION_AGENT_LOCKS.clear()
     yield
     models.SESSIONS.clear()
@@ -53,6 +54,7 @@ def _isolate_sessions(tmp_path, monkeypatch):
     config.AGENT_INSTANCES.clear()
     config.ACTIVE_RUNS.clear()
     config.STREAM_SESSION_OWNERS.clear()
+    config.SESSION_WRITEBACK_OWNERS.clear()
     config.SESSION_AGENT_LOCKS.clear()
 
 
@@ -422,6 +424,314 @@ def test_issue6623_stale_recovery_successor_survives_delayed_cancel_finalizer(
     assert disk.pending_user_message == "newer prompt"
     assert disk.pending_started_at == 2000.0
     assert disk.pending_user_source == "webui"
+    assert any(
+        str(m.get("content", "")) == "newer prompt" and m.get("role") == "user"
+        for m in disk.messages
+    )
+
+
+def test_issue6623_writeback_owner_released_only_while_still_owned():
+    """RE-GATE unit: the writeback-ownership record is replaced by a successor
+    admission, and a worker's teardown clears it ONLY while it still owns it —
+    the old worker's finally must never erase the successor's claim."""
+    config.register_session_writeback_owner("sess_owner_release", "stream-a")
+    # A successor replaced the claim; the old worker's finally must not clear it.
+    config.register_session_writeback_owner("sess_owner_release", "stream-b")
+    config.clear_session_writeback_owner_if_owned("sess_owner_release", "stream-a")
+    assert config.session_writeback_owner("sess_owner_release") == "stream-b"
+    # The current owner's finally clears it.
+    config.clear_session_writeback_owner_if_owned("sess_owner_release", "stream-b")
+    assert config.session_writeback_owner("sess_owner_release") is None
+
+
+def test_issue6623_replaced_session_successor_survives_delayed_cancel_finalizer(
+    tmp_path, monkeypatch
+):
+    """RE-GATE regression (#6623): the delayed cancel finalizer must resolve
+    the CURRENT session object and bind authority to the writeback-ownership
+    record — a deterministic schedule with TWO distinct Session instances:
+
+    1. Old turn owns the session; cancel_stream() clears + saves it.
+    2. REAL LRU eviction (production ``_evict_sessions_over_cap``) drops the
+       old object; ``get_session()`` lazily reloads a DISTINCT object.
+    3. A successor turn is admitted and persisted through the replacement.
+    4. The old worker unwinds through the real cancel-finalizer path holding
+       its stale snapshot.
+    5. Cache and disk must retain the successor's fields/messages; the old
+       generation must not make a terminal write.
+
+    The pre-fix guard accepted ``active_stream_id is None`` on the worker-held
+    snapshot (cancel_stream clears it eagerly), so it proceeded to serialize
+    the stale snapshot over the successor — this test fails without the fix.
+    """
+    sid = "sess_replaced_successor"
+    old_stream = "old-replaced-stream"
+    newer_stream = "newer-replaced-stream"
+
+    s_old = Session(
+        session_id=sid,
+        title="Replaced successor",
+        messages=[
+            {"role": "user", "content": "old prompt"},
+            {"role": "assistant", "content": "partial old answer"},
+        ],
+    )
+    s_old.active_stream_id = old_stream
+    s_old.pending_user_message = "old prompt"
+    s_old.pending_attachments = []
+    s_old.pending_started_at = 1000.0
+    s_old.pending_user_source = "webui"
+    s_old.save()
+    models.SESSIONS[sid] = s_old
+
+    config.register_stream_owner(old_stream, sid)
+    config.register_session_writeback_owner(sid, old_stream)
+    config.STREAMS[old_stream] = queue.Queue()
+    config.CANCEL_FLAGS[old_stream] = threading.Event()
+    config.register_active_run(old_stream, session_id=sid, phase="running")
+
+    # 2) Cancel through the real production path.
+    assert streaming.cancel_stream(old_stream) is True
+    assert s_old.active_stream_id is None
+    assert streaming._session_has_cancel_marker(s_old)
+    _old_messages_after_cancel = len(s_old.messages)
+
+    # 3) REAL LRU eviction: drop the (now idle, persisted) old object via the
+    # production eviction pass, then lazily reload a DISTINCT object.
+    monkeypatch.setattr(models, "SESSIONS_MAX", 2)
+    for i in range(4):
+        _filler = Session(
+            session_id=f"sess_replaced_filler_{i}", title="filler", messages=[]
+        )
+        _filler.save()
+        models.SESSIONS[_filler.session_id] = _filler
+    with config.LOCK:
+        _evicted = models._evict_sessions_over_cap(0)
+    assert sid not in models.SESSIONS, (
+        f"old generation should be LRU-evicted (evicted={_evicted})"
+    )
+
+    s_new = models.get_session(sid)
+    assert s_new is not s_old, "lazy reload must yield a DISTINCT Session instance"
+
+    # 4) Admit the successor the way the route layer does: under the session
+    # lock, rotate active_stream_id/pending_*, register the writeback owner,
+    # append the newer user turn, and persist.
+    _lock = streaming._get_session_agent_lock(sid)
+    with _lock:
+        s_new.active_stream_id = newer_stream
+        s_new.pending_user_message = "newer prompt"
+        s_new.pending_attachments = []
+        s_new.pending_started_at = 2000.0
+        s_new.pending_user_source = "webui"
+        s_new.messages.append(
+            {"role": "user", "content": "newer prompt", "timestamp": 2000}
+        )
+        config.register_session_writeback_owner(sid, newer_stream)
+        s_new.save()
+    _messages_before_release = len(s_new.messages)
+
+    # 5) Release the old worker: it unwinds through the REAL cancel-finalizer
+    # path holding its STALE snapshot (s_old) under the session lock.
+    with _lock:
+        streaming._finalize_cancelled_turn(s_old, ephemeral=False, stream_id=old_stream)
+
+    # 6) The old generation made no terminal write: its in-memory snapshot
+    # must be untouched (no delayed marker appended, no stale save).
+    assert len(s_old.messages) == _old_messages_after_cancel, (
+        "stale snapshot must not receive a delayed terminal write"
+    )
+    # The successor's cache object survives untouched.
+    assert s_new.active_stream_id == newer_stream
+    assert s_new.pending_user_message == "newer prompt"
+    assert s_new.pending_attachments == []
+    assert s_new.pending_started_at == 2000.0
+    assert s_new.pending_user_source == "webui"
+    assert len(s_new.messages) == _messages_before_release, (
+        "delayed cancel finalizer must not append anything over the successor turn"
+    )
+    # The writeback-ownership record still names the successor.
+    assert config.session_writeback_owner(sid) == newer_stream
+    # The persisted state survives on disk too.
+    disk = models.Session.load(sid)
+    assert disk.active_stream_id == newer_stream
+    assert disk.pending_user_message == "newer prompt"
+    assert disk.pending_started_at == 2000.0
+    assert disk.pending_user_source == "webui"
+    assert any(
+        str(m.get("content", "")) == "newer prompt" and m.get("role") == "user"
+        for m in disk.messages
+    )
+
+
+def test_issue6623_replaced_session_completed_successor_still_protected_by_ownership_record(
+    tmp_path, monkeypatch
+):
+    """RE-GATE control (#6623): even after the successor's own turn completed
+    (so the CURRENT object's ``active_stream_id`` is None again — exactly the
+    ambiguous state the pre-fix guard accepted), the writeback-ownership record
+    still proves the session advanced past the old stream. The delayed
+    finalizer must no-op: the stale snapshot's save() would otherwise
+    overwrite the completed successor transcript on disk."""
+    sid = "sess_completed_successor"
+    old_stream = "old-completed-stream"
+    newer_stream = "newer-completed-stream"
+
+    s_old = Session(
+        session_id=sid,
+        title="Completed successor",
+        messages=[{"role": "user", "content": "old prompt"}],
+    )
+    s_old.active_stream_id = old_stream
+    s_old.pending_user_message = "old prompt"
+    s_old.pending_attachments = []
+    s_old.pending_started_at = 1000.0
+    s_old.pending_user_source = "webui"
+    s_old.save()
+    models.SESSIONS[sid] = s_old
+    config.register_session_writeback_owner(sid, old_stream)
+
+    config.register_stream_owner(old_stream, sid)
+    config.STREAMS[old_stream] = queue.Queue()
+    config.CANCEL_FLAGS[old_stream] = threading.Event()
+    config.register_active_run(old_stream, session_id=sid, phase="running")
+    assert streaming.cancel_stream(old_stream) is True
+
+    monkeypatch.setattr(models, "SESSIONS_MAX", 2)
+    for i in range(4):
+        _filler = Session(
+            session_id=f"sess_completed_filler_{i}", title="filler", messages=[]
+        )
+        _filler.save()
+        models.SESSIONS[_filler.session_id] = _filler
+    with config.LOCK:
+        models._evict_sessions_over_cap(0)
+    s_new = models.get_session(sid)
+    assert s_new is not s_old
+
+    with streaming._get_session_agent_lock(sid):
+        s_new.active_stream_id = newer_stream
+        s_new.pending_user_message = "newer prompt"
+        s_new.pending_attachments = []
+        s_new.pending_started_at = 2000.0
+        s_new.pending_user_source = "webui"
+        s_new.messages.append(
+            {"role": "user", "content": "newer prompt", "timestamp": 2000}
+        )
+        config.register_session_writeback_owner(sid, newer_stream)
+        s_new.save()
+        # The successor turn then completes normally: active_stream_id and
+        # pending fields are cleared, the transcript persists. The ownership
+        # record is NOT touched by normal completion.
+        s_new.active_stream_id = None
+        s_new.pending_user_message = None
+        s_new.pending_attachments = []
+        s_new.pending_started_at = None
+        s_new.pending_user_source = None
+        s_new.save()
+    _messages_after_successor_completion = len(s_new.messages)
+
+    with streaming._get_session_agent_lock(sid):
+        streaming._finalize_cancelled_turn(s_old, ephemeral=False, stream_id=old_stream)
+
+    assert config.session_writeback_owner(sid) == newer_stream
+    disk = models.Session.load(sid)
+    assert disk.active_stream_id is None
+    assert len(disk.messages) == _messages_after_successor_completion, (
+        "delayed finalizer must not mutate the completed successor transcript"
+    )
+    assert any(
+        str(m.get("content", "")) == "newer prompt" and m.get("role") == "user"
+        for m in disk.messages
+    )
+
+
+def test_issue6623_replaced_session_process_wakeup_pause_merges_into_current(
+    tmp_path, monkeypatch
+):
+    """RE-GATE regression (#6623): the credential-pool process-wakeup
+    exception branch must merge the pause into the CURRENT session object
+    under the canonical lock — never save a detached worker snapshot.
+
+    Same replacement schedule as the finalizer regression: cancel the old
+    generation, force REAL LRU eviction, lazily reload a distinct object,
+    admit and persist a successor through it, then run the pause branch with
+    the old worker's stale snapshot. The pause must land on the current object
+    + disk while the successor state survives; the stale snapshot must not be
+    the write target."""
+    sid = "sess_replaced_pause"
+    old_stream = "old-pause-stream"
+    newer_stream = "newer-pause-stream"
+
+    s_old = Session(
+        session_id=sid,
+        title="Replaced pause",
+        messages=[{"role": "user", "content": "old prompt"}],
+    )
+    s_old.active_stream_id = old_stream
+    s_old.pending_user_message = "old prompt"
+    s_old.pending_attachments = []
+    s_old.pending_started_at = 1000.0
+    s_old.pending_user_source = "process_wakeup"
+    s_old.save()
+    models.SESSIONS[sid] = s_old
+    config.register_session_writeback_owner(sid, old_stream)
+
+    config.register_stream_owner(old_stream, sid)
+    config.STREAMS[old_stream] = queue.Queue()
+    config.CANCEL_FLAGS[old_stream] = threading.Event()
+    config.register_active_run(old_stream, session_id=sid, phase="running")
+    assert streaming.cancel_stream(old_stream) is True
+
+    monkeypatch.setattr(models, "SESSIONS_MAX", 2)
+    for i in range(4):
+        _filler = Session(
+            session_id=f"sess_pause_filler_{i}", title="filler", messages=[]
+        )
+        _filler.save()
+        models.SESSIONS[_filler.session_id] = _filler
+    with config.LOCK:
+        models._evict_sessions_over_cap(0)
+    assert sid not in models.SESSIONS
+    s_new = models.get_session(sid)
+    assert s_new is not s_old
+
+    with streaming._get_session_agent_lock(sid):
+        s_new.active_stream_id = newer_stream
+        s_new.pending_user_message = "newer prompt"
+        s_new.pending_attachments = []
+        s_new.pending_started_at = 2000.0
+        s_new.pending_user_source = "webui"
+        s_new.messages.append(
+            {"role": "user", "content": "newer prompt", "timestamp": 2000}
+        )
+        config.register_session_writeback_owner(sid, newer_stream)
+        s_new.save()
+
+    # The old worker unwinds through the credential-pool process-wakeup
+    # branch holding its stale snapshot, under the session lock.
+    with streaming._get_session_agent_lock(sid):
+        _recorded = streaming._merge_process_wakeup_pause_into_current_session(
+            s_old,
+            classification="credential_pool_empty",
+            model="test-model",
+            provider="test-provider",
+        )
+    assert _recorded is not None
+    # The stale snapshot itself was NOT the write target: the default empty
+    # pause dict must not carry the recorded pause.
+    assert not (s_old.process_wakeup_pause or {}).get("paused")
+    # The pause merged into the CURRENT object and persisted.
+    assert s_new.process_wakeup_pause is not None
+    assert s_new.process_wakeup_pause.get("paused") is True
+    assert s_new.process_wakeup_pause.get("classification") == "credential_pool_empty"
+    assert s_new.process_wakeup_pause.get("model") == "test-model"
+    disk = models.Session.load(sid)
+    assert disk.process_wakeup_pause is not None
+    assert disk.process_wakeup_pause.get("classification") == "credential_pool_empty"
+    # Successor state survives on disk.
+    assert disk.active_stream_id == newer_stream
+    assert disk.pending_user_message == "newer prompt"
     assert any(
         str(m.get("content", "")) == "newer prompt" and m.get("role") == "user"
         for m in disk.messages

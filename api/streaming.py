@@ -38,6 +38,8 @@ from api.config import (
     register_active_run, update_active_run, unregister_active_run,
     unregister_stream_owner,
     stream_owner_session_id,
+    session_writeback_owner,
+    clear_session_writeback_owner_if_owned,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
     resolve_custom_provider_connection,
@@ -1969,6 +1971,71 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
         logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
 
 
+def _resolve_current_session_for_write(session):
+    """Resolve the CURRENT session object for a delayed-cancel write.
+
+    The worker thread holds a snapshot ``Session`` object captured when the
+    turn started. ``cancel_stream()`` clears ``active_stream_id`` on the
+    object it resolves and saves it, after which the session is eligible for
+    LRU eviction; a successor turn may then be admitted through a DISTINCT
+    object lazily reloaded by ``get_session()``. Writing to the worker's
+    snapshot after that point serializes stale state over the successor
+    (#6623 re-gate), so delayed-cancel writes MUST target the object that
+    ``get_session()`` currently resolves under the canonical per-session
+    lock. Falls back to the passed object when the session cannot be
+    resolved (missing file, transient error).
+    """
+    sid = getattr(session, "session_id", None)
+    if not sid:
+        return session
+    try:
+        current = get_session(sid)
+    except Exception:
+        logger.debug(
+            "Failed to resolve current session %s for delayed-cancel write; "
+            "falling back to worker-held snapshot",
+            sid,
+            exc_info=True,
+        )
+        return session
+    if current is None:
+        return session
+    return current
+
+
+def _merge_process_wakeup_pause_into_current_session(
+    session,
+    *,
+    classification: str,
+    model=None,
+    provider=None,
+) -> dict | None:
+    """Record a process-wakeup provider-unavailable pause on the CURRENT session.
+
+    The worker-held ``session`` may be a detached snapshot (LRU-evicted and
+    replaced by a distinct object through which a successor was admitted and
+    saved). The pause is session-wide suppression metadata that must survive
+    regardless of stream ownership, so it is merged into the current object —
+    resolved under the canonical per-session lock — and saved there. Saving
+    the worker's snapshot instead would serialize stale state over the
+    successor even when the generation-guarded finalizer later no-ops
+    (#6623 re-gate).
+    """
+    current = _resolve_current_session_for_write(session)
+    recorded = record_process_wakeup_provider_unavailable_pause(
+        current,
+        classification=classification,
+        model=model,
+        provider=provider,
+    )
+    if recorded:
+        try:
+            current.save(touch_updated_at=False)
+        except Exception:
+            logger.debug("Failed to save process-wakeup pause", exc_info=True)
+    return recorded
+
+
 def _finalize_cancelled_turn(
     session,
     *,
@@ -1979,27 +2046,51 @@ def _finalize_cancelled_turn(
     """Finalize a cancelled turn for persistent or ephemeral sessions.
 
     Generation-guarded (#6623 re-gate): when ``stream_id`` is provided, the
-    finalizer only acts while the session has not advanced past that stream —
-    either the session still points at it (``active_stream_id == stream_id``)
-    or no successor has been admitted yet (``active_stream_id is None``). A
-    successor turn admitted while the old worker was still blocked in provider
-    I/O (stale-cancel recovery) owns ``active_stream_id`` now, and a delayed
-    finalizer from the old worker MUST no-op against it instead of clearing
-    pending fields, materializing the pending user turn, appending markers,
-    unlinking the session, or saving. Callers hold the per-session agent lock,
-    so this check cannot race cancel_stream()'s own cleanup.
+    finalizer only acts while the session has not advanced past that stream.
+    The worker-held ``session`` object is only a snapshot: cancel_stream()
+    clears ``active_stream_id`` eagerly, and the session may have been
+    LRU-evicted and lazily reloaded as a DISTINCT object through which a
+    successor turn was admitted and saved. Finalization authority is therefore
+    bound to the per-session writeback-ownership record
+    (``SESSION_WRITEBACK_OWNERS``), which survives cancel cleanup, AND to the
+    CURRENT session object resolved by canonical session id under the
+    per-session agent lock (callers hold it). A successor owns the session now
+    and a delayed finalizer from the old worker MUST no-op against it instead
+    of clearing pending fields, materializing the pending user turn, appending
+    markers, unlinking the session, or saving. ``active_stream_id is None`` on
+    a worker-held snapshot is NOT proof that no successor exists — cancel
+    cleanup clears that field eagerly.
     """
     if stream_id:
-        _current = getattr(session, "active_stream_id", None)
+        session_id = getattr(session, "session_id", None)
+        current = _resolve_current_session_for_write(session) if session_id else session
+        # Immutable stream/generation authority: the writeback-ownership record
+        # survives cancel cleanup and is replaced only by a successor admission,
+        # so ``owner != stream_id`` is proof the session has advanced past this
+        # worker's stream — even when the current object's active_stream_id has
+        # since been cleared again (successor completed or was itself cancelled).
+        owner = session_writeback_owner(session_id) if session_id else None
+        if owner is not None and owner != stream_id:
+            logger.info(
+                "Skipping stale cancelled-turn finalize for session %s stream %s; "
+                "writeback owner=%s (successor owns the session)",
+                session_id,
+                stream_id,
+                owner,
+            )
+            return
+        _current = getattr(current, "active_stream_id", None)
         if _current is not None and _current != stream_id:
             logger.info(
                 "Skipping stale cancelled-turn finalize for session %s stream %s; "
                 "active_stream_id=%s (successor owns the writeback)",
-                getattr(session, "session_id", "?"),
+                session_id,
                 stream_id,
                 _current,
             )
             return
+        # Finalize against the CURRENT object — never the worker's snapshot.
+        session = current
     if ephemeral:
         _cleanup_ephemeral_cancelled_turn(session)
         return
@@ -7663,6 +7754,13 @@ def _run_agent_streaming(
         # already registered the stream owner, so release it here to avoid
         # leaking a STREAM_SESSION_OWNERS entry that the teardown finally never sees.
         unregister_stream_owner(stream_id)
+        try:
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+        except Exception:
+            logger.debug(
+                "Failed to clear session writeback owner for stream %s", stream_id,
+                exc_info=True,
+            )
         return
     register_active_run(
         stream_id,
@@ -11208,22 +11306,21 @@ def _run_agent_streaming(
                         and _turn_pending_source == 'process_wakeup'
                         and _exc_is_credential_pool_empty
                     ):
-                        _wakeup_pause_recorded = record_process_wakeup_provider_unavailable_pause(
+                        # Merge the pause into the CURRENT session object under
+                        # the canonical lock. The worker-held ``s`` may be a
+                        # detached snapshot (LRU-evicted + replaced by a
+                        # distinct object through which a successor was
+                        # admitted); saving it would serialize stale state over
+                        # the successor even though the generation-guarded
+                        # finalizer below later no-ops. The pause is
+                        # session-wide suppression metadata that must survive
+                        # regardless of stream ownership (#6623 re-gate).
+                        _wakeup_pause_recorded = _merge_process_wakeup_pause_into_current_session(
                             s,
                             classification=_classification['type'],
                             model=_turn_route_model,
                             provider=_turn_route_provider,
                         )
-                        # Persist the wakeup pause independently of the
-                        # generation-guarded cancelled-turn finalizer below: the
-                        # finalizer may no-op when a successor now owns the
-                        # session, but the pause is a session-wide suppression
-                        # record that must survive regardless of stream ownership.
-                        if _wakeup_pause_recorded:
-                            try:
-                                s.save(touch_updated_at=False)
-                            except Exception:
-                                logger.debug("Failed to save process-wakeup pause", exc_info=True)
                     _finalize_cancelled_turn(s, ephemeral=ephemeral, stream_id=stream_id)
                     if not ephemeral:
                         try:
@@ -11553,6 +11650,16 @@ def _run_agent_streaming(
             # Clean up the stream-owner registry so stale stream_id→session_id
             # mappings do not accumulate over thousands of completed streams (#6351).
             unregister_stream_owner(stream_id)
+            # Release the session's writeback-ownership entry only while this
+            # stream still owns it (#6623 re-gate): a successor admitted after
+            # cancel must keep its registry claim.
+            try:
+                clear_session_writeback_owner_if_owned(session_id, stream_id)
+            except Exception:
+                logger.debug(
+                    "Failed to clear session writeback owner for stream %s", stream_id,
+                    exc_info=True,
+                )
             # NOTE: do NOT discard PENDING_GOAL_CONTINUATION here. The marker
             # is set by goal_continue (line ~3328) inside the SAME function
             # call and consumed atomically by `_start_chat_stream_for_session`
