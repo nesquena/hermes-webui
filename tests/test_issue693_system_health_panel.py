@@ -94,6 +94,7 @@ def test_system_health_payload_partial_and_unavailable_are_graceful(monkeypatch)
     assert "/home/user" not in repr(partial)
 
     monkeypatch.setattr(system_health, "_disk_usage", boom)
+    monkeypatch.setattr(system_health, "_network_throughput", boom)
     unavailable = system_health.build_system_health_payload()
     assert unavailable["status"] == "unavailable"
     assert unavailable["available"] is False
@@ -302,3 +303,183 @@ def test_system_health_backend_uses_no_shell_or_private_process_sources():
     assert "/proc/self/environ" not in src
     for private_field in ("argv", "cmdline", "username", "mountpoint"):
         assert private_field not in src
+
+
+def test_system_health_network_throughput_keys_and_first_call_is_zero(monkeypatch):
+    from api import system_health
+
+    fake_dev = [
+        "Inter-|   Receive                                                |  Transmit\n",
+        " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets\n",
+        "  lo: 1000      10    0    0    0     0          0         0     1000      10\n",
+        "  eth0: 5000000  50    0    0    0     0          0         0     2000000   20\n",
+        "  wlan0: 3000000 30    0    0    0     0          0         0     1000000   10\n",
+    ]
+
+    class _FakeFile:
+        def __init__(self, lines):
+            self.lines = lines
+
+        def __enter__(self):
+            return iter(self.lines)
+
+        def __exit__(self, *exc):
+            return False
+
+    class _FakeNetDev:
+        def open(self, *args, **kwargs):
+            return _FakeFile(fake_dev)
+
+    monkeypatch.setattr(system_health, "_PROC_NET_DEV", _FakeNetDev())
+    # Reset the cross-request sample so the first call is deterministic.
+    system_health._NET_SAMPLE.update({"rx": None, "tx": None, "ts": None})
+
+    first = system_health._network_throughput()
+    assert first["rx_total_bytes"] == 8000000
+    assert first["tx_total_bytes"] == 3000000
+    assert first["rx_bytes_per_s"] == 0.0
+    assert first["tx_bytes_per_s"] == 0.0
+
+
+def test_system_health_network_throughput_computes_delta_and_excludes_loopback(monkeypatch):
+    from api import system_health
+
+    snapshots = [
+        [
+            "  lo: 1000 0 0 0 0 0 0 0 1000 0\n",
+            "  eth0: 8000000 80 0 0 0 0 0 0 3000000 30\n",
+        ],
+        [
+            "  lo: 1000 0 0 0 0 0 0 0 1000 0\n",
+            "  eth0: 9000000 90 0 0 0 0 0 0 3500000 35\n",
+        ],
+    ]
+
+    class _FakeFile:
+        def __init__(self, lines):
+            self.lines = lines
+
+        def __enter__(self):
+            return iter(self.lines)
+
+        def __exit__(self, *exc):
+            return False
+
+    class _FakeNetDev:
+        def __init__(self):
+            # Start at index 1 so the single _network_throughput() read below
+            # returns the "current" snapshot (90/35), while we pre-seed prev
+            # with the "previous" snapshot (80/30) to exercise the delta math.
+            self._i = 1
+
+        def open(self, *args, **kwargs):
+            snap = snapshots[min(self._i, len(snapshots) - 1)]
+            self._i += 1
+            return _FakeFile(snap)
+
+    monkeypatch.setattr(system_health, "_PROC_NET_DEV", _FakeNetDev())
+    system_health._NET_SAMPLE.update({"rx": None, "tx": None, "ts": None})
+
+    prev = system_health._NET_SAMPLE
+    prev["rx"], prev["tx"], prev["ts"] = 8000000, 3000000, 1000.0
+    monkeypatch.setattr(system_health.time, "monotonic", lambda: 1002.0)
+
+    rate = system_health._network_throughput()
+    # 1 MB over 2 s == 500000 B/s rx; 500 KB over 2 s == 250000 B/s tx.
+    # Loopback deltas (0) must not pollute the aggregate.
+    assert rate["rx_bytes_per_s"] == 500000.0
+    assert rate["tx_bytes_per_s"] == 250000.0
+    assert rate["rx_total_bytes"] == 9000000
+    assert rate["tx_total_bytes"] == 3500000
+
+
+def test_system_health_payload_includes_network_block(monkeypatch):
+    from api import system_health
+
+    monkeypatch.setattr(system_health, "_cpu_percent", lambda: 17.3)
+    monkeypatch.setattr(
+        system_health,
+        "_memory_usage",
+        lambda: {"used_bytes": 4000, "total_bytes": 10000, "percent": 40.0},
+    )
+    monkeypatch.setattr(
+        system_health,
+        "_disk_usage",
+        lambda: {"used_bytes": 55500, "total_bytes": 100000, "percent": 55.5},
+    )
+    system_health._NET_SAMPLE.update({"rx": None, "tx": None, "ts": None})
+
+    payload = system_health.build_system_health_payload()
+    assert "network" in payload
+    net = payload["network"]
+    assert set(net) == {
+        "rx_bytes_per_s",
+        "tx_bytes_per_s",
+        "rx_total_bytes",
+        "tx_total_bytes",
+    }
+    assert isinstance(net["rx_bytes_per_s"], float)
+    assert isinstance(net["tx_bytes_per_s"], float)
+    assert isinstance(net["rx_total_bytes"], int)
+    assert isinstance(net["tx_total_bytes"], int)
+    # Privacy: no peer/interface detail escapes the server.
+    assert "/proc/net/dev" not in repr(payload)
+
+
+def test_system_health_route_returns_network_payload(monkeypatch):
+    from api import routes
+
+    monkeypatch.setattr(
+        routes,
+        "build_system_health_payload",
+        lambda: {
+            "status": "ok",
+            "available": True,
+            "checked_at": "2026-08-03T00:00:00+00:00",
+            "cpu": {"percent": 12.0},
+            "memory": {"used_bytes": 1, "total_bytes": 2, "percent": 50.0},
+            "disk": {"used_bytes": 3, "total_bytes": 4, "percent": 75.0},
+            "network": {
+                "rx_bytes_per_s": 100.0,
+                "tx_bytes_per_s": 50.0,
+                "rx_total_bytes": 9,
+                "tx_total_bytes": 4,
+            },
+            "errors": [],
+        },
+    )
+    handler = _FakeHandler()
+    assert routes.handle_get(handler, urlparse("http://example.test/api/system/health")) is True
+    payload = handler.json_body()
+    assert payload["network"] == {
+        "rx_bytes_per_s": 100.0,
+        "tx_bytes_per_s": 50.0,
+        "rx_total_bytes": 9,
+        "tx_total_bytes": 4,
+    }
+
+
+def test_resource_status_bar_markup_mounts_always_visible_footer():
+    assert "function _renderResourceStatusBar()" in PANELS_JS
+    assert 'id="resourceStatusBar"' in PANELS_JS
+    assert 'data-rsb-metric="cpu"' in PANELS_JS
+    assert 'data-rsb-metric="memory"' in PANELS_JS
+    assert 'data-rsb-metric="disk"' in PANELS_JS
+    assert 'data-rsb-metric="network"' in PANELS_JS
+    assert "id=\"resourceBarStatus\"" in PANELS_JS
+    # Footer lives in the app shell (always visible), not inside the Insights card.
+    assert PANELS_JS.index("_renderResourceStatusBar()") < PANELS_JS.index("_renderLlmWikiStatus(wikiStatus)")
+    assert ".resource-status-bar" in STYLE_CSS
+    assert ".rsb-bar-fill" in STYLE_CSS
+    assert ".rsb-dot" in STYLE_CSS
+
+
+def test_resource_status_bar_polls_without_insights_open():
+    assert "function _mountResourceStatusBar()" in UI_JS
+    assert "function _updateResourceStatusBar(payload)" in UI_JS
+    assert "function _formatBytesPerSec(bytesPerSec)" in UI_JS
+    # Always poll when the bar is mounted, independent of the Insights side-panel.
+    assert "if($('resourceStatusBar')) return true;" in UI_JS
+    # Mounted on load (DOMContentLoaded or immediately).
+    assert "document.addEventListener('DOMContentLoaded',_mountResourceStatusBar)" in UI_JS
+    assert "_mountResourceStatusBar();" in UI_JS

@@ -9291,6 +9291,7 @@ function renderSystemHealth(payload){
   if(!panel) return;
   if(!payload||payload.available===false){
     setSystemHealthUnavailable('Unavailable');
+    _updateResourceStatusBar(null);
     return;
   }
   panel.classList.remove('loading','unavailable');
@@ -9298,6 +9299,7 @@ function renderSystemHealth(payload){
   _updateSystemHealthMetric('cpu',payload.cpu);
   _updateSystemHealthMetric('memory',payload.memory);
   _updateSystemHealthMetric('disk',payload.disk);
+  _updateResourceStatusBar(payload);
 }
 async function pollSystemHealth(){
   if(document.visibilityState !== 'visible') return;
@@ -9310,9 +9312,64 @@ async function pollSystemHealth(){
   }
 }
 function _systemHealthPanelIsVisible(){
-  return document.visibilityState === 'visible' &&
-    !!document.querySelector('main.main.showing-insights') &&
+  // Always poll when the persistent MobaXterm-style resource bar is mounted,
+  // even if the Insights side-panel is closed.
+  if(document.visibilityState !== 'visible') return false;
+  if($('resourceStatusBar')) return true;
+  return !!document.querySelector('main.main.showing-insights') &&
     !!$('systemHealthPanel');
+}
+
+// ── Persistent resource status bar (#693) ──
+function _formatBytesPerSec(bytesPerSec){
+  const b=Math.max(0,Number(bytesPerSec)||0);
+  const units=['B/s','KB/s','MB/s','GB/s','TB/s'];
+  let v=b, i=0;
+  while(v>=1024 && i<units.length-1){ v/=1024; i++; }
+  return `${v<10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+function _updateResourceStatusBar(payload){
+  const bar=$('resourceStatusBar');
+  if(!bar) return;
+  if(!payload||payload.available===false){
+    bar.classList.add('unavailable');
+    const st=$('resourceBarStatus');
+    if(st) st.innerHTML='<span class="rsb-dot"></span>Unavailable';
+    ['cpu','memory','disk'].forEach(name=>{
+      const item=bar.querySelector(`[data-rsb-metric="${name}"] [data-rsb-value]`);
+      if(item) item.textContent='—';
+      const fill=bar.querySelector(`[data-rsb-metric="${name}"] .rsb-bar-fill`);
+      if(fill) fill.style.width='0%';
+    });
+    const net=bar.querySelector('[data-rsb-metric="network"] [data-rsb-value]');
+    if(net) net.textContent='—';
+    return;
+  }
+  bar.classList.remove('unavailable');
+  const setItem=(name,text,percent)=>{
+    const item=bar.querySelector(`[data-rsb-metric="${name}"] [data-rsb-value]`);
+    if(item) item.textContent=text;
+    const fill=bar.querySelector(`[data-rsb-metric="${name}"] .rsb-bar-fill`);
+    if(fill) fill.style.width=`${Math.max(0,Math.min(100,percent||0))}%`;
+  };
+  setItem('cpu', _formatSystemHealthPercent(_systemHealthPercent(payload.cpu)), _systemHealthPercent(payload.cpu)||0);
+  setItem('memory', _formatSystemHealthPercent(_systemHealthPercent(payload.memory)), _systemHealthPercent(payload.memory)||0);
+  setItem('disk', _formatSystemHealthPercent(_systemHealthPercent(payload.disk)), _systemHealthPercent(payload.disk)||0);
+  const net=payload.network||{};
+  const netItem=bar.querySelector('[data-rsb-metric="network"] [data-rsb-value]');
+  if(netItem) netItem.textContent=`↓ ${_formatBytesPerSec(net.rx_bytes_per_s)}  ↑ ${_formatBytesPerSec(net.tx_bytes_per_s)}`;
+  const st=$('resourceBarStatus');
+  if(st) st.innerHTML=`<span class="rsb-dot"></span>${payload.status==='partial'?'Partial':'Live'}`;
+}
+
+function _mountResourceStatusBar(){
+  if($('resourceStatusBar')) return;
+  if(typeof _renderResourceStatusBar!=='function') return;
+  const wrap=document.createElement('div');
+  wrap.innerHTML=_renderResourceStatusBar().trim();
+  const el=wrap.firstElementChild;
+  if(el) document.body.appendChild(el);
 }
 function startSystemHealthMonitor(){
   if(!_systemHealthPanelIsVisible()) return;
@@ -9330,6 +9387,9 @@ function _syncSystemHealthMonitorVisibility(){
 document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility);
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',startSystemHealthMonitor);
 else startSystemHealthMonitor();
+// Mount the always-visible MobaXterm-style resource bar (#693) and begin polling.
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',_mountResourceStatusBar);
+else _mountResourceStatusBar();
 
 // ── Hermes agent/gateway heartbeat alert (#716) ──
 const AGENT_HEALTH_INTERVAL_MS=30000;

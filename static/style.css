@@ -1547,6 +1547,27 @@
   .system-health-bar{height:5px;overflow:hidden;border-radius:999px;background:color-mix(in srgb,var(--border) 70%,transparent);border:1px solid color-mix(in srgb,var(--border) 75%,transparent);}
   .system-health-bar-fill{height:100%;width:0%;border-radius:inherit;background:linear-gradient(90deg,var(--accent),var(--accent-hover));transition:width .25s ease;}
   .system-health-foot{font-size:11px;color:var(--muted);line-height:1.45;opacity:.82;}
+
+  /* ── Persistent MobaXterm-style resource status bar (#693) ── */
+  .resource-status-bar{display:flex;align-items:center;gap:14px;flex-shrink:0;height:26px;padding:0 12px;background:var(--sidebar);border-top:1px solid var(--border);color:var(--muted);font-size:11px;line-height:1;user-select:none;white-space:nowrap;overflow:hidden;position:relative;z-index:20;}
+  .resource-status-bar[hidden]{display:none;}
+  .resource-status-bar.unavailable{opacity:.55;}
+  .rsb-item{display:inline-flex;align-items:center;gap:5px;min-width:0;}
+  .rsb-icon{display:inline-flex;align-items:center;color:var(--accent);opacity:.85;flex-shrink:0;}
+  .rsb-label{font-weight:600;letter-spacing:.02em;}
+  .rsb-value{font-variant-numeric:tabular-nums;color:var(--text);font-weight:650;white-space:nowrap;}
+  .rsb-bar{position:relative;width:46px;height:4px;border-radius:999px;background:color-mix(in srgb,var(--border) 70%,transparent);overflow:hidden;flex-shrink:0;}
+  .rsb-bar-fill{position:absolute;left:0;top:0;height:100%;width:0%;border-radius:inherit;background:linear-gradient(90deg,var(--accent),var(--accent-hover));transition:width .25s ease;}
+  .rsb-net .rsb-value{font-size:10.5px;}
+  .rsb-spacer{flex:1 1 auto;}
+  .rsb-status{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-weight:600;flex-shrink:0;}
+  .rsb-dot{width:7px;height:7px;border-radius:999px;background:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);opacity:.88;}
+  .resource-status-bar.unavailable .rsb-dot{background:var(--muted);box-shadow:none;opacity:.55;}
+  @media(max-width:640px){
+    .resource-status-bar{gap:9px;padding:0 8px;font-size:10px;}
+    .rsb-bar{width:32px;}
+    .rsb-label{display:none;}
+  }
   .app-titlebar-icon{display:inline-flex;align-items:center;color:var(--accent);}
   .app-titlebar-title{font-size:12px;font-weight:600;color:var(--text);letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60vw;}
   .app-titlebar-sub{font-size:10px;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;font-family:'SF Mono',ui-monospace,monospace;white-space:nowrap;flex-shrink:0;}

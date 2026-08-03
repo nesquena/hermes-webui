@@ -159,20 +159,96 @@ def _safe_error(metric: str, exc: Exception) -> dict[str, str]:
     return {"metric": metric, "code": type(exc).__name__}
 
 
+_PROC_NET_DEV = Path("/proc/net/dev")
+# Cross-request window for throughput deltas. Kept tiny and module-local so the
+# endpoint stays stateless per request but can still report a bytes/sec rate.
+_NET_SAMPLE: dict[str, Any] = {"rx": None, "tx": None, "ts": None}
+
+
+def _read_proc_net_dev() -> tuple[int, int]:
+    """Sum (rx_bytes, tx_bytes) over physical interfaces, excluding loopback."""
+    rx_total = 0
+    tx_total = 0
+    try:
+        with _PROC_NET_DEV.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if ":" not in line:
+                    continue
+                name, _, rest = line.partition(":")
+                if name.strip() == "lo":
+                    continue
+                parts = rest.split()
+                if len(parts) < 9:
+                    continue
+                try:
+                    rx_total += int(parts[0])
+                    tx_total += int(parts[8])
+                except ValueError:
+                    continue
+    except OSError:
+        return 0, 0
+    return rx_total, tx_total
+
+
+def _network_throughput() -> dict[str, float]:
+    """Sample aggregate network throughput (bytes/sec).
+
+    Stateless over requests: keeps the previous total byte count + timestamp in
+    a small module cache and computes a delta. The first call returns zeros to
+    avoid a bogus spike. No per-interface breakdown or peer data leaves the server.
+    """
+    rx_now, tx_now = _read_proc_net_dev()
+    now = time.monotonic()
+    prev = _NET_SAMPLE
+    if prev["ts"] is None:
+        prev["rx"], prev["tx"], prev["ts"] = rx_now, tx_now, now
+        return {
+            "rx_bytes_per_s": 0.0,
+            "tx_bytes_per_s": 0.0,
+            "rx_total_bytes": rx_now,
+            "tx_total_bytes": tx_now,
+        }
+    elapsed = now - prev["ts"]
+    if elapsed <= 0:
+        return {
+            "rx_bytes_per_s": 0.0,
+            "tx_bytes_per_s": 0.0,
+            "rx_total_bytes": rx_now,
+            "tx_total_bytes": tx_now,
+        }
+    rx_rate = max(0.0, (rx_now - prev["rx"]) / elapsed)
+    tx_rate = max(0.0, (tx_now - prev["tx"]) / elapsed)
+    prev["rx"], prev["tx"], prev["ts"] = rx_now, tx_now, now
+    return {
+        "rx_bytes_per_s": round(rx_rate, 1),
+        "tx_bytes_per_s": round(tx_rate, 1),
+        "rx_total_bytes": rx_now,
+        "tx_total_bytes": tx_now,
+    }
+
+
 def build_system_health_payload() -> dict[str, Any]:
-    metrics: dict[str, Any] = {"cpu": None, "memory": None, "disk": None}
+    metrics: dict[str, Any] = {"cpu": None, "memory": None, "disk": None, "network": None}
     errors: list[dict[str, str]] = []
 
     collectors = {
         "cpu": _cpu_percent,
         "memory": _memory_usage,
         "disk": _disk_usage,
+        "network": _network_throughput,
     }
     for name, collect in collectors.items():
         try:
             value = collect()
             if name == "cpu":
                 metrics[name] = {"percent": _clamp_percent(value)}
+            elif name == "network":
+                metrics[name] = {
+                    "rx_bytes_per_s": float(value["rx_bytes_per_s"]),
+                    "tx_bytes_per_s": float(value["tx_bytes_per_s"]),
+                    "rx_total_bytes": int(value["rx_total_bytes"]),
+                    "tx_total_bytes": int(value["tx_total_bytes"]),
+                }
             else:
                 metrics[name] = {
                     "used_bytes": max(0, int(value["used_bytes"])),
@@ -191,5 +267,6 @@ def build_system_health_payload() -> dict[str, Any]:
         "cpu": metrics["cpu"],
         "memory": metrics["memory"],
         "disk": metrics["disk"],
+        "network": metrics["network"],
         "errors": errors,
     }
