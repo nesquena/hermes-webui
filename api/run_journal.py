@@ -58,6 +58,37 @@ _SNAPSHOT_ARGS_MAX_TOTAL_CHARS = 64 * 1024
 _SNAPSHOT_ARGS_TRUNCATED_SUFFIX = "...[truncated]"
 
 
+class _ReadBudget:
+    """Mutable remaining-work meter shared across every descriptor read in one
+    logical scan, so physical I/O never exceeds the caller's allowance.
+
+    Each helper that reads the descriptor charges every read against
+    ``remaining`` and caps the requested length at it; when ``remaining`` hits 0
+    the scan stops (helpers return their exhausted/None fallback). Used by
+    ``_read_last_complete_line_before`` to bound the *physical* bytes touched
+    across ``_rfind_byte_before``, structural validation, prefix extraction, and
+    candidate parsing in one aggregate meter (#6139 r9, item 1). When ``budget``
+    is None the helpers run unbounded (the whole tail read is already bounded by
+    the ``_SESSION_REPLAY_MAX_BYTES`` window + the ``os.fstat`` pin).
+    """
+
+    __slots__ = ("remaining",)
+
+    def __init__(self, budget_bytes: int):
+        self.remaining = budget_bytes
+
+    def take(self, requested: int) -> int:
+        """Return the number of bytes actually allowed for a read of
+        ``requested`` bytes, decrementing ``remaining``. 0 means stop."""
+        allow = min(requested, max(0, self.remaining))
+        self.remaining -= allow
+        return allow
+
+    @property
+    def exhausted(self) -> bool:
+        return self.remaining <= 0
+
+
 def _default_session_dir() -> Path:
     from api.models import SESSION_DIR
 
@@ -298,11 +329,11 @@ def _read_last_complete_line_before(fh, size: int, end_offset: int, *, budget: i
 
     Scans backward across preceding complete lines, skipping any that are blank,
     malformed (JSONDecodeError), or non-dict, until a valid event dict is found.
-    For each candidate line, uses ``_extract_boundary_record_summary`` (the
-    bounded prefix extractor) to read ONLY the record's summary fields when the
-    line is oversized. This keeps the recovery path within the cap even when the
-    preceding valid record is itself an oversized multi-MB event. Returns the
-    summary dict, or None if there's no valid preceding record.
+    For each oversized predecessor, the row is SKIPPED (fail-closed, #6139 r9
+    item 2): an oversized record's full-record JSON validity can NEVER be proven
+    without materializing its payload, so its fabricated prefix must not be
+    trusted as proof of a valid event. The scan continues backward to a
+    normal-sized (fully-parseable) valid event, or returns None.
 
     This loop fixes #6139 r7: a shape like ``token\\n\\n<oversized partial done>``
     (a valid event, then a blank line, then a crash-truncated oversized record)
@@ -311,99 +342,142 @@ def _read_last_complete_line_before(fh, size: int, end_offset: int, *, budget: i
     line and recovers the valid event.
 
     The caller owns the handle and passes the pinned size from os.fstat.
-    ``budget`` bounds the total bytes/rows scanned (prevents infinite loops on
-    pathological files). If None, defaults to _SESSION_REPLAY_MAX_BYTES.
+    ``budget`` bounds the total PHYSICAL bytes touched by ``fh.read`` across the
+    whole scan — every descriptor read (``_rfind_byte_before`` newline scans,
+    candidate-line parsing, oversized structural check, oversized prefix
+    extraction) charges a single shared ``_ReadBudget`` meter, so the scan
+    stops as soon as the allowance is exhausted (#6139 r9 item 1). ``rows_scanned``
+    is retained as a secondary row-cap guard (a pathological file of tiny rows
+    could fit many rows in the byte budget). If ``budget`` is None it defaults to
+    ``_SESSION_REPLAY_MAX_BYTES``.
     """
     if end_offset <= 0:
         return None
     scan_end = min(end_offset, size)
-    # Budget tracking to bound the total work across the loop.
+    # One shared remaining-work meter across every descriptor read in this scan
+    # so physical I/O never exceeds the caller's allowance (#6139 r9 item 1).
     budget_bytes = budget if budget is not None else _SESSION_REPLAY_MAX_BYTES
-    bytes_consumed = 0
+    budget_obj = _ReadBudget(budget_bytes)
     rows_scanned = 0
     # Loop backward across preceding complete lines, skipping blank / malformed /
-    # non-dict lines, until a valid event dict is found. Without this loop, a
-    # shape like `token\n\n<big>` (a blank line between the valid event and the
-    # truncated boundary record) defeats recovery: the first preceding line is
-    # blank, json.loads("") fails, and the function returns None instead of
-    # continuing back to the valid event. (#6139 r7)
+    # non-dict lines (and oversized predecessors, fail-closed), until a valid
+    # normal-sized event dict is found. Without this loop, a shape like
+    # `token\n\n<big>` (a blank line between the valid event and the truncated
+    # boundary record) defeats recovery: the first preceding line is blank,
+    # json.loads("") fails, and the function returns None instead of continuing
+    # back to the valid event. (#6139 r7)
     while scan_end > 0:
-        # Check budget before each iteration (guard against infinite loops).
-        if bytes_consumed > budget_bytes or rows_scanned > _SESSION_REPLAY_MAX_ROWS:
+        # Secondary row-cap guard (the budget is byte-based; a pathological file
+        # of tiny rows could fit many rows in the byte budget).
+        if rows_scanned > _SESSION_REPLAY_MAX_ROWS:
             return None
-        first_nl = _rfind_byte_before(fh, b"\n", scan_end)
+        # Stop before the next helper at exhaustion (the maintainer's exact
+        # words for item 1: "stop before the next helper at exhaustion").
+        if budget_obj.exhausted:
+            return None
+        first_nl = _rfind_byte_before(fh, b"\n", scan_end, budget=budget_obj)
         if first_nl is None or first_nl == 0:
-            return None  # no preceding complete line
-        second_nl = _rfind_byte_before(fh, b"\n", first_nl)
+            return None  # no preceding complete line (or budget exhausted mid-scan)
+        if budget_obj.exhausted:
+            return None  # stop before the next helper at exhaustion
+        second_nl = _rfind_byte_before(fh, b"\n", first_nl, budget=budget_obj)
         line_start = (second_nl + 1) if second_nl is not None else 0
         line_len = first_nl - line_start
         if line_len <= 0:
             # Blank line (e.g. the gap in `token\n\n<big>`). Skip it: continue the
-            # backward scan from before this blank line.
+            # backward scan from before this blank line. No descriptor read here,
+            # so the budget is untouched; only the row-cap advances.
             rows_scanned += 1  # count blank lines too (guard against infinite blank streaks)
             scan_end = line_start  # strictly < previous scan_end (line_start <= first_nl < scan_end)
             if scan_end <= 0:
                 return None
             continue
-        # Attempt to read + parse this candidate line (bounded for oversized).
-        if line_len <= _BOUNDARY_SUMMARY_PREFIX_BYTES:
-            try:
-                fh.seek(line_start)
-                raw = fh.read(line_len)
-                parsed = json.loads(raw.decode("utf-8", errors="replace"))
-            except (json.JSONDecodeError, OSError):
-                parsed = None
-            bytes_consumed += line_len
-            rows_scanned += 1
-            if isinstance(parsed, dict):
-                return parsed
-            # Malformed or non-dict: skip, continue backward.
-            scan_end = line_start
-            if scan_end <= 0:
-                return None
-            continue
-        # Oversized preceding record: bounded prefix extraction (no payload materialized).
-        # CRITICAL: before accepting the fabricated prefix, gate on structural completeness.
-        # An oversized malformed predecessor (no closing brace/newline) must NOT be accepted
-        # via fabricated prefix as if it were valid JSON. If it's incomplete, skip it like
-        # any other malformed line.
-        if not _record_is_structurally_complete(fh, size, line_start):
-            # Oversized row is malformed/truncated — do NOT accept its fabricated prefix.
-            # Treat it like any other malformed line: skip and continue backward.
-            bytes_consumed += _BOUNDARY_SUMMARY_PREFIX_BYTES
+        # Oversized predecessor (> _BOUNDARY_SUMMARY_PREFIX_BYTES): fail-closed.
+        # Its full-record JSON validity can NEVER be proven without materializing
+        # the payload, so per #6139 r9 item 2 the fabricated prefix is NOT
+        # trusted. The row is skipped and the scan continues to the preceding
+        # normal-sized valid event. (The scan work done so far by
+        # _rfind_byte_before is already charged via the shared budget.)
+        if line_len > _BOUNDARY_SUMMARY_PREFIX_BYTES:
+            # An oversized predecessor's validity cannot be proven without
+            # materializing its payload, so per #6139 r9 it is skipped
+            # (fail-closed). The scan continues to the preceding normal-sized
+            # valid event.
             rows_scanned += 1
             scan_end = line_start
             if scan_end <= 0:
                 return None
             continue
-        candidate = _extract_boundary_record_summary(fh, line_start)
-        bytes_consumed += _BOUNDARY_SUMMARY_PREFIX_BYTES
+        # Normal-size candidate line: charge the budget for the parse read too
+        # (the maintainer named "candidate parsing" in item 1), then read.
+        to_read = budget_obj.take(line_len)
+        if to_read == 0:
+            return None  # exhausted before parsing this candidate — stop
+        try:
+            fh.seek(line_start)
+            raw = fh.read(to_read)
+        except (FileNotFoundError, OSError):
+            return None  # TOCTOU: journal deleted mid-read — safe fallback
+        try:
+            parsed = json.loads(raw.decode("utf-8", errors="replace"))
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            parsed = None
         rows_scanned += 1
-        if isinstance(candidate, dict):
-            return candidate
+        if isinstance(parsed, dict):
+            return parsed
+        # Malformed or non-dict: skip, continue backward.
         scan_end = line_start
         if scan_end <= 0:
             return None
     return None
 
 
-def _rfind_byte_before(fh, byte: bytes, end_offset: int) -> int | None:
+def _rfind_byte_before(
+    fh, byte: bytes, end_offset: int, *, budget: _ReadBudget | None = None
+) -> int | None:
     """Return the offset of the last occurrence of ``byte`` at or before
     ``end_offset - 1``, scanning backward in bounded chunks. None if not found.
 
     The caller owns the handle; all reads use the same inode generation.
+
+    When ``budget`` is a ``_ReadBudget``, every ``fh.read`` is capped at the
+    budget's remaining allowance via ``budget.take`` (the read covers the LAST
+    ``to_read`` bytes of the candidate ``[read_from, pos)`` range, since we scan
+    backward). If the allowance hits 0 the scan stops and returns None. When
+    ``budget`` is None the helper runs unbounded (the whole tail read is already
+    bounded by the caller). Capping only ever narrows the examined window — the
+    byte-found offset math is unchanged when the full chunk is read.
     """
     chunk_size = _SESSION_REPLAY_READ_CHUNK_BYTES
     pos = end_offset
     try:
         while pos > 0:
             read_from = max(0, pos - chunk_size)
-            fh.seek(read_from)
-            block = fh.read(pos - read_from)
-            idx = block.rfind(byte)
-            if idx >= 0:
-                return read_from + idx
-            pos = read_from
+            want = pos - read_from
+            if budget is not None:
+                to_read = budget.take(want)
+                if to_read == 0:
+                    return None  # exhausted before this read — stop (fail-quiet)
+                # Read the LAST `to_read` bytes of [read_from, pos): scanning
+                # backward, the suffix is the highest-value window to examine.
+                block_start = pos - to_read
+                fh.seek(block_start)
+                block = fh.read(to_read)
+                idx = block.rfind(byte)
+                if idx >= 0:
+                    return block_start + idx
+                # Byte not in this suffix. If the suffix was shorter than the
+                # candidate range (budget truncated it), there may be unexamined
+                # bytes in [read_from, block_start) — but only if budget remains.
+                # If exhausted, stop; otherwise advance pos to the suffix start.
+                pos = block_start
+            else:
+                fh.seek(read_from)
+                block = fh.read(want)
+                idx = block.rfind(byte)
+                if idx >= 0:
+                    return read_from + idx
+                pos = read_from
     except (FileNotFoundError, OSError):
         # TOCTOU: journal deleted before/during the scan. Return the safe
         # fallback (None = byte not found) rather than escaping to the caller.
@@ -412,7 +486,9 @@ def _rfind_byte_before(fh, byte: bytes, end_offset: int) -> int | None:
     return None
 
 
-def _record_is_structurally_complete(fh, size: int, record_start: int) -> bool:
+def _record_is_structurally_complete(
+    fh, size: int, record_start: int, *, budget: _ReadBudget | None = None
+) -> bool:
     """Return True iff the JSONL record at ``record_start`` is structurally
     complete — i.e. its JSON object is closed (brace depth returns to 0) AND
     followed by a newline terminator — scanning forward in bounded chunks WITHOUT
@@ -424,7 +500,12 @@ def _record_is_structurally_complete(fh, size: int, record_start: int) -> bool:
     and its recovery signal is silently dropped. Returns False if EOF is reached
     at brace depth > 0 (the record was truncated mid-write).
 
-    The caller owns the handle and passes the pinned size from os.fstat.
+    The caller owns the handle and passes the pinned size from os.fstat. When
+    ``budget`` is a ``_ReadBudget``, every ``fh.read`` is capped at the budget's
+    remaining allowance via ``budget.take``; if the allowance hits 0 before the
+    record's closing brace is confirmed, returns False (fail-closed — can't
+    prove completeness within the budget). When ``budget`` is None the helper
+    runs unbounded. The brace-depth + terminator logic is unchanged.
     """
     chunk_size = _SESSION_REPLAY_READ_CHUNK_BYTES
     depth = 0
@@ -434,10 +515,21 @@ def _record_is_structurally_complete(fh, size: int, record_start: int) -> bool:
     try:
         fh.seek(record_start)
         while pos < size:
-            chunk = fh.read(min(chunk_size, size - pos))
+            want = min(chunk_size, size - pos)
+            if budget is not None:
+                to_read = budget.take(want)
+                if to_read == 0:
+                    return False  # exhausted before confirming completeness — fail-closed
+            else:
+                to_read = want
+            chunk = fh.read(to_read)
             if not chunk:
                 break
             chunk_len = len(chunk)
+            if budget is not None and chunk_len < want and depth > 0:
+                # Budget truncated this read before we could reach the closing
+                # brace — can't confirm completeness within the allowance.
+                return False
             for ci in range(chunk_len):
                 b = chunk[ci]
                 pos += 1
@@ -492,7 +584,9 @@ def _record_is_structurally_complete(fh, size: int, record_start: int) -> bool:
         return False
 
 
-def _extract_boundary_record_summary(fh, record_start: int) -> dict | None:
+def _extract_boundary_record_summary(
+    fh, record_start: int, *, budget: _ReadBudget | None = None
+) -> dict | None:
     """Extract ONLY the summary fields of an oversized journal record that
     straddles the tail-window boundary, without materializing its payload.
 
@@ -504,11 +598,21 @@ def _extract_boundary_record_summary(fh, record_start: int) -> dict | None:
     replaced with an empty dict so downstream consumers see the shape but not
     the bytes.
 
-    The caller owns the handle; all reads use the same inode generation.
+    The caller owns the handle; all reads use the same inode generation. When
+    ``budget`` is a ``_ReadBudget`` the prefix read is capped at the budget's
+    remaining allowance; if the allowance hits 0 the function returns None. The
+    rest of the function operates on whatever prefix was read — if a shorter-
+    than-expected prefix can't be parsed, returns None.
     """
     try:
         fh.seek(record_start)
-        prefix_raw = fh.read(_BOUNDARY_SUMMARY_PREFIX_BYTES)
+        if budget is not None:
+            to_read = budget.take(_BOUNDARY_SUMMARY_PREFIX_BYTES)
+            if to_read == 0:
+                return None  # exhausted before reading any prefix — stop
+            prefix_raw = fh.read(to_read)
+        else:
+            prefix_raw = fh.read(_BOUNDARY_SUMMARY_PREFIX_BYTES)
     except (FileNotFoundError, OSError):
         return None
     text = prefix_raw.decode("utf-8", errors="replace")
