@@ -3729,13 +3729,22 @@ def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch, t
     dropped from models.SESSIONS in try/finally; the worker is awaited until
     its stream channel and active-run registry are gone, so no shared state
     leaks to later tests in the same pytest process (round-5 re-gate).
+
+    Round-6 re-gate: the finalization wait keys on the immutable stream_id
+    returned by the route (never on s.active_stream_id, which the writeback
+    clears before the worker's final cleanup); models.SESSIONS is snapshotted
+    and exactly restored under models.LOCK (new_session may evict a pre-existing
+    LRU entry, so popping owned IDs cannot restore the prior registry); the
+    route's last_workspace.txt write is isolated under tmp_path.
     """
+    import collections
     import time as _time
 
     import api.config as config
     import api.gateway_chat as gateway_chat
     import api.models as models
     import api.routes as routes
+    import api.workspace as workspace
 
     raw_command = "/llm-wiki list pages"
     expansion = "[IMPORTANT: The user has invoked the llm-wiki skill...]\nfull skill body"
@@ -3749,6 +3758,11 @@ def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch, t
     monkeypatch.setattr(models, "SESSION_DIR", sessions_dir)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", index_path)
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_path)
+    # Isolate the route's set_last_workspace() write (routes.py:21307).
+    monkeypatch.setattr(
+        workspace, "_last_workspace_file",
+        lambda: tmp_path / "webui-state" / "last_workspace.txt",
+    )
 
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
@@ -3757,12 +3771,16 @@ def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch, t
         gateway_chat, "_gateway_reasoning_effort_for_request", lambda *a, **k: None
     )
 
-    owned_sids = []
+    # Snapshot the exact ordered registry (object identities included) before
+    # new_session() can evict a pre-existing LRU entry.
+    with models.LOCK:
+        pre_sessions = collections.OrderedDict(models.SESSIONS)
 
     def _wait_for_worker_finalization(stream_id):
         """Wait until the daemon worker removed its stream channel and its
-        active-run registry row; the writeback (active_stream_id=None) alone
-        happens before the worker's final global cleanup."""
+        active-run registry row. The stream_id comes from the route result and
+        is immutable; s.active_stream_id alone is cleared by the writeback
+        before the worker's final global cleanup."""
         deadline = _time.time() + 10
         while _time.time() < deadline:
             with config.STREAMS_LOCK:
@@ -3815,9 +3833,8 @@ def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch, t
             monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a, **k: False)
 
         s = models.new_session(workspace="/tmp", model="test-model")
-        owned_sids.append(s.session_id)
         s.save()
-        routes._start_chat_stream_for_session(
+        start_result = routes._start_chat_stream_for_session(
             s,
             msg=raw_command,
             agent_message=expansion,
@@ -3829,7 +3846,8 @@ def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch, t
             source="webui",
             external_runtime_owned=True,
         )
-        stream_id = getattr(s, "active_stream_id", None)
+        stream_id = (start_result or {}).get("stream_id")
+        assert stream_id, "route must return an immutable stream_id"
         finalized = _wait_for_worker_finalization(stream_id)
         assert finalized, (
             f"gateway worker did not finalize stream {stream_id!r} in time"
@@ -3859,8 +3877,8 @@ def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch, t
         )
         _assert_gateway_writeback_split(s_cc, raw_command, expansion)
     finally:
-        # Restore exact prestate: drop only the owned sessions from the
-        # in-memory registry (their files live under tmp_path).
+        # Restore the exact ordered registry prestate (object identities and
+        # order); files and the last_workspace write live under tmp_path.
         with models.LOCK:
-            for sid in owned_sids:
-                models.SESSIONS.pop(sid, None)
+            models.SESSIONS.clear()
+            models.SESSIONS.update(pre_sessions)
