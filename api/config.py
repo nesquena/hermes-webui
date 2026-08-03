@@ -6605,14 +6605,20 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     # ── COLD PATH helper ─────────────────────────────────────────────────────
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
     # prevent thundering-herd: only one thread rebuilds while others wait.
-    def _build_available_models_uncached(cfg_snapshot: dict | None = None) -> dict:
+    def _build_available_models_uncached(cfg_snapshot: dict) -> dict:
         # Request-owned config snapshot (#5619): the cold rebuild may run on a
         # detached worker thread that does not inherit the request profile TLS,
         # and the module-global ``cfg`` can be repointed by a concurrent profile
-        # reload between capture and build. Bind the snapshot locally so every
-        # ``cfg`` read below (direct or via helpers) resolves against the
-        # captured profile's config, never a foreign one.
-        cfg = cfg_snapshot if isinstance(cfg_snapshot, dict) else get_config()
+        # reload between capture and build. The snapshot is REQUIRED — there is
+        # no ambient fallback, so every ``cfg`` read below (direct or via
+        # helpers) resolves against the captured profile's config, never a
+        # foreign one or a stale module global.
+        if not isinstance(cfg_snapshot, dict):
+            raise TypeError(
+                "get_available_models() must pass a captured config snapshot "
+                "(#5619); refusing to read the ambient module-global cfg"
+            )
+        cfg = cfg_snapshot
         active_provider = None
         default_model = get_effective_default_model(cfg)
         groups = []

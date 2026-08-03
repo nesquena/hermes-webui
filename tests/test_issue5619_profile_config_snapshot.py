@@ -162,9 +162,11 @@ def test_builder_publishes_captured_profile_not_concurrent_global(monkeypatch, t
     )
 
 
-def test_builder_without_snapshot_falls_back_to_live_cfg(monkeypatch, tmp_path):
-    """The snapshot parameter is optional: callers that pass nothing keep the
-    previous behavior (resolve the live module-global cfg)."""
+def test_builder_requires_snapshot_and_preserves_in_memory_overrides(monkeypatch, tmp_path):
+    """The snapshot parameter is REQUIRED (no ambient get_config() fallback,
+    #5619 review). get_available_models() always captures one inside the
+    profile scope; in-memory overrides (a rebound ``cfg``) are preserved
+    verbatim by the capture, exactly like get_config() semantics."""
     _install_fake_hermes_cli(monkeypatch)
     _pin_test_paths(monkeypatch, tmp_path)
 
@@ -189,6 +191,10 @@ def test_builder_without_snapshot_falls_back_to_live_cfg(monkeypatch, tmp_path):
 
     assert payload["active_provider"] == "anthropic"
     assert payload["default_model"] == "claude-haiku-4.5"
+    # The builder must have received a snapshot (never resolved ambient cfg):
+    # the result deep-copied out of get_available_models() matches the
+    # builder's captured output, and the builder output reflects profile B.
+    assert captured.get("result", {}).get("active_provider") == "anthropic"
 
 
 def test_snapshot_expands_env_against_calling_threads_profile_scope(monkeypatch, tmp_path):
