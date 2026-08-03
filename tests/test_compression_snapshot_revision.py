@@ -362,6 +362,112 @@ def test_snapshot_reader_missing_explicit_profile_does_not_fall_back_to_active_d
     assert snapshot.revision is None
 
 
+def test_reconciled_reader_missing_explicit_profile_does_not_fall_back_to_active_db(
+    tmp_path,
+    monkeypatch,
+):
+    sid = "missing-profile-reconcile"
+    foreign_db = tmp_path / "active-home" / "state.db"
+    foreign_db.parent.mkdir()
+    _make_state_db(
+        foreign_db,
+        sid,
+        [{"role": "user", "content": "foreign profile row", "timestamp": 1.0}],
+    )
+    missing_home = tmp_path / "missing-profile"
+    monkeypatch.setattr(models, "_get_profile_home", lambda _profile: missing_home)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: foreign_db)
+    session = Session(
+        session_id=sid,
+        profile="missing",
+        messages=[],
+        context_messages=[],
+    )
+
+    reconciled = models.reconciled_state_db_messages_for_session(
+        session,
+        with_revision=True,
+    )
+
+    assert reconciled.messages == []
+    assert reconciled.revision is None
+
+
+def test_stale_partial_requires_authoritative_current_turn_boundary():
+    session = Session(
+        session_id="partial-authority",
+        messages=[],
+        context_messages=[],
+    )
+    result = {
+        "partial": True,
+        "messages": [
+            {"role": "user", "content": "repeat prompt"},
+            {"role": "assistant", "content": "historical answer"},
+            {"role": "user", "content": "later unrelated turn"},
+            {"role": "assistant", "content": "later answer"},
+        ]
+    }
+    identity = {
+        "token": "stream:123",
+        "text": "repeat prompt",
+        "current_turn_user_idx": 8,
+        "turn_id": "session:turn-current",
+    }
+
+    streaming._append_result_partial_on_error(
+        session,
+        result,
+        [{"role": "user", "content": "unrelated baseline"}],
+        "repeat prompt",
+        active_turn_identity=identity,
+    )
+
+    assert not any(message.get("_partial") for message in session.messages)
+
+
+def test_stale_non_prefix_partial_uses_token_and_stops_at_next_user():
+    session = Session(
+        session_id="stale-partial-token-boundary",
+        messages=[],
+        context_messages=[],
+    )
+    result = {
+        "partial": True,
+        "messages": [
+            {"role": "user", "content": "historical"},
+            {"role": "assistant", "content": "historical answer"},
+            {
+                "role": "user",
+                "content": "current prompt",
+                "_active_turn_token": "current-turn-token",
+            },
+            {"role": "assistant", "content": "current partial"},
+            {"role": "user", "content": "later turn"},
+            {"role": "assistant", "content": "later answer"},
+        ],
+    }
+
+    appended = streaming._append_result_partial_on_error(
+        session,
+        result,
+        [{"role": "user", "content": "different baseline"}],
+        "current prompt",
+        active_turn_identity={
+            "token": "current-turn-token",
+            "turn_id": "turn-current",
+            "current_turn_user_idx": 2,
+            "text": "current prompt",
+        },
+    )
+
+    assert appended is not None
+    assert appended["content"] == "current partial"
+    assert [message["content"] for message in session.messages] == [
+        "current partial"
+    ]
+
+
 def test_reconciled_compressed_projection_keeps_durable_snapshot_revision(tmp_path, monkeypatch):
     sid = "revision-reconcile"
     db_path = tmp_path / "state.db"
@@ -677,6 +783,7 @@ def test_stale_compression_snapshot_emits_actionable_error_without_replaying_tur
         "stale_without_current_assistant",
         "stale_non_prefix_compacted",
         "stale_non_prefix_without_current_user",
+        "stale_non_prefix_repeated_prompt_without_authority",
     ],
 )
 def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
@@ -758,6 +865,11 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
                     stale_messages = history + [
                         {"role": "user", "content": "new webui turn"}
                     ]
+                elif second_result == "stale_non_prefix_repeated_prompt_without_authority":
+                    stale_messages = [
+                        {"role": "user", "content": "new webui turn"},
+                        {"role": "assistant", "content": "prior answer"},
+                    ]
                 else:
                     stale_messages = history + [
                         {"role": "user", "content": "new webui turn"},
@@ -772,6 +884,7 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
                             "stale_without_current_assistant",
                             "stale_non_prefix_compacted",
                             "stale_non_prefix_without_current_user",
+                            "stale_non_prefix_repeated_prompt_without_authority",
                         )
                         else "partial stale"
                     ),
@@ -851,6 +964,7 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
             "stale_without_current_assistant",
             "stale_non_prefix_compacted",
             "stale_non_prefix_without_current_user",
+            "stale_non_prefix_repeated_prompt_without_authority",
         ):
             assert not partials
             assert not any(

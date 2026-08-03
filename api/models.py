@@ -9370,10 +9370,17 @@ def reconciled_state_db_messages_for_session(
         local_messages = getattr(session, 'messages', None) or []
     if state_messages is None:
         session_id = getattr(session, 'session_id', None)
+        session_profile = getattr(session, 'profile', None)
         if with_revision:
             state_result = get_state_db_session_messages(
                 session_id,
+                profile=session_profile,
                 with_revision=True,
+            )
+        elif session_profile:
+            state_result = get_state_db_session_messages(
+                session_id,
+                profile=session_profile,
             )
         else:
             # Preserve the historical one-argument call contract for ordinary

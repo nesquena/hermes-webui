@@ -6669,6 +6669,29 @@ def _agent_result_terminal_failure(result) -> bool:
     return False
 
 
+def _self_heal_result_succeeded(result, previous_message_count, token_sent) -> bool:
+    """Accept a credential retry only after observable current-turn success."""
+    if not isinstance(result, dict):
+        return False
+    if _result_reports_compression_snapshot_stale(result):
+        return False
+    if _agent_result_terminal_failure(result):
+        return False
+    result_error = result.get('error')
+    if isinstance(result_error, str):
+        if result_error.strip():
+            return False
+    elif result_error:
+        return False
+    if result.get('completed') is False:
+        return False
+    messages = result.get('messages') or []
+    return bool(token_sent) or _has_new_assistant_reply(
+        messages,
+        previous_message_count,
+    )
+
+
 _TOOL_RESULT_SNIPPET_MAX = 4000
 
 # Tool-arg keys whose values are card content / diff-reconstruction inputs.
@@ -7185,6 +7208,8 @@ def _append_result_partial_on_error(
     result,
     pre_call_context,
     msg_text,
+    *,
+    active_turn_identity=None,
 ) -> dict | None:
     """Retain only a current-turn partial assistant row from an Agent result."""
     if not isinstance(result, dict) or result.get('partial') is not True:
@@ -7222,25 +7247,33 @@ def _append_result_partial_on_error(
     else:
         # Compacted/replayed results can REPLACE the pre-call baseline instead
         # of appending to it; a numeric suffix slice can then expose a
-        # historical assistant row as this turn's partial. Anchor on the
-        # current user turn instead. This persistence path must require a
-        # positive exact match: _find_current_user_turn() deliberately falls
-        # back to the last arbitrary user row, which could misattribute a
-        # historical assistant row when the current turn is absent.
+        # historical assistant row as this turn's partial. Require the unique
+        # active-turn token to survive in the returned projection; a positional
+        # index belongs to the replaced projection and may coincidentally point
+        # at a repeated historical prompt after compaction.
         current_user_idx = next(
             (
                 index
-                for index in range(len(messages) - 1, -1, -1)
-                if isinstance(messages[index], dict)
-                and messages[index].get('role') == 'user'
-                and _normalize_user_text(_message_text(messages[index].get('content')))
-                == normalized_msg_text
+                for index, row in enumerate(messages)
+                if _active_turn_token_matches(row, active_turn_identity)
             ),
             None,
         )
         if current_user_idx is None:
             return None
         current_turn_rows = messages[current_user_idx + 1:]
+    # A later user row starts another turn. Never cross that boundary while
+    # selecting a partial assistant response for the current turn.
+    next_user_idx = next(
+        (
+            index
+            for index, row in enumerate(current_turn_rows)
+            if isinstance(row, dict) and row.get('role') == 'user'
+        ),
+        None,
+    )
+    if next_user_idx is not None:
+        current_turn_rows = current_turn_rows[:next_user_idx]
     assistant_row = next(
         (
             row
@@ -10292,13 +10325,10 @@ def _run_agent_streaming(
                                         result=_heal_result,
                                     )
                                     result = _heal_result
-                                _heal_all_msgs = _heal_result.get('messages') or []
-                                _heal_ok = (
-                                    _heal_stale_classification is None
-                                    and (
-                                        _has_new_assistant_reply(_heal_all_msgs, _prev_len)
-                                        or _token_sent
-                                    )
+                                _heal_ok = _self_heal_result_succeeded(
+                                    _heal_result,
+                                    _prev_len,
+                                    _token_sent,
                                 )
                             except Exception as _retry_exc:
                                 logger.warning(
@@ -11560,7 +11590,11 @@ def _run_agent_streaming(
                                 result=_heal_result,
                             )
                             result = _heal_result
-                        else:
+                        elif _self_heal_result_succeeded(
+                            _heal_result,
+                            len(_heal_context_messages),
+                            _token_sent,
+                        ):
                             # Retry succeeded — persist the result normally.
                             if s is not None:
                                 if _checkpoint_stop is not None:
@@ -11699,6 +11733,7 @@ def _run_agent_streaming(
                         result,
                         _result_partial_pre_call_context,
                         msg_text,
+                        active_turn_identity=_active_turn_identity,
                     )
                 except Exception:
                     logger.debug("Failed to snapshot partials on error for %s", stream_id, exc_info=True)
