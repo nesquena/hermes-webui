@@ -1,58 +1,38 @@
 """Regression tests for #5937/#6586 — terminal backend isolation generation protocol.
 
-The re-gate review (nesquena-hermes, PR #6586) found two blockers in the
-first re-push:
+The 2026-08-03 redesign replaced the thread-local ``_turn_state`` (which carried
+the calling turn's backend generation) with an explicit
+``contextvars.ContextVar`` (``_TURN_BACKEND_GENERATION``): the Agent dispatches
+parallel-safe tool calls on child threads and propagates ContextVars
+(``contextvars.copy_context()``), NOT arbitrary thread-locals — so a
+thread-local slot was invisible inside tool workers, and acquisition there fell
+back to the process-global per-task owner, letting a concurrent profile change
+reuse state outside the calling turn's captured generation.
 
-1. **Deterministic deadlock.**  ``api.streaming._wrapped_terminal_tool()``
-   entered ``tt._env_lock`` and then called ``tt.get_active_env()``.  The
-   installed agent defines ``_env_lock = threading.Lock()`` (non-reentrant)
-   and ``get_active_env()`` acquires that same lock, so the first guarded
-   terminal call blocked forever.
+The new protocol, driven by the REAL ``api.streaming`` functions:
 
-2. **Ownership was never published.**  ``_mark_env_backend_generation()``
-   had no caller; ``_invalidate_stale_terminal_backend()`` popped the
-   generation record *before* reading it, so ``recorded`` was always ``None``
-   and the stale check returned early — neither ``cleanup_vm()`` nor
-   ``clear_file_ops_cache()`` was ever reached.  ``_refresh_env_generation_tag()``
-   also could not tag an environment because it depended on that absent record.
+* ``_begin_turn_generation(profile_runtime_env)`` — ONE ``_backend_generation_lock``
+  transaction: identity compare/publish (``_publish_backend_identity``),
+  exact-generation capture, ContextVar bind, active-use increment.  A failed
+  transition RAISES (fail-closed) and binds nothing, so the production
+  try/finally's ``_end_turn_generation()`` no-ops.
+* ``_end_turn_generation()`` / ``_unregister_turn_generation()`` — reads the
+  SAME captured generation from the ContextVar, clears it, decrements active
+  use, and drains deferred stale evictions.
+* ``_validate_backend_ownership`` — ONE shared acquisition boundary for
+  terminal / file / code-execution.  Compares the live env's tag against the
+  CALLING TURN's captured (ContextVar) generation — never the process-global
+  current generation, never the recorded owner.  An untagged env is retired
+  (fail-closed) for registered WebUI turns; an env still owned by an active
+  old-generation turn is waited on (bounded) instead of torn down.
+* ``_retire_generation_env`` — compare-and-remove under the registry lock; the
+  exact removed object is cleaned OUTSIDE the lock, so a replacement installed
+  under the same key is never torn down.
 
-The 2026-08-02 re-gate review found further blockers, all fixed here:
-
-3. **Deferred retire never published.**  ``_invalidate_stale_terminal_backend()``
-   assigned ``_pending_eviction_generation`` without a ``global`` declaration,
-   so the deferral was a local write and the pending retire was lost.  Pending
-   stale generations are now a SET (``_pending_eviction_generations``),
-   drained by ``_drain_pending_evictions()``.
-
-4. **File and execute_code acquisition bypassed the guard.**  Only
-   ``terminal_tool.terminal_tool`` was wrapped; ``file_tools._get_file_ops()``
-   and ``code_execution_tool._get_or_create_env()`` reused/created
-   ``_active_environments`` directly.  All three paths now share ONE
-   acquisition boundary (``_validate_backend_ownership``), and envs are tagged
-   at creation via the shared ``_create_environment`` funnel.
-
-5. **Active-use deferral admitted cross-backend reuse.**  Acquisition compared
-   the live env's tag against the process-global *recorded* owner, which the
-   deferred path never updated.  Acquisition now compares against the CALLING
-   TURN's captured (thread-local) generation — carried immutably from turn
-   setup — and the identity transition + ownership registration are atomic.
-   A new-backend turn neither reuses nor tears down an env an active
-   old-backend turn still owns; it waits (bounded) for that turn to drain.
-
-6. **Read/retire gap.**  ``get_active_env()`` then ``cleanup_vm()`` allowed a
-   replacement installed under the same key to be removed.  Retire is now a
-   compare-and-remove under the registry lock that cleans up the exact removed
-   object OUTSIDE the lock.
-
-7. **Registration was not inside a guaranteed outer try/finally.**  The
-   production call site now registers via ``_begin_turn_generation()`` as the
-   first statements of the try whose finally calls ``_end_turn_generation()``,
-   so a raising agent body can never leak an active-use registration.
-
-These tests drive the REAL ``api.streaming`` functions against a faithful
-fake of the agent's ``tools.terminal_tool`` contract (non-reentrant lock,
-lock-taking accessors, registry dicts), so they are RED on the buggy head
-and GREEN after the fix.
+These tests drive the REAL ``api.streaming`` functions against a faithful fake
+of the agent's ``tools.terminal_tool`` contract (non-reentrant lock,
+lock-taking accessors, registry dicts), so they are RED on the buggy head and
+GREEN after the fix.
 """
 from __future__ import annotations
 
@@ -144,7 +124,7 @@ def _tagged_generation(streaming) -> int:
     """Generation a fake creation path tags a fresh env with: the calling
     turn's captured generation when present, else the current global — the
     same policy the production ``_create_environment`` wrapper applies."""
-    turn_gen = getattr(streaming._turn_state, "backend_generation", None)
+    turn_gen = streaming._get_turn_generation()
     return turn_gen if turn_gen is not None else streaming._get_current_backend_generation()
 
 
@@ -183,7 +163,7 @@ def _isolate_generation_state(monkeypatch):
         streaming._terminal_env_guard_installed = False
         streaming._active_turn_generations.clear()
         streaming._pending_eviction_generations = set()
-    streaming._turn_state.backend_generation = None
+    streaming._TURN_BACKEND_GENERATION.set(None)
     yield
 
 
@@ -331,10 +311,9 @@ def test_guard_evicts_stale_generation_env_without_deadlock(fake_terminal_tool):
 
 
 def test_guard_compares_against_turn_captured_generation(fake_terminal_tool):
-    """Blocker 3 (focused): acquisition must compare against the CALLING
-    TURN's captured generation — not the recorded owner (which a deferred
-    transition could leave stale) and not the process-global current
-    generation.
+    """The acquisition boundary must compare against the CALLING TURN's
+    captured generation — not the recorded owner (which a deferred transition
+    could leave stale) and not the process-global current generation.
 
     Here the recorded owner is still 0 (the worst case the old code produced)
     while the env is tagged 0 and the calling turn is registered under gen 1:
@@ -343,6 +322,8 @@ def test_guard_compares_against_turn_captured_generation(fake_terminal_tool):
     streaming = importlib.import_module("api.streaming")
     streaming._install_terminal_env_generation_guard()
 
+    host_a_env = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-a"}
+    streaming._last_backend_identity = streaming._compute_backend_identity(host_a_env)
     streaming._env_backend_generations["default"] = 0
     streaming._current_backend_generation = 1
     env_a = _FakeEnv(generation=0)
@@ -351,7 +332,8 @@ def test_guard_compares_against_turn_captured_generation(fake_terminal_tool):
     result = {}
 
     def _turn_b():
-        streaming._register_turn_generation()          # gen 1
+        # Same identity as _last_backend_identity → no bump → captures gen 1.
+        streaming._begin_turn_generation(host_a_env)          # gen 1
         try:
             result["out"] = fake_terminal_tool.terminal_tool(
                 "whoami", task_id=None, session_id="s3"
@@ -359,7 +341,7 @@ def test_guard_compares_against_turn_captured_generation(fake_terminal_tool):
         except Exception as exc:  # pragma: no cover - failure path
             result["error"] = repr(exc)
         finally:
-            streaming._unregister_turn_generation()
+            streaming._end_turn_generation()
 
     t = threading.Thread(target=_turn_b)
     t.start()
@@ -371,28 +353,32 @@ def test_guard_compares_against_turn_captured_generation(fake_terminal_tool):
     assert result.get("out") == '{"output": "ok", "exit_code": 0}'
 
 
-def test_invalidate_publishes_ownership_after_identity_change(fake_terminal_tool):
-    """Blocker 2: after a backend identity change the invalidator must (a)
-    retire the stale env, (b) PUBLISH the new generation as owner so the next
-    refresh can tag and future invalidations can compare."""
+def test_begin_turn_publishes_ownership_after_identity_change(fake_terminal_tool):
+    """After a backend identity change the begin transaction must (a) retire
+    the stale env, (b) PUBLISH the new generation as owner so the next refresh
+    can tag and future acquisitions can compare."""
     streaming = importlib.import_module("api.streaming")
 
-    # Turn A: env created under gen 0, ownership published by refresh.
-    streaming._env_backend_generations["default"] = 0
-    fake_terminal_tool._active_environments["default"] = _FakeEnv(generation=0)
-
-    # Turn B: profile switches to a different SSH host — same TERMINAL_ENV,
-    # different backend identity (host B).  Full fingerprint must differ.
     env_a = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-a"}
     env_b = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-b"}
     assert streaming._compute_backend_identity(env_a) != streaming._compute_backend_identity(env_b)
 
-    streaming._invalidate_stale_terminal_backend(env_b)
+    # Turn A: env created under gen 0, ownership published.
+    streaming._last_backend_identity = streaming._compute_backend_identity(env_a)
+    streaming._env_backend_generations["default"] = 0
+    fake_terminal_tool._active_environments["default"] = _FakeEnv(generation=0)
 
-    # Stale env (gen 0) retired; new generation (1) published as owner.
-    assert "default" not in fake_terminal_tool._active_environments
-    assert streaming._env_backend_generations.get("default") == 1
-    assert streaming._current_backend_generation == 1
+    # Turn B: profile switches to a different SSH host — the begin transaction
+    # compares/publishes the identity, bumps to gen 1 and retires the stale env.
+    try:
+        streaming._begin_turn_generation(env_b)
+
+        # Stale env (gen 0) retired; new generation (1) published as owner.
+        assert "default" not in fake_terminal_tool._active_environments
+        assert streaming._env_backend_generations.get("default") == 1
+        assert streaming._current_backend_generation == 1
+    finally:
+        streaming._end_turn_generation()
 
 
 def test_refresh_tags_env_and_publishes_ownership(fake_terminal_tool):
@@ -409,22 +395,27 @@ def test_refresh_tags_env_and_publishes_ownership(fake_terminal_tool):
     assert streaming._env_backend_generations.get("default") == 0
 
 
-def test_invalidate_skips_retire_when_env_replaced_by_newer_generation(fake_terminal_tool):
+def test_begin_turn_skips_retire_when_env_replaced_by_newer_generation(fake_terminal_tool):
     """A concurrent turn already replaced the env with a newer generation:
-    the invalidator must NOT retire that newer env."""
+    the begin transaction must NOT retire that newer env."""
     streaming = importlib.import_module("api.streaming")
 
+    env_a = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-a"}
+    env_b = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-b"}
+    streaming._last_backend_identity = streaming._compute_backend_identity(env_a)
+
     # Recorded owner is gen 0 (stale), but the registry already holds a
-    # gen-1 env from a concurrent turn — the invalidator must leave it alone.
+    # gen-1 env from a concurrent turn — the transition must leave it alone.
     streaming._env_backend_generations["default"] = 0
     fake_terminal_tool._active_environments["default"] = _FakeEnv(generation=1)
 
-    streaming._invalidate_stale_terminal_backend(
-        {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-b"}
-    )
+    try:
+        streaming._begin_turn_generation(env_b)
 
-    assert "default" in fake_terminal_tool._active_environments
-    assert streaming._current_backend_generation == 1
+        assert "default" in fake_terminal_tool._active_environments
+        assert streaming._current_backend_generation == 1
+    finally:
+        streaming._end_turn_generation()
 
 
 def test_active_use_defers_retire_until_turn_exits(fake_terminal_tool):
@@ -432,37 +423,44 @@ def test_active_use_defers_retire_until_turn_exits(fake_terminal_tool):
     not be torn down; the retire is deferred until the turn exits."""
     streaming = importlib.import_module("api.streaming")
 
+    env_a = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-a"}
+    env_b = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-b"}
+    streaming._last_backend_identity = streaming._compute_backend_identity(env_a)
     streaming._env_backend_generations["default"] = 0
     fake_terminal_tool._active_environments["default"] = _FakeEnv(generation=0)
 
     # An older turn is still executing under gen 0.
     streaming._active_turn_generations[0] = 1
 
-    streaming._invalidate_stale_terminal_backend(
-        {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-b"}
-    )
+    try:
+        streaming._begin_turn_generation(env_b)
 
-    # Not retired yet — deferred (every pending generation, not a scalar).
-    assert "default" in fake_terminal_tool._active_environments
-    assert streaming._pending_eviction_generations == {0}
+        # Not retired yet — deferred (every pending generation, not a scalar).
+        assert "default" in fake_terminal_tool._active_environments
+        assert streaming._pending_eviction_generations == {0}
 
-    # The older turn exits → the deferred retire is drained.
-    streaming._active_turn_generations.pop(0, None)
-    streaming._drain_pending_evictions()
+        # The older turn exits → the deferred retire is drained.
+        streaming._active_turn_generations.pop(0, None)
+        streaming._drain_pending_evictions()
 
-    assert "default" not in fake_terminal_tool._active_environments
-    assert streaming._pending_eviction_generations == set()
+        assert "default" not in fake_terminal_tool._active_environments
+        assert streaming._pending_eviction_generations == set()
+    finally:
+        streaming._end_turn_generation()
 
 
-def test_register_unregister_turn_generation_roundtrip(fake_terminal_tool):
+def test_begin_end_turn_generation_roundtrip(fake_terminal_tool):
     """The turn lifecycle hooks bump/decrement the active-use counter and
     drain deferred evictions on the last exit.
 
-    Uses a faithful TWO-THREAD schedule: ``_turn_state`` is thread-local, so a
+    Uses a faithful TWO-THREAD schedule: the ContextVar is per-context, so a
     single thread can only hold one registration at a time — nesting two
-    registers on one thread is not a valid schedule and left {0: 1} behind.
+    begins on one thread is not a valid schedule and left {0: 1} behind.
     """
     streaming = importlib.import_module("api.streaming")
+
+    host_a_env = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-a"}
+    streaming._last_backend_identity = streaming._compute_backend_identity(host_a_env)
 
     a_registered = threading.Event()
     b_go = threading.Event()
@@ -473,18 +471,18 @@ def test_register_unregister_turn_generation_roundtrip(fake_terminal_tool):
     b_done = threading.Event()
 
     def _turn_a():
-        streaming._register_turn_generation()          # gen 0
+        streaming._begin_turn_generation(host_a_env)          # gen 0
         a_registered.set()
         assert a_go.wait(timeout=10)
-        streaming._unregister_turn_generation()
+        streaming._end_turn_generation()
         a_done.set()
 
     def _turn_b():
         assert b_go.wait(timeout=10)
-        streaming._register_turn_generation()          # gen 0
+        streaming._begin_turn_generation(host_a_env)          # gen 0
         b_registered.set()
         assert b_may_finish.wait(timeout=10)
-        streaming._unregister_turn_generation()
+        streaming._end_turn_generation()
         b_done.set()
 
     ta = threading.Thread(target=_turn_a)
@@ -525,18 +523,19 @@ def test_guard_installs_only_once(fake_terminal_tool):
 def _run_two_thread_backend_switch(streaming, fake, acquire, completion_order):
     """Deterministic A-active/B-start backend-switch schedule (REAL threads).
 
-    - Turn A registers under generation 0 (profile host-a) with a live gen-0
+    - Turn A begins under generation 0 (profile host-a) with a live gen-0
       env in the registry.
-    - Turn B starts with profile host-b: identity change bumps to gen 1 and B
-      registers gen 1.
+    - Turn B starts with profile host-b: the begin transaction bumps to gen 1
+      and B captures gen 1.
     - B's acquisition (``acquire(streaming, fake)``) must never reuse env_a
       and never tear it down while A is still active.
     - completion_order=1: B's acquisition blocks (drain wait) until A exits.
     - completion_order=2: A exits first (drain retires env_a) and only then
       does B's acquisition run — it must not block at all.
     """
-    streaming._last_backend_identity = streaming._compute_backend_identity(
-        {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-a"})
+    host_a_env = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-a"}
+    host_b_env = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-b"}
+    streaming._last_backend_identity = streaming._compute_backend_identity(host_a_env)
     streaming._env_backend_generations["default"] = 0
     env_a = _FakeEnv(generation=0)
     fake._active_environments["default"] = env_a
@@ -558,28 +557,28 @@ def _run_two_thread_backend_switch(streaming, fake, acquire, completion_order):
     streaming._wait_for_generation_drain = _hooked_wait
     try:
         def _turn_a():
-            streaming._register_turn_generation()          # gen 0
+            streaming._begin_turn_generation(host_a_env)      # gen 0 (no bump)
             a_registered.set()
             try:
                 assert a_may_finish.wait(timeout=15), "turn A never released"
             finally:
-                streaming._unregister_turn_generation()
+                streaming._end_turn_generation()
                 a_finished.set()
 
         def _turn_b():
-            streaming._invalidate_stale_terminal_backend(
-                {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-b"})
-            streaming._register_turn_generation()          # gen 1
+            # Identity change + generation capture + active-use increment are
+            # ONE transaction (the invalidate is folded into the begin).
+            streaming._begin_turn_generation(host_b_env)      # gen 1
             b_setup_done.set()
             try:
                 assert b_may_acquire.wait(timeout=15), "turn B never allowed to acquire"
                 b_result["out"] = acquire(streaming, fake)
             finally:
-                streaming._unregister_turn_generation()
+                streaming._end_turn_generation()
 
         ta = threading.Thread(target=_turn_a)
         ta.start()
-        # A must be registered BEFORE B's setup runs, so B's invalidator sees
+        # A must be registered BEFORE B's setup runs, so B's transition sees
         # an active gen-0 turn and defers the retire (deterministic schedule).
         assert a_registered.wait(timeout=15)
 
@@ -658,31 +657,29 @@ def test_two_thread_backend_switch_no_reuse_or_teardown(
         assert isinstance(result["out"], tuple) and result["out"][0] is live
 
 
-def test_setup_exception_still_registers_and_releases_turn(fake_terminal_tool, monkeypatch):
-    """Setup exceptions must not leak a turn registration: the identity
-    transition is non-fatal (registration still happens) and the production
-    try/finally (begin → body → end) always releases it."""
+def test_failed_identity_transition_is_fail_closed(fake_terminal_tool, monkeypatch):
+    """Fail-closed transition: a raising identity publish REFUSES the turn —
+    nothing is bound and no active-use registration leaks — and the guaranteed
+    try/finally's ``_end_turn_generation()`` is a safe no-op afterwards."""
     streaming = importlib.import_module("api.streaming")
 
     def _boom(profile_runtime_env):
         raise RuntimeError("identity transition failed")
 
-    monkeypatch.setattr(streaming, "_invalidate_stale_terminal_backend", _boom)
+    monkeypatch.setattr(streaming, "_publish_backend_identity", _boom)
 
-    # begin must not raise and must still register under the current gen.
-    streaming._begin_turn_generation(
-        {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-b"})
-    assert streaming._active_turn_generations.get(0) == 1
+    with pytest.raises(RuntimeError, match="identity transition failed"):
+        streaming._begin_turn_generation(
+            {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-b"})
 
-    try:
-        raise RuntimeError("agent body exploded")
-    except RuntimeError:
-        pass
-    finally:
-        streaming._end_turn_generation()
+    # Fail-closed: nothing registered, ContextVar unbound.
+    assert streaming._active_turn_generations == {}
+    assert streaming._get_turn_generation() is None
 
-    assert 0 not in streaming._active_turn_generations
-    assert getattr(streaming._turn_state, "backend_generation", None) is None
+    # The production finally (end_turn_generation) is a safe no-op.
+    streaming._end_turn_generation()
+    assert streaming._active_turn_generations == {}
+    assert streaming._get_turn_generation() is None
 
 
 def test_replacement_between_read_and_retire_not_torn_down(fake_terminal_tool):
@@ -692,6 +689,9 @@ def test_replacement_between_read_and_retire_not_torn_down(fake_terminal_tool):
     now."""
     streaming = importlib.import_module("api.streaming")
 
+    env_a = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-a"}
+    env_b = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-b"}
+    streaming._last_backend_identity = streaming._compute_backend_identity(env_a)
     streaming._env_backend_generations["default"] = 0
     e0 = _FakeEnv(generation=0)
     installed = {}
@@ -707,12 +707,13 @@ def test_replacement_between_read_and_retire_not_torn_down(fake_terminal_tool):
     e0.cleanup = _cleanup_installs_replacement
     fake_terminal_tool._active_environments["default"] = e0
 
-    streaming._invalidate_stale_terminal_backend(
-        {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-b"}
-    )
+    try:
+        streaming._begin_turn_generation(env_b)
 
-    repl = fake_terminal_tool._active_environments.get("default")
-    assert repl is installed.get("repl"), "the replacement must survive the retire"
-    assert repl._webui_backend_generation == 1
-    assert not repl.cleaned, "the replacement must never be torn down"
-    assert e0.cleaned, "the exact stale object must be retired"
+        repl = fake_terminal_tool._active_environments.get("default")
+        assert repl is installed.get("repl"), "the replacement must survive the retire"
+        assert repl._webui_backend_generation == 1
+        assert not repl.cleaned, "the replacement must never be torn down"
+        assert e0.cleaned, "the exact stale object must be retired"
+    finally:
+        streaming._end_turn_generation()
