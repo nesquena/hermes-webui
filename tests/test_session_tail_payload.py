@@ -59,6 +59,36 @@ def test_lineage_merge_maps_tool_calls_by_message_key_before_projection():
     assert projection.tool_calls[0]["assistant_msg_idx"] == 2
 
 
+def test_lineage_projection_reconstructs_compression_parent_for_branch_and_sse(tmp_path, monkeypatch):
+    import api.models as models
+    from api.transcript_mutations import lineage_messages_for_projection
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    parent = models.Session(
+        session_id="lineage-parent-6610",
+        workspace=str(tmp_path),
+        source_tag="webui",
+        raw_source="webui",
+        session_source="webui",
+        pre_compression_snapshot=True,
+        messages=[{"id": "old", "role": "user", "content": "old"}],
+    )
+    parent.save()
+    child = models.Session(
+        session_id="lineage-child-6610",
+        workspace=str(tmp_path),
+        source_tag="webui",
+        raw_source="webui",
+        session_source="webui",
+        parent_session_id=parent.session_id,
+        messages=[{"id": "new", "role": "assistant", "content": "new"}],
+    )
+    display, source = lineage_messages_for_projection(child)
+    assert [row["id"] for row in display] == ["old", "new"]
+    assert [row["id"] for row in source] == ["new"]
+
+
 class _FakeSession:
     def __init__(self, messages):
         self.session_id = "tail_payload_001"

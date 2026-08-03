@@ -432,9 +432,12 @@ def project_transcript(
         for source_index, message in enumerate(list(source_messages or [])):
             if merge_key(message) in source_ambiguous:
                 source_to_input.pop(source_index, None)
+    projected_count = len(projected)
+    if getattr(session, "pending_user_message", None):
+        projected_count = max(projected_count, 1)
     return TranscriptProjection(
         messages=projected,
-        projected_count=len(projected),
+        projected_count=projected_count,
         visible_to_raw=visible_to_raw,
         raw_to_visible=raw_to_visible,
         tool_calls=_rebased_tool_calls(
@@ -443,6 +446,47 @@ def project_transcript(
             source_to_input,
         ),
     )
+
+
+def lineage_messages_for_projection(session):
+    """Reconstruct compression-snapshot lineage without importing routes."""
+    from api.models import Session, merge_session_messages_append_only
+
+    current = session
+    own_messages = list(getattr(session, "messages", None) or [])
+    source = str(getattr(session, "session_source", "") or "").strip().lower()
+    root_is_fork = source == "fork"
+    seen = {str(getattr(session, "session_id", "") or "")}
+    parents = []
+    for _ in range(20):
+        parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
+        if not parent_id or parent_id in seen:
+            break
+        parent = Session.load(parent_id)
+        if not parent or not getattr(parent, "pre_compression_snapshot", False):
+            break
+        parent_source = str(getattr(parent, "session_source", "") or "").strip().lower()
+        if root_is_fork and parent_source != "fork":
+            break
+        parents.append(parent)
+        seen.add(parent_id)
+        current = parent
+    if not parents:
+        return own_messages, own_messages
+    merged = []
+    for parent in reversed(parents):
+        merged = merge_session_messages_append_only(
+            merged,
+            list(getattr(parent, "messages", None) or []),
+            truncation_watermark=getattr(parent, "truncation_watermark", None),
+            truncation_boundary=getattr(parent, "truncation_boundary", None),
+        )
+    merged = merge_session_messages_append_only(
+        merged,
+        own_messages,
+        truncation_watermark=None,
+    )
+    return merged, own_messages
 
 
 def decorate_projection(session, projection: TranscriptProjection) -> list:

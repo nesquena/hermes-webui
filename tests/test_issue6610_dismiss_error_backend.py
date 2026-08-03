@@ -11,6 +11,7 @@ from api.transcript_mutations import (
     materialize_duplicate,
     materialize_fork,
     project_transcript,
+    projected_count_for_session,
     record_dismissal,
 )
 
@@ -100,6 +101,64 @@ def test_filtered_tool_anchor_fails_closed_without_retargeting():
         tool_calls=[{"name": "stale", "assistant_msg_idx": 0}],
     )
     assert projection.tool_calls == []
+
+
+def test_pending_user_floor_is_shared_by_full_projection_and_compact():
+    session = _session("pending-floor-6610")
+    session.pending_user_message = "still pending"
+    projection = project_transcript(session, [])
+    assert projection.projected_count == 1
+    assert projected_count_for_session(session, raw_count=0, messages=[]) == 1
+    assert session.compact()["message_count"] == 1
+
+
+def test_truncation_reconciles_removed_dismissal_identity():
+    from api.session_ops import truncate_session_at_keep
+
+    session = _session("truncate-6610")
+    error = _error(session)
+    session.messages = [
+        {"role": "user", "content": "keep"},
+        error,
+        {"role": "assistant", "content": "later"},
+    ]
+    record_dismissal(session, session.session_id, error)
+    assert session.transcript_dismissal_active_count == 1
+    truncate_session_at_keep(session, 1)
+    assert session.transcript_dismissal_active_count == 0
+    assert session.transcript_dismissals["entries"][0]["active"] is False
+
+
+def test_gateway_terminal_provider_error_uses_canonical_admission(monkeypatch, tmp_path):
+    from api import gateway_chat, streaming
+
+    session = _session("gateway-6610")
+    session.workspace = str(tmp_path)
+    session.model = "test"
+    session.model_provider = "test"
+    session.active_stream_id = "gateway-stream-6610"
+    monkeypatch.setattr(gateway_chat, "get_session", lambda _sid: session)
+    monkeypatch.setattr(gateway_chat, "_get_session_agent_lock", lambda _sid: __import__("contextlib").nullcontext())
+    monkeypatch.setattr(streaming, "_classify_provider_error", lambda _error: {"type": "provider", "label": "Provider error", "hint": ""})
+    monkeypatch.setattr(streaming, "_provider_error_payload", lambda _error, _kind, _hint: {"message": "failed"})
+    monkeypatch.setattr(streaming, "_materialize_pending_user_turn_before_error", lambda _session: None)
+    monkeypatch.setattr(streaming, "_snapshot_and_append_partial_on_error", lambda *_args: None)
+    monkeypatch.setattr(streaming, "_terminal_turn_duration", lambda _session: None)
+    monkeypatch.setattr(session, "save", lambda: None)
+
+    result = gateway_chat._settle_gateway_terminal_error(
+        session.session_id,
+        session.active_stream_id,
+        session.workspace,
+        session.model,
+        session.model_provider,
+        RuntimeError("failed"),
+    )
+    row = session.messages[-1]
+    assert result["terminal_session_persisted"] is True
+    assert row["_generated_error_source_session_id"] == session.session_id
+    assert row["_generated_error_provenance"]
+    assert row["id"]
 
 
 class _Handler:

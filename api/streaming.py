@@ -85,11 +85,19 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     must report the count of that embedded transcript, otherwise completion and
     reconcile paths can mistake a complete payload for a stale short window.
     """
-    from api.transcript_mutations import decorate_projection, project_transcript
+    from api.transcript_mutations import (
+        decorate_projection,
+        lineage_messages_for_projection,
+        project_transcript,
+    )
+    display_messages, source_messages = lineage_messages_for_projection(session)
+    from api.models import _session_message_merge_key
     projection = project_transcript(
         session,
-        list(getattr(session, 'messages', None) or []),
+        display_messages,
         tool_calls=tool_calls if tool_calls is not None else getattr(session, 'tool_calls', None),
+        source_messages=source_messages,
+        merge_key=_session_message_merge_key,
     )
     messages = decorate_projection(session, projection)
     raw = session.compact() | {

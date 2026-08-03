@@ -15375,11 +15375,11 @@ def handle_post(handler, parsed) -> bool:
         cli_meta = _lookup_cli_session_metadata(source.session_id) if _session_requires_cli_metadata_lookup(source) else {}
         is_messaging_session = _is_messaging_session_record(source) or _is_messaging_session_record(cli_meta)
         cli_messages = get_cli_session_messages(source.session_id) if is_messaging_session else []
-        source_messages = (
-            _merged_session_messages_for_display(source, cli_messages)
-            if is_messaging_session and cli_messages
-            else list(source.messages or [])
-        )
+        if is_messaging_session and cli_messages:
+            source_messages = _merged_session_messages_for_display(source, cli_messages)
+        else:
+            from api.transcript_mutations import lineage_messages_for_projection
+            source_messages, _source_sidecar_messages = lineage_messages_for_projection(source)
         from api.transcript_mutations import materialize_fork
         source_projection = _final_transcript_projection(source, source_messages)
         source_messages, source_tool_calls = materialize_fork(source_projection)
