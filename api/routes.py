@@ -2206,7 +2206,7 @@ def _build_session_list_cache_payload(
 
     def _all_sessions_for_sidebar():
         if supports_lineage_metadata:
-            return all_sessions(diag=diag, include_lineage_metadata=True)
+            return all_sessions(diag=diag, include_lineage_metadata=False)
         # Focused tests and third-party callers sometimes monkeypatch
         # routes.all_sessions with the historical diag-only signature.
         return all_sessions(diag=diag)
@@ -2487,8 +2487,7 @@ def _build_session_list_cache_payload(
     if not include_archived:
         diag_stage("filter_archived_sessions")
     diag_stage("visible_lineage_metadata")
-    if not supports_lineage_metadata:
-        _enrich_sidebar_lineage_metadata(scoped)
+    _enrich_sidebar_lineage_metadata(scoped)
     # Delegated subagent children (#5307) are view-only, owned by the delegate
     # runner. Coerce their sidebar rows to read_only=True + is_cli_session=False
     # so the UI never offers delete / edit / truncate / pin affordances on them
@@ -14530,8 +14529,8 @@ def handle_post(handler, parsed) -> bool:
                 workspace=session.workspace,
                 model=session.model,
                 model_provider=session.model_provider,
-                messages=copied_messages,
-                tool_calls=copied_tool_calls,
+                messages=copy.deepcopy(copied_messages),
+                tool_calls=copy.deepcopy(copied_tool_calls),
                 # Reset per-session-instance flags for the new visible copy.
                 pinned=False,
                 archived=False,
@@ -15419,7 +15418,7 @@ def handle_post(handler, parsed) -> bool:
             profile=getattr(source, "profile", None),
             title=branch_title,
             messages=forked_messages,
-            tool_calls=forked_tool_calls,
+            tool_calls=copy.deepcopy(forked_tool_calls),
             project_id=getattr(source, "project_id", None),
             personality=getattr(source, "personality", None),
             enabled_toolsets=getattr(source, "enabled_toolsets", None),

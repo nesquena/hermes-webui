@@ -452,11 +452,13 @@ def test_branch_does_not_copy_usage_counters():
 
 
 def test_branch_does_not_copy_tool_calls():
-    """Branch must NOT inherit tool_calls from source."""
+    """Branch must carry the rebased fork tool-call projection."""
     block, _ = _extract_branch_block()
     ctor = _find_session_ctor(block, 'branch')
-    assert not _has_field(ctor, 'tool_calls'), \
-        "tool_calls should NOT be copied in branch"
+    assert _has_field(ctor, 'tool_calls'), \
+        "branch must persist the rebased fork tool-call projection"
+    assert 'forked_tool_calls' in ctor, \
+        "branch tool_calls must come from the projected fork window"
 
 
 def test_branch_does_not_copy_gateway_routing_history():

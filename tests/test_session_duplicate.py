@@ -106,7 +106,8 @@ def test_duplicate_creates_independent_session():
 
     # Verify that messages are copied (accept both plain assignment and the
     # corrected deepcopy form added May 2 2026).
-    assert 'messages=copied_messages' in endpoint_code, \
+    assert ('messages=copied_messages' in endpoint_code or
+            'messages=copy.deepcopy(copied_messages)' in endpoint_code), \
         "Messages should be copied to duplicate"
 
     # Verify that title includes (copy)
@@ -153,7 +154,8 @@ def test_duplicate_session_copies_messages_logic():
     # Verify messages are copied from original session.  Accept either the
     # plain assignment (insufficient — see test_duplicate_runtime_messages_independence)
     # or the proper deepcopy form (the May 2 2026 fix).
-    assert 'messages=copied_messages' in endpoint_code, \
+    assert ('messages=copied_messages' in endpoint_code or
+            'messages=copy.deepcopy(copied_messages)' in endpoint_code), \
         f"Messages should be copied from original. Got: {endpoint_code}"
 
 
@@ -231,7 +233,8 @@ def test_duplicate_session_copies_all_session_properties():
            'title=(session.title or "Untitled")' in construction_block, \
         f"title must be copied (plain or guarded form). Got: {construction_block[:300]}"
 
-    assert 'messages=copied_messages' in construction_block, \
+    assert ('messages=copied_messages' in construction_block or
+            'messages=copy.deepcopy(copied_messages)' in construction_block), \
         f"messages must be copied (plain or deepcopy form). Got: {construction_block[:300]}"
 
 

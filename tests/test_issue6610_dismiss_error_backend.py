@@ -112,6 +112,21 @@ def test_pending_user_floor_is_shared_by_full_projection_and_compact():
     assert session.compact()["message_count"] == 1
 
 
+def test_legacy_index_count_still_applies_dismissal_projection():
+    session = _session("legacy-index-dismissal-6610")
+    session._loaded_metadata_only = True
+    session._metadata_message_count = 3
+    session._metadata_message_count_from_index = True
+    session.transcript_dismissal_active_count = 1
+    session.transcript_dismissals = {
+        "version": 2,
+        "entries": [],
+        "active_keys": [[session.session_id, "dismissed-error"]],
+    }
+
+    assert session.compact()["message_count"] == 2
+
+
 def test_truncation_reconciles_removed_dismissal_identity():
     from api.session_ops import truncate_session_at_keep
 
