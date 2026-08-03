@@ -2872,9 +2872,10 @@ def _kanban_unknown_endpoint(handler, parsed, method: str) -> bool:
 # stuck (e.g. blocked in C-level provider I/O and never reaching its finally).
 # Once the cancel has been outstanding past this grace window, the run row can
 # no longer protect the session's active_stream_id/pending_* from stale
-# cleanup: _clear_stale_stream_state() clears them, and the
-# _stream_writeback_is_current() guard rejects any eventual writeback from the
-# stuck worker, so clearing early cannot clobber a newer turn (#6623).
+# cleanup: _clear_stale_stream_state() clears them, and every delayed cancel
+# finalizer (api/streaming.py _finalize_cancelled_turn) is generation-guarded
+# under the session lock — it no-ops unless the session still points at the
+# cancelled stream — so clearing early cannot clobber a newer turn (#6623).
 _STALE_CANCELLED_RUN_GRACE_SECONDS = 60.0
 
 
@@ -21119,9 +21120,14 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
     wedged worker that never reaches its finally (e.g. stuck in a provider call,
     or leaked by SIGKILL without restart) must NOT 409 the session forever — so an
     entry older than the unwind ceiling (180s) is treated as stale and ignored
-    here. A legitimately long-running turn keeps ``active_stream_id`` SET
-    and is handled by ``_active_stream_blocks_chat_start`` above; this guard only
-    covers the cleared-stream-id unwind window. (Codex brick-gate hardening, #3822.)
+    here. For a phase="cancelling" row the ceiling is anchored on the cancel time
+    (``cancelled_at``), never on the original run start: cancel_stream() removes
+    STREAMS itself, so absence from STREAMS is not worker-death proof, and a
+    long-running turn that was just cancelled must not be reaped (and a successor
+    admitted) while the old worker is still alive (#6623). A legitimately
+    long-running turn keeps ``active_stream_id`` SET and is handled by
+    ``_active_stream_blocks_chat_start`` above; this guard only covers the
+    cleared-stream-id unwind window. (Codex brick-gate hardening, #3822.)
     """
     sid = str(session_id or "").strip()
     if not sid:
@@ -21149,13 +21155,35 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
                     started_at = float((raw or {}).get("started_at") or 0)
                 except (TypeError, ValueError):
                     started_at = 0.0
+                # #6623 re-gate: cancel_stream() removes STREAMS itself, so a
+                # missing SSE channel is NOT proof that a cancelled worker is
+                # dead. For a phase="cancelling" row the unwind ceiling must be
+                # anchored on the CANCEL time (cancelled_at, started_at as a
+                # legacy fallback), never on the original run start: a turn that
+                # ran for minutes and was just cancelled would otherwise be
+                # reaped the instant its started_at crosses the ceiling and a
+                # successor admitted while the old worker is still alive. A
+                # recently cancelled run therefore keeps blocking a successor
+                # (this function returns its stream id) until the worker either
+                # unwinds (its finally unregisters the row within seconds) or
+                # the cancel itself has been outstanding past the ceiling.
+                _run_phase = str((raw or {}).get("phase") or "").strip()
+                if _run_phase == "cancelling":
+                    try:
+                        _age_anchor = float(
+                            (raw or {}).get("cancelled_at") or started_at or 0
+                        )
+                    except (TypeError, ValueError):
+                        _age_anchor = started_at
+                else:
+                    _age_anchor = started_at
                 # Past the unwind ceiling: never block a successor on it (the
                 # anti-permanent-409 guarantee, #3822). Additionally reconcile the
                 # zombie out of ACTIVE_RUNS so health/recovery polling stops seeing a
                 # half-alive run — but ONLY when the worker is truly gone from
                 # STREAMS, so a still-live / still-tearing-down worker keeps its
                 # lifecycle row. Pop by the real dict key. (Codex gate, #4492)
-                if started_at and (now - started_at) > ceiling:
+                if _age_anchor and (now - _age_anchor) > ceiling:
                     if run_stream_id not in live_stream_ids and stream_id not in live_stream_ids:
                         stale_stream_ids.append(run_stream_id)
                     continue
