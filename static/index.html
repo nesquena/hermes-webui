@@ -592,7 +592,7 @@
           <span class="voice-mode-indicator" id="voiceModeIndicator"></span>
           <span class="voice-mode-label" id="voiceModeLabel"></span>
         </div>
-        <textarea id="msg" rows="1" placeholder="Message Hermes…"></textarea>
+        <textarea id="msg" rows="1" enterkeyhint="enter" placeholder="Message Hermes…"></textarea>
         <div id="composerWorkspaceContext" class="sr-only"></div>
         <div class="composer-footer">
           <div class="composer-left">
@@ -1774,6 +1774,39 @@
 <script src="static/extension_settings.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
+<!-- Mobile Enter key fix: intercept Enter on touch-only devices BEFORE boot.js runs.
+     Capture-phase listener on document runs before #msg's own listeners, so
+     stopImmediatePropagation() prevents boot.js's keydown handler from calling
+     send(). We do NOT preventDefault(), so the browser inserts the newline
+     natively (preserves undo history and IME state).
+     Phone UA is authoritative here: iOS Safari can report (any-pointer:fine)
+     as true on a plain iPhone, which is why media-query-only detection failed. -->
+<script>
+(function(){
+  function _isTouchOnly(){
+    var ua=navigator.userAgent||'';
+    if(/iPhone|iPod|Android|iPad/i.test(ua)) return true;
+    try{ if(/Macintosh/i.test(ua)&&(navigator.maxTouchPoints||0)>1) return true; }catch(e){}
+    try{ return matchMedia('(pointer:coarse)').matches && !matchMedia('(any-pointer:fine)').matches; }catch(e){}
+    return false;
+  }
+  if(!_isTouchOnly()) return;
+  document.addEventListener('keydown',function(e){
+    if(e.key!=='Enter') return;
+    var target=e.target;
+    if(!target || target.id!=='msg') return;
+    // Let the IME commit its own composition.
+    if(e.isComposing || e.keyCode===229) return;
+    // Slash-command autocomplete open: Enter picks the highlighted command.
+    var dd=document.getElementById('cmdDropdown');
+    if(dd && dd.classList.contains('open')) return;
+    // Ctrl/Cmd+Enter still sends on mobile; plain Enter must insert a newline.
+    if(e.ctrlKey || e.metaKey || e.altKey) return;
+    // Block boot.js's handler; let the browser insert the newline itself.
+    e.stopImmediatePropagation();
+  },true);
+})();
+</script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/outline.js?v=__WEBUI_VERSION__" defer></script>
 
