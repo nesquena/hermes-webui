@@ -98,6 +98,27 @@ def _session_list_cache_active_stream_ids():
     return _active_stream_ids()
 
 
+def _session_list_cache_running_cron_jobs() -> dict[str, float]:
+    """Return {job_id: start_epoch} for cron jobs currently tracked as running.
+
+    Cron liveness lives only in the in-memory ``_RUNNING_CRON_JOBS`` dict in
+    api.routes (#6728): the sidebar polls /api/sessions (not /api/crons/status),
+    so without this overlay a still-running cron job's session row looks
+    completed the moment it appends a message. Fail closed to an empty dict.
+    """
+    try:
+        import api.routes as _routes
+
+        jobs = getattr(_routes, "_RUNNING_CRON_JOBS", None)
+        lock = getattr(_routes, "_RUNNING_CRON_LOCK", None)
+        if jobs is None or lock is None:
+            return {}
+        with lock:
+            return dict(jobs)
+    except Exception:
+        return {}
+
+
 def _session_list_cache_resolved_source_stamp(key: tuple):
     try:
         import api.routes as _routes
@@ -426,6 +447,11 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
         active_stream_ids = _session_list_cache_active_stream_ids()
     except Exception:
         active_stream_ids = set()
+    try:
+        running_cron_jobs = _session_list_cache_running_cron_jobs()
+    except Exception:
+        running_cron_jobs = {}
+    cron_job_prefixes = [(jid, f"cron_{jid}_", started_at) for jid, started_at in running_cron_jobs.items()]
     session_ids = [
         str(row.get("session_id") or "").strip()
         for row in rows
@@ -457,9 +483,31 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
                     item[key] = raw_live_value
         stream_id = item.get("active_stream_id")
         item["is_streaming"] = bool(stream_id and stream_id in active_stream_ids)
+        # #6728: a still-running cron job's session row must not look completed
+        # in the sidebar. Cron liveness is only exposed via /api/crons/status,
+        # which the sidebar never polls — stamp the flag here so the client can
+        # defer its completion/unread transition until the job actually ends.
+        # Session ids are cron_{job_id}_{run_timestamp}: only the run started at
+        # (or after) the tracked start belongs to the live execution — older runs
+        # of the same job stay completed.
+        item["cron_running"] = _session_list_row_cron_running(
+            sid, item, cron_job_prefixes
+        )
         overlaid.append(item)
     overlaid.sort(key=_session_list_runtime_sort_key, reverse=True)
     return overlaid
+
+
+def _session_list_row_cron_running(
+    sid: str, row: dict, cron_job_prefixes: list[tuple[str, str, float]]
+) -> bool:
+    if not cron_job_prefixes or not sid:
+        return False
+    created_at = _session_list_row_numeric_value(row.get("created_at"))
+    for _jid, prefix, started_at in cron_job_prefixes:
+        if sid.startswith(prefix) and created_at >= started_at:
+            return True
+    return False
 
 
 def _session_list_row_numeric_value(value) -> float:

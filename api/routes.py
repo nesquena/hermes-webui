@@ -10026,6 +10026,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "is_cli_session",
     "is_messaging_session",
     "is_streaming",
+    "cron_running",
     "active_stream_id",
     "has_pending_user_message",
     "pending_started_at",
