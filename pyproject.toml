@@ -21,6 +21,13 @@ dynamic = ["version", "dependencies"]
 Repository = "https://github.com/nesquena/hermes-webui"
 Issues = "https://github.com/nesquena/hermes-webui/issues"
 
+[project.scripts]
+# Packaged CLI entry point (#6739): `hermes-webui` starts the WebUI server, the
+# pip-installed equivalent of `python server.py` from a source checkout. The
+# generated console script calls server.main(), the same startup path used by
+# the existing `python server.py` / `python -m server` launch surface.
+hermes-webui = "server:main"
+
 [tool.setuptools]
 include-package-data = true
 packages = ["api", "static"]
