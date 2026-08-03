@@ -45,6 +45,10 @@ const LOCALES = {
     text_pasted: 'Pasted text attached as ',
     // messages.js
     edit_message: 'Edit message',
+    delete_message: 'Delete message',
+    delete_message_confirm_title: 'Delete message?',
+    delete_message_confirm_message: 'This message and everything after it will be removed from the session.',
+    delete_failed: 'Delete failed: ',
     regenerate: 'Regenerate response',
     copy: 'Copy',
     copied: 'Copied!',
