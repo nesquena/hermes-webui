@@ -9332,6 +9332,22 @@ function _formatBytesPerSec(bytesPerSec){
   return `${v<10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
 }
 
+// Local formatting helpers (no external deps; the prior version referenced
+// helpers that didn't exist on this fork, which made updates throw and left
+// the bar frozen on its '—' placeholders).
+function _rsbFmtPercent(metric){
+  if(!metric||typeof metric.percent!=='number'||isNaN(metric.percent)) return null;
+  return Math.round(metric.percent)+'%';
+}
+function _rsbFmtBytes(bytes){
+  if(bytes===null||bytes===undefined||isNaN(bytes)) return '—';
+  const b=Number(bytes);
+  if(b<1024) return b+' B';
+  const units=['KB','MB','GB','TB','PB'];
+  let v=b/1024, i=0;
+  while(v>=1024&&i<units.length-1){ v/=1024; i++; }
+  return (v>=100?v.toFixed(0):v.toFixed(1))+' '+units[i];
+}
 function _updateResourceStatusBar(payload){
   const bar=$('resourceStatusBar');
   if(!bar) return;
@@ -9342,7 +9358,7 @@ function _updateResourceStatusBar(payload){
     ['cpu','memory','disk'].forEach(name=>{
       const item=bar.querySelector(`[data-rsb-metric="${name}"] [data-rsb-value]`);
       if(item) item.textContent='—';
-      const fill=bar.querySelector(`[data-rsb-metric="${name}"] .rsb-bar-fill`);
+      const fill=bar.querySelector(`[data-rsb-meta="${name}"] .rsb-bar-fill`)||bar.querySelector(`[data-rsb-metric="${name}"] .rsb-bar-fill`);
       if(fill) fill.style.width='0%';
     });
     const net=bar.querySelector('[data-rsb-metric="network"] [data-rsb-value]');
@@ -9350,18 +9366,22 @@ function _updateResourceStatusBar(payload){
     return;
   }
   bar.classList.remove('unavailable');
-  const setItem=(name,text,percent)=>{
+  const setItem=(name,text,percent,title)=>{
     const item=bar.querySelector(`[data-rsb-metric="${name}"] [data-rsb-value]`);
     if(item) item.textContent=text;
     const fill=bar.querySelector(`[data-rsb-metric="${name}"] .rsb-bar-fill`);
     if(fill) fill.style.width=`${Math.max(0,Math.min(100,percent||0))}%`;
+    if(title){ const lbl=bar.querySelector(`[data-rsb-metric="${name}"] .rsb-label`); if(lbl) lbl.title=title; }
   };
-  setItem('cpu', _formatSystemHealthPercent(_systemHealthPercent(payload.cpu)), _systemHealthPercent(payload.cpu)||0);
-  setItem('memory', _formatSystemHealthPercent(_systemHealthPercent(payload.memory)), _systemHealthPercent(payload.memory)||0);
-  setItem('disk', _formatSystemHealthPercent(_systemHealthPercent(payload.disk)), _systemHealthPercent(payload.disk)||0);
+  setItem('cpu', _rsbFmtPercent(payload.cpu)||'—', payload.cpu&&payload.cpu.percent||0);
+  const mem=payload.memory||{};
+  setItem('memory', _rsbFmtPercent(mem)||'—', mem.percent||0, `${_rsbFmtBytes(mem.used_bytes)} / ${_rsbFmtBytes(mem.total_bytes)}`);
+  const disk=payload.disk||{};
+  const diskFree=(disk.total_bytes&&disk.used_bytes!=null)?_rsbFmtBytes(disk.total_bytes-disk.used_bytes):'—';
+  setItem('disk', _rsbFmtPercent(disk)||'—', disk.percent||0, `${_rsbFmtBytes(disk.used_bytes)} used · ${diskFree} free`);
   const net=payload.network||{};
   const netItem=bar.querySelector('[data-rsb-metric="network"] [data-rsb-value]');
-  if(netItem) netItem.textContent=`↓ ${_formatBytesPerSec(net.rx_bytes_per_s)}  ↑ ${_formatBytesPerSec(net.tx_bytes_per_s)}`;
+  if(netItem) netItem.textContent=`↓ ${_rsbFmtBytes(net.rx_bytes_per_s)}/s  ↑ ${_rsbFmtBytes(net.tx_bytes_per_s)}/s`;
   const st=$('resourceBarStatus');
   if(st) st.innerHTML=`<span class="rsb-dot"></span>${payload.status==='partial'?'Partial':'Live'}`;
 }
