@@ -8999,7 +8999,23 @@ def _final_transcript_projection(session, messages=None, *, cli_messages=None):
             session, cli_messages=cli_messages, project=False
         )
     from api.transcript_mutations import project_transcript
-    return project_transcript(session, messages)
+    return project_transcript(
+        session,
+        messages,
+        source_messages=getattr(session, "messages", None),
+        merge_key=_session_message_merge_key,
+    )
+
+
+def _session_payload_from_projection(session, projection) -> dict:
+    from api.transcript_mutations import decorate_projection
+    visible = decorate_projection(session, projection)
+    payload = session.compact() | {
+        "messages": visible,
+        "message_count": projection.projected_count,
+        "tool_calls": projection.tool_calls,
+    }
+    return payload
 
 
 def _rebase_session_dismissals(session, messages=None) -> bool:
@@ -9010,12 +9026,7 @@ def _rebase_session_dismissals(session, messages=None) -> bool:
 def _final_projected_session_payload(session, messages=None, *, cli_messages=None) -> dict:
     """Return session metadata whose count matches visible transcript rows."""
     projection = _final_transcript_projection(session, messages, cli_messages=cli_messages)
-    from api.transcript_mutations import decorate_projection
-    visible = decorate_projection(session, projection)
-    payload = session.compact() | {"messages": visible}
-    payload["message_count"] = projection.projected_count
-    payload["tool_calls"] = projection.tool_calls
-    return payload
+    return _session_payload_from_projection(session, projection)
 
 
 def _message_summary(messages) -> dict:
@@ -12844,7 +12855,15 @@ def handle_get(handler, parsed) -> bool:
                     _truncated_msgs,
                     getattr(s, "anchor_activity_scenes", None),
                     message_offset=_messages_offset,
-                    tool_calls=getattr(s, "tool_calls", None),
+                    tool_calls=(
+                        _tool_calls_for_message_window(
+                            _display_projection.tool_calls,
+                            _messages_offset,
+                            len(_all_msgs),
+                        )
+                        if _display_projection is not None
+                        else []
+                    ),
                 )
             else:
                 _truncated_msgs = []
@@ -12952,9 +12971,10 @@ def handle_get(handler, parsed) -> bool:
             except TypeError:
                 compact_session = s.compact()
             if load_messages:
-                _merged_message_count = max(
-                    len(_all_msgs),
-                    _numeric_count(compact_session.get("message_count")),
+                _merged_message_count = (
+                    _display_projection.projected_count
+                    if _display_projection is not None
+                    else len(_all_msgs)
                 )
             raw = compact_session | {
                 "messages": _truncated_msgs,
@@ -14757,8 +14777,11 @@ def handle_post(handler, parsed) -> bool:
             with LOCK:
                 SESSIONS[sid] = s
                 SESSIONS.move_to_end(sid)
-            updated = decorate_projection(s, project_transcript(s, coordinate))
-        return j(handler, {"ok": True, "session": _final_projected_session_payload(s, updated)})
+            updated_projection = _final_transcript_projection(s, coordinate)
+        return j(
+            handler,
+            {"ok": True, "session": _session_payload_from_projection(s, updated_projection)},
+        )
 
     if parsed.path == "/api/session/rename":
         try:

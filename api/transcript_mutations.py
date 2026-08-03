@@ -329,7 +329,31 @@ class TranscriptProjection:
     tool_calls: list
 
 
-def _rebased_tool_calls(tool_calls, raw_to_visible: dict[int, int]) -> list:
+def projected_count_for_session(session, raw_count=None, messages=None) -> int:
+    """Return the canonical visible count for detail, index, and sidebar paths."""
+    if messages is None:
+        messages = getattr(session, "messages", None)
+    if (
+        isinstance(messages, list)
+        and not getattr(session, "_loaded_metadata_only", False)
+    ):
+        return project_transcript(session, messages).projected_count
+    if raw_count is None:
+        raw_count = getattr(session, "_metadata_message_count", None)
+        if raw_count is None:
+            raw_count = len(messages or [])
+    return projected_message_count(
+        raw_count,
+        active_dismissal_count(session),
+        has_pending_user_message=bool(getattr(session, "pending_user_message", None)),
+    )
+
+
+def _rebased_tool_calls(
+    tool_calls,
+    raw_to_visible: dict[int, int],
+    source_to_input: dict[int, int] | None = None,
+) -> list:
     result = []
     for call in tool_calls or []:
         if not isinstance(call, dict):
@@ -337,7 +361,12 @@ def _rebased_tool_calls(tool_calls, raw_to_visible: dict[int, int]) -> list:
         raw_index = call.get("assistant_msg_idx")
         if isinstance(raw_index, bool) or not isinstance(raw_index, int):
             continue
-        visible_index = raw_to_visible.get(raw_index)
+        input_index = raw_index
+        if source_to_input is not None:
+            input_index = source_to_input.get(raw_index)
+            if input_index is None:
+                continue
+        visible_index = raw_to_visible.get(input_index)
         if visible_index is None:
             continue
         rebased = copy.deepcopy(call)
@@ -352,6 +381,8 @@ def project_transcript(
     *,
     tool_calls=None,
     source_session_id: str | None = None,
+    source_messages=None,
+    merge_key=None,
 ) -> TranscriptProjection:
     """Build a pure clean projection and rebase every retained tool anchor."""
     source = _text(source_session_id or getattr(session, "session_id", ""))
@@ -376,6 +407,31 @@ def project_transcript(
         visible_to_raw[visible_index] = raw_index
         raw_to_visible[raw_index] = visible_index
         projected.append(row)
+    source_to_input = None
+    if source_messages is not None and merge_key is not None:
+        input_positions = {}
+        ambiguous = set()
+        for input_index, message in enumerate(list(messages or [])):
+            key = merge_key(message)
+            if key in input_positions:
+                ambiguous.add(key)
+            else:
+                input_positions[key] = input_index
+        for key in ambiguous:
+            input_positions.pop(key, None)
+        source_to_input = {}
+        source_seen = set()
+        source_ambiguous = set()
+        for source_index, message in enumerate(list(source_messages or [])):
+            key = merge_key(message)
+            if key in source_seen:
+                source_ambiguous.add(key)
+            source_seen.add(key)
+            if key in input_positions:
+                source_to_input[source_index] = input_positions[key]
+        for source_index, message in enumerate(list(source_messages or [])):
+            if merge_key(message) in source_ambiguous:
+                source_to_input.pop(source_index, None)
     return TranscriptProjection(
         messages=projected,
         projected_count=len(projected),
@@ -384,6 +440,7 @@ def project_transcript(
         tool_calls=_rebased_tool_calls(
             getattr(session, "tool_calls", None) if tool_calls is None else tool_calls,
             raw_to_visible,
+            source_to_input,
         ),
     )
 
@@ -419,8 +476,7 @@ def materialize_duplicate(projection: TranscriptProjection, *, source_session_id
     rows = copy.deepcopy(projection.messages)
     for row in rows:
         if (
-            _text(row.get("_generated_error_source_session_id")) == _text(source_session_id)
-            and row.get("_generated_error_provenance") == PROVIDER_ERROR_PROVENANCE
+            row.get("_generated_error_provenance") == PROVIDER_ERROR_PROVENANCE
             and row.get("_webui_generated_provider_error") is True
             and row.get("_error") is True
         ):

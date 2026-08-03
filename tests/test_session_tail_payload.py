@@ -24,6 +24,41 @@ def test_tail_projection_rebases_session_tool_calls_after_filtered_row():
     assert projection.tool_calls[0]["assistant_msg_idx"] == 1
 
 
+def test_lineage_merge_maps_tool_calls_by_message_key_before_projection():
+    from api.models import Session
+    from api.routes import _session_message_merge_key
+    from api.transcript_mutations import admit_generated_provider_error, project_transcript, record_dismissal
+
+    session = Session(
+        session_id="lineage-projection-6610",
+        source_tag="webui",
+        raw_source="webui",
+        session_source="webui",
+        messages=[],
+        tool_calls=[{"name": "later", "assistant_msg_idx": 2}],
+    )
+    error = {"id": "dismissed", "role": "assistant", "content": "dismissed", "_error": True}
+    admit_generated_provider_error(error, session)
+    source_messages = [
+        {"id": "first", "role": "user", "content": "first"},
+        error,
+        {"id": "later", "role": "assistant", "content": "later"},
+    ]
+    merged_messages = [
+        {"id": "parent-only", "role": "assistant", "content": "compressed parent"},
+        *source_messages,
+    ]
+    record_dismissal(session, session.session_id, error)
+    projection = project_transcript(
+        session,
+        merged_messages,
+        source_messages=source_messages,
+        merge_key=_session_message_merge_key,
+    )
+    assert [row["id"] for row in projection.messages] == ["parent-only", "first", "later"]
+    assert projection.tool_calls[0]["assistant_msg_idx"] == 2
+
+
 class _FakeSession:
     def __init__(self, messages):
         self.session_id = "tail_payload_001"

@@ -65,6 +65,7 @@ def test_transport_decoration_is_separate_from_clean_projection():
 def test_duplicate_materialization_rehomes_only_admitted_errors_and_strips_transport():
     source = _session()
     row = _error(source)
+    row["_generated_error_source_session_id"] = "parent-snapshot"
     projection = project_transcript(source, [row])
     decorated = decorate_projection(source, projection)
     duplicate_rows, duplicate_calls = materialize_duplicate(
@@ -151,3 +152,62 @@ def test_duplicate_route_preserves_source_and_persists_clean_copy(monkeypatch):
     assert source.transcript_dismissal_active_count == 1
     assert source.tool_calls[0]["assistant_msg_idx"] == 2
     assert all("_provider_error_dismissal_capability" not in row for row in source.messages)
+
+
+def test_reload_and_metadata_polling_preserve_ledger_and_source_bytes(tmp_path, monkeypatch):
+    import api.models as models
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    session = _session("reload-6610")
+    error = _error(session)
+    session.messages = [{"role": "user", "content": "keep"}, error]
+    record_dismissal(session, session.session_id, error)
+    session.save()
+    source_bytes = session.path.read_bytes()
+
+    reloaded = models.Session.load(session.session_id)
+    metadata = models.Session.load_metadata_only(session.session_id)
+
+    assert reloaded.transcript_dismissals == session.transcript_dismissals
+    assert reloaded.transcript_dismissal_active_count == 1
+    assert metadata.transcript_dismissals == session.transcript_dismissals
+    assert metadata.transcript_dismissal_active_count == 1
+    assert reloaded.path.read_bytes() == source_bytes
+
+
+def test_sidebar_refresh_and_state_db_overlay_keep_projected_count(tmp_path, monkeypatch):
+    import api.models as models
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    session = _session("sidebar-6610")
+    error = _error(session)
+    session.messages = [{"role": "user", "content": "keep"}, error, {"role": "assistant", "content": "later"}]
+    record_dismissal(session, session.session_id, error)
+    session.save()
+    row = {"session_id": session.session_id, "message_count": 3, "updated_at": 1}
+
+    refreshed = models._refresh_index_rows_from_sidecar_metadata(
+        [row], index_message_counts={session.session_id: 3}
+    )
+    assert refreshed[0]["message_count"] == 2
+    assert refreshed[0]["transcript_dismissal_active_count"] == 1
+
+    sidebar_row = {
+        "session_id": session.session_id,
+        "message_count": 0,
+        "transcript_dismissal_active_count": 1,
+        "last_message_at": 1,
+        "updated_at": 1,
+    }
+    models._apply_sidebar_state_db_override_metadata(
+        [sidebar_row],
+        {session.session_id: {
+            "_state_db_source": "webui",
+            "_state_db_message_count": 3,
+            "_state_db_last_message_at": 2,
+        }},
+    )
+    assert sidebar_row["message_count"] == 2
+    assert sidebar_row["actual_message_count"] == 3
