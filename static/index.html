@@ -1791,6 +1791,10 @@
     return false;
   }
   if(!_isTouchOnly()) return;
+  // Read the user's send-key preference from localStorage (written by panels.js
+  // on save, same key boot.js reads for synchronous init). Default 'enter'.
+  var _sendKey;
+  try{ _sendKey=localStorage.getItem('hermes-pref-send_key')||'enter'; }catch(e){ _sendKey='enter'; }
   document.addEventListener('keydown',function(e){
     if(e.key!=='Enter') return;
     var target=e.target;
@@ -1800,8 +1804,21 @@
     // Slash-command autocomplete open: Enter picks the highlighted command.
     var dd=document.getElementById('cmdDropdown');
     if(dd && dd.classList.contains('open')) return;
-    // Ctrl/Cmd+Enter still sends on mobile; plain Enter must insert a newline.
-    if(e.ctrlKey || e.metaKey || e.altKey) return;
+    // Respect the user's configured send key. Only intercept when the current
+    // key combination should NOT send (i.e. it should insert a newline instead).
+    // - shift+enter mode: Shift+Enter sends, plain Enter = newline
+    // - ctrl+enter mode:  Ctrl/Cmd+Enter sends, plain Enter = newline
+    // - enter mode:       plain Enter sends (but on touch-only we override to
+    //                     newline — the whole point of this interceptor)
+    // In all modes, Numpad Enter behaves like its modifier combination.
+    var _isNumpadEnter = e.code==='NumpadEnter'||e.location===KeyboardEvent.DOM_KEY_LOCATION_NUMPAD;
+    if(e.ctrlKey || e.metaKey) return;  // Ctrl/Cmd+Enter always sends
+    if(_sendKey==='shift+enter' && e.shiftKey) return;  // Shift+Enter sends in that mode
+    if(_isNumpadEnter && (_sendKey==='ctrl+enter'||_sendKey==='shift+enter'||_sendKey==='enter')) {
+      // Numpad Enter is treated as a send trigger in all modes by boot.js,
+      // so don't intercept it.
+      return;
+    }
     // Block boot.js's handler; let the browser insert the newline itself.
     e.stopImmediatePropagation();
   },true);
