@@ -5689,6 +5689,16 @@ let _lastMessageClientHeight=null;   // #4702: track scroller height to ignore i
 // window after load as suppressed.
 let _lastNonMessageScrollIntentMs=-Infinity;
 let _messageUserUnpinned=false;
+// #6653: layout-free authoritative follow-intent cache for synchronous readers
+// (the SSE cancel handler in messages.js). _scrollPinned/_messageUserUnpinned
+// are only updated inside the scroll listener's requestAnimationFrame callback,
+// so a reader who JUST scrolled away (scrollbar or keyboard) can still read
+// stale pin state until the next frame. Every scroll-away-up invalidates this
+// cache SYNCHRONOUSLY in the scroll/keydown listeners (before the
+// programmatic-scroll early-return and the rAF deferral); every re-pin re-arms
+// it. Reads never touch scrollHeight/clientHeight, so this is safe inside a
+// synchronous EventSource callback on WKWebView (#6653).
+let _messageFollowIntentCache=true;
 // A monotonic ownership token lets delayed restores distinguish reader input
 // that happened after a snapshot from input that merely happened recently.
 let _messageScrollInputGeneration=0;
@@ -5874,6 +5884,7 @@ function _resetScrollDirectionTracker(){
   _lastMessageClientHeight=null;
   _messageUserUnpinned=false;
   _scrollPinned=true;
+  _messageFollowIntentCache=true;
   _nearBottomCount=0;
   _touchStartY=null;
   _messageTouchScrollActive=false;
@@ -5893,6 +5904,7 @@ function _resetStreamScrollFollow(){
   _clearNewMessageScrollCue();
   _messageUserUnpinned=false;
   _scrollPinned=true;
+  _messageFollowIntentCache=true;
   _nearBottomCount=0;
   _lastScrollTop=null;
   // #4970 review: clear low-delta wheel intent on fresh stream start too, else a
@@ -6034,12 +6046,25 @@ if(typeof window!=='undefined'){
       _lastMessageKeyScrollIntentMs=now;
       const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
       if(bottomDistance>120) _lastMessageScrollIntentMs=now;
+      // #6653: a keyboard scroll-away (PageUp/ArrowUp/Home) invalidates the
+      // layout-free follow-intent cache synchronously, before the native scroll
+      // event and the rAF that flip _scrollPinned/_messageUserUnpinned - so a
+      // cancel landing in that window never treats the reader as still pinned.
+      if(e.key==='PageUp'||e.key==='ArrowUp'||e.key==='Home') _messageFollowIntentCache=false;
     }
   },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
     _scheduleMessageVirtualizedRender();
     if(_programmaticScroll&&(performance.now()-_programmaticScrollSetAt)>150) _programmaticScroll=false;
+    // #6653: synchronously invalidate the layout-free follow-intent cache on any
+    // upward scroll-away BEFORE the programmatic-scroll early-return and the rAF
+    // deferral below. _scrollPinned/_messageUserUnpinned are only flipped inside
+    // that requestAnimationFrame, so a cancel landing between this event and the
+    // next frame would otherwise read stale pin state and yank a reader who just
+    // scrolled up back to the cancellation notice. Reads only scrollTop (never
+    // scrollHeight/clientHeight) - no forced layout in the synchronous path.
+    if(!_programmaticScroll && _lastScrollTop!==null && el.scrollTop<_lastScrollTop-2) _messageFollowIntentCache=false;
     if(_programmaticScroll) return;
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
@@ -6094,6 +6119,7 @@ if(typeof window!=='undefined'){
         _cancelBottomSettle();
         _nearBottomCount=0;
         _scrollPinned=false;
+        _messageFollowIntentCache=false;
         _messageUserUnpinned=true;
       }else if(movedDown&&nearBottom){
         _nearBottomCount=_nearBottomCount+1;
@@ -6105,13 +6131,14 @@ if(typeof window!=='undefined'){
           if(!_messageUserUnpinned||bottomDistance<=80){
             _messageUserUnpinned=false;
             _scrollPinned=true;
+            _messageFollowIntentCache=true;
           }
           _nearBottomCount=0;
         }
       }else if(!_messageUserUnpinned){
         if(nearBottom){
           _nearBottomCount=_nearBottomCount+1;
-          if(_nearBottomCount>=2){_scrollPinned=true;_nearBottomCount=0;}
+          if(_nearBottomCount>=2){_scrollPinned=true;_messageFollowIntentCache=true;_nearBottomCount=0;}
         }else if(!movedUp && window._autoScrollFollow && _scrollPinned){
           // Content-grew-beneath-a-pinned-viewport case (NOT a user scroll-away).
           // During streaming on a tall transcript (esp. mobile, where chunks land
@@ -6128,10 +6155,12 @@ if(typeof window!=='undefined'){
         }else{
           _nearBottomCount=0;
           _scrollPinned=false;
+          _messageFollowIntentCache=false;
         }
       }else if(!nearBottom){
         _nearBottomCount=0;
         _scrollPinned=false;
+        _messageFollowIntentCache=false;
       }
       if(nearBottom) _clearNewMessageScrollCue();
       const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80;
@@ -6734,6 +6763,7 @@ function _setMessageScrollToBottom(){
   _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
   _nearBottomCount=2;
   _scrollPinned=true;
+  _messageFollowIntentCache=true;
   requestAnimationFrame(()=>{
     // Retry the bottom write on the next layout frame so a DOM rebuild that
     // grows the transcript after the first write doesn't strand a pinned
@@ -6749,6 +6779,7 @@ function _setMessageScrollToBottom(){
     _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
     _nearBottomCount=2;
     _scrollPinned=true;
+    _messageFollowIntentCache=true;
     _deferClearProgrammaticScroll();
   });
 }
@@ -6894,6 +6925,7 @@ function _settleFinalScroll(token){
   _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
   _nearBottomCount=2;
   _scrollPinned=true;
+  _messageFollowIntentCache=true;
   _deferClearProgrammaticScroll();
 }
 function scrollIfPinned(){
@@ -6915,6 +6947,7 @@ function scrollIfPinned(){
     _nearBottomCount=0;
     _messageUserUnpinned=false;
     _scrollPinned=true;
+    _messageFollowIntentCache=true;
   }
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
@@ -6924,6 +6957,7 @@ function scrollIfPinned(){
 function scrollToBottom(){
   _clearNewMessageScrollCue();
   _scrollPinned=true;
+  _messageFollowIntentCache=true;
   _messageUserUnpinned=false;
   // Write scrollTop once synchronously to anchor the viewport, then let
   // ResizeObserver settle handle any late layout growth (Prism, KaTeX,
@@ -15095,6 +15129,7 @@ function _restoreMessageScrollSnapshot(snapshot){
   }else if(snapshot.pinned===true){
     _messageUserUnpinned=false;
     _scrollPinned=true;
+    _messageFollowIntentCache=true;
     _nearBottomCount=2;
   }else{
     const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
@@ -15105,6 +15140,7 @@ function _restoreMessageScrollSnapshot(snapshot){
     }else if(bottomDistance<=120){
       _messageUserUnpinned=false;
       _scrollPinned=true;
+      _messageFollowIntentCache=true;
       _nearBottomCount=2;
     }
   }
@@ -15407,6 +15443,7 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   if(snapshot.pinned===true){
     _messageUserUnpinned=false;
     _scrollPinned=true;
+    _messageFollowIntentCache=true;
     _nearBottomCount=2;
   }else if(snapshot.userUnpinned===true){
     _messageUserUnpinned=true;
@@ -15607,6 +15644,7 @@ function _reanchorPinnedTailAfterRender(wasNearTail){
     _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
     _nearBottomCount=2;
     _scrollPinned=true;
+    _messageFollowIntentCache=true;
   }
 }
 function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
