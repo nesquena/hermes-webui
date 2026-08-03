@@ -784,8 +784,10 @@ def test_stale_compression_snapshot_emits_actionable_error_without_replaying_tur
         "stale_flag",
         "stale_without_current_assistant",
         "stale_non_prefix_compacted",
+        "stale_non_prefix_owned_partial",
         "stale_non_prefix_without_current_user",
         "stale_non_prefix_repeated_prompt_without_authority",
+        "no_response_after_streamed_token",
     ],
 )
 def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
@@ -817,6 +819,7 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
             self.context_compressor = None
             self.ephemeral_system_prompt = None
             self._last_error = None
+            self.stream_delta_callback = _kwargs.get("stream_delta_callback")
 
         def run_conversation(self, **kwargs):
             type(self).runs += 1
@@ -840,8 +843,26 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
                         "message": "token invalid",
                     },
                 }
+            if second_result == "no_response_after_streamed_token":
+                if self.stream_delta_callback is not None:
+                    self.stream_delta_callback("streamed but not finalized")
+                return {"completed": True, "messages": history}
             if second_result != "recovered":
-                if second_result == "stale_non_prefix_without_current_user":
+                if second_result == "stale_non_prefix_owned_partial":
+                    stale_messages = [
+                        {"role": "assistant", "content": "compacted history"},
+                        {
+                            "role": "user",
+                            "content": "new webui turn",
+                            "_active_turn_token": streaming.build_active_turn_token(
+                                stream_id, 10.0
+                            ),
+                        },
+                        {"role": "assistant", "content": "owned partial"},
+                        {"role": "user", "content": "later user"},
+                        {"role": "assistant", "content": "later wrong"},
+                    ]
+                elif second_result == "stale_non_prefix_without_current_user":
                     stale_messages = [
                         {"role": "user", "content": "unrelated historical user"},
                         {"role": "assistant", "content": "historical answer"},
@@ -880,15 +901,19 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
                 stale_result = {
                     "completed": False,
                     "final_response": (
-                        ""
-                        if second_result
-                        in (
-                            "stale_without_current_assistant",
-                            "stale_non_prefix_compacted",
-                            "stale_non_prefix_without_current_user",
-                            "stale_non_prefix_repeated_prompt_without_authority",
+                        "owned partial"
+                        if second_result == "stale_non_prefix_owned_partial"
+                        else (
+                            ""
+                            if second_result
+                            in (
+                                "stale_without_current_assistant",
+                                "stale_non_prefix_compacted",
+                                "stale_non_prefix_without_current_user",
+                                "stale_non_prefix_repeated_prompt_without_authority",
+                            )
+                            else "partial stale"
                         )
-                        else "partial stale"
                     ),
                     "messages": stale_messages,
                     "partial": True,
@@ -949,6 +974,12 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
     if second_result == "recovered":
         assert not apperrors
         assert any(message.get("content") == "recovered" for message in reloaded.messages)
+    elif second_result == "no_response_after_streamed_token":
+        assert len(apperrors) == 1
+        assert apperrors[0]["type"] == "auth_mismatch"
+        assert not any(event == "done" for event, _payload in events)
+        assert reloaded.active_stream_id is None
+        assert reloaded.pending_user_message is None
     else:
         assert len(apperrors) == 1
         assert apperrors[0]["type"] == "compression_snapshot_stale"
@@ -974,6 +1005,16 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
                 for message in reloaded.messages
             )
         else:
-            assert [message.get("content") for message in partials] == ["partial stale"]
+            expected_partial = (
+                "owned partial"
+                if second_result == "stale_non_prefix_owned_partial"
+                else "partial stale"
+            )
+            assert [message.get("content") for message in partials] == [expected_partial]
+            if second_result == "stale_non_prefix_owned_partial":
+                assert not any(
+                    message.get("content") == "later wrong"
+                    for message in reloaded.messages
+                )
         assert reloaded.messages[-1]["_error"] is True
         assert "next message" in reloaded.messages[-1]["content"].lower()

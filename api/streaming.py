@@ -6669,8 +6669,12 @@ def _agent_result_terminal_failure(result) -> bool:
     return False
 
 
-def _self_heal_result_succeeded(result, previous_message_count, token_sent) -> bool:
-    """Accept a credential retry only after observable current-turn success."""
+def _self_heal_result_succeeded(
+    result,
+    previous_context,
+    active_turn_identity,
+) -> bool:
+    """Accept a credential retry only after authoritative turn success."""
     if not isinstance(result, dict):
         return False
     if _result_reports_compression_snapshot_stale(result):
@@ -6686,9 +6690,38 @@ def _self_heal_result_succeeded(result, previous_message_count, token_sent) -> b
     if result.get('completed') is False:
         return False
     messages = result.get('messages') or []
-    return bool(token_sent) or _has_new_assistant_reply(
-        messages,
-        previous_message_count,
+    previous_context = list(previous_context or [])
+    if _messages_have_prefix(messages, previous_context):
+        current_turn_rows = list(messages[len(previous_context):])
+    else:
+        current_user_idx = next(
+            (
+                index
+                for index, row in enumerate(messages)
+                if _active_turn_token_matches(row, active_turn_identity)
+            ),
+            None,
+        )
+        if current_user_idx is None:
+            current_turn_rows = []
+        else:
+            current_turn_rows = list(messages[current_user_idx + 1:])
+    next_user_idx = next(
+        (
+            index
+            for index, row in enumerate(current_turn_rows)
+            if isinstance(row, dict) and row.get('role') == 'user'
+        ),
+        None,
+    )
+    if next_user_idx is not None:
+        current_turn_rows = current_turn_rows[:next_user_idx]
+    return any(
+        isinstance(row, dict)
+        and row.get('role') == 'assistant'
+        and not row.get('_error')
+        and _assistant_message_has_final_visible_text(row)
+        for row in current_turn_rows
     )
 
 
@@ -10327,8 +10360,8 @@ def _run_agent_streaming(
                                     result = _heal_result
                                 _heal_ok = _self_heal_result_succeeded(
                                     _heal_result,
-                                    _prev_len,
-                                    _token_sent,
+                                    _heal_context_messages,
+                                    _active_turn_identity,
                                 )
                             except Exception as _retry_exc:
                                 logger.warning(
@@ -10455,6 +10488,7 @@ def _run_agent_streaming(
                                 result,
                                 _result_partial_pre_call_context,
                                 msg_text,
+                                active_turn_identity=_active_turn_identity,
                             )
                         except Exception:
                             logger.debug("Failed to snapshot partials on error for %s", stream_id, exc_info=True)
@@ -11592,8 +11626,8 @@ def _run_agent_streaming(
                             result = _heal_result
                         elif _self_heal_result_succeeded(
                             _heal_result,
-                            len(_heal_context_messages),
-                            _token_sent,
+                            _heal_context_messages,
+                            _active_turn_identity,
                         ):
                             # Retry succeeded — persist the result normally.
                             if s is not None:
