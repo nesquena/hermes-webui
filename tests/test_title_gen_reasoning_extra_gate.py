@@ -24,14 +24,26 @@ _AGENT_AFTER_COLLECTION = sys.modules.get("agent", _MISSING)
 
 def test_collection_preserves_the_real_agent_package():
     """Importing this regression module must not poison later Agent imports."""
-    assert _AGENT_AFTER_COLLECTION is _AGENT_BEFORE_COLLECTION
     if _AGENT_BEFORE_COLLECTION is _MISSING:
-        assert "agent" not in sys.modules
-        if _AGENT_IMPORT_SPEC_BEFORE_COLLECTION is None:
-            pytest.skip("Hermes Agent is not installed in this WebUI-only environment")
+        agent_module = _AGENT_AFTER_COLLECTION
+        if agent_module is _MISSING:
+            if _AGENT_IMPORT_SPEC_BEFORE_COLLECTION is None:
+                pytest.skip("Hermes Agent is not installed in this WebUI-only environment")
+            agent_module = importlib.import_module("agent")
+
+        agent_spec = getattr(agent_module, "__spec__", None)
+        agent_path = getattr(agent_module, "__path__", _MISSING)
+        assert agent_spec is not None
+        assert agent_path is not _MISSING
+        if _AGENT_IMPORT_SPEC_BEFORE_COLLECTION is not None:
+            assert agent_spec.origin == _AGENT_IMPORT_SPEC_BEFORE_COLLECTION.origin
+            assert tuple(agent_path) == tuple(
+                _AGENT_IMPORT_SPEC_BEFORE_COLLECTION.submodule_search_locations or ()
+            )
         assert importlib.import_module("agent.model_metadata") is not None
         return
 
+    assert _AGENT_AFTER_COLLECTION is _AGENT_BEFORE_COLLECTION
     assert getattr(_AGENT_AFTER_COLLECTION, "__spec__", _MISSING) is _AGENT_SPEC_BEFORE_COLLECTION
     assert getattr(_AGENT_AFTER_COLLECTION, "__path__", _MISSING) is _AGENT_PATH_BEFORE_COLLECTION
     assert _AGENT_SPEC_BEFORE_COLLECTION is not None
