@@ -106,9 +106,7 @@ def test_duplicate_creates_independent_session():
 
     # Verify that messages are copied (accept both plain assignment and the
     # corrected deepcopy form added May 2 2026).
-    assert 'messages=session.messages' in endpoint_code or \
-           'messages=copy.deepcopy(session.messages)' in endpoint_code or \
-           'messages=copied_session.messages' in endpoint_code, \
+    assert 'messages=copied_messages' in endpoint_code, \
         "Messages should be copied to duplicate"
 
     # Verify that title includes (copy)
@@ -155,8 +153,7 @@ def test_duplicate_session_copies_messages_logic():
     # Verify messages are copied from original session.  Accept either the
     # plain assignment (insufficient — see test_duplicate_runtime_messages_independence)
     # or the proper deepcopy form (the May 2 2026 fix).
-    assert 'messages=session.messages' in endpoint_code or \
-           'messages=copy.deepcopy(session.messages)' in endpoint_code, \
+    assert 'messages=copied_messages' in endpoint_code, \
         f"Messages should be copied from original. Got: {endpoint_code}"
 
 
@@ -220,7 +217,7 @@ def test_duplicate_session_copies_all_session_properties():
     # `title` accepts either the original `title=session.title` or the
     # SF-3 hardened form `title=(session.title or "Untitled")` (May 2 2026).
     properties_to_check = [
-        'session_id=uuid.uuid4',  # New unique ID
+        'session_id=copied_session_id',  # New unique ID
         'workspace=session.workspace',
         'model=session.model',
         'model_provider=session.model_provider',
@@ -234,9 +231,7 @@ def test_duplicate_session_copies_all_session_properties():
            'title=(session.title or "Untitled")' in construction_block, \
         f"title must be copied (plain or guarded form). Got: {construction_block[:300]}"
 
-    # `messages` accepts either the plain assignment or the deepcopy form (May 2 2026 fix).
-    assert 'messages=session.messages' in construction_block or \
-           'messages=copy.deepcopy(session.messages)' in construction_block, \
+    assert 'messages=copied_messages' in construction_block, \
         f"messages must be copied (plain or deepcopy form). Got: {construction_block[:300]}"
 
 
@@ -245,23 +240,27 @@ def test_duplicate_session_copies_all_session_properties():
 # Runtime tests added May 2 2026 (Opus pre-release follow-up to #1462 review)
 # ---------------------------------------------------------------------------
 
-def test_duplicate_uses_deepcopy_for_messages():
-    """The duplicate must use copy.deepcopy() for messages and tool_calls.
+def test_duplicate_materializer_owns_clean_detached_rows():
+    from api.transcript_mutations import TranscriptProjection, materialize_duplicate
 
-    Static-grep regression test: catches the original bug where
-    `messages=session.messages` was a plain reference assignment, leaving
-    both sessions sharing the same list object in memory.
-    """
-    with open('api/routes.py', 'r', encoding='utf-8') as f:
-        content = f.read()
-    duplicate_start = content.find('if parsed.path == "/api/session/duplicate":')
-    assert duplicate_start != -1, "Duplicate endpoint not found"
-    lines = content[duplicate_start:].split('\n')
-    endpoint_code = '\n'.join(lines[:100])
-    assert 'copy.deepcopy(session.messages)' in endpoint_code, \
-        "duplicate must use copy.deepcopy(session.messages) — plain assignment shares list refs"
-    assert 'copy.deepcopy(session.tool_calls)' in endpoint_code, \
-        "duplicate must use copy.deepcopy(session.tool_calls) — plain assignment shares list refs"
+    source_row = {
+        "role": "assistant",
+        "content": "provider failure",
+        "_error": True,
+        "_generated_error_provenance": "webui.generated.provider_error",
+        "_webui_generated_provider_error": True,
+        "_generated_error_source_session_id": "source",
+        "id": "error-1",
+        "_provider_error_dismissal_capability": "transport-only",
+    }
+    rows, calls = materialize_duplicate(
+        TranscriptProjection([source_row], 1, {0: 0}, {0: 0}, []),
+        source_session_id="source",
+        destination_session_id="copy",
+    )
+    assert rows[0]["_generated_error_source_session_id"] == "copy"
+    assert "_provider_error_dismissal_capability" not in rows[0]
+    assert rows is not source_row and calls == []
 
 
 def test_duplicate_explicitly_persists_to_disk():

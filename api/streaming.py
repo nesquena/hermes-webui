@@ -85,14 +85,20 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     must report the count of that embedded transcript, otherwise completion and
     reconcile paths can mistake a complete payload for a stale short window.
     """
-    messages = list(getattr(session, 'messages', None) or [])
+    from api.transcript_mutations import decorate_projection, project_transcript
+    projection = project_transcript(
+        session,
+        list(getattr(session, 'messages', None) or []),
+        tool_calls=tool_calls if tool_calls is not None else getattr(session, 'tool_calls', None),
+    )
+    messages = decorate_projection(session, projection)
     raw = session.compact() | {
         'messages': messages,
-        'message_count': len(messages),
+        'message_count': projection.projected_count,
     }
     attach_todo_state(raw, messages)
     if tool_calls is not None:
-        raw['tool_calls'] = tool_calls
+        raw['tool_calls'] = projection.tool_calls
     return raw
 
 
@@ -1780,6 +1786,8 @@ def _settle_result_messages(
         source=source,
         verification_nudge_provenance=verification_nudge_provenance,
     )
+    from api.transcript_mutations import reconcile_dismissals
+    reconcile_dismissals(session, session.messages)
     _compact_session_image_parts_for_persistence(session)
     _advance_truncation_watermark_after_commit(session)  # #3831
     return result_messages
@@ -4467,6 +4475,28 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
         logger.debug("Could not read old session file before preservation")
     except Exception:
         logger.debug("Failed to preserve pre-compression session file", exc_info=True)
+
+
+def _reset_compression_continuation_dismissals(session) -> None:
+    """Retain effective dismissals when a continuation rotates its session id."""
+    current = getattr(session, "transcript_dismissals", None)
+    entries = current.get("entries") if isinstance(current, dict) else None
+    active_keys = current.get("active_keys") if isinstance(current, dict) else None
+    if not isinstance(active_keys, list):
+        active_keys = []
+        for entry in entries or []:
+            if not isinstance(entry, dict) or entry.get("active") is False:
+                continue
+            source = str(entry.get("source_session_id") or "").strip()
+            message_id = str(entry.get("message_id") or "").strip()
+            if source and message_id:
+                active_keys.append([source, message_id])
+    session.transcript_dismissals = {
+        "version": 2,
+        "entries": copy.deepcopy(entries) if isinstance(entries, list) else [],
+        "active_keys": copy.deepcopy(active_keys),
+    }
+    session.transcript_dismissal_active_count = len(active_keys)
 
 
 def _maybe_schedule_title_refresh(session, put_event, agent):
@@ -9805,6 +9835,10 @@ def _run_agent_streaming(
                     # the write when the file already contains up-to-date data
                     # (i.e. it was just saved by a checkpoint).
                     _preserve_pre_compression_snapshot(s, old_sid)
+                    # The archived parent keeps its own dismissal decisions. The
+                    # rotated child owns a new projection ledger, so lineage cannot
+                    # reinterpret a parent dismissal under the child source.
+                    _reset_compression_continuation_dismissals(s)
                     # The continuation is the live/tip session, not another archived
                     # snapshot. If the in-memory object was itself loaded from a
                     # pre-compression snapshot (possible on repeated compression chains
@@ -10192,6 +10226,8 @@ def _run_agent_streaming(
                             _error_message['provider_details_label'] = 'Interruption details'
                         elif _err_type == 'tool_limit_reached':
                             _error_message['provider_details_label'] = 'Terminal state details'
+                        from api.transcript_mutations import admit_generated_provider_error
+                        admit_generated_provider_error(_error_message, s)
                         s.messages.append(_error_message)
                         try:
                             s.save()
@@ -11415,6 +11451,8 @@ def _run_agent_streaming(
                     _error_message['provider_details_label'] = 'Cancellation details'
                 elif _exc_type == 'interrupted':
                     _error_message['provider_details_label'] = 'Interruption details'
+                from api.transcript_mutations import admit_generated_provider_error
+                admit_generated_provider_error(_error_message, s)
                 s.messages.append(_error_message)
                 try:
                     s.save()

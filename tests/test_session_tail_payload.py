@@ -3,6 +3,27 @@ from unittest.mock import patch
 from urllib.parse import urlparse
 
 
+def test_tail_projection_rebases_session_tool_calls_after_filtered_row():
+    from api.models import Session
+    from api.transcript_mutations import project_transcript, record_dismissal, admit_generated_provider_error
+
+    session = Session(
+        session_id="tail-projection-6610",
+        source_tag="webui",
+        raw_source="webui",
+        session_source="webui",
+        messages=[],
+        tool_calls=[{"name": "tail", "assistant_msg_idx": 2}],
+    )
+    error = {"role": "assistant", "content": "dismissed", "_error": True}
+    admit_generated_provider_error(error, session)
+    rows = [{"role": "user", "content": "first"}, error, {"role": "assistant", "content": "tail"}]
+    record_dismissal(session, session.session_id, error)
+    projection = project_transcript(session, rows)
+    assert [row["content"] for row in projection.messages] == ["first", "tail"]
+    assert projection.tool_calls[0]["assistant_msg_idx"] == 1
+
+
 class _FakeSession:
     def __init__(self, messages):
         self.session_id = "tail_payload_001"
