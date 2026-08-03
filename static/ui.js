@@ -9286,12 +9286,15 @@ function setSystemHealthUnavailable(message){
   ['cpu','memory','disk'].forEach(name=>_updateSystemHealthMetric(name,null));
 }
 function renderSystemHealth(payload){
+  // The persistent resource status bar MUST update on every poll, even when the
+  // Insights side-panel (and thus #systemHealthPanel) is closed. Update it first,
+  // before the Insights-only early return below.
+  _updateResourceStatusBar(payload);
   const panel=$('systemHealthPanel');
   const status=$('systemHealthStatus');
   if(!panel) return;
   if(!payload||payload.available===false){
     setSystemHealthUnavailable('Unavailable');
-    _updateResourceStatusBar(null);
     return;
   }
   panel.classList.remove('loading','unavailable');
@@ -9299,7 +9302,6 @@ function renderSystemHealth(payload){
   _updateSystemHealthMetric('cpu',payload.cpu);
   _updateSystemHealthMetric('memory',payload.memory);
   _updateSystemHealthMetric('disk',payload.disk);
-  _updateResourceStatusBar(payload);
 }
 async function pollSystemHealth(){
   if(document.visibilityState !== 'visible') return;
