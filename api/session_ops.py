@@ -101,8 +101,10 @@ def _truncation_watermark_for(messages):
 
 def _reconcile_after_transcript_shrink(session) -> None:
     from api.transcript_mutations import reconcile_dismissals
+    from api.transcript_mutations import lineage_messages_for_projection
 
-    reconcile_dismissals(session, getattr(session, "messages", None) or [])
+    displayed_messages, _source_messages = lineage_messages_for_projection(session)
+    reconcile_dismissals(session, displayed_messages)
 
 
 def truncate_context_for_display_keep(

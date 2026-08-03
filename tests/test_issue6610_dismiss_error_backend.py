@@ -129,6 +129,36 @@ def test_truncation_reconciles_removed_dismissal_identity():
     assert session.transcript_dismissals["entries"][0]["active"] is False
 
 
+def test_shrink_reconciles_against_compression_parent_lineage(tmp_path, monkeypatch):
+    import api.models as models
+    from api.session_ops import truncate_session_at_keep
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    parent = _session("shrink-parent-6610")
+    parent.pre_compression_snapshot = True
+    parent_error = _error(parent, "parent provider failure")
+    parent.messages = [parent_error]
+    parent.save()
+
+    child = _session("shrink-child-6610")
+    child.parent_session_id = parent.session_id
+    child.messages = [{"role": "user", "content": "child turn"}]
+    child.transcript_dismissals = {
+        "version": 2,
+        "entries": [{
+            "source_session_id": parent.session_id,
+            "message_id": parent_error["id"],
+            "active": True,
+        }],
+        "active_keys": [[parent.session_id, parent_error["id"]]],
+    }
+    child.transcript_dismissal_active_count = 1
+    truncate_session_at_keep(child, 0)
+    assert child.transcript_dismissal_active_count == 1
+    assert child.transcript_dismissals["entries"][0]["active"] is True
+
+
 def test_gateway_terminal_provider_error_uses_canonical_admission(monkeypatch, tmp_path):
     from api import gateway_chat, streaming
 
@@ -213,6 +243,33 @@ def test_duplicate_route_preserves_source_and_persists_clean_copy(monkeypatch):
     assert all("_provider_error_dismissal_capability" not in row for row in source.messages)
 
 
+def test_duplicate_route_reloads_real_destination_without_transport_metadata(tmp_path, monkeypatch):
+    import api.models as models
+    from api import routes
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *args, **kwargs: None)
+    source = _session("real-duplicate-source-6610")
+    error = _error(source)
+    source.messages = [{"role": "user", "content": "keep"}, error]
+    source.save()
+    source_bytes = source.path.read_bytes()
+    handler = _Handler({"session_id": source.session_id})
+
+    routes.handle_post(handler, __import__("urllib.parse").parse.urlparse("/api/session/duplicate"))
+
+    assert handler.status == 200
+    response = json.loads(handler.body)
+    destination = models.Session.load(response["session"]["session_id"])
+    assert destination is not None
+    assert destination.transcript_dismissal_active_count == 0
+    assert all("_provider_error_dismissal_capability" not in row for row in destination.messages)
+    assert destination.messages[1]["_generated_error_source_session_id"] == destination.session_id
+    assert source.path.read_bytes() == source_bytes
+
+
 def test_reload_and_metadata_polling_preserve_ledger_and_source_bytes(tmp_path, monkeypatch):
     import api.models as models
 
@@ -270,3 +327,39 @@ def test_sidebar_refresh_and_state_db_overlay_keep_projected_count(tmp_path, mon
     )
     assert sidebar_row["message_count"] == 2
     assert sidebar_row["actual_message_count"] == 3
+
+
+def test_sidebar_route_cache_and_state_db_consumer_use_projected_count(tmp_path, monkeypatch):
+    from urllib.parse import urlparse
+    from api import routes
+    from tests.test_webui_state_db_reconciliation import (
+        _GetHandler,
+        _append_state_db_rows,
+        _install_test_session,
+        _make_state_db,
+    )
+
+    sid = "sidebar-route-6610"
+    rows = [
+        {"role": "user", "content": "old", "timestamp": 1000.0},
+        {"role": "assistant", "content": "answer", "timestamp": 1001.0},
+    ]
+    _install_test_session(monkeypatch, tmp_path, sid, rows)
+    _make_state_db(tmp_path / "state.db", sid, rows)
+    monkeypatch.setattr(routes, "load_settings", lambda: {"show_cli_sessions": False})
+    routes._clear_session_list_cache()
+
+    first = _GetHandler("/api/sessions?sidebar_source=webui")
+    routes.handle_get(first, urlparse(first.path))
+    assert next(row for row in first.response_json["sessions"] if row["session_id"] == sid)["message_count"] == 2
+    _append_state_db_rows(
+        tmp_path / "state.db",
+        sid,
+        [
+            {"role": "user", "content": "desktop user", "timestamp": 1002.0},
+            {"role": "assistant", "content": "desktop answer", "timestamp": 1003.0},
+        ],
+    )
+    second = _GetHandler("/api/sessions?sidebar_source=webui")
+    routes.handle_get(second, urlparse(second.path))
+    assert next(row for row in second.response_json["sessions"] if row["session_id"] == sid)["message_count"] == 4

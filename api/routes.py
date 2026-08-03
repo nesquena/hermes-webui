@@ -4798,23 +4798,27 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
                     push(row)
                     order += 1
     external_tool_counts = {}
+    # ``tool_calls`` uses the same visible-relative coordinate as ``messages``
+    # in this hydration contract. The window offset is applied exactly once
+    # when matching the full-coordinate scene rows below.
     for call in tool_calls or []:
         if not isinstance(call, dict):
             continue
         try:
-            absolute_idx = int(call.get("assistant_msg_idx"))
+            local_idx = int(call.get("assistant_msg_idx"))
         except (TypeError, ValueError):
             continue
+        absolute_idx = local_idx + int(message_offset or 0)
         external_tool_counts[absolute_idx] = external_tool_counts.get(absolute_idx, 0) + 1
     external_tool_ordinals = {}
     for call in tool_calls or []:
         if not isinstance(call, dict):
             continue
         try:
-            absolute_idx = int(call.get("assistant_msg_idx"))
+            local_idx = int(call.get("assistant_msg_idx"))
         except (TypeError, ValueError):
             continue
-        local_idx = absolute_idx - int(message_offset or 0)
+        absolute_idx = local_idx + int(message_offset or 0)
         if not (turn_start < local_idx <= local_final_idx):
             continue
         row = _anchor_scene_tool_row(call, order, absolute_idx, stream_id)
