@@ -1233,13 +1233,14 @@ def _run_gateway_lifecycle_command(action: str) -> subprocess.CompletedProcess:
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("BROWSER", "echo")
     return subprocess.run(
-        cmd,
-        cwd=str(agent_dir),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS,
-    )
+            cmd,
+            cwd=str(agent_dir),
+            env=env,
+            capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+            timeout=_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS,
+            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0),
+        )
 
 
 def _handle_gateway_lifecycle(handler, action: str, body: dict):

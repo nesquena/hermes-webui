@@ -251,20 +251,20 @@ def _run_git(
                 run_env[f"GIT_CONFIG_KEY_{i}"] = key
                 run_env[f"GIT_CONFIG_VALUE_{i}"] = value
         result = subprocess.run(
-            _hardened_git_argv(
-                args,
-                destructive=hardened_destructive_path,
-                attributes_file=attributes_file,
-                hooks_path=hooks_path,
-            ),
-            cwd=str(cwd),
-            shell=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=run_env,
-            creationflags=_windows_hide_flags(),
-        )
+                    _hardened_git_argv(
+                        args,
+                        destructive=hardened_destructive_path,
+                        attributes_file=attributes_file,
+                        hooks_path=hooks_path,
+                    ),
+                    cwd=str(cwd),
+                    shell=False,
+                    capture_output=True,
+                    text=True, encoding="utf-8", errors="replace",
+                    timeout=timeout,
+                    env=run_env,
+                    creationflags=_windows_hide_flags(),
+                )
     except subprocess.TimeoutExpired as exc:
         raise GitWorkspaceError("Git command timed out", "timeout") from exc
     except FileNotFoundError as exc:
@@ -299,15 +299,15 @@ def _config_names_for_scope(
     ignore_unsupported: bool = False,
 ) -> set[str]:
     result = subprocess.run(
-        ["git", "config", "--includes", scope, "--name-only", "--get-regexp", config_pattern],
-        cwd=str(cwd),
-        shell=False,
-        text=True,
-        capture_output=True,
-        timeout=GIT_TIMEOUT,
-        env=env,
-        creationflags=_windows_hide_flags(),
-    )
+            ["git", "config", "--includes", scope, "--name-only", "--get-regexp", config_pattern],
+            cwd=str(cwd),
+            shell=False,
+            text=True, encoding="utf-8", errors="replace",
+            capture_output=True,
+            timeout=GIT_TIMEOUT,
+            env=env,
+            creationflags=_windows_hide_flags(),
+        )
     if result.returncode not in {0, 1}:
         if ignore_unsupported:
             return set()

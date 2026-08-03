@@ -112,7 +112,7 @@ def auto_install_agent_deps() -> bool:
         print('[!!] Auto-install skipped: no requirements.txt or pyproject.toml in agent dir.', flush=True)
         return False
     try:
-        result = subprocess.run(install_args, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(install_args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         if result.returncode != 0:
             print(f'[!!] pip install failed (exit {result.returncode}):', flush=True)
             for line in (result.stderr or '').splitlines()[-10:]:

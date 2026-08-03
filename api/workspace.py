@@ -16,6 +16,7 @@ import secrets
 import shutil
 import stat
 import subprocess
+import sys
 import concurrent.futures
 import threading
 import time
@@ -1719,13 +1720,26 @@ def raw_authorized_escape_target(workspace: Path, session_id: str, token: str, r
 
 # ── Git detection ──────────────────────────────────────────────────────────
 
+def _windows_hide_flags() -> int:
+    """Win32 ``creationflags`` that hide a short-lived console child's window
+    (``CREATE_NO_WINDOW``) without detaching it, so ``capture_output`` still
+    works. Returns ``0`` on non-Windows — the ``subprocess`` default, a genuine
+    no-op. Mirrors ``api/workspace_git.py``'s helper; kept local to avoid a
+    circular import (workspace_git already imports from this module).
+    """
+    if sys.platform == "win32":
+        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return 0
+
+
 def _run_git(args, cwd, timeout=3):
     """Run a git command and return stdout, or None on failure."""
     try:
         r = subprocess.run(
-            ['git'] + args, cwd=str(cwd), capture_output=True,
-            text=True, timeout=timeout,
-        )
+                    ['git'] + args, cwd=str(cwd), capture_output=True,
+                    text=True, encoding="utf-8", errors="replace", timeout=timeout,
+                    creationflags=_windows_hide_flags(),
+                )
         return r.stdout.strip() if r.returncode == 0 else None
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return None
