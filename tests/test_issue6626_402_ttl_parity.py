@@ -7,7 +7,8 @@ installs the one-hour fallback is preserved, so display/probe code never marks
 an entry usable earlier than ``CredentialPool.select()`` will.
 """
 
-import inspect
+import sys
+import types
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -51,6 +52,25 @@ def test_402_boundary_not_one_hour(providers):
     assert ttl != 3600
 
 
+def test_host_helper_402_boundary_119_120(providers, monkeypatch):
+    """Host helper: with runtime TTL=120, an exhausted 402 entry stays unavailable
+    at 119s and becomes available at 120s (both int and persisted-string codes)."""
+    import agent.credential_pool as cp
+
+    monkeypatch.setattr(cp, "_exhausted_ttl", lambda error_code: 120)
+
+    assert providers._entry_exhausted_ttl_seconds(402) == 120
+    assert providers._entry_exhausted_ttl_seconds("402") == 120
+
+    now = datetime.now(timezone.utc)
+    entry_119 = _entry(error_code="402", status_at=(now - timedelta(seconds=119)).timestamp())
+    entry_120 = _entry(error_code="402", status_at=(now - timedelta(seconds=120)).timestamp())
+    # 119s after the failure the pool is still exhausted (unavailable)...
+    assert providers._entry_is_pool_exhausted(entry_119) is True
+    # ...and exactly at the 120s TTL boundary it becomes available again.
+    assert providers._entry_is_pool_exhausted(entry_120) is False
+
+
 def test_401_and_default_unchanged(providers):
     assert providers._entry_exhausted_ttl_seconds(401) == 5 * 60
     assert providers._entry_exhausted_ttl_seconds("401") == 5 * 60
@@ -86,8 +106,47 @@ def test_last_error_reset_at_precedence(providers):
     assert providers._entry_pool_exhausted_until(entry) == reset_at
 
 
-def test_both_helper_copies_carry_runtime_parity(providers):
-    """The duplicated helper (drift hazard) has both copies on the parity path."""
-    src = inspect.getsource(providers)
-    assert src.count("def _entry_exhausted_ttl_seconds(error_code):") == 2
-    assert src.count("_runtime_exhausted_ttl(int(code))") == 2
+def test_embedded_subprocess_helper_402_boundary_119_120(monkeypatch):
+    """The helper copy embedded in _ACCOUNT_USAGE_SUBPROCESS_CODE must behave
+    identically: TTL 120 for int/string 402 and 119/120s eligibility boundary."""
+    import api.providers as providers
+
+    agent_mod = types.ModuleType("agent")
+    agent_mod.__path__ = []
+    account_usage_mod = types.ModuleType("agent.account_usage")
+    credential_pool_mod = types.ModuleType("agent.credential_pool")
+
+    def fake_fetch_account_usage(provider, *, base_url=None, api_key=None):
+        return None
+
+    class FakePool:
+        def entries(self):
+            return []
+
+    credential_pool_mod._exhausted_ttl = lambda error_code: 120
+    credential_pool_mod.load_pool = lambda provider: FakePool()
+    account_usage_mod.fetch_account_usage = fake_fetch_account_usage
+    monkeypatch.setitem(sys.modules, "agent", agent_mod)
+    monkeypatch.setitem(sys.modules, "agent.account_usage", account_usage_mod)
+    monkeypatch.setitem(sys.modules, "agent.credential_pool", credential_pool_mod)
+    monkeypatch.setattr(sys, "argv", ["quota-probe", "openai-codex", ""])
+
+    namespace = {"__name__": "__main__"}
+    exec(providers._ACCOUNT_USAGE_SUBPROCESS_CODE, namespace)
+
+    embedded_ttl = namespace["_entry_exhausted_ttl_seconds"]
+    embedded_is_pool_exhausted = namespace["_entry_is_pool_exhausted"]
+    embedded_pool_exhausted_until = namespace["_entry_pool_exhausted_until"]
+
+    assert embedded_ttl(402) == 120
+    assert embedded_ttl("402") == 120
+
+    now = datetime.now(timezone.utc)
+    entry_119 = _entry(error_code="402", status_at=(now - timedelta(seconds=119)).timestamp())
+    entry_120 = _entry(error_code="402", status_at=(now - timedelta(seconds=120)).timestamp())
+    assert embedded_is_pool_exhausted(entry_119) is True
+    assert embedded_is_pool_exhausted(entry_120) is False
+
+    status_at = datetime(2026, 8, 2, 12, 0, 0, tzinfo=timezone.utc)
+    entry = _entry(error_code="402", status_at=status_at.timestamp())
+    assert embedded_pool_exhausted_until(entry) == status_at + timedelta(seconds=120)
