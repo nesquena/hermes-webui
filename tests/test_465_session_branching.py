@@ -446,6 +446,92 @@ def test_branch_route_keeps_404_for_truly_missing_sessions(monkeypatch):
     assert cap["bad"] == ("Session not found", 404)
 
 
+def test_branch_route_slices_merged_display_view_not_raw_sidecar(monkeypatch):
+    """keep_count is an index into GET /api/session's merged display view.
+
+    Compression-lineage stitching and the state.db append-only merge can make
+    the display view diverge from the raw sidecar in BOTH length and content.
+    The branch handler must slice the same merged view the frontend indexed
+    into; slicing the raw sidecar landed the cut rows too early, so forks from
+    the final conclusion stopped mid tool-run and dropped that conclusion.
+    """
+    handler = _FakeHandler()
+    conclusion = {
+        "role": "assistant",
+        "content": "# CONCLUSION\n---\n> 🟢 final answer",
+        "timestamp": 6.0,
+    }
+    # Raw sidecar: 6 rows (a replayed/duplicated tool-run segment survived a
+    # compression continuation). The merged display view deduplicates one of
+    # those rows, so the frontend sees 5 rows ending on the conclusion.
+    raw_sidecar = [
+        {"role": "user", "content": "question", "timestamp": 1.0},
+        {"role": "assistant", "content": "checking", "tool_calls": [{"id": "t1", "name": "terminal", "arguments": {}}], "timestamp": 2.0},
+        {"role": "tool", "tool_call_id": "t1", "content": '{"output":"ok"}', "timestamp": 3.0},
+        {"role": "assistant", "content": "still checking", "tool_calls": [{"id": "t2", "name": "terminal", "arguments": {}}], "timestamp": 4.0},
+        {"role": "tool", "tool_call_id": "t2", "content": '{"output":"ok2"}', "timestamp": 5.0},
+        conclusion,
+    ]
+    merged_view = [
+        raw_sidecar[0],
+        raw_sidecar[1],
+        raw_sidecar[2],
+        raw_sidecar[3],
+        conclusion,
+    ]
+    # Frontend clicked fork on the conclusion: index 4 in the merged view.
+    keep_count = len(merged_view)
+
+    source = routes.Session(
+        session_id="src-merged-1",
+        title="Merged source",
+        workspace=".",
+        model="claude-sonnet",
+        messages=list(raw_sidecar),
+        context_messages=[],
+    )
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {"session_id": "src-merged-1", "keep_count": keep_count},
+    )
+    monkeypatch.setattr(routes, "get_session", lambda _sid, metadata_only=False: source)
+    monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda _s: False)
+    monkeypatch.setattr(routes, "_is_messaging_session_record", lambda _s: False)
+    monkeypatch.setattr(
+        routes,
+        "_webui_sidecar_lineage_messages_for_display",
+        lambda _s: list(raw_sidecar),
+    )
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *a, **k: [])
+    monkeypatch.setattr(
+        routes,
+        "merge_session_messages_append_only",
+        lambda side, state, **k: list(merged_view),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_merged_webui_lineage_messages_for_display",
+        lambda _s, messages=None: list(messages if messages is not None else []),
+    )
+    monkeypatch.setattr(routes, "_evict_sessions_over_cap", lambda: None)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *a, **k: None)
+    monkeypatch.setattr(routes.Session, "save", lambda self: None)
+    cap = _capture_route(monkeypatch)
+    routes.handle_post(handler, urlparse("/api/session/branch"))
+    assert "bad" not in cap
+    assert cap["status"] == 200
+    forked = routes.SESSIONS[cap["ok"]["session_id"]]
+    assert len(forked.messages) == keep_count
+    assert forked.messages[-1]["role"] == "assistant"
+    assert forked.messages[-1]["content"].startswith("# CONCLUSION"), (
+        "Fork sliced the raw sidecar instead of the merged display view: "
+        "the final conclusion is missing and the transcript ends mid tool-run"
+    )
+    routes.SESSIONS.pop(cap["ok"]["session_id"], None)
+
+
 # ── Session model ──────────────────────────────────────────────────────────────
 
 def test_session_model_parent_session_id():
