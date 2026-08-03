@@ -9373,17 +9373,20 @@ function _mountResourceStatusBar(){
   const wrap=document.createElement('div');
   wrap.innerHTML=_renderResourceStatusBar().trim();
   const el=wrap.firstElementChild;
-  if(el) document.body.appendChild(el);
+  if(el){
+    el.hidden=false;
+    document.body.appendChild(el);
+  }
 }
 // Live show/hide for the resource bar toggle (#693).
 function _applyResourceStatusBarVisibility(){
   if(_resourceBarEnabled()){
     if(!$('resourceStatusBar')) _mountResourceStatusBar();
     const bar=$('resourceStatusBar');
-    if(bar) bar.style.display='';
+    if(bar){ bar.hidden=false; bar.style.display=''; }
   } else {
     const bar=$('resourceStatusBar');
-    if(bar) bar.style.display='none';
+    if(bar){ bar.hidden=true; bar.style.display='none'; }
   }
   if(typeof _syncSystemHealthMonitorVisibility==='function') _syncSystemHealthMonitorVisibility();
 }
