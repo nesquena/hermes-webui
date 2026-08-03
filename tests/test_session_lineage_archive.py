@@ -52,10 +52,20 @@ globalThis.localStorage = {{
   removeItem: key => local.delete(key),
 }};
 globalThis.S = {{session: {{session_id:'tip', archived:false}}}};
+globalThis._lineageReportCache = new Map([['root', {{segments:[
+  {{session_id:'old', profile:'default'}},
+  {{session_id:'foreign-report', profile:'other-profile'}},
+]}}]]);
+globalThis._sidebarLineageKeyForRow = session => session._lineage_key || session._lineage_root_id || session.session_id;
+globalThis._lineageReportCacheKey = (_session, lineageKey) => lineageKey;
+globalThis._sessionSegmentCount = session => Number(session._compression_segment_count || (session._lineage_segments || []).length || 0);
+globalThis._lineageReportNeedsFetch = () => false;
+globalThis._fetchLineageReportForRow = async () => null;
 globalThis._allSessions = [
   {{session_id:'tip', profile:'default', archived:false}},
   {{session_id:'mid', profile:'default', archived:false}},
   {{session_id:'root', profile:'default', archived:false}},
+  {{session_id:'old', profile:'default', archived:false}},
   {{session_id:'fork', profile:'default', archived:false}},
   {{session_id:'child', profile:'default', archived:false}},
   {{session_id:'foreign', profile:'other-profile', archived:false}},
@@ -82,6 +92,8 @@ const row = {{
   session_id:'tip',
   profile:'default',
   archived:false,
+  _lineage_key:'root',
+  _compression_segment_count:4,
   _lineage_segments:[
     {{session_id:'tip', profile:'default'}},
     {{session_id:'mid', profile:'default'}},
@@ -105,9 +117,20 @@ const row = {{
     fork: _sessionArchiveTargets({{session_id:'fork', profile:'default', session_source:'fork'}}).map(s => s.session_id),
     child: _sessionArchiveTargets({{session_id:'child', profile:'default', relationship_type:'child_session'}}).map(s => s.session_id),
   }};
+  _lineageReportCache.clear();
+  const incomplete = await _archiveSession({{
+    session_id:'incomplete-tip',
+    profile:'default',
+    archived:false,
+    _lineage_key:'incomplete-root',
+    _compression_segment_count:2,
+  }}, true);
+  const incompleteCalls = calls.splice(0).map(call => call.body);
   console.log(JSON.stringify({{
     archived,
     restored,
+    incomplete,
+    incompleteCalls,
     archivedCalls,
     restoredCalls,
     archiveState,
@@ -121,20 +144,25 @@ const row = {{
 
     assert result["archived"] is True
     assert result["restored"] is True
+    assert result["incomplete"] is False
+    assert result["incompleteCalls"] == []
     assert result["archivedCalls"] == [
         {"session_id": "tip", "archived": True},
         {"session_id": "mid", "archived": True},
         {"session_id": "root", "archived": True},
+        {"session_id": "old", "archived": True},
     ]
     assert result["restoredCalls"] == [
         {"session_id": "tip", "archived": False},
         {"session_id": "mid", "archived": False},
         {"session_id": "root", "archived": False},
+        {"session_id": "old", "archived": False},
     ]
     assert result["archiveState"] == {
         "tip": True,
         "mid": True,
         "root": True,
+        "old": True,
         "fork": False,
         "child": False,
         "foreign": False,
