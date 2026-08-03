@@ -411,7 +411,9 @@ def test_stale_partial_requires_authoritative_current_turn_boundary():
     identity = {
         "token": "stream:123",
         "text": "repeat prompt",
-        "current_turn_user_idx": 8,
+        # This index belonged to the replaced projection but now happens to
+        # point at an identical historical prompt. It is not current-turn proof.
+        "current_turn_user_idx": 0,
         "turn_id": "session:turn-current",
     }
 
