@@ -1860,7 +1860,7 @@ function cmdReasoning(args){
     // Takes effect on the NEXT session/turn (agent re-reads config at
     // construction time), matching CLI semantics where `/reasoning high`
     // also forces an agent re-init.
-    api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:arg})})
+    api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:arg,..._reasoningEffortContext()})})
       .then(function(st){
         const eff=(st && st.reasoning_effort)||arg;
         showToast(BRAIN+' Reasoning effort: '+eff+' (saved; applies to next turn)');
