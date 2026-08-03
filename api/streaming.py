@@ -9659,6 +9659,19 @@ def _run_agent_streaming(
                     state_messages=_external_state_snapshot,
                 ) or []
             )
+            # Keep the owner/context projection distinct from the display projection.
+            # Settlement and stale-result attribution require the exact pre-run owner
+            # context even when state.db reconciliation changes the visible transcript.
+            _previous_owner_context_messages = list(
+                reconciled_state_db_messages_for_session(
+                    s,
+                    prefer_context=True,
+                    state_messages=_external_state_snapshot,
+                ) or []
+            )
+            _previous_owner_context_messages = _deduplicate_context_messages(
+                _previous_owner_context_messages
+            )
             (
                 _previous_context_messages,
                 _conversation_history_revision,
