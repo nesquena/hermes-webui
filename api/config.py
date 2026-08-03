@@ -504,6 +504,59 @@ def get_config_snapshot() -> dict:
         return copy.deepcopy(active_cfg)
 
 
+def _capture_profile_config_snapshot() -> dict:
+    """Return a request-owned, deep-copied config snapshot captured while the
+    calling thread's profile scope is authoritative (#5619).
+
+    Must be called INSIDE the request profile's env scope — i.e. with the
+    profile TLS / thread-local env active (``profile_env_for_active_request``
+    on the request thread, ``profile_scope_for_detached_worker`` on the
+    models-catalog rebuild worker) — so the captured values resolve the
+    request profile, not the ambient process.
+
+    Two properties the plain ``get_config()`` / ``get_config_snapshot()``
+    reads lack:
+
+      * The deep copy itself runs under ``_cfg_lock``, so a concurrent
+        ``_refresh_config_cache()`` (which clears and re-updates ``_cfg_cache``
+        in place) can never tear it.
+      * ``${VAR}`` references are re-expanded from the RAW YAML against the
+        CURRENT thread's profile env. The shared cache is deliberately pinned
+        to the unscoped process-env view at reload time (#798), so copying it
+        — even inside the profile scope — would freeze values expanded for the
+        wrong (ambient) environment. Re-expanding here gives a named profile
+        whose ``.env`` differs from the server process its own values.
+
+    In-memory overrides (a test / runtime caller that rebound or mutated
+    ``cfg``) are preserved verbatim, matching ``get_config()`` semantics, so
+    callers that rely on them keep working unchanged. Staleness/path refresh
+    goes through ``reload_config_if_stale()`` so harnesses that stub it keep
+    their isolation, exactly like ``get_config()``.
+    """
+    reload_config_if_stale()
+    with _cfg_lock:
+        try:
+            if _cfg_has_in_memory_overrides():
+                active_cfg = cfg if cfg is not _cfg_cache else _cfg_cache
+                return copy.deepcopy(active_cfg)
+        except NameError:
+            pass
+        # No in-memory overrides: expand the raw YAML against THIS thread's
+        # profile env (the shared cache is process-env-pinned, #798), then
+        # apply the same documented defaults get_config() applies.
+        raw = _load_yaml_config_file_raw(_get_config_path(), _copy=False)
+        if isinstance(raw, dict) and raw:
+            expanded = _expand_env_vars(raw)
+            if isinstance(expanded, dict):
+                _apply_config_defaults(expanded)
+                return expanded
+        try:
+            active_cfg = cfg if cfg is not _cfg_cache else _cfg_cache
+        except NameError:
+            active_cfg = _cfg_cache
+        return copy.deepcopy(active_cfg)
+
+
 def get_webui_session_save_mode(config_data: dict | None = None) -> str:
     """Return the validated first-turn session persistence mode.
 
@@ -8175,14 +8228,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             _prof_env_request = None
             _prof_scope_worker = None
 
-        # Capture a request-owned config snapshot while the profile TLS is
-        # authoritative (#5619). The rebuild below may run on a detached worker
-        # thread that does not inherit the TLS, and the module-global ``cfg``
-        # can be repointed by a concurrent profile reload between capture and
-        # build — so the builder must resolve against this deep copy, not the
-        # live global. Deep-copy keeps later config edits (this or another
-        # profile) from mutating the snapshot mid-build.
-        _cfg_snapshot = copy.deepcopy(get_config())
+        # The request-owned config snapshot (#5619) is captured INSIDE the
+        # profile env scopes below — on the request thread for the synchronous
+        # path, on the rebuild worker for the bounded path — while the request
+        # profile is authoritative and under _cfg_lock (see
+        # _capture_profile_config_snapshot). Capturing here, outside the
+        # scope, would both race the shared-cache reload and freeze ${VAR}
+        # values expanded against the ambient process environment, which
+        # entering the profile scope afterwards cannot repair.
 
         # Legacy synchronous (unbounded) rebuild — opt-in via budget<=0.
         if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
@@ -8197,6 +8250,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     else _nullcontext()
                 )
                 with _sync_scope:
+                    _cfg_snapshot = _capture_profile_config_snapshot()
                     result = _invoke_models_rebuild(
                         lambda: _build_available_models_uncached(_cfg_snapshot)
                     )
@@ -8299,6 +8353,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             )
             with _worker_scope:
                 try:
+                    # Capture the snapshot on the worker INSIDE the rebound
+                    # profile scope (#3957/#5619) so ${VAR} expansion resolves
+                    # the captured profile's env, not the ambient process env.
+                    _cfg_snapshot = _capture_profile_config_snapshot()
                     box["result"] = _invoke_models_rebuild(
                         lambda: _build_available_models_uncached(_cfg_snapshot)
                     )

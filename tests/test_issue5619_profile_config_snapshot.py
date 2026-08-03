@@ -189,3 +189,75 @@ def test_builder_without_snapshot_falls_back_to_live_cfg(monkeypatch, tmp_path):
 
     assert payload["active_provider"] == "anthropic"
     assert payload["default_model"] == "claude-haiku-4.5"
+
+
+def test_snapshot_expands_env_against_calling_threads_profile_scope(monkeypatch, tmp_path):
+    """The request-owned snapshot must be captured while the request profile is
+    authoritative: a ${VAR} reference resolves against the calling thread's
+    profile env, never the process-env-pinned shared cache (#798). The same
+    config.yaml therefore yields different expansions depending on the active
+    scope, and the returned dict is a deep copy, not the shared cache object."""
+    import os
+    import textwrap
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        textwrap.dedent(
+            """\
+            model:
+              provider: custom
+              default: "${MULTI_PROFILE_TEST_TOKEN}"
+            fallback_providers: []
+            providers: {}
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    old_cfg = config.cfg
+    old_mtime = config._cfg_mtime
+    old_path = config._cfg_path
+    old_env = os.environ.get("MULTI_PROFILE_TEST_TOKEN")
+    os.environ["MULTI_PROFILE_TEST_TOKEN"] = "ambient-secret"
+
+    try:
+        monkeypatch.setattr(config, "_get_config_path", lambda: cfg_file)
+        # No in-memory overrides: cfg aliases the shared cache.
+        config.cfg = config._cfg_cache
+        config._cfg_mtime = 0.0
+        config._cfg_path = None
+
+        # Ambient scope: expands against the process env...
+        ambient = config._capture_profile_config_snapshot()
+        assert ambient["model"]["default"] == "ambient-secret", (
+            f"ambient expansion mismatch: {ambient['model']['default']!r}"
+        )
+        # ...and the snapshot is request-owned, never the shared cache object.
+        assert ambient is not config._cfg_cache
+
+        # Profile scope: the SAME file must expand to the profile's value,
+        # even though the shared cache is frozen with the ambient expansion.
+        config._set_thread_env(MULTI_PROFILE_TEST_TOKEN="profile-secret")
+        config._thread_ctx.block_process_env_fallback = True
+        try:
+            profiled = config._capture_profile_config_snapshot()
+        finally:
+            config._clear_thread_env()
+            config._thread_ctx.block_process_env_fallback = False
+
+        assert profiled["model"]["default"] == "profile-secret", (
+            "snapshot froze the ambient expansion instead of the profile's "
+            f"value: {profiled['model']['default']!r}"
+        )
+        assert config._cfg_cache["model"]["default"] == "ambient-secret", (
+            "shared cache must stay process-env-pinned; the profile expansion "
+            "must live only in the request-owned snapshot"
+        )
+    finally:
+        config.cfg = old_cfg
+        config._cfg_mtime = old_mtime
+        config._cfg_path = old_path
+        if old_env is None:
+            os.environ.pop("MULTI_PROFILE_TEST_TOKEN", None)
+        else:
+            os.environ["MULTI_PROFILE_TEST_TOKEN"] = old_env
