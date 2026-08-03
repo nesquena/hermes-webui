@@ -1,21 +1,73 @@
 """Regression coverage for auxiliary title reasoning-suppression routing."""
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import sys
-import types
 from unittest.mock import patch
 
 import pytest
 
-_agent_stub = types.ModuleType('agent')
-_aux_stub = types.ModuleType('agent.auxiliary_client')
-sys.modules['agent'] = _agent_stub
-sys.modules['agent.auxiliary_client'] = _aux_stub
-_agent_stub.auxiliary_client = _aux_stub
+_MISSING = object()
+_AGENT_BEFORE_COLLECTION = sys.modules.get("agent", _MISSING)
+_AGENT_SPEC_BEFORE_COLLECTION = getattr(_AGENT_BEFORE_COLLECTION, "__spec__", _MISSING)
+_AGENT_PATH_BEFORE_COLLECTION = getattr(_AGENT_BEFORE_COLLECTION, "__path__", _MISSING)
+try:
+    _AGENT_IMPORT_SPEC_BEFORE_COLLECTION = importlib.util.find_spec("agent")
+except (ImportError, ValueError):
+    _AGENT_IMPORT_SPEC_BEFORE_COLLECTION = None
 
 from api.streaming import _route_accepts_reasoning_extra, generate_title_raw_via_aux
 
+_AGENT_AFTER_COLLECTION = sys.modules.get("agent", _MISSING)
 
+
+def test_collection_preserves_the_real_agent_package():
+    """Importing this regression module must not poison later Agent imports."""
+    assert _AGENT_AFTER_COLLECTION is _AGENT_BEFORE_COLLECTION
+    if _AGENT_BEFORE_COLLECTION is _MISSING:
+        assert "agent" not in sys.modules
+        if _AGENT_IMPORT_SPEC_BEFORE_COLLECTION is None:
+            pytest.skip("Hermes Agent is not installed in this WebUI-only environment")
+        assert importlib.import_module("agent.model_metadata") is not None
+        return
+
+    assert getattr(_AGENT_AFTER_COLLECTION, "__spec__", _MISSING) is _AGENT_SPEC_BEFORE_COLLECTION
+    assert getattr(_AGENT_AFTER_COLLECTION, "__path__", _MISSING) is _AGENT_PATH_BEFORE_COLLECTION
+    assert _AGENT_SPEC_BEFORE_COLLECTION is not None
+    assert _AGENT_PATH_BEFORE_COLLECTION is not _MISSING
+    assert importlib.import_module("agent.model_metadata") is not None
+
+
+@pytest.fixture
+def _scoped_auxiliary_client_module(monkeypatch):
+    """Provide a call boundary per test without mutating collection state."""
+    try:
+        auxiliary_client = importlib.import_module("agent.auxiliary_client")
+    except Exception:
+        agent_module = sys.modules.get("agent")
+        if agent_module is None:
+            agent_spec = importlib.util.spec_from_loader(
+                "agent", loader=None, is_package=True
+            )
+            agent_module = importlib.util.module_from_spec(agent_spec)
+            monkeypatch.setitem(sys.modules, "agent", agent_module)
+
+        auxiliary_spec = importlib.util.spec_from_loader(
+            "agent.auxiliary_client", loader=None
+        )
+        auxiliary_client = importlib.util.module_from_spec(auxiliary_spec)
+        monkeypatch.setitem(
+            sys.modules, "agent.auxiliary_client", auxiliary_client
+        )
+        monkeypatch.setattr(
+            agent_module, "auxiliary_client", auxiliary_client, raising=False
+        )
+
+    yield auxiliary_client
+
+
+@pytest.mark.usefixtures("_scoped_auxiliary_client_module")
 class TestAuxReasoningExtraRouteContract:
     def test_known_reasoning_routes_keep_suppression(self):
         assert _route_accepts_reasoning_extra(
@@ -63,13 +115,36 @@ class TestAuxReasoningExtraRouteContract:
         )
         assert request['extra_body'] == {'reasoning': {'enabled': False}}
 
-    def test_known_reject_routes_omit_suppression(self):
-        assert _route_accepts_reasoning_extra('openai', 'gpt-5', 'https://api.openai.com/v1') is False
-        assert _route_accepts_reasoning_extra('azure', 'gpt-4', '') is False
-        assert _route_accepts_reasoning_extra('custom', 'gpt-5', 'https://x.services.ai.azure.com/v1') is False
-        assert _route_accepts_reasoning_extra(
-            'openrouter', 'anthropic/claude-sonnet-4.6', 'https://openrouter.ai/api/v1'
-        ) is False
+    @pytest.mark.parametrize(
+        ("provider", "model", "base_url"),
+        (
+            ("openai", "gpt-5", "https://api.openai.com/v1"),
+            ("openai-codex", "gpt-5", ""),
+            ("azure", "gpt-4", ""),
+            ("azure-foundry", "gpt-4", ""),
+            ("azure-ai-foundry", "gpt-4", ""),
+            ("azure-ai", "gpt-4", ""),
+            ("azure/deployment", "gpt-4", ""),
+            ("azure-deployment", "gpt-4", ""),
+            ("custom", "gpt-5", "https://x.openai.azure.com/v1"),
+            ("custom", "gpt-5", "https://x.services.ai.azure.com/v1"),
+            ("custom", "gpt-5", "https://x.cognitiveservices.azure.com/v1"),
+            (
+                "openrouter",
+                "anthropic/claude-sonnet-4.6",
+                "https://openrouter.ai/api/v1",
+            ),
+            (
+                "openrouter",
+                "anthropic/claude-opus-4.8",
+                "https://openrouter.ai/api/v1",
+            ),
+        ),
+    )
+    def test_known_reject_routes_omit_suppression(
+        self, provider, model, base_url
+    ):
+        assert _route_accepts_reasoning_extra(provider, model, base_url) is False
 
     def test_unknown_custom_route_omits_suppression(self):
         assert _route_accepts_reasoning_extra('custom:relay', 'reasoning-model', 'https://relay.example.test/v1') is False
