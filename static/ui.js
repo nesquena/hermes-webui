@@ -9407,8 +9407,16 @@ document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility)
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',startSystemHealthMonitor);
 else startSystemHealthMonitor();
 // Mount the always-visible MobaXterm-style resource bar (#693) and begin polling.
-if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',_mountResourceStatusBar);
-else _mountResourceStatusBar();
+// panels.js (which defines _renderResourceStatusBar) is also a defer script and runs
+// AFTER ui.js. Under defer, readyState is 'interactive' while ui.js executes, so a
+// synchronous mount would bail on the typeof guard. Always wait for DOMContentLoaded,
+// which fires only after every defer script has been parsed.
+function _bootResourceStatusBar(){ _mountResourceStatusBar(); _syncSystemHealthMonitorVisibility(); }
+if(document.readyState==='loading'||document.readyState==='interactive'){
+  document.addEventListener('DOMContentLoaded',_bootResourceStatusBar);
+} else {
+  _bootResourceStatusBar();
+}
 
 // ── Hermes agent/gateway heartbeat alert (#716) ──
 const AGENT_HEALTH_INTERVAL_MS=30000;
