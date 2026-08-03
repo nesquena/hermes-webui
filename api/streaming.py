@@ -1794,8 +1794,9 @@ def _settle_result_messages(
         source=source,
         verification_nudge_provenance=verification_nudge_provenance,
     )
-    from api.transcript_mutations import reconcile_dismissals
-    reconcile_dismissals(session, session.messages)
+    from api.transcript_mutations import lineage_messages_for_projection, reconcile_dismissals
+    retained_messages, _source_messages = lineage_messages_for_projection(session)
+    reconcile_dismissals(session, retained_messages)
     _compact_session_image_parts_for_persistence(session)
     _advance_truncation_watermark_after_commit(session)  # #3831
     return result_messages

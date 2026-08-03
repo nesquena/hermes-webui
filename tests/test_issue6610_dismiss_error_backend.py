@@ -159,6 +159,47 @@ def test_shrink_reconciles_against_compression_parent_lineage(tmp_path, monkeypa
     assert child.transcript_dismissals["entries"][0]["active"] is True
 
 
+def test_settled_child_turn_preserves_dismissed_parent_error(tmp_path, monkeypatch):
+    import api.models as models
+    from api import streaming
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    parent = _session("settle-parent-6610")
+    parent.pre_compression_snapshot = True
+    parent_error = _error(parent, "parent provider failure")
+    parent.messages = [parent_error]
+    parent.save()
+    record_dismissal(parent, parent.session_id, parent_error)
+
+    child = _session("settle-child-6610")
+    child.parent_session_id = parent.session_id
+    child.messages = [{"role": "user", "content": "continue"}]
+    child.transcript_dismissals = {
+        "version": 2,
+        "entries": [{
+            "source_session_id": parent.session_id,
+            "message_id": parent_error["id"],
+            "active": True,
+        }],
+        "active_keys": [[parent.session_id, parent_error["id"]]],
+    }
+    child.transcript_dismissal_active_count = 1
+
+    streaming._settle_result_messages(
+        child,
+        child.messages,
+        child.messages,
+        child.messages + [{"role": "assistant", "content": "completed"}],
+        "continue",
+        "webui",
+        None,
+    )
+
+    assert child.transcript_dismissal_active_count == 1
+    assert child.transcript_dismissals["entries"][0]["active"] is True
+
+
 def test_gateway_terminal_provider_error_uses_canonical_admission(monkeypatch, tmp_path):
     from api import gateway_chat, streaming
 
