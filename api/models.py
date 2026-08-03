@@ -1392,11 +1392,11 @@ class Session:
         # list.  Active workers can hold an alias to ``self.messages``; replacing
         # it here would detach an append that lands while save() is preparing
         # the payload.  A later save will include any concurrent append.
-        # Deep-copy the retained rows so a worker mutating a nested dict (e.g.
-        # codex_reasoning_items[0].encrypted_content) between the collapse scan
-        # and json.dumps cannot leak into this save's immutable payload (#6600).
-        collapsed_messages, _ = _collapse_duplicate_incomplete_message_ids(self.messages)
-        messages_to_persist = copy.deepcopy(collapsed_messages)
+        # Own the complete snapshot BEFORE duplicate selection.  Otherwise a
+        # nested mutation after selection but before deepcopy can invalidate the
+        # equality decision and leak into this save's payload (#6600).
+        owned_messages = copy.deepcopy(self.messages)
+        messages_to_persist, _ = _collapse_duplicate_incomplete_message_ids(owned_messages)
         if touch_updated_at:
             self.updated_at = time.time()
         # Write metadata fields first so load_metadata_only() can read them
@@ -1748,17 +1748,21 @@ class Session:
         # identical to the persisted payload.  Outside save() it is None and
         # the live list is used as before.
         projection_messages = getattr(self, '_index_projection_messages', None)
-        if projection_messages is None:
+        has_index_projection = projection_messages is not None
+        if not has_index_projection:
             projection_messages = self.messages
-        message_count = (
-            self._metadata_message_count
-            if self._metadata_message_count is not None
-            else len(projection_messages)
-        )
-        if has_pending_user_message:
+        if has_index_projection:
+            message_count = len(projection_messages)
+        else:
+            message_count = (
+                self._metadata_message_count
+                if self._metadata_message_count is not None
+                else len(projection_messages)
+            )
+        if has_pending_user_message and not has_index_projection:
             message_count = max(message_count, 1)
         last_message_at = _last_message_timestamp(projection_messages) or self.updated_at
-        if has_pending_user_message and self.pending_started_at:
+        if has_pending_user_message and self.pending_started_at and not has_index_projection:
             last_message_at = self.pending_started_at
         return {
             'session_id': self.session_id,
@@ -1816,7 +1820,7 @@ class Session:
                 'worktree_repo_root': self.worktree_repo_root,
                 'worktree_created_at': self.worktree_created_at,
             } if self.worktree_path else {}),
-            'user_message_count': Session._compute_user_message_count(self.messages),
+            'user_message_count': Session._compute_user_message_count(projection_messages),
             'active_stream_id': self.active_stream_id,
             'pending_user_message': self.pending_user_message,
             'has_pending_user_message': has_pending_user_message,

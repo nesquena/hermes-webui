@@ -5981,14 +5981,6 @@ def _message_identity(msg):
         # Now, _partial messages with empty text get a stable identity
         # keyed on their role + _partial flag + reasoning/tool metadata,
         # so the merge can dedup identical empty partials.
-        if msg.get('_partial'):
-            reasoning_key = " ".join(str(msg.get('reasoning') or '').split())[:200]
-            return (
-                role,
-                '',  # empty text
-                '',  # no tool_call_id
-                '__partial__' + reasoning_key,
-            )
         # Codex can persist a reasoning-only assistant result with an empty
         # visible body and finish_reason=incomplete without the legacy
         # ``_partial`` flag. Those rows still carry the stable core message id.
@@ -6011,6 +6003,16 @@ def _message_identity(msg):
                     '',
                     '__incomplete_message_id__' + repr(typed_id_key),
                 )
+        # Canonical incomplete identity must win over the legacy partial arm:
+        # persistence keys `_partial + incomplete` rows by typed message id too.
+        if msg.get('_partial'):
+            reasoning_key = " ".join(str(msg.get('reasoning') or '').split())[:200]
+            return (
+                role,
+                '',  # empty text
+                '',  # no tool_call_id
+                '__partial__' + reasoning_key,
+            )
         return None
     return (
         role,

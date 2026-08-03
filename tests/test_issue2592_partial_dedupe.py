@@ -1,5 +1,6 @@
 import copy
 import json
+import threading
 
 
 def _incomplete_reasoning_only(message_id, *, reasoning="encrypted reasoning", timestamp=123):
@@ -393,6 +394,47 @@ def test_save_deep_isolates_retained_rows_from_concurrent_mutation(tmp_path, mon
     assert session.messages[0]["codex_reasoning_items"][0]["encrypted_content"] == "MUTATED"
 
 
+def test_save_owns_snapshot_before_duplicate_selection(tmp_path, monkeypatch):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "index.json")
+
+    first = _incomplete_reasoning_only(1701, reasoning="first")
+    duplicate = copy.deepcopy(first)
+    session = models.Session(session_id="selection-isolation", messages=[first, duplicate])
+    real_collapse = models._collapse_duplicate_incomplete_message_ids
+    selection_done = threading.Event()
+    mutation_done = threading.Event()
+
+    def mutate_after_selection():
+        assert selection_done.wait(timeout=2)
+        first["codex_reasoning_items"][0]["encrypted_content"] = "MUTATED"
+        mutation_done.set()
+
+    worker = threading.Thread(target=mutate_after_selection)
+    worker.start()
+
+    def collapse_then_mutate(messages):
+        selected = real_collapse(messages)
+        # Pause save after selection while a scheduled writer mutates the live
+        # row.  This is exactly before the old post-selection deepcopy.
+        selection_done.set()
+        assert mutation_done.wait(timeout=2)
+        return selected
+
+    monkeypatch.setattr(models, "_collapse_duplicate_incomplete_message_ids", collapse_then_mutate)
+    session.save(skip_index=True)
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+
+    persisted = json.loads((session_dir / "selection-isolation.json").read_text(encoding="utf-8"))
+    assert len(persisted["messages"]) == 1
+    assert persisted["messages"][0]["codex_reasoning_items"][0]["encrypted_content"] == "opaque"
+
+
 def test_save_writes_index_from_same_collapsed_snapshot(tmp_path, monkeypatch):
     from api import models
 
@@ -410,6 +452,7 @@ def test_save_writes_index_from_same_collapsed_snapshot(tmp_path, monkeypatch):
 
     # A replayed duplicate carrying a LATER timestamp lands in the live list.
     session.messages.append(_incomplete_reasoning_only(1701, timestamp=999))
+    session._metadata_message_count = 2
     session.save()  # fast path: _write_session_index(updates=[self])
 
     sidecar = json.loads((session_dir / "index-parity.json").read_text(encoding="utf-8"))
@@ -491,6 +534,15 @@ def test_reconciliation_and_persistence_share_incomplete_eligibility():
         {**base, "id": float("nan")},
     ]
 
+    partial_same_id_different_reasoning = [
+        {**base, "_partial": True, "reasoning": "first"},
+        {**base, "_partial": True, "reasoning": "second"},
+    ]
+    partial_different_ids_same_reasoning = [
+        {**base, "_partial": True, "id": 1701, "reasoning": "same"},
+        {**base, "_partial": True, "id": 1702, "reasoning": "same"},
+    ]
+
     # Blank content (plain or structured), tool-call identity, and malformed
     # ids are classified identically by both layers: neither may drop a row
     # the other considers distinct.
@@ -500,3 +552,11 @@ def test_reconciliation_and_persistence_share_incomplete_eligibility():
     for message in cases_ineligible:
         assert _incomplete_reasoning_message_id(message) is None
         assert reconciliation_incomplete_key(message) is None
+    assert (
+        reconciliation_incomplete_key(partial_same_id_different_reasoning[0])
+        == reconciliation_incomplete_key(partial_same_id_different_reasoning[1])
+    )
+    assert (
+        reconciliation_incomplete_key(partial_different_ids_same_reasoning[0])
+        != reconciliation_incomplete_key(partial_different_ids_same_reasoning[1])
+    )
