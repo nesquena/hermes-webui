@@ -2805,6 +2805,7 @@ from api.config import (
     ACTIVE_RUNS,
     ACTIVE_RUNS_LOCK,
     register_stream_owner,
+    register_session_writeback_owner,
     stream_owner_session_id,
     unregister_stream_owner,
     CHAT_LOCK,
@@ -20850,6 +20851,7 @@ def _handle_btw(handler, body):
     ephemeral.save()
     stream_id = uuid.uuid4().hex
     ephemeral.active_stream_id = stream_id
+    register_session_writeback_owner(ephemeral.session_id, stream_id)
     ephemeral.save()
     stream = create_stream_channel()
     register_stream_owner(stream_id, ephemeral.session_id)
@@ -20900,6 +20902,7 @@ def _handle_background(handler, body):
     bg.save()
     stream_id = uuid.uuid4().hex
     bg.active_stream_id = stream_id
+    register_session_writeback_owner(bg.session_id, stream_id)
     bg.save()
     stream = create_stream_channel()
     register_stream_owner(stream_id, bg.session_id)
@@ -21039,6 +21042,7 @@ def _prepare_chat_start_session_for_stream(
     s.model = model
     s.model_provider = model_provider
     s.active_stream_id = stream_id
+    register_session_writeback_owner(s.session_id, stream_id)
     s.post_compression_context_tokens_estimate = None
     s.pending_user_message = msg
     s.pending_attachments = attachments
