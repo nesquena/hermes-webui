@@ -4,8 +4,50 @@ from __future__ import annotations
 import concurrent.futures
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+
+def _capture_post(monkeypatch, body):
+    import api.routes as routes
+
+    captured = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: body)
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured.update(
+            payload=payload,
+            status=status,
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, message, status=400: captured.update(
+            payload={"error": message},
+            status=status,
+        )
+        or True,
+    )
+    return captured
+
+
+def _isolate_session_store(tmp_path, monkeypatch):
+    import api.models as models
+    import api.routes as routes
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    models.SESSIONS.clear()
+    return session_dir
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -95,6 +137,69 @@ def test_preexisting_linked_worktree_without_claim_fails_closed(linked, tmp_path
     _repo, wt = linked
     with pytest.raises(WorktreeOwnershipError, match="has no owner"):
         WorktreeAuthority(tmp_path / "claims.sqlite3").assert_owner(wt, "legacy")
+
+
+def test_archive_ownerless_linked_worktree_session_mutates_only_session_metadata(
+    linked, tmp_path, monkeypatch
+):
+    import api.routes as routes
+    import api.worktree_authority as authority_module
+    from api.models import Session
+    from api.worktree_authority import WorktreeAuthority
+
+    repo, wt = linked
+    _isolate_session_store(tmp_path, monkeypatch)
+    authority = WorktreeAuthority(tmp_path / "claims.sqlite3")
+    monkeypatch.setattr(authority_module, "default_authority", lambda: authority)
+    session = Session(
+        session_id="ownerless-archive",
+        title="Ownerless archive",
+        workspace=str(wt),
+        worktree_path=str(wt),
+        worktree_branch="linked",
+        worktree_repo_root=str(repo),
+        messages=[{"role": "user", "content": "archive me"}],
+    )
+    session.save()
+    captured = _capture_post(
+        monkeypatch,
+        {"session_id": session.session_id, "archived": True},
+    )
+
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/archive")) is True
+
+    assert captured["status"] == 200
+    assert captured["payload"]["session"]["archived"] is True
+    assert Session.load(session.session_id).archived is True
+    assert wt.exists()
+    with authority._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
+
+    restored = _capture_post(
+        monkeypatch,
+        {"session_id": session.session_id, "archived": False},
+    )
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/archive")) is True
+    assert restored["status"] == 200
+    assert restored["payload"]["session"]["archived"] is False
+    loaded = Session.load(session.session_id)
+    assert loaded is not None
+    assert loaded.archived is False
+    with authority._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
+
+    refused = _capture_post(
+        monkeypatch,
+        {"session_id": session.session_id, "title": "Must stay unchanged"},
+    )
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/rename")) is True
+    assert refused["status"] == 409
+    assert refused["payload"]["error"] == (
+        "Worktree write refused: linked worktree has no owner"
+    )
+    loaded = Session.load(session.session_id)
+    assert loaded is not None
+    assert loaded.title == "Ownerless archive"
 
 
 def test_failed_claim_leaves_no_in_memory_ghost(linked, tmp_path, monkeypatch):

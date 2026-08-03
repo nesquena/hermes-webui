@@ -669,8 +669,15 @@ def _guard_request_session_visibility(handler, parsed, body=None, method="GET") 
     return True
 
 
-def _guard_request_worktree_ownership(handler, body=None) -> bool:
+def _request_worktree_ownership_exempt(method: str, path: str | None) -> bool:
+    """Return whether a request mutates session metadata but not its worktree."""
+    return method == "POST" and path == "/api/session/archive"
+
+
+def _guard_request_worktree_ownership(handler, body=None, *, method="POST", path=None) -> bool:
     """Fail closed before any POST can mutate a worktree-backed session."""
+    if _request_worktree_ownership_exempt(str(method).upper(), path):
+        return True
     if not isinstance(body, dict):
         return True
     sid = str(body.get("session_id") or "").strip()
@@ -14311,7 +14318,12 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return True
-    if not _guard_request_worktree_ownership(handler, body=body):
+    if not _guard_request_worktree_ownership(
+        handler,
+        body=body,
+        method="POST",
+        path=parsed.path,
+    ):
         if diag:
             diag.finish()
         return True
