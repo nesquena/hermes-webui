@@ -1,4 +1,5 @@
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -98,6 +99,7 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
       btn._classes = btn.classList._set;
       if (id === 'dashboardRailBtn' || id === 'dashboardMobileBtn') {
         btn.setAttribute('data-dashboard-link', '');
+        btn.setAttribute('data-tooltip', 'Dashboard');
         btn.setAttribute('aria-label', 'Dashboard');
       }
       return btn;
@@ -108,6 +110,12 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
     const url = process.argv[4] || '';
     const uiSrc = fs.readFileSync(process.argv[5], 'utf8');
     const panelsSrc = fs.readFileSync(process.argv[6], 'utf8');
+
+    const winHostname = process.env.DASH_WINDOW_HOSTNAME || '127.0.0.1';
+    const statusRunning = process.env.DASH_STATUS_RUNNING;
+    const statusBrowserUrl = process.env.DASH_STATUS_BROWSER_URL;
+    const statusUrl = process.env.DASH_STATUS_URL;
+    const statusPort = process.env.DASH_STATUS_PORT;
 
     const modeEl = makeButton('settingsDashboardMode');
     const urlEl = makeButton('settingsDashboardUrl');
@@ -122,12 +130,21 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
     const delayedConfigValue = { enabled: 'never', url: 'http://stale.local:1234' };
     let delayedConfigUsed = false;
 
+    function dashboardStatusFromEnv() {
+      return {
+        running: statusRunning !== undefined ? statusRunning === '1' : modeEl.value !== 'never',
+        browser_url: statusBrowserUrl !== undefined ? statusBrowserUrl : (modeEl.value === 'never' ? '' : 'http://127.0.0.1:1234'),
+        ...(statusUrl !== undefined ? { url: statusUrl } : {}),
+        ...(statusPort !== undefined ? { port: statusPort } : {}),
+      };
+    }
+
     global._dashboardLastNonNeverMode = 'auto';
     global._dashboardStatusCache = null;
     global._dashboardStatusFetchedAt = 0;
     global._dashboardSettingsLoadSeq = 0;
     global._dashboardSettingsWriteSeq = 0;
-    global.window = { location: { hostname: '127.0.0.1' } };
+    global.window = { location: { hostname: winHostname } };
     global.document = {
       createElement: () => makeEl(),
       querySelectorAll: (sel) => {
@@ -149,7 +166,6 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
       if (key === 'dashboard_loopback_warning') return 'Loopback';
       return key;
     };
-    global._dashboardIsBrowserLoopback = () => false;
 
     global.api = (url, opts = {}) => {
       result.calls.push({ url: String(url), method: (opts.method || 'GET').toUpperCase(), body: opts.body || '', timeoutToast: !!(opts.timeoutToast) });
@@ -177,10 +193,7 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
       }
       if (String(url) === '/api/dashboard/status') {
         result.statusCalls += 1;
-        return Promise.resolve({
-          running: modeEl.value !== 'never',
-          browser_url: modeEl.value === 'never' ? '' : 'http://127.0.0.1:1234',
-        });
+        return Promise.resolve(dashboardStatusFromEnv());
       }
       return Promise.resolve({ running: false });
     };
@@ -192,7 +205,7 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
     for (const name of ['_normalizeDashboardEnabledMode','_setDashboardModeForChip','_getDashboardChipRestoreMode']) {
       eval(extractFn(uiSrc, name));
     }
-    for (const name of ['_dashboardBrowserUrl', '_applyDashboardStatus', 'refreshDashboardStatus', 'loadDashboardSettings', 'saveDashboardSettings']) {
+    for (const name of ['_dashboardBrowserUrl', '_dashboardIsBrowserLoopback', '_dashboardUrlIsLoopback', '_applyDashboardStatus', 'refreshDashboardStatus', 'loadDashboardSettings', 'saveDashboardSettings']) {
       let src = extractFn(uiSrc, name);
       if(name === 'saveDashboardSettings'){
         src = src.replace(
@@ -213,6 +226,7 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
         display: btn.style.display || '',
         dashboardUrl: btn._attrs['data-dashboard-url'] || '',
         tooltip: btn._attrs['data-tooltip'] || '',
+        ariaLabel: btn._attrs['aria-label'] || '',
       }));
     }
 
@@ -277,6 +291,13 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
         return;
       }
 
+      if (action === 'status-apply') {
+        _applyDashboardStatus(dashboardStatusFromEnv());
+        recordButtons();
+        console.log(JSON.stringify({ buttonStates: result.buttonStates }));
+        return;
+      }
+
       if (action === 'chip-toggle') {
         _toggleDashboardVisibilityChip();
       } else {
@@ -299,11 +320,14 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
 )
 
 
-def _run_dashboard_link_driver(action: str, mode: str = 'auto', url: str = '') -> dict:
+def _run_dashboard_link_driver(action: str, mode: str = 'auto', url: str = '', env: dict | None = None) -> dict:
     with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as f:
         f.write(_DASHBOARD_LINK_DRIVER)
         driver = f.name
     try:
+        run_env = os.environ.copy()
+        if env:
+            run_env.update(env)
         result = subprocess.run(
             [
                 NODE,
@@ -319,6 +343,7 @@ def _run_dashboard_link_driver(action: str, mode: str = 'auto', url: str = '') -
             capture_output=True,
             timeout=2.0,
             check=False,
+            env=run_env,
         )
         if result.returncode != 0:
             raise RuntimeError(f"node harness failed: {result.stderr or result.stdout}")
@@ -703,3 +728,90 @@ def test_failed_dashboard_save_reloads_backend_after_stale_load_is_dropped():
         ("/api/dashboard/config", "GET"),
     ]
     assert out["statusCalls"] == 0
+
+
+@requires_node
+def test_remote_webui_public_target_has_normal_tooltip_and_aria_label():
+    # Remote WebUI + public HTTPS target: resolved navigation URL host is
+    # non-loopback, so no loopback-only warning (normal tooltip + ARIA label).
+    out = _run_dashboard_link_driver(
+        "status-apply",
+        mode="always",
+        env={
+            "DASH_WINDOW_HOSTNAME": "webui.example.test",
+            "DASH_STATUS_RUNNING": "1",
+            "DASH_STATUS_BROWSER_URL": "https://dashboard.example.test",
+        },
+    )
+    assert out["buttonStates"]
+    for state in out["buttonStates"]:
+        assert state["tooltip"] == "Dashboard"
+        assert state["ariaLabel"] == "Dashboard"
+
+
+@requires_node
+@pytest.mark.parametrize(
+    "target_url",
+    [
+        "http://127.0.0.1:1234",
+        "http://localhost:1234",
+        "http://[::1]:1234",
+    ],
+)
+def test_remote_webui_loopback_target_keeps_loopback_warning(target_url):
+    # Remote WebUI + loopback target: the warning must remain even though
+    # browser_url is truthy — the resolved URL still points at loopback.
+    out = _run_dashboard_link_driver(
+        "status-apply",
+        mode="always",
+        env={
+            "DASH_WINDOW_HOSTNAME": "webui.example.test",
+            "DASH_STATUS_RUNNING": "1",
+            "DASH_STATUS_BROWSER_URL": target_url,
+        },
+    )
+    assert out["buttonStates"]
+    for state in out["buttonStates"]:
+        assert state["tooltip"] == "Loopback"
+        assert state["ariaLabel"] == "Loopback"
+
+
+@requires_node
+def test_remote_webui_configured_loopback_url_warns_without_browser_url():
+    # enabled:always with a configured loopback URL (or the generated loopback
+    # fallback) can return a truthy browser_url that still resolves to loopback;
+    # the warning must key off the resolved URL host, not browser_url presence.
+    out = _run_dashboard_link_driver(
+        "status-apply",
+        mode="always",
+        env={
+            "DASH_WINDOW_HOSTNAME": "webui.example.test",
+            "DASH_STATUS_RUNNING": "1",
+            "DASH_STATUS_BROWSER_URL": "",
+            "DASH_STATUS_URL": "http://127.0.0.1:1234",
+        },
+    )
+    assert out["buttonStates"]
+    for state in out["buttonStates"]:
+        assert state["tooltip"] == "Loopback"
+        assert state["ariaLabel"] == "Loopback"
+
+
+@requires_node
+@pytest.mark.parametrize("origin_hostname", ["127.0.0.1", "localhost", "[::1]"])
+def test_loopback_webui_origin_has_no_remote_browser_warning(origin_hostname):
+    # Loopback WebUI origin: the operator is on the same machine, so the
+    # loopback target is reachable — no remote-browser warning.
+    out = _run_dashboard_link_driver(
+        "status-apply",
+        mode="always",
+        env={
+            "DASH_WINDOW_HOSTNAME": origin_hostname,
+            "DASH_STATUS_RUNNING": "1",
+            "DASH_STATUS_BROWSER_URL": "http://127.0.0.1:1234",
+        },
+    )
+    assert out["buttonStates"]
+    for state in out["buttonStates"]:
+        assert state["tooltip"] == "Dashboard"
+        assert state["ariaLabel"] == "Dashboard"

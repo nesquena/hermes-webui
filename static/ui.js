@@ -1675,6 +1675,14 @@ function _dashboardIsBrowserLoopback(){
   return host==='127.0.0.1'||host==='localhost'||host==='::1';
 }
 
+function _dashboardUrlIsLoopback(url){
+  if(!url) return false;
+  try{
+    const host=new URL(url).hostname.replace(/^\[|\]$/g,'').toLowerCase();
+    return host==='127.0.0.1'||host==='localhost'||host==='::1';
+  }catch(_){return false;}
+}
+
 function _normalizeDashboardEnabledMode(mode){
   return mode==='auto'||mode==='always'||mode==='never'?mode:'auto';
 }
@@ -1774,7 +1782,7 @@ else _initNavActionMirrors();
 function _applyDashboardStatus(status){
   const running=!!(status&&status.running);
   const url=running?_dashboardBrowserUrl(status):'';
-  const warning=running&&!status.browser_url&&!_dashboardIsBrowserLoopback()?t('dashboard_loopback_warning'):'';
+  const warning=running&&!_dashboardIsBrowserLoopback()&&_dashboardUrlIsLoopback(url)?t('dashboard_loopback_warning'):'';
   document.querySelectorAll('[data-dashboard-link]').forEach(btn=>{
     btn.classList.toggle('dashboard-link-visible',running);
     btn.classList.toggle('nav-action-visible',running);
