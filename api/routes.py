@@ -2869,6 +2869,7 @@ from api.config import (
     get_config_for_profile_home,
     _cfg_lock,
     PENDING_BG_TASK_COMPLETIONS,
+    _parse_provider_qualified_model_id,
 )
 from api import config as api_config
 from api.helpers import (
@@ -6394,20 +6395,42 @@ def _repair_foreign_session_model_provider(
 
 
 def _clean_session_model_provider(value: str | None) -> str | None:
+    """Normalize a stored/requested provider value to a bare provider ID.
+
+    An ``@``-prefixed value is a provider-qualified *model* hint, so the
+    provider is resolved with the shared
+    ``config._parse_provider_qualified_model_id()`` grammar rather than a
+    positional colon split — that keeps multi-segment custom provider IDs
+    (``custom:<slug>``, ``custom:<host>:<port>``) whole while still dropping a
+    trailing model segment (#6722). Values without the ``@`` marker are already
+    plain provider IDs, whose colons belong to the ID itself, so they are
+    preserved verbatim.
+    """
     provider = str(value or "").strip().lower()
     if not provider or provider == "default":
         return None
     if provider.startswith("@"):
-        provider = provider[1:]
+        parsed = _parse_provider_qualified_model_id(provider)
+        provider = parsed[1].strip() if parsed else provider[1:]
     return provider or None
 
 
 def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
+    """Split an ``@provider:model`` hint into ``(bare_model, provider)``.
+
+    Delegates the grammar to ``config._parse_provider_qualified_model_id()``,
+    the shared parser that already knows how to keep a multi-segment custom
+    provider ID (``custom:<slug>``, ``custom:<host>:<port>``) intact while
+    still letting the model segment carry its own colons for tags such as
+    ``:free``. Keeping one parser here means every caller in this module and
+    the gateway request path resolve the same provider/model pair (#6722).
+    """
     model = str(model or "").strip()
-    if model.startswith("@") and ":" in model:
-        provider_hint, bare_model = model[1:].rsplit(":", 1)
+    parsed = _parse_provider_qualified_model_id(model)
+    if parsed:
+        bare_model, provider_hint = parsed
         provider = _clean_session_model_provider(provider_hint)
-        bare = bare_model.strip()
+        bare = str(bare_model or "").strip()
         if provider and bare:
             return bare, provider
     return model, None
@@ -7791,6 +7814,10 @@ def _session_model_state_from_request(
         _bare, explicit_provider = _split_provider_qualified_model(model_value)
         if explicit_provider:
             provider = explicit_provider
+            # The provider now travels in its own field, so the model must be
+            # the bare name. Leaving the "@provider:" prefix on model_value is
+            # what reached the gateway verbatim and 404'd upstream (#6722).
+            model_value = _bare
         elif requested_provider is None:
             provider = _clean_session_model_provider(current_provider)
         model_value, provider, _changed = _resolve_compatible_session_model_state(
