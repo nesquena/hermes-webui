@@ -7450,6 +7450,35 @@ def _add_supported_run_conversation_kwarg(callable_obj, kwargs, name, value):
     return False
 
 
+def _build_run_conversation_kwargs(
+    callable_obj,
+    *,
+    user_message,
+    system_message,
+    conversation_history,
+    conversation_history_revision,
+    task_id,
+    persist_user_message,
+    persist_user_timestamp,
+):
+    """Build one rolling-compatible Agent invocation contract."""
+    kwargs = {
+        "user_message": user_message,
+        "system_message": system_message,
+        "conversation_history": conversation_history,
+        "task_id": task_id,
+        "persist_user_message": persist_user_message,
+        "persist_user_timestamp": persist_user_timestamp,
+    }
+    _add_supported_run_conversation_kwarg(
+        callable_obj,
+        kwargs,
+        "conversation_history_revision",
+        conversation_history_revision,
+    )
+    return kwargs
+
+
 def _attempt_credential_self_heal(
     provider_id, session_id, _agent_lock_ref, *, target_model=None,
 ):
@@ -9735,7 +9764,8 @@ def _run_agent_streaming(
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
-            _run_conversation_kwargs = dict(
+            _run_conversation_kwargs = _build_run_conversation_kwargs(
+                agent.run_conversation,
                 user_message=user_message,
                 system_message=workspace_system_msg,
                 conversation_history=_sanitize_messages_for_api(
@@ -9745,15 +9775,10 @@ def _run_agent_streaming(
                     effective_provider=resolved_provider,
                     effective_base_url=resolved_base_url,
                 ),
+                conversation_history_revision=_conversation_history_revision,
                 task_id=session_id,
                 persist_user_message=msg_text,
                 persist_user_timestamp=getattr(s, 'pending_started_at', None),
-            )
-            _add_supported_run_conversation_kwarg(
-                agent.run_conversation,
-                _run_conversation_kwargs,
-                "conversation_history_revision",
-                _conversation_history_revision,
             )
             # Only pass moa_config when a /moa override is actually active, so a
             # normal send never trips a TypeError on an older hermes-agent whose
@@ -10232,7 +10257,8 @@ def _run_agent_streaming(
                                     _heal_context_messages,
                                     _heal_conversation_history_revision,
                                 ) = _refresh_context_and_revision_from_state_db()
-                                _heal_kwargs = dict(
+                                _heal_kwargs = _build_run_conversation_kwargs(
+                                    agent.run_conversation,
                                     user_message=user_message,
                                     system_message=workspace_system_msg,
                                     conversation_history=_sanitize_messages_for_api(
@@ -10242,15 +10268,12 @@ def _run_agent_streaming(
                                         effective_provider=resolved_provider,
                                         effective_base_url=resolved_base_url,
                                     ),
+                                    conversation_history_revision=(
+                                        _heal_conversation_history_revision
+                                    ),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
                                     persist_user_timestamp=getattr(s, 'pending_started_at', None),
-                                )
-                                _add_supported_run_conversation_kwarg(
-                                    agent.run_conversation,
-                                    _heal_kwargs,
-                                    "conversation_history_revision",
-                                    _heal_conversation_history_revision,
                                 )
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
@@ -11501,7 +11524,8 @@ def _run_agent_streaming(
                             _heal_context_messages,
                             _heal_conversation_history_revision,
                         ) = _refresh_context_and_revision_from_state_db()
-                        _heal_kwargs2 = dict(
+                        _heal_kwargs2 = _build_run_conversation_kwargs(
+                            _heal_agent.run_conversation,
                             user_message=user_message,
                             system_message=workspace_system_msg,
                             conversation_history=_sanitize_messages_for_api(
@@ -11511,15 +11535,12 @@ def _run_agent_streaming(
                                 effective_provider=resolved_provider,
                                 effective_base_url=resolved_base_url,
                             ),
+                            conversation_history_revision=(
+                                _heal_conversation_history_revision
+                            ),
                             task_id=session_id,
                             persist_user_message=msg_text,
                             persist_user_timestamp=getattr(s, 'pending_started_at', None),
-                        )
-                        _add_supported_run_conversation_kwarg(
-                            _heal_agent.run_conversation,
-                            _heal_kwargs2,
-                            "conversation_history_revision",
-                            _heal_conversation_history_revision,
                         )
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config

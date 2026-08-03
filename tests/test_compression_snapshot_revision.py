@@ -63,10 +63,39 @@ def test_run_conversation_revision_kwarg_is_added_for_capable_agent(revision, mo
     assert kwargs["conversation_history_revision"] is revision
 
 
-def test_all_agent_invocation_paths_use_revision_capability_gate():
-    source = streaming.__loader__.get_source(streaming.__name__)
-    assert source.count("_add_supported_run_conversation_kwarg(") == 4
-    assert source.count('"conversation_history_revision",') == 3
+def test_build_run_conversation_kwargs_omits_revision_for_strict_legacy_agent():
+    class LegacyAgent:
+        def run_conversation(
+            self,
+            user_message,
+            system_message,
+            conversation_history,
+            task_id,
+            persist_user_message,
+            persist_user_timestamp,
+        ):
+            return None
+
+    agent = LegacyAgent()
+    kwargs = streaming._build_run_conversation_kwargs(
+        agent.run_conversation,
+        user_message="hello",
+        system_message="system",
+        conversation_history=[{"role": "user", "content": "prior"}],
+        conversation_history_revision={"session_id": "session-1"},
+        task_id="session-1",
+        persist_user_message="hello",
+        persist_user_timestamp=123.0,
+    )
+
+    assert kwargs == {
+        "user_message": "hello",
+        "system_message": "system",
+        "conversation_history": [{"role": "user", "content": "prior"}],
+        "task_id": "session-1",
+        "persist_user_message": "hello",
+        "persist_user_timestamp": 123.0,
+    }
 
 
 def _make_state_db(path, sid, rows):
