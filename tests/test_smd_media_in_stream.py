@@ -198,7 +198,14 @@ def _run_real_smd_media_cases() -> dict:
         "const pdf=renderModes(['MEDIA:C:/tmp/report.pdf ']);\n"
         "const falsePrefix=renderModes(['M', 'aybe plain prose ']);\n"
         "const crossParent=renderModes(['- ME', '\\n- ow']);\n"
-        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent}));\n"
+        "// #6580 re-gate: quoted MEDIA tokens with spaces, split across chunks.\n"
+        "const quotedComplete=renderModes(['MEDIA:\"/tmp/my screenshot.png\" done']);\n"
+        "const quotedSplit=renderModes(['MEDIA:\"/tmp/my scre', 'enshot.png\" done']);\n"
+        "const quotedSplitAfterSpace=renderModes(['MEDIA:\"/tmp/my ', 'screenshot.png\" done']);\n"
+        "const quotedSingle=renderModes([\"MEDIA:'/tmp/my screenshot.png' done\"]);\n"
+        "const quotedUnclosed=renderModes(['MEDIA:\"/tmp/my screenshot.png']);\n"
+        "const multipleTokens=renderModes(['MEDIA:/tmp/a.png and MEDIA:\"/tmp/b c.png\" done']);\n"
+        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent, quotedComplete, quotedSplit, quotedSplitAfterSpace, quotedSingle, quotedUnclosed, multipleTokens}));\n"
     )
     completed = subprocess.run(
         [NODE, "--input-type=module", "-e", script],
@@ -381,13 +388,32 @@ class TestSmdMediaInStream(unittest.TestCase):
         # "MEDIA:fo" at the end of a chunk even if the next chunk is "o.png".
         # The interceptor must not emit a media node for that partial ref;
         # it should keep the candidate in unmatchedTail unless a delimiter or
-        # reliable filename suffix proves the ref is complete.
+        # reliable filename suffix proves the ref is complete. The selected
+        # capture is now named `ref` (m[1]/m[2] are quoted arms, m[3] bare).
         idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
         block = MESSAGES_JS[idx:idx + 6500]
         self.assertIn("function _smdMediaRefHasReliableBoundary", MESSAGES_JS)
         self.assertIn("matchEnd===combined.length", block)
-        self.assertIn("!_smdMediaRefHasReliableBoundary(m[1])", block)
+        self.assertIn("!_smdMediaRefHasReliableBoundary(ref)", block)
         self.assertIn("unmatchedTail = candidate", block)
+
+    def test_unterminated_quoted_candidate_is_buffered_not_emitted(self):
+        # #6580 re-gate: a chunk ending inside an open quoted MEDIA token
+        # (e.g. 'MEDIA:"/tmp/my ') must be held in the tail buffer until the
+        # closing quote arrives. The bare arm must never consume the partial
+        # as a quote-prefixed media ref, and the flush entry must render an
+        # unclosed quote as literal text.
+        idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
+        block = MESSAGES_JS[idx:idx + 7000]
+        self.assertIn('const quotedRef = m[1]||m[2];', block)
+        self.assertIn("/^[\"']/.test(m[3])", block)
+        self.assertIn("if(!ref){", block)
+        flush = MESSAGES_JS[
+            MESSAGES_JS.index("function _smdMediaTailFlushEntry"):
+            MESSAGES_JS.index("function _smdMediaTailFlush(")
+        ]
+        self.assertIn("/^MEDIA:\"([^\"]+)\"$", flush)
+        self.assertIn(r"|^MEDIA:([^\s\)\]\n]+)$", flush)
 
     def test_media_ref_boundary_extension_list_matches_renderer_formats(self):
         # Keep the streaming boundary whitelist aligned with ui.js media
@@ -409,7 +435,11 @@ class TestSmdMediaInStream(unittest.TestCase):
         # boundary check must therefore treat a complete http(s) ref as complete
         # even when it has no filename extension.
         self.assertIn("function _smdMediaTailFlush", MESSAGES_JS)
-        self.assertIn("/^MEDIA:([^", MESSAGES_JS)
+        # Flush-entry regex: quoted (double + single) arms in front of the bare
+        # arm; the bare arm still admits a complete extensionless https ref at
+        # stream end (e.g. MEDIA:https://fal.media/generated).
+        self.assertIn('/^MEDIA:"([^"]+)"$', MESSAGES_JS)
+        self.assertIn(r"|^MEDIA:([^\s\)\]\n]+)$", MESSAGES_JS)
         self.assertIn("_smdMediaTailFlush(_smdParser)", MESSAGES_JS)
 
     def test_extensionless_https_tail_waits_until_stream_end(self):
@@ -573,7 +603,65 @@ class TestSmdMediaRealParserBehaviour(unittest.TestCase):
                     self.assertTrue(result["fadeWords"])
                     self.assertEqual("".join(result["fadeWords"]), "MEow")
 
+    # ── #6580 re-gate: quoted MEDIA tokens with spaces ──────────────────────
+    def test_real_smd_parser_quoted_token_emits_exact_ref(self):
+        for mode, result in self.cases["quotedComplete"].items():
+            with self.subTest(mode=mode):
+                self.assertIn('class="media-node"', result["html"])
+                self.assertIn('data-ref="/tmp/my screenshot.png"', result["html"])
+                self.assertIn("done", result["text"])
+                self.assertNotIn("MEDIA:", result["text"])
+
+    def test_real_smd_parser_quoted_token_split_mid_ref(self):
+        # "MEDIA:\"/tmp/my scre" + "enshot.png\" done" — the closing quote
+        # arrives in the second chunk; the ref must still be captured whole.
+        for mode, result in self.cases["quotedSplit"].items():
+            with self.subTest(mode=mode):
+                self.assertIn('class="media-node"', result["html"])
+                self.assertIn('data-ref="/tmp/my screenshot.png"', result["html"])
+                self.assertIn("done", result["text"])
+                self.assertNotIn("MEDIA:", result["text"])
+
+    def test_real_smd_parser_quoted_token_split_after_space_buffered(self):
+        # The exact re-gate scenario: the chunk ends after an opening quote
+        # AND a space ('MEDIA:"/tmp/my '). The bare arm must NOT consume
+        # 'MEDIA:"/tmp/my' as a media ref — the candidate stays buffered until
+        # the closing quote completes it in the next chunk.
+        for mode, result in self.cases["quotedSplitAfterSpace"].items():
+            with self.subTest(mode=mode):
+                self.assertIn('class="media-node"', result["html"])
+                self.assertIn('data-ref="/tmp/my screenshot.png"', result["html"])
+                self.assertNotIn('data-ref="/tmp/my"', result["html"])
+                self.assertIn("done", result["text"])
+                self.assertNotIn("MEDIA:", result["text"])
+
+    def test_real_smd_parser_single_quoted_token_emits_exact_ref(self):
+        for mode, result in self.cases["quotedSingle"].items():
+            with self.subTest(mode=mode):
+                self.assertIn('class="media-node"', result["html"])
+                self.assertIn('data-ref="/tmp/my screenshot.png"', result["html"])
+                self.assertIn("done", result["text"])
+                self.assertNotIn("MEDIA:", result["text"])
+
+    def test_real_smd_parser_unclosed_quote_flushes_as_literal_text(self):
+        # Malformed/unclosed quote at stream end: never a media node, never a
+        # quote-prefixed partial ref — the buffered token flushes as text.
+        for mode, result in self.cases["quotedUnclosed"].items():
+            with self.subTest(mode=mode):
+                self.assertNotIn('class="media-node"', result["html"])
+                self.assertIn('MEDIA:"/tmp/my screenshot.png', result["text"])
+
+    def test_real_smd_parser_multiple_tokens_bare_and_quoted(self):
+        for mode, result in self.cases["multipleTokens"].items():
+            with self.subTest(mode=mode):
+                self.assertIn('data-ref="/tmp/a.png"', result["html"])
+                self.assertIn('data-ref="/tmp/b c.png"', result["html"])
+                self.assertIn("and", result["text"])
+                self.assertIn("done", result["text"])
+                self.assertNotIn("MEDIA:", result["text"])
+
 
 if __name__ == "__main__":
     import unittest
     unittest.main()
+

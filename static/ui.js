@@ -2641,31 +2641,38 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
   const sid=sessionId
     || (typeof S!=='undefined'&&S&&S.session&&S.session.session_id?String(S.session.session_id):'')
     || '';
-  const apiUrl='api/media?path='+encodeURIComponent(ref)+(sid?'&session_id='+encodeURIComponent(sid):'');
-  const localKind=_mediaKindForName(ref);
+  // Normalize exactly once: quoted MEDIA:"…" stashes and bare tokens arrive
+  // with raw spaces or with %20 already applied. Decode-then-re-encode maps
+  // both forms to the same query encoding and never produces %2520. Guarded
+  // because a literal '%' not followed by two hex digits (e.g. "100%.png")
+  // must survive untouched.
+  let norm=ref;
+  try{ norm=decodeURIComponent(String(ref)); }catch(_){ /* keep raw */ }
+  const apiUrl='api/media?path='+encodeURIComponent(norm)+(sid?'&session_id='+encodeURIComponent(sid):'');
+  const localKind=_mediaKindForName(norm);
   // localArtifactCard(...)
   if(localKind==='image'){
-    const safeName=esc(altText===undefined?(ref.split('/').pop()||'image'):altText);
+    const safeName=esc(altText===undefined?(norm.split('/').pop()||'image'):altText);
     const tt=(typeof t==='function')?t:(key=>({media_download:'Download'}[key]||key));
     const dlLabel=esc(tt('media_download'));
     const dlSvg='<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
     return `<span class="msg-artifact-image"><img class="msg-media-img" src="${esc(apiUrl)}" alt="${safeName}" loading="lazy"><a class="msg-artifact-download" href="${esc(apiUrl)}" download="${safeName}" title="${dlLabel}" aria-label="${dlLabel}" onclick="event.stopPropagation()">${dlSvg}</a></span>`;
   }
-  if(_SVG_EXTS.test(ref)) return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${esc(altText===undefined?(typeof t==='function'?t('media_svg_label'):'svg'):altText)}" loading="lazy">`;
+  if(_SVG_EXTS.test(norm)) return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${esc(altText===undefined?(typeof t==='function'?t('media_svg_label'):'svg'):altText)}" loading="lazy">`;
   if(localKind==='audio'||localKind==='video'){
-    return _mediaPlayerHtml(localKind,apiUrl+'&inline=1',ref.split('/').pop()||ref);
+    return _mediaPlayerHtml(localKind,apiUrl+'&inline=1',norm.split('/').pop()||norm);
   }
-  if(_PDF_EXTS.test(ref)){
-    const fname=esc(ref.split('/').pop()||ref);
-    return `<div class="pdf-preview-load" data-path="${esc(ref)}"><span class="pdf-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('pdf_loading'):'Loading')} ${fname}...</div>`;
+  if(_PDF_EXTS.test(norm)){
+    const fname=esc(norm.split('/').pop()||norm);
+    return `<div class="pdf-preview-load" data-path="${esc(norm)}"><span class="pdf-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('pdf_loading'):'Loading')} ${fname}...</div>`;
   }
-  if(_HTML_EXTS.test(ref)){
-    return `<div class="html-preview-load" data-path="${esc(ref)}"><span class="html-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('html_loading'):'Loading')}...</div>`;
+  if(_HTML_EXTS.test(norm)){
+    return `<div class="html-preview-load" data-path="${esc(norm)}"><span class="html-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('html_loading'):'Loading')}...</div>`;
   }
-  const fname=esc(ref.split('/').pop()||ref);
-  if(/\.(patch|diff)$/i.test(ref)) return `<div class="diff-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('diff_loading'):'Loading diff')} ${fname}...</div>`;
-  if(_CSV_EXTS.test(ref)) return `<div class="csv-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('csv_loading'):'Loading')} ${fname}...</div>`;
-  if(_EXCALIDRAW_EXTS.test(ref)) return `<div class="excalidraw-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('excalidraw_loading'):'Loading')} ${fname}...</div>`;
+  const fname=esc(norm.split('/').pop()||norm);
+  if(/\.(patch|diff)$/i.test(norm)) return `<div class="diff-inline-load" data-path="${esc(norm)}">${esc(typeof t==='function'?t('diff_loading'):'Loading diff')} ${fname}...</div>`;
+  if(_CSV_EXTS.test(norm)) return `<div class="csv-inline-load" data-path="${esc(norm)}">${esc(typeof t==='function'?t('csv_loading'):'Loading')} ${fname}...</div>`;
+  if(_EXCALIDRAW_EXTS.test(norm)) return `<div class="excalidraw-inline-load" data-path="${esc(norm)}">${esc(typeof t==='function'?t('excalidraw_loading'):'Loading')} ${fname}...</div>`;
   return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
 }
 function _renderAttachmentHtml(fname, url){
@@ -7187,7 +7194,22 @@ function renderMd(raw){
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
   const media_stash=[];
-  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
+  // Quoted MEDIA — support spaces inside double-quotes. Kept RAW: the stash is
+  // decoded+re-encoded exactly once in _inlineMediaHtmlForRef, so a raw space
+  // and an already-%20 ref both land on the same query encoding (never %2520).
+  s=s.replace(/MEDIA:"([^"]+)"/g,(_,raw_ref)=>{
+    media_stash.push(raw_ref);
+    return '\x00D'+(media_stash.length-1)+'\x00';
+  });
+  // Quoted MEDIA — support spaces inside single-quotes
+  s=s.replace(/MEDIA:'([^']+)'/g,(_,raw_ref)=>{
+    media_stash.push(raw_ref);
+    return '\x00D'+(media_stash.length-1)+'\x00';
+  });
+  // Unquoted MEDIA — whitespace/bracket/newline delimited (avoids consuming
+  // prose). A leading quote is NOT captured: an unterminated quoted token must
+  // stay literal text instead of becoming a quote-prefixed media ref.
+  s=s.replace(/MEDIA:([^"\s\)\]\n][^\s\)\]\n]*)/g,(_,raw_ref)=>{
     media_stash.push(raw_ref);
     return '\x00D'+(media_stash.length-1)+'\x00';
   });
@@ -7296,6 +7318,15 @@ function renderMd(raw){
   // stashing so a file:// inside any code/preformatted region stays literal text
   // (#3219/#3234). Only bare URLs (line-start or whitespace-delimited) match, so
   // normal [label](file://...) markdown anchors keep the link path below.
+  // Quoted forms keep the ref RAW — _inlineMediaHtmlForRef normalizes once.
+  s=s.replace(/(^|\s)file:\/\/"([^"]+)"/g,(_,lead,ref)=>{
+    media_stash.push('file://'+ref);
+    return lead+'\x00D'+(media_stash.length-1)+'\x00';
+  });
+  s=s.replace(/(^|\s)file:\/\/'([^']+)'/g,(_,lead,ref)=>{
+    media_stash.push('file://'+ref);
+    return lead+'\x00D'+(media_stash.length-1)+'\x00';
+  });
   s=s.replace(/(^|\s)(file:\/\/[^\s<>"')\]]+)/g,(_,lead,raw_ref)=>{
     media_stash.push(raw_ref);
     return lead+'\x00D'+(media_stash.length-1)+'\x00';
@@ -7350,14 +7381,14 @@ function renderMd(raw){
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
     // is not consumed by the [label](url) link regex.
-    t=t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+    t=t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22').replace(/ /g,'%20')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
     t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
-    t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
+    t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u.replace(/ /g,'%20')));return `\x00L${_link_stash.length-1}\x00`;});
     t=t.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
@@ -7492,13 +7523,13 @@ function renderMd(raw){
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
-  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22').replace(/ /g,'%20')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
   const _a_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
-  s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,label,url)=>_markdownAnchor(label,url));
+  s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\)]+)\)/g,(_,label,url)=>_markdownAnchor(label,url.replace(/ /g,'%20')));
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
   // Restore raw <pre> only after markdown rewrites so literal preformatted
   // content stays placeholder-protected, then let the sanitizer normalize tags.
