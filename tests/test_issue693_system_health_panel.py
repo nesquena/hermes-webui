@@ -478,8 +478,8 @@ def test_resource_status_bar_polls_without_insights_open():
     assert "function _mountResourceStatusBar()" in UI_JS
     assert "function _updateResourceStatusBar(payload)" in UI_JS
     assert "function _formatBytesPerSec(bytesPerSec)" in UI_JS
-    # Always poll when the bar is mounted, independent of the Insights side-panel.
-    assert "if($('resourceStatusBar')) return true;" in UI_JS
+    # Always poll when the bar is mounted (and enabled), independent of Insights.
+    assert "if($('resourceStatusBar') && _resourceBarEnabled()) return true;" in UI_JS
     # Mounted on load (DOMContentLoaded or immediately).
     assert "document.addEventListener('DOMContentLoaded',_mountResourceStatusBar)" in UI_JS
     assert "_mountResourceStatusBar();" in UI_JS

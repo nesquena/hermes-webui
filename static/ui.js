@@ -9311,11 +9311,14 @@ async function pollSystemHealth(){
     setSystemHealthUnavailable('Unavailable');
   }
 }
+function _resourceBarEnabled(){
+  try{ return localStorage.getItem('hermes-webui-resource-bar')!=='off'; }catch(_){ return true; }
+}
 function _systemHealthPanelIsVisible(){
   // Always poll when the persistent MobaXterm-style resource bar is mounted,
   // even if the Insights side-panel is closed.
   if(document.visibilityState !== 'visible') return false;
-  if($('resourceStatusBar')) return true;
+  if($('resourceStatusBar') && _resourceBarEnabled()) return true;
   return !!document.querySelector('main.main.showing-insights') &&
     !!$('systemHealthPanel');
 }
@@ -9366,10 +9369,23 @@ function _updateResourceStatusBar(payload){
 function _mountResourceStatusBar(){
   if($('resourceStatusBar')) return;
   if(typeof _renderResourceStatusBar!=='function') return;
+  if(!_resourceBarEnabled()) return;
   const wrap=document.createElement('div');
   wrap.innerHTML=_renderResourceStatusBar().trim();
   const el=wrap.firstElementChild;
   if(el) document.body.appendChild(el);
+}
+// Live show/hide for the resource bar toggle (#693).
+function _applyResourceStatusBarVisibility(){
+  if(_resourceBarEnabled()){
+    if(!$('resourceStatusBar')) _mountResourceStatusBar();
+    const bar=$('resourceStatusBar');
+    if(bar) bar.style.display='';
+  } else {
+    const bar=$('resourceStatusBar');
+    if(bar) bar.style.display='none';
+  }
+  if(typeof _syncSystemHealthMonitorVisibility==='function') _syncSystemHealthMonitorVisibility();
 }
 function startSystemHealthMonitor(){
   if(!_systemHealthPanelIsVisible()) return;

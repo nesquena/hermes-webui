@@ -8953,6 +8953,16 @@ async function loadSettingsPanel(){
         else if(!open&&_workspacePanelMode!=='closed') toggleWorkspacePanel(false);
       };
     }
+    // Resource status bar toggle (localStorage-backed, #693)
+    const rsbCb=$('settingsResourceBar');
+    if(rsbCb){
+      rsbCb.checked=localStorage.getItem('hermes-webui-resource-bar')!=='off';
+      rsbCb.onchange=function(){
+        const on=this.checked;
+        try{ localStorage.setItem('hermes-webui-resource-bar', on?'on':'off'); }catch(_){ }
+        if(typeof _applyResourceStatusBarVisibility==='function') _applyResourceStatusBarVisibility();
+      };
+    }
     const endlessScrollCb=$('settingsSessionEndlessScroll');
     if(endlessScrollCb){
       endlessScrollCb.checked=!!settings.session_endless_scroll;
