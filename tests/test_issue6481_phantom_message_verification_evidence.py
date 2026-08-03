@@ -516,15 +516,23 @@ def test_install_wrapper_is_idempotent(monkeypatch):
 def test_require_ai_agent_class_installs_sanitizer(monkeypatch):
     """The Agent entry chokepoint wires the boundary wrapper (streaming + sync)."""
     import api.agent_runtime as agent_runtime
+    import api.verification_sanitizer as verification_sanitizer
 
     installed = []
 
     def _fake_install():
         installed.append(True)
+        return True
 
     # require_ai_agent_class does a lazy from-import inside the function body,
-    # so pointing api.streaming's symbol at the fake is sufficient.
-    monkeypatch.setattr(streaming, "_install_agent_verification_evidence_sanitizer", _fake_install)
+    # so pointing api.verification_sanitizer's symbol at the fake is sufficient
+    # (the installer moved out of api.streaming into the cycle-safe module so
+    # the cold-start path at streaming.py:631 can reach it — #6481 re-gate).
+    monkeypatch.setattr(
+        verification_sanitizer,
+        "_install_agent_verification_evidence_sanitizer",
+        _fake_install,
+    )
 
     # Avoid actually importing the real AIAgent — stub `run_agent` in
     # sys.modules so the import inside require_ai_agent_class resolves to a
@@ -699,3 +707,376 @@ def test_sync_sidecar_from_state_db_sanitizes_merged_rows(monkeypatch, tmp_path)
         if msg.get("role") == "tool":
             assert "verification_evidence" not in str(msg.get("content", ""))
     models.SESSIONS.clear()
+
+
+# --------------------------------------------------------------------------- #
+# Gap 4: _correlate_tool_call_name fails CLOSED on ambiguous identity (#6481)
+# --------------------------------------------------------------------------- #
+
+
+def _assistant_with_tool_call(call_id, name, *, position=0):
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"id": call_id, "function": {"name": name, "arguments": "{}"}}],
+    }
+
+
+def test_correlate_tool_call_name_returns_preceding_terminal_name():
+    messages = [
+        _assistant_with_tool_call("call-1", "terminal"),
+        {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+    ]
+    assert streaming._correlate_tool_call_name(messages, messages[1], tool_index=1) == "terminal"
+
+
+def test_correlate_tool_call_name_fails_closed_on_future_match():
+    """An id whose only assistant match is AFTER the tool row must not correlate.
+
+    A recovered/duplicate id that appears later in the transcript cannot prove
+    this row is the result of a preceding call — fail closed to avoid stripping
+    legitimate data from a non-terminal row.
+    """
+    messages = [
+        {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+        _assistant_with_tool_call("call-1", "terminal"),
+    ]
+    assert streaming._correlate_tool_call_name(messages, messages[0], tool_index=0) == ""
+
+
+def test_correlate_tool_call_name_fails_closed_when_id_reused_in_future():
+    """Match in BOTH a preceding AND a future assistant call → ambiguous → ""."""
+    messages = [
+        _assistant_with_tool_call("call-1", "terminal"),
+        {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+        _assistant_with_tool_call("call-1", "read_file"),
+    ]
+    assert streaming._correlate_tool_call_name(messages, messages[1], tool_index=1) == ""
+
+
+def test_correlate_tool_call_name_fails_closed_on_duplicate_preceding_ids():
+    """Same id in two PRECEDING assistant calls → ambiguous → ""."""
+    messages = [
+        _assistant_with_tool_call("call-1", "terminal"),
+        _assistant_with_tool_call("call-1", "terminal"),
+        {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+    ]
+    assert streaming._correlate_tool_call_name(messages, messages[2], tool_index=2) == ""
+
+
+def test_correlate_tool_call_name_fails_closed_on_conflicting_names():
+    """Same id correlated to DIFFERENT function names → ambiguous → ""."""
+    messages = [
+        _assistant_with_tool_call("call-1", "terminal"),
+        _assistant_with_tool_call("call-1", "read_file"),
+        {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+    ]
+    assert streaming._correlate_tool_call_name(messages, messages[2], tool_index=2) == ""
+
+
+def test_correlate_tool_call_name_fails_closed_on_empty_id():
+    assert streaming._correlate_tool_call_name([{"role": "tool", "content": "x"}], {"role": "tool", "content": "x"}) == ""
+    assert streaming._correlate_tool_call_name([], {"role": "tool", "tool_call_id": ""}) == ""
+
+
+def test_correlate_tool_call_name_fails_closed_on_missing_match():
+    messages = [
+        _assistant_with_tool_call("call-1", "terminal"),
+        {"role": "tool", "tool_call_id": "call-9", "content": "ok"},
+    ]
+    assert streaming._correlate_tool_call_name(messages, messages[1], tool_index=1) == ""
+
+
+def test_correlate_tool_call_name_bounds_by_explicit_tool_index():
+    """Passing tool_index bounds the scan: a same-position match is a future match."""
+    messages = [
+        _assistant_with_tool_call("call-1", "terminal"),
+        {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+    ]
+    # tool_index=0 means the "tool row" is BEFORE the assistant call — the only
+    # match is at idx 1 >= 0, so it is a future match and must fail closed.
+    assert streaming._correlate_tool_call_name(messages, messages[1], tool_index=0) == ""
+
+
+# --------------------------------------------------------------------------- #
+# Production gap: state.db missing-sidecar recovery sanitizes full list (#6481)
+# --------------------------------------------------------------------------- #
+
+
+def _recovery_state_db(path, *, sid="recovered_6481"):
+    """Build a temp state.db with a contaminated terminal row + identity columns."""
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, "
+        "started_at REAL, message_count INTEGER, parent_session_id TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, "
+        "content TEXT, timestamp REAL, tool_call_id TEXT, tool_name TEXT, tool_calls TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, title, model, started_at, message_count, parent_session_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (sid, "webui", "Recovered", "openai/gpt-5", 2000.0, 3, None),
+    )
+    contaminated = json.dumps({
+        "output": "12 passed",
+        "exit_code": 0,
+        "verification_evidence": {"status": "passed"},
+    })
+    rows = [
+        # Preceding assistant terminal tool_call (identity preserved by reader).
+        (sid, "assistant", "", 2000.0, None, None, json.dumps(
+            [{"id": "call-rec-1", "function": {"name": "terminal", "arguments": "{}"}}]
+        )),
+        # NAMELESS legacy terminal row — must be correlated + stripped.
+        (sid, "tool", contaminated, 2001.0, "call-rec-1", None, None),
+        # Named non-terminal row with a top-level evidence-like key — must NOT strip.
+        (sid, "tool", json.dumps({"output": "custom", "verification_evidence": {"status": "passed"}}),
+         2002.0, "call-rec-2", "read_file", None),
+    ]
+    conn.executemany(
+        "INSERT INTO messages (session_id, role, content, timestamp, tool_call_id, tool_name, tool_calls) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+    return sid
+
+
+def test_recover_missing_sidecars_from_state_db_strips_verification_evidence(tmp_path):
+    """Recovered sidecars never persist the phantom field; nameless legacy terminal
+    rows are correlated through tool_call_id and stripped, non-terminal rows kept."""
+    from api.session_recovery import recover_missing_sidecars_from_state_db
+
+    sid = _recovery_state_db(tmp_path / "state.db")
+    result = recover_missing_sidecars_from_state_db(tmp_path, tmp_path / "state.db")
+    assert result["materialized"] == 1
+
+    sidecar = tmp_path / f"{sid}.json"
+    assert sidecar.exists()
+    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    tool_msgs = [m for m in data["messages"] if m.get("role") == "tool"]
+    assert len(tool_msgs) == 2
+    nameless = [m for m in tool_msgs if m.get("name") != "read_file" and not m.get("tool_name")]
+    named_non_terminal = [m for m in tool_msgs if m.get("name") == "read_file"]
+    assert len(nameless) == 1
+    assert len(named_non_terminal) == 1
+    # The nameless legacy terminal row was stripped of the phantom field.
+    assert "verification_evidence" not in nameless[0]["content"]
+    # The named non-terminal row keeps its payload untouched.
+    assert "verification_evidence" in named_non_terminal[0]["content"]
+
+
+def test_state_db_row_to_sidecar_sanitizes_full_list(tmp_path):
+    """Direct unit: _state_db_row_to_sidecar strips the phantom field from the
+    full recovered message list before the sidecar payload is built."""
+    from api.session_recovery import _state_db_row_to_sidecar
+
+    contaminated = json.dumps({
+        "output": "12 passed",
+        "exit_code": 0,
+        "verification_evidence": {"status": "passed"},
+    })
+    row = {
+        "id": "direct-6481",
+        "source": "webui",
+        "title": "Direct",
+        "started_at": 3000.0,
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call-d-1", "function": {"name": "terminal", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "call-d-1", "content": contaminated},
+        ],
+    }
+    payload = _state_db_row_to_sidecar(row)
+    for msg in payload["messages"]:
+        if msg.get("role") == "tool":
+            assert "verification_evidence" not in str(msg.get("content", ""))
+
+
+# --------------------------------------------------------------------------- #
+# Production gap: display projection strips verification_evidence (#6481)
+# --------------------------------------------------------------------------- #
+
+
+def _limited_display_fixture(contaminated_tail=True):
+    import types
+
+    tool_payload = json.dumps({
+        "output": "12 passed",
+        "exit_code": 0,
+        "verification_evidence": {"status": "passed"},
+    })
+    sidecar_messages = [
+        {"role": "user", "content": "old question", "timestamp": 100.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+    ]
+    state_db_messages = [
+        {"role": "user", "content": "new request", "timestamp": 102.0},
+        {"role": "assistant", "content": "visible text", "timestamp": 103.0},
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "name": "terminal",
+            "content": tool_payload,
+            "timestamp": 104.0,
+        },
+        {"role": "assistant", "content": "latest live progress", "timestamp": 105.0},
+    ]
+    if not contaminated_tail:
+        state_db_messages[-1]["content"] = "clean"
+    session = types.SimpleNamespace(
+        session_id="limited-6481",
+        session_source="webui",
+        messages=list(sidecar_messages),
+        parent_session_id=None,
+        truncation_watermark=None,
+        truncation_boundary=None,
+    )
+    return session, sidecar_messages, state_db_messages
+
+
+def test_limited_webui_messages_for_display_strips_verification_evidence():
+    from api.routes import _limited_webui_messages_for_display_with_sidecar
+
+    session, sidecar_messages, state_db_messages = _limited_display_fixture()
+    displayed = _limited_webui_messages_for_display_with_sidecar(
+        session,
+        sidecar_messages,
+        state_db_messages,
+    )
+    for msg in displayed:
+        if msg.get("role") == "tool":
+            assert "verification_evidence" not in str(msg.get("content", ""))
+
+
+def test_limited_webui_messages_for_display_does_not_mutate_session_messages():
+    """The display projection is a read path: sanitizing the output must not
+    mutate the session's in-memory transcript or the caller's state.db dicts."""
+    from api.routes import _limited_webui_messages_for_display_with_sidecar
+
+    session, sidecar_messages, state_db_messages = _limited_display_fixture()
+    displayed = _limited_webui_messages_for_display_with_sidecar(
+        session,
+        sidecar_messages,
+        state_db_messages,
+    )
+    # The output is clean…
+    assert all("verification_evidence" not in str(m.get("content", "")) for m in displayed)
+    # …but the caller's dicts are untouched (shallow-copied projection).
+    contaminated_input = [m for m in state_db_messages if m.get("role") == "tool"]
+    assert contaminated_input
+    assert "verification_evidence" in str(contaminated_input[0].get("content", ""))
+    assert all("verification_evidence" not in str(m.get("content", "")) for m in session.messages)
+    assert all(id(m) not in {id(s) for s in displayed} for m in session.messages)
+
+
+# --------------------------------------------------------------------------- #
+# Production gap: cold-start subprocess installs the sanitizer (#6481 re-gate)
+# --------------------------------------------------------------------------- #
+
+
+def test_cold_start_subprocess_installs_verification_sanitizer(tmp_path):
+    """A REAL cold import of api.streaming must install the producer-boundary
+    wrapper on BOTH the helper and the executor alias.
+
+    This is the exact re-gate failure: on master the installer lived in
+    api.streaming, and streaming.py:631 calls get_ai_agent_class() while the
+    module is still partially initialized, so the installer was unreachable and
+    _webui_verification_sanitized stayed False on a normal server boot. The
+    cycle-safe api.verification_sanitizer module makes the cold-start install
+    work; this test proves it in a fresh subprocess.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent
+    script = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(repo_root)!r})\n"
+        "import api.streaming\n"
+        "import agent.tool_dispatch_helpers as tdh\n"
+        "import agent.tool_executor as te\n"
+        "ok = (\n"
+        "    getattr(tdh.make_tool_result_message, '_webui_verification_sanitized', False)\n"
+        "    and getattr(te.make_tool_result_message, '_webui_verification_sanitized', False)\n"
+        "    and te.make_tool_result_message is tdh.make_tool_result_message\n"
+        ")\n"
+        "print('SANITIZER_INSTALLED' if ok else 'SANITIZER_MISSING')\n"
+        "sys.exit(0 if ok else 1)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(repo_root),
+    )
+    assert result.returncode == 0, f"cold-start install failed:\n{result.stdout}\n{result.stderr}"
+    assert "SANITIZER_INSTALLED" in result.stdout
+
+
+def test_real_executor_alias_flushes_clean_terminal_message(tmp_path):
+    """The REAL agent.tool_executor alias must produce a message free of the
+    phantom field and flush clean rows into a real temp SessionDB.
+
+    The executor calls its module-level make_tool_result_message reference
+    (imported via ``from agent.tool_dispatch_helpers import ...``), so patching
+    only the helper is not enough — the alias must be wrapped too. This test
+    installs the sanitizer, builds a fresh contaminated terminal result through
+    the executor's own reference, and persists it to a real SQLite SessionDB.
+    """
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    import agent.tool_executor as te
+    from api.verification_sanitizer import _install_agent_verification_evidence_sanitizer
+
+    installed = _install_agent_verification_evidence_sanitizer()
+    assert installed, "sanitizer must install against the real agent modules"
+    assert getattr(te.make_tool_result_message, "_webui_verification_sanitized", False)
+
+    fresh_result = {
+        "output": "12 passed, 0 failed",
+        "exit_code": 0,
+        "error": None,
+        "verification_evidence": {
+            "status": "passed",
+            "kind": "test",
+            "scope": "full",
+            "canonical_command": "pytest",
+        },
+    }
+    tool_message = te.make_tool_result_message("terminal", dict(fresh_result), "call-real-1")
+    assert "verification_evidence" not in str(tool_message.get("content", ""))
+
+    # Flush into a REAL temp SessionDB the way the executor's incremental
+    # persistence does (append_message on the canonical store).
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("real-exec-6481", "webui")
+    content = tool_message["content"]
+    db.append_message(
+        session_id="real-exec-6481",
+        role="tool",
+        content=content if isinstance(content, str) else json.dumps(content, ensure_ascii=False),
+        tool_name=tool_message.get("tool_name"),
+        tool_call_id=tool_message.get("tool_call_id"),
+    )
+    rows = db.get_messages("real-exec-6481")
+    assert len(rows) == 1
+    assert "verification_evidence" not in str(rows[0]["content"])
+    assert "12 passed, 0 failed" in str(rows[0]["content"])
