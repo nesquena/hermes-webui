@@ -5443,16 +5443,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // ── Renderer host seam ─────────────────────────────────────────────────────
     // If an extension registered a renderer via window.registerHermesRenderer(),
     // boot.js wires window._hermesRendererMount / window._hermesRendererUnmount.
-    // We call mount here (once per _wireSSE call) so the renderer can attach its
-    // own SSE listeners to `source` alongside the ones below.  On every terminal
-    // path (done / apperror / cancel / onerror) we call unmount so the renderer
-    // can clean up.  The seam is a pure no-op when no renderer is registered.
+    // _wireSSE may be called more than once for the same stream (reconnect path).
+    // On reconnect we unmount the previous binding before mounting the new source
+    // so the renderer is never attached to a stale closed EventSource.
+    // On every terminal path (done / apperror / cancel / onerror) we call unmount
+    // so the renderer can clean up its listeners and timers.
+    // The seam is a pure no-op when no renderer is registered.
     //
     // root — the live assistant turn container (#liveAssistantTurn when present,
-    //         falling back to the messages pane so the renderer always receives a
-    //         stable element even before the first token creates the turn row).
+    //         falling back to #messages so the renderer receives a stable element
+    //         even before the first token creates the turn row).  The renderer
+    //         owns ONLY this element; it must not mutate siblings or ancestors.
     // ctx  — { sessionId: activeSid, streamId }
     const _rendererRoot=(typeof $==='function'&&($('liveAssistantTurn')||$('messages')))||null;
+    // Unmount any prior mount on this root before (re-)mounting.  This handles the
+    // reconnect path where _wireSSE is entered a second time for the same stream.
+    if(typeof window._hermesRendererUnmount==='function' && _rendererRoot){
+      try{window._hermesRendererUnmount(_rendererRoot);}catch(_){}
+    }
     if(typeof window._hermesRendererMount==='function' && _rendererRoot){
       try{window._hermesRendererMount(_rendererRoot,source,{sessionId:activeSid,streamId});}catch(_){}
     }

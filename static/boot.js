@@ -3042,8 +3042,13 @@ if(typeof window!=='undefined') window.registerHermesSkin=registerHermesSkin;
   // they are internal infrastructure, not part of the public extension API.
   function _mount(root, source, ctx){
     if(_disabled || !_rendererDescriptor) return;
+    // Snapshot the descriptor at mount time so that a concurrent
+    // registerHermesRenderer() call cannot split mount and unmount across
+    // two different descriptors for the same stream.
+    const snapshot = _rendererDescriptor;
+    root._hermesRendererSnapshot = snapshot;
     try{
-      _rendererDescriptor.mount(root, source, ctx);
+      snapshot.mount(root, source, ctx);
     }catch(e){
       // Renderer errors must never crash the core stream.
       if(typeof console!=='undefined') console.warn('[HermesRenderer] mount error:', e);
@@ -3051,9 +3056,13 @@ if(typeof window!=='undefined') window.registerHermesSkin=registerHermesSkin;
   }
 
   function _unmount(root){
-    if(!_rendererDescriptor) return;
+    // Use the snapshot stored at mount time, not the current _rendererDescriptor,
+    // so we always call unmount on the descriptor that performed the mount.
+    const snapshot = (root && root._hermesRendererSnapshot) || _rendererDescriptor;
+    if(!snapshot) return;
+    if(root) root._hermesRendererSnapshot = null;
     try{
-      _rendererDescriptor.unmount(root);
+      snapshot.unmount(root);
     }catch(e){
       if(typeof console!=='undefined') console.warn('[HermesRenderer] unmount error:', e);
     }
