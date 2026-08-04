@@ -141,6 +141,10 @@ function buildRuntime() {
   globalThis._messageRenderWindowSize = 20;
   globalThis._streamFinalized = !!scenario.streamFinalized;
   globalThis._persistTimer = null;
+  // #2761: _restoreSettledSession reads the STREAM-OWNED continuation-sid
+  // binding that attachLiveStream() provides. The standalone extraction has no
+  // attachLiveStream scope, so mirror the closure default ('' = no rotation).
+  globalThis._streamCompressionContinuationSid = '';
   globalThis.api = async () => scenario.apiPayload || { session: null };
   globalThis.msgContent = undefined;
   globalThis._isPreservedCompressionTaskListMarkerOnlyText = () => false;
@@ -194,6 +198,46 @@ function buildRuntime() {
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
       terminalMarkerCount,
       calls,
+    }));
+    return;
+  }
+
+  if (scenario.action === 'restore_two_stream_race') {
+    // Two-stream recovery (#6689 re-gate finding #1): stream A settles via
+    // _restoreSettledSession. While A's /api/session poll is in flight, a
+    // newer continuation turn B starts and takes stream ownership
+    // (S.activeStreamId -> 'stream-B'). A's late settle must be rejected as
+    // stale and must NOT clear B's stream id, replace S.session, or replace
+    // S.messages with A's archived transcript. Then B's own terminal settle
+    // must be honored ('restored'), not rejected as stale.
+    globalThis.api = async () => {
+      // B starts in the interval after A's active_stream_id is cleared but
+      // before A's done lands.
+      S.activeStreamId = 'stream-B';
+      return scenario.aPayload || { session: null };
+    };
+    const aStatus = await _restoreSettledSession({}, { status: true });
+    const afterA = {
+      status: aStatus,
+      activeStreamId: S.activeStreamId,
+      session: S.session ? { session_id: S.session.session_id } : null,
+      messages: Array.isArray(S.messages) ? S.messages.map((m) => ({ role: m.role, content: m.content })) : [],
+      calls: calls.slice(),
+    };
+    // Phase 2: B's own settle (B owns the stream now).
+    globalThis.streamId = 'stream-B';
+    globalThis._streamFinalized = false;
+    globalThis.api = async () => scenario.bPayload || { session: null };
+    const bStatus = await _restoreSettledSession({}, { status: true });
+    console.log(JSON.stringify({
+      action: scenario.action,
+      a: afterA,
+      b: {
+        status: bStatus,
+        session: S.session ? { session_id: S.session.session_id } : null,
+        messages: Array.isArray(S.messages) ? S.messages.map((m) => ({ role: m.role, content: m.content })) : [],
+        calls: calls.slice(),
+      },
     }));
     return;
   }
@@ -421,3 +465,74 @@ def test_terminal_error_marker_is_single_instance_and_not_duplicated(driver_path
 
     assert outcome["terminalMarkerCount"] == 1, f"terminal marker should be deduped to one, got {outcome['terminalMarkerCount']}"
     assert outcome["messages"][-1]["content"].startswith("**Connection interrupted:**")
+
+
+def test_two_stream_recovery_newer_continuation_wins_over_stale_done(driver_path):
+    """Two-stream recovery (#6689 re-gate finding #1): a newer continuation
+    turn B starts in the interval after A's active_stream_id is cleared but
+    before A's done lands. A's late settle must be rejected as stale and must
+    NOT clear B's stream id, replace S.session, or clobber B's transcript;
+    B's own terminal event must be honored (not rejected as stale)."""
+    outcome = _run_scenario(driver_path, {
+        "action": "restore_two_stream_race",
+        "state": {
+            "session": {"session_id": "session-5224", "message_count": 5},
+            "messages": [
+                {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                {"role": "assistant", "content": "B live answer segment", "_ts": "b1"},
+            ],
+            "activeStreamId": "stream-A",
+        },
+        "aPayload": {
+            "session": {
+                "session_id": "session-5224",
+                "active_stream_id": None,
+                "pending_user_message": None,
+                "messages": [
+                    {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                    {"role": "assistant", "content": "A stale archived answer", "_ts": "a1"},
+                ],
+            },
+        },
+        "bPayload": {
+            "session": {
+                "session_id": "session-5224",
+                "active_stream_id": None,
+                "pending_user_message": None,
+                "messages": [
+                    {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                    {"role": "assistant", "content": "B final answer", "_ts": "bFinal"},
+                ],
+            },
+        },
+        "activeSid": "session-5224",
+        "streamId": "stream-A",
+        "isActiveSession": True,
+        "isSessionCurrentPane": True,
+        "isSessionActivelyViewed": False,
+    })
+
+    a = outcome["a"]
+    # A's late settle must be rejected as stale — the newer stream B owns the turn.
+    assert a["status"] == "stale", f"A must be rejected as stale, got {a['status']}"
+    # A must NOT clear B's stream id.
+    assert a["activeStreamId"] == "stream-B", (
+        f"A clobbered B's stream id: {a['activeStreamId']}"
+    )
+    # A must NOT replace S.session with its archived snapshot.
+    assert a["session"] == {"session_id": "session-5224"}
+    # A must NOT clobber B's live transcript with A's archived messages.
+    a_contents = [item["content"] for item in a["messages"]]
+    assert "B live answer segment" in a_contents, (
+        f"B's live transcript was clobbered by A: {a_contents}"
+    )
+    assert "A stale archived answer" not in a_contents, (
+        f"A replaced B's transcript with its archived snapshot: {a_contents}"
+    )
+    # B's own terminal event must be honored (not rejected as stale).
+    b = outcome["b"]
+    assert b["status"] == "restored", f"B's terminal settle must be honored, got {b['status']}"
+    b_contents = [item["content"] for item in b["messages"]]
+    assert "B final answer" in b_contents, (
+        f"B's final answer must land in the transcript: {b_contents}"
+    )

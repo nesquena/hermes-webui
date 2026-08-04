@@ -105,16 +105,29 @@ def test_restore_settled_session_polls_rotated_continuation_id():
 
 def test_continuation_sid_is_reset_per_turn():
     """The captured continuation id must be scoped to one stream/turn so a
-    previous turn's rotation cannot leak into the next turn's recovery."""
+    previous turn's rotation cannot leak into the next turn's recovery.
+    The state is STREAM-OWNED: it lives inside attachLiveStream() (not
+    send()), and a brand-new stream starts clean via the per-stream registry
+    (_STREAM_COMPRESSION_SIDS) while a reconnect of the SAME stream keeps the
+    rotated id captured before the drop.
+    """
     src = _read("static/messages.js")
     decl = src.find("let _streamCompressionContinuationSid='';")
     assert decl != -1, "per-stream continuation sid declaration not found"
-    # Skip past the declaration itself (it also ends with `='';`).
-    reset = src.find("_streamCompressionContinuationSid='';", decl + len("let _streamCompressionContinuationSid='';"))
+    # The declaration must live inside attachLiveStream (stream ownership),
+    # not in send() — a send()-scoped binding is invisible to the compressed
+    # handler and _restoreSettledSession (implicit-global bug).
+    attach_start = src.find("function attachLiveStream(")
+    assert attach_start != -1 and attach_start < decl, (
+        "continuation sid declaration must be inside attachLiveStream, not send()"
+    )
+    # A brand-new stream starts clean: the registry entry is re-seeded.
+    reset = src.find("{streamId,continuationSid:''}", decl)
     assert reset != -1 and reset > decl, (
-        "continuation sid must be reset after stream id assignment"
+        "per-stream continuation sid reset not found after declaration"
     )
-    stream_id_assign = src.find("S.activeStreamId = streamId;", decl)
-    assert stream_id_assign != -1 and stream_id_assign < reset, (
-        "continuation sid reset must happen at stream start"
-    )
+    # Reconnect of the SAME stream must preserve the rotated id.
+    assert "reconnecting&&_prevComp&&_prevComp.streamId===streamId" in src
+    # No implicit-global send() binding may remain.
+    send_decl = src.find("let _streamCompressionContinuationSid='';", 0, attach_start)
+    assert send_decl == -1, "send() must not bind the continuation sid (implicit global)"

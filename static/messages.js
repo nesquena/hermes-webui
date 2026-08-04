@@ -1767,8 +1767,10 @@ async function send(){
   // continuation session, the `compressed` SSE event carries the new id.
   // Recovery paths (done settle, _restoreSettledSession) must know it to
   // avoid polling the archived pre-compression session and freezing the
-  // live turn behind the running compression card.
-  let _streamCompressionContinuationSid='';
+  // live turn behind the running compression card. The captured id is
+  // STREAM-OWNED state and lives in attachLiveStream() (see there) — a
+  // send()-scoped binding would be invisible to the compressed handler and
+  // _restoreSettledSession, silently relying on an implicit global.
   let postStartData;
   let modelStateForPostStart;
   let explicitPickForPostStart;
@@ -1887,7 +1889,6 @@ async function send(){
   const startData = postStartData || {};
   streamId = postStartData ? postStartData.stream_id : null;
   S.activeStreamId = streamId;
-  _streamCompressionContinuationSid='';
   // setBusy(true) already ran with activeStreamId=null; refresh now that we
   // have a stream id so the primary button can switch to Stop (see
   // getComposerPrimaryAction).
@@ -2019,6 +2020,13 @@ const _STREAM_NOTIFICATION_BACKGROUND={};
 // keeps the prior state when the streamId matches. One idempotent
 // visibilitychange listener (never leaks) flips wasHidden on all active entries.
 const _STREAM_WAS_HIDDEN={};
+// #2761 (Gate B): per-stream continuation-session id registry, mirroring
+// _STREAM_WAS_HIDDEN's stream-ownership model. Keyed by activeSid with
+// {streamId, continuationSid}; a reconnect of the SAME stream keeps the
+// rotated id captured before the drop, while a brand-new stream starts clean.
+// The live value is a local inside attachLiveStream() — the registry only
+// preserves it across reconnects of the same stream.
+const _STREAM_COMPRESSION_SIDS={};
 let _streamHiddenTrackerBound=false;
 function _bindStreamHiddenTracker(){
   if(_streamHiddenTrackerBound||typeof document==='undefined'||typeof document.addEventListener!=='function') return;
@@ -2139,6 +2147,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   const _extensionTurnStartedAt=(S.session&&S.session.session_id===activeSid&&Number.isFinite(S.session.pending_started_at))
     ?S.session.pending_started_at
     :Date.now()/1000;
+  // #2761 (Gate B): continuation-session id captured from the `compressed`
+  // SSE event. STREAM-OWNED: declared here (not in send()) so the compressed
+  // handler and _restoreSettledSession share one per-stream binding instead
+  // of relying on an implicit global. A reconnect of the SAME stream keeps
+  // the rotated id captured before the drop; a brand-new stream starts clean.
+  let _streamCompressionContinuationSid='';
+  {
+    const _prevComp=_STREAM_COMPRESSION_SIDS[activeSid];
+    const _keepComp=reconnecting&&_prevComp&&_prevComp.streamId===streamId;
+    if(_keepComp){
+      _streamCompressionContinuationSid=_prevComp.continuationSid||'';
+    }else{
+      _STREAM_COMPRESSION_SIDS[activeSid]={streamId,continuationSid:''};
+    }
+  }
   // #4416: start (or, on reconnect for the SAME stream, keep) tracking whether
   // the tab was hidden during this stream so the done-notification fires for a
   // backgrounded tab. A reconnect with a different streamId re-seeds (the old
@@ -6160,9 +6183,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // to the visible pane when its completed session id equals the
         // currently displayed session, so treat that as an active-session
         // settle even though the turn's original activeSid rotated.
-        const isActiveSession=_isSessionCurrentPane(activeSid)
-          || (!!completedSid && !!S.session && S.session.session_id===completedSid);
-        const isSessionViewed=_isSessionActivelyViewed(activeSid);
+        // #2761 re-gate: the backend clears/saves active_stream_id BEFORE
+        // emitting done, so a newer continuation turn can start in that
+        // interval. Require canonical-pane AND current-stream ownership
+        // immediately before any mutation of S.session / S.messages /
+        // S.activeStreamId — otherwise the old handler clears the newer
+        // stream id, replaces its transcript, and the newer terminal event is
+        // rejected as stale (the newer answer is dropped).
+        const isActiveSession=(_isSessionCurrentPane(activeSid)
+          || (!!completedSid && !!S.session && S.session.session_id===completedSid))
+          && (!S.activeStreamId || S.activeStreamId===streamId);
+        // #2761 re-gate: the pane may have rotated to the continuation id, so
+        // resolve completedSid and treat EITHER the original activeSid or the
+        // rotated completedSid as viewed — a continuation pane the user is
+        // looking at must not be persisted as unread.
+        const isSessionViewed=_isSessionActivelyViewed(activeSid)
+          || (!!completedSid && _isSessionActivelyViewed(completedSid));
         const completedMessageCount=completedSession.message_count != null
           ? completedSession.message_count
           : (
@@ -6529,8 +6565,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // #2761 (Gate B): capture the rotated continuation id so recovery paths
       // (done settle, _restoreSettledSession) can poll the session that
       // actually carries the final answer instead of the archived
-      // pre-compression session.
-      if(continuationSid&&continuationSid!==activeSid) _streamCompressionContinuationSid=continuationSid;
+      // pre-compression session. Record it in the stream-owned local AND the
+      // per-stream registry so a same-stream reconnect keeps it.
+      if(continuationSid&&continuationSid!==activeSid){
+        _streamCompressionContinuationSid=continuationSid;
+        if(_STREAM_COMPRESSION_SIDS[activeSid]){
+          _STREAM_COMPRESSION_SIDS[activeSid]={streamId,continuationSid};
+        }
+      }
       const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||d.new_session_id===currentSid||d.continuation_session_id===currentSid));
       if(!eventMatchesCurrent) return;
       _applyToAnchor('compressed',d,e);
@@ -7017,6 +7059,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const session=data&&data.session;
       if(!session) return returnStatus?'missing':false;
       if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;
+      // #2761 re-gate (finding #1 of #6689): the backend clears/saves
+      // active_stream_id BEFORE emitting done, so a newer continuation turn can
+      // start while this poll was in flight. Re-assert canonical-pane AND
+      // current-stream ownership immediately before ANY mutation of S.session /
+      // S.messages / S.activeStreamId — a stale handler must not clear the
+      // newer stream id, mark its completion unread, or replace its transcript.
+      if(!(_isSessionCurrentPane(activeSid)||_isSessionCurrentPane(_restoreSid))
+        || (S.activeStreamId && S.activeStreamId!==streamId)){
+        _closeSource(source);
+        return returnStatus?'stale':false;
+      }
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _cancelThrottledSnapshotTimer();
       _clearAnchorProseIncrementalNode();
@@ -7031,15 +7084,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _closeSource(source);
       _clearApprovalForOwner();
       _clearClarifyForOwner('terminal');
-      const isSessionViewed=_isSessionActivelyViewed(activeSid);
       const completedSid=session.session_id||activeSid;
+      // #2761 re-gate: the pane may have rotated to the continuation id, so
+      // treat EITHER the original activeSid or the rotated completedSid as
+      // viewed — a continuation pane the user is looking at must not be
+      // persisted as unread.
+      const isSessionViewed=_isSessionActivelyViewed(activeSid)
+        || (!!completedSid && _isSessionActivelyViewed(completedSid));
       if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
         _markSessionCompletionUnread(completedSid, session.message_count);
       }
       // #2761 (Gate B): when the session was rotated to a continuation id,
       // the pane is authoritative if it is showing the rotated session (or
       // still the original one).
-      const isActiveSession=_isSessionCurrentPane(activeSid)||_isSessionCurrentPane(_restoreSid);
+      const isActiveSession=(_isSessionCurrentPane(activeSid)||_isSessionCurrentPane(_restoreSid))
+        && (!S.activeStreamId || S.activeStreamId===streamId);
       if(isActiveSession){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
