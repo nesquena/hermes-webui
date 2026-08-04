@@ -22142,6 +22142,25 @@ def _handle_chat_start(handler, body, diag=None):
                 pass
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
+        # A mobile client can still hold a pre-compression snapshot id after
+        # context compression. The gateway refuses appends to a closed
+        # snapshot ("closed by compression; adopt its live continuation"), so a
+        # full agent turn would run and then fail to persist (response_len=0).
+        # Resolve to the live continuation here, mirroring the GET /api/session
+        # continuation hint, so the typed message lands in the active session.
+        if getattr(s, "pre_compression_snapshot", False):
+            continuation_sid = _pre_compression_continuation_session_id(s)
+            if continuation_sid:
+                try:
+                    s = _get_or_materialize_session(
+                        continuation_sid, refresh_cli_messages=True
+                    )
+                except KeyError:
+                    logger.warning(
+                        "resolved continuation %s for snapshot %s but it is not loadable; continuing with snapshot",
+                        continuation_sid,
+                        body["session_id"],
+                    )
         diag.stage("validate_profile") if diag else None
         requested_profile = str(body.get("profile") or "").strip()
         active_profile = _get_active_profile_name()
