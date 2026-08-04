@@ -1,7 +1,9 @@
 import io
 import json
 import socket
+import ssl
 import time
+import urllib.error
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
@@ -334,7 +336,7 @@ def test_validate_id_token_rejects_mismatched_jwk_key_family(monkeypatch):
     monkeypatch.setattr(
         auth_oidc,
         "_get_jwks_document",
-        lambda _jwks_uri, **_kwargs: {
+        lambda _policy, _jwks_uri, **_kwargs: {
             "keys": [
                 {
                     "kid": "key-1",
@@ -354,6 +356,9 @@ def test_validate_id_token_rejects_mismatched_jwk_key_family(monkeypatch):
             issuer="https://issuer.example",
             nonce="nonce-token",
             jwks_uri="https://issuer.example/jwks",
+            policy=auth_oidc._OIDCNetworkPolicy(
+                issuer="https://issuer.example", allow_private_endpoints=False
+            ),
         )
 
 def test_validate_id_token_accepts_real_es256_jose_signature(monkeypatch):
@@ -374,7 +379,7 @@ def test_validate_id_token_accepts_real_es256_jose_signature(monkeypatch):
     monkeypatch.setattr(
         auth_oidc,
         "_get_jwks_document",
-        lambda _jwks_uri, **_kwargs: {"keys": [_ec_jwk(private_key)]},
+        lambda _policy, _jwks_uri, **_kwargs: {"keys": [_ec_jwk(private_key)]},
     )
 
     claims = auth_oidc._validate_id_token(
@@ -383,6 +388,9 @@ def test_validate_id_token_accepts_real_es256_jose_signature(monkeypatch):
         issuer="https://issuer.example",
         nonce="nonce-token",
         jwks_uri="https://issuer.example/jwks",
+        policy=auth_oidc._OIDCNetworkPolicy(
+            issuer="https://issuer.example", allow_private_endpoints=False
+        ),
     )
 
     assert claims["sub"] == "user-123"
@@ -407,7 +415,7 @@ def test_complete_authorization_pins_discovery_to_configured_issuer(monkeypatch)
     monkeypatch.setattr(
         auth_oidc,
         "_get_discovery_document",
-        lambda _issuer: {
+        lambda _policy, _issuer: {
             "issuer": "https://evil.example",
             "token_endpoint": "https://issuer.example/token",
             "jwks_uri": "https://issuer.example/jwks",
@@ -452,7 +460,7 @@ def test_validate_id_token_refetches_jwks_once_on_key_miss(monkeypatch):
     )
     fetches = []
 
-    def fake_fetch_json(url):
+    def fake_fetch_json(url, **_kwargs):
         fetches.append(url)
         return {"keys": [_ec_jwk(new_key, kid="new-key")]}
 
@@ -464,6 +472,9 @@ def test_validate_id_token_refetches_jwks_once_on_key_miss(monkeypatch):
         issuer="https://issuer.example",
         nonce="nonce-token",
         jwks_uri=jwks_uri,
+        policy=auth_oidc._OIDCNetworkPolicy(
+            issuer="https://issuer.example", allow_private_endpoints=False
+        ),
     )
 
     assert claims["sub"] == "user-123"
@@ -493,8 +504,11 @@ def test_fetch_json_rejects_unsafe_oidc_urls(url, message):
     import api.auth_oidc as auth_oidc
     from api.auth_oidc import OIDCAuthError
 
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example", allow_private_endpoints=False
+    )
     with pytest.raises(OIDCAuthError, match=message):
-        auth_oidc._fetch_json(url)
+        auth_oidc._fetch_json(url, policy=policy)
 
 
 def test_fetch_json_rejects_dns_resolved_private_hosts(monkeypatch):
@@ -508,9 +522,15 @@ def test_fetch_json_rejects_dns_resolved_private_hosts(monkeypatch):
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.7", 443))
         ],
     )
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example", allow_private_endpoints=False
+    )
 
     with pytest.raises(OIDCAuthError, match="private or local addresses"):
-        auth_oidc._fetch_json("https://issuer.example/.well-known/openid-configuration")
+        auth_oidc._fetch_json(
+            "https://issuer.example/.well-known/openid-configuration",
+            policy=policy,
+        )
 
 
 def test_select_public_key_rejects_wrong_ec_curve_for_alg():
@@ -575,28 +595,84 @@ def test_normalize_allow_values_and_scopes_use_separate_delimiters():
 
 
 def test_allow_private_endpoints_matching_issuer_host(monkeypatch):
-    """When allow_private_endpoints=True and the URL host matches the
-    configured issuer host, private IP resolution must NOT raise."""
+    """When allow_private_endpoints=True and the URL's origin (host AND port)
+    matches the configured issuer's exact origin, private IP resolution must
+    NOT raise."""
     import api.auth_oidc as auth_oidc
 
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://auth.internal.example", allow_private_endpoints=True
+    )
     monkeypatch.setattr(
-        auth_oidc,
-        "_resolve_oidc_config",
-        lambda: {
-            "issuer": "https://auth.internal.example",
-            "client_id": "webui-client",
-            "client_secret": "",
-            "redirect_uri": "",
-            "scopes": ["openid"],
-            "allow_claim": "email",
-            "allow_values": ["user@example.com"],
-            "allow_private_endpoints": True,
-        },
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 443))
+        ],
     )
-    # URL on the same host as the configured issuer — must skip SSRF check
+    # URL on the exact configured origin — must skip the SSRF address check
     auth_oidc._validate_outbound_oidc_url(
-        "https://auth.internal.example/.well-known/openid-configuration"
+        "https://auth.internal.example/.well-known/openid-configuration",
+        policy=policy,
     )
+
+
+def test_allow_private_grant_is_exact_origin_scoped_same_host_different_port(monkeypatch):
+    """The allow-private grant is (host, port) scoped: a discovery-controlled
+    endpoint on the SAME host but a DIFFERENT port must NOT inherit it."""
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://auth.internal.example:8443", allow_private_endpoints=True
+    )
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.7", 9999))
+        ],
+    )
+    # Same host, different port → NOT the exact origin → private blocked
+    with pytest.raises(OIDCAuthError, match="private or local addresses"):
+        auth_oidc._validate_outbound_oidc_url(
+            "https://auth.internal.example:9999/token", policy=policy
+        )
+    # Same host AND port (the exact origin) → grant applies
+    auth_oidc._validate_outbound_oidc_url(
+        "https://auth.internal.example:8443/.well-known/openid-configuration",
+        policy=policy,
+    )
+
+
+def test_allow_private_grant_normalizes_effective_port(monkeypatch):
+    """Effective-port normalization: an issuer without an explicit port is
+    origin 443, so an explicit :443 URL is still the exact origin, while
+    :8443 is not."""
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://auth.internal.example", allow_private_endpoints=True
+    )
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 443))
+        ],
+    )
+    # Explicit :443 equals the default 443 origin → allowed
+    auth_oidc._validate_outbound_oidc_url(
+        "https://auth.internal.example:443/.well-known/openid-configuration",
+        policy=policy,
+    )
+    # Different port → blocked even though the host matches
+    with pytest.raises(OIDCAuthError, match="private or local addresses"):
+        auth_oidc._validate_outbound_oidc_url(
+            "https://auth.internal.example:8443/.well-known/openid-configuration",
+            policy=policy,
+        )
 
 
 def test_allow_private_endpoints_different_host_still_blocked(monkeypatch):
@@ -605,19 +681,8 @@ def test_allow_private_endpoints_different_host_still_blocked(monkeypatch):
     import api.auth_oidc as auth_oidc
     from api.auth_oidc import OIDCAuthError
 
-    monkeypatch.setattr(
-        auth_oidc,
-        "_resolve_oidc_config",
-        lambda: {
-            "issuer": "https://auth.internal.example",
-            "client_id": "webui-client",
-            "client_secret": "",
-            "redirect_uri": "",
-            "scopes": ["openid"],
-            "allow_claim": "email",
-            "allow_values": ["user@example.com"],
-            "allow_private_endpoints": True,
-        },
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://auth.internal.example", allow_private_endpoints=True
     )
     monkeypatch.setattr(
         auth_oidc.socket,
@@ -629,28 +694,18 @@ def test_allow_private_endpoints_different_host_still_blocked(monkeypatch):
     # Different host from issuer — must still reject private IPs
     with pytest.raises(OIDCAuthError, match="private or local addresses"):
         auth_oidc._validate_outbound_oidc_url(
-            "https://evil-token.internal.example/token"
+            "https://evil-token.internal.example/token", policy=policy
         )
 
 
 def test_allow_private_endpoints_default_false_blocks_private_dns(monkeypatch):
-    """Without allow_private_endpoints=True, private IPs must still be blocked."""
+    """Without allow_private_endpoints=True, private IPs must still be blocked
+    even when the URL is on the exact configured origin."""
     import api.auth_oidc as auth_oidc
     from api.auth_oidc import OIDCAuthError
 
-    monkeypatch.setattr(
-        auth_oidc,
-        "_resolve_oidc_config",
-        lambda: {
-            "issuer": "https://auth.internal.example",
-            "client_id": "webui-client",
-            "client_secret": "",
-            "redirect_uri": "",
-            "scopes": ["openid"],
-            "allow_claim": "email",
-            "allow_values": ["user@example.com"],
-            "allow_private_endpoints": False,
-        },
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://auth.internal.example", allow_private_endpoints=False
     )
     monkeypatch.setattr(
         auth_oidc.socket,
@@ -661,5 +716,659 @@ def test_allow_private_endpoints_default_false_blocks_private_dns(monkeypatch):
     )
     with pytest.raises(OIDCAuthError, match="private or local addresses"):
         auth_oidc._validate_outbound_oidc_url(
-            "https://auth.internal.example/.well-known/openid-configuration"
+            "https://auth.internal.example/.well-known/openid-configuration",
+            policy=policy,
         )
+
+
+class _FakeOpener:
+    def __init__(self, payload=None, capture=None, error=None):
+        self.payload = payload
+        self.capture = capture
+        self.error = error
+
+    def open(self, req, timeout=None):
+        if self.capture is not None:
+            self.capture["req"] = req
+        if self.error is not None:
+            raise self.error
+        return _FakeResponse(self.payload)
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._raw = json.dumps(payload).encode("utf-8")
+
+    def read(self):
+        return self._raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        # IPv4: loopback, private (RFC1918), link-local/metadata, multicast,
+        # unspecified, reserved
+        "127.0.0.1",
+        "10.0.0.1",
+        "172.16.0.1",
+        "192.168.1.7",
+        "169.254.169.254",
+        "169.254.1.1",
+        "224.0.0.1",
+        "0.0.0.0",
+        "240.0.0.1",
+        # IPv6: loopback, ULA, link-local, multicast, unspecified
+        "::1",
+        "fc00::1",
+        "fe80::1",
+        "ff02::1",
+        "::",
+        # IPv4-mapped IPv6 forms of loopback/private/link-local
+        "::ffff:127.0.0.1",
+        "::ffff:10.0.0.1",
+        "::ffff:169.254.169.254",
+    ],
+)
+def test_validate_outbound_url_rejects_special_address_ranges(address):
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example", allow_private_endpoints=False
+    )
+    host = f"[{address}]" if ":" in address else address
+    with pytest.raises(OIDCAuthError, match="private or local addresses"):
+        auth_oidc._validate_outbound_oidc_url(
+            f"https://{host}/.well-known/openid-configuration", policy=policy
+        )
+
+
+@pytest.mark.parametrize("address", ["93.184.216.34", "8.8.8.8"])
+def test_validate_outbound_url_allows_public_address_ranges(address):
+    import api.auth_oidc as auth_oidc
+
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example", allow_private_endpoints=False
+    )
+    host = f"[{address}]" if ":" in address else address
+    auth_oidc._validate_outbound_oidc_url(
+        f"https://{host}/.well-known/openid-configuration", policy=policy
+    )
+
+
+def test_exact_origin_loopback_allowance_is_explicit_and_scoped(monkeypatch):
+    """Loopback is reachable ONLY for the exact configured origin under the
+    explicit opt-in; the same loopback on another port stays blocked, and
+    without the opt-in the exact origin itself stays blocked."""
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 8443))],
+    )
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://127.0.0.1:8443", allow_private_endpoints=True
+    )
+    # Exact loopback origin under the opt-in → allowed
+    auth_oidc._validate_outbound_oidc_url(
+        "https://127.0.0.1:8443/.well-known/openid-configuration", policy=policy
+    )
+    # Same loopback host, different port → blocked
+    with pytest.raises(OIDCAuthError, match="private or local addresses"):
+        auth_oidc._validate_outbound_oidc_url(
+            "https://127.0.0.1:9999/token", policy=policy
+        )
+    # No opt-in → even the exact loopback origin is blocked
+    policy_no_optin = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://127.0.0.1:8443", allow_private_endpoints=False
+    )
+    with pytest.raises(OIDCAuthError, match="private or local addresses"):
+        auth_oidc._validate_outbound_oidc_url(
+            "https://127.0.0.1:8443/.well-known/openid-configuration",
+            policy=policy_no_optin,
+        )
+
+
+def test_exact_origin_never_reaches_link_local_metadata(monkeypatch):
+    """Even with the opt-in, the exact configured origin must never reach
+    link-local / cloud-metadata addresses (169.254.0.0/16)."""
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 443))],
+    )
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example", allow_private_endpoints=True
+    )
+    # URL is the exact origin (URL-level check skipped), but the pinned
+    # connection classifies link-local as always-disallowed → fail closed.
+    with pytest.raises(OIDCAuthError, match="resolved only to disallowed addresses"):
+        auth_oidc._fetch_json(
+            "https://issuer.example/.well-known/openid-configuration", policy=policy
+        )
+
+
+def test_fetch_json_fails_closed_on_dns_error(monkeypatch):
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    def boom(*a, **k):
+        raise socket.gaierror(-2, "Name or service not known")
+
+    monkeypatch.setattr(auth_oidc.socket, "getaddrinfo", boom)
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example", allow_private_endpoints=False
+    )
+    with pytest.raises(OIDCAuthError, match="Failed to resolve OIDC endpoint host"):
+        auth_oidc._fetch_json(
+            "https://issuer.example/.well-known/openid-configuration", policy=policy
+        )
+
+
+def test_fetch_json_fails_closed_on_empty_dns_answers(monkeypatch):
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setattr(auth_oidc.socket, "getaddrinfo", lambda *a, **k: [])
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example", allow_private_endpoints=False
+    )
+    with pytest.raises(OIDCAuthError, match="resolved to no addresses"):
+        auth_oidc._fetch_json(
+            "https://issuer.example/.well-known/openid-configuration", policy=policy
+        )
+
+
+def test_fetch_json_rejects_mixed_public_private_answers(monkeypatch):
+    """A non-exact-origin host that resolves to a mix of public and private
+    addresses is rejected outright (fail closed on mixed answers)."""
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *a, **k: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 443)),
+        ],
+    )
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example", allow_private_endpoints=False
+    )
+    with pytest.raises(OIDCAuthError, match="private or local addresses"):
+        auth_oidc._fetch_json(
+            "https://issuer.example/.well-known/openid-configuration", policy=policy
+        )
+
+
+def test_fetch_json_fails_closed_on_rebinding_to_metadata(monkeypatch):
+    """DNS rebinding / peer mismatch: the URL-level precheck passes (as if the
+    first resolution were public), but the connect-time resolution flips to
+    the cloud metadata address — the pinned connection must fail closed."""
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    # Precheck sees a clean resolution...
+    monkeypatch.setattr(auth_oidc, "_is_disallowed_oidc_host", lambda _host: False)
+    # ...then the actual connection resolves to link-local metadata.
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 443))],
+    )
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example", allow_private_endpoints=False
+    )
+    with pytest.raises(OIDCAuthError, match="resolved only to disallowed addresses"):
+        auth_oidc._fetch_json(
+            "https://issuer.example/.well-known/openid-configuration", policy=policy
+        )
+
+
+def test_pinned_connection_binds_to_first_approved_address_and_keeps_sni(monkeypatch):
+    """The connection resolves ONCE, skips disallowed addresses, pins the
+    socket to the first approved (public) address, and still verifies the TLS
+    hostname (server_hostname) against the requested host."""
+    import api.auth_oidc as auth_oidc
+
+    captured = {}
+
+    class FakeSocket:
+        def __init__(self, family, socktype, proto):
+            captured["family"] = family
+            captured["socktype"] = socktype
+
+        def settimeout(self, timeout):
+            captured["timeout"] = timeout
+
+        def connect(self, sockaddr):
+            captured["sockaddr"] = sockaddr
+
+        def close(self):
+            pass
+
+    def fake_wrap_socket(self, sock, *, server_hostname=None, **kwargs):
+        captured["server_hostname"] = server_hostname
+        return sock
+
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *a, **k: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.7", 443)),
+        ],
+    )
+    monkeypatch.setattr(auth_oidc.socket, "socket", FakeSocket)
+    monkeypatch.setattr(ssl.SSLContext, "wrap_socket", fake_wrap_socket)
+
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example", allow_private_endpoints=False
+    )
+    conn = auth_oidc._PinnedHTTPSConnection("issuer.example", 443, policy=policy, timeout=10)
+    conn.connect()
+
+    # Pinned to the first approved address of the SINGLE resolution — never
+    # to the private one, never to a re-resolved address.
+    assert captured["sockaddr"] == ("93.184.216.34", 443)
+    # TLS hostname verification / SNI preserved against the requested host.
+    assert captured["server_hostname"] == "issuer.example"
+    assert conn.sock is not None
+
+
+def test_pinned_connection_fails_closed_when_only_disallowed_addresses(monkeypatch):
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 443))],
+    )
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example", allow_private_endpoints=False
+    )
+    conn = auth_oidc._PinnedHTTPSConnection("issuer.example", 443, policy=policy, timeout=10)
+    with pytest.raises(OIDCAuthError, match="disallowed addresses"):
+        conn.connect()
+
+
+def test_pinned_connection_fails_closed_on_dns_error(monkeypatch):
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    def boom(*a, **k):
+        raise socket.gaierror(-2, "Name or service not known")
+
+    monkeypatch.setattr(auth_oidc.socket, "getaddrinfo", boom)
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example", allow_private_endpoints=False
+    )
+    conn = auth_oidc._PinnedHTTPSConnection("issuer.example", 443, policy=policy, timeout=10)
+    with pytest.raises(OIDCAuthError, match="Failed to resolve OIDC endpoint host"):
+        conn.connect()
+
+
+def test_no_redirect_handler_refuses_all_redirects():
+    """Redirects stay disabled: every 3xx hop is refused, never followed."""
+    import api.auth_oidc as auth_oidc
+
+    handler = auth_oidc._NoRedirect()
+    assert (
+        handler.redirect_request(None, None, 302, None, None, "https://evil.example/steal")
+        is None
+    )
+
+
+def test_fetch_json_surfaces_redirect_as_failure(monkeypatch):
+    """A 302 response is not followed; it surfaces as an OIDCAuthError."""
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+    )
+    monkeypatch.setattr(
+        auth_oidc,
+        "_oidc_opener",
+        lambda _policy: _FakeOpener(
+            error=urllib.error.HTTPError(
+                "https://issuer.example/", 302, "Found", {}, None
+            )
+        ),
+    )
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example", allow_private_endpoints=False
+    )
+    with pytest.raises(OIDCAuthError, match="Failed to reach OIDC endpoint"):
+        auth_oidc._fetch_json(
+            "https://issuer.example/.well-known/openid-configuration", policy=policy
+        )
+
+
+def test_fetch_json_sends_get_with_accept_header(monkeypatch):
+    import api.auth_oidc as auth_oidc
+
+    captured = {}
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+    )
+    monkeypatch.setattr(
+        auth_oidc, "_oidc_opener", lambda _policy: _FakeOpener({"ok": True}, captured)
+    )
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example", allow_private_endpoints=False
+    )
+    result = auth_oidc._fetch_json(
+        "https://issuer.example/.well-known/openid-configuration", policy=policy
+    )
+
+    req = captured["req"]
+    assert req.get_method() == "GET"
+    assert req.full_url == "https://issuer.example/.well-known/openid-configuration"
+    assert any(
+        k.lower() == "accept" and v == "application/json"
+        for k, v in req.header_items()
+    )
+    assert result == {"ok": True}
+
+
+def test_post_form_json_sends_exact_method_target_and_secrets(monkeypatch):
+    """The token exchange is a POST to the exact discovery-controlled target;
+    the client_secret travels in the form body — never in an Authorization
+    header."""
+    import api.auth_oidc as auth_oidc
+
+    captured = {}
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+    )
+    monkeypatch.setattr(
+        auth_oidc,
+        "_oidc_opener",
+        lambda _policy: _FakeOpener({"access_token": "at"}, captured),
+    )
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example", allow_private_endpoints=False
+    )
+    result = auth_oidc._post_form_json(
+        "https://issuer.example/token",
+        {
+            "grant_type": "authorization_code",
+            "client_id": "webui-client",
+            "code": "auth-code",
+            "code_verifier": "pkce-verifier",
+            "client_secret": "super-secret",
+        },
+        policy=policy,
+    )
+
+    req = captured["req"]
+    assert req.get_method() == "POST"
+    assert req.full_url == "https://issuer.example/token"
+    headers = {k.lower(): v for k, v in req.header_items()}
+    assert headers["content-type"] == "application/x-www-form-urlencoded"
+    body = req.data.decode("utf-8")
+    assert "client_secret=super-secret" in body
+    assert "code_verifier=pkce-verifier" in body
+    assert "authorization" not in headers
+    assert result == {"access_token": "at"}
+
+
+def test_oidc_network_policy_is_immutable():
+    """The policy is parsed once and cannot be mutated afterwards."""
+    import api.auth_oidc as auth_oidc
+
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example:8443", allow_private_endpoints=True
+    )
+    assert (policy.origin_host, policy.origin_port) == ("issuer.example", 8443)
+    assert policy.allow_private_endpoints is True
+    with pytest.raises(AttributeError):
+        policy.origin_host = "evil.example"
+    with pytest.raises(AttributeError):
+        policy.allow_private_endpoints = False
+    # Non-https issuers are rejected at policy construction time.
+    with pytest.raises(auth_oidc.OIDCConfigError):
+        auth_oidc._OIDCNetworkPolicy(
+            issuer="http://issuer.example", allow_private_endpoints=True
+        )
+
+
+def test_start_flow_requires_present_discovery_issuer(monkeypatch):
+    """The start flow must NOT consume authorization_endpoint unless the
+    discovery document declares a present issuer."""
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setattr(
+        auth_oidc,
+        "_require_oidc_config",
+        lambda: {
+            "issuer": "https://issuer.example",
+            "client_id": "webui-client",
+            "client_secret": "",
+            "redirect_uri": "",
+            "scopes": ["openid"],
+            "allow_claim": "email",
+            "allow_values": ["user@example.com"],
+            "allow_private_endpoints": False,
+        },
+    )
+    monkeypatch.setattr(
+        auth_oidc,
+        "_get_discovery_document",
+        lambda _policy, _issuer: {
+            "authorization_endpoint": "https://issuer.example/authorize",
+            "token_endpoint": "https://issuer.example/token",
+            "jwks_uri": "https://issuer.example/jwks",
+            # "issuer" deliberately missing
+        },
+    )
+    with pytest.raises(OIDCAuthError, match="did not include an issuer"):
+        auth_oidc.build_authorization_redirect("http://localhost:8787")
+
+
+def test_start_flow_rejects_mismatched_discovery_issuer(monkeypatch):
+    """The start flow must reject a discovery document whose issuer differs
+    from the configured issuer."""
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setattr(
+        auth_oidc,
+        "_require_oidc_config",
+        lambda: {
+            "issuer": "https://issuer.example",
+            "client_id": "webui-client",
+            "client_secret": "",
+            "redirect_uri": "",
+            "scopes": ["openid"],
+            "allow_claim": "email",
+            "allow_values": ["user@example.com"],
+            "allow_private_endpoints": False,
+        },
+    )
+    monkeypatch.setattr(
+        auth_oidc,
+        "_get_discovery_document",
+        lambda _policy, _issuer: {
+            "issuer": "https://evil.example",
+            "authorization_endpoint": "https://issuer.example/authorize",
+            "token_endpoint": "https://issuer.example/token",
+            "jwks_uri": "https://issuer.example/jwks",
+        },
+    )
+    with pytest.raises(OIDCAuthError, match="did not match the configured issuer"):
+        auth_oidc.build_authorization_redirect("http://localhost:8787")
+
+
+def test_callback_flow_requires_present_discovery_issuer(monkeypatch):
+    """The callback flow must reject a discovery document with NO issuer —
+    a missing issuer is as fatal as a mismatch."""
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setattr(
+        auth_oidc,
+        "_resolve_oidc_config",
+        lambda: {
+            "issuer": "https://issuer.example",
+            "client_id": "webui-client",
+            "client_secret": "",
+            "redirect_uri": "",
+            "scopes": ["openid"],
+            "allow_claim": "email",
+            "allow_values": ["user@example.com"],
+            "allow_private_endpoints": False,
+        },
+    )
+    monkeypatch.setattr(
+        auth_oidc,
+        "_get_discovery_document",
+        lambda _policy, _issuer: {
+            "token_endpoint": "https://issuer.example/token",
+            "jwks_uri": "https://issuer.example/jwks",
+        },
+    )
+    auth_oidc._pending_flows.clear()
+    auth_oidc._pending_flows["state-token"] = {
+        "created_at": time.time(),
+        "nonce": "nonce-token",
+        "code_verifier": "verifier",
+        "next_path": "/",
+    }
+    with pytest.raises(OIDCAuthError, match="did not include an issuer"):
+        auth_oidc.complete_authorization_code_flow(
+            "http://localhost:8787", "state-token", "code-token"
+        )
+
+
+def test_callback_flow_blocks_same_host_different_port_token_pivot(monkeypatch):
+    """#6136 re-gate: a discovery-controlled token_endpoint on the SAME host
+    but a DIFFERENT port must NOT inherit the allow-private grant."""
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setattr(
+        auth_oidc,
+        "_resolve_oidc_config",
+        lambda: {
+            "issuer": "https://auth.internal.example:8443",
+            "client_id": "webui-client",
+            "client_secret": "",
+            "redirect_uri": "",
+            "scopes": ["openid"],
+            "allow_claim": "email",
+            "allow_values": ["user@example.com"],
+            "allow_private_endpoints": True,
+        },
+    )
+    monkeypatch.setattr(
+        auth_oidc,
+        "_get_discovery_document",
+        lambda _policy, _issuer: {
+            "issuer": "https://auth.internal.example:8443",
+            "token_endpoint": "https://auth.internal.example:9999/token",
+            "jwks_uri": "https://auth.internal.example:8443/jwks",
+        },
+    )
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.7", 9999))],
+    )
+    auth_oidc._pending_flows.clear()
+    auth_oidc._pending_flows["state-token"] = {
+        "created_at": time.time(),
+        "nonce": "nonce-token",
+        "code_verifier": "verifier",
+        "next_path": "/",
+    }
+    with pytest.raises(OIDCAuthError, match="private or local addresses"):
+        auth_oidc.complete_authorization_code_flow(
+            "http://localhost:8787", "state-token", "code-token"
+        )
+
+
+def test_callback_flow_allows_exact_origin_private_endpoints_end_to_end(monkeypatch):
+    """The full callback flow (discovery → token → id_token) succeeds when the
+    discovery-controlled endpoints sit on the exact configured origin and the
+    opt-in is enabled — the immutable policy is carried through every hop."""
+    import api.auth_oidc as auth_oidc
+
+    monkeypatch.setattr(
+        auth_oidc,
+        "_resolve_oidc_config",
+        lambda: {
+            "issuer": "https://auth.internal.example:8443",
+            "client_id": "webui-client",
+            "client_secret": "client-secret",
+            "redirect_uri": "",
+            "scopes": ["openid"],
+            "allow_claim": "email",
+            "allow_values": ["user@example.com"],
+            "allow_private_endpoints": True,
+        },
+    )
+    monkeypatch.setattr(
+        auth_oidc,
+        "_get_discovery_document",
+        lambda _policy, _issuer: {
+            "issuer": "https://auth.internal.example:8443",
+            "token_endpoint": "https://auth.internal.example:8443/token",
+            "jwks_uri": "https://auth.internal.example:8443/jwks",
+        },
+    )
+    # The exact origin resolves privately — permitted by the scoped grant.
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 8443))],
+    )
+    captured = {}
+    monkeypatch.setattr(
+        auth_oidc,
+        "_oidc_opener",
+        lambda _policy: _FakeOpener({"id_token": "abc.def.ghi"}, captured),
+    )
+    monkeypatch.setattr(
+        auth_oidc,
+        "_validate_id_token",
+        lambda _token, **_kwargs: {"sub": "user-123", "email": "user@example.com"},
+    )
+    auth_oidc._pending_flows.clear()
+    auth_oidc._pending_flows["state-token"] = {
+        "created_at": time.time(),
+        "nonce": "nonce-token",
+        "code_verifier": "verifier",
+        "next_path": "/chat/1",
+    }
+
+    result = auth_oidc.complete_authorization_code_flow(
+        "http://localhost:8787", "state-token", "code-token"
+    )
+
+    assert result["subject"] == "user-123"
+    assert result["email"] == "user@example.com"
+    assert result["next_path"] == "/chat/1"
+    # The token exchange hit the exact-origin token endpoint.
+    assert captured["req"].full_url == "https://auth.internal.example:8443/token"
