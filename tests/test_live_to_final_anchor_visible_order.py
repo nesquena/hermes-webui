@@ -427,7 +427,10 @@ def test_live_processed_anchor_renders_before_first_activity_row():
     assert "turnStartedAt:S.session&&S.session.pending_started_at" in live
     assert "if(!S.session) return null;" in shell
     assert "const activeStreamId=S.activeStreamId||'';" in shell
-    assert "_renderLiveAnchorActivitySceneForStream(activeStreamId, S.session.session_id, {mode:'compact_worklog'})" in shell
+    # #5942/#5943: the hardcoded {mode:'compact_worklog'} hint was removed so the
+    # helper resolves the user's ACTIVE display mode (a caller hint must not force
+    # compact onto a transparent turn). Assert the call is still wired, mode-free.
+    assert "_renderLiveAnchorActivitySceneForStream(activeStreamId, S.session.session_id)" in shell
     assert "if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();" in send
 
 
@@ -851,6 +854,170 @@ def test_application_error_settlement_attaches_projected_anchor_scene_before_ren
     assert synthetic_push_idx < synthetic_attach_idx < render_idx
 
 
+def test_deferred_application_error_retry_is_owner_fenced_and_idempotent():
+    attach = _function_body(MESSAGES_JS, "_attachProjectedAnchorSceneToLastAssistant")
+    message_ref = _function_body(MESSAGES_JS, "_anchorSceneMessageRef")
+    owner_key = _function_body(MESSAGES_JS, "_settledAnchorRetryOwnerKey")
+    retry = _function_body(MESSAGES_JS, "_retrySettledAnchorScene")
+    script = f"""
+const activeSid='sid-A';
+const streamId='stream-A';
+const _anchorRegistry={{generation:'A'}};
+const _anchorRegistryMap=new Map([['stream-A',_anchorRegistry]]);
+const S={{session:{{session_id:'sid-A'}},activeStreamId:null,messages:[]}};
+let scene={{version:'activity_scene_v1',mode:'compact_worklog',activity_rows:[{{role:'tool'}}]}};
+let persisted=[];
+let deferredRetry=null;
+function _projectLiveAnchorActivityScene(){{ return scene; }}
+function _completeSettledAnchorSceneForTurn(messages,index,projected){{ return projected; }}
+function _anchorSceneHasOwnedOutcomes(){{ return false; }}
+function _anchorSceneHasWorklogWorthyRows(){{ return true; }}
+function _persistSettledAnchorScene(message,nextScene,index){{ persisted.push({{message,index,nextScene}}); }}
+function _attachProjectedAnchorSceneToLastAssistant(messages,targetMessage=null,targetIndex=null){{{attach}}}
+function _anchorSceneMessageRef(message){{{message_ref}}}
+function _settledAnchorRetryOwnerKey(messages,targetIndex,retryStreamId){{{owner_key}}}
+function _retrySettledAnchorScene(targetMessage,targetIndex,retryStreamId,retryRegistry,retryOwnerKey){{{retry}}}
+function scheduleRetry(targetMessage,targetIndex,retryStreamId,retryRegistry,retryOwnerKey){{
+  deferredRetry=()=>_retrySettledAnchorScene(targetMessage,targetIndex,retryStreamId,retryRegistry,retryOwnerKey);
+}}
+const sharedPrefix='x'.repeat(160);
+const originalMessages=[
+  {{role:'user',content:'inspect the current turn'}},
+  {{
+    role:'assistant',
+    content:sharedPrefix+' owner-A tail',
+    tool_calls:[{{id:'tool-A',function:{{name:'terminal',arguments:'{{}}'}}}}],
+  }},
+  {{role:'assistant',content:'**Error:** gateway failed'}},
+];
+const assistantA=originalMessages[2];
+S.messages=originalMessages;
+const refreshedMessages=JSON.parse(JSON.stringify(originalMessages));
+const initialResult=_attachProjectedAnchorSceneToLastAssistant(S.messages,assistantA,2);
+const persistedAfterInitial=persisted.length;
+const ownerKey=_settledAnchorRetryOwnerKey(S.messages,2,'stream-A');
+scheduleRetry(assistantA,2,'stream-A',_anchorRegistry,ownerKey);
+S.messages=refreshedMessages;
+const refreshedA=S.messages[2];
+const firstResult=deferredRetry();
+const persistedAfterRefresh=persisted.length;
+scene={{
+  version:'activity_scene_v1',
+  mode:'compact_worklog',
+  activity_rows:[{{role:'tool'}},{{role:'thinking'}}],
+}};
+scheduleRetry(assistantA,2,'stream-A',_anchorRegistry,ownerKey);
+const secondResult=deferredRetry();
+const persistedAfterLateRow=persisted.length;
+scheduleRetry(assistantA,2,'stream-A',_anchorRegistry,ownerKey);
+const thirdResult=deferredRetry();
+const positiveState={{
+  ownerKeyPresent:Boolean(ownerKey),
+  initialResult,
+  firstResult,
+  secondResult,
+  thirdResult,
+  persistedAfterInitial,
+  persistedAfterRefresh,
+  persistedAfterLateRow,
+  refreshedHasScene:Boolean(refreshedA._anchor_activity_scene),
+  persisted:persisted.length,
+}};
+
+const ambiguousB={{role:'assistant',content:'**Error:** gateway failed'}};
+S.messages=[
+  {{role:'user',content:'inspect the current turn'}},
+  {{
+    role:'assistant',
+    content:sharedPrefix+' owner-B tail',
+    tool_calls:[{{id:'tool-B',function:{{name:'terminal',arguments:'{{}}'}}}}],
+  }},
+  ambiguousB,
+];
+scheduleRetry(assistantA,2,'stream-A',_anchorRegistry,ownerKey);
+const ambiguousResult=deferredRetry();
+const ambiguousState={{
+  result:ambiguousResult,
+  bHasScene:Boolean(ambiguousB._anchor_activity_scene),
+  bStreamId:ambiguousB._anchor_stream_id||null,
+  persisted:persisted.length,
+}};
+
+const ownerlessA={{role:'assistant',content:'timestamp-less owner'}};
+S.messages=[ownerlessA];
+const ownerlessKey=_settledAnchorRetryOwnerKey(S.messages,0,'stream-A');
+scheduleRetry(ownerlessA,0,'stream-A',_anchorRegistry,ownerlessKey);
+const ownerlessExactResult=deferredRetry();
+const ownerlessB={{role:'assistant',content:'timestamp-less owner'}};
+S.messages=[ownerlessB];
+scheduleRetry(ownerlessA,0,'stream-A',_anchorRegistry,ownerlessKey);
+const ownerlessReplacementResult=deferredRetry();
+const ownerlessState={{
+  ownerKey:ownerlessKey,
+  exactResult:ownerlessExactResult,
+  replacementResult:ownerlessReplacementResult,
+  bHasScene:Boolean(ownerlessB._anchor_activity_scene),
+  persisted:persisted.length,
+}};
+
+S.messages=JSON.parse(JSON.stringify(originalMessages));
+S.activeStreamId='stream-B';
+scheduleRetry(assistantA,2,'stream-A',_anchorRegistry,ownerKey);
+const streamResult=deferredRetry();
+const streamState={{result:streamResult,persisted:persisted.length}};
+S.activeStreamId=null;
+_anchorRegistryMap.set('stream-A',{{generation:'B'}});
+scheduleRetry(assistantA,2,'stream-A',_anchorRegistry,ownerKey);
+const registryResult=deferredRetry();
+const registryState={{result:registryResult,persisted:persisted.length}};
+_anchorRegistryMap.set('stream-A',_anchorRegistry);
+S.session={{session_id:'sid-B'}};
+scheduleRetry(assistantA,2,'stream-A',_anchorRegistry,ownerKey);
+const sessionResult=deferredRetry();
+const sessionState={{result:sessionResult,persisted:persisted.length}};
+console.log(JSON.stringify({{
+  positiveState,
+  ambiguousState,
+  ownerlessState,
+  streamState,
+  registryState,
+  sessionState,
+}}));
+"""
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["positiveState"] == {
+        "ownerKeyPresent": True,
+        "initialResult": True,
+        "firstResult": True,
+        "secondResult": True,
+        "thirdResult": True,
+        "persistedAfterInitial": 1,
+        "persistedAfterRefresh": 1,
+        "persistedAfterLateRow": 2,
+        "refreshedHasScene": True,
+        "persisted": 2,
+    }
+    assert data["ambiguousState"] == {
+        "result": False,
+        "bHasScene": False,
+        "bStreamId": None,
+        "persisted": 2,
+    }
+    assert data["ownerlessState"] == {
+        "ownerKey": "",
+        "exactResult": True,
+        "replacementResult": False,
+        "bHasScene": False,
+        "persisted": 3,
+    }
+    assert data["streamState"] == {"result": False, "persisted": 3}
+    assert data["registryState"] == {"result": False, "persisted": 3}
+    assert data["sessionState"] == {"result": False, "persisted": 3}
+
+
 def test_connection_error_terminal_message_attaches_projected_anchor_scene_before_render():
     error = _function_body(MESSAGES_JS, "_handleStreamError")
 
@@ -924,10 +1091,12 @@ def test_settled_anchor_scene_preserves_live_projected_order_before_backfill():
     overlap = _function_body(MESSAGES_JS, "_anchorSceneRowTextOverlapsExisting")
 
     projected_idx = complete.index("const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];")
-    projected_push_idx = complete.index("for(const row of projectedRows){")
-    backfill_idx = complete.index("for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)")
-    terminal_idx = complete.index("if(row&&row.role==='terminal') pushRow(row);", backfill_idx)
-    assert projected_idx < projected_push_idx < backfill_idx < terminal_idx
+    ordered_idx = complete.index("const orderedRows=[];", projected_idx)
+    projected_push_idx = complete.index("orderedRows.push(row);", ordered_idx)
+    backfill_idx = complete.index("for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)", projected_push_idx)
+    terminal_idx = complete.index("if(row&&row.role==='terminal') orderedRows.push(row);", backfill_idx)
+    replay_idx = complete.index("orderedRows.forEach((row)=>pushRow(row));", terminal_idx)
+    assert projected_idx < ordered_idx < projected_push_idx < backfill_idx < terminal_idx < replay_idx
 
     assert "const seenTextKeys=[];" in complete
     assert "_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)" in complete
@@ -943,9 +1112,16 @@ def test_settled_anchor_scene_does_not_persist_running_live_activity_rows():
     assert "const hasSettledThinking=_anchorSceneMessageRowsHaveThinking(messageRows);" in complete
     assert "row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);" in complete
     assert "String(value||'').startsWith('live-')" in live_identity
+    assert "const hasStreamOwner=!!(row.stream_id||row.run_id||identity.stream_id||identity.run_id);" in live_identity
+    assert "const hasAssistantMessageIndex=group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null;" in live_identity
+    assert "return hasStreamOwner&&!hasAssistantMessageIndex;" in live_identity
     assert "String(row.status||'').toLowerCase()!=='running'" in settle_live
     assert "if(row.role==='thinking'&&hasSettledThinking) return null;" in settle_live
-    assert "return {...row,status:'completed'};" in settle_live
+    assert "const sealed={...row,status:'completed'};" in settle_live
+    assert "sealed.payload={...row.payload,status:'completed'};" in settle_live
+    assert "if(row.role==='tool') sealed.payload.done=true;" in settle_live
+    assert "sealed.tool={...row.tool,done:true};" in settle_live
+    assert "return sealed;" in settle_live
 
 
 def test_settled_anchor_scene_separates_final_answer_from_activity_rows():
@@ -990,7 +1166,8 @@ def test_transparent_stream_renders_persisted_anchor_scene_after_reload():
     assert 'blocks.querySelectorAll(\'[data-anchor-settled-scene-row="1"],.transparent-event-row[data-anchor-scene-row="1"]\')' in transparent
     # combined fix: the final answer text is computed and threaded into the row
     # renderer so intermediate prose survives while the final-answer duplicate is dropped.
-    assert "_anchorSceneTransparentNodeForRow(row,{settled:true,finalAnswer})" in transparent
+    assert "const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);" in transparent
+    assert "liveTokenFinalPrefixEligible:idx>lastNonTerminalWorkRowIndex" in transparent
     assert "finalAnswer" in transparent
     assert "blocks.insertBefore(node,segment)" in transparent
     assert "_syncTransparentEventControls(turn)" in transparent
@@ -1009,7 +1186,7 @@ def test_live_anchor_scene_snapshot_renders_transparent_rows_before_compact_gate
     row = _function_body(UI_JS, "_anchorSceneTransparentNodeForRow")
 
     transparent_gate = "return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);"
-    compact_gate = "if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()) return false;"
+    compact_gate = "if(sceneMode!=='compact_worklog') return false;"
     assert transparent_gate in live
     assert compact_gate in live
     assert live.index(transparent_gate) < live.index(compact_gate), (
@@ -1181,6 +1358,7 @@ global.$=(id)=>{{
   return findById(msgInner,id);
 }};
 let transparentMode=true;
+global.chatActivityMode=()=>transparentMode?'transparent_stream':'compact_worklog';
 global.isTransparentStream=()=>transparentMode;
 global.isCompactWorklogMode=()=>!transparentMode;
 global._anchorSceneRowsForRendering=(scene)=>scene.activity_rows||[];
@@ -1233,8 +1411,10 @@ global._renderAnchorSceneRowsIntoWorklog=(group, rows)=>{{
 }};
 global._syncToolCallGroupSummary=()=>{{}};
 
+    eval(extractFunc('_anchorSceneLiveTokenFinalPrefix'));
     eval(extractFunc('_anchorSceneTransparentNodeForRow'));
     eval(extractFunc('renderLiveAnchorActivityScene'));
+    eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
     eval(extractFunc('_transparentLiveRowKey'));
     eval(extractFunc('_transparentLiveRowsCompatible'));
     eval(extractFunc('_transparentLiveRowAttributePairs'));
@@ -1596,7 +1776,9 @@ def test_session_switch_prefers_live_anchor_scene_before_snapshot_fallback():
     fallback = SESSIONS_JS.index("restoreLiveTurnHtmlForSession", first)
     assert first < fallback
     assert "let restoredLiveTurn=!!restoredAnchorScene;" in SESSIONS_JS
-    assert "{mode:'compact_worklog'}" in SESSIONS_JS
+    # #5942/#5943: the restore path no longer forces {mode:'compact_worklog'} — it
+    # resolves the active display mode so a transparent session restores as
+    # transparent (not a compact grouped frame). The call itself is asserted above.
 
 
 def test_session_reload_can_render_runtime_journal_anchor_scene_snapshot():

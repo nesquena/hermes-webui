@@ -65,7 +65,19 @@ def test_loadCsvInline_function():
     with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert 'function loadCsvInline' in src, "Missing loadCsvInline function"
-    assert 'function buildCsvTablePreview(path, text)' in src, "Missing shared CSV preview helper"
+    assert 'function buildCsvTablePreview(path, text, downloadUrl' in src, "Missing shared CSV preview helper"
+    assert 'function _csvMediaUrl(path, opts={})' in src, "Missing CSV media URL helper"
+
+
+def test_csv_media_file_keeps_download_affordance():
+    """MEDIA: CSV preview must keep a visible downloadable attachment link."""
+    with open('static/ui.js', encoding="utf-8") as f:
+        src = f.read()
+    csv_section = src[src.find('function buildCsvTablePreview'):src.find('function loadCsvInline') + 1600]
+    assert 'csv-download-link msg-media-link' in csv_section
+    assert '_csvMediaUrl(path,{download:true})' in src
+    assert 'download="${esc(fname)}"' in csv_section
+    assert 'buildCsvTablePreview(path, text, downloadUrl)' in src
 
 
 def test_csv_inline_max_size():
@@ -126,7 +138,7 @@ def test_csv_loadCsvInline_called_after_render():
     body = src[idx:idx + 500]
     assert 'loadCsvInline(container)' in body, "post-process should call loadCsvInline once per render"
     load_section = src[src.find('function loadCsvInline'):src.find('function loadCsvInline') + 1200]
-    assert 'buildCsvTablePreview(path, text)' in load_section, "Inline loader should reuse the shared helper"
+    assert 'buildCsvTablePreview(path, text, downloadUrl)' in load_section, "Inline loader should reuse the shared helper"
     open_file = WORKSPACE_JS[WORKSPACE_JS.index("async function openFile(path, opts={}){"):WORKSPACE_JS.index("\nfunction downloadFile")]
     csv_pos = open_file.find("} else if(ext==='.csv'){")
     generic_pos = open_file.find("} else {\n    // Plain code / text -- but fall back to download if server signals binary")

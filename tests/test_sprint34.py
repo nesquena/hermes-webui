@@ -181,6 +181,8 @@ class TestStatusFromRuntimeOAuth:
         assert result["provider_configured"] is True
         assert result["provider_ready"] is False
         assert result["setup_state"] == "provider_incomplete"
+        assert result["provider_note_key"] == "onboarding_notice_provider_auth_required"
+        assert result["provider_note_args"] == ["copilot"]
 
     def test_oauth_incomplete_note_mentions_hermes_auth(self, tmp_path):
         """When OAuth provider is incomplete, note should mention hermes auth/model."""
@@ -198,11 +200,20 @@ class TestStatusFromRuntimeOAuth:
             f"Note misleadingly mentions 'API key' for OAuth provider: {note!r}"
         )
 
+    def test_custom_provider_missing_base_url_gets_specific_note_key(self, tmp_path):
+        """Custom provider setup must not collapse into the generic setup notice."""
+        result = self._call("custom", "local-model", tmp_path)
+        assert result["provider_ready"] is False
+        assert result["provider_note_key"] == "onboarding_notice_custom_base_url_required"
+        assert result["provider_note_args"] == []
+        assert "base URL" in result["provider_note"]
+
     def test_standard_provider_incomplete_note_still_says_api_key(self, tmp_path):
         """For a standard API-key provider (openrouter), note should still say API key."""
         # openrouter with no .env
         result = self._call("openrouter", "anthropic/claude-sonnet-4.6", tmp_path)
         assert result["provider_ready"] is False
+        assert result["provider_note_key"] == "onboarding_notice_provider_api_key_required"
         note = result["provider_note"]
         assert "API key" in note, (
             f"Expected 'API key' in note for openrouter, got: {note!r}"

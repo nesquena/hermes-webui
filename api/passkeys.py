@@ -72,6 +72,8 @@ def _atomic_write_json(path: Path, payload: Any) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())  # durable before rename: no zero-length passkey file on power loss
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except Exception:

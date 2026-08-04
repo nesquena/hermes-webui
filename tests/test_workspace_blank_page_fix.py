@@ -201,3 +201,69 @@ class TestWorkspaceDropdownBlankPageCurrentWs:
             "renderWorkspaceDropdownInto must use session, profile default, or data.last "
             "as current workspace on blank page"
         )
+
+
+class TestNewChatOnWorkspaceSwitchOptIn:
+    """#5473 opt-in: switching to a DIFFERENT workspace starts a new chat instead
+    of mutating the current session in place. Default OFF preserves shipped behavior."""
+
+    def test_setting_registered_default_off(self):
+        import api.config as c
+        assert c._SETTINGS_DEFAULTS.get('new_chat_on_workspace_switch') is False, (
+            "new_chat_on_workspace_switch must default to False (shipped in-place behavior)"
+        )
+        assert 'new_chat_on_workspace_switch' in c._SETTINGS_BOOL_KEYS, (
+            "new_chat_on_workspace_switch must be a recognized boolean setting key"
+        )
+
+    def test_switch_to_workspace_has_gated_new_chat_branch(self):
+        src = read('static/panels.js')
+        start = src.find('async function switchToWorkspace(')
+        assert start != -1
+        fn = src[start:src.find('async function toggleWorktreePanel', start)]
+        # The new-chat branch must be gated on the opt-in flag AND a different workspace.
+        assert 'window._newChatOnWorkspaceSwitch===true' in fn, (
+            "the new-chat branch must be gated on the default-off opt-in flag"
+        )
+        assert 'path!==S.session.workspace' in fn, (
+            "the new-chat branch must only fire when the target workspace DIFFERS "
+            "(same-workspace selection stays an in-place refresh/no-op)"
+        )
+        assert 'S.messages.length>0' in fn, (
+            "the new-chat branch must only fire when the current conversation has messages"
+        )
+        assert 'newSession(false)' in fn, (
+            "the new-chat branch must call newSession() to start the fresh chat"
+        )
+        # The branch must run BEFORE the in-place /api/session/update mutation.
+        newchat_idx = fn.index('window._newChatOnWorkspaceSwitch===true')
+        update_idx = fn.index("api('/api/session/update'")
+        assert newchat_idx < update_idx, (
+            "the opt-in new-chat branch must short-circuit before the in-place workspace update"
+        )
+
+    def test_boot_and_panels_wire_the_flag(self):
+        boot = read('static/boot.js')
+        panels = read('static/panels.js')
+        assert 'window._newChatOnWorkspaceSwitch=!!s.new_chat_on_workspace_switch' in boot, (
+            "boot.js must set window._newChatOnWorkspaceSwitch from the loaded settings"
+        )
+        assert 'settingsNewChatOnWorkspaceSwitch' in panels, (
+            "panels.js must wire the settings checkbox (load + payload)"
+        )
+        assert 'payload.new_chat_on_workspace_switch' in panels, (
+            "panels.js must include new_chat_on_workspace_switch in the autosave payload"
+        )
+
+    def test_settings_checkbox_and_i18n_present(self):
+        html = read('static/index.html')
+        assert 'id="settingsNewChatOnWorkspaceSwitch"' in html, (
+            "the Settings checkbox for the opt-in must exist"
+        )
+        i18n = read('static/i18n.js')
+        for key in (
+            'settings_label_new_chat_on_workspace_switch',
+            'settings_desc_new_chat_on_workspace_switch',
+            'workspace_switched_new_chat',
+        ):
+            assert key in i18n, f"i18n key {key} must be defined"

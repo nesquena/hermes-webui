@@ -8,6 +8,12 @@ name: Browser smoke
 #
 # No secrets, no credentials: the server boots agent-free and the smoke script
 # strips every *_API_KEY from the environment before launch.
+#
+# Docs-only fast path: `browser-smoke` is a REQUIRED status check in the master
+# ruleset, and a skipped required check reports as pending forever (auto-merge
+# would hang). So on a docs/CHANGELOG/README-only change we keep the job running
+# and reporting green but short-circuit the expensive browser install + smoke.
+# Detection FAILS SAFE: any uncertainty or any non-doc path -> full smoke runs.
 
 on:
   pull_request:
@@ -16,13 +22,85 @@ on:
     branches: [master]
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.detect.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect docs-only change set
+        id: detect
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Fail-safe: ALWAYS exits 0 and ALWAYS emits docs_only (default 'false' =
+          # run full smoke), so a detection hiccup can never wedge the required
+          # browser-smoke context into perpetual pending.
+          docs_only="false"
+          emit() { echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"; }
+          trap emit EXIT
+          set -uo pipefail
+          # STRICT ALLOWLIST — docs iff doc extension (*.md/.markdown/.rst) or an
+          # extensionless doc basename. NOT docs: *.txt (requirements.txt!), anything
+          # under docs/ that isn't a doc extension, and code files merely NAMED
+          # README/CHANGELOG. See tests.yml for the full rationale.
+          is_docs() {
+            f="$1"; low="$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]')"; base="${f##*/}"
+            case "$low" in
+              *.md|*.markdown|*.rst) return 0 ;;
+            esac
+            case "$base" in
+              LICENSE|README|CHANGELOG|NOTICE|AUTHORS|CONTRIBUTING) return 0 ;;
+            esac
+            return 1
+          }
+          if [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || git fetch --no-tags origin master || true
+            RANGE="$BASE_SHA...$HEAD_SHA"
+          else
+            RANGE="${{ github.event.before }}...${{ github.sha }}"
+          fi
+          # --no-renames so a rename reveals BOTH sides (a renamed-away code file is visible).
+          if ! FILES="$(git diff --name-only --no-renames "$RANGE" 2>/dev/null)"; then
+            echo "Could not diff $RANGE — running full smoke (fail-safe)."; exit 0
+          fi
+          if [ -z "$FILES" ]; then
+            echo "Empty diff — running full smoke (fail-safe)."; exit 0
+          fi
+          echo "Changed files:"; echo "$FILES"
+          result="true"
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if ! is_docs "$f"; then
+              echo "Non-docs path -> full smoke required: $f"
+              result="false"
+              break
+            fi
+          done <<< "$FILES"
+          docs_only="$result"
+          echo "docs_only=$docs_only"
+
   browser-smoke:
+    needs: changes
+    # Belt-and-suspenders (see tests.yml): run even if `changes` errored/was skipped
+    # so this required context can never wedge; step guards degrade to full smoke.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Docs-only short-circuit
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Docs-only change set — skipping browser smoke (no page-executable change)."
+
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.docs_only != 'true'
 
       - name: Set up Python
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -32,6 +110,7 @@ jobs:
             **/pyproject.toml
 
       - name: Install dependencies
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           python -m pip install --upgrade pip
           pip install "pyyaml>=6.0" playwright
@@ -39,4 +118,5 @@ jobs:
           python -m playwright install --with-deps chromium
 
       - name: Run browser smoke
+        if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_smoke.py

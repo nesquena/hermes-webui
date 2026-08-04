@@ -686,19 +686,22 @@ class TestToolCallGroupingStatic:
         assert "const liveThinkingText=_liveThinkingText();" in reasoning_fn, (
             "Reasoning SSE updates should cache the live thinking text before routing."
         )
-        assert "_upsertAnchorReasoning(liveThinkingText)" in reasoning_fn, (
+        primary_call = "_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback)"
+        assert primary_call in reasoning_fn, (
             "Anchor reasoning must remain the primary renderer path."
         )
-        assert reasoning_fn.index("_upsertAnchorReasoning(liveThinkingText)") < reasoning_fn.index(
-            "_updateLiveThinkingCard(liveThinkingText)"
-        ), (
+        fallback_call = "_updateLiveThinkingCard(liveThinkingText,{"
+        assert reasoning_fn.index(primary_call) < reasoning_fn.index(fallback_call), (
             "The legacy thinking card should only run after anchor upsert fails."
         )
-        assert "if(!_upsertAnchorReasoning(liveThinkingText)){" in reasoning_fn, (
+        assert "if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback)){" in reasoning_fn, (
             "The legacy thinking card should be a falsy-anchor fallback."
         )
-        assert reasoning_fn.count("_updateLiveThinkingCard(liveThinkingText)") == 1, (
+        assert reasoning_fn.count(fallback_call) == 1, (
             "Reasoning SSE updates should call the live thinking card only in fallback."
+        )
+        assert "...anchorReasoningFallback" in reasoning_fn, (
+            "The fallback renderer must receive the exact Anchor reasoning identity."
         )
         assert "_updateLiveThinkingCard(" in render_live_thinking_fn, (
             "Inline parsed thinking still needs the live thinking card renderer."

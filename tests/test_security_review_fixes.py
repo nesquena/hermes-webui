@@ -45,14 +45,30 @@ def test_onboarding_local_gate_ignores_forwarded_ip_unless_trusted(monkeypatch):
 
 
 def test_onboarding_local_gate_uses_forwarded_ip_when_explicitly_trusted(monkeypatch):
+    """Even with HERMES_WEBUI_TRUST_FORWARDED_FOR=1, a forwarded header is only
+    honored when the RAW socket peer is a trusted proxy (loopback or in
+    HERMES_WEBUI_TRUSTED_PROXY_CIDRS). A PUBLIC direct client (raw peer 8.8.8.8)
+    that merely SETS X-Forwarded-For can NOT promote itself to local — otherwise
+    a passwordless WebUI with the opt-in enabled would admit any remote attacker
+    to the embedded terminal (#5764). The forwarded IP is consulted only after
+    the un-spoofable socket peer is confirmed to be a trusted proxy.
+    """
     from api import routes
 
     monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.delenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", raising=False)
     handler = _Handler(
         client_ip="8.8.8.8",
         headers={"X-Forwarded-For": "10.0.0.2", "X-Real-IP": "203.0.113.11"},
     )
 
+    # Raw peer 8.8.8.8 is NOT a trusted proxy → forwarded header ignored →
+    # classified by the public raw peer → DENY.
+    assert routes._onboarding_request_is_local(handler) is False
+
+    # With the peer's own network in the trusted-proxy allowlist, the forwarded
+    # client IP (private 10.0.0.2) is now honored → local.
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "8.8.8.0/24")
     assert routes._onboarding_request_is_local(handler) is True
 
 

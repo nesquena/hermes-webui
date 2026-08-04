@@ -15,7 +15,7 @@ On a cron-heavy profile (the #4842 reporter had 200+ cron sessions) that was
 hundreds of file reads per `/api/sessions` build, and because the enclosing
 `_CLI_SESSIONS_CACHE` is keyed on a state.db content fingerprint that advances
 on every streamed message row, the whole scan was re-paid on essentially every
-5s poll during a live turn — pinning CPU to 100% and making `get_cli_sessions`
+streaming poll during a live turn — pinning CPU to 100% and making `get_cli_sessions`
 take multiple seconds (#4842 / #4808 / #4672).
 
 These tests pin the fix: the expensive per-row work is now O(unique files), the

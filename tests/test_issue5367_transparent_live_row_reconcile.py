@@ -299,6 +299,7 @@ global._createAssistantTurn = () => turn;
 global._assistantTurnBlocks = () => turn;
 
 global._anchorSceneTransparentNodeForRow = (row) => null;
+eval(extractFunc('_anchorSceneLiveTokenFinalPrefix'));
 eval(extractFunc('_anchorSceneTransparentNodeForRow'));
 eval(extractFunc('_transparentLiveRowKey'));
 eval(extractFunc('_transparentLiveRowsCompatible'));
@@ -310,6 +311,8 @@ eval(extractFunc('_bindTransparentFadeCleanup'));
 eval(extractFunc('_appendTransparentFadeText'));
 eval(extractFunc('_refreshTransparentFadeProseRow'));
 eval(extractFunc('_refreshTransparentLiveRow'));
+eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
+eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
 eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 
 const firstScene = {{
@@ -1263,6 +1266,7 @@ eval(extractFunc('_transparentLiveRowInteractiveState'));
 eval(extractFunc('_rehydrateTransparentLiveRow'));
 eval(extractFunc('_refreshTransparentThinkingLiveRow'));
 eval(extractFunc('_refreshTransparentLiveRow'));
+eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
 eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 
 const firstScene = { version:'activity_scene_v1', activity_rows:[{ row_id:'row-tool', role:'tool', source_event_type:'tool_delta', toolName:'old_tool' }] };
@@ -1600,6 +1604,7 @@ eval(extractFunc('_transparentLiveRowInteractiveState'));
 eval(extractFunc('_rehydrateTransparentLiveRow'));
 eval(extractFunc('_refreshTransparentThinkingLiveRow'));
 eval(extractFunc('_refreshTransparentLiveRow'));
+eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
 eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 global._copyEventToClipboard = (row) => {{
   const tc = row && row._tcData || {{}};

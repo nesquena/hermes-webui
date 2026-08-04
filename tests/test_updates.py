@@ -1,4 +1,5 @@
 """Tests for self-update diagnostics (api/updates.py)."""
+import json
 import os
 import time
 from unittest.mock import MagicMock, patch
@@ -72,6 +73,74 @@ def test_check_repo_redacts_credentialed_fetch_failure(tmp_path):
     assert 'ash:' not in info['error']
     assert '<redacted>' in info['error']
     assert 'Authentication failed' in info['error']
+
+
+def test_check_repo_reports_manual_update_for_baked_webui_version(tmp_path, monkeypatch):
+    """Docker WebUI installs should banner a manual update when GitHub tags are newer."""
+
+    class FakeResponse:
+        def __init__(self, body):
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return self._body
+
+    payload = [
+        {'name': 'v0.51.833', 'commit': {'sha': 'current-sha'}},
+        {'name': 'v0.51.914-rc1', 'commit': {'sha': 'prerelease-sha'}},
+        {'name': 'v0.51.914', 'commit': {'sha': 'stable-sha'}},
+    ]
+    seen = {}
+
+    def fake_urlopen(request, timeout=0):
+        seen['url'] = request.full_url
+        seen['timeout'] = timeout
+        return FakeResponse(json.dumps(payload).encode('utf-8'))
+
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', fake_urlopen)
+    monkeypatch.setattr(updates, 'WEBUI_VERSION', 'v0.51.833')
+
+    info = updates._check_repo(tmp_path, 'webui')
+
+    assert info['name'] == 'webui'
+    assert info['no_git'] is True
+    assert info['manual_update'] is True
+    assert info['release_based'] is True
+    assert info['behind'] == 1
+    assert info['current_version'] == 'v0.51.833'
+    assert info['latest_version'] == 'v0.51.914'
+    assert info['current_sha'] == 'current-sha'
+    assert info['latest_sha'] == 'stable-sha'
+    assert info['compare_url'] == (
+        'https://github.com/nesquena/hermes-webui/compare/current-sha...stable-sha'
+    )
+    assert seen['url'] == 'https://api.github.com/repos/nesquena/hermes-webui/tags?per_page=100'
+    assert seen['timeout'] == 3.0
+
+
+def test_check_repo_webui_no_git_falls_back_to_old_payload_on_tags_failure(tmp_path, monkeypatch):
+    """If GitHub tags cannot be read, the Docker path must stay on can't-check."""
+
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', lambda *args, **kwargs: (_ for _ in ()).throw(updates.urllib.error.URLError('boom')))
+    monkeypatch.setattr(updates, 'WEBUI_VERSION', 'v0.51.833')
+
+    info = updates._check_repo(tmp_path, 'webui')
+
+    assert info == {'name': 'webui', 'behind': None, 'no_git': True}
+
+
+def test_check_repo_no_git_agent_stays_cant_check(tmp_path):
+    """Agent no-git installs must keep the legacy can't-check response."""
+
+    info = updates._check_repo(tmp_path, 'agent')
+
+    assert info == {'name': 'agent', 'behind': None, 'no_git': True}
 
 
 def test_check_repo_fetch_failure_without_tags_is_not_up_to_date(tmp_path):

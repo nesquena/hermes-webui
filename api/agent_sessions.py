@@ -53,6 +53,7 @@ CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
 CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
 
 SOURCE_LABELS = {
+    'acp': 'ACP',
     'api_server': 'API',
     'cli': 'CLI',
     'cron': 'Cron',
@@ -81,7 +82,12 @@ def normalize_agent_session_source(raw_source: str | None) -> dict:
 
     if raw == 'webui':
         session_source = 'webui'
-    elif raw in {'cli', 'tui'}:
+    elif raw in {'acp', 'cli', 'tui'}:
+        # 'acp' (Agent Client Protocol adapter — Zed, external device bridges)
+        # is a local interactive agent client like the CLI/TUI: its sessions
+        # live only in state.db, so classifying it 'other' would leave them
+        # invisible in both sidebar buckets (webui skips the state.db
+        # projection; cli keeps only CLI-classified rows).
         session_source = 'cli'
     elif raw in MESSAGING_SOURCES:
         session_source = 'messaging'
@@ -219,11 +225,22 @@ def is_cli_session_row(row: dict) -> bool:
         return False
     if source == "cli":
         return True
+    # External-agent imports (Claude Code, Codex, etc.) are read-only sessions
+    # that Hermes discovers on disk and lists alongside CLI/TUI sessions. The
+    # client renderer (static/sessions.js: _isCliSession) files them in the CLI
+    # bucket via the is_cli_session fallthrough, so the server session-count
+    # classifier MUST agree — otherwise the server counts them under
+    # webui_session_count while the client renders them under CLI, and the WebUI
+    # filter shows a non-zero count with an empty list (#5831). These carry a
+    # real title, so they'd otherwise fall through to the conservative
+    # default-title gate below and be misclassified as non-CLI.
+    if source in {"external_agent", "external-agent"}:
+        return True
     if (
-        source_tag in {"cli", "tui"}
-        or raw_source in {"cli", "tui"}
-        or source_name in {"cli", "tui"}
-        or source_label in {"cli", "tui"}
+        source_tag in {"acp", "cli", "tui"}
+        or raw_source in {"acp", "cli", "tui"}
+        or source_name in {"acp", "cli", "tui"}
+        or source_label in {"acp", "cli", "tui"}
     ):
         return True
 
@@ -259,13 +276,20 @@ def is_cli_session_row_visible(row: dict) -> bool:
     ):
         return True
 
-    if "tui" in {
+    interactive_sources = {
         _normalize_source_name(row.get("source")),
         _normalize_source_name(row.get("source_tag")),
         _normalize_source_name(row.get("raw_source")),
         _normalize_source_name(row.get("source_label")),
-    }:
+    }
+    if "tui" in interactive_sources:
         return True
+    if "acp" in interactive_sources:
+        # Like TUI rows, user-driven ACP sessions stay visible even when
+        # ended/untitled. Unlike TUI, an ACP connection can record only
+        # assistant/tool/system rows (e.g. a replayed or aborted turn), so
+        # require at least one user turn before surfacing the row.
+        return _count_user_turns(row) > 0
 
     if _has_cli_lineage(row):
         return True

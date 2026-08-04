@@ -721,7 +721,7 @@ def _age_cache_entry(key, seconds):
 
 def test_streaming_widens_cache_freshness_window(monkeypatch):
     """#4808: while a turn streams, an entry older than the idle TTL but younger
-    than the streaming TTL must still read FRESH, so the fixed 5s streaming poll
+    than the streaming TTL must still read FRESH, so the fixed streaming poll
     does not force a rebuild every poll."""
     routes._session_list_cache_clear()
     key = _streaming_ttl_key()
@@ -729,7 +729,7 @@ def test_streaming_widens_cache_freshness_window(monkeypatch):
     monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda k: ("stable",))
 
     routes._session_list_cache_set(key, _session_cache_payload("live"))
-    # Age it past the idle 2.5s TTL but under the 10s streaming TTL.
+    # Age it past the idle TTL but keep it under the streaming TTL.
     _age_cache_entry(key, routes._SESSIONS_CACHE_TTL_SECONDS + 1.0)
 
     # Idle (no active stream) → stale → miss.

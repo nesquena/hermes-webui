@@ -89,9 +89,59 @@ python tests/browser_smoke.py
 It is intentionally **credential-free**: it strips every `*_API_KEY` from the
 environment before launching the server, needs no secrets, and does not drive a
 real model (it verifies the app *loads and initializes* cleanly — the brick class
-that breaks the page for everyone). A full chat golden-path E2E (send → stream →
-render → switch → reload) lives in the maintainer's private QA harness, which has
-the agent + a mock LLM provider available.
+that breaks the page for everyone).
+
+## Public conversation lifecycle gate
+
+`tests/browser_conversation_lifecycle.py` adds a public deterministic
+multi-row lifecycle gate. It drives the real composer and real WebUI server in Chromium,
+while a localhost-only fixture supplies reasoning, tool, process, and final/error
+events through the existing Hermes Gateway Runs API. The gate now covers both
+normal and terminal-error proof-matrix rows, asserting semantic activity during
+live streaming, after settlement, and after hard reload, including
+transcript-backed `activity_scene_v1` persistence and zero unexpected browser
+errors. It uses isolated temporary state and no provider credentials.
+
+```bash
+pip install -r requirements.txt playwright
+python -m playwright install --with-deps chromium
+
+# Normal-path deterministic conversation lifecycle gate.
+python tests/browser_conversation_lifecycle.py
+
+# Terminal-error lifecycle gate (new row in the proof matrix).
+LIFECYCLE_SCENARIO=terminal-error python tests/browser_conversation_lifecycle.py
+
+# Historical ID-linked transcript hydration row.
+python tests/browser_historical_transcript_hydration.py
+```
+
+To certify that the gate catches its target failure, the test owns an opt-in
+mutation that drops the browser's Anchor-scene persistence request. This command
+must fail at the hard-reload boundary:
+
+```bash
+LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+  python tests/browser_conversation_lifecycle.py
+
+# Terminal-state-specific mutation bite: remove terminal row from persisted scene
+# so hard reload cannot recover terminal status.
+LIFECYCLE_SCENARIO=terminal-error \
+LIFECYCLE_TEST_BITE=drop-terminal-anchor-row \
+  python tests/browser_conversation_lifecycle.py
+
+# Historical-hydration mutation: corrupt one persisted tool-result link so the
+# strict Anchor projection must fail instead of claiming the legacy transcript.
+HISTORICAL_HYDRATION_TEST_BITE=break-tool-link \
+  python tests/browser_historical_transcript_hydration.py
+```
+
+The dedicated `Conversation lifecycle (informational)` workflow runs the current
+proof rows (`normal`, `terminal-error`, and `historical-transcript-hydration`) and
+stays non-blocking while the public
+matrix expands to additional behavior rows. The maintainer's private QA harness
+remains broader; later public slices will add session switching, reconnect/replay,
+cancellation, compression, and recovery.
 
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present
@@ -556,6 +606,27 @@ EXPECT:
     ## assistant
     (response text)
 FAIL: No download triggered, file is empty, file is corrupted JSON instead of markdown.
+
+### T8.2: Create and Revoke a Public Share Link
+SETUP: A session with at least 2 visible messages (1 user + 1 assistant).
+STEPS:
+  1. Click the "Hermes" button in the sidebar footer
+  2. In the Conversation section, click "Share"
+EXPECT:
+  - A public `/share/<token>` page opens in a new tab
+  - The link is copied to the clipboard
+  - The Conversation section meta line shows that a public share is active
+  - The shared page uses the current Hermes theme/skin and shows only a read-only transcript snapshot
+FAIL: No link opens, the page requires login unexpectedly, or the shared page exposes workspace/profile/live controls.
+
+STEPS:
+  3. Return to the app and click "Stop sharing"
+  4. Confirm the revoke dialog
+EXPECT:
+  - A toast confirms the link was revoked
+  - Reopening the old share URL shows an unavailable/not found state
+  - The active-share status disappears from the Conversation section
+FAIL: The old link still loads the transcript, or the session still appears as publicly shared after revocation.
 
 ---
 

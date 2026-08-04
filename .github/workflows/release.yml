@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+      - 'exp-v*'
 
 jobs:
   release:
@@ -15,11 +16,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Check whether this is a stable or experimental release
+      - name: Detect release channel
+        id: channel
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "is_stable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_stable=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # Create GitHub Release from tag with auto-generated notes
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          prerelease: ${{ steps.channel.outputs.is_stable == 'false' }}
 
       # Set up multi-arch build (QEMU + Buildx)
       - uses: docker/setup-qemu-action@v3
@@ -41,7 +53,9 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=match,pattern=v(\d+\.\d+(?:\.\d+)?),group=1
-            type=raw,value=latest
+            type=match,pattern=exp-v(\d+\.\d+(?:\.\d+)?),group=1
+            type=raw,value=latest,enable=${{ steps.channel.outputs.is_stable == 'true' }}
+            type=raw,value=experimental,enable=${{ steps.channel.outputs.is_stable == 'false' }}
 
       # Build and push multi-arch image (amd64 + arm64)
       - name: Build and push Docker image

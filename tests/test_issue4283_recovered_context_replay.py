@@ -264,7 +264,7 @@ class _DummySession:
         self.context_messages = context_messages
         self.pending_user_message = pending_msg
         self.pending_attachments = []
-        self.pending_started_at = None
+        self.pending_started_at = 1778098700.0
         self.active_stream_id = "stream-test"
         self.truncation_watermark = None
         self.path = ""
@@ -293,6 +293,7 @@ def test_materialize_mirrors_recovered_user_to_context_messages():
     ctx_users = [m for m in s.context_messages if m.get("role") == "user"]
     assert any(m.get("_recovered") for m in ctx_users)
     assert any("restart the gateway" in m.get("content", "") for m in ctx_users)
+    assert any(m.get("timestamp") == 1778098700 for m in ctx_users)
 
 
 def test_materialize_does_not_duplicate_context_messages():

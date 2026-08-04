@@ -191,6 +191,11 @@ def _invoke_api_session_keyerror(*, index_json, cli_messages):
         def read_text(self, encoding="utf-8"):
             return index_json
 
+        def read_bytes(self):
+            # The index reader now parses raw bytes (json.loads decodes UTF-8 in
+            # one pass); model that so this fake matches the real Path interface.
+            return None if index_json is None else index_json.encode("utf-8")
+
     parsed = urlparse("/api/session?session_id=gone_001&messages=0&resolve_model=0")
     with patch("api.routes.get_session", side_effect=KeyError("gone_001")), \
          patch("api.routes.SESSION_INDEX_FILE", _FakeIndexFile()), \

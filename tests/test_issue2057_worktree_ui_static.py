@@ -57,8 +57,13 @@ def test_archive_delete_success_copy_prefers_response_worktree_retained():
     assert "session.archived?_sessionArchiveToast(response,session):t('session_restored')" in src
     assert "_sessionResponseRetainsWorktree(response,session)?t('session_deleted_worktree')" in src
     assert "const retainedCount=_worktreeResponseCount(results)" in src
+    assert "const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;" in src
+    assert "if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');" in src
     assert "showToast(retainedCount?t('session_archived_worktree'):t('session_archived'))" in src
     assert "showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))" in src
+    assert "const cleanupFailed=!!(response&&response.state_db_cleanup_failed);" in src
+    assert "if(cleanupFailed) showToast(t('delete_failed'),0,'error');" in src
+    assert "return !cleanupFailed;" in src
 
 
 def test_worktree_archive_delete_api_responses_are_explicit():
@@ -66,7 +71,9 @@ def test_worktree_archive_delete_api_responses_are_explicit():
     assert "def _worktree_retained_payload(session)" in src
     assert "def _worktree_retained_payload_for_session_id(sid: str)" in src
     assert '"worktree_retained": True' in src
-    assert '{"ok": True, **worktree_retained}' in src
+    assert '"state_db_cleanup_failed": state_db_cleanup_failed' in src
+    assert '"ok": True,' in src
+    assert "**worktree_retained," in src
     assert '{"ok": True, "session": s.compact(), **_worktree_retained_payload(s)}' in src
 
 

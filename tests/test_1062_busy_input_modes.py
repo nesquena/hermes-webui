@@ -96,20 +96,23 @@ class TestSlashCommandHandlers:
         assert "cancelStream" in body, "/interrupt must call cancelStream() so the drain re-sends"
 
     def test_cmd_steer_delegates_to_try_steer(self):
-        """/steer delegates to _trySteer which calls /api/chat/steer with
-        a non-destructive fallback. The fallback path is exercised by tests
-        in test_real_steer.py — this test just pins the delegation."""
+        """/steer delegates to _trySteer which calls /api/chat/steer.
+        Fallback behavior is covered in test_real_steer.py; this test pins
+        delegation and blocks the old cancel-on-failure path."""
         idx = COMMANDS_JS.find("async function cmdSteer(")
         assert idx >= 0
         body = COMMANDS_JS[idx:idx + 800]
-        # cmdSteer delegates to _trySteer; fallback must not queue+cancel.
+        # cmdSteer delegates to _trySteer; fallback must not cancel.
         assert "_trySteer" in body, "cmdSteer must call _trySteer to use the real /api/chat/steer endpoint"
-        # The shared helper must contain the non-destructive fallback path.
+        # The shared helper must contain the non-cancelling fallback path.
         helper_idx = COMMANDS_JS.find("async function _trySteer(")
         assert helper_idx >= 0, "_trySteer helper must exist"
         helper_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
-        assert "queueSessionMessage" not in helper_body
         assert "cancelStream" not in helper_body
+        gateway_fallback_idx = helper_body.find("result&&result.fallback==='gateway_steer_queued'")
+        gateway_queue_idx = helper_body.find("queueSessionMessage", gateway_fallback_idx)
+        assert gateway_fallback_idx >= 0
+        assert gateway_queue_idx > gateway_fallback_idx
         assert "inp.value" in helper_body
         assert "if(result&&result.accepted)" in helper_body
         assert "S.pendingFiles=_remaining" in helper_body

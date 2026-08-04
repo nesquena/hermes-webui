@@ -53,7 +53,7 @@ def test_sessions_and_projects_load_independently_so_projects_failure_cannot_bla
     assert "return await api('/api/projects' + projectQS,{timeoutToast:false});" in helper
     assert "console.warn('renderProjectsList',projectError);" in helper
     assert "const projData = await projectPromise;" in helper
-    assert "_applySessionListPayload(sessData,projData)" in block
+    assert "_applySessionListPayload(sessData,projData,{unreadGen})" in block
 
 
 def test_sessions_api_always_retries_transient_upstream_statuses_and_boot_keeps_longer_timeout():

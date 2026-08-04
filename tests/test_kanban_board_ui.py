@@ -25,3 +25,30 @@ def test_kanban_columns_render_scrollable_card_lists():
     assert "overflow-y:auto" in rule
     assert "overscroll-behavior:contain" in rule
     assert "scrollbar-gutter:stable" in rule
+
+
+def test_kanban_consolidated_board_fills_viewport_height():
+    """The consolidated (single-board) view must stretch to fill the viewport
+    instead of leaving empty space below the columns on desktop.
+
+    Both the board element and its column bodies drop their capped heights and
+    take height:100% so the columns extend to the bottom of the board wrap.
+    """
+    board_rule = _css_rule(".kanban-board.kanban-board-consolidated")
+    assert "height:100%" in board_rule
+
+    body_rule = _css_rule(".kanban-board-consolidated .kanban-column-body")
+    assert "height:100%" in body_rule
+    assert "max-height:unset" in body_rule
+    # The consolidated view owns its own full-height scroll container, so it opts
+    # out of the scroll-chaining lock the capped lane view uses.
+    assert "overscroll-behavior:auto" in body_rule
+
+
+def test_kanban_consolidated_class_toggled_by_lane_mode():
+    """The consolidated-height CSS only takes effect when the board element
+    carries the `kanban-board-consolidated` class, which the renderer adds only
+    in the single-board (non-lanes) view. Pin the wiring so a render refactor
+    can't silently strip the class and reintroduce the empty-space regression.
+    """
+    assert "classList.toggle('kanban-board-consolidated'" in PANELS_JS

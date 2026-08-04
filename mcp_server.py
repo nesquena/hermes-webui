@@ -7,7 +7,7 @@ Option A rewrite (2026-05-08): imports api.models and api.profiles
 directly from the webui codebase, using canonical helpers for
 locking, profile scoping, index consistency, and validation.
 
-    pip install mcp       # one-time setup
+    pip install "mcp<2"   # one-time setup
     python3 mcp_server.py # start via stdio
 
 MCP config for Hermes Agent (add to config.yaml):

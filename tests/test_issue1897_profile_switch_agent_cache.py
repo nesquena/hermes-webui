@@ -156,7 +156,7 @@ def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path
     monkeypatch.setattr(
         streaming,
         "resolve_model_provider",
-        lambda _model: ("test-model", "test-provider", None),
+        lambda _model, **_kw: ("test-model", "test-provider", None),
     )
     monkeypatch.setattr(streaming, "_maybe_schedule_title_refresh", lambda *args, **kwargs: None)
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", home_for_profile)

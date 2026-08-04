@@ -170,7 +170,9 @@ def test_terminal_slash_command_preflights_remote_backend_before_session_create(
     assert "syncTerminalBackendState(data)" in cmd_block
     assert "data&&data.terminal_remote_backend" in cmd_block
     assert "_terminalRemoteBackendUnsupportedMessage" in cmd_block
-    assert cmd_block.index("data&&data.terminal_remote_backend") < cmd_block.index("await newSession()")
+    # #6022: the auto-mint passes explicit worktree:false so the config
+    # default can't leak a worktree from opening the terminal.
+    assert cmd_block.index("data&&data.terminal_remote_backend") < cmd_block.index("await newSession(false, {worktree: false})")
 
 
 def test_terminal_v1_does_not_expose_send_to_chat_action():

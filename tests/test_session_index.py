@@ -1304,16 +1304,18 @@ def test_all_sessions_reuses_loaded_index_counts_for_legacy_sidecar_refresh(monk
         })
     _write_index_file(index_file, rows)
 
-    original_read_text = Path.read_text
+    # The index is parsed from raw bytes (json.loads decodes UTF-8 in one pass),
+    # so count read_bytes rather than read_text.
+    original_read_bytes = Path.read_bytes
     index_reads = 0
 
-    def _counting_read_text(self, *args, **kwargs):
+    def _counting_read_bytes(self, *args, **kwargs):
         nonlocal index_reads
         if self == index_file:
             index_reads += 1
-        return original_read_text(self, *args, **kwargs)
+        return original_read_bytes(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", _counting_read_text)
+    monkeypatch.setattr(Path, "read_bytes", _counting_read_bytes)
     monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
 
     result = models.all_sessions()

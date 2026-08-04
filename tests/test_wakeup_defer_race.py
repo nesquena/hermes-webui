@@ -482,7 +482,66 @@ def test_teardown_409_requeues_wakeup_so_it_is_not_lost(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# Test 7 — Greptile P1: multiple deferred wakeups in one teardown. Only the
+# Test 7 — credential exhaustion pause: a paused wakeup is also a 409, but it
+# must be treated as intentionally suppressed rather than an active-turn race.
+# --------------------------------------------------------------------------
+
+
+def test_paused_process_wakeup_409_does_not_requeue(monkeypatch):
+    """A credential-exhaustion pause returns 409, but must not re-defer.
+
+    Ordinary 409s mean "another turn won the lock" and need redelivery. A
+    ``process_wakeup_paused`` 409 means the wakeup was intentionally suppressed,
+    so re-queueing would recreate the same provider-unavailable loop.
+    """
+    from api import background_process as bp, config as cfg
+    import api.routes as routes
+
+    _reset_cfg_state()
+    sid = "sess-paused-409"
+    holder = {"calls": [], "event": threading.Event(), "requeued": []}
+
+    def _paused_start_session_turn(session_id, message, *, source="process_wakeup"):
+        holder["calls"].append(
+            {"session_id": session_id, "message": message, "source": source}
+        )
+        holder["event"].set()
+        return {"_status": 409, "error": "process_wakeup_paused"}
+
+    def _unexpected_requeue(session_id, process_id, wakeup_prompt):
+        holder["requeued"].append(
+            {
+                "session_id": session_id,
+                "process_id": process_id,
+                "wakeup_prompt": wakeup_prompt,
+            }
+        )
+
+    try:
+        bp.record_deferred_wakeup(
+            sid,
+            "proc-paused-1",
+            "[IMPORTANT: Background process completed while credentials were unavailable.]",
+        )
+        monkeypatch.setattr(routes, "start_session_turn", _paused_start_session_turn)
+        monkeypatch.setattr(bp, "record_deferred_wakeup", _unexpected_requeue)
+
+        assert bp.drain_deferred_wakeups_for_session(sid) == 1
+        assert holder["event"].wait(timeout=1.0)
+
+        import time as _t
+
+        _t.sleep(0.1)
+        assert len(holder["calls"]) == 1
+        assert holder["requeued"] == []
+        with cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
+            assert sid not in cfg.DEFERRED_PROCESS_WAKEUPS
+    finally:
+        _reset_cfg_state()
+
+
+# --------------------------------------------------------------------------
+# Test 8 — Greptile P1: multiple deferred wakeups in one teardown. Only the
 # FIRST starts a turn (the rest would 409 racing the per-session agent lock);
 # entries 2..N must be re-deferred, not lost, and drain on later teardowns.
 # --------------------------------------------------------------------------

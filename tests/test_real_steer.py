@@ -41,13 +41,23 @@ def _restore_auth_sessions():
 @pytest.fixture
 def _clear_caches():
     """Snapshot SESSION_AGENT_CACHE and STREAMS so tests don't bleed."""
-    from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK, STREAMS, STREAMS_LOCK
+    from api.config import (
+        ACTIVE_RUNS,
+        ACTIVE_RUNS_LOCK,
+        SESSION_AGENT_CACHE,
+        SESSION_AGENT_CACHE_LOCK,
+        STREAMS,
+        STREAMS_LOCK,
+    )
     with SESSION_AGENT_CACHE_LOCK:
         cache_snap = dict(SESSION_AGENT_CACHE)
         SESSION_AGENT_CACHE.clear()
     with STREAMS_LOCK:
         streams_snap = dict(STREAMS)
         STREAMS.clear()
+    with ACTIVE_RUNS_LOCK:
+        active_runs_snap = dict(ACTIVE_RUNS)
+        ACTIVE_RUNS.clear()
     yield
     with SESSION_AGENT_CACHE_LOCK:
         SESSION_AGENT_CACHE.clear()
@@ -55,6 +65,9 @@ def _clear_caches():
     with STREAMS_LOCK:
         STREAMS.clear()
         STREAMS.update(streams_snap)
+    with ACTIVE_RUNS_LOCK:
+        ACTIVE_RUNS.clear()
+        ACTIVE_RUNS.update(active_runs_snap)
 
 
 def _make_handler():
@@ -121,6 +134,30 @@ class TestHandleChatSteerFallbacks:
         body = _captured_response(handler)
         assert body["accepted"] is False
         assert body["fallback"] == "no_cached_agent"
+
+    def test_gateway_owned_stream_without_cached_agent_queues_fallback(self, _clear_caches):
+        from api.streaming import _handle_chat_steer
+        from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK, STREAMS, STREAMS_LOCK
+        import queue as _q
+
+        sid, stream_id = "sid_gateway", "stream_gateway"
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = _q.Queue()
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": "gateway"}
+
+        sess = MagicMock()
+        sess.active_stream_id = stream_id
+        with patch("api.streaming.get_session", return_value=sess):
+            handler = _make_handler()
+            _handle_chat_steer(handler, {"session_id": sid, "text": "preserve this"})
+
+        body = _captured_response(handler)
+        assert body == {
+            "accepted": False,
+            "fallback": "gateway_steer_queued",
+            "stream_id": stream_id,
+        }
 
     def test_agent_lacks_steer_method(self, _clear_caches):
         from api.streaming import _handle_chat_steer
@@ -272,9 +309,10 @@ class TestFrontendWiring:
     def test_try_steer_handles_fallback_without_cancelling(self):
         idx = self.cmds.find("async function _trySteer(")
         body = _source_between(self.cmds, "async function _trySteer(", "\nasync function cmdTitle")
-        # Must check result.accepted and surface fallback without queueing or cancelling.
+        # Must check result.accepted and keep generic failures from cancelling.
         assert "result&&result.accepted" in body or "result.accepted" in body
-        assert "queueSessionMessage" not in body
+        assert "result&&result.fallback==='gateway_steer_queued'" in body
+        assert "queueSessionMessage(ownerSid" in body
         assert "cancelStream" not in body, "fallback path must not cancel the stream"
         assert "inp.value" in body, "fallback path must restore the composer draft"
 
@@ -541,11 +579,11 @@ class TestFrontendWiring:
             function _steerFailureMessageKey(fallback){{return 'steer_fail_'+fallback;}}
             function scrollToBottom(){{}}
             function setComposerStatus(){{}}
-            function showToast(){{}}
-            function renderTray(){{}}
+            function showToast(key){{if(globalThis.__toasts)globalThis.__toasts.push(key);}}
+            function renderTray(){{if(globalThis.__trayRenders)globalThis.__trayRenders.count += 1;}}
             function autoResize(){{}}
             function _showSteerIndicator(){{}}
-            function _clearComposerDraft(){{}}
+            function _clearComposerDraft(sid,text,files){{if(globalThis.__draftClears)globalThis.__draftClears.push({{sid,text,files}});}}
             async function uploadPendingFiles(){{return [];}}
             eval(steerSrc);
 
@@ -643,6 +681,83 @@ class TestFrontendWiring:
               assert.strictEqual(apiCalls, 2);
             }}
 
+            async function runGatewayQueuedFallback(switchDuringAwait=false){{
+              let input = {{value:''}};
+              let clearInflightCalls = [];
+              let updateSendBtnCalls = 0;
+              let queued = [];
+              let queueBadges = [];
+              let draftClears = [];
+              let trayRenders = 0;
+              let toasts = [];
+              let submittedFile = {{name:'a.pdf'}};
+              let replacementFile = {{name:'replacement.pdf'}};
+              let apiPayload = null;
+              inner = makeElement('div');
+              globalThis.S = {{
+                session:{{session_id:'A', active_stream_id:'stream-1', model:'fallback-model', model_provider:'fallback-provider'}},
+                activeStreamId:'stream-1',
+                activeProfile:'work',
+                busy:true,
+                pendingFiles:[submittedFile],
+              }};
+              globalThis.INFLIGHT = {{A:{{messages:[]}}}};
+              globalThis.$ = id => input;
+              globalThis.clearInflightState = sid => clearInflightCalls.push(sid);
+              globalThis.updateSendBtn = () => {{updateSendBtnCalls += 1;}};
+              globalThis.queueSessionMessage = (sid, payload) => queued.push({{sid, payload}});
+              globalThis.updateQueueBadge = sid => queueBadges.push(sid);
+              globalThis.__draftClears = draftClears;
+              globalThis.__trayRenders = {{count:0}};
+              globalThis.__toasts = toasts;
+              globalThis._chatPayloadModelState = () => ({{model:'captured-model', model_provider:'captured-provider'}});
+              globalThis.api = async (url, options) => {{
+                assert.strictEqual(url, '/api/chat/steer');
+                apiPayload = JSON.parse(options.body);
+                if(switchDuringAwait){{
+                  S.session={{session_id:'B', active_stream_id:'stream-B'}};
+                  S.activeStreamId='stream-B';
+                  S.pendingFiles=[replacementFile];
+                }}else{{
+                  S.pendingFiles=[submittedFile, replacementFile];
+                }}
+                return {{accepted:false, fallback:'gateway_steer_queued'}};
+              }};
+
+              const delivered = await _trySteer('queue me', false);
+              assert.strictEqual(delivered, true);
+              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:'queue me'}});
+              assert.strictEqual(S.busy, true);
+              assert.ok(Object.prototype.hasOwnProperty.call(INFLIGHT, 'A'));
+              assert.deepStrictEqual(clearInflightCalls, []);
+              assert.strictEqual(updateSendBtnCalls, 0);
+              assert.strictEqual(inner.children.length, 0);
+              assert.deepStrictEqual(queueBadges, ['A']);
+              assert.strictEqual(queued.length, 1);
+              assert.strictEqual(queued[0].sid, 'A');
+              assert.strictEqual(queued[0].payload.text, 'queue me');
+              assert.deepStrictEqual(queued[0].payload.files, [submittedFile]);
+              assert.strictEqual(queued[0].payload.model, 'captured-model');
+              assert.strictEqual(queued[0].payload.model_provider, 'captured-provider');
+              assert.strictEqual(queued[0].payload.profile, 'work');
+              assert.strictEqual(draftClears.length, 1);
+              assert.strictEqual(draftClears[0].sid, 'A');
+              assert.strictEqual(draftClears[0].text, 'queue me');
+              assert.deepStrictEqual(draftClears[0].files, [submittedFile]);
+              assert.deepStrictEqual(toasts, ['steer_leftover_queued']);
+              if(switchDuringAwait){{
+                assert.strictEqual(S.session.session_id, 'B');
+                assert.deepStrictEqual(S.pendingFiles, [replacementFile]);
+                assert.strictEqual(globalThis.__trayRenders.count, 0);
+              }}else{{
+                assert.deepStrictEqual(S.pendingFiles, [replacementFile]);
+                assert.strictEqual(globalThis.__trayRenders.count, 1);
+              }}
+              delete globalThis.__draftClears;
+              delete globalThis.__trayRenders;
+              delete globalThis.__toasts;
+            }}
+
             async function runLateDeadFallbackDoesNotClearNewStream(){{
               let input = {{value:''}};
               let clearInflightCalls = [];
@@ -713,6 +828,8 @@ class TestFrontendWiring:
             (async()=>{{
               await runNoCachedAgentFallback();
               await runNoCachedAgentFallback(true);
+              await runGatewayQueuedFallback(false);
+              await runGatewayQueuedFallback(true);
               await runStreamDeadFallback();
               await runStreamDeadFallback(true);
               await runStreamDeadFallback(true, '/help');

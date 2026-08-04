@@ -116,7 +116,10 @@ def test_blank_boot_open_panel_auto_binds_default_workspace_session():
     result = _helper_driver("browse", "/default-workspace")
 
     assert result["bound"] is True
-    assert result["calls"] == [{"arg0": False, "arg1": {"awaitWorkspaceLoad": True}}]
+    # worktree:false is explicit and load-bearing (#6022): the boot auto-bind
+    # must opt out so a config-level worktree default can't mint a worktree
+    # from merely opening the page.
+    assert result["calls"] == [{"arg0": False, "arg1": {"awaitWorkspaceLoad": True, "worktree": False}}]
 
 
 @node_test

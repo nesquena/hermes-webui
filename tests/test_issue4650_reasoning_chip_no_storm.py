@@ -81,6 +81,7 @@ function extractFunc(name) {
 // declare them in this eval scope so the extracted functions can see them.
 var _currentReasoningEffort = null;
 var _currentReasoningEffortsSupported = null;
+var _profileTransitionReasoningContext = null;
 var _lastReasoningFetchKey = null;
 var _reasoningFetchSeq = 0;
 

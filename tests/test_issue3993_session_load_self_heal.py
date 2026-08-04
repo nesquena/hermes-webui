@@ -88,7 +88,7 @@ def test_stale_load_guard_present_before_self_heal():
     # loadSession catch block for the stale-load guard.
     heal_idx = js.index("_clearStuckSessionOnBoot(sid, currentSid);")
     block = js[heal_idx - 2400: heal_idx + 60]
-    guard = "if (_loadingSessionId !== sid) {"
+    guard = "if (!_isCurrentLoad()) {"
     assert guard in block, "stale-load guard missing from the loadSession catch block"
     # The guard must come BEFORE the self-heal call (so a superseded load can't clear).
     assert block.index(guard) < block.index("_clearStuckSessionOnBoot(sid, currentSid);"), \

@@ -124,12 +124,12 @@ def test_pre_switch_draft_flush_rechecks_stale_loading_guard():
     """The awaited draft-save in loadSession yields the event loop. On a rapid
     session switch (B then quickly C) the stale B continuation must bail out
     before the destructive state-clearing block, or it would wipe the
-    freshly-loaded C state. The guard is `if (_loadingSessionId !== sid) return;`
+    freshly-loaded C state. The guard is `if (!_isCurrentLoad()) return;`
     placed AFTER the awaited save and BEFORE the `S.messages = []` clear
     (Codex pre-release CORE catch, #3471)."""
     body = _load_session_clear_block()
     await_idx = body.find("await _saveComposerDraftNow(currentSid")
-    guard_idx = body.find("if (_loadingSessionId !== sid) return;", await_idx)
+    guard_idx = body.find("if (!_isCurrentLoad()) return;", await_idx)
     clear_idx = body.find("S.messages = [];", await_idx)
     assert await_idx != -1, "pre-switch awaited draft save not found"
     assert guard_idx != -1, "stale-loading guard missing after the awaited draft save"

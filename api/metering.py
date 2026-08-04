@@ -44,6 +44,7 @@ The SSE `metering` event payload:
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -58,6 +59,8 @@ class _SessionMeter:
     reasoning_tokens: int = 0
     first_token_ts: float = 0.0   # time.monotonic() of first token received
     last_token_ts: float = 0.0    # time.monotonic() of last token received
+    pending_started_at: float | None = None
+    ttft_ms: int | None = None
 
     def total_tokens(self) -> int:
         return self.output_tokens + self.reasoning_tokens
@@ -94,6 +97,18 @@ class GlobalMeter:
         with self._lock:
             self._sessions[stream_id] = _SessionMeter()
 
+    def set_pending_started_at(self, stream_id: str, pending_started_at) -> None:
+        try:
+            value = float(pending_started_at)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(value) or value <= 0:
+            return
+        with self._lock:
+            session = self._sessions.get(stream_id)
+            if session is not None:
+                session.pending_started_at = value
+
     def get_interval(self) -> float:
         """Return 1.0 when sessions are actively receiving tokens, 10.0 when idle.
 
@@ -119,6 +134,8 @@ class GlobalMeter:
                 s.first_token_ts = now
             s.last_token_ts = now
             s.output_tokens = running_output_tokens
+            if s.ttft_ms is None and s.pending_started_at is not None:
+                s.ttft_ms = max(0, round((time.time() - s.pending_started_at) * 1000))
 
     def record_reasoning(self, stream_id: str, running_reasoning_tokens: int) -> None:
         now = time.monotonic()
@@ -135,7 +152,12 @@ class GlobalMeter:
         with self._lock:
             self._sessions.pop(stream_id, None)
 
-    def get_stats(self) -> dict:
+    def get_ttft_ms(self, stream_id: str) -> int | None:
+        with self._lock:
+            session = self._sessions.get(stream_id)
+            return session.ttft_ms if session is not None else None
+
+    def get_stats(self, stream_id: str | None = None) -> dict:
         now = time.monotonic()
         with self._lock:
             # Prune stale sessions
@@ -175,7 +197,7 @@ class GlobalMeter:
             high = max(active_readings) if active_readings else 0.0
             low = min(active_readings) if active_readings else 0.0
 
-            return {
+            stats = {
                 'tps': round(global_tps, 1) if global_tps is not None else None,
                 'tps_available': global_tps is not None,
                 'estimated': False,
@@ -183,6 +205,11 @@ class GlobalMeter:
                 'low': round(low, 1) if low else None,
                 'active': len(self._sessions),
             }
+            if stream_id is not None:
+                session = self._sessions.get(stream_id)
+                if session is not None and session.ttft_ms is not None:
+                    stats['ttft_ms'] = session.ttft_ms
+            return stats
 
 
 # ── Module-level singleton ─────────────────────────────────────────────────────

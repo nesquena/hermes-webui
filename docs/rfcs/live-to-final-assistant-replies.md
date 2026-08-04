@@ -3,6 +3,7 @@
 - **Status:** Accepted (parent contract; implementation tracked in [#3400](https://github.com/nesquena/hermes-webui/issues/3400))
 - **Author:** @franksong2702
 - **Created:** 2026-06-03
+- **Updated:** 2026-07-16
 - **Tracking issue:** [#3400](https://github.com/nesquena/hermes-webui/issues/3400)
 
 ## Background: Long-Running Sessions Are The Anchor
@@ -203,6 +204,43 @@ Requirements:
   explain a visible error or recovery outcome.
 - Very long final answers remain complete and readable. They should not be
   hidden inside the activity summary or replaced by a progress/status artifact.
+
+### Activity display and disclosure addenda
+
+The accepted lifecycle now has three presentation strategies over the same
+assistant-turn activity data:
+
+- **Compact Worklog** remains the default. Its top-level Worklog is expanded
+  while live so progress remains visible, and the user may collapse or reopen it.
+  Nested tool/reasoning detail remains progressively disclosed.
+- **Transparent Stream** is opt-in and renders the same ordered activity as
+  chronological rows. It does not create a second live or settled owner.
+- **Final answer only** is opt-in (`hide_all_activity` in persisted settings).
+  It suppresses activity rows without deleting the persisted Anchor scene or
+  changing the final-answer owner.
+
+For normal completed turns, the settled Compact Worklog remains collapsed by
+default. When a terminal error-family turn has actual Worklog content, the
+Worklog defaults open so readable partial work is not hidden behind the error
+outcome. The current disclosure error family is `error`, `no_response`,
+`degraded`, `connection_lost`, `tool_limit_reached`, and
+`compression_exhausted`; cancelled turns and the parent `interrupted` terminal
+outcome keep their separate semantics. An explicit user disclosure choice wins
+over these defaults and may be restored across a render rebuild.
+
+`degraded` and `connection_lost` are Anchor-level reconstruction/transport
+outcomes defined in
+[`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md), not
+additional canonical product states in the table below. In this parent
+contract, `connection_lost` is the transport-specific Anchor form of an
+interruption, while `degraded` is the explicit recovery-state counterpart to the
+restoring/degraded path. They use error-family disclosure only because they can
+leave readable partial Worklog content without a normal final answer.
+
+These are presentation and disclosure rules only. They do not change reply
+ownership, terminal classification, durable transcript truth, or the requirement
+that all three strategies converge across live, settle, reload, session switch,
+and reconnect.
 
 ### Recovery and replay
 
@@ -473,7 +511,9 @@ for current open/merged/superseded status.
 | Track | Scope | Current vehicle |
 | --- | --- | --- |
 | Parent product RFC | Define the long-running live-to-final assistant reply lifecycle and review checklist. | This RFC; tracking issue [#3400](https://github.com/nesquena/hermes-webui/issues/3400). |
-| First reply lifecycle implementation | Live process prose, quiet tool activity, settled activity summary above final answer, replay/reattach consistency, live-only compression status, supporting stream ownership fixes. | [#3401](https://github.com/nesquena/hermes-webui/pull/3401). |
+| First reply lifecycle implementation | Live process prose, quiet tool activity, settled activity summary above final answer, replay/reattach consistency, live-only compression status, supporting stream ownership fixes. | [#3401](https://github.com/nesquena/hermes-webui/pull/3401), absorbed through [#3741](https://github.com/nesquena/hermes-webui/pull/3741). |
+| Activity display projections | Compact Worklog by default, opt-in Transparent Stream, and opt-in Final answer only over the same assistant-turn data. | [#3820](https://github.com/nesquena/hermes-webui/issues/3820), [`transparent-stream-activity-mode.md`](transparent-stream-activity-mode.md), tracking issue [#3400](https://github.com/nesquena/hermes-webui/issues/3400). |
+| Assistant-turn presentation ownership | Normalize live, settled, replayed, and recovered activity into one Anchor / `activity_scene_v1`, with legacy rendering limited to historical or non-anchor compatibility. | [#3926](https://github.com/nesquena/hermes-webui/issues/3926), [`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md); core implementation shipped through the #4411/#4564 and #5242/#5243 capstones. |
 | Terminal/no-final stabilization | Compression exhausted, tool-tail/no-final transcript shape, context-compaction marker suppression, terminal error routing. | [#3315](https://github.com/nesquena/hermes-webui/issues/3315), [#3316](https://github.com/nesquena/hermes-webui/pull/3316). |
 | Cancel ownership hardening | Frontend cancel should close its own SSE source and clear only its own busy state. | [#3344](https://github.com/nesquena/hermes-webui/issues/3344), [#3345](https://github.com/nesquena/hermes-webui/pull/3345). |
 | Early-cancel startup race | Backend cancel should still interrupt the worker when the SSE registry detached before startup fully settled. | [#3475](https://github.com/nesquena/hermes-webui/issues/3475), [#3476](https://github.com/nesquena/hermes-webui/pull/3476). |

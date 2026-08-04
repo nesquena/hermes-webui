@@ -329,6 +329,53 @@ def test_auth_401_seeded_replayed_assistant_does_not_satisfy_current_turn(tmp_pa
     assert not any(event == "done" for event, _ in events)
 
 
+def test_captured_terminal_http_400_beats_structured_final_answer(tmp_path, monkeypatch):
+    session = _prepare_session("captured_terminal_http_400", "stream_captured_terminal_http_400", pending_user_message="Please use the tool")
+
+    class CapturedTerminalHttp400Agent(MockAgent):
+        def __init__(self, status_callback=None, **kwargs):
+            super().__init__(**kwargs)
+            self.status_callback = status_callback
+
+        def run_conversation(self, **kwargs):
+            history = list(kwargs.get("conversation_history") or [])
+            status_cb = getattr(self, "status_callback", None)
+            if status_cb is not None:
+                status_cb("lifecycle", "❌ Non-retryable error (HTTP 400): invalid model")
+            if self.stream_delta_callback is not None:
+                self.stream_delta_callback("Partial text before failure")
+            return {
+                "messages": history + [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "tool_use", "name": "weather.lookup", "input": {"city": "Leeds"}},
+                            {"type": "output_text", "output_text": "It is 18C and sunny."},
+                        ],
+                        "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "weather.lookup", "arguments": "{}"}}],
+                    }
+                ],
+                "error": "",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_captured_terminal_http_400",
+        CapturedTerminalHttp400Agent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("captured_terminal_http_400")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    apperrors = [data for event, data in events if event == "apperror"]
+    assert apperrors, "expected apperror for captured terminal HTTP 400"
+    assert apperrors[-1]["type"] == "model_not_found"
+    assert not any(event == "done" for event, _ in events)
+    assert saved.messages[-1]["_error"] is True
+
+
 def test_auth_retry_success_does_not_append_error_turn(tmp_path, monkeypatch):
     session = _prepare_session("auth_retry", "stream_auth_retry", pending_user_message="Please retry")
     agent_cls = _build_auth_failure_agent(token_text="")

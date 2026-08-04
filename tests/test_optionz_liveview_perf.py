@@ -226,11 +226,25 @@ def test_sse_write_timeout_drops_slow_subscriber():
 def test_all_sse_endpoints_set_write_deadline():
     src = (REPO_ROOT / "api" / "routes.py").read_text()
     assert "_sse_set_write_deadline" in src
-    # Every SSE handler must arm the deadline. Count call sites — there are
-    # 6 long-lived SSE endpoints (chat-stream, terminal, gateway, approval,
-    # clarify, session).
-    assert src.count("_sse_set_write_deadline(handler") >= 6, (
-        "all 6 SSE endpoints must arm the write deadline"
+    # Every long-lived SSE handler must arm the deadline. Call sites: chat-stream,
+    # terminal, gateway, approval, clarify, session-list, and the session-events
+    # invalidation stream (the last was previously the only one missing it).
+    assert src.count("_sse_set_write_deadline(handler") >= 7, (
+        "every long-lived SSE endpoint must arm the write deadline"
+    )
+
+
+def test_session_events_stream_arms_write_deadline():
+    """The session-events invalidation SSE handler must arm the write deadline
+    like every other long-lived SSE endpoint — otherwise a slow/backgrounded tab
+    can pin its handler thread for up to the 30s connection timeout instead of
+    the tunable deadline."""
+    src = (REPO_ROOT / "api" / "routes.py").read_text()
+    start = src.index("def _handle_session_events_stream(")
+    end = src.index("\ndef ", start)
+    body = src[start:end]
+    assert "_sse_set_write_deadline(handler)" in body, (
+        "_handle_session_events_stream must call _sse_set_write_deadline"
     )
 
 

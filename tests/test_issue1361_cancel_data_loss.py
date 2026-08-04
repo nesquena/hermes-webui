@@ -402,9 +402,16 @@ def test_stream_error_pending_materialization_does_not_duplicate_eager_checkpoin
         pending_msg="please restart the WebUI",
         messages=[
             {"role": "assistant", "content": "previous answer"},
-            {"role": "user", "content": "please restart the WebUI"},
+            {
+                "role": "user",
+                "content": "[Workspace::v1: C:\\repo]\nplease   restart the WebUI",
+                "timestamp": 1778098700,
+                "attachments": [{"name": "screen.png"}],
+            },
         ],
     )
+    s.pending_started_at = 1778098700.0
+    s.pending_attachments = [{"name": "screen.png"}]
 
     appended = _materialize_pending_user_turn_before_error(s)
 
