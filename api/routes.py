@@ -6408,6 +6408,15 @@ def _normalize_custom_qualified_session_model(
     removed from the session's own profile must not be remapped from another
     profile's ``custom_providers``.
     """
+    # #6718 re-gate (CORE 2 follow-up): fail closed. A ``None`` profile config
+    # must NEVER fall through to the module-global ``api.config.cfg``
+    # (``_custom_provider_entries`` defaults to it when handed a non-dict) —
+    # otherwise a slug removed from the session's own profile gets remapped
+    # from another profile's (or the process-global) ``custom_providers``.
+    # Callers that need normalization (chat/start, /api/session/new,
+    # /api/session/update) thread the session's own profile config here.
+    if not isinstance(profile_config, dict):
+        return None
     bare: str | None = None
     qualifier: str | None = None
     if model.startswith("@"):
@@ -7820,6 +7829,8 @@ def _session_model_state_from_request(
     model: str | None,
     requested_provider: str | None,
     current_provider: str | None = None,
+    *,
+    profile_config: dict | None = None,
 ) -> tuple[str | None, str | None]:
     model_value = str(model).strip() if model is not None else None
     provider = (
@@ -7836,6 +7847,7 @@ def _session_model_state_from_request(
         model_value, provider, _changed = _resolve_compatible_session_model_state(
             model_value,
             provider,
+            profile_config=profile_config,
         )
     return model_value, provider
 
@@ -14352,9 +14364,29 @@ def handle_post(handler, parsed) -> bool:
             except Exception as e:
                 logger.exception("failed to create worktree-backed session")
                 return bad(handler, f"Failed to create worktree: {e}", status=500)
+        # #6718 re-gate: the custom-provider slug normalizer must resolve under
+        # the session's OWN profile config (fail-closed when unreadable) —
+        # never the process-global config, which may belong to another profile.
+        _profile_name = str(body.get("profile") or "").strip() or None
+        _session_profile_config = None
+        try:
+            from api.profiles import get_hermes_home_for_profile
+
+            _p_cfg_path = os.path.join(
+                str(get_hermes_home_for_profile(_profile_name)),
+                "config.yaml",
+            )
+            if os.path.isfile(_p_cfg_path):
+                _session_profile_config = _read_profile_config_cached(
+                    str(_profile_name or ""),
+                    _p_cfg_path,
+                )
+        except Exception:
+            _session_profile_config = None
         model, model_provider = _session_model_state_from_request(
             body.get("model"),
             body.get("model_provider"),
+            profile_config=_session_profile_config,
         )
         try:
             enabled_toolsets = _validate_session_toolsets_shape(body.get("enabled_toolsets"))
@@ -14898,10 +14930,13 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(body["session_id"]):
             s.workspace = new_ws
             if "model" in body or "model_provider" in body:
+                # #6718 re-gate: normalize under the session's OWN profile
+                # config (fail-closed when unreadable), never process-global.
                 model, provider = _session_model_state_from_request(
                     body.get("model", s.model),
                     body.get("model_provider") if "model_provider" in body else None,
                     getattr(s, "model_provider", None),
+                    profile_config=_load_profile_config_dict(s),
                 )
                 if model is not None:
                     s.model = model
