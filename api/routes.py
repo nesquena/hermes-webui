@@ -2809,8 +2809,6 @@ from api.config import (
     unregister_stream_owner,
     CHAT_LOCK,
     _get_session_agent_lock,
-    SESSION_AGENT_LOCKS,
-    SESSION_AGENT_LOCKS_LOCK,
     CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
     load_settings,
     persisted_speech_settings_keys,
@@ -9392,6 +9390,8 @@ from api.models import (
     get_session_for_scan,
     find_compression_recovery_session,
     get_session_for_file_ops,
+    persist_recovered_workspace_binding,
+    WorkspaceBindingPersistenceError,
     new_session,
     all_sessions,
     title_from,
@@ -9630,6 +9630,7 @@ from api.workspace import (
     safe_resolve_ws,
     raw_authorized_escape_target,
     resolve_trusted_workspace,
+    resolve_implicit_workspace_with_recovery,
     open_anchored_fd,
     open_anchored_create_fd,
     open_anchored_write_fd,
@@ -9671,6 +9672,7 @@ from api.run_journal import (
     read_session_run_events,
     session_journal_fingerprint,
     stale_interrupted_event,
+    SSE_RELAY_CLOSE_EVENTS,
 )
 from api.todo_state import attach_todo_state
 from api.providers import (
@@ -9715,8 +9717,15 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     _approval_sse_notify_locked,
     _approval_sse_notify,
     _GATEWAY_MIRROR_FLAG,
-    _gateway_mirrored_pending_run_id,
+    _GATEWAY_MIRROR_TOKEN,
+    _gateway_mirror_entry_token,
+    claim_gateway_approval_relay_owner,
+    gateway_pending_mirror,
+    release_gateway_approval_relay_owner,
+    retire_gateway_pending_mirror,
     reconcile_gateway_pending_mirror_locked,
+    resolve_gateway_pending_local,
+    resolve_gateway_pending_local_no_run_mirror,
     submit_gateway_pending_mirror,
     submit_pending,
 )
@@ -13367,6 +13376,39 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "stream_id required")
         if not _stream_id_visible_to_request_profile(handler, stream_id):
             return True
+        gateway_stop_blocked = False
+        try:
+            from api.gateway_chat import (
+                GATEWAY_RUN_ID_WAIT_TIMEOUT,
+                stop_gateway_run,
+                wait_for_gateway_run_id,
+            )
+
+            structured_gateway, run_id = wait_for_gateway_run_id(stream_id, GATEWAY_RUN_ID_WAIT_TIMEOUT)
+            if not run_id and structured_gateway:
+                gateway_stop_blocked = True
+            if run_id:
+                if stop_gateway_run(run_id):
+                    owner_sid = stream_owner_session_id(stream_id)
+                    if owner_sid:
+                        retire_gateway_pending_mirror(owner_sid, run_id=run_id)
+                else:
+                    gateway_stop_blocked = True
+        except Exception:
+            logger.debug("Failed to stop gateway run during chat cancellation", exc_info=True)
+            gateway_stop_blocked = True
+        if gateway_stop_blocked:
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "cancelled": False,
+                    "stream_id": stream_id,
+                    "error": "Gateway stop failed",
+                },
+                status=502,
+            )
+
         from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
 
         if runtime_adapter_enabled():
@@ -14531,7 +14573,6 @@ def handle_post(handler, parsed) -> bool:
         import api.routes as _routes
         _routes.get_session = _models.get_session
         _routes.Session = _models.Session
-        _routes.compact = _models.compact
         return j(handler, {"status": "ok", "reloaded": "api.models"})
 
     if parsed.path == "/api/sessions/cleanup":
@@ -14857,36 +14898,44 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
-        # Delete from WebUI session store
-        with LOCK:
-            SESSIONS.pop(sid, None)
-        # Evict cached agent so turn count doesn't leak into a recycled session
+        # Serialize with recovery, but bound contention so a browser timeout
+        # cannot be followed by a delayed server-side delete.
+        session_lock = _get_session_agent_lock(sid)
+        if not session_lock.acquire(timeout=5):
+            return bad(handler, "Session busy, try again", 503)
+        try:
+            with LOCK:
+                SESSIONS.pop(sid, None)
+            try:
+                p = (SESSION_DIR / f"{sid}.json").resolve()
+                p.relative_to(SESSION_DIR.resolve())
+            except Exception:
+                return bad(handler, "Invalid session_id", 400)
+            sidecar_deleted = False
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                logger.debug("Failed to unlink session file %s", p)
+            sidecar_deleted = not p.exists()
+            try:
+                prune_session_from_index(sid)
+            except Exception:
+                logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
+            try:
+                p.with_suffix('.json.bak').unlink(missing_ok=True)
+            except Exception:
+                logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+            if sidecar_deleted and not is_messaging_session:
+                try:
+                    _record_webui_deleted_session_tombstone(sid)
+                except Exception:
+                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+        finally:
+            session_lock.release()
+        # Evict outside the mutation lock: lifecycle commit may perform provider
+        # I/O and must not hold a per-session Session lock.
         from api.config import _evict_session_agent
         _evict_session_agent(sid)
-        try:
-            p = (SESSION_DIR / f"{sid}.json").resolve()
-            p.relative_to(SESSION_DIR.resolve())
-        except Exception:
-            return bad(handler, "Invalid session_id", 400)
-        sidecar_deleted = False
-        try:
-            p.unlink(missing_ok=True)
-        except Exception:
-            logger.debug("Failed to unlink session file %s", p)
-        sidecar_deleted = not p.exists()
-        try:
-            p.with_suffix('.json.bak').unlink(missing_ok=True)
-        except Exception:
-            logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-        try:
-            prune_session_from_index(sid)
-        except Exception:
-            logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
-        if sidecar_deleted and not is_messaging_session:
-            try:
-                _record_webui_deleted_session_tombstone(sid)
-            except Exception:
-                logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         try:
             from api.upload import _session_attachment_dir
 
@@ -14910,10 +14959,8 @@ def handle_post(handler, parsed) -> bool:
             delete_run_journal(sid)
         except Exception:
             logger.debug("Failed to delete run journal for deleted session %s", sid)
-        # Prune the per-session agent lock so deleted sessions don't leak
-        # Lock entries in SESSION_AGENT_LOCKS forever.
-        with SESSION_AGENT_LOCKS_LOCK:
-            SESSION_AGENT_LOCKS.pop(sid, None)
+        # The weak lock registry releases this entry automatically after all
+        # holders and waiters drop their strong references.
         # Prune the completion-dedup entry too. The reaper sweeps it once the
         # completion is delivered (drained from PENDING); a session deleted
         # while a completion is still pending would otherwise keep its entry.
@@ -16895,8 +16942,10 @@ def _handle_list_dir(handler, parsed):
     sid = qs.get("session_id", [""])[0]
     if not sid:
         return bad(handler, "session_id is required")
+    webui_session = None
     try:
         s = get_session(sid)
+        webui_session = s
         workspace = s.workspace
     except KeyError:
         # Fallback for CLI sessions not loaded in WebUI memory
@@ -16912,6 +16961,22 @@ def _handle_list_dir(handler, parsed):
         except Exception:
             return bad(handler, "Session not found", 404)
     try:
+        if webui_session is None:
+            workspace = resolve_trusted_workspace(workspace)
+            recovered = False
+        else:
+            stored_workspace = workspace
+            workspace, recovered = resolve_implicit_workspace_with_recovery(
+                stored_workspace,
+                get_last_workspace,
+            )
+            if recovered:
+                persisted = persist_recovered_workspace_binding(
+                    webui_session,
+                    workspace,
+                    expected_workspace=stored_workspace,
+                )
+                workspace = Path(persisted.workspace)
         rel_path = qs.get("path", ["."])[0]
         entries = list_dir(Path(workspace), rel_path)
         return j(
@@ -16920,8 +16985,12 @@ def _handle_list_dir(handler, parsed):
                 "entries": entries,
                 "signature": dir_signature(Path(workspace), rel_path, entries),
                 "path": rel_path,
+                "workspace": str(workspace),
+                "workspace_recovered": recovered,
             },
         )
+    except WorkspaceBindingPersistenceError as e:
+        return bad(handler, _sanitize_error(e), 500)
     except (FileNotFoundError, ValueError) as e:
         return bad(handler, _sanitize_error(e), 404)
 
@@ -17413,7 +17482,7 @@ def _stream_runner_run_events(handler, run_id: str, cursor: str | None = None) -
                 event = _runner_event_name(entry)
                 _sse_with_id(handler, event, _runner_event_payload(entry), _runner_event_id(run_id, entry))
                 emitted = True
-                if event in ("stream_end", "error", "cancel"):
+                if event in SSE_RELAY_CLOSE_EVENTS:
                     terminal = True
             next_cursor = getattr(event_stream, "cursor", None)
             if next_cursor not in (None, ""):
@@ -17507,7 +17576,7 @@ def _handle_sse_stream(handler, parsed):
                 _sse_with_id(handler, event, data, event_id)
             else:
                 _sse(handler, event, data)
-            if event in ("stream_end", "error", "cancel"):
+            if event in SSE_RELAY_CLOSE_EVENTS:
                 break
     except _CLIENT_DISCONNECT_ERRORS:
         pass
@@ -17645,7 +17714,7 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
                     queued_event_id = STREAM_LAST_EVENT_ID.get(active_stream_id)
                 event_id = queued_event_id or STREAM_LAST_EVENT_ID.get(active_stream_id)
                 event_seq = _run_journal_same_run_seq(event_id, active_stream_id)
-                _is_terminal = event in ("stream_end", "error", "cancel")
+                _is_terminal = event in SSE_RELAY_CLOSE_EVENTS
                 _already_sent = (
                     (replay_cutoff_seq is not None and event_seq is not None and event_seq <= replay_cutoff_seq)
                     or (event_id and event_id in sent_event_ids)
@@ -17802,18 +17871,7 @@ def _handle_terminal_output(handler, parsed):
     sid = qs.get("session_id", [""])[0]
     if not sid:
         return bad(handler, "session_id required")
-    from api.terminal import get_terminal
-    term = get_terminal(sid)
-    if term is None:
-        return j(handler, {"error": "terminal not running"}, status=404)
-
-    handler.send_response(200)
-    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
-    handler.send_header("Cache-Control", "no-cache")
-    handler.send_header("X-Accel-Buffering", "no")
-    handler.send_header("Connection", "close")
-    end_sse_headers(handler)
-    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
+    from api.terminal import attach_terminal
     # EventSource automatically returns the last received SSE id on transport
     # reconnect. Seed only newer backlog entries in that case so already-rendered
     # terminal bytes (including ANSI cursor controls) are not written twice. A
@@ -17825,8 +17883,32 @@ def _handle_terminal_output(handler, parsed):
             after_seq = max(0, int(last_event_id))
         except ValueError:
             pass
-    output = term.subscribe(after_seq=after_seq)
+    # Look up and subscribe in one atomic step. A separate `get_terminal()` then
+    # `term.subscribe()` leaves a window in which the idle reaper can claim and
+    # tear the terminal down, leaving this stream attached to a corpse after we
+    # already committed a 200. Attaching atomically means we either hold a live
+    # viewer (which makes the terminal un-reapable) or learn it is gone in time
+    # to answer 404.
+    attached = attach_terminal(sid, after_seq=after_seq)
+    if attached is None:
+        return j(handler, {"error": "terminal not running"}, status=404)
+    term, output = attached
+
+    # The subscription is live from here on, so EVERY exit path — including a
+    # failure while writing the response headers — must unsubscribe. Writing
+    # headers to a client that already dropped raises BrokenPipeError, and if
+    # that escaped before the try block the queue would stay in
+    # `_subscribers` forever, pinning `unwatched_since` at None and making the
+    # terminal permanently unreapable: the exact fd/thread leak this reaper
+    # exists to prevent. Hence the try starts immediately after the attach.
     try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("X-Accel-Buffering", "no")
+        handler.send_header("Connection", "close")
+        end_sse_headers(handler)
+        _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
         while True:
             try:
                 event_seq, event, data = output.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
@@ -20847,10 +20929,15 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
             if latest_text == msg_text:
                 return
     user_msg = {"role": "user", "content": msg}
-    if source and source != "webui":
-        user_msg["_source"] = source
+    from api.process_event_utils import build_active_turn_token, stamp_message_source
+
+    stamp_message_source(
+        user_msg,
+        source,
+        active_turn_token=build_active_turn_token(getattr(s, "active_stream_id", None), started_at),
+    )
     if isinstance(started_at, (int, float)) and started_at > 0:
-        user_msg["timestamp"] = int(started_at)
+        user_msg["timestamp"] = float(started_at)
     if attachments:
         user_msg["attachments"] = list(attachments)
     s.messages.append(user_msg)
@@ -21206,13 +21293,27 @@ def _start_chat_stream_for_session(
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
+    if backend_is_gateway:
+        from api.gateway_chat import _mark_gateway_run_starting
+        _mark_gateway_run_starting(stream_id)
     thr = threading.Thread(
         target=worker_target,
         args=(s.session_id, msg, model, workspace, stream_id, attachments),
         kwargs=worker_kwargs,
         daemon=True,
     )
-    thr.start()
+    try:
+        thr.start()
+    except Exception:
+        if backend_is_gateway:
+            try:
+                from api.gateway_chat import _finish_gateway_run_starting
+                _finish_gateway_run_starting(stream_id)
+                from api.gateway_chat import _clear_gateway_run_starting
+                _clear_gateway_run_starting(stream_id)
+            except Exception:
+                logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+        raise
     response = {
         "stream_id": stream_id,
         "session_id": s.session_id,
@@ -21480,6 +21581,8 @@ def start_session_turn(
 
     try:
         workspace = _resolve_chat_workspace_with_recovery(s, None)
+    except WorkspaceBindingPersistenceError as e:
+        return {"error": str(e), "_status": 500}
     except ValueError as e:
         return {"error": str(e), "_status": 400}
 
@@ -22089,6 +22192,8 @@ def _handle_chat_start(handler, body, diag=None):
         diag.stage("resolve_workspace") if diag else None
         try:
             workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
+        except WorkspaceBindingPersistenceError as e:
+            return bad(handler, str(e), 500)
         except ValueError as e:
             return bad(handler, str(e))
         requested_model = body.get("model") or s.model
@@ -22239,19 +22344,21 @@ def _handle_chat_start(handler, body, diag=None):
 def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
     """Recover stale implicit session workspaces without hiding explicit errors."""
     explicit = requested_workspace not in (None, "")
-    candidate = requested_workspace if explicit else getattr(s, "workspace", None)
-    try:
-        return str(resolve_trusted_workspace(candidate))
-    except ValueError:
-        if explicit:
-            raise
-    fallback = str(resolve_trusted_workspace(get_last_workspace()))
-    s.workspace = fallback
-    try:
-        s.save()
-    except Exception:
-        pass
-    return fallback
+    if explicit:
+        return str(resolve_trusted_workspace(requested_workspace))
+    stored_workspace = getattr(s, "workspace", None)
+    workspace, recovered = resolve_implicit_workspace_with_recovery(
+        stored_workspace,
+        get_last_workspace,
+    )
+    if not recovered:
+        return str(workspace)
+    persisted = persist_recovered_workspace_binding(
+        s,
+        workspace,
+        expected_workspace=stored_workspace,
+    )
+    return str(persisted.workspace)
 
 
 def _normalize_chat_attachments(raw_attachments):
@@ -23748,7 +23855,7 @@ def _handle_workspace_reorder(handler, body):
     return j(handler, {"ok": True, "workspaces": reordered})
 
 
-def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
+def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: str = "") -> bool:
     """Resolve an approval through the existing callback path.
 
     Slice 3b keeps the RuntimeAdapter as a protocol translator: it delegates to
@@ -23759,17 +23866,31 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     pending = None
     found_target = False
     gateway_keys = []
+    local_gateway_approval_id = ""
+    gateway_head_matches_target = False
     with _lock:
         reconcile_gateway_pending_mirror_locked(sid)
         queue = _pending.get(sid)
         if isinstance(queue, list):
             if approval_id:
-                # Find and remove the specific entry by approval_id.
+                # Prefer a local exact-id match over a mirrored one, so a
+                # preceding remote mirror cannot consume the user's local choice.
+                preferred_index = None
+                fallback_index = None
                 for i, entry in enumerate(queue):
-                    if entry.get("approval_id") == approval_id:
-                        pending = queue.pop(i)
-                        found_target = True
+                    if entry.get("approval_id") != approval_id:
+                        continue
+                    if run_id and str(entry.get("run_id") or "").strip() != run_id:
+                        continue
+                    if not entry.get(_GATEWAY_MIRROR_FLAG) or not str(entry.get("run_id") or "").strip():
+                        preferred_index = i
                         break
+                    if fallback_index is None:
+                        fallback_index = i
+                match_index = preferred_index if preferred_index is not None else fallback_index
+                if match_index is not None:
+                    pending = queue.pop(match_index)
+                    found_target = True
                 else:
                     # A stale explicit id must not accidentally approve the
                     # oldest queued command; duplicate/stale responses are
@@ -23782,7 +23903,13 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
                 _pending.pop(sid, None)
         elif queue:
             # Legacy single-dict value.
-            if not approval_id or queue.get("approval_id") == approval_id:
+            if (
+                not approval_id
+                or (
+                    queue.get("approval_id") == approval_id
+                    and (not run_id or str(queue.get("run_id") or "").strip() == run_id)
+                )
+            ):
                 pending = _pending.pop(sid, None)
                 found_target = pending is not None
         # When no _pending entry found AND no explicit approval_id was
@@ -23805,16 +23932,35 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
                 # idempotent over the session key set so the outcome is
                 # the same regardless of which entry wins the race.
                 found_target = True
+        elif approval_id:
+            gw_queue = _gateway_queues.get(sid)
+            if gw_queue and len(gw_queue) > 0:
+                gw_entry = gw_queue[0]
+                gw_data = getattr(gw_entry, "data", None) or {}
+                gw_approval_id = str(gw_data.get("approval_id") or "").strip()
+                gw_run_id = str(gw_data.get("run_id") or "").strip()
+                gateway_head_matches_target = bool(
+                    run_id and gw_approval_id == approval_id and gw_run_id == run_id
+                )
+                if gw_approval_id == approval_id and (not run_id or gw_run_id == run_id):
+                    local_gateway_approval_id = approval_id
+                elif not run_id and found_target and pending:
+                    pending_token = str(pending.get(_GATEWAY_MIRROR_TOKEN) or "").strip()
+                    gateway_token = str(gw_data.get("_webui_mirror_token") or "").strip()
+                    if pending_token and pending_token == gateway_token:
+                        gw_data["approval_id"] = approval_id
+                        local_gateway_approval_id = approval_id
         # Notify SSE subscribers of the new head (or empty state) so the UI
         # surfaces any trailing approvals that were queued behind this one
         # without waiting for the next submit_pending. Without this, a parallel
         # tool-call scenario (#527) would leave the second approval invisible
         # in the SSE path until the next event ever fired (the agent thread
         # would be parked indefinitely from the user's perspective).
-        if isinstance(_pending.get(sid), list) and _pending[sid]:
-            _approval_sse_notify_locked(sid, _pending[sid][0], len(_pending[sid]))
-        else:
-            _approval_sse_notify_locked(sid, None, 0)
+        if not local_gateway_approval_id:
+            if isinstance(_pending.get(sid), list) and _pending[sid]:
+                _approval_sse_notify_locked(sid, _pending[sid][0], len(_pending[sid]))
+            else:
+                _approval_sse_notify_locked(sid, None, 0)
 
     # Collect keys from both _pending and _gateway_queues
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
@@ -23836,11 +23982,18 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     # This is the primary signal when streaming is active — the agent
     # thread is parked in entry.event.wait() and needs to be woken up.
     gateway_resolved = 0
-    if found_target or not approval_id:
+    local_gateway_resolved = 0
+    if approval_id and found_target and not run_id and local_gateway_approval_id:
+        local_gateway_resolved, _head, _total = resolve_gateway_pending_local(
+            sid, local_gateway_approval_id, choice
+        )
+    elif approval_id and found_target and run_id and gateway_head_matches_target:
+        gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
+    elif not approval_id:
         gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
     # Keep the historical no-id response path truthy for old clients/tests while
     # making stale explicit ids bounded as not-active for Slice 3b.
-    resolved = bool(pending) or bool(gateway_resolved) or not bool(approval_id)
+    resolved = bool(pending) or bool(gateway_resolved) or bool(local_gateway_resolved) or not bool(approval_id)
     if resolved:
         publish_session_list_changed("attention_resolved")
     return resolved
@@ -23849,6 +24002,10 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
 _GATEWAY_APPROVAL_RELAY_UNAVAILABLE = (
     "Gateway approval could not be relayed because the active run is unavailable. "
     "Reopen the session or retry after it reconnects."
+)
+_GATEWAY_APPROVAL_RELAY_IN_PROGRESS = (
+    "Another approval response for this Gateway run is already in progress. "
+    "Wait for it to finish, then retry if the card is still visible."
 )
 
 
@@ -23865,11 +24022,11 @@ def _gateway_pending_approval_without_run_id(sid: str, approval_id: str) -> bool
         if approval_id:
             for entry in entries:
                 if isinstance(entry, dict) and entry.get("approval_id") == approval_id:
-                    return bool(entry.get(_GATEWAY_MIRROR_FLAG))
+                    return bool(entry.get(_GATEWAY_MIRROR_FLAG)) and not str(entry.get("run_id") or "").strip()
             return False
         if not entries or not isinstance(entries[0], dict):
             return False
-        return bool(entries[0].get(_GATEWAY_MIRROR_FLAG))
+        return bool(entries[0].get(_GATEWAY_MIRROR_FLAG)) and not str(entries[0].get("run_id") or "").strip()
 
 
 def _session_has_pending_approval(sid: str) -> bool:
@@ -23912,36 +24069,76 @@ def _handle_approval_respond(handler, body):
             _gateway_api_key,
             webui_gateway_chat_enabled,
         )
-        from api.config import get_config as _get_config
+        from api.config import get_config as _get_config, gateway_supports_approval_identity_v1
+        from api.route_approvals import _GATEWAY_AGENT_IDENTITY_V1
         s = get_session(sid)
-        _run_id = None
+        _candidate_run_id = None
         if s is not None:
             active_sid = getattr(s, "active_stream_id", None)
             if active_sid:
-                _run_id = _STREAM_RUN_IDS.get(active_sid)
-            if not _run_id and approval_id:
-                _run_id = _gateway_mirrored_pending_run_id(sid, approval_id)
-        if _run_id:
-            if not approval_id:
-                return bad(handler, "approval_id is required for gateway approvals")
-            from api.runner_client import HttpRunnerClient, RunnerClientError
-            _cfg = _get_config()
-            _base = _gateway_base_url(_cfg)
-            _key = _gateway_api_key()
-            try:
-                HttpRunnerClient(base_url=_base, api_key=_key).respond_approval(_run_id, approval_id, choice)
-            except (RunnerClientError, ValueError) as exc:
-                return j(handler, {"ok": False, "choice": choice, "relayed": True, "error": str(exc)}, status=502)
-            # The outbound relay only resumes the remote run; the local mirror
-            # still needs the same cleanup path so the parked entry, mirrored
-            # card, and agent signal all settle here too.
-            _resolve_approval_legacy(sid, approval_id, choice)
-            return j(handler, {"ok": True, "choice": choice, "relayed": True})
-        # Only a still-mirrored gateway approval with a missing run should 409;
-        # stale or empty gateway clicks fall through to local resolution.
-        if webui_gateway_chat_enabled(_get_config()) and _gateway_pending_approval_without_run_id(
-            sid, approval_id
-        ):
+                _candidate_run_id = _STREAM_RUN_IDS.get(active_sid)
+        local_match = False
+        run_backed_gateway_matches = 0
+        same_run_stale_without_token = False
+        with _lock:
+            queue = _pending.get(sid)
+            entries = queue if isinstance(queue, list) else [queue] if queue else []
+            if approval_id:
+                local_match = any(
+                    isinstance(entry, dict)
+                    and entry.get("approval_id") == approval_id
+                    and (
+                        not entry.get(_GATEWAY_MIRROR_FLAG)
+                        or not str(entry.get("run_id") or "").strip()
+                    )
+                    for entry in entries
+                )
+                run_backed_gateway_matches = sum(
+                    1
+                    for entry in entries
+                    if isinstance(entry, dict)
+                    and entry.get("approval_id") == approval_id
+                    and entry.get(_GATEWAY_MIRROR_FLAG)
+                    and str(entry.get("run_id") or "").strip()
+                )
+                gateway_queue = _gateway_queues.get(sid) or []
+                live_head_data = getattr(gateway_queue[0], "data", None) or {} if gateway_queue else {}
+                live_head_run_id = str(live_head_data.get("run_id") or "").strip()
+                live_head_token = (
+                    _gateway_mirror_entry_token(gateway_queue[0])
+                    if gateway_queue and live_head_data
+                    else None
+                )
+                live_head_approval_id = str(live_head_data.get("approval_id") or "").strip()
+                if not live_head_approval_id and live_head_token and live_head_run_id:
+                    live_head_approval_id = f"gwrun:{live_head_run_id}:{live_head_token}"
+                stale_same_run_id = _candidate_run_id or live_head_run_id
+                if (
+                    stale_same_run_id
+                    and live_head_run_id == stale_same_run_id
+                    and live_head_approval_id
+                    and live_head_approval_id != approval_id
+                ):
+                    same_run_stale_without_token = any(
+                        isinstance(entry, dict)
+                        and entry.get("approval_id") == approval_id
+                        and entry.get(_GATEWAY_MIRROR_FLAG)
+                        and str(entry.get("run_id") or "").strip() == stale_same_run_id
+                        and not str(entry.get(_GATEWAY_MIRROR_TOKEN) or "").strip()
+                        for entry in entries
+                    )
+            else:
+                local_match = any(
+                    isinstance(entry, dict)
+                    and (
+                        not entry.get(_GATEWAY_MIRROR_FLAG)
+                        or not str(entry.get("run_id") or "").strip()
+                    )
+                    for entry in entries
+                )
+        if local_match:
+            _candidate_run_id = None
+        if approval_id and not local_match and same_run_stale_without_token:
             return j(
                 handler,
                 {
@@ -23953,6 +24150,111 @@ def _handle_approval_respond(handler, body):
                 },
                 status=409,
             )
+        matched_mirror = (
+            gateway_pending_mirror(sid, approval_id=approval_id, run_id=_candidate_run_id)
+            if approval_id and not local_match
+            else None
+        )
+        _run_id = matched_mirror["run_id"] if matched_mirror else None
+        if not matched_mirror and approval_id:
+            if local_match:
+                _candidate_run_id = None
+            elif run_backed_gateway_matches > 1 and not _candidate_run_id:
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "choice": choice,
+                        "relayed": False,
+                        "code": "gateway_run_unavailable",
+                        "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+                    },
+                    status=409,
+                )
+        if _run_id:
+            from api.runner_client import HttpRunnerClient, RunnerClientError
+            _cfg = _get_config()
+            _base = _gateway_base_url(_cfg)
+            _key = _gateway_api_key()
+            claimed_approval_id = str(matched_mirror.get("approval_id") or "").strip()
+            if not claim_gateway_approval_relay_owner(sid, _run_id, claimed_approval_id):
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "choice": choice,
+                        "relayed": False,
+                        "code": "gateway_approval_in_progress",
+                        "error": _GATEWAY_APPROVAL_RELAY_IN_PROGRESS,
+                    },
+                    status=409,
+                )
+            try:
+                current_mirror = gateway_pending_mirror(
+                    sid,
+                    approval_id=claimed_approval_id,
+                    run_id=_run_id,
+                )
+                if not current_mirror:
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "choice": choice,
+                            "relayed": False,
+                            "code": "gateway_run_unavailable",
+                            "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+                        },
+                        status=409,
+                    )
+                identity_v1 = bool(current_mirror.get(_GATEWAY_AGENT_IDENTITY_V1)) and gateway_supports_approval_identity_v1(_base, _key)
+                if not identity_v1:
+                    run_head = gateway_pending_mirror(sid, run_id=_run_id)
+                    if not run_head or str(run_head.get("approval_id") or "").strip() != claimed_approval_id:
+                        return j(
+                            handler,
+                            {
+                                "ok": False,
+                                "choice": choice,
+                                "relayed": False,
+                                "code": "gateway_run_unavailable",
+                                "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+                            },
+                            status=409,
+                        )
+                matched_mirror = current_mirror
+                try:
+                    HttpRunnerClient(base_url=_base, api_key=_key).respond_approval(
+                        _run_id, matched_mirror["approval_id"] if identity_v1 else "", choice
+                    )
+                except (RunnerClientError, ValueError) as exc:
+                    return j(handler, {"ok": False, "choice": choice, "relayed": True, "error": str(exc)}, status=502)
+                # The outbound relay only resumes the remote run; the local mirror
+                # still needs the same cleanup path so the parked entry, mirrored
+                # card, and agent signal all settle here too.
+                cleanup_approval_id = matched_mirror["approval_id"]
+                _resolve_approval_legacy(sid, cleanup_approval_id, choice, run_id=_run_id)
+                retire_gateway_pending_mirror(sid, approval_id=cleanup_approval_id, run_id=_run_id)
+                return j(handler, {"ok": True, "choice": choice, "relayed": True})
+            finally:
+                release_gateway_approval_relay_owner(sid, _run_id, claimed_approval_id)
+        if _candidate_run_id:
+            return j(handler, {"ok": False, "choice": choice, "relayed": False,
+                               "code": "gateway_run_unavailable",
+                               "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE}, status=409)
+        # A no-run mirror is local visibility state only. Resolve it only while
+        # the exact parked producer still exists; otherwise keep the card live
+        # and fail closed instead of claiming success.
+        if webui_gateway_chat_enabled(_get_config()):
+            handled_no_run_mirror, resolved_count, _, _ = resolve_gateway_pending_local_no_run_mirror(
+                sid, approval_id, choice
+            )
+            if handled_no_run_mirror and resolved_count == 1:
+                return j(handler, {"ok": True, "choice": choice, "local_retired": True})
+            if handled_no_run_mirror:
+                return j(handler, {"ok": False, "choice": choice, "relayed": False,
+                                   "code": "gateway_run_unavailable",
+                                   "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE}, status=409)
     except Exception:
         pass  # fall through to local approval path
 
