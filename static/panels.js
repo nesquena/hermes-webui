@@ -8651,11 +8651,6 @@ function _preferencesPayloadFromUi(){
   const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
   if(virtualizeTranscriptCb){
     payload.virtualize_transcript=virtualizeTranscriptCb.checked;
-    // #4343: persist the opt-in marker alongside. Enabling the experimental
-    // feature records an explicit post-flip opt-in so load_settings honors it
-    // (a stored true WITHOUT this marker is treated as a stale pre-flip value
-    // and reset to off). Unchecking clears the marker.
-    payload.virtualize_transcript_optin=virtualizeTranscriptCb.checked;
   }
   const showTpsCb=$('settingsShowTps');
   if(showTpsCb) payload.show_tps=showTpsCb.checked;
@@ -9223,10 +9218,10 @@ async function loadSettingsPanel(){
     }
     const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
     if(virtualizeTranscriptCb){
-      // #4343: EXPERIMENTAL/opt-IN, default OFF. Honor a stored true only when
-      // it came from an explicit post-flip opt-in (===true); a pre-flip true is
-      // already reset to false server-side by the load_settings migration.
-      virtualizeTranscriptCb.checked=settings.virtualize_transcript===true;
+      // #6151: DOM virtualization is ON by default. The checkbox reflects the
+      // server value (!==false), so a default-on user sees it checked and a
+      // saved opt-out (stored false) shows unchecked.
+      virtualizeTranscriptCb.checked=settings.virtualize_transcript!==false;
       window._virtualizeTranscript=virtualizeTranscriptCb.checked;
       virtualizeTranscriptCb.addEventListener('change',()=>{
         window._virtualizeTranscript=virtualizeTranscriptCb.checked;

@@ -3398,7 +3398,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=false;
     applyEmptyStateSuggestionPref();
-    window._virtualizeTranscript=true;  // settings-load failed: default-ON (#6151, re-enables after #4346 fix)
+    window._hideEmptyStatePanel=false;
+    applyEmptyStatePanelPref();
+    window._virtualizeTranscript=true;  // settings-load failed: mirror the True config default (#6151)
     window._showTps=false;
     window._fadeTextEffect=false;
     window._showCliSessions=true;  // settings-load failed: mirror the True config default (#3988)
