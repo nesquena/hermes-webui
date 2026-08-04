@@ -19129,9 +19129,26 @@ function loadHtmlInline(container){
   });
 }
 
-const MD_MAX_SIZE = 256 * 1024;
+function _postProcessMdInlineSubtree(root){
+  // Bounded post-process pass for a freshly inserted Markdown subtree.
+  // Mirrors postProcessRenderedMessages() except loadMarkdownInline: running
+  // that here would re-enter the fetch loop on nested .md references (and can
+  // recurse unboundedly on self-referencing documents). Nested .md placeholders
+  // are picked up by the next full postProcessRenderedMessages() pass instead.
+  highlightCode(root);
+  addCopyButtons(root);
+  loadDiffInline(root);
+  loadCsvInline(root);
+  loadExcalidrawInline(root);
+  loadPdfInline(root);
+  loadHtmlInline(root);
+  renderMermaidBlocks(root);
+  renderKatexBlocks(root);
+  initTreeViews(root);
+}
 
 function loadMarkdownInline(container){
+  const MD_MAX_SIZE = 256 * 1024; // 256 KB cap for inline Markdown preview
   const root = container || document;
   root.querySelectorAll('.md-inline-load:not([data-loaded])').forEach(el => {
     el.setAttribute('data-loaded', '1');
@@ -19149,7 +19166,14 @@ function loadMarkdownInline(container){
           return;
         }
         const rendered = renderMd(text);
-        el.outerHTML = `<div class="md-inline-wrap"><div class="md-inline-header"><span class="md-preview-title">${esc(fname)}</span><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a></div><div class="md-inline-content">${rendered}</div></div>`;
+        const wrap = document.createElement('div');
+        wrap.innerHTML = `<div class="md-inline-wrap"><div class="md-inline-header"><span class="md-preview-title">${esc(fname)}</span><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a></div><div class="md-inline-content">${rendered}</div></div>`;
+        const contentEl = wrap.querySelector('.md-inline-content');
+        el.replaceWith(wrap.firstElementChild);
+        // Fetched Markdown bypasses the normal post-render pipeline — run the
+        // bounded post-processors on the new subtree so code-copy affordances,
+        // MEDIA:/file previews, Mermaid, KaTeX and tree views still apply.
+        _postProcessMdInlineSubtree(contentEl);
       })
       .catch(() => {
         el.outerHTML = `<div class="md-inline-fallback"><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${esc(typeof t === 'function' ? t('md_error') : 'Error loading markdown')}</span></div>`;
