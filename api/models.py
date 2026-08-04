@@ -175,6 +175,73 @@ def _safe_replace(src: Path, dst: Path) -> None:
             delay *= 2  # 50 -> 100 -> 200 -> 400 -> 800 ms
 
 
+@contextmanager
+def _session_sidecar_cross_process_lock(sid: str):
+    """Serialize read-merge-validate-replace of ONE session sidecar across processes.
+
+    PR #6422: the cross-client merge needs ``merge + truncate-generation
+    comparison + final fingerprint validation + atomic replace`` to be a single
+    per-session transaction.  The process-local ``_get_session_agent_lock`` only
+    serializes threads of one process, so a second WebUI worker can interleave a
+    write between our validation read and our ``os.replace``.  This lock closes
+    that TOCTOU window: every sidecar write goes through ``Session.save()``,
+    which holds this lock for the whole read-modify-write of the file.
+
+    POSIX uses ``flock``; native Windows locks the first byte with
+    ``msvcrt.locking`` (mirroring ``_cleanup_manifest_process_lock``).  The lock
+    file is kept in place permanently — unlinking it while another process is
+    waiting can split later callers across different inodes and defeat the
+    lock.  If neither primitive exists (exotic platform), degrade to a no-op
+    rather than block every save.
+    """
+    if not is_safe_session_id(sid):
+        yield
+        return
+    lock_path = SESSION_DIR / f'.{sid}.sidecar.lock'
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        logger.debug("sidecar lock open failed for %s", sid, exc_info=True)
+        yield
+        return
+    with os.fdopen(fd, 'r+b', buffering=0) as lock_file:
+        if _fcntl is not None:
+            _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
+            return
+        if _msvcrt is not None:
+            try:
+                if os.fstat(lock_file.fileno()).st_size == 0:
+                    lock_file.write(b'\0')
+                lock_file.seek(0)
+                _msvcrt.locking(  # type: ignore[attr-defined]
+                    lock_file.fileno(), _msvcrt.LK_LOCK, 1  # type: ignore[attr-defined]
+                )
+            except OSError:
+                logger.debug("sidecar msvcrt lock failed for %s", sid, exc_info=True)
+                yield
+                return
+            try:
+                yield
+            finally:
+                try:
+                    lock_file.seek(0)
+                    _msvcrt.locking(  # type: ignore[attr-defined]
+                        lock_file.fileno(), _msvcrt.LK_UNLCK, 1  # type: ignore[attr-defined]
+                    )
+                except OSError:
+                    logger.debug("sidecar msvcrt unlock failed for %s", sid, exc_info=True)
+            return
+        # No cross-process primitive available: best-effort no-op.
+        logger.debug("cross-process sidecar locking unavailable for %s", sid)
+        yield
+
+
+
 # Serializes index writers so concurrent Session.save() calls cannot race on
 # stale baselines while still allowing LOCK to be released before disk I/O.
 _INDEX_WRITE_LOCK = threading.RLock()
@@ -1220,6 +1287,7 @@ class Session:
                  truncation_watermark=None,
                  truncation_boundary=None,
                  clear_generation=None,
+                 truncate_generation=None,
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
@@ -1301,6 +1369,12 @@ class Session:
         self.truncation_watermark = truncation_watermark
         self.truncation_boundary = truncation_boundary
         self.clear_generation = clear_generation
+        # #6422: authoritative monotonic truncate/clear generation.  Every
+        # /undo, /retry, /truncate and /clear bumps it; the cross-client merge
+        # compares the on-disk value against ``_loaded_truncate_generation`` to
+        # distinguish a real truncation from a mere pre-turn checkpoint that
+        # happens to be shorter.  Persisted in the sidecar metadata prefix.
+        self.truncate_generation = truncate_generation
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
@@ -1341,6 +1415,17 @@ class Session:
         # #6422: cross-process CAS fingerprint.  Set by _merge_concurrent_appends()
         # to the crc32 of the file text it merged against, then verified in save().
         self._merge_snapshot_fingerprint = None
+        # #6422: the truncate/clear generation this object was loaded with.
+        # ``_merge_concurrent_appends_locked()`` treats disk as truncated only
+        # when its generation is STRICTLY NEWER than this value.  Freshly
+        # constructed sessions (never loaded) default to 0, i.e. they reconcile
+        # against any first truncation.
+        self._loaded_truncate_generation = None
+        # #6422: set by the truncation entry points (truncate_session_at_keep,
+        # undo_last, retry_last) so save() can stamp a generation strictly
+        # greater than anything on disk even when this object is a stale cache
+        # whose in-memory generation lagged behind other processes' truncations.
+        self._truncation_pending = False
 
     @property
     def path(self):
@@ -1350,10 +1435,10 @@ class Session:
         """Merge messages appended by another client since we loaded this session.
 
         Reads the current on-disk state. If disk has messages we don't know
-        about AND the shared prefix is identical (verified by message ``id``
-        first, then ``role``+``content`` as fallback), appends the extra
-        disk-only messages to ``self.messages`` so our save doesn't clobber a
-        concurrent append.
+        about AND the shared prefix is identical (verified by the durable row
+        lineage ``uuid`` first, then ``id``/``role``+``content`` as fallback),
+        appends the extra disk-only messages to ``self.messages`` so our save
+        doesn't clobber a concurrent append.
 
         This handles two cases:
         1. Disk is longer than our copy (standard append race).
@@ -1362,11 +1447,28 @@ class Session:
         This is safe to call only when the caller KNOWS it is appending new
         messages (e.g. streaming completion handler).  It must NOT be called
         from generic ``save()``, because ``save()`` cannot distinguish an
-        append race from an intentional truncation (``/undo``, ``/retry``).
+        append race from an intentional truncation (``/undo``, ``/retry``) —
+        that is why truncation detection here is driven by the authoritative
+        monotonic ``truncate_generation`` instead of row counts.
 
-        Stores ``_merge_snapshot_fingerprint`` so the subsequent ``save()``
-        can verify no cross-process write landed between the merge and the
-        atomic write (CAS guard, PR #6422).
+        This is an ADVISORY pre-pass: it reads the on-disk state without the
+        per-session cross-process lock and stores
+        ``_merge_snapshot_fingerprint``.  The AUTHORITATIVE merge + generation
+        comparison + final fingerprint validation + atomic replace happens in
+        ``save()`` under ``_session_sidecar_cross_process_lock``; if the file
+        changed between this pre-pass and ``save()``, ``save()`` re-runs
+        ``_merge_concurrent_appends_locked()`` under the lock and rebuilds the
+        payload, so the final bytes on disk always come from one per-session
+        cross-process transaction (PR #6422).
+        """
+        self._merge_concurrent_appends_locked()
+
+    def _merge_concurrent_appends_locked(self) -> None:
+        """Locked body of ``_merge_concurrent_appends()``.
+
+        Caller must hold ``_session_sidecar_cross_process_lock`` (or be in the
+        advisory pre-pass, where the subsequent ``save()`` transaction
+        re-validates everything under the lock).
         """
         self._merge_snapshot_fingerprint = None  # Reset on every call.
         if not self.path.exists():
@@ -1381,7 +1483,35 @@ class Session:
         if not existing_msgs or not our_msgs:
             return
 
-        # Find the longest prefix where every position matches (by id or content).
+        # ── #6422 authoritative truncate/clear generation guard ─────────
+        # Row counts can never distinguish an intentional truncation (/undo,
+        # /retry, /truncate, /clear) from a plain pre-turn checkpoint: the
+        # normal streaming path saves a shorter checkpoint BEFORE the turn and
+        # a longer completed transcript after, so "disk shorter than memory"
+        # is the EXPECTED mid-turn state, not evidence of a truncation.  Only a
+        # ``truncate_generation`` strictly NEWER than the one this object
+        # loaded with is authoritative proof the user truncated since load.
+        disk_gen = int(existing.get('truncate_generation') or 0)
+        loaded_gen = int(getattr(self, '_loaded_truncate_generation', None) or 0)
+        if disk_gen > loaded_gen:
+            # Fail closed: adopt the truncated disk state and its generation
+            # (never regress it).  This may drop our own new messages in the
+            # rare truncate-while-streaming case, but it cannot resurrect
+            # messages the user deleted.
+            self.messages = list(existing_msgs)
+            self.truncate_generation = disk_gen
+            self._loaded_truncate_generation = disk_gen
+            self._merge_snapshot_fingerprint = _fast_fingerprint(existing_text)
+            return
+
+        # Find the longest prefix where every position matches.  When both
+        # rows carry the durable ``uuid`` lineage (minted once at row
+        # creation), compare THAT: ``_assign_stable_message_ids()`` uses
+        # ``max(existing id) + 1``, so two clients loaded from the same base
+        # can assign the same next integer id to different messages — equal
+        # ids, even with identical content, are NOT proof the rows are the
+        # same.  Rows without a uuid (legacy writers) fall back to the
+        # id-then-content comparison.
         prefix_len = 0
         min_len = min(len(existing_msgs), len(our_msgs))
         for i in range(min_len):
@@ -1389,42 +1519,38 @@ class Session:
             disk_msg = existing_msgs[i]
             if not isinstance(our_msg, dict) or not isinstance(disk_msg, dict):
                 break
-            our_id = our_msg.get('id')
-            disk_id = disk_msg.get('id')
-            if our_id is not None and disk_id is not None:
-                if our_id != disk_id:
+            our_uuid = our_msg.get('uuid')
+            disk_uuid = disk_msg.get('uuid')
+            if our_uuid is not None and disk_uuid is not None:
+                if our_uuid != disk_uuid:
+                    # Distinct rows — divergence, even on equal id/content.
                     break
-                # ── #6422 collision guard ────────────────────────────────
-                # ``_assign_stable_message_ids()`` uses ``max(existing id) +
-                # 1``, so two clients loaded from the same base can assign
-                # the *same* next integer ID to different appended messages.
-                # When IDs are equal but content differs, the messages are
-                # distinct concurrent appends — treat this as a divergence.
-                if (our_msg.get('role'), our_msg.get('content')) != (disk_msg.get('role'), disk_msg.get('content')):
+                # Same uuid = same logical row; content differences are
+                # partial-update artifacts of a shared row, keep matching.
+            else:
+                our_id = our_msg.get('id')
+                disk_id = disk_msg.get('id')
+                if our_id is not None and disk_id is not None:
+                    if our_id != disk_id:
+                        break
+                    # Equal N+1 integer ids with different content = two
+                    # distinct concurrent appends — treat as a divergence.
+                    if (our_msg.get('role'), our_msg.get('content')) != (disk_msg.get('role'), disk_msg.get('content')):
+                        break
+                elif (our_msg.get('role'), our_msg.get('content')) != (disk_msg.get('role'), disk_msg.get('content')):
                     break
-            elif (our_msg.get('role'), our_msg.get('content')) != (disk_msg.get('role'), disk_msg.get('content')):
-                break
             prefix_len += 1
 
         if prefix_len == 0:
             return  # No common ground — bail, don't risk data corruption.
 
-        # ── #6422 truncation guard ──────────────────────────────────────
-        # If the on-disk session is now SHORTER than our copy at this
-        # prefix boundary, another client must have truncated via /undo or
-        # /retry since we loaded.  Fail closed: take the disk state and
-        # discard our stale suffix.  This may lose our new messages too
-        # in the rare truncation-while-streaming scenario, but it avoids
-        # the worse outcome of resurrecting deleted messages.
-        if prefix_len == len(existing_msgs) and prefix_len < len(our_msgs):
-            self.messages = list(existing_msgs)
-            self._merge_snapshot_fingerprint = _fast_fingerprint(existing_text)
-            return
-
         # Messages on disk beyond the common prefix.
         disk_tail = existing_msgs[prefix_len:]
         if not disk_tail:
-            return  # Disk has nothing we don't already have.
+            # Disk has nothing we don't already have.  A shorter on-disk
+            # transcript at the SAME generation is a pre-turn checkpoint (or
+            # stale copy), NOT a truncation — keep our completed transcript.
+            return
 
         # Case 1: our messages are a prefix of disk (append race).
         if prefix_len == len(our_msgs):
@@ -1432,8 +1558,8 @@ class Session:
             self._merge_snapshot_fingerprint = _fast_fingerprint(existing_text)
             return
 
-        # Case 2: same length but divergent tails (concurrent equal-length append)
-        # or disk is shorter than our copy.
+        # Case 2: divergent tails (concurrent equal-length append, or disk
+        # shorter at the same generation with a divergent boundary).
         # Merge: keep the common prefix, insert disk's extras, then our extras.
         our_tail = our_msgs[prefix_len:]
         self.messages = list(our_msgs[:prefix_len]) + list(disk_tail) + list(our_tail)
@@ -1482,6 +1608,7 @@ class Session:
             'truncation_watermark',
             'truncation_boundary',
             'clear_generation',
+            'truncate_generation',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
@@ -1516,117 +1643,152 @@ class Session:
                  and not k.startswith('_')}
         payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
 
-        # ── #1558 backup safeguard ──────────────────────────────────────
-        # Before overwriting the session file, copy the previous version to
-        # ``<sid>.json.bak`` IFF the previous file has more messages than the
-        # incoming payload. The asymmetric guard means:
-        #   * Normal grow-the-conversation saves never produce a backup
-        #     (incoming messages >= existing) — keeps disk overhead near zero.
-        #   * Any save that would shrink the messages array (the failure mode
-        #     of #1558, plus anything similar in the future) leaves a recoverable
-        #     snapshot of the pre-shrink state on disk.
-        # The recovery path is api/session_recovery.py — at server startup and
-        # via /api/session/recover, sessions whose JSON has fewer messages than
-        # their .bak get restored automatically.
-        try:
-            if self.path.exists():
-                existing_text = self.path.read_text(encoding='utf-8')
-                try:
-                    existing = json.loads(existing_text)
-                    existing_msg_count = len(existing.get('messages') or [])
-                except (json.JSONDecodeError, ValueError):
-                    existing_msg_count = -1  # corrupt → always back up
-                incoming_msg_count = len(self.messages or [])
-                if (
-                    existing_msg_count > 0
-                    and incoming_msg_count == 0
-                    and (self.active_stream_id or self.pending_user_message)
-                ):
-                    logger.warning(
-                        "refusing to overwrite session %s messages with empty active/pending snapshot "
-                        "(existing=%s, incoming=%s, stream=%s)",
-                        self.session_id,
-                        existing_msg_count,
-                        incoming_msg_count,
-                        self.active_stream_id,
-                    )
-                    return
-                if existing_msg_count > incoming_msg_count:
-                    bak_path = self.path.with_suffix('.json.bak')
-                    # SHOULD-FIX #2 (Opus): atomic write via tmp+replace,
-                    # mirroring the main save() pattern below. Prevents a
-                    # torn .bak from a crash mid-write or a concurrent
-                    # backup-producing save. Recovery defends against a
-                    # torn .bak (JSONDecodeError → no_action), so the
-                    # failure mode pre-fix was "backup is lost"; with
-                    # this fix the backup either lands cleanly or doesn't
-                    # land at all.
+        # ── #6422 per-session cross-process transaction ─────────────────
+        # The entire read-modify-write of the sidecar — backup safeguard,
+        # monotonic truncate-generation stamping, CAS fingerprint validation,
+        # (re-)merge, and the atomic replace — runs under ONE per-session
+        # cross-process lock.  This closes the final read-to-replace TOCTOU
+        # window the re-gate flagged: no other process can interleave a write
+        # between our validation read and our os.replace, and the /undo,
+        # /retry, /truncate, /clear handlers serialize against the streaming
+        # completion merge instead of racing it.
+        with _session_sidecar_cross_process_lock(self.session_id):
+            existing_text = None
+            existing = None
+            existing_msg_count = -1
+            try:
+                if self.path.exists():
+                    existing_text = self.path.read_text(encoding='utf-8')
                     try:
-                        bak_tmp = bak_path.with_suffix(
-                            f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
-                        )
-                        with open(bak_tmp, 'w', encoding='utf-8') as bf:
-                            bf.write(existing_text)
-                            bf.flush()
-                            os.fsync(bf.fileno())
-                        _safe_replace(bak_tmp, bak_path)
-                    except OSError:
-                        # Backup is best-effort; main save proceeds regardless.
-                        try:
-                            bak_tmp.unlink(missing_ok=True)
-                        except Exception:
-                            pass
-        except OSError:
-            pass
+                        existing = json.loads(existing_text)
+                        existing_msg_count = len(existing.get('messages') or [])
+                    except (json.JSONDecodeError, ValueError):
+                        existing_msg_count = -1  # corrupt → always back up
+            except OSError:
+                pass
 
-        # ── #6422 cross-process CAS guard ───────────────────────────────
-        # If _merge_concurrent_appends() was called before this save(),
-        # verify the file hasn't been modified by another process between
-        # the merge and the atomic write (TOCTOU window).  Re-read the
-        # on-disk state and compare fingerprint.  If it changed, re-merge
-        # and rebuild the payload with bounded retry (3 attempts).
-        _cas_fp = getattr(self, '_merge_snapshot_fingerprint', None)
-        if _cas_fp is not None:
-            for _cas_attempt in range(3):
-                try:
-                    _cas_text = self.path.read_text(encoding='utf-8')
-                except OSError:
-                    break  # File vanished — proceed, atomic write will create it.
-                _cur_fp = _fast_fingerprint(_cas_text)
-                if _cur_fp == _cas_fp:
-                    break  # File unchanged since merge — continue to write.
-                # File changed — re-merge against current state.
-                _orig_messages = list(self.messages or [])
-                self._merge_concurrent_appends()
-                _new_fp = getattr(self, '_merge_snapshot_fingerprint', None)
-                if _new_fp is None or _new_fp == _cur_fp:
-                    break  # Re-merge converged or had nothing to merge.
-                # Stalemate — another write happened during re-merge.
-                if _cas_attempt == 2:
-                    logger.warning(
-                        "Cross-process CAS retries exhausted for session %s "
-                        "(attempts=%d, fingerprint=%s); proceeding with best-effort merge",
-                        self.session_id, _cas_attempt + 1, _cur_fp,
-                    )
-            if _cas_fp != getattr(self, '_merge_snapshot_fingerprint', None):
-                # Messages changed during re-merge — rebuild payload.
-                meta['message_count'] = len(self.messages or [])
-                meta['messages'] = self.messages
+            # ── #6422 monotonic truncate/clear generation ───────────────
+            # A truncating save (flagged by truncate_session_at_keep /
+            # undo_last / retry_last) must stamp a generation STRICTLY greater
+            # than anything on disk, so even a stale-cache truncate can never
+            # regress the counter.  A plain save just carries the max forward
+            # (adopting generations stamped by other processes).  Rebuild the
+            # payload if the stamped value differs from what was serialized
+            # above.
+            existing_gen = int((existing or {}).get('truncate_generation') or 0)
+            if self._truncation_pending:
+                self.truncate_generation = max(int(self.truncate_generation or 0), existing_gen + 1)
+                self._truncation_pending = False
+            else:
+                self.truncate_generation = max(int(self.truncate_generation or 0), existing_gen)
+            if meta.get('truncate_generation') != self.truncate_generation:
+                meta['truncate_generation'] = self.truncate_generation
                 payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
 
-        tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
-        try:
-            with open(tmp, 'w', encoding='utf-8') as f:
-                f.write(payload)
-                f.flush()
-                os.fsync(f.fileno())
-            _safe_replace(tmp, self.path)
-        except Exception:
+            # ── #1558 backup safeguard ──────────────────────────────────
+            # Before overwriting the session file, copy the previous version
+            # to ``<sid>.json.bak`` IFF the previous file has more messages
+            # than the incoming payload. The asymmetric guard means:
+            #   * Normal grow-the-conversation saves never produce a backup
+            #     (incoming messages >= existing) — keeps disk overhead near
+            #     zero.
+            #   * Any save that would shrink the messages array (the failure
+            #     mode of #1558, plus anything similar in the future) leaves a
+            #     recoverable snapshot of the pre-shrink state on disk.
+            # The recovery path is api/session_recovery.py — at server startup
+            # and via /api/session/recover, sessions whose JSON has fewer
+            # messages than their .bak get restored automatically.
+            incoming_msg_count = len(self.messages or [])
+            if (
+                existing_msg_count > 0
+                and incoming_msg_count == 0
+                and (self.active_stream_id or self.pending_user_message)
+            ):
+                logger.warning(
+                    "refusing to overwrite session %s messages with empty active/pending snapshot "
+                    "(existing=%s, incoming=%s, stream=%s)",
+                    self.session_id,
+                    existing_msg_count,
+                    incoming_msg_count,
+                    self.active_stream_id,
+                )
+                return
+            if existing_text is not None and existing_msg_count > incoming_msg_count:
+                bak_path = self.path.with_suffix('.json.bak')
+                # SHOULD-FIX #2 (Opus): atomic write via tmp+replace,
+                # mirroring the main save() pattern below. Prevents a
+                # torn .bak from a crash mid-write or a concurrent
+                # backup-producing save. Recovery defends against a
+                # torn .bak (JSONDecodeError → no_action), so the
+                # failure mode pre-fix was "backup is lost"; with
+                # this fix the backup either lands cleanly or doesn't
+                # land at all.
+                try:
+                    bak_tmp = bak_path.with_suffix(
+                        f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
+                    )
+                    with open(bak_tmp, 'w', encoding='utf-8') as bf:
+                        bf.write(existing_text)
+                        bf.flush()
+                        os.fsync(bf.fileno())
+                    _safe_replace(bak_tmp, bak_path)
+                except OSError:
+                    # Backup is best-effort; main save proceeds regardless.
+                    try:
+                        bak_tmp.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+            # ── #6422 cross-process CAS guard ───────────────────────────
+            # If _merge_concurrent_appends() was called before this save(),
+            # verify the file hasn't been modified by another process between
+            # the merge and the atomic write (TOCTOU window).  Re-read the
+            # on-disk state and compare fingerprint.  If it changed, re-merge
+            # (locked variant — we already hold the per-session lock) and
+            # rebuild the payload with bounded retry (3 attempts).
+            _cas_fp = getattr(self, '_merge_snapshot_fingerprint', None)
+            if _cas_fp is not None:
+                for _cas_attempt in range(3):
+                    try:
+                        _cas_text = self.path.read_text(encoding='utf-8')
+                    except OSError:
+                        break  # File vanished — proceed, atomic write will create it.
+                    _cur_fp = _fast_fingerprint(_cas_text)
+                    if _cur_fp == _cas_fp:
+                        break  # File unchanged since merge — continue to write.
+                    # File changed — re-merge against current state.
+                    self._merge_concurrent_appends_locked()
+                    _new_fp = getattr(self, '_merge_snapshot_fingerprint', None)
+                    if _new_fp is None or _new_fp == _cur_fp:
+                        break  # Re-merge converged or had nothing to merge.
+                    # Stalemate — another write happened during re-merge.
+                    if _cas_attempt == 2:
+                        logger.warning(
+                            "Cross-process CAS retries exhausted for session %s "
+                            "(attempts=%d, fingerprint=%s); proceeding with best-effort merge",
+                            self.session_id, _cas_attempt + 1, _cur_fp,
+                        )
+                if _cas_fp != getattr(self, '_merge_snapshot_fingerprint', None):
+                    # Messages (or adopted generation) changed during re-merge —
+                    # rebuild payload.
+                    meta['message_count'] = len(self.messages or [])
+                    meta['messages'] = self.messages
+                    meta['truncate_generation'] = self.truncate_generation
+                    payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
+
+            tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
             try:
-                tmp.unlink(missing_ok=True)
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    f.write(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                _safe_replace(tmp, self.path)
             except Exception:
-                pass
-            raise
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
         if not skip_index:
             _write_session_index(updates=[self])
 
@@ -1671,6 +1833,11 @@ class Session:
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
+        # #6422: remember the truncate/clear generation this object loaded
+        # with, so _merge_concurrent_appends_locked() can tell an intentional
+        # truncation (disk generation newer than this) from a plain pre-turn
+        # checkpoint (same generation, just shorter).
+        session._loaded_truncate_generation = int(session.truncate_generation or 0)
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching

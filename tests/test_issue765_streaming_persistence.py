@@ -284,21 +284,23 @@ class TestIssue765FollowupHardening:
         with a distinct source tmp path. With the old shared `<sid>.tmp` scheme, both
         threads would target the same path and the second replace would deterministically
         fail once the first consume/remove happened.
+
+        Since PR #6422 same-session saves are additionally serialized by the per-session
+        cross-process sidecar lock, so the second save runs only after the first has
+        fully replaced the file — but it still must use its own distinct tmp path.
         """
         s = _make_session("same_sid")
         s.save(skip_index=True)  # seed the file on disk
 
         original_replace = models.os.replace
-        barrier = threading.Barrier(2)
         replace_sources = []
         errors = []
 
-        def _replace_with_barrier(src, dst):
+        def _record_replace(src, dst):
             replace_sources.append(str(src))
-            barrier.wait(timeout=5)
             return original_replace(src, dst)
 
-        monkeypatch.setattr(models.os, "replace", _replace_with_barrier)
+        monkeypatch.setattr(models.os, "replace", _record_replace)
 
         def _save_worker():
             try:
@@ -310,8 +312,8 @@ class TestIssue765FollowupHardening:
         t2 = threading.Thread(target=_save_worker)
         t1.start()
         t2.start()
-        t1.join(timeout=5)
-        t2.join(timeout=5)
+        t1.join(timeout=10)
+        t2.join(timeout=10)
 
         assert not errors, f"Concurrent same-session saves should not fail: {errors}"
         assert len(replace_sources) == 2, f"Expected 2 replace calls, got {replace_sources}"
@@ -1040,7 +1042,12 @@ class TestCrossClientDesyncMerge6422:
 
     def test_truncation_guard_in_merge_concurrent_appends(self, _isolate_session_dir):
         """When disk is SHORTER than our copy (_merge_concurrent_appends path),
-        the truncation guard must not resurrect deleted messages.
+        the monotonic truncate-generation guard must not resurrect deleted
+        messages.
+
+        Production-composed: the truncation goes through
+        ``truncate_session_at_keep`` (the /api/session/truncate + /clear path),
+        which bumps the authoritative ``truncate_generation``.
 
         Scenario:
           1. Both load [A, B, C]
@@ -1049,6 +1056,8 @@ class TestCrossClientDesyncMerge6422:
              then save().  Must produce [A, B] (the truncation is recognized),
              NOT resurrect C.
         """
+        from api.session_ops import truncate_session_at_keep
+
         session_dir, index_file = _isolate_session_dir
         full = [
             {"role": "user", "content": "q1"},
@@ -1059,18 +1068,20 @@ class TestCrossClientDesyncMerge6422:
         s1 = Session(session_id="trunc_guard_test", messages=list(full))
         s1.save()
 
-        # Client 1: /undo truncates to [q1]
-        s1.messages = full[:1]
+        # Client 1: /undo truncates to [q1] via the PRODUCTION truncation path
+        # (stamps a strictly newer truncate_generation).
+        truncate_session_at_keep(s1, 1)
         s1.save()
 
-        # Client 2: stale copy [q1, a1, q2], calls _merge concurent appends
+        # Client 2: stale copy [q1, a1, q2] (loaded at the OLD generation),
+        # calls _merge_concurrent_appends.
         s2 = Session(session_id="trunc_guard_test", messages=list(full))
         s2._merge_concurrent_appends()
         s2.save()
 
         persisted = json.loads((session_dir / "trunc_guard_test.json").read_text(encoding="utf-8"))
         contents = [m["content"] for m in persisted["messages"]]
-        # The truncation guard should keep disk state: [q1]
+        # The generation guard should keep disk state: [q1]
         assert contents == ["q1"], (
             f"Truncation guard resurrected messages: {contents}"
         )
@@ -1080,6 +1091,9 @@ class TestCrossClientDesyncMerge6422:
         """When disk is SHORTER and our caller has appended, the merge
         must fail-closed: take the disk state rather than resurrect.
 
+        Production-composed: the truncation goes through
+        ``truncate_session_at_keep`` (bumps ``truncate_generation``).
+
         Scenario:
           1. Both load [A, B, C]
           2. Client 1 does /undo → [A] → save()
@@ -1087,6 +1101,8 @@ class TestCrossClientDesyncMerge6422:
              with a new message D appended.  Must produce [A], discarding
              stale tail (A is better than resurrecting B, C).
         """
+        from api.session_ops import truncate_session_at_keep
+
         session_dir, index_file = _isolate_session_dir
         base = [
             {"role": "user", "content": "first"},
@@ -1097,8 +1113,8 @@ class TestCrossClientDesyncMerge6422:
         s1 = Session(session_id="trunc_append_test", messages=list(base))
         s1.save()
 
-        # Client 1: /undo truncates to [first]
-        s1.messages = base[:1]
+        # Client 1: /undo truncates to [first] via the PRODUCTION path.
+        truncate_session_at_keep(s1, 1)
         s1.save()
 
         # Client 2: stale [first, reply1, second] + its own new message
@@ -1110,7 +1126,7 @@ class TestCrossClientDesyncMerge6422:
 
         persisted = json.loads((session_dir / "trunc_append_test.json").read_text(encoding="utf-8"))
         contents = [m["content"] for m in persisted["messages"]]
-        # Fail-closed: truncation guard takes disk state [first] only.
+        # Fail-closed: generation guard takes disk state [first] only.
         # fresh_reply is lost, but that's better than resurrecting reply1+second.
         assert contents == ["first"], (
             f"Truncation guard resurrected messages: {contents}"
