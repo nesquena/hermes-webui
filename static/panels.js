@@ -6401,6 +6401,10 @@ async function switchToWorkspace(path,name){
     : null;
   try{
     closeWsDropdown();
+    // Invalidate any older /api/list response before the explicit workspace
+    // mutation. Otherwise a delayed recovery response for this same session can
+    // overwrite the user's newer selection and reject this switch's fresh tree.
+    if(typeof bumpWorkspaceTreeGen==='function')bumpWorkspaceTreeGen();
     await api('/api/session/update',{method:'POST',body:JSON.stringify({
       session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
     })});

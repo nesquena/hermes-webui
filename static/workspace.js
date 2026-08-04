@@ -738,6 +738,14 @@ async function loadDir(path, opts={}){
       `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path||'.')}`
     );
     if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
+    if(data.workspace_recovered&&data.workspace){
+      S.session.workspace=String(data.workspace);
+      S._dirCache={};
+      _restoreExpandedDirs();
+      if(typeof syncWorkspaceDisplays==='function')syncWorkspaceDisplays();
+      if(typeof syncTerminalButton==='function')syncTerminalButton();
+      showToast(t('workspace_recovered_notice',S.session.workspace),5000,'warning');
+    }
     S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
     // #2673 — refresh Artifacts tab when its source data (the file tree) updates.
     if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();

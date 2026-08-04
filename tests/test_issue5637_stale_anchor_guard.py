@@ -52,6 +52,185 @@ def _run_node(source: str) -> str:
     return result.stdout.strip()
 
 
+def _extract_js_function(js: str, name: str) -> str:
+    """Extract a production function without runtime eval/source execution."""
+    marker = f"function {name}("
+    start = js.index(marker)
+    brace = js.index("{", start)
+    depth = 0
+    quote = None
+    escaped = False
+    line_comment = False
+    block_comment = False
+    index = brace
+    while index < len(js):
+        char = js[index]
+        next_char = js[index + 1] if index + 1 < len(js) else ""
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+            index += 1
+            continue
+        if block_comment:
+            if char == "*" and next_char == "/":
+                block_comment = False
+                index += 2
+                continue
+            index += 1
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+        if char == "/" and next_char == "/":
+            line_comment = True
+            index += 2
+            continue
+        if char == "/" and next_char == "*":
+            block_comment = True
+            index += 2
+            continue
+        if char in "'\"`":
+            quote = char
+            index += 1
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return js[start : index + 1]
+        index += 1
+    raise AssertionError(f"JavaScript function {name} did not close")
+
+
+def _live_render_ownership_harness(*, move_to_bottom: bool) -> str:
+    """Compose real input production with the production queued live-render restore."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    functions = [
+        "renderLiveAnchorActivityScene",
+        "_recordNonMessageScrollIntent",
+        "_captureMessageScrollSnapshot",
+        "_messageScrollSnapshotInputChanged",
+        "_abandonMessageScrollSnapshot",
+        "_restorePinnedMessageScrollSnapshot",
+        "_restoreMessageScrollSnapshotSameFrame",
+        "_prepareLiveAnchorScrollRebuildGuard",
+        "_restoreLiveAnchorScrollSnapshotAfterRebuild",
+    ]
+    production = "\n".join(_extract_js_function(js, name) for name in functions)
+    target_delta = 100 if move_to_bottom else -100
+    final_top = 90026 if move_to_bottom else 89000
+    return production + f"""
+let writes=[];
+let _messageScrollInputGeneration=0;
+let _messageUserUnpinned={str(move_to_bottom).lower()};
+let _scrollPinned={str(not move_to_bottom).lower()};
+let _nearBottomCount=0;
+let _lastScrollTop=null, _lastMessageClientHeight=null;
+let _programmaticScroll=false, _programmaticScrollSetAt=0;
+let recordWrites=true;
+const callbacks=[];
+const performance={{now(){{return 1;}}}};
+const el={{
+  scrollHeight:90453, clientHeight:427,
+  get scrollTop(){{return this._top;}},
+  set scrollTop(value){{if(recordWrites) writes.push(Math.round(value)); this._top=value;}},
+  _top:{'89577' if move_to_bottom else '90026'},
+  contains(target){{return target===this;}},
+  querySelector(){{return null;}},
+}};
+const document={{getElementById(id){{return id==='messages'?el:null;}}}};
+const msgInner={{style:{{}},dataset:{{}}}};
+const emptyState={{style:{{display:''}}}};
+const turn={{
+  dataset:{{}},
+  setAttribute(){{}},
+  querySelectorAll(){{return [];}},
+}};
+const blocks={{querySelectorAll(){{return [];}}}};
+function $(id){{
+  if(id==='messages') return el;
+  if(id==='msgInner') return msgInner;
+  if(id==='emptyState') return emptyState;
+  if(id==='liveAssistantTurn') return turn;
+  return null;
+}}
+function _captureMessageViewportAnchor(){{return null;}}
+function _shouldFollowMessagesOnDomReplace(){{return true;}}
+function _deferClearProgrammaticScroll(){{}}
+function _cancelBottomSettle(){{}}
+function _restoreMessageViewportAnchor(){{return false;}}
+function _remountMessageViewportAnchor(){{return false;}}
+function _desktopAnchorRealignDelta(){{return null;}}
+function _isTouchLikeMessageViewport(){{return false;}}
+function _recentMessageScrollIntent(){{return false;}}
+function _recentMessageTouchScrollIntent(){{return false;}}
+function _restoreMessageScrollSnapshotSameFrameFallback(){{}}
+function requestAnimationFrame(callback){{callbacks.push(callback);}}
+function chatActivityMode(){{return 'compact_worklog';}}
+function isSimplifiedToolCalling(){{return true;}}
+const S={{session:{{session_id:'sid-1',pending_started_at:1}},activeStreamId:'stream-1'}};
+function _anchorSceneRowsForRendering(){{return [];}}
+function _assistantTurnBlocks(){{return blocks;}}
+function _captureWorklogDetailDisclosureState(){{return null;}}
+function _anchorSceneWorklogGroup(){{return {{}};}}
+function _renderAnchorSceneRowsIntoWorklog(){{return true;}}
+function _restoreWorklogDetailDisclosureState(){{}}
+function _startActivityElapsedTimer(){{}}
+function _dedupeLiveProcessedWorklogAnchors(){{}}
+function _moveLiveRunStatusToTurnEnd(){{}}
+function scrollIfPinned(){{}}
+const rendered=renderLiveAnchorActivityScene('stream-1',{{activity_rows:[]}},{{sessionId:'sid-1'}});
+const initialWrites=writes.slice();
+writes=[];
+const guardQueued=callbacks.length>0;
+recordWrites=false;
+_recordNonMessageScrollIntent({{target:el,deltaY:{target_delta}}});
+el.scrollTop={final_top};
+recordWrites=true;
+callbacks.shift()();
+console.log(JSON.stringify({{rendered,guardQueued,initialWrites,writes, finalScrollTop:el.scrollTop,
+  messageUserUnpinned:_messageUserUnpinned, scrollPinned:_scrollPinned,
+  generation:_messageScrollInputGeneration}}));
+"""
+
+
+def test_live_render_queue_preserves_real_upward_input_from_pinned_capture():
+    """The real producer and queued live-render callback preserve upward input."""
+    result = json.loads(_run_node(_live_render_ownership_harness(move_to_bottom=False)))
+    assert result == {
+        "rendered": True,
+        "guardQueued": True,
+        "initialWrites": [90026],
+        "writes": [],
+        "finalScrollTop": 89000,
+        "messageUserUnpinned": True,
+        "scrollPinned": False,
+        "generation": 1,
+    }
+
+
+def test_live_render_queue_repins_real_downward_input_at_bottom():
+    """The real producer and queued live-render callback re-pin at true bottom."""
+    result = json.loads(_run_node(_live_render_ownership_harness(move_to_bottom=True)))
+    assert result == {
+        "rendered": True,
+        "guardQueued": True,
+        "initialWrites": [89577],
+        "writes": [],
+        "finalScrollTop": 90026,
+        "messageUserUnpinned": False,
+        "scrollPinned": True,
+        "generation": 1,
+    }
+
+
 def _extract_func_script(js: str) -> str:
     prelude = "const src = " + json.dumps(js) + ";\n"
     body = r"""
@@ -175,8 +354,12 @@ def test_realign_allows_on_desktop_no_native_anchor():
 def _fallback_harness(*, snapshot_scroll_height, cur_scroll_height, snapshot_top,
                       active_intent: bool = False, touch_like: bool = True,
                       init_scroll_top: int = 90030,
+                      snapshot_user_unpinned: bool = False,
+                      snapshot_pinned: bool = False,
                       anchor=None, anchor_row_content_pos=None, container_top: int = 0,
-                      top_pad_now=None) -> str:
+                      top_pad_now=None, input_generation: int = 0,
+                      delayed_input_generation=None, delayed_scroll_top: int = 89000,
+                      restore_fn: str = "_restoreMessageScrollSnapshotSameFrame") -> str:
     """Node harness for the absolute-fallback path of _restoreMessageScrollSnapshotSameFrame.
 
     SCROLL-DEPENDENT geometry (round-3 gate-cert requirement): the anchor row's
@@ -202,6 +385,7 @@ def _fallback_harness(*, snapshot_scroll_height, cur_scroll_height, snapshot_top
     return _extract_func_script(js) + f"""
 let writes = [];
 let stTop = {init_scroll_top};
+let _messageScrollInputGeneration = {input_generation};
 const CONTAINER_TOP = {container_top};
 const ROW_CONTENT_POS = {row_pos_js};
 const ROW_PRESENT = {"true" if row_present else "false"};
@@ -230,7 +414,12 @@ function _recentMessageScrollIntent(){{ return {intent_js}; }}
 function _recentMessageTouchScrollIntent(){{ return {intent_js}; }}
 function _isTouchLikeMessageViewport(){{ return {touch_js}; }}
 // realign path fails (no anchor restore) so execution reaches the absolute fallback
-function _restorePinnedMessageScrollSnapshot(){{ return false; }}
+function _restorePinnedMessageScrollSnapshot(snapshot){{
+  if(snapshot.pinned!==true) return false;
+  const pinnedTarget=el.scrollHeight-el.clientHeight-(Number(snapshot.bottom)||0);
+  el.scrollTop=pinnedTarget;
+  return true;
+}}
 function _restoreMessageViewportAnchor(){{ return false; }}
 function _remountMessageViewportAnchor(){{ return false; }}
 let _messageUserUnpinned = false; let _scrollPinned = true; let _nearBottomCount = 5;
@@ -241,10 +430,13 @@ function _deferClearProgrammaticScroll(){{}}
 function requestAnimationFrame(cb){{ cb(); }}
 function setTimeout(cb){{ cb(); return 1; }}
 const snapshot = {{ anchor: {anchor_js}, top: {snapshot_top}, bottom: 40,
-  scrollHeight: {sh}, pinned: false, userUnpinned: false }};
+  scrollHeight: {sh}, inputGeneration: {input_generation}, pinned: {str(snapshot_pinned).lower()}, userUnpinned: {str(snapshot_user_unpinned).lower()} }};
 eval(extractFunc('_desktopAnchorRealignDelta'));
-eval(extractFunc('_restoreMessageScrollSnapshotSameFrame'));
-_restoreMessageScrollSnapshotSameFrame(snapshot);
+eval(extractFunc('_messageScrollSnapshotInputChanged'));
+eval(extractFunc('_abandonMessageScrollSnapshot'));
+eval(extractFunc({json.dumps(restore_fn)}));
+{restore_fn}(snapshot);
+{f"stTop = {delayed_scroll_top}; _messageScrollInputGeneration = {delayed_input_generation}; {restore_fn}(snapshot);" if delayed_input_generation is not None else ""}
 console.log(JSON.stringify({{ wrote: writes.length, writes,
   messageUserUnpinned: _messageUserUnpinned, scrollPinned: _scrollPinned, finalScrollTop: Math.round(stTop) }}));
 """
@@ -309,6 +501,75 @@ def test_fallback_allows_snapshot_top_on_desktop_no_native_anchor():
         active_intent=False, touch_like=False,
     )))
     assert m["writes"] == [89577]
+    assert m["messageUserUnpinned"] is False and m["scrollPinned"] is True
+
+
+def test_unpinned_anchor_miss_restores_on_desktop_without_native_anchor():
+    """A desktop reader who deliberately scrolled up cannot be left to native
+    anchoring: desktop disables it. If the semantic row is temporarily absent,
+    the rebuild may clamp scrollTop toward zero before this function runs, so the
+    fallback must restore the snapshot rather than taking the mobile no-write exit.
+    """
+    m = json.loads(_run_node(_fallback_harness(
+        snapshot_scroll_height=90000, cur_scroll_height=90453, snapshot_top=89577,
+        active_intent=False, touch_like=False, snapshot_user_unpinned=True,
+        init_scroll_top=0,
+    )))
+    assert m["writes"] == [89577]
+    assert m["messageUserUnpinned"] is True and m["scrollPinned"] is False
+
+
+def test_delayed_restore_cannot_overwrite_new_desktop_input():
+    """The synchronous restore owns generation 0, then the reader moves to 89000
+    before the delayed rAF restore. The second call must abandon the stale snapshot
+    instead of writing its old 89577 target."""
+    m = json.loads(_run_node(_fallback_harness(
+        snapshot_scroll_height=90453, cur_scroll_height=90453, snapshot_top=89577,
+        active_intent=False, touch_like=False, snapshot_user_unpinned=True,
+        init_scroll_top=89577, input_generation=0, delayed_input_generation=1,
+    )))
+    assert m["writes"] == [89577]
+    assert m["finalScrollTop"] == 89000
+    assert m["messageUserUnpinned"] is True and m["scrollPinned"] is False
+
+
+@pytest.mark.parametrize("restore_fn", [
+    "_restoreMessageScrollSnapshot",
+    "_restoreMessageScrollSnapshotSameFrame",
+])
+def test_delayed_pinned_restore_cannot_overwrite_new_upward_input(restore_fn):
+    """A pinned-at-capture snapshot must lose ownership before its tail write.
+
+    The reader moves upward before the delayed restore; the stale pinned snapshot
+    must not put them back at its captured tail-relative position.
+    """
+    m = json.loads(_run_node(_fallback_harness(
+        snapshot_scroll_height=90453, cur_scroll_height=90453, snapshot_top=89577,
+        active_intent=False, touch_like=False, snapshot_pinned=True,
+        init_scroll_top=89577, input_generation=0, delayed_input_generation=1,
+        delayed_scroll_top=89000,
+        restore_fn=restore_fn,
+    )))
+    assert m["writes"] == [89986]
+    assert m["finalScrollTop"] == 89000
+    assert m["messageUserUnpinned"] is True and m["scrollPinned"] is False
+
+
+@pytest.mark.parametrize("restore_fn", [
+    "_restoreMessageScrollSnapshot",
+    "_restoreMessageScrollSnapshotSameFrame",
+])
+def test_delayed_unpinned_restore_repins_reader_who_reached_bottom(restore_fn):
+    """Abandoning a stale unpinned snapshot must reconcile a live bottom position."""
+    m = json.loads(_run_node(_fallback_harness(
+        snapshot_scroll_height=90453, cur_scroll_height=90453, snapshot_top=89577,
+        active_intent=False, touch_like=False, snapshot_user_unpinned=True,
+        init_scroll_top=89577, input_generation=0, delayed_input_generation=1,
+        delayed_scroll_top=90026,
+        restore_fn=restore_fn,
+    )))
+    assert m["writes"] == [89577]
+    assert m["finalScrollTop"] == 90026
     assert m["messageUserUnpinned"] is False and m["scrollPinned"] is True
 
 
@@ -479,6 +740,7 @@ def test_predicate_stays_true_on_touch_when_inline_anchor_clobbered_to_none():
     assert m["touchLike"] is True
 
 
+
 def test_predicate_false_on_desktop_fine_pointer():
     """Desktop (fine pointer): matchMedia('(pointer:coarse)') is false and the resting
     computed overflow-anchor is 'none' -> predicate reports NOT touch, so the guards do
@@ -546,4 +808,3 @@ def test_predicate_true_on_android_not_ios():
         platform="Linux armv8l", max_touch_points=5,
     )))
     assert m["touchLike"] is True
-

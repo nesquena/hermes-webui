@@ -488,6 +488,11 @@ def _activity_snapshot(page) -> dict:
             Array.from(document.querySelectorAll('.assistant-turn')).pop() || null;
           const groups = turn ? Array.from(turn.querySelectorAll('[data-anchor-scene-owner="1"]')) : [];
           const rows = turn ? Array.from(turn.querySelectorAll('[data-anchor-scene-row="1"]')) : [];
+          const sceneRows = assistants.flatMap(message =>
+            message && message._anchor_activity_scene && Array.isArray(message._anchor_activity_scene.activity_rows)
+              ? message._anchor_activity_scene.activity_rows
+              : []
+          );
           const visibleFinal = turn ? Array.from(turn.querySelectorAll('.assistant-segment .msg-body'))
             .filter(el => {
               const segment = el.closest('.assistant-segment');
@@ -518,6 +523,11 @@ def _activity_snapshot(page) -> dict:
             })),
             rows: rows.map(row => ({
               role: row.getAttribute('data-anchor-row-role'),
+              rowId: row.getAttribute('data-anchor-row-id') || '',
+              toolCallId: (sceneRows.find(sceneRow =>
+                String(sceneRow && (sceneRow.row_id || sceneRow.local_id) || '') ===
+                String(row.getAttribute('data-anchor-row-id') || '')
+              ) || {}).tool_call_id || '',
               source: row.getAttribute('data-anchor-source-event-type'),
               status: row.getAttribute('data-anchor-row-status'),
               tool: row.getAttribute('data-tool-name'),
