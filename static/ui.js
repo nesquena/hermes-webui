@@ -2837,14 +2837,20 @@ function _getOptionProviderId(opt){
 /** Refresh window._defaultModel from the server so that __default__
  * sentinel sessions pick up admin default-model changes immediately,
  * not only on page reload. Called before send() when the session
- * model is '__default__'. Silently fails on network error. */
+ * model is '__default__'. On failure the stale cached default is kept
+ * and a warning is logged for diagnostics. */
 async function _refreshDefaultModelCache(){
   try{
     const res=await fetch('/api/settings',{credentials:'include'});
-    if(!res.ok) return;
+    if(!res.ok){
+      console.warn('[default-model] /api/settings returned',res.status,'— keeping stale default');
+      return;
+    }
     const data=await res.json();
     if(data.default_model) window._defaultModel=data.default_model;
-  }catch(_e){/* network error — keep stale cache */}
+  }catch(e){
+    console.warn('[default-model] failed to refresh default model:',e.message||e,'— keeping stale default');
+  }
 }
 function _providerFromModelValue(modelId){
   const value=String(modelId||'').trim();
