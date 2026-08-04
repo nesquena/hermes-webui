@@ -57,6 +57,41 @@ def test_remote_terminal_workspace_paths_outside_cwd_still_reject(monkeypatch):
         workspace.resolve_trusted_workspace("/Users/other/projects/demo")
 
 
+@pytest.mark.parametrize(
+    "terminal_cfg",
+    [
+        pytest.param({"backend": "ssh", "cwd": REMOTE_CWD}, id="cwd-absolute"),
+        pytest.param({"backend": "ssh"}, id="cwd-omitted"),
+        pytest.param({"backend": "ssh", "cwd": ""}, id="cwd-empty"),
+        pytest.param({"backend": "ssh", "cwd": "."}, id="cwd-dot"),
+    ],
+)
+def test_remote_terminal_implicit_recovery_does_not_use_local_missing_path(
+    monkeypatch, tmp_path, terminal_cfg
+):
+    fallback_path = tmp_path / "fallback"
+    fallback_path.mkdir()
+    monkeypatch.setattr(
+        api_config,
+        "get_config",
+        lambda: _remote_config(terminal=terminal_cfg),
+    )
+    monkeypatch.setattr(workspace, "_home_path", lambda: tmp_path)
+    fallback_calls = {"count": 0}
+
+    def fallback():
+        fallback_calls["count"] += 1
+        return fallback_path
+
+    with pytest.raises(ValueError, match="Path does not exist"):
+        workspace.resolve_implicit_workspace_with_recovery(
+            "/Users/other/projects/demo",
+            fallback,
+        )
+
+    assert fallback_calls["count"] == 0
+
+
 def test_remote_terminal_workspace_paths_with_parent_escape_still_reject(monkeypatch):
     monkeypatch.setattr(api_config, "get_config", lambda: _remote_config())
 

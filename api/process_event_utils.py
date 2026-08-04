@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 import logging
+import math
 import re
 import threading
 import time
@@ -137,7 +138,25 @@ def attach_wakeup_display_meta(msg: Any, source: Any) -> None:
         msg["_wakeup_meta"] = meta
 
 
-def stamp_message_source(msg: Any, source: Any) -> None:
+def build_active_turn_token(stream_id: Any, started_at: Any) -> str | None:
+    """Return the exact eager-row token for one active WebUI turn."""
+    if not stream_id:
+        return None
+    try:
+        started = float(started_at)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(started) or started <= 0:
+        return None
+    return f"{str(stream_id).strip()}:{started:.17g}"
+
+
+def stamp_message_source(
+    msg: Any,
+    source: Any,
+    *,
+    active_turn_token: Any = None,
+) -> None:
     """Stamp ``_source`` and any display metadata on a materialized user turn.
 
     Single choke point for every path that persists a non-``webui`` user turn
@@ -147,6 +166,8 @@ def stamp_message_source(msg: Any, source: Any) -> None:
     and the cancel outer-finally recovery. ``webui`` turns are left untouched to
     preserve the existing "``_source`` omitted for the default source" contract.
     """
+    if isinstance(msg, dict) and active_turn_token:
+        msg["_active_turn_token"] = str(active_turn_token)
     if not isinstance(msg, dict) or not source or source == "webui":
         return
     msg["_source"] = source
