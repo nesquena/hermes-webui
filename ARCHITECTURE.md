@@ -8,9 +8,11 @@
 > Keep this document updated as architecture changes are made.
 
 > Current shipped build: `v0.51.792` (July 1, 2026).
-> Automated coverage: ~11,500 tests via `pytest tests/ --collect-only -q`. CI runs on
-> Python 3.11, 3.12, and 3.13 (3 parallel shards each) against every PR, plus a ruff
-> lint gate, a headless browser smoke test, and a Docker smoke test.
+> Automated coverage: ~11,500 tests via `pytest tests/ --collect-only -q`. Pull-request
+> CI runs the full suite on Python 3.12 in 5 shards plus a fast Python 3.11/3.13
+> dependency + compile + collection compatibility gate; pushes to `master` run the full
+> 3.11/3.12/3.13 execution matrix. The ruff lint gate, headless browser smoke test, and
+> Docker smoke test remain separate safety gates.
 >
 > Notable architecture state: the bootstrap and first-run onboarding flow own setup discovery; the default WebUI state directory is `~/.hermes/webui`; `ctl.sh` provides a daemon wrapper for homelab installs; chat streaming is still WebUI-owned SSE with stream-ownership guards, cancellation, async manual compression, and turn-journal audit plumbing; provider/model discovery is profile-aware with live-model cache invalidation and custom-provider scoping. (Version/test-count numbers above are a periodic snapshot — the authoritative source is the latest git tag and `pytest --collect-only`.)
 
