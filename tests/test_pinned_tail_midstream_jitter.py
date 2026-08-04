@@ -102,6 +102,7 @@ let _lastScrollTop = 0;
 let _lastMessageClientHeight = 0;
 let _nearBottomCount = 0;
 let _scrollPinned = false;
+let _messageFollowIntentCache = false;
 const performance = { now: () => 0 };
 """
         + body

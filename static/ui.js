@@ -5699,6 +5699,13 @@ let _messageUserUnpinned=false;
 // it. Reads never touch scrollHeight/clientHeight, so this is safe inside a
 // synchronous EventSource callback on WKWebView (#6653).
 let _messageFollowIntentCache=true;
+// #6653 re-gate: cumulative scrollTop baseline captured at scrollbar pointerdown.
+// A scrollbar drag that starts inside the programmatic-suppression window has its
+// per-event deltas swallowed by the `if(_programmaticScroll) return` latch, so the
+// raw _lastScrollTop comparison alone cannot see it; comparing the CURRENT
+// scrollTop against this pointerdown baseline measures the cumulative drag
+// distance and still catches the upward drag as authoritative user input.
+let _scrollbarDragBaselineScrollTop=null;
 // A monotonic ownership token lets delayed restores distinguish reader input
 // that happened after a snapshot from input that merely happened recently.
 let _messageScrollInputGeneration=0;
@@ -5995,22 +6002,28 @@ if(typeof window!=='undefined'){
   el.addEventListener('pointerdown',(e)=>{
     if(e.target===el&&e.offsetX>=el.clientWidth){
       _scrollbarDragActive=true;
+      // #6653 re-gate: seed the cumulative drag baseline at pointerdown so an
+      // upward thumb drag that happens during programmatic suppression (where
+      // per-event deltas are swallowed by the latch) is still caught.
+      _scrollbarDragBaselineScrollTop=el.scrollTop;
       if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
     }
   },{passive:true});
   window.addEventListener('pointerup',()=>{
     if(!_scrollbarDragActive) return;
     _scrollbarDragActive=false;
+    _scrollbarDragBaselineScrollTop=null;
     _scheduleMessageVirtualizedRender(true);
   },{passive:true});
   window.addEventListener('pointercancel',()=>{
     if(!_scrollbarDragActive) return;
     _scrollbarDragActive=false;
+    _scrollbarDragBaselineScrollTop=null;
     _scheduleMessageVirtualizedRender(true);
   },{passive:true});
-  window.addEventListener('blur',()=>{ _scrollbarDragActive=false; },{passive:true});
+  window.addEventListener('blur',()=>{ _scrollbarDragActive=false; _scrollbarDragBaselineScrollTop=null; },{passive:true});
   document.addEventListener('visibilitychange',()=>{
-    if(document.visibilityState==='hidden') _scrollbarDragActive=false;
+    if(document.visibilityState==='hidden'){ _scrollbarDragActive=false; _scrollbarDragBaselineScrollTop=null; }
   },{passive:true});
   // #4970 review (greptile P1): record keyboard-driven message-pane scrolling as
   // user intent. PageUp/PageDown, Arrow keys, Space/Shift+Space, Home/End scroll
@@ -6046,25 +6059,35 @@ if(typeof window!=='undefined'){
       _lastMessageKeyScrollIntentMs=now;
       const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
       if(bottomDistance>120) _lastMessageScrollIntentMs=now;
-      // #6653: a keyboard scroll-away (PageUp/ArrowUp/Home) invalidates the
-      // layout-free follow-intent cache synchronously, before the native scroll
-      // event and the rAF that flip _scrollPinned/_messageUserUnpinned - so a
-      // cancel landing in that window never treats the reader as still pinned.
-      if(e.key==='PageUp'||e.key==='ArrowUp'||e.key==='Home') _messageFollowIntentCache=false;
+      // #6653: a keyboard scroll-away (PageUp/ArrowUp/Home, or Shift+Space which
+      // pages up) invalidates the layout-free follow-intent cache synchronously,
+      // before the native scroll event and the rAF that flip
+      // _scrollPinned/_messageUserUnpinned - so a cancel landing in that window
+      // never treats the reader as still pinned.
+      if(e.key==='PageUp'||e.key==='ArrowUp'||e.key==='Home'||((e.key===' '||e.key==='Spacebar')&&e.shiftKey)) _messageFollowIntentCache=false;
     }
   },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
     _scheduleMessageVirtualizedRender();
     if(_programmaticScroll&&(performance.now()-_programmaticScrollSetAt)>150) _programmaticScroll=false;
-    // #6653: synchronously invalidate the layout-free follow-intent cache on any
-    // upward scroll-away BEFORE the programmatic-scroll early-return and the rAF
-    // deferral below. _scrollPinned/_messageUserUnpinned are only flipped inside
-    // that requestAnimationFrame, so a cancel landing between this event and the
-    // next frame would otherwise read stale pin state and yank a reader who just
-    // scrolled up back to the cancellation notice. Reads only scrollTop (never
-    // scrollHeight/clientHeight) - no forced layout in the synchronous path.
-    if(!_programmaticScroll && _lastScrollTop!==null && el.scrollTop<_lastScrollTop-2) _messageFollowIntentCache=false;
+    // #6653: synchronously invalidate the layout-free follow-intent cache ONLY
+    // on authoritative upward INPUT - an active scrollbar drag (cumulative from
+    // its pointerdown baseline, so a drag that starts inside the programmatic
+    // suppression window is still caught) or recent wheel/touch/keyboard
+    // message-pane intent. Delayed no-input render artifacts (suppressed in the
+    // rAF below) also emit upward deltas; clearing the cache on those would
+    // silently cancel a genuine follower's cancellation notice. Programmatic
+    // scrolls never touch the cache. Reads only scrollTop (never scrollHeight/
+    // clientHeight) - no forced layout in the synchronous path.
+    if((typeof _scrollbarDragActive!=='undefined'&&!!_scrollbarDragActive)){
+      if(_scrollbarDragBaselineScrollTop!==null&&el.scrollTop<_scrollbarDragBaselineScrollTop-2) _messageFollowIntentCache=false;
+    }else if(!_programmaticScroll&&_lastScrollTop!==null&&el.scrollTop<_lastScrollTop-2
+      &&((typeof _recentMessageWheelIntent==='function'&&_recentMessageWheelIntent())
+      ||(typeof _recentMessageTouchScrollIntent==='function'&&_recentMessageTouchScrollIntent())
+      ||(typeof _recentMessageKeyScrollIntent==='function'&&_recentMessageKeyScrollIntent()))){
+      _messageFollowIntentCache=false;
+    }
     if(_programmaticScroll) return;
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
@@ -6758,6 +6781,15 @@ document.addEventListener('DOMContentLoaded',function(){
 function _setMessageScrollToBottom(){
   const el=$('messages');
   if(!el) return;
+  // #6653 re-gate: automatic follow must HONOR a false follow-intent cache. A
+  // reader who just scrolled away (cache invalidated synchronously in the
+  // scroll/keydown listeners, BEFORE the rAF flips the pin flags) must not be
+  // yanked back to the bottom by a streaming token arriving in that window -
+  // and the false cache stays STICKY: automatic writers never re-arm it. Only
+  // explicit bottom-navigation (scrollToBottom() re-arms first), stream/session
+  // resets, or confirmed near-bottom/downward motion (scroll listener rAF) may
+  // flip it back to true.
+  if(_messageFollowIntentCache===false) return;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   el.scrollTop=el.scrollHeight;
   _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
@@ -6770,8 +6802,10 @@ function _setMessageScrollToBottom(){
     // conversation mid-scroll (#3319). But by this frame the user may have
     // scrolled up — under the sticky-unpin model (#3343) _messageUserUnpinned
     // is the authoritative "user scrolled away" signal, so DON'T snap them back
-    // or re-pin if so; only release the programmatic-scroll latch.
-    if(_messageUserUnpinned || !_scrollPinned || _recentNonMessageScrollIntent()){
+    // or re-pin if so; only release the programmatic-scroll latch. #6653
+    // re-gate: a false follow-intent cache (scroll-away in the synchronous
+    // window) must also abort the retry so the retry never re-arms or yanks.
+    if(_messageUserUnpinned || !_scrollPinned || _recentNonMessageScrollIntent() || _messageFollowIntentCache===false){
       _deferClearProgrammaticScroll();
       return;
     }
@@ -6868,7 +6902,7 @@ function _settleMessageScrollToBottom(force, explicit){
   // active one that may now be in the global _settleRO. (Codex review #3.)
   const ro=new ResizeObserver(()=>{
     if(token!==_bottomSettleToken){ ro.disconnect(); if(_settleRO===ro) _settleRO=null; return; }
-    if((!window._autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){
+    if((!window._autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()||_messageFollowIntentCache===false){
       ro.disconnect(); if(_settleRO===ro) _settleRO=null;
       _programmaticScroll=false;
       return;
@@ -6907,7 +6941,7 @@ function _settleMessageScrollToBottom(force, explicit){
   _settleFinalTimer=setTimeout(()=>{
     if(token!==_bottomSettleToken) return;
     ro.disconnect(); if(_settleRO===ro) _settleRO=null;
-    if((!window._autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){ _programmaticScroll=false; return; }
+    if((!window._autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()||_messageFollowIntentCache===false){ _programmaticScroll=false; return; }
     _settleFinalScroll(token);
   },2000);
 }
@@ -6916,7 +6950,7 @@ function _settleFinalScroll(token){
   if(token!==_bottomSettleToken) return;
   const el=document.getElementById('messages');
   if(!el){ _programmaticScroll=false; return; }
-  if(_messageUserUnpinned||!_scrollPinned||_recentNonMessageScrollIntent()||_recentMessageTouchScrollIntent()){
+  if(_messageUserUnpinned||!_scrollPinned||_recentNonMessageScrollIntent()||_recentMessageTouchScrollIntent()||_messageFollowIntentCache===false){
     _programmaticScroll=false;
     return;
   }
@@ -6925,7 +6959,9 @@ function _settleFinalScroll(token){
   _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
   _nearBottomCount=2;
   _scrollPinned=true;
-  _messageFollowIntentCache=true;
+  // #6653 re-gate: settle is an automatic writer - never flip a false cache
+  // back to true (the bail above already skips the write when it is false).
+  if(_messageFollowIntentCache!==false) _messageFollowIntentCache=true;
   _deferClearProgrammaticScroll();
 }
 function scrollIfPinned(){
