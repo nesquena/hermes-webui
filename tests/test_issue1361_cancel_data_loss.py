@@ -653,3 +653,129 @@ class TestCancelStreamIdempotentWithWorkerFinalizer:
             {'role': 'assistant', 'content': 'done normally', 'timestamp': 101},
         ]
         assert q.empty(), "late cancel must not emit a terminal cancel event after done"
+
+
+# ── §E: #6407 — recovered pending-turn checkpoint carries exact per-turn identity ──
+
+def test_cancel_materialize_stamps_exact_turn_id_and_rejects_foreign_identity():
+    """Cancellation/error producer (_materialize_pending_user_turn_before_error)
+    must stamp _turn_id from the authoritative pending identity so the shared
+    pending-checkpoint matcher recognizes the exact turn: the SAME identity is
+    an exact checkpoint (no duplicate), a DIFFERENT identity is rejected
+    (fail-safe, never authorizes destructive suppression)."""
+    from api.streaming import _materialize_pending_user_turn_before_error
+
+    sid = "test_6407_cancel_turn_id"
+    s = _make_session(
+        session_id=sid,
+        pending_msg="please restart the WebUI",
+        messages=[{"role": "assistant", "content": "previous answer"}],
+    )
+    s.pending_started_at = 1778098700.0
+    s.pending_turn_id = "stream_6407_cancel"
+    s.active_stream_id = "stream_6407_cancel"
+
+    appended = _materialize_pending_user_turn_before_error(s)
+
+    assert appended is True
+    recovered = s.messages[-1]
+    assert recovered["role"] == "user"
+    assert recovered["_turn_id"] == "stream_6407_cancel"
+    assert recovered["timestamp"] == 1778098700
+    # Same pending identity → exact checkpoint (a later repair dedupes).
+    assert models._message_matches_pending_checkpoint(
+        recovered, "please restart the WebUI", 1778098700, None, [],
+        pending_turn_id="stream_6407_cancel",
+    ) is True
+    # Foreign identity → NOT this turn's checkpoint (fail-safe).
+    assert models._message_matches_pending_checkpoint(
+        recovered, "please restart the WebUI", 1778098700, None, [],
+        pending_turn_id="stream_6407_other",
+    ) is False
+    # A second error path hitting the same pending turn must not duplicate.
+    assert _materialize_pending_user_turn_before_error(s) is False
+    assert sum(
+        1 for m in s.messages
+        if m.get("role") == "user" and m.get("content") == "please restart the WebUI"
+    ) == 1
+
+
+def test_provider_error_local_checkpoint_enforces_turn_identity():
+    """The local is_exact_checkpoint inside the error materializer must enforce
+    turn identity the same way the shared matcher does: a tail user row stamped
+    with a DIFFERENT turn id (identical text/timestamp/source/attachments) is
+    NOT an exact checkpoint, so the current turn is materialized instead of
+    being destructively suppressed."""
+    from api.streaming import _materialize_pending_user_turn_before_error
+
+    sid = "test_6407_provider_identity"
+    s = _make_session(
+        session_id=sid,
+        pending_msg="please restart the WebUI",
+        messages=[
+            {"role": "assistant", "content": "previous answer"},
+            {
+                "role": "user",
+                "content": "please restart the WebUI",
+                "timestamp": 1778098700,
+                "_turn_id": "stream_6407_prior",
+                "_recovered": True,
+            },
+        ],
+    )
+    s.pending_started_at = 1778098700.0
+    s.pending_turn_id = "stream_6407_current"
+    s.active_stream_id = "stream_6407_current"
+
+    appended = _materialize_pending_user_turn_before_error(s)
+
+    # Same fingerprint but a different turn id → NOT an exact checkpoint → the
+    # current turn is materialized, not suppressed.
+    assert appended is True
+    assert s.messages[-1]["_turn_id"] == "stream_6407_current"
+    assert [
+        m.get("_turn_id") for m in s.messages if m.get("role") == "user"
+    ] == ["stream_6407_prior", "stream_6407_current"]
+
+
+def test_stale_stream_recovery_stamps_turn_id_and_fails_safe_on_mismatch():
+    """Stale-stream cleanup (_clear_stale_stream_state) materializes the pending
+    user turn with _turn_id and clears pending_turn_id; a later repair with the
+    SAME identity dedupes against the exact checkpoint while a MISMATCHED
+    identity fails safe (a different turn is never suppressed)."""
+    from api.routes import _clear_stale_stream_state
+
+    sid = "test_6407_stale_id"
+    s = _make_session(
+        session_id=sid,
+        pending_msg="please make the GUI fully usable",
+        messages=[{"role": "assistant", "content": "previous answer"}],
+    )
+    s.pending_started_at = 1778187755.0
+    s.pending_turn_id = "stream_6407_stale"
+    s.active_stream_id = "stream_6407_stale"
+    s.pending_attachments = [{"name": "visible-state.png"}]
+
+    cleared = _clear_stale_stream_state(s)
+
+    assert cleared is True
+    assert s.active_stream_id is None
+    assert s.pending_user_message is None
+    assert s.pending_turn_id is None
+    user_rows = [m for m in s.messages if m.get("role") == "user"]
+    assert len(user_rows) == 1
+    assert user_rows[0]["_turn_id"] == "stream_6407_stale"
+    assert user_rows[0]["timestamp"] == 1778187755
+    assert s.messages[-1].get("type") == "interrupted"
+    # Same identity → recognized checkpoint (no duplicate on a later pass).
+    assert models._message_matches_pending_checkpoint(
+        user_rows[0], "please make the GUI fully usable", 1778187755, None,
+        [{"name": "visible-state.png"}],
+        pending_turn_id="stream_6407_stale",
+    ) is True
+    # Mismatched identity → fails safe (different turn never suppressed).
+    assert models._message_matches_pending_checkpoint(
+        user_rows[0], "please make the GUI fully usable", 1778187755, None,
+        [{"name": "visible-state.png"}],
+        pending_turn_id="stream_6407_other",
+    ) is False

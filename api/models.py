@@ -3566,11 +3566,13 @@ def _apply_core_sync_or_error_marker(
         session.pending_started_at = None
         session.pending_user_source = None
         session.pending_turn_id = None
-        session.messages.append(
-            _build_recovery_marker_with_retry_hook(
-                recovered_output=recovered_output,
-                stream_id=_stream_id,
-                pending_started_at=_pending_started_at,
+        if not terminal_error_recovered:
+            session.messages.append(
+                _build_recovery_marker_with_retry_hook(
+                    recovered_output=recovered_output,
+                    stream_id=_stream_id,
+                    pending_started_at=_pending_started_at,
+                )
             )
         session.save(touch_updated_at=touch_updated_at)
         logger.info(
@@ -3628,7 +3630,7 @@ def _apply_core_sync_or_error_marker(
             session.pending_started_at = None
             session.pending_user_source = None
             session.pending_turn_id = None
-            if recovered_output:
+            if recovered_output and not terminal_error_recovered:
                 session.messages.append(
                     _interrupted_recovery_marker(
                         recovered_output=True,
@@ -3679,11 +3681,13 @@ def _apply_core_sync_or_error_marker(
     session.pending_started_at = None
     session.pending_user_source = None
     session.pending_turn_id = None
-    session.messages.append(
-        _build_recovery_marker_with_retry_hook(
-            recovered_output=recovered_output,
-            stream_id=_stream_id,
-            pending_started_at=_pending_started_at,
+    if not terminal_error_recovered:
+        session.messages.append(
+            _build_recovery_marker_with_retry_hook(
+                recovered_output=recovered_output,
+                stream_id=_stream_id,
+                pending_started_at=_pending_started_at,
+            )
         )
     session.save(touch_updated_at=touch_updated_at)
     logger.info("Session %s: no core transcript found, added error marker", sid)
