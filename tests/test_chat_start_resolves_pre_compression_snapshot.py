@@ -289,3 +289,27 @@ def test_chat_start_fork_only_child_does_not_unblock_snapshot(monkeypatch, tmp_p
 
     assert captured["handler"].response_status == 409
     assert "session_id" not in captured
+
+
+def test_chat_start_compressed_fork_lineage_still_resolves(monkeypatch, tmp_path):
+    """A fork that itself underwent compression (fork sidecar sealed as a
+    snapshot) must still resolve to its live continuation.
+
+    Greptile P1 concern: the continuation of a compressed fork would inherit
+    session_source=\"fork\" and be wrongly excluded. In this data model that
+    cannot happen — the gateway has no session_source column and the webui
+    materializer reads it from gateway metadata (always None); the only
+    writer of session_source=\"fork\" is /api/session/branch. This test pins
+    the behavior so the lineage stays resolvable.
+    """
+    _seed_session_dir(monkeypatch, tmp_path)
+    _make_session(
+        SNAPSHOT_ID,
+        pre_compression_snapshot=True,
+        session_source="fork",
+    )
+    _make_session(CONT_ID, parent_session_id=SNAPSHOT_ID)
+
+    captured = _call_chat_start(monkeypatch, SNAPSHOT_ID)
+
+    assert captured["session_id"] == CONT_ID
