@@ -4516,7 +4516,7 @@ function _renderDashboard(box, insights, crons, skills, health, recent, logs) {
     const ok = String(c.status || '').toLowerCase() === 'success' || String(c.status || '').toLowerCase() === 'ok';
     const sid = String(c.session_id || '');
     const open = sid
-      ? `onclick="switchPanel('chat');loadSession('${esc(sid)}')"`
+      ? `onclick='switchPanel("chat");loadSession(${JSON.stringify(sid)})'`
       : `onclick="switchPanel('tasks')"`;
     return `<button type="button" class="dash-feed-item" ${open}>`
       + `<span class="dash-feed-dot" style="background:${ok ? 'var(--success)' : 'var(--error)'}"></span>`
