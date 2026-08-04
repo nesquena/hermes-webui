@@ -1080,3 +1080,326 @@ def test_real_executor_alias_flushes_clean_terminal_message(tmp_path):
     assert len(rows) == 1
     assert "verification_evidence" not in str(rows[0]["content"])
     assert "12 passed, 0 failed" in str(rows[0]["content"])
+
+
+# --------------------------------------------------------------------------- #
+# Re-gate: executor-owned suffix (valid JSON object + guidance) stays intact
+# --------------------------------------------------------------------------- #
+
+
+def _terminal_json_with_evidence():
+    return json.dumps({
+        "output": "12 passed, 0 failed",
+        "exit_code": 0,
+        "error": None,
+        "verification_evidence": {
+            "status": "passed",
+            "kind": "test",
+            "scope": "full",
+            "canonical_command": "pytest",
+        },
+    }, ensure_ascii=False)
+
+
+_GUARDRAIL_SUFFIX = (
+    "\n\n[Tool loop warning: tool_loop; count=2; terminal failed twice; "
+    "diagnose before retrying]"
+)
+
+_SUBDIR_SUFFIX = "\n\n[Subdirectory context: project/AGENTS.md project conventions]"
+
+
+def test_strips_verification_evidence_from_json_with_appended_guardrail_suffix():
+    """A valid JSON result with tool-guard guidance appended is sanitized in place.
+
+    The installed Agent's executor appends ``_append_guardrail_observation``
+    output to the serialized terminal result BEFORE the wrapped
+    ``make_tool_result_message`` is called, so the content is
+    ``valid JSON object + suffix`` — not whole-string JSON. The sanitizer must
+    remove the field from the decoded prefix and leave the exact suffix
+    untouched.
+    """
+    content = _terminal_json_with_evidence() + _GUARDRAIL_SUFFIX
+    stripped = streaming._strip_verification_evidence_from_tool_content(content)
+    assert "verification_evidence" not in stripped
+    assert stripped.endswith(_GUARDRAIL_SUFFIX), "executor-owned suffix must survive verbatim"
+    prefix = stripped[: -len(_GUARDRAIL_SUFFIX)]
+    parsed = json.loads(prefix)
+    assert parsed["output"] == "12 passed, 0 failed"
+    assert parsed["exit_code"] == 0
+
+
+def test_strips_verification_evidence_from_json_with_appended_subdir_suffix():
+    """A valid JSON result with subdirectory hints appended is sanitized in place.
+
+    ``agent.tool_executor`` can also append ``_subdirectory_hints`` output to
+    the result string; same prefix-plus-suffix handling must apply.
+    """
+    content = _terminal_json_with_evidence() + _SUBDIR_SUFFIX
+    stripped = streaming._strip_verification_evidence_from_tool_content(content)
+    assert "verification_evidence" not in stripped
+    assert stripped.endswith(_SUBDIR_SUFFIX), "subdirectory hint suffix must survive verbatim"
+    parsed = json.loads(stripped[: -len(_SUBDIR_SUFFIX)])
+    assert parsed["output"] == "12 passed, 0 failed"
+
+
+def test_preserves_json_with_suffix_but_no_evidence():
+    """A JSON+suffix result WITHOUT the evidence field is returned unchanged."""
+    content = json.dumps({"output": "ok", "exit_code": 0}, ensure_ascii=False) + _GUARDRAIL_SUFFIX
+    stripped = streaming._strip_verification_evidence_from_tool_content(content)
+    assert stripped == content
+
+
+def test_preserves_non_dict_json_with_suffix():
+    """A JSON array + suffix is not a terminal dict — left fully untouched."""
+    content = json.dumps(["a", "b", "verification_evidence"]) + _GUARDRAIL_SUFFIX
+    assert streaming._strip_verification_evidence_from_tool_content(content) == content
+
+
+def test_strips_evidence_from_json_with_suffix_inside_display_projection():
+    """End-to-end: _strip_verification_from_messages cleans JSON+suffix rows."""
+    content = _terminal_json_with_evidence() + _GUARDRAIL_SUFFIX
+    messages = [
+        {
+            "role": "tool",
+            "tool_call_id": "call-guard-1",
+            "name": "terminal",
+            "content": content,
+        },
+    ]
+    streaming._strip_verification_from_messages(messages)
+    cleaned = messages[0]["content"]
+    assert "verification_evidence" not in cleaned
+    assert cleaned.endswith(_GUARDRAIL_SUFFIX)
+
+
+def test_conflicting_explicit_identity_fails_closed():
+    """name/tool_name disagreement must preserve the row (fail closed).
+
+    ``{name: \"terminal\", tool_name: \"read_file\"}`` must NOT be stripped —
+    the old ``name or tool_name`` selection stripped it while preserving the
+    inverse conflict. Any present explicit identity naming a non-terminal tool
+    wins: we cannot prove the row is a terminal result.
+    """
+    payload = json.dumps({
+        "output": "custom",
+        "verification_evidence": {"status": "passed"},
+    })
+    for name, tool_name in (
+        ("terminal", "read_file"),
+        ("read_file", "terminal"),
+        ("read_file", "read_file"),
+    ):
+        messages = [{
+            "role": "tool",
+            "tool_call_id": "call-conflict-1",
+            "name": name,
+            "tool_name": tool_name,
+            "content": payload,
+        }]
+        streaming._strip_verification_from_messages(messages)
+        assert "verification_evidence" in messages[0]["content"], (
+            f"conflicting identity {{{name!r}, {tool_name!r}}} must be preserved"
+        )
+
+
+def test_agreeing_explicit_identity_strips():
+    """Both explicit identity fields agreeing on terminal → strip."""
+    messages = [{
+        "role": "tool",
+        "tool_call_id": "call-agree-1",
+        "name": "terminal",
+        "tool_name": "terminal",
+        "content": _terminal_json_with_evidence(),
+    }]
+    streaming._strip_verification_from_messages(messages)
+    assert "verification_evidence" not in messages[0]["content"]
+
+
+def _run_real_sequential_executor_with_guardrail_suffix(tmp_path, monkeypatch):
+    """Drive the REAL agent.tool_executor sequential loop with a fake agent.
+
+    Returns (messages, db, session_id, tool_message) after the executor's
+    incremental SessionDB flush ran. The terminal dispatch is stubbed to return
+    the actual serialized result (exactly what ``tools/terminal_tool.py``
+    produces), and the fake agent's ``_append_guardrail_observation`` forces a
+    tool-guard WARN decision so the executor appends real guidance to the
+    result string — the production composition the re-gate flagged.
+    """
+    import sys
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    repo_root = Path(__file__).resolve().parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    import agent.tool_executor as te
+    from agent.tool_guardrails import ToolGuardrailDecision, append_toolguard_guidance
+    from api.verification_sanitizer import _install_agent_verification_evidence_sanitizer
+
+    # Install the real producer-boundary wrapper on BOTH the helper and the
+    # executor alias — the executor calls its module-level reference.
+    installed = _install_agent_verification_evidence_sanitizer()
+    assert installed, "sanitizer must install against the real agent modules"
+    assert getattr(te.make_tool_result_message, "_webui_verification_sanitized", False)
+
+    serialized_result = _terminal_json_with_evidence()
+
+    def _stub_middleware(agent, *, function_name, function_args, effective_task_id,
+                         tool_call_id, execute, scope_block=None, display_index=None,
+                         middleware_trace=None, begin_execution=None,
+                         authorization_gate=None, **kwargs):
+        # Stubbed terminal dispatch: return the actual serialized terminal
+        # result without running the real command pipeline.
+        return te._ManagedToolResult(
+            result=serialized_result,
+            args=function_args,
+            middleware_trace=list(middleware_trace or []),
+            blocked=False,
+        )
+
+    monkeypatch.setattr(te, "_run_agent_tool_execution_middleware", _stub_middleware)
+
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    session_id = "seq-exec-6481"
+    db.create_session(session_id, "webui")
+
+    class _FakeAgent:
+        _incremental_persistence_failed = False
+        _interrupt_requested = False
+        verbose_logging = False
+        quiet_mode = False
+        log_prefix = "[fake] "
+        log_prefix_chars = 200
+        session_id = ""
+        tool_progress_callback = None
+        tool_complete_callback = None
+        _current_tool = None
+        _tool_guardrails = None
+        _context_engine_tool_names = None
+        _memory_manager = None
+        # Executor reads agent._subdirectory_hints.check_tool_call(...).
+        _subdirectory_hints = SimpleNamespace(check_tool_call=lambda name, args: None)
+
+        def _vprint(self, msg, force=False):
+            pass
+
+        def _should_emit_quiet_tool_messages(self):
+            return False
+
+        def _touch_activity(self, msg):
+            pass
+
+        def _record_file_mutation_result(self, *args, **kwargs):
+            pass
+
+        def _append_guardrail_observation(self, tool_name, function_args,
+                                          function_result, *, failed):
+            # Force a WARN decision through the REAL guidance appender so the
+            # executor-owned suffix matches production byte-for-byte.
+            decision = ToolGuardrailDecision(
+                action="warn",
+                code="tool_loop",
+                message="terminal failed twice; diagnose before retrying",
+                tool_name=tool_name,
+                count=2,
+            )
+            return append_toolguard_guidance(function_result, decision)
+
+        def _tool_result_content_for_active_model(self, name, result):
+            # String results pass through unchanged (matches run_agent).
+            return result
+
+        def _apply_pending_steer_to_tool_results(self, messages, num_tools):
+            pass
+
+        def _flush_messages_to_session_db(self, messages):
+            # Mirror the executor's incremental persistence: append the
+            # in-memory tool rows to the REAL temp SessionDB.
+            for msg in messages:
+                if not isinstance(msg, dict) or msg.get("role") != "tool":
+                    continue
+                content = msg.get("content")
+                db.append_message(
+                    session_id=session_id,
+                    role="tool",
+                    content=content if isinstance(content, str)
+                    else json.dumps(content, ensure_ascii=False),
+                    tool_name=msg.get("tool_name"),
+                    tool_call_id=msg.get("tool_call_id"),
+                )
+            return True
+
+    agent = _FakeAgent()
+    agent.session_id = session_id
+
+    tool_call = SimpleNamespace(
+        id="call-seq-guard-1",
+        function=SimpleNamespace(
+            name="terminal",
+            arguments=json.dumps({"command": "pytest tests/ -q"}),
+        ),
+    )
+    assistant_message = SimpleNamespace(tool_calls=[tool_call])
+    messages = [
+        {"role": "user", "content": "Run the tests."},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call-seq-guard-1", "function": {"name": "terminal", "arguments": "{}"}}
+        ]},
+    ]
+
+    te.execute_tool_calls_sequential(
+        agent, assistant_message, messages, effective_task_id="task-6481"
+    )
+    return messages, db, session_id
+
+
+def test_real_sequential_executor_guardrail_suffix_stays_sanitized(tmp_path, monkeypatch):
+    """The REAL sequential executor never leaks verification_evidence.
+
+    Production composition from the re-gate: the executor runs the terminal
+    dispatch (stubbed to return the actual serialized result), appends
+    tool-guard guidance to the string (``_append_guardrail_observation``),
+    builds the tool message through the sanitizer-wrapped
+    ``make_tool_result_message``, appends it to the live conversation, and
+    flushes it to SessionDB — all before WebUI regains control. The evidence
+    field must be absent from the in-memory tool message, the second same-turn
+    provider payload, and the persisted row, while the guidance suffix remains
+    intact.
+    """
+    messages, db, session_id = _run_real_sequential_executor_with_guardrail_suffix(
+        tmp_path, monkeypatch
+    )
+
+    # 1. In-memory tool message — evidence gone, suffix intact.
+    tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    content = tool_msgs[0]["content"]
+    assert isinstance(content, str)
+    assert "verification_evidence" not in content
+    assert content.endswith(_GUARDRAIL_SUFFIX), "executor-owned guidance must survive"
+    parsed = json.loads(content[: -len(_GUARDRAIL_SUFFIX)])
+    assert parsed["output"] == "12 passed, 0 failed"
+    assert parsed["exit_code"] == 0
+
+    # 2. Second same-turn provider payload — what the model would receive on
+    # the next request in the same turn (raw serialized messages). The suffix
+    # is embedded as escaped ``\n\n`` inside the JSON-encoded string.
+    provider_payload = json.dumps(messages, ensure_ascii=False)
+    assert "verification_evidence" not in provider_payload
+    assert "[Tool loop warning: tool_loop; count=2;" in provider_payload
+
+    # 2b. The WebUI model-boundary sanitizer is also clean on the live list.
+    sanitized = streaming._sanitize_messages_for_api(messages)
+    assert "verification_evidence" not in json.dumps(sanitized, ensure_ascii=False)
+
+    # 3. Persisted SessionDB row — evidence gone, suffix intact.
+    rows = db.get_messages(session_id)
+    assert len(rows) == 1
+    row_content = str(rows[0]["content"])
+    assert "verification_evidence" not in row_content
+    assert "12 passed, 0 failed" in row_content
+    assert _GUARDRAIL_SUFFIX in row_content

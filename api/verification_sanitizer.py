@@ -36,6 +36,18 @@ def _strip_verification_evidence_from_tool_content(content):
     persisted transcripts. When ``verification_evidence`` is present the field
     is removed (dict stays a dict, string is re-serialized); otherwise the
     input is returned unchanged.
+
+    The string form is decoded with ``json.JSONDecoder().raw_decode()`` from
+    the first non-whitespace character rather than whole-string ``json.loads``:
+    the installed Agent's executor appends tool-guard guidance (and possibly
+    subdirectory hints) to the serialized result BEFORE the wrapped
+    ``make_tool_result_message`` is called (``agent/tool_executor.py`` calls
+    ``_append_guardrail_observation`` / ``_subdirectory_hints.check_tool_call``
+    first), so live content is a *valid JSON object + executor-owned suffix*,
+    not whole-string JSON. ``raw_decode`` parses exactly one JSON value and
+    reports where it ended, so the decoded prefix can be reserialized without
+    the field and the exact untouched suffix re-appended verbatim — no
+    regex-deletion of arbitrary output.
     """
     if isinstance(content, dict):
         if "verification_evidence" not in content:
@@ -46,7 +58,8 @@ def _strip_verification_evidence_from_tool_content(content):
     if "verification_evidence" not in content:
         return content
     try:
-        parsed = json.loads(content)
+        stripped = content.lstrip()
+        parsed, end = json.JSONDecoder().raw_decode(stripped)
     except (json.JSONDecodeError, TypeError, ValueError):
         return content
     if not isinstance(parsed, dict):
@@ -54,7 +67,8 @@ def _strip_verification_evidence_from_tool_content(content):
     if "verification_evidence" not in parsed:
         return content
     parsed.pop("verification_evidence", None)
-    return json.dumps(parsed, ensure_ascii=False, sort_keys=False)
+    prefix = json.dumps(parsed, ensure_ascii=False, sort_keys=False)
+    return prefix + stripped[end:]
 
 
 def _correlate_tool_call_name(messages, tool_msg, tool_index=None):
@@ -129,10 +143,13 @@ def _strip_verification_from_messages(messages):
     handled). Only strips from messages confirmed to be terminal tool results to
     avoid deleting legitimate data from non-terminal tools:
 
-    - messages whose ``name`` or ``tool_name`` is ``\"terminal\"`` are stripped;
+    - messages whose explicit identity fields (``name`` / ``tool_name``) all
+      agree on ``"terminal"`` are stripped; a message where the fields
+      DISAGREE (e.g. ``name="terminal"`` with ``tool_name="read_file"``) is
+      preserved — conflicting explicit identity fails closed;
     - legacy messages lacking both fields are correlated through ``tool_call_id``
       against the PRECEDING assistant ``tool_calls`` — stripped only when the
-      correlated function name is ``\"terminal\"``, preserved otherwise.
+      correlated function name is ``"terminal"``, preserved otherwise.
 
     Correlation is always run against the full list (never a singleton) so the
     preceding assistant call is visible, and fails closed on future/duplicate/
@@ -146,9 +163,17 @@ def _strip_verification_from_messages(messages):
         # Only strip from confirmed terminal tool results to avoid corrupting
         # legitimate JSON content from plugin/MCP/native tools that might
         # happen to use a top-level ``verification_evidence`` key.
-        msg_name = msg.get("name") or msg.get("tool_name") or ""
-        if msg_name:
-            if msg_name != "terminal":
+        name_value = msg.get("name")
+        tool_name_value = msg.get("tool_name")
+        explicit_identities = [v for v in (name_value, tool_name_value) if v]
+        if explicit_identities:
+            # Fail closed on conflicting explicit identity: strip only when
+            # EVERY present explicit field agrees the row is a terminal
+            # result. A ``name or tool_name`` selection would strip
+            # ``{name: "terminal", tool_name: "read_file"}`` while preserving
+            # the inverse conflict — inconsistent and unsafe. Any present
+            # field naming a non-terminal tool → preserve the row.
+            if any(v != "terminal" for v in explicit_identities):
                 continue
         else:
             # Legacy row without name/tool_name: correlate through tool_call_id
