@@ -136,3 +136,50 @@ class TestServerNoWildcard:
             "Host": "127.0.0.1:8787",
         })
         assert sent == {}
+
+
+class _FakePluginHandler(_FakeHandler):
+    """_FakeHandler with a request path, for plugin-API preflight tests."""
+
+    def __init__(self, headers, path):
+        super().__init__(headers)
+        self.path = path
+
+
+def _plugin_preflight(headers, path):
+    h = _FakePluginHandler(headers, path)
+    apply_cors_preflight_headers(h)
+    return h.sent
+
+
+class TestSandboxedPluginPreflight:
+    """A sandboxed plugin iframe is an opaque origin (``Origin: null``) that no
+    allowlist can name, so its X-Plugin-Request preflight has a narrow carve-out
+    matching the _is_plugin_request CSRF exemption — and nothing wider."""
+
+    _PLUGIN = {
+        "Origin": "null",
+        "Host": "127.0.0.1:8787",
+        "Access-Control-Request-Headers": "content-type, x-plugin-request",
+    }
+
+    def test_plugin_preflight_allowed(self):
+        sent = _plugin_preflight(dict(self._PLUGIN), "/api/plugins/demo/items")
+        assert sent.get("Access-Control-Allow-Origin") == "null"
+        assert "X-Plugin-Request" in sent.get("Access-Control-Allow-Headers", "")
+
+    def test_plugin_preflight_never_sends_credentials(self):
+        sent = _plugin_preflight(dict(self._PLUGIN), "/api/plugins/demo/items")
+        assert "Access-Control-Allow-Credentials" not in sent
+
+    def test_null_origin_outside_plugin_api_rejected(self):
+        assert _plugin_preflight(dict(self._PLUGIN), "/api/sessions") == {}
+
+    def test_null_origin_without_plugin_header_rejected(self):
+        headers = dict(self._PLUGIN, **{"Access-Control-Request-Headers": "content-type"})
+        assert _plugin_preflight(headers, "/api/plugins/demo/items") == {}
+
+    def test_concrete_cross_origin_plugin_preflight_rejected(self):
+        """An attacker page carries a real Origin, so it never takes this path."""
+        headers = dict(self._PLUGIN, Origin="https://evil.example")
+        assert _plugin_preflight(headers, "/api/plugins/demo/items") == {}
