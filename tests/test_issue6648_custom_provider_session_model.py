@@ -112,3 +112,112 @@ def test_non_custom_model_untouched(monkeypatch):
 
     assert routes._normalize_custom_qualified_session_model("@deepseek:deepseek-v4-pro", None) is None
     assert routes._normalize_custom_qualified_session_model("gpt-5.4", None) is None
+
+
+def test_provider_name_collisions_never_normalized(monkeypatch):
+    """Non-custom qualifiers are never normalized, even when the lookup would
+    resolve them to a custom slug (#6718 re-gate, CORE finding 1).
+
+    Regression cases from the review:
+      - ``@openai:gpt-5.5`` with a named ``openai`` provider must reach OpenAI
+        as the bare ``gpt-5.5``, never ``openai/gpt-5.5``;
+      - ``custom/x`` under an ``moa`` provider must not be rerouted to moa.
+    """
+    import api.config as config
+    import api.routes as routes
+
+    # The lookup resolves ANY qualifier to a custom slug — the gate must reject
+    # non-``custom:`` qualifiers before the lookup is even consulted.
+    monkeypatch.setattr(
+        config,
+        "_named_custom_provider_slug_for_provider",
+        lambda provider, config_obj=None: "custom:" + str(provider).removeprefix("custom:"),
+    )
+
+    assert routes._normalize_custom_qualified_session_model("@openai:gpt-5.5", "openai") is None
+    assert routes._normalize_custom_qualified_session_model("@moa:ensemble", "moa") is None
+    assert routes._normalize_custom_qualified_session_model("custom/x", "moa") is None
+    assert routes._normalize_custom_qualified_session_model("custom/x", None) is None
+
+
+def test_session_profile_config_is_source_of_truth(monkeypatch):
+    """The lookup must run against the session's OWN profile config — the
+    ``config_obj`` threaded into the helper must be the session profile dict
+    (#6718 re-gate, CORE finding 2)."""
+    import api.config as config
+    import api.routes as routes
+
+    session_cfg = {
+        "custom_providers": [
+            {"name": "Sensenova Primary", "model": "deepseek-v4-flash"},
+        ]
+    }
+    captured = {}
+
+    def _fake_named_slug(provider, config_obj=None):
+        captured["config_obj"] = config_obj
+        if config_obj is session_cfg and provider == "custom:sensenova-primary":
+            return "custom:sensenova-primary"
+        return ""
+
+    monkeypatch.setattr(config, "_named_custom_provider_slug_for_provider", _fake_named_slug)
+
+    effective, provider, changed = routes._resolve_compatible_session_model_state(
+        "@custom:sensenova-primary:deepseek-v4-flash",
+        None,
+        profile_config=session_cfg,
+    )
+
+    assert changed is True
+    assert captured["config_obj"] is session_cfg
+    assert effective == "sensenova-primary/deepseek-v4-flash", effective
+    assert provider == "sensenova-primary", provider
+
+
+def test_slug_missing_from_session_profile_not_leaked(monkeypatch):
+    """A slug defined only in another profile (global cfg) must NOT remap a
+    session whose own profile no longer defines it (#6718 re-gate, CORE
+    finding 2: no global fallback when a profile config was supplied)."""
+    import api.config as config
+    import api.routes as routes
+
+    # Global config still defines the slug...
+    monkeypatch.setattr(
+        config,
+        "cfg",
+        {"custom_providers": [{"name": "Sensenova Primary"}]},
+    )
+
+    # ...but the session's own profile does not. The REAL helper must not fall
+    # back to the global cfg once a profile config dict was supplied.
+    session_cfg = {"custom_providers": []}
+
+    result = routes._normalize_custom_qualified_session_model(
+        "@custom:sensenova-primary:deepseek-v4-flash",
+        None,
+        profile_config=session_cfg,
+    )
+    assert result is None
+
+
+def test_configured_qualified_value_drives_normalization():
+    """End-to-end through the REAL helper: the canonical slug comes from the
+    profile config entry's qualified value (custom_providers), resolved under
+    the session's own profile config."""
+    import api.routes as routes
+
+    session_cfg = {
+        "custom_providers": [
+            {"name": "Sensenova Primary", "model": "deepseek-v4-flash"},
+        ]
+    }
+
+    effective, provider, changed = routes._resolve_compatible_session_model_state(
+        "@custom:sensenova-primary:deepseek-v4-flash",
+        "custom:sensenova-primary",
+        profile_config=session_cfg,
+    )
+
+    assert changed is True
+    assert effective == "sensenova-primary/deepseek-v4-flash", effective
+    assert provider == "sensenova-primary", provider

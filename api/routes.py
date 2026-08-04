@@ -6380,6 +6380,8 @@ def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
 def _normalize_custom_qualified_session_model(
     model: str,
     provider: str | None,
+    *,
+    profile_config: dict | None = None,
 ) -> tuple[str, str] | None:
     """#6648: map session-persisted custom-provider formats to canonical slugs.
 
@@ -6387,33 +6389,46 @@ def _normalize_custom_qualified_session_model(
     model in forms the Hermes runtime cannot resolve:
 
       - ``@custom:<slug>:<model>`` (qualifier ``custom:<slug>``)
-      - ``custom/<model>``        (slash form with a bare ``custom`` qualifier)
+      - ``custom/<model>``        (slash form persisted under a ``custom:<slug>`` provider)
 
     The runtime only knows the canonical provider slug (e.g. ``sensenova-primary``),
     so the ``custom:`` prefix must be stripped. Returns ``(model, provider)``
     normalized to ``<slug>/<bare>`` / ``<slug>`` when the qualifier matches a
     NAMED ``custom_providers`` entry, else ``None`` (caller keeps current
     behavior — e.g. endpoint-derived ``custom:<host>:<port>`` slugs stay as-is).
+
+    Only qualifiers that THEMSELVES start with ``custom:`` are eligible — never a
+    bare ``custom/`` model-prefix match or an arbitrary provider name (``moa``,
+    ``openai``, ...), which would hijack unrelated routes (#6718 re-gate). The
+    canonical slug always comes from the CONFIGURED entry (the profile's
+    ``custom_providers`` qualified value), not from the raw stored string.
+
+    The lookup runs against ``profile_config`` when supplied (the session's own
+    profile config.yaml), with NO fallback to the module-global config — a slug
+    removed from the session's own profile must not be remapped from another
+    profile's ``custom_providers``.
     """
     bare: str | None = None
     qualifier: str | None = None
     if model.startswith("@"):
         bare, qualifier = _split_provider_qualified_model(model)
-        if not qualifier:
-            return None
-    elif model.lower().startswith("custom/"):
+    elif model.lower().startswith("custom/") and provider:
         bare = model.split("/", 1)[1].strip()
-        qualifier = provider or "custom"
+        qualifier = provider
     else:
         return None
-    if not bare:
+    qualifier = _clean_session_model_provider(qualifier)
+    if not bare or not qualifier or not qualifier.startswith("custom:"):
         return None
 
     try:
         from api.config import _named_custom_provider_slug_for_provider
     except Exception:
         return None
-    slug = _named_custom_provider_slug_for_provider(qualifier)
+    slug = _named_custom_provider_slug_for_provider(
+        qualifier,
+        config_obj=profile_config,
+    )
     if not slug:
         return None
     canonical = slug.removeprefix("custom:")
@@ -7147,11 +7162,17 @@ def _resolve_compatible_session_model_state(
     # #6648: session-persisted custom-provider qualifiers ("@custom:<slug>:<model>"
     # or "custom/<model>") carry the "custom:" prefix the Hermes runtime does not
     # recognize — it only knows the canonical provider slug. Normalize to
-    # "<slug>/<bare_model>" (when the qualifier matches a named custom_providers
-    # entry) so chat/start routes in a single API call instead of exhausting the
-    # full fallback chain (10-30x slower). Runs before every fast path below so
-    # no branch can return the broken "@custom:..." form verbatim.
-    _custom_norm = _normalize_custom_qualified_session_model(model, requested_provider)
+    # "<slug>/<bare_model>" when the qualifier matches a named custom_providers
+    # entry in the SESSION's own profile config (profile_config) so chat/start
+    # routes in a single API call instead of exhausting the full fallback chain
+    # (10-30x slower). Runs before every fast path below so no branch can return
+    # the broken "@custom:..." form verbatim; non-custom qualifiers (moa, openai,
+    # ...) and unknown custom slugs fall through unchanged (#6718 re-gate).
+    _custom_norm = _normalize_custom_qualified_session_model(
+        model,
+        requested_provider,
+        profile_config=profile_config,
+    )
     if _custom_norm is not None:
         return _custom_norm[0], _custom_norm[1], True
     if model and requested_provider == "moa":
