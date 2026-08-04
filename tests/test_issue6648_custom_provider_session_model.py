@@ -23,9 +23,11 @@ def test_custom_qualified_model_normalized_to_canonical_slug(monkeypatch):
 
     monkeypatch.setattr(config, "_named_custom_provider_slug_for_provider", _fake_named_slug)
 
+    profile_cfg = {"custom_providers": [{"name": "Sensenova Primary"}]}
     effective, provider, changed = routes._resolve_compatible_session_model_state(
         "@custom:sensenova-primary:deepseek-v4-flash",
         None,
+        profile_config=profile_cfg,
     )
 
     assert changed is True
@@ -49,6 +51,7 @@ def test_custom_qualified_model_routes_in_single_path(monkeypatch):
     effective, provider, changed = routes._resolve_compatible_session_model_state(
         "@custom:sensenova-primary:deepseek-v4-flash",
         "custom:sensenova-primary",
+        profile_config={"custom_providers": [{"name": "Sensenova Primary"}]},
     )
 
     assert changed is True
@@ -74,6 +77,7 @@ def test_slash_custom_form_normalized(monkeypatch):
     effective, provider, changed = routes._resolve_compatible_session_model_state(
         "custom/deepseek-v4-flash",
         "custom:sensenova-primary",
+        profile_config={"custom_providers": [{"name": "Sensenova Primary"}]},
     )
 
     assert changed is True
@@ -220,4 +224,106 @@ def test_configured_qualified_value_drives_normalization():
 
     assert changed is True
     assert effective == "sensenova-primary/deepseek-v4-flash", effective
+    assert provider == "sensenova-primary", provider
+
+
+def test_profile_config_none_fails_closed_against_global(monkeypatch):
+    """A slug configured only in the module-global config must NOT normalize
+    when ``profile_config=None`` — the ``None`` state is reachable from
+    /api/session/new and chat/start when the profile YAML is absent/unreadable,
+    and the helper chain must fail closed instead of falling back to
+    ``api.config.cfg`` (#6718 re-gate, CORE 2 follow-up).
+
+    The REAL helper is used end-to-end (no slug-lookup monkeypatch): the global
+    config defines the slug, so any global fallback would resolve it.
+    """
+    import api.config as config
+    import api.routes as routes
+
+    # Only the module-global config defines the slug.
+    monkeypatch.setattr(
+        config,
+        "cfg",
+        {"custom_providers": [{"name": "Sensenova Primary"}]},
+    )
+    # Keep the resolver out of the real (network-backed) catalog — the
+    # assertion here is about fail-closed normalization, not catalog resolution.
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda *a, **k: {"default_model": "gpt-5.4"},
+    )
+
+    # Direct helper call with profile_config=None → fail closed.
+    assert (
+        routes._normalize_custom_qualified_session_model(
+            "@custom:sensenova-primary:deepseek-v4-flash",
+            None,
+            profile_config=None,
+        )
+        is None
+    )
+
+    # The resolver entry point without a profile config also fails closed.
+    effective, provider, changed = routes._resolve_compatible_session_model_state(
+        "@custom:sensenova-primary:deepseek-v4-flash",
+        None,
+        profile_config=None,
+    )
+    assert changed is False
+    assert effective == "@custom:sensenova-primary:deepseek-v4-flash", effective
+
+
+def test_session_new_request_threads_profile_config(monkeypatch):
+    """``_session_model_state_from_request`` (the /api/session/new and
+    /api/session/update entry point) must thread the session profile config
+    into the normalizer — the lookup sees the session's own config dict
+    (#6718 re-gate, CORE 2 follow-up)."""
+    import api.config as config
+    import api.routes as routes
+
+    session_cfg = {
+        "custom_providers": [
+            {"name": "Sensenova Primary", "model": "deepseek-v4-flash"},
+        ]
+    }
+    captured = {}
+
+    def _fake_named_slug(provider, config_obj=None):
+        captured["config_obj"] = config_obj
+        if config_obj is session_cfg and provider == "custom:sensenova-primary":
+            return "custom:sensenova-primary"
+        return ""
+
+    monkeypatch.setattr(config, "_named_custom_provider_slug_for_provider", _fake_named_slug)
+
+    model, provider = routes._session_model_state_from_request(
+        "@custom:sensenova-primary:deepseek-v4-flash",
+        None,
+        profile_config=session_cfg,
+    )
+
+    assert captured.get("config_obj") is session_cfg
+    assert model == "sensenova-primary/deepseek-v4-flash", model
+    assert provider == "sensenova-primary", provider
+
+
+def test_session_new_request_e2e_profile_config():
+    """End-to-end through the REAL helper: a named-custom model on /api/session/new
+    normalizes to the canonical slug under the session's own profile config."""
+    import api.routes as routes
+
+    session_cfg = {
+        "custom_providers": [
+            {"name": "Sensenova Primary", "model": "deepseek-v4-flash"},
+        ]
+    }
+
+    model, provider = routes._session_model_state_from_request(
+        "@custom:sensenova-primary:deepseek-v4-flash",
+        None,
+        profile_config=session_cfg,
+    )
+
+    assert model == "sensenova-primary/deepseek-v4-flash", model
     assert provider == "sensenova-primary", provider
