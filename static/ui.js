@@ -17347,7 +17347,19 @@ function renderMessages(options){
   // historical blank turn must not re-paint blank during a follow-up stream
   // (Opus advisor, stage-342).
   {
-    const _turnHasVisibleContent=(turn)=>_assistantTurnHasVisibleRenderedSegment(turn)===true;
+    const _turnHasVisibleContent=(turn)=>{
+      if(typeof _assistantTurnHasVisibleRenderedSegment==='function'){
+        return _assistantTurnHasVisibleRenderedSegment(turn)===true;
+      }
+      // Keep the extracted renderMessages test harness self-contained.
+      if(!turn||typeof turn.querySelectorAll!=='function') return false;
+      for(const seg of turn.querySelectorAll('.assistant-segment')){
+        if(seg.classList.contains('assistant-segment-worklog-source')) continue;
+        if(seg.classList.contains('assistant-segment-anchor')) continue;
+        if((seg.textContent||'').trim()) return true;
+      }
+      return false;
+    };
     for(const turn of inner.querySelectorAll('.assistant-turn')){
       if(turn.id==='liveAssistantTurn') continue; // live turn drives its own state
       if(_turnHasVisibleContent(turn)) continue;
