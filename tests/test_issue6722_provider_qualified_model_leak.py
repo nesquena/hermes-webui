@@ -1,18 +1,20 @@
 """Regression tests for issue #6722 — @provider:model leaking to the gateway.
 
 The WebUI model picker deliberately carries a provider-qualified model string
-(``@provider:model``) through internal routing (#1253). Three places used to
-mishandle that string:
+(``@provider:model``) through internal routing (#1253). The leak involved
+three parsing/request-boundary failures:
 
-1. ``_clean_session_model_provider`` returned the whole ``provider:model``
-   value as the provider, so the gateway received a provider name like
-   ``ollama-cloud:deepseek-v4-flash`` → "Unknown provider".
-2. ``_session_model_state_from_request`` extracted the provider correctly but
-   kept the full ``@provider:model`` string as the model value.
-3. The gateway request builders sent that string verbatim as ``body["model"]``,
-   which the upstream provider API 404'd on.
+1. ``_clean_session_model_provider`` did not parse qualified values with the
+   shared grammar, so provider selection could retain or truncate the wrong
+   segments.
+2. ``_split_provider_qualified_model`` used a positional split that could not
+   distinguish multi-segment custom provider IDs from colon-tagged model IDs.
+3. The gateway request builders sent the internally qualified model string
+   verbatim as ``body["model"]``, which the upstream provider API 404'd on.
 
-All three now resolve the pair through the single shared grammar in
+Internal session-state resolution deliberately keeps the qualified string for
+routing and provider-switch repair. The gateway boundary alone strips it to the
+bare model. All parsing now uses the single shared grammar in
 ``config._parse_provider_qualified_model_id()``. That parser is the important
 part of the fix: a positional colon split cannot tell
 ``@ollama-cloud:deepseek-v4-flash:0731`` (single-segment provider, tagged
