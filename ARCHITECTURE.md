@@ -276,6 +276,29 @@ is caught).
 Fallback sync endpoint: POST /api/chat still exists and holds the connection open until
 the agent finishes. The frontend never uses it but it can be useful for debugging.
 
+### 4.3.1 Stable Session Lineage Ownership
+
+`api/session_lineage.py` is the single server-side authority for compression
+lineage identity. It verifies same-profile sidecar edges and resolves each
+logical conversation to two deliberately different values:
+
+- `root_session_id` is the oldest verified compression segment. It is the sole
+  identity for active-run busy checks, deferred wakeup claim/drain state, and
+  cross-process turn permits.
+- `delivery_session_id` is the newest verified committed continuation. It is a
+  delivery target only and must be re-resolved immediately before a wakeup is
+  started.
+
+Compression publishes a durable `pending` transition before moving the live
+session/cache/lock aliases and changes it to `committed` only after the new tip
+sidecar is saved. Pending transitions, forks, cycles, cross-profile edges,
+missing traversed sidecars, and chains over 20 hops fail closed. Permit files
+are hash-named, never unlinked, and held with nonblocking `flock` on POSIX or
+`msvcrt.locking` on Windows. Elapsed time, PID contents, and lock-file age are
+diagnostics only; they never establish or release turn ownership. The existing
+weak `_alias_session_agent_lock` remains the in-process mutation lock across a
+compression rotation and is not replaced by the lineage permit.
+
 ### 4.4 Agent Invocation (_run_agent_streaming)
 
     def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id):

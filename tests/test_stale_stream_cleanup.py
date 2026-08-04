@@ -279,15 +279,8 @@ def test_chat_start_allows_same_session_after_active_run_unregisters(monkeypatch
         routes.STREAMS.pop("new-stream", None)
 
 
-def test_chat_start_not_permanently_blocked_by_stale_active_run(monkeypatch, tmp_path):
-    """A wedged/detached ACTIVE_RUNS entry past the unwind ceiling must NOT 409 forever.
-
-    The #3808 successor guard waits on a same-session ACTIVE_RUNS entry during the
-    short post-cancel unwind. But unregister only runs in the worker finally, so a
-    worker stuck in a provider call (or leaked by SIGKILL without restart) would
-    block the session permanently. The guard ignores entries older than the 180s
-    ceiling so the user can recover. (Codex brick-gate hardening, #3822.)
-    """
+def test_chat_start_remains_blocked_by_unproven_old_active_run(monkeypatch, tmp_path):
+    """Elapsed time cannot release a worker-owned ACTIVE_RUNS lineage row."""
     config.STREAMS.clear()
     config.ACTIVE_RUNS.clear()
     config.SESSION_AGENT_LOCKS.clear()
@@ -313,15 +306,12 @@ def test_chat_start_not_permanently_blocked_by_stale_active_run(monkeypatch, tmp
     session = ChatStartSession()
     stale_stream_id = "wedged-old-stream"
     config.register_active_run(stale_stream_id, session_id=session.session_id, phase="running")
-    # Age the entry well past the 180s unwind ceiling.
+    # Age is diagnostic only; it cannot prove that worker ownership ended.
     with config.ACTIVE_RUNS_LOCK:
         config.ACTIVE_RUNS[stale_stream_id]["started_at"] = time.time() - 600
 
-    # The bounded guard should treat it as stale and NOT report it as blocking.
-    assert routes._active_run_stream_for_session(session.session_id) is None
-    # It must also reconcile the zombie registry entry immediately so health /
-    # recovery polling does not keep advertising a half-alive run forever.
-    assert stale_stream_id not in config.ACTIVE_RUNS
+    assert routes._active_run_stream_for_session(session.session_id) == stale_stream_id
+    assert stale_stream_id in config.ACTIVE_RUNS
 
     class NoopThread:
         def __init__(self, *args, **kwargs):
@@ -345,23 +335,16 @@ def test_chat_start_not_permanently_blocked_by_stale_active_run(monkeypatch, tmp
             model="test-model",
             model_provider=None,
         )
-        assert "error" not in response
-        assert response["stream_id"] == "new-stream"
-        assert session.active_stream_id == "new-stream"
+        assert response["_status"] == 409
+        assert response["active_stream_id"] == stale_stream_id
+        assert session.active_stream_id is None
     finally:
         config.unregister_active_run(stale_stream_id)
         routes.STREAMS.pop("new-stream", None)
 
 
-def test_live_worker_past_ceiling_is_not_reaped_from_active_runs():
-    """A still-live worker (present in STREAMS) past the age ceiling must NOT be
-    popped from ACTIVE_RUNS — only genuinely-gone workers are reconciled (#4492).
-
-    A long turn whose active_stream_id was cleared during final writeback can be
-    mid-teardown past the 180s ceiling while its STREAMS entry is still present;
-    reaping its lifecycle row then would lie to health / background-wakeup /
-    active-agent-cache consumers that read ACTIVE_RUNS as worker-lifecycle truth.
-    """
+def test_live_worker_age_is_never_release_authority():
+    """A live lifecycle row remains busy regardless of its observed age."""
     config.STREAMS.clear()
     config.ACTIVE_RUNS.clear()
     sid = "live-teardown-session"
@@ -372,9 +355,7 @@ def test_live_worker_past_ceiling_is_not_reaped_from_active_runs():
         config.ACTIVE_RUNS[live_stream_id]["started_at"] = time.time() - 600
     config.STREAMS[live_stream_id] = object()
     try:
-        # Not reported as blocking (past the ceiling) ...
-        assert routes._active_run_stream_for_session(sid) is None
-        # ... but the lifecycle row is preserved because the worker is still live.
+        assert routes._active_run_stream_for_session(sid) == live_stream_id
         assert live_stream_id in config.ACTIVE_RUNS
     finally:
         config.STREAMS.pop(live_stream_id, None)

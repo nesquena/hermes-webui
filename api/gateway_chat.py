@@ -826,8 +826,32 @@ def _run_gateway_chat_streaming(
         # layer registered so STREAM_SESSION_OWNERS does not leak (no teardown finally runs).
         unregister_stream_owner(stream_id)
         return
+    from api.session_lineage import resolve_session_lineage
+
+    try:
+        lineage = resolve_session_lineage(session_id)
+    except Exception:
+        logger.error(
+            "gateway turn blocked because session lineage is unresolved: %s",
+            session_id,
+            exc_info=True,
+        )
+        try:
+            q.put_nowait(("apperror", {
+                "type": "session_lineage_unresolved",
+                "message": "Session lineage could not be verified; no gateway turn was started.",
+                "retryable": True,
+                "session_id": session_id,
+            }))
+        except Exception:
+            pass
+        unregister_stream_owner(stream_id)
+        return
+    lineage_root_session_id = lineage.root_session_id
     register_active_run(
         stream_id,
+        lineage_id=lineage_root_session_id,
+        delivery_session_id=lineage.delivery_session_id,
         session_id=session_id,
         started_at=time.time(),
         phase="gateway-starting",
@@ -1371,3 +1395,13 @@ def _run_gateway_chat_streaming(
         _clear_gateway_run_starting(stream_id)
         unregister_stream_owner(stream_id)
         unregister_active_run(stream_id)
+        try:
+            from api.background_process import drain_deferred_wakeups_for_session
+
+            drain_deferred_wakeups_for_session(lineage_root_session_id)
+        except Exception:
+            logger.debug(
+                "gateway deferred-wakeup drain failed for lineage %s",
+                lineage_root_session_id,
+                exc_info=True,
+            )
