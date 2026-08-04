@@ -1719,6 +1719,12 @@ async function send(){
   let postStartData;
   let modelStateForPostStart;
   let explicitPickForPostStart;
+  // When the session uses the __default__ sentinel, refresh the cached
+  // default model from the server so a mid-session admin default-model
+  // change is picked up on the very next message — not just on page reload.
+  if(S.session&&S.session.model==='__default__'&&typeof _refreshDefaultModelCache==='function'){
+    try{await _refreshDefaultModelCache();}catch(_e){}
+  }
   try{
     const _modelState=_chatPayloadModelState();
     modelStateForPostStart=_modelState;

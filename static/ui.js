@@ -2834,6 +2834,18 @@ function _getOptionProviderId(opt){
   if(value.startsWith('@') && value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
   return '';
 }
+/** Refresh window._defaultModel from the server so that __default__
+ * sentinel sessions pick up admin default-model changes immediately,
+ * not only on page reload. Called before send() when the session
+ * model is '__default__'. Silently fails on network error. */
+async function _refreshDefaultModelCache(){
+  try{
+    const res=await fetch('/api/settings',{credentials:'include'});
+    if(!res.ok) return;
+    const data=await res.json();
+    if(data.default_model) window._defaultModel=data.default_model;
+  }catch(_e){/* network error — keep stale cache */}
+}
 function _providerFromModelValue(modelId){
   const value=String(modelId||'').trim();
   if(value.startsWith('@')&&value.includes(':')) return value.slice(1,value.lastIndexOf(':'));

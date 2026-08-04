@@ -134,6 +134,26 @@ class TestCodePatterns:
             "chat/start post-processing must preserve __default__ sentinel"
         )
 
+    def test_send_refreshes_default_model_cache(self):
+        """send() must refresh the cached default model before resolving __default__."""
+        src = MESSAGES_JS.read_text(encoding="utf-8")
+        assert "_refreshDefaultModelCache" in src, (
+            "send() must call _refreshDefaultModelCache before _chatPayloadModelState"
+        )
+        assert "S.session.model==='__default__'&&typeof _refreshDefaultModelCache==='function'" in src, (
+            "Refresh must be gated on __default__ session model"
+        )
+
+    def test_refresh_default_model_cache_exists(self):
+        """_refreshDefaultModelCache() must be defined in ui.js."""
+        src = UI_JS.read_text(encoding="utf-8")
+        assert "async function _refreshDefaultModelCache" in src, (
+            "_refreshDefaultModelCache must be defined in ui.js"
+        )
+        assert "/api/settings" in src, (
+            "_refreshDefaultModelCache must fetch /api/settings"
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 2. Node.js runtime tests
