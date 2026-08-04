@@ -48,6 +48,16 @@ _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
 _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
+# Which profile's .env last set each key in os.environ via _reload_dotenv()
+# ("" = root/default).  Lets the detached root-worker scope scrub ONLY values
+# proven foreign to root — never root's own credentials (#6327).
+_loaded_profile_env_owner: dict[str, str] = {}
+# #6327: ONE audited ownership protocol for the detached-worker profile scopes.
+# Both the named and root branches of profile_scope_for_detached_worker hold
+# this lock for the ENTIRE worker body, serializing the complete process-env
+# mutation AND the raw os.getenv() read body, so overlapping named/root scopes
+# can never expose or restore foreign values.
+_DETACHED_SCOPE_ENV_LOCK = threading.Lock()
 
 # Thread-local profile context: set per-request by server.py, cleared after.
 # Enables per-client profile isolation (issue #798) — each HTTP request thread
@@ -434,6 +444,23 @@ def _is_root_profile(name: str) -> bool:
                 continue
         _root_profile_name_cache_loaded = True
         return name in _root_profile_name_cache
+
+
+def _is_root_profile_home(home) -> bool:
+    """True when *home* is the root/default profile's home.
+
+    The root profile's ``.env`` IS the process env, so its loaded keys are
+    root-owned — the detached root-worker scope must never scrub them as
+    foreign (#6327).  In isolated profile mode the single pinned profile's
+    home plays the root role.
+    """
+    try:
+        home_path = Path(home).expanduser()
+        if _is_isolated_profile_mode():
+            return True
+        return home_path == Path(_DEFAULT_HERMES_HOME).expanduser()
+    except Exception:
+        return False
 
 
 def _profiles_match(row_profile, active_profile) -> bool:
@@ -1501,31 +1528,138 @@ def profile_scope_for_detached_worker(
         return
     set_request_profile(name)
     try:
-        if _is_root_profile(name):
-            # Root profile: TLS bound above.  Block fallthrough to the
-            # process env so _thread_local_env_value() callers cannot see
-            # named-profile credentials (#6327).  Setting
-            # block_process_env_fallback on the worker thread's TLS is
-            # sufficient — do NOT mutate the process-wide os.environ
-            # (that would break concurrent named-profile requests).
-            previous_block_process_env = False
-            try:
-                from api.config import _thread_ctx
-
-                previous_block_process_env = bool(
-                    getattr(_thread_ctx, "block_process_env_fallback", False)
-                )
-                _thread_ctx.block_process_env_fallback = True
-                yield
-            finally:
-                _thread_ctx.block_process_env_fallback = previous_block_process_env
-        else:
-            with profile_env_for_background_worker(
-                name, purpose, logger_override=logger_override
-            ):
-                yield
+        # #6327: ONE audited ownership protocol.  Both the named and root
+        # branches hold _DETACHED_SCOPE_ENV_LOCK for the ENTIRE worker body,
+        # serializing the complete process-env mutation AND the raw
+        # os.getenv() read body.  Overlapping named/root scopes can therefore
+        # never expose or restore foreign values — a thread-local boolean
+        # alone cannot gate raw os.getenv().
+        with _DETACHED_SCOPE_ENV_LOCK:
+            if _is_root_profile(name):
+                with _root_profile_worker_env_scope(
+                    name, purpose, logger_override=logger_override
+                ):
+                    yield
+            else:
+                with profile_env_for_background_worker(
+                    name, purpose, logger_override=logger_override
+                ):
+                    yield
     finally:
         clear_request_profile()
+
+
+@contextmanager
+def _root_profile_worker_env_scope(
+    name,
+    purpose: str = "detached worker",
+    logger_override: Optional[logging.Logger] = None,
+):
+    """Install root-owned thread/context credentials + close the raw os.getenv()
+    channel for a default/root detached worker (#6327).
+
+    The root profile's env IS the process env, so unlike the named branch we
+    do NOT mirror a profile env into os.environ.  Instead we:
+      1. install the canonical root runtime/thread environment and context-local
+         home BEFORE blocking process fallback, so _thread_local_env_value()
+         and the provider/config readers resolve ROOT credentials — not the
+         empty default a bare block flag would return;
+      2. scrub from os.environ ONLY values proven foreign to root (keys the
+         last _reload_dotenv() loaded from a NAMED profile's .env) for the
+         duration of the worker body, so raw os.getenv() readers cannot see a
+         named profile's credentials; root-owned keys and operator env are
+         preserved;
+      3. restore everything on success AND exception, without stale
+         reinsertion/overwrite.
+
+    Caller must hold _DETACHED_SCOPE_ENV_LOCK for the entire body.
+    """
+    log = logger_override or logger
+    try:
+        from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
+
+        root_home = Path(get_hermes_home_for_profile(name))
+        runtime_env = get_profile_runtime_env(root_home)
+        safe_runtime_env = filter_runtime_env_for_gateway_parity(runtime_env)
+        thread_env = dict(safe_runtime_env)
+        thread_env["HERMES_HOME"] = str(root_home)
+    except Exception:
+        log.debug(
+            "Failed to resolve root env for %s profile %s; falling back to current env",
+            purpose,
+            name,
+            exc_info=True,
+        )
+        yield
+        return
+
+    previous_thread_env = getattr(_thread_ctx, "env", {}).copy()
+    previous_block_process_env = bool(
+        getattr(_thread_ctx, "block_process_env_fallback", False)
+    )
+    _scope_token = None
+    _has_scope = False
+    _secret_scope_mod = None
+    _home_override_mod = None
+    _home_override_token = None
+    _home_override_installed = False
+
+    # Raw os.getenv() channel: scrub ONLY values proven foreign to root — keys
+    # currently in os.environ that the last _reload_dotenv() loaded from a
+    # NAMED profile's .env (owner != "").  Root's own keys (owner "") and
+    # operator/deployment env (never loaded by _reload_dotenv) are preserved.
+    scrubbed: dict[str, str] = {}
+    for key, owner in _loaded_profile_env_owner.items():
+        if owner and key in os.environ:
+            scrubbed[key] = os.environ.pop(key)
+
+    try:
+        # Install root-owned thread/context credentials BEFORE blocking the
+        # process-env fallback so TLS-aware readers resolve the root value.
+        _set_thread_env(**thread_env)
+        _thread_ctx.block_process_env_fallback = True
+        _secret_scope_mod = _resolve_secret_scope_module()
+        if _secret_scope_mod is not None:
+            try:
+                _scope_token = _secret_scope_mod.set_secret_scope(thread_env)
+                _has_scope = True
+            except Exception:
+                pass
+        _home_override_mod = _resolve_hermes_home_override()
+        if _home_override_mod is not None:
+            try:
+                _home_override_token = _home_override_mod.set_hermes_home_override(
+                    str(root_home)
+                )
+                _home_override_installed = True
+            except Exception:
+                _home_override_token = None
+                _home_override_installed = False
+        yield
+    finally:
+        try:
+            if _has_scope and _secret_scope_mod is not None:
+                try:
+                    _secret_scope_mod.reset_secret_scope(_scope_token)
+                except Exception:
+                    pass
+            if _home_override_mod is not None and _home_override_installed:
+                try:
+                    _home_override_mod.reset_hermes_home_override(_home_override_token)
+                except Exception:
+                    pass
+        finally:
+            _thread_ctx.block_process_env_fallback = previous_block_process_env
+            if previous_thread_env:
+                _set_thread_env(**previous_thread_env)
+            else:
+                _clear_thread_env()
+        # Restore scrubbed foreign values — only keys that were actually
+        # removed AND are still absent, so a value the worker body itself set
+        # is never overwritten and nothing stale is reinserted.
+        for key, value in scrubbed.items():
+            if key not in os.environ:
+                os.environ[key] = value
 
 
 def _set_hermes_home(home: Path):
@@ -1559,18 +1693,26 @@ def _reload_dotenv(home: Path):
     Clears env vars that were loaded from the previously active profile before
     applying the current profile's .env. This prevents API keys and other
     profile-scoped secrets from leaking across profile switches.
+
+    Also records, per key, which profile's .env owns the value currently in
+    os.environ (``_loaded_profile_env_owner``; "" = root/default).  The
+    detached root-worker scope uses that ownership registry to scrub ONLY
+    values proven foreign to root (#6327) — never root's own credentials.
     """
     global _loaded_profile_env_keys
+    global _loaded_profile_env_owner
 
     # Remove keys loaded from the previous profile first.
     for key in list(_loaded_profile_env_keys):
         os.environ.pop(key, None)
     _loaded_profile_env_keys = set()
+    _loaded_profile_env_owner = {}
 
     env_path = home / '.env'
     if not env_path.exists():
         return
     try:
+        owner = '' if _is_root_profile_home(home) else home.name
         loaded_keys: set[str] = set()
         for line in env_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -1591,9 +1733,11 @@ def _reload_dotenv(home: Path):
                         continue
                     os.environ[k] = v
                     loaded_keys.add(k)
+                    _loaded_profile_env_owner[k] = owner
         _loaded_profile_env_keys = loaded_keys
     except Exception:
         _loaded_profile_env_keys = set()
+        _loaded_profile_env_owner = {}
         logger.debug("Failed to reload dotenv from %s", env_path)
 
 

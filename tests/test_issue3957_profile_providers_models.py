@@ -441,23 +441,41 @@ def test_detached_worker_scope_binds_tls_for_default_profile(monkeypatch):
 
     For 'default', the scope must set the request-profile TLS so the worker
     resolves the default profile's configuration even when the process-wide
-    active profile is a named profile, AND must set block_process_env_fallback
-    on the worker thread's TLS so _thread_local_env_value() callers cannot see
-    named-profile credentials (#6327).  The process-wide os.environ is NOT
-    mutated (that would break concurrent named-profile requests).
+    active profile is a named profile, AND must install root-owned
+    thread/context credentials while blocking the process-env fallback so
+    _thread_local_env_value() callers resolve the root credential — never a
+    named-profile credential (#6327).  Raw os.getenv() readers must not see
+    named-profile .env values for the duration of the body; they are scrubbed
+    (values proven foreign to root) and restored afterwards.
     """
     monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
     monkeypatch.delenv("ISSUE_3957_WPROBE", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    # Simulate a named profile having loaded its .env credentials (#6327):
+    # the registry must record those keys as owned by a NAMED profile so the
+    # root scope can prove they are foreign to root.
+    profiles._loaded_profile_env_keys.add("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner["OPENROUTER_API_KEY"] = "work"
+    os.environ["OPENROUTER_API_KEY"] = "named-profile-credential-leaked"
 
     # Set process-wide active to a named profile to verify TLS overrides it.
     profiles._active_profile = "work"
     try:
-        # Default name → TLS bound, block_process_env_fallback set.
+        # Default name → TLS bound, root thread env installed, raw channel
+        # scrubbed for the body.
         with profiles.profile_scope_for_detached_worker("default", "test"):
             assert profiles.get_active_profile_name() == "default"
             assert os.environ.get("ISSUE_3957_WPROBE") is None
+            # Named profile credential is NOT visible inside default scope (#6327).
+            assert os.environ.get("OPENROUTER_API_KEY") is None
+        # Credential restored after scope exit.
+        assert os.environ.get("OPENROUTER_API_KEY") == "named-profile-credential-leaked"
     finally:
         profiles._active_profile = "default"
+        profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+        profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+        os.environ.pop("OPENROUTER_API_KEY", None)
     # Empty name → still no-op.
     with profiles.profile_scope_for_detached_worker("", "test"):
         assert os.environ.get("ISSUE_3957_WPROBE") is None
@@ -898,10 +916,11 @@ def test_default_detached_worker_isolates_from_named_active_profile(monkeypatch,
     When the process-wide active profile is a named profile (e.g. 'work'),
     a detached worker spawned for the 'default' profile must bind the
     request-profile TLS so that get_active_profile_name() returns 'default',
-    not 'work', AND must set block_process_env_fallback on the worker's
-    TLS so _thread_local_env_value() callers cannot see named-profile
-    credentials (#6327).  The process-wide os.environ is NOT mutated
-    (that would break concurrent named-profile requests).
+    not 'work', AND must install root-owned thread/context credentials while
+    closing the raw os.getenv() channel: the named profile's .env values
+    (proven foreign to root) are scrubbed from os.environ for the worker body
+    and restored afterwards (#6327).  Without this fix, the worker would
+    resolve 'work's provider/model/credentials — breaking profile isolation.
     """
     import threading
 
@@ -916,8 +935,8 @@ def test_default_detached_worker_isolates_from_named_active_profile(monkeypatch,
     monkeypatch.delenv("ISSUE_3957_WPROBE", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
-    # Load the named profile's .env into os.environ so the worker thread
-    # can observe it before and after the scope (#6327).
+    # Load the named profile's .env into os.environ and record its ownership
+    # so the root scope can prove those values are foreign to root (#6327).
     profiles._reload_dotenv(base / "profiles" / "work")
 
     # Simulate process-wide active profile == 'work'
@@ -931,10 +950,13 @@ def test_default_detached_worker_isolates_from_named_active_profile(monkeypatch,
                 # On this fresh thread, get_active_profile_name() returns 'work'
                 # (process-wide active) because no TLS is set yet.
                 out["before"] = profiles.get_active_profile_name()
+                out["before_key"] = os.environ.get("OPENROUTER_API_KEY")
                 with profiles.profile_scope_for_detached_worker("default", "test"):
                     out["inside"] = profiles.get_active_profile_name()
                     out["inside_env"] = os.environ.get("ISSUE_3957_WPROBE")
+                    out["inside_key"] = os.environ.get("OPENROUTER_API_KEY")
                 out["after"] = profiles.get_active_profile_name()
+                out["after_key"] = os.environ.get("OPENROUTER_API_KEY")
             except BaseException as exc:
                 worker_exc.append(exc)
 
@@ -946,45 +968,423 @@ def test_default_detached_worker_isolates_from_named_active_profile(monkeypatch,
 
         # Before scope: process-wide active 'work' is visible on the new thread.
         assert out["before"] == "work"
+        # Named profile credential IS visible before the scope (the leaked state).
+        assert out["before_key"] == "named-profile-credential-leaked"
         # Inside scope: TLS bound to 'default' overrides process-wide 'work'.
         assert out["inside"] == "default"
-        # Env mirroring skipped for root — work's .env remains visible via
-        # raw os.getenv() (only TLS-aware _thread_local_env_value() readers
-        # are blocked by block_process_env_fallback).
-        # After scope: TLS cleared, falls back to process-wide 'work'.
+        # Raw os.getenv() channel closed for the root worker body: the named
+        # profile's .env values (proven foreign to root) are scrubbed (#6327).
+        assert out["inside_env"] is None
+        assert out["inside_key"] is None
+        # After scope: TLS cleared, falls back to process-wide 'work', and the
+        # scrubbed named credential is restored (no stale reinsertion).
         assert out["after"] == "work"
+        assert out["after_key"] == "named-profile-credential-leaked"
     finally:
         profiles._active_profile = "default"
         # Clean up the .env state loaded by _reload_dotenv so it does not
         # leak into subsequent tests.
         profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
         profiles._loaded_profile_env_keys.discard("ISSUE_3957_WPROBE")
+        profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+        profiles._loaded_profile_env_owner.pop("ISSUE_3957_WPROBE", None)
         os.environ.pop("OPENROUTER_API_KEY", None)
         os.environ.pop("ISSUE_3957_WPROBE", None)
 
-def test_default_detached_worker_preserves_root_credentials_when_root_active(monkeypatch):
+def test_default_detached_worker_preserves_root_credentials_when_root_active(monkeypatch, tmp_path):
     """Default-scoped worker preserves root's own credentials when root is active (#6327).
 
-    When the process-wide active profile IS the root/default profile (the common
-    single-profile deployment), the scope must NOT mutate os.environ — root's
-    own credentials survive intact inside and after the scope.
+    Loads a REAL root ``.env`` through ``_reload_dotenv()`` and asserts BOTH
+    the raw ``os.getenv()`` channel AND the TLS-aware
+    ``_thread_local_env_value()`` / provider behavior preserve the root
+    credential inside the default worker.  The root scope must install the
+    canonical root runtime/thread env BEFORE blocking process fallback, and
+    must NOT scrub root-owned keys (owner == "" in the ownership registry).
     """
-    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    import threading
 
-    # Simulate root profile having loaded its own .env credentials.
-    monkeypatch.setenv("OPENROUTER_API_KEY", "root-own-key")
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text(
+        "OPENROUTER_API_KEY=root-own-key\nISSUE_3957_ROOT_PROBE=root-probe-value\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("ISSUE_3957_ROOT_PROBE", raising=False)
+
+    # Load the REAL root .env into os.environ; ownership registry must record
+    # these keys as root-owned (owner == "") so they are never scrubbed.
+    profiles._reload_dotenv(base)
+    assert profiles._loaded_profile_env_owner.get("OPENROUTER_API_KEY") == ""
+    assert profiles._loaded_profile_env_owner.get("ISSUE_3957_ROOT_PROBE") == ""
+    assert os.environ.get("OPENROUTER_API_KEY") == "root-own-key"
 
     # Process-wide active profile is root (default state).
     profiles._active_profile = "default"
     try:
-        with profiles.profile_scope_for_detached_worker("default", "test"):
-            assert profiles.get_active_profile_name() == "default"
-            # Root's own credential must survive inside the default scope.
-            assert os.environ.get("OPENROUTER_API_KEY") == "root-own-key"
-        # Credential intact after scope exit too.
-        assert os.environ.get("OPENROUTER_API_KEY") == "root-own-key"
+        out: dict = {}
+        worker_exc: list[BaseException] = []
+
+        def worker():
+            try:
+                with profiles.profile_scope_for_detached_worker("default", "test"):
+                    out["name"] = profiles.get_active_profile_name()
+                    # Raw os.getenv() channel preserves the root credential.
+                    out["raw"] = os.environ.get("OPENROUTER_API_KEY")
+                    out["raw_probe"] = os.environ.get("ISSUE_3957_ROOT_PROBE")
+                    # TLS-aware channel resolves it from the installed root
+                    # thread env (not the empty default).
+                    out["tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                    out["tls_probe"] = config._thread_local_env_value(
+                        "ISSUE_3957_ROOT_PROBE"
+                    )
+                    out["blocked"] = getattr(
+                        config._thread_ctx, "block_process_env_fallback", False
+                    )
+                    # Provider behavior: ${VAR} expansion in a custom provider
+                    # config must resolve the root credential via the
+                    # TLS-aware path inside the worker.
+                    out["expanded"] = config._expand_env_vars(
+                        {"api_key": "${OPENROUTER_API_KEY}"}
+                    )
+                # Restored after scope exit: raw still present, TLS cleared.
+                out["after_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["after_blocked"] = getattr(
+                    config._thread_ctx, "block_process_env_fallback", False
+                )
+                out["after_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+            except BaseException as exc:
+                worker_exc.append(exc)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        if worker_exc:
+            raise worker_exc[0]
+
+        # Credential intact inside the default scope (raw + TLS + provider).
+        assert out["name"] == "default"
+        assert out["raw"] == "root-own-key"
+        assert out["raw_probe"] == "root-probe-value"
+        assert out["tls"] == "root-own-key"
+        assert out["tls_probe"] == "root-probe-value"
+        assert out["blocked"] is True
+        assert out["expanded"] == {"api_key": "root-own-key"}
+        # Credential intact after scope exit too; TLS + block flag restored.
+        assert out["after_raw"] == "root-own-key"
+        assert out["after_blocked"] is False
+        assert out["after_tls"] == "root-own-key"
     finally:
         profiles._active_profile = "default"
+        # Clean up the .env state loaded by _reload_dotenv so it does not
+        # leak into subsequent tests.
+        profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+        profiles._loaded_profile_env_keys.discard("ISSUE_3957_ROOT_PROBE")
+        profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+        profiles._loaded_profile_env_owner.pop("ISSUE_3957_ROOT_PROBE", None)
+        os.environ.pop("OPENROUTER_API_KEY", None)
+        os.environ.pop("ISSUE_3957_ROOT_PROBE", None)
+
+
+def test_detached_worker_named_root_overlap_named_first(monkeypatch, tmp_path):
+    """Barrier-controlled named→root overlap: same key, different values (#6327).
+
+    The named profile's .env carries OPENROUTER_API_KEY=named-value and the
+    root profile's .env carries OPENROUTER_API_KEY=root-value.  The named
+    scope enters FIRST; while it holds the scope, a root worker must NOT see
+    the named value through raw os.getenv() (the ownership protocol serializes
+    the process-env mutation + raw-read body), and after the named scope
+    exits the root worker must resolve the ROOT value — never the named one.
+    """
+    import threading
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    work_home = base / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    (work_home / ".env").write_text(
+        "OPENROUTER_API_KEY=named-value\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    # Load the NAMED profile's .env into os.environ (process-wide active =
+    # named profile), recording ownership so the root scope can prove the
+    # value is foreign.
+    profiles._reload_dotenv(work_home)
+    assert profiles._loaded_profile_env_owner.get("OPENROUTER_API_KEY") == "work"
+    assert os.environ.get("OPENROUTER_API_KEY") == "named-value"
+    profiles._active_profile = "work"
+
+    named_entered = threading.Event()
+    release_named = threading.Event()
+    root_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def named_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("work", "test"):
+                named_entered.set()
+                out["named_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["named_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                # Hold the scope until the main thread has started the root
+                # worker and confirmed it is blocked on the ownership lock.
+                assert release_named.wait(5)
+        except BaseException as exc:
+            worker_exc.append(exc)
+
+    def root_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("default", "test"):
+                out["root_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["root_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            root_done.set()
+
+    t_named = threading.Thread(target=named_worker)
+    t_root = threading.Thread(target=root_worker)
+    t_named.start()
+    assert named_entered.wait(5)
+    # Start the root worker while the named scope is active.  The ownership
+    # lock serializes the process-env mutation + raw-read body, so the root
+    # worker must NOT be able to enter (or see the named value) yet.
+    t_root.start()
+    import time as _time
+
+    _time.sleep(0.1)
+    assert not root_done.is_set()
+    release_named.set()
+    t_named.join(5)
+    t_root.join(5)
+    if worker_exc:
+        raise worker_exc[0]
+
+    # Named worker saw its own value on both channels.
+    assert out["named_raw"] == "named-value"
+    assert out["named_tls"] == "named-value"
+    # Root worker, after the named scope exited, resolved the ROOT value via
+    # the TLS-aware channel — never the named value.
+    assert out["root_tls"] == "root-value"
+    # Raw channel inside the root worker is scrubbed (named value proven
+    # foreign to root) — the raw read must NOT see the named credential.
+    assert out["root_raw"] is None
+    # Process env restored to the pre-scope named state (no stale values).
+    assert os.environ.get("OPENROUTER_API_KEY") == "named-value"
+    profiles._active_profile = "default"
+    profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
+
+
+def test_detached_worker_named_root_overlap_root_first(monkeypatch, tmp_path):
+    """Barrier-controlled root→named overlap: same key, different values (#6327).
+
+    Mirrors test_detached_worker_named_root_overlap_named_first but the ROOT
+    scope enters FIRST.  While the root worker is active (holding the
+    ownership lock), the named worker must not be able to enter or expose the
+    named value; after the root scope exits, the named worker resolves the
+    NAMED value on both channels.
+    """
+    import threading
+    import time as _time
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    work_home = base / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    (work_home / ".env").write_text(
+        "OPENROUTER_API_KEY=named-value\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    profiles._reload_dotenv(work_home)
+    assert os.environ.get("OPENROUTER_API_KEY") == "named-value"
+    profiles._active_profile = "work"
+
+    root_entered = threading.Event()
+    release_root = threading.Event()
+    named_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def root_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("default", "test"):
+                root_entered.set()
+                out["root_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["root_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                assert release_root.wait(5)
+        except BaseException as exc:
+            worker_exc.append(exc)
+
+    def named_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("work", "test"):
+                out["named_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["named_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            named_done.set()
+
+    t_root = threading.Thread(target=root_worker)
+    t_named = threading.Thread(target=named_worker)
+    t_root.start()
+    assert root_entered.wait(5)
+    # Start the named worker while the root scope is active.  The ownership
+    # lock serializes the process-env mutation + raw-read body, so the named
+    # worker must NOT enter while the root worker holds the scope.
+    t_named.start()
+    _time.sleep(0.1)
+    assert not named_done.is_set()
+    release_root.set()
+    t_root.join(5)
+    t_named.join(5)
+    if worker_exc:
+        raise worker_exc[0]
+
+    # Root worker resolved the root value (raw scrubbed of the named value).
+    assert out["root_tls"] == "root-value"
+    assert out["root_raw"] is None
+    # Named worker, after the root scope exited, resolved the NAMED value.
+    assert out["named_raw"] == "named-value"
+    assert out["named_tls"] == "named-value"
+    assert os.environ.get("OPENROUTER_API_KEY") == "named-value"
+    profiles._active_profile = "default"
+    profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
+
+
+def test_detached_worker_root_scope_restores_on_exception(monkeypatch, tmp_path):
+    """Root worker restores os.environ / TLS / fallback state on exception (#6327).
+
+    A real root .env is loaded through _reload_dotenv(); a named profile's
+    .env is loaded into os.environ as the foreign (leaked) state.  An
+    exception raised inside the default worker body must NOT leave the scrubbed
+    named value missing, must restore the root credential, and must restore the
+    thread env + block_process_env_fallback on the worker thread.
+    """
+    import threading
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    work_home = base / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    (work_home / ".env").write_text(
+        "OPENROUTER_API_KEY=named-value\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    profiles._reload_dotenv(work_home)
+    assert os.environ.get("OPENROUTER_API_KEY") == "named-value"
+    profiles._active_profile = "work"
+
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("default", "test"):
+                # Raw channel scrubbed while inside the body.
+                out["inside_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["inside_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass  # expected — restoration must still happen
+        except BaseException as exc:
+            worker_exc.append(exc)
+        # After the exception propagated through the scope's finally:
+        out["after_raw"] = os.environ.get("OPENROUTER_API_KEY")
+        out["after_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        out["after_blocked"] = getattr(
+            config._thread_ctx, "block_process_env_fallback", False
+        )
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    if worker_exc:
+        raise worker_exc[0]
+
+    assert out["inside_raw"] is None  # foreign value scrubbed during the body
+    assert out["inside_tls"] == "root-value"  # root thread env installed
+    # Exception restoration: named value reinserted, no stale overwrite.
+    assert out["after_raw"] == "named-value"
+    # TLS-aware read after restore: root credential preserved via process env.
+    assert out["after_tls"] == "named-value"
+    assert out["after_blocked"] is False
+    assert os.environ.get("OPENROUTER_API_KEY") == "named-value"
+    profiles._active_profile = "default"
+    profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
+
+
+def test_detached_worker_root_scope_no_stale_reinsertion(monkeypatch, tmp_path):
+    """Root worker restore never reinserts a value the body itself changed (#6327).
+
+    A named profile's .env (foreign to root) is scrubbed for the body, then
+    the body overwrites that key with its own value.  On exit the scope must
+    NOT reinsert the stale foreign value over the body's write — restoration
+    only reinserts keys that are still absent.
+    """
+    import threading
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    work_home = base / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    (work_home / ".env").write_text(
+        "OPENROUTER_API_KEY=named-value\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    profiles._reload_dotenv(work_home)
+    profiles._active_profile = "work"
+
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("default", "test"):
+                out["inside_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                # The worker body itself writes the key with a new value.
+                os.environ["OPENROUTER_API_KEY"] = "body-wrote-value"
+            out["after_raw"] = os.environ.get("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    if worker_exc:
+        raise worker_exc[0]
+
+    assert out["inside_raw"] is None
+    # No stale reinsertion/overwrite: the body's own value survives the exit.
+    assert out["after_raw"] == "body-wrote-value"
+    profiles._active_profile = "default"
+    profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
 
 
 def test_expand_env_vars_does_not_leak_process_env_under_block_scope(monkeypatch):
