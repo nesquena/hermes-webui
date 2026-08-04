@@ -154,6 +154,49 @@ class TestCodePatterns:
             "_refreshDefaultModelCache must fetch /api/settings"
         )
 
+    def test_sentinel_persistence_helpers_exist(self):
+        """localStorage-based sentinel persistence helpers must exist in ui.js."""
+        src = UI_JS.read_text(encoding="utf-8")
+        assert "function _setDefaultModelSession(" in src
+        assert "function _clearDefaultModelSession(" in src
+        assert "function _isDefaultModelSession(" in src
+        assert "function _preserveDefaultModelSentinel(" in src
+        assert "'hermes-webui-default-sessions'" in src
+
+    def test_sentinel_restored_after_server_session_replacement(self):
+        """Every S.session replacement from server data must restore the sentinel."""
+        msgs_src = MESSAGES_JS.read_text(encoding="utf-8")
+        sessions_src = SESSIONS_JS.read_text(encoding="utf-8")
+        # SSE done + error + cancel paths in messages.js
+        assert msgs_src.count("_preserveDefaultModelSentinel(S.session)") >= 4, (
+            "messages.js must restore sentinel after SSE done/error/cancel paths"
+        )
+        # loadSession + resolveModelForDisplay in sessions.js
+        assert sessions_src.count("_preserveDefaultModelSentinel(S.session)") >= 2, (
+            "sessions.js must restore sentinel after loadSession and resolveModelForDisplay"
+        )
+
+    def test_new_session_marks_default_mode(self):
+        """newSession must call _setDefaultModelSession when created with __default__."""
+        src = SESSIONS_JS.read_text(encoding="utf-8")
+        assert "_setDefaultModelSession(S.session.session_id)" in src
+        assert "newModelState.model==='__default__'" in src
+
+    def test_dropdown_onchange_tracks_default_mode(self):
+        """Model dropdown onchange must set/clear default-mode tracking."""
+        boot_src = BOOT_JS.read_text(encoding="utf-8")
+        assert "_setDefaultModelSession(S.session.session_id)" in boot_src
+        assert "_clearDefaultModelSession(S.session.session_id)" in boot_src
+
+    def test_effective_model_does_not_clobber_sentinel(self):
+        """Server-resolved effective_model must not overwrite the sentinel."""
+        msgs_src = MESSAGES_JS.read_text(encoding="utf-8")
+        commands_src = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+        panels_src = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+        assert "S.session.model!=='__default__'" in msgs_src
+        assert "S.session.model!=='__default__'" in commands_src
+        assert "S.session.model!=='__default__'" in panels_src
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 2. Node.js runtime tests

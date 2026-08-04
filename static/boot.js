@@ -2082,7 +2082,7 @@ $('btnShareSession').onclick=async()=>{
       }
     }
     const res=await api('/api/share/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
-    if(res&&res.session) S.session=res.session;
+    if(res&&res.session){ S.session=res.session; if(typeof _preserveDefaultModelSentinel==='function')_preserveDefaultModelSentinel(S.session); }
     const href=new URL(String(res&&res.share&&res.share.url||''),location.origin).href;
     await _copyText(href);
     showToast(t('share_session_created'));
@@ -2103,7 +2103,7 @@ $('btnStopSharingSession').onclick=async()=>{
   if(!ok) return;
   try{
     const res=await api('/api/share/revoke',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
-    if(res&&res.session) S.session=res.session;
+    if(res&&res.session){ S.session=res.session; if(typeof _preserveDefaultModelSentinel==='function')_preserveDefaultModelSentinel(S.session); }
     showToast(t('share_session_revoked'));
     if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
   }catch(err){
@@ -2218,6 +2218,13 @@ $('modelSelect').onchange=async()=>{
     return;
   }
   if(typeof _rememberPendingSessionModel==='function') _rememberPendingSessionModel(S.session.session_id,modelState.model,modelState.model_provider);
+  // Track "Default (auto)" mode so the __default__ sentinel survives
+  // server round-trips (SSE done, session re-fetch, page reload).
+  if(modelState.model==='__default__'){
+    if(typeof _setDefaultModelSession==='function')_setDefaultModelSession(S.session.session_id);
+  }else{
+    if(typeof _clearDefaultModelSession==='function')_clearDefaultModelSession(S.session.session_id);
+  }
   S.session.model=modelState.model;
   S.session.model_provider=modelState.model_provider||null;
   if(typeof syncModelChip==='function') syncModelChip();

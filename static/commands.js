@@ -731,6 +731,7 @@ async function cmdModel(args){
         if(resp.ok){
           S.session.model=q;
           S.session.model_provider=provider;
+          if(typeof _clearDefaultModelSession==='function'&&S.session.session_id)_clearDefaultModelSession(S.session.session_id);
           if(typeof syncTopbar==='function') syncTopbar();
           showToast(t('switched_to')+q);
           return;
@@ -1258,8 +1259,8 @@ async function cmdGoal(args){
     if(S.session&&S.session.session_id===activeSid){
       S.session.active_stream_id=r.stream_id;
       if(typeof r.pending_started_at==='number')S.session.pending_started_at=r.pending_started_at;
-      if(r.effective_model)S.session.model=r.effective_model;
-      if(r.effective_model_provider)S.session.model_provider=r.effective_model_provider;
+      if(r.effective_model&&S.session.model!=='__default__')S.session.model=r.effective_model;
+      if(r.effective_model_provider&&S.session.model!=='__default__')S.session.model_provider=r.effective_model_provider;
     }
     INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[],toolCalls:[]};
     if(typeof markInflight==='function')markInflight(activeSid,r.stream_id);

@@ -491,7 +491,7 @@ async function startCompressionRecovery(btn){
     if(!sid) throw new Error('Compression recovery did not return a session.');
     try{localStorage.setItem('hermes-webui-session',sid);}catch(_){}
     if(typeof loadSession==='function') await loadSession(sid,{preserveActiveInput:false});
-    else if(data.session){S.session=data.session;S.messages=data.session.messages||[];syncTopbar();renderMessages();}
+    else if(data.session){S.session=data.session;if(typeof _preserveDefaultModelSentinel==='function')_preserveDefaultModelSentinel(S.session);S.messages=data.session.messages||[];syncTopbar();renderMessages();}
     if(typeof renderSessionList==='function') await renderSessionList();
     if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(sid);
     if(typeof showToast==='function') showToast((data&&data.message)||'Started focused continuation.',3000,'success');
@@ -2852,6 +2852,58 @@ async function _refreshDefaultModelCache(){
     console.warn('[default-model] failed to refresh default model:',e.message||e,'— keeping stale default');
   }
 }
+// ── Default (auto) model session tracking ──────────────────────────────
+// Sessions set to "Default (auto)" store the __default__ sentinel as their
+// model. Because the server resolves and persists the concrete model, the
+// sentinel would be lost on every server round-trip (SSE done, session
+// re-fetch, page reload). We track which sessions are in "default auto"
+// mode in localStorage and restore the sentinel after every S.session
+// replacement from server data.
+function _defaultModelSessionsKey(){ return 'hermes-webui-default-sessions'; }
+function _readDefaultModelSessions(){
+  try{
+    const raw=localStorage.getItem(_defaultModelSessionsKey());
+    return raw?JSON.parse(raw):{};
+  }catch(_){ return {}; }
+}
+function _writeDefaultModelSessions(map){
+  try{
+    // Prune: keep the map bounded (cap 200, oldest entries dropped) so a
+    // long-lived browser doesn't accumulate stale session ids forever.
+    const entries=Object.entries(map);
+    if(entries.length>200){
+      map=Object.fromEntries(entries.slice(-200));
+    }
+    localStorage.setItem(_defaultModelSessionsKey(),JSON.stringify(map));
+  }catch(_){}
+}
+function _setDefaultModelSession(sid){
+  if(!sid) return;
+  const map=_readDefaultModelSessions();
+  map[String(sid)]=true;
+  _writeDefaultModelSessions(map);
+}
+function _clearDefaultModelSession(sid){
+  if(!sid) return;
+  const map=_readDefaultModelSessions();
+  delete map[String(sid)];
+  _writeDefaultModelSessions(map);
+}
+function _isDefaultModelSession(sid){
+  if(!sid) return false;
+  return !!_readDefaultModelSessions()[String(sid)];
+}
+/** Restore the __default__ sentinel on a session that was set to
+ * "Default (auto)". Call after every S.session replacement from server
+ * data (SSE events, session re-fetch, page reload). */
+function _preserveDefaultModelSentinel(session){
+  if(!session||!session.session_id) return session;
+  if(_isDefaultModelSession(session.session_id)){
+    session.model='__default__';
+    session.model_provider=null;
+  }
+  return session;
+}
 function _providerFromModelValue(modelId){
   const value=String(modelId||'').trim();
   if(value.startsWith('@')&&value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
@@ -2958,6 +3010,11 @@ function _captureModelDropdownSelection(sel){
   return {model:String(sel.value||''),model_provider:null};
 }
 function _modelProviderForSend(modelId){
+  // __default__ sessions carry no provider — route through the active provider
+  // so chat/start takes the fast path instead of a cold catalog rebuild.
+  if(S&&S.session&&S.session.model==='__default__'){
+    return (typeof window!=='undefined'&&window._activeProvider)||null;
+  }
   const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
   if(sessionProvider) return sessionProvider;
   const model=String(modelId||'').trim();
@@ -3165,6 +3222,12 @@ function _applyPendingSessionModelForSession(sessionId){
   if(!S.session||S.session.session_id!==sessionId) return false;
   const pending=_readPendingSessionModel(sessionId);
   if(!pending) return false;
+  // "Default (auto)" sessions: only accept a pending pick that IS __default__.
+  // A stale resolved-model pick must not clobber the sentinel.
+  if(S.session.model==='__default__'&&pending.model!=='__default__'){
+    _clearPendingSessionModel(sessionId);
+    return false;
+  }
   const sameModel=String(S.session.model||'')===pending.model;
   const sameProvider=String(S.session.model_provider||'')===String(pending.model_provider||'');
   if(sameModel&&sameProvider){
@@ -7986,11 +8049,13 @@ function setBusy(v){
         S.pendingFiles=Array.isArray(next.files)?[...next.files]:[];
         // Restore model from queued item (sent in /api/chat/start payload)
         // Note: profile is NOT restored — full profile switch requires server interaction
-        if(next.model&&S.session&&next.model!==S.session.model){
+        // __default__ sessions re-resolve the default at send time, so a queued
+        // resolved model must not clobber the sentinel.
+        if(next.model&&S.session&&S.session.model!=='__default__'&&next.model!==S.session.model){
           S.session.model=next.model;
         }
-        if(next.model_provider&&S.session) S.session.model_provider=next.model_provider;
-        if(next.model&&S.session){
+        if(next.model_provider&&S.session&&S.session.model!=='__default__') S.session.model_provider=next.model_provider;
+        if(next.model&&S.session&&S.session.model!=='__default__'){
           if(typeof _applyModelToDropdown==='function'&&$('modelSelect')) _applyModelToDropdown(next.model,$('modelSelect'),S.session.model_provider||null);
           if(typeof syncModelChip==='function') syncModelChip();
         }

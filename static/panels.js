@@ -7079,8 +7079,12 @@ async function switchToProfile(name) {
       S._pendingProfileModelProvider = modelState.model_provider||providerId||null;
       // Only patch the in-memory session model if we're NOT about to replace the session
       if (S.session && !sessionInProgress) {
-        S.session.model = modelToUse;
-        S.session.model_provider = modelState.model_provider||providerId||null;
+        // "Default (auto)" sessions keep the sentinel: it resolves to the NEW
+        // profile's default at send time, which is exactly the desired behavior.
+        if (S.session.model!=='__default__') {
+          S.session.model = modelToUse;
+          S.session.model_provider = modelState.model_provider||providerId||null;
+        }
         S.session.profile = data.active || name;
       }
     }
