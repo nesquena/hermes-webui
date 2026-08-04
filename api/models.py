@@ -1717,6 +1717,26 @@ class Session:
             return False
         if parsed.get('truncation_boundary') not in (None, ''):
             return False
+        # ── #6317 re-gate: disqualify session shapes the tail-only window
+        #    cannot reproduce exactly ────────────────────────────────────
+        # Compression/fork lineage: the display path stitches
+        # ``pre_compression_snapshot`` parents via
+        # ``_webui_sidecar_lineage_messages_for_display``; a tail-only window
+        # cannot reproduce that stitching, so these sessions stay on the
+        # authoritative full-load path.
+        if str(parsed.get('parent_session_id') or '').strip():
+            return False
+        # CLI / messaging / imported shapes: their display path merges
+        # CLI-store rows against the full sidecar lineage
+        # (``_merged_session_messages_for_display``), which the tail window
+        # cannot reproduce.
+        if bool(parsed.get('is_cli_session')) or bool(parsed.get('read_only')):
+            return False
+        _src = str(parsed.get('session_source') or '').strip().lower()
+        if _src in ('messaging', 'external_agent', 'external-agent'):
+            return False
+        if any(parsed.get(k) for k in ('source_tag', 'raw_source', 'source', 'source_label', 'platform')):
+            return False
         return True
 
     @staticmethod
