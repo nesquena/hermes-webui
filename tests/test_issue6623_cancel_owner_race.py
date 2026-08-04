@@ -16,6 +16,16 @@ Covers the two CHANGES_REQUESTED items on PR #6636:
    stamps ``cancelled_at`` on the run when cancel_stream() flips it to
    phase="cancelling", and ``_clear_stale_stream_state()`` reclaims the session
    once the cancel has been outstanding past the grace window.
+
+3. (RE-GATE 20:36) A delayed cancel finalizer must not be authorized by a
+   MISSING writeback-ownership record: the successor's own teardown clears
+   ``SESSION_WRITEBACK_OWNERS[session_id]`` when it completes, so ``owner is
+   None`` with ``active_stream_id is None`` again is exactly the ambiguous
+   state that lets an obsolete finalizer serialize over the completed
+   successor. ``None`` — and any unresolvable current session — must fail
+   closed. The stale-stream process-wakeup branch must likewise merge the
+   pause into the canonical current session, never save the worker's detached
+   snapshot.
 """
 import queue
 import threading
@@ -234,10 +244,12 @@ def test_issue6623_fresh_cancelled_run_still_deferred(tmp_path, monkeypatch):
 
 
 def test_issue6623_delayed_cancel_finalizer_gated_by_stream_ownership():
-    """RE-GATE unit control: ``_finalize_cancelled_turn(..., stream_id=...)``
-    must no-op entirely (no clearing, no marker append, no save) once a
-    successor owns the session — while still finalizing when the session
-    points at the cancelled stream or at no stream at all."""
+    """RE-GATE unit control (20:36): ``_finalize_cancelled_turn(..., stream_id=...)``
+    must no-op entirely (no clearing, no marker append, no save) unless the
+    immutable writeback-ownership record still names the old worker's exact
+    stream_id. ``None`` — successor completed and its teardown cleared the
+    entry, or the record was never registered — must FAIL CLOSED, and so must
+    an unresolvable current session (deleted/unloadable)."""
     old_stream = "finalizer-old-stream"
 
     # Successor owns the session -> the delayed finalizer must no-op.
@@ -249,26 +261,43 @@ def test_issue6623_delayed_cancel_finalizer_gated_by_stream_ownership():
     s.pending_user_message = "newer prompt"
     s.pending_started_at = 456.0
     s.save = Mock()
+    models.SESSIONS[s.session_id] = s
+    config.register_session_writeback_owner(s.session_id, "newer-stream")
     streaming._finalize_cancelled_turn(s, ephemeral=False, stream_id=old_stream)
     assert s.active_stream_id == "newer-stream"
     assert s.pending_user_message == "newer prompt"
     s.save.assert_not_called()
     assert streaming._session_has_cancel_marker(s) is False
 
-    # No stream owns the session (cancel_stream already cleared it, no
-    # successor) -> the finalizer may still persist the cancelled-turn marker.
+    # Ownership record missing (successor completed and its teardown cleared
+    # it) and active_stream_id is None again -> ``None`` must NOT authorize:
+    # the finalizer no-ops instead of appending/saving the obsolete
+    # cancellation over the completed successor.
     s2 = Session(session_id="finalizer-gate-nostream", messages=[])
     s2.active_stream_id = None
     s2.save = Mock()
+    models.SESSIONS[s2.session_id] = s2
     streaming._finalize_cancelled_turn(s2, ephemeral=False, stream_id=old_stream)
-    s2.save.assert_called_once()
+    s2.save.assert_not_called()
     assert s2.active_stream_id is None
-    assert streaming._session_has_cancel_marker(s2) is True
+    assert streaming._session_has_cancel_marker(s2) is False
 
-    # Session still points at the cancelled stream -> the finalizer runs.
+    # Current session cannot be resolved (not cached, no file on disk) ->
+    # fail closed: no terminal write from a detached worker.
+    s4 = Session(session_id="finalizer-gate-unresolvable", messages=[])
+    s4.active_stream_id = None
+    s4.save = Mock()
+    streaming._finalize_cancelled_turn(s4, ephemeral=False, stream_id=old_stream)
+    s4.save.assert_not_called()
+    assert streaming._session_has_cancel_marker(s4) is False
+
+    # Session still points at the cancelled stream AND the worker still owns
+    # the writeback record -> the finalizer runs.
     s3 = Session(session_id="finalizer-gate-owns", messages=[])
     s3.active_stream_id = old_stream
     s3.save = Mock()
+    models.SESSIONS[s3.session_id] = s3
+    config.register_session_writeback_owner(s3.session_id, old_stream)
     streaming._finalize_cancelled_turn(s3, ephemeral=False, stream_id=old_stream)
     s3.save.assert_called_once()
     assert s3.active_stream_id is None
@@ -736,3 +765,155 @@ def test_issue6623_replaced_session_process_wakeup_pause_merges_into_current(
         str(m.get("content", "")) == "newer prompt" and m.get("role") == "user"
         for m in disk.messages
     )
+
+
+def test_issue6623_completed_successor_teardown_cleared_owner_blocks_old_finalizer(
+    tmp_path, monkeypatch
+):
+    """RE-GATE regression (#6623, 20:36): a delayed old finalizer must not be
+    authorized by a MISSING writeback-ownership record.
+
+    The successor is admitted, persists its result, then COMPLETES — and its
+    teardown clears the ownership entry (``clear_session_writeback_owner_if_owned``
+    in the final teardown of ``_run_agent_streaming``). When the old cancelled
+    worker finally resumes, ``owner is None`` AND the current object's
+    ``active_stream_id`` is None again — the exact ambiguous state the pre-fix
+    guard accepted (``owner is not None`` / ``active_stream_id is not None``
+    both false). ``None`` must fail closed: the old worker must not
+    append/save its obsolete cancellation over the completed successor.
+
+    This is the sequence the earlier completed-successor control did NOT
+    exercise (it kept the ownership record alive); production completion
+    clears it.
+    """
+    sid = "sess_teardown_cleared_owner"
+    old_stream = "old-teardown-stream"
+    newer_stream = "newer-teardown-stream"
+
+    s_old = Session(
+        session_id=sid,
+        title="Teardown-cleared owner",
+        messages=[{"role": "user", "content": "old prompt"}],
+    )
+    s_old.active_stream_id = old_stream
+    s_old.pending_user_message = "old prompt"
+    s_old.pending_attachments = []
+    s_old.pending_started_at = 1000.0
+    s_old.pending_user_source = "webui"
+    s_old.save()
+    models.SESSIONS[sid] = s_old
+    config.register_session_writeback_owner(sid, old_stream)
+
+    config.register_stream_owner(old_stream, sid)
+    config.STREAMS[old_stream] = queue.Queue()
+    config.CANCEL_FLAGS[old_stream] = threading.Event()
+    config.register_active_run(old_stream, session_id=sid, phase="running")
+
+    # 2) Cancel the old turn through the real production path.
+    assert streaming.cancel_stream(old_stream) is True
+    assert s_old.active_stream_id is None
+    assert streaming._session_has_cancel_marker(s_old)
+    _old_messages_after_cancel = len(s_old.messages)
+
+    # 3) REAL LRU eviction + lazy reload of a DISTINCT current object.
+    monkeypatch.setattr(models, "SESSIONS_MAX", 2)
+    for i in range(4):
+        _filler = Session(
+            session_id=f"sess_teardown_filler_{i}", title="filler", messages=[]
+        )
+        _filler.save()
+        models.SESSIONS[_filler.session_id] = _filler
+    with config.LOCK:
+        models._evict_sessions_over_cap(0)
+    s_new = models.get_session(sid)
+    assert s_new is not s_old, "lazy reload must yield a DISTINCT Session instance"
+
+    # 4) Admit the successor, let it COMPLETE, then run its teardown: the
+    # ownership entry is released (compare-and-clear) exactly like the final
+    # teardown in _run_agent_streaming.
+    with streaming._get_session_agent_lock(sid):
+        s_new.active_stream_id = newer_stream
+        s_new.pending_user_message = "newer prompt"
+        s_new.pending_attachments = []
+        s_new.pending_started_at = 2000.0
+        s_new.pending_user_source = "webui"
+        s_new.messages.append(
+            {"role": "user", "content": "newer prompt", "timestamp": 2000}
+        )
+        config.register_session_writeback_owner(sid, newer_stream)
+        s_new.save()
+        # Successor completes: active_stream_id + pending fields cleared.
+        s_new.active_stream_id = None
+        s_new.pending_user_message = None
+        s_new.pending_attachments = []
+        s_new.pending_started_at = None
+        s_new.pending_user_source = None
+        s_new.save()
+        # Successor teardown: release ownership while still owning it.
+        config.clear_session_writeback_owner_if_owned(sid, newer_stream)
+    assert config.session_writeback_owner(sid) is None
+    _messages_after_successor = len(s_new.messages)
+    # The old turn's OWN cancel marker is legitimately on disk (cancel_stream
+    # persisted it); the successor transcript may carry it. What must NOT
+    # happen is the delayed finalizer appending a NEW one.
+    _cancel_markers_before = sum(
+        1 for m in s_new.messages
+        if str(m.get("content", "")).startswith("**Task cancelled:**")
+    )
+
+    # 5) The old worker resumes and unwinds through the delayed cancel
+    # finalizer holding its stale snapshot, under the session lock.
+    with streaming._get_session_agent_lock(sid):
+        streaming._finalize_cancelled_turn(s_old, ephemeral=False, stream_id=old_stream)
+
+    # 6) Fail closed: the old generation made no terminal write.
+    assert len(s_old.messages) == _old_messages_after_cancel, (
+        "stale snapshot must not receive a delayed terminal write"
+    )
+    # The successor's cache object and disk state survive untouched.
+    assert s_new.active_stream_id is None
+    assert s_new.pending_user_message is None
+    assert len(s_new.messages) == _messages_after_successor, (
+        "delayed cancel finalizer must not append over the completed successor"
+    )
+    assert sum(
+        1 for m in s_new.messages
+        if str(m.get("content", "")).startswith("**Task cancelled:**")
+    ) == _cancel_markers_before, (
+        "delayed cancel finalizer must not append a new cancel marker"
+    )
+    disk = models.Session.load(sid)
+    assert disk.active_stream_id is None
+    assert len(disk.messages) == _messages_after_successor
+    assert any(
+        str(m.get("content", "")) == "newer prompt" and m.get("role") == "user"
+        for m in disk.messages
+    )
+    assert sum(
+        1 for m in disk.messages
+        if str(m.get("content", "")).startswith("**Task cancelled:**")
+    ) == _cancel_markers_before, (
+        "disk must not gain a new cancel marker from the stale finalizer"
+    )
+
+
+def test_issue6623_unresolvable_current_session_fails_closed_for_pause_merge(
+    tmp_path, monkeypatch
+):
+    """RE-GATE regression (#6623, 20:36): the process-wakeup pause merge must
+    fail closed (no write, no exception) when the canonical current session
+    cannot be resolved — the worker-held snapshot is never the write target.
+    """
+    sid = "sess_unresolvable_pause"
+    s_old = Session(session_id=sid, messages=[])
+    s_old.save = Mock()
+    # NOT cached, no file on disk -> get_session() resolves nothing.
+    recorded = streaming._merge_process_wakeup_pause_into_current_session(
+        s_old,
+        classification="credential_pool_empty",
+        model="test-model",
+        provider="test-provider",
+    )
+    assert recorded is None
+    s_old.save.assert_not_called()
+    assert not (s_old.process_wakeup_pause or {}).get("paused")
