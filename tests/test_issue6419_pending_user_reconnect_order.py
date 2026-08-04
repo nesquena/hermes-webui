@@ -133,6 +133,10 @@ def test_merge_helper_repairs_malformed_order_and_is_idempotent():
     preserve its metadata/attachments, and remain ordered on repeated probes."""
     helpers = "\n".join(
         [
+            _function_source(UI_JS, "_timestampSeconds"),
+            _function_source(UI_JS, "_firstValidTimestampSeconds"),
+            _function_source(UI_JS, "_isTailActivityOwnedByCandidateTurn"),
+            _function_source(UI_JS, "_isCanonicalAssistantToolCallEnvelope"),
             _function_source(SESSIONS_JS, "_messageComparableText"),
             _function_source(SESSIONS_JS, "_stripAttachedFilesMarker"),
             _function_source(SESSIONS_JS, "_stripForcedSkillEnvelope"),
@@ -187,6 +191,10 @@ def test_refresh_session_uses_canonical_helper_before_render():
     once when the canonical helper is available."""
     helpers = "\n".join(
         [
+            _function_source(UI_JS, "_timestampSeconds"),
+            _function_source(UI_JS, "_firstValidTimestampSeconds"),
+            _function_source(UI_JS, "_isTailActivityOwnedByCandidateTurn"),
+            _function_source(UI_JS, "_isCanonicalAssistantToolCallEnvelope"),
             _function_source(SESSIONS_JS, "_messageComparableText"),
             _function_source(SESSIONS_JS, "_stripAttachedFilesMarker"),
             _function_source(SESSIONS_JS, "_stripForcedSkillEnvelope"),

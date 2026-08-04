@@ -92,6 +92,9 @@ def _run_current_turn_scope_probe() -> dict:
         [
             _function_body(UI_SRC, "function _stripWorkspaceDisplayPrefix"),
             _function_body(UI_SRC, "function msgContent"),
+            _function_body(UI_SRC, "function _timestampSeconds"),
+            _function_body(UI_SRC, "function _firstValidTimestampSeconds"),
+            _function_body(UI_SRC, "function _isTailActivityOwnedByCandidateTurn"),
             _function_body(UI_SRC, "function _isContextCompactionText"),
             _function_body(UI_SRC, "function _isContextCompactionMessage"),
             _function_body(SESSIONS_SRC, "function _messageComparableText"),
@@ -177,7 +180,7 @@ const toolTurnInflight = _mergeInflightTailMessages(
   toolTurnBase,
   [{{role:'user', content:toolTurnPrompt, _ts:3}}, {{role:'assistant', content:'live turn', _live:true, _ts:4}}]
 );
-const toolTurnPendingMessage = {{pending_user_message:toolTurnPrompt, pending_started_at:4}};
+const toolTurnPendingMessage = {{pending_user_message:toolTurnPrompt, pending_started_at:3}};
 const toolTurnPendingMerged = _mergePendingSessionMessage(toolTurnPendingMessage, toolTurnBase);
 const distinctCompletedTurnPromptCount = inflightAfterHistory.filter(
   m=>m&&m.role==='user'&&_normalizeUserTranscriptText(m.content)==={json.dumps(prompt)}
@@ -218,7 +221,7 @@ def _run_pending_session_message_probe() -> dict:
         {
             "role": "assistant",
             "content": "",
-            "_ts": 2.5,
+            "_ts": 3.1,
             "tool_calls": [
                 {
                     "id": "turn-envelope-call",
@@ -240,6 +243,9 @@ def _run_pending_session_message_probe() -> dict:
             _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
             _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
             _function_body(UI_SRC, "function _isCanonicalAssistantToolCallEnvelope"),
+            _function_body(UI_SRC, "function _timestampSeconds"),
+            _function_body(UI_SRC, "function _firstValidTimestampSeconds"),
+            _function_body(UI_SRC, "function _isTailActivityOwnedByCandidateTurn"),
             _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
             _function_body(UI_SRC, "function _isContextCompactionText"),
             _function_body(UI_SRC, "function _isContextCompactionMessage"),
@@ -273,7 +279,7 @@ const repeatedCompletedBase = [
   repeatedPromptAnswerTwo,
 ];
 const toolEnvelopeCurrentTurn = {tool_envelope_current_turn};
-const toolEnvelopeResult = {{role:'tool', content:'tool result', tool_call_id:'turn-envelope-call', _ts:2.6}};
+const toolEnvelopeResult = {{role:'tool', content:'tool result', tool_call_id:'turn-envelope-call', _ts:3.6}};
 const toolEnvelopeCurrentMessages = [historical, historicalAnswer, currentTail, toolEnvelopeCurrentTurn, toolEnvelopeResult];
 
 const fromHistoricalSameText = getPendingSessionMessage(
@@ -325,7 +331,7 @@ process.stdout.write(JSON.stringify({{
   workspaceCurrentTailDedupe: workspaceCurrentResult===null,
   liveAfterCurrentTailDedupe: liveAfterCurrentResult===null,
   toolEnvelopeTurnSuppressesPending: getPendingSessionMessage(
-    {{pending_user_message:prompt, pending_started_at:4}},
+    {{pending_user_message:prompt, pending_started_at:3}},
     toolEnvelopeCurrentMessages
   )===null,
   differentCurrentTailSurvives: !!differentTailResult && differentTailResult.content===prompt && differentTailResult._pending===true,
@@ -341,6 +347,66 @@ process.stdout.write(JSON.stringify({{
     return json.loads(proc.stdout)
 
 
+def _run_candidate_turn_activity_regression_probe() -> dict:
+    prompt = "repeat me"
+    tool_call = json.dumps(
+        {
+            "id": "older-tool-call",
+            "type": "function",
+            "function": {"name": "inspect", "arguments": "{}"},
+        }
+    )
+    older_tool_envelope = json.dumps(
+        {
+            "role": "assistant",
+            "content": "",
+            "_ts": 2,
+            "tool_calls": [json.loads(tool_call)],
+        }
+    )
+    helpers = "\n".join(
+        [
+            _function_body(UI_SRC, "function msgContent"),
+            _function_body(UI_SRC, "function _timestampSeconds"),
+            _function_body(UI_SRC, "function _firstValidTimestampSeconds"),
+            _function_body(UI_SRC, "function _isTailActivityOwnedByCandidateTurn"),
+            _function_body(UI_SRC, "function _isCanonicalAssistantToolCallEnvelope"),
+            _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
+            _function_body(UI_SRC, "function getPendingSessionMessage"),
+            _function_body(SESSIONS_SRC, "function _messageComparableText"),
+            _function_body(SESSIONS_SRC, "function _stripAttachedFilesMarker"),
+            _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
+            _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
+            _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
+            _function_body(SESSIONS_SRC, "function _currentTailUserMessage"),
+            _function_body(SESSIONS_SRC, "function _hasCurrentTailUserDuplicate"),
+            _function_body(SESSIONS_SRC, "function _mergeInflightTailMessages"),
+        ]
+    )
+    script = f"""
+{helpers}
+const prompt = {json.dumps(prompt)};
+const olderUser = {{role:'user', content:prompt, _ts:1}};
+const olderToolEnvelope = {older_tool_envelope};
+const olderToolResult = {{role:'tool', content:'older result', tool_call_id:'older-tool-call', _ts:3}};
+const olderActivity = [olderUser, olderToolEnvelope, olderToolResult];
+const inflight = _mergeInflightTailMessages(
+  olderActivity,
+  [{{role:'user', content:prompt, _ts:10}}, {{role:'assistant', content:'working', _live:true, _ts:11}}]
+);
+const pending = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:10}},
+  olderActivity
+);
+process.stdout.write(JSON.stringify({{
+  inflightUserTimestamps: inflight.filter(m=>m&&m.role==='user').map(m=>m._ts),
+  pendingTimestamp: pending&&pending._ts,
+}}));
+"""
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    return json.loads(proc.stdout)
+
+
 def _run_tail_scanner_boundary_probe() -> list[dict]:
     prompt = "scan me"
     prior_prompt = "older prompt"
@@ -349,6 +415,9 @@ def _run_tail_scanner_boundary_probe() -> list[dict]:
             _function_body(SESSIONS_SRC, "function _currentTailUserMessage"),
             _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
             _function_body(UI_SRC, "function _isCanonicalAssistantToolCallEnvelope"),
+            _function_body(UI_SRC, "function _timestampSeconds"),
+            _function_body(UI_SRC, "function _firstValidTimestampSeconds"),
+            _function_body(UI_SRC, "function _isTailActivityOwnedByCandidateTurn"),
             _function_body(UI_SRC, "function msgContent"),
             _function_body(UI_SRC, "function _isContextCompactionText"),
             _function_body(UI_SRC, "function _isContextCompactionMessage"),
@@ -386,39 +455,48 @@ const canonicalPreambleCall = {{
   function: {{name: 'inspect', arguments: '{{}}'}},
 }};
 
-const canonicalFunctionEnvelope = {{role:'assistant', content:'', _ts:2.1, tool_calls:[canonicalFunctionCall]}};
-const canonicalTopNameEnvelope = {{role:'assistant', content:'', _ts:2.2, tool_calls:[canonicalTopNameCall]}};
-const canonicalCallIdEnvelope = {{role:'assistant', content:'', _ts:2.3, tool_calls:[canonicalTopNameCall]}};
-const canonicalPreambleEnvelope = {{role:'assistant', content:'I will inspect', _ts:2.4, tool_calls:[canonicalPreambleCall]}};
+const canonicalFunctionEnvelope = {{role:'assistant', content:'', _ts:3, tool_calls:[canonicalFunctionCall]}};
+const canonicalTimestampEnvelope = {{role:'assistant', content:'', timestamp:3, tool_calls:[canonicalFunctionCall]}};
+const canonicalTopNameEnvelope = {{role:'assistant', content:'', _ts:3.1, tool_calls:[canonicalTopNameCall]}};
+const canonicalCallIdEnvelope = {{role:'assistant', content:'', _ts:3.2, tool_calls:[canonicalTopNameCall]}};
+const canonicalPreambleEnvelope = {{role:'assistant', content:'I will inspect', _ts:3.3, tool_calls:[canonicalPreambleCall]}};
+const olderTimestampEnvelope = {{role:'assistant', content:'', _ts:2, tool_calls:[canonicalFunctionCall]}};
+const missingActivityTimestampEnvelope = {{role:'assistant', content:'', tool_calls:[canonicalFunctionCall]}};
+const invalidActivityTimestampEnvelope = {{role:'assistant', content:'', _ts:'not-a-timestamp', tool_calls:[canonicalFunctionCall]}};
 const malformedLiteral = {{role:'assistant', content:'no tools', _ts:2.7}};
 const malformedObjectNoId = {{role:'assistant', content:'', _ts:3.6, tool_calls:[{{type:'function', function:{{name:'inspect', arguments:'{{}}'}}}}]}};
 const malformedObjectNoName = {{role:'assistant', content:'', _ts:3.7, tool_calls:[{{id:'no-name', type:'function', function:{{}}}}]}};
 const toolCallWithInvalid = {{role:'assistant', content:'', _ts:3.8, tool_calls:[canonicalFunctionCall, null]}};
 
 const cases = [
-  {{name:'canonical function.name', helperMessage:canonicalFunctionEnvelope, messages:[priorUser, currentUser, canonicalFunctionEnvelope], expectHelper:true, expectTailPrompt:prompt}},
-  {{name:'canonical top-level name', helperMessage:canonicalTopNameEnvelope, messages:[priorUser, currentUser, canonicalTopNameEnvelope], expectHelper:true, expectTailPrompt:prompt}},
-  {{name:'canonical call_id', helperMessage:canonicalCallIdEnvelope, messages:[priorUser, currentUser, canonicalCallIdEnvelope], expectHelper:true, expectTailPrompt:prompt}},
-  {{name:'canonical with visible preamble', helperMessage:canonicalPreambleEnvelope, messages:[priorUser, currentUser, canonicalPreambleEnvelope], expectHelper:true, expectTailPrompt:prompt}},
-  {{name:'canonical envelope followed by tool result', helperMessage:canonicalFunctionEnvelope, messages:[priorUser, currentUser, canonicalFunctionEnvelope, toolResult], expectHelper:true, expectTailPrompt:prompt}},
-  {{name:'final assistant boundary after tool activity', helperMessage:canonicalFunctionEnvelope, messages:[priorUser, currentUser, canonicalFunctionEnvelope, toolResult, completedAssistant], expectHelper:true, expectTailPrompt:null}},
-  {{name:'legitimate repeated user rows', helperMessage:malformedLiteral, messages:[{{role:'user', content:prompt, _ts:1}}, priorAssistant, currentUser], expectHelper:false, expectTailPrompt:prompt}},
-  {{name:'compaction before completion', helperMessage:canonicalFunctionEnvelope, messages:[priorUser, priorAssistant, currentUser, compaction, canonicalFunctionEnvelope], expectHelper:true, expectTailPrompt:prompt}},
-  {{name:'compaction after completion', helperMessage:canonicalFunctionEnvelope, messages:[priorUser, currentUser, canonicalFunctionEnvelope, toolResult, completedAssistant, compaction], expectHelper:true, expectTailPrompt:null}},
-  {{name:'_live', helperMessage:malformedLiteral, messages:[priorUser, currentUser, live], expectHelper:false, expectTailPrompt:prompt}},
-  {{name:'[]', helperMessage:{{role:'assistant', content:'', _ts:3.1, tool_calls: []}}, messages:[priorUser, {{role:'assistant', content:'', _ts:3.1, tool_calls: []}}], expectHelper:false, expectTailPrompt:null}},
-  {{name:'non-array tool_calls', helperMessage:{{role:'assistant', content:'', _ts:3.2, tool_calls:'not-an-array'}}, messages:[priorUser, {{role:'assistant', content:'', _ts:3.2, tool_calls:'not-an-array'}}], expectHelper:false, expectTailPrompt:null}},
-  {{name:'[null]', helperMessage:{{role:'assistant', content:'', _ts:3.3, tool_calls:[null]}}, messages:[priorUser, {{role:'assistant', content:'', _ts:3.3, tool_calls:[null]}}], expectHelper:false, expectTailPrompt:null}},
-  {{name:'[{{}}]', helperMessage:{{role:'assistant', content:'', _ts:3.4, tool_calls:[{{}}]}}, messages:[priorUser, {{role:'assistant', content:'', _ts:3.4, tool_calls:[{{}}]}}], expectHelper:false, expectTailPrompt:null}},
-  {{name:'primitive entry', helperMessage:{{role:'assistant', content:'', _ts:3.5, tool_calls:[1]}}, messages:[priorUser, {{role:'assistant', content:'', _ts:3.5, tool_calls:[1]}}], expectHelper:false, expectTailPrompt:null}},
-  {{name:'missing ID', helperMessage:malformedObjectNoId, messages:[priorUser, malformedObjectNoId], expectHelper:false, expectTailPrompt:null}},
-  {{name:'missing name', helperMessage:malformedObjectNoName, messages:[priorUser, malformedObjectNoName], expectHelper:false, expectTailPrompt:null}},
-  {{name:'mixed valid+invalid', helperMessage:toolCallWithInvalid, messages:[priorUser, toolCallWithInvalid], expectHelper:false, expectTailPrompt:null}},
+  {{name:'canonical function.name same-turn _ts', helperMessage:canonicalFunctionEnvelope, messages:[priorUser, currentUser, canonicalFunctionEnvelope], candidateStart:3, expectHelper:true, expectTailPrompt:prompt}},
+  {{name:'canonical timestamp field same-turn', helperMessage:canonicalTimestampEnvelope, messages:[priorUser, currentUser, canonicalTimestampEnvelope], candidateStart:3, expectHelper:true, expectTailPrompt:prompt}},
+  {{name:'canonical top-level name', helperMessage:canonicalTopNameEnvelope, messages:[priorUser, currentUser, canonicalTopNameEnvelope], candidateStart:3, expectHelper:true, expectTailPrompt:prompt}},
+  {{name:'canonical call_id', helperMessage:canonicalCallIdEnvelope, messages:[priorUser, currentUser, canonicalCallIdEnvelope], candidateStart:3, expectHelper:true, expectTailPrompt:prompt}},
+  {{name:'canonical with visible preamble', helperMessage:canonicalPreambleEnvelope, messages:[priorUser, currentUser, canonicalPreambleEnvelope], candidateStart:3, expectHelper:true, expectTailPrompt:prompt}},
+  {{name:'canonical envelope followed by tool result', helperMessage:canonicalFunctionEnvelope, messages:[priorUser, currentUser, canonicalFunctionEnvelope, toolResult], candidateStart:3, expectHelper:true, expectTailPrompt:prompt}},
+  {{name:'final assistant boundary after tool activity', helperMessage:canonicalFunctionEnvelope, messages:[priorUser, currentUser, canonicalFunctionEnvelope, toolResult, completedAssistant], candidateStart:3, expectHelper:true, expectTailPrompt:null}},
+  {{name:'older activity timestamp', helperMessage:olderTimestampEnvelope, messages:[priorUser, currentUser, olderTimestampEnvelope], candidateStart:3, expectHelper:true, expectTailPrompt:null}},
+  {{name:'missing activity timestamp', helperMessage:missingActivityTimestampEnvelope, messages:[priorUser, currentUser, missingActivityTimestampEnvelope], candidateStart:3, expectHelper:true, expectTailPrompt:null}},
+  {{name:'invalid activity timestamp', helperMessage:invalidActivityTimestampEnvelope, messages:[priorUser, currentUser, invalidActivityTimestampEnvelope], candidateStart:3, expectHelper:true, expectTailPrompt:null}},
+  {{name:'missing candidate start', helperMessage:canonicalFunctionEnvelope, messages:[priorUser, currentUser, canonicalFunctionEnvelope], expectHelper:true, expectTailPrompt:null}},
+  {{name:'legitimate repeated user rows', helperMessage:malformedLiteral, messages:[{{role:'user', content:prompt, _ts:1}}, priorAssistant, currentUser], candidateStart:3, expectHelper:false, expectTailPrompt:prompt}},
+  {{name:'compaction before completion', helperMessage:canonicalFunctionEnvelope, messages:[priorUser, priorAssistant, currentUser, compaction, canonicalFunctionEnvelope], candidateStart:3, expectHelper:true, expectTailPrompt:prompt}},
+  {{name:'compaction after completion', helperMessage:canonicalFunctionEnvelope, messages:[priorUser, currentUser, canonicalFunctionEnvelope, toolResult, completedAssistant, compaction], candidateStart:3, expectHelper:true, expectTailPrompt:null}},
+  {{name:'_live', helperMessage:malformedLiteral, messages:[priorUser, currentUser, live], candidateStart:3, expectHelper:false, expectTailPrompt:prompt}},
+  {{name:'[]', helperMessage:{{role:'assistant', content:'', _ts:3.1, tool_calls: []}}, messages:[priorUser, {{role:'assistant', content:'', _ts:3.1, tool_calls: []}}], candidateStart:3, expectHelper:false, expectTailPrompt:null}},
+  {{name:'non-array tool_calls', helperMessage:{{role:'assistant', content:'', _ts:3.2, tool_calls:'not-an-array'}}, messages:[priorUser, {{role:'assistant', content:'', _ts:3.2, tool_calls:'not-an-array'}}], candidateStart:3, expectHelper:false, expectTailPrompt:null}},
+  {{name:'[null]', helperMessage:{{role:'assistant', content:'', _ts:3.3, tool_calls:[null]}}, messages:[priorUser, {{role:'assistant', content:'', _ts:3.3, tool_calls:[null]}}], candidateStart:3, expectHelper:false, expectTailPrompt:null}},
+  {{name:'[{{}}]', helperMessage:{{role:'assistant', content:'', _ts:3.4, tool_calls:[{{}}]}}, messages:[priorUser, {{role:'assistant', content:'', _ts:3.4, tool_calls:[{{}}]}}], candidateStart:3, expectHelper:false, expectTailPrompt:null}},
+  {{name:'primitive entry', helperMessage:{{role:'assistant', content:'', _ts:3.5, tool_calls:[1]}}, messages:[priorUser, {{role:'assistant', content:'', _ts:3.5, tool_calls:[1]}}], candidateStart:3, expectHelper:false, expectTailPrompt:null}},
+  {{name:'missing ID', helperMessage:malformedObjectNoId, messages:[priorUser, malformedObjectNoId], candidateStart:3, expectHelper:false, expectTailPrompt:null}},
+  {{name:'missing name', helperMessage:malformedObjectNoName, messages:[priorUser, malformedObjectNoName], candidateStart:3, expectHelper:false, expectTailPrompt:null}},
+  {{name:'mixed valid+invalid', helperMessage:toolCallWithInvalid, messages:[priorUser, toolCallWithInvalid], candidateStart:3, expectHelper:false, expectTailPrompt:null}},
 ];
 
 const results = cases.map((tc) => {{
-  const current = _currentTailUserMessage(tc.messages);
-  const pending = _pendingCurrentTailUserMessage(tc.messages);
+  const current = _currentTailUserMessage(tc.messages,tc.candidateStart);
+  const pending = _pendingCurrentTailUserMessage(tc.messages,tc.candidateStart);
   const currentPrompt = current && current.role==='user' ? String(current.content||'') : null;
   const pendingPrompt = pending && pending.role==='user' ? String(pending.content||'') : null;
   return {{
@@ -661,6 +739,13 @@ def test_get_pending_session_message_keeps_deferred_repeat_prompt_by_behavior():
     assert result["isContextCompactionText"] is True
     assert result["isContextCompactionMessage"] is True
     assert result["toolEnvelopeTurnSuppressesPending"] is True
+
+
+def test_candidate_turn_activity_does_not_hide_newer_repeat_prompt():
+    result = _run_candidate_turn_activity_regression_probe()
+
+    assert result["inflightUserTimestamps"] == [1, 10]
+    assert result["pendingTimestamp"] == 10
 
 
 def test_live_tool_matching_uses_the_same_aliases_as_live_card_dedup():
