@@ -975,18 +975,27 @@ def _current_turn_has_final_assistant(
     pending reference to an already-answered turn, this checks both text
     match *and* checkpoint identity (timestamp, source, attachments).
 
-    Returns True only when:
-      - the last user message matches *pending_text*,
-      - that user message has the exact same checkpoint identity
-        (timestamp, source, attachments) as the pending turn,
-      - the next non-tool, non-compaction-marker message after it is a
-        non-partial, non-error assistant response with visible text.
+    The WHOLE bounded turn is classified, not just the first assistant row:
+    scanning starts at the checkpoint-matched user row and continues through
+    tool rows, context-compaction markers, top-level tool-call assistants,
+    partial/error/empty rows, and other non-final assistant rows, stopping
+    only at the next user boundary. A committed final assistant answer
+    (canonical rule from api.streaming._assistant_message_has_final_visible_text)
+    anywhere within that turn proves completion, so a later committed final
+    after tool use is recognized without appending duplicate recovery rows.
     """
     if not pending_text or not isinstance(messages, list):
         return False
-    # Find the last non-tool user message.
-    last_user = None
-    last_user_idx = -1
+    # Find the checkpoint-matched user row. The pending turn's user may not
+    # be the last row in the transcript when a later user turn already
+    # started, so scan backward for the most recent user that matches BOTH
+    # the pending text and the checkpoint identity (timestamp, source,
+    # attachments) — never just the text, and never just the last row.
+    try:
+        _recovered_ts = int(pending_started_at or 0)
+    except (TypeError, ValueError):
+        _recovered_ts = 0
+    matched_user_idx = -1
     for i in range(len(messages) - 1, -1, -1):
         msg = messages[i]
         if not isinstance(msg, dict):
@@ -994,76 +1003,59 @@ def _current_turn_has_final_assistant(
         role = msg.get('role')
         if role in ('tool', 'tool_calls'):
             continue
-        if role == 'user':
-            last_user = msg
-            last_user_idx = i
+        if role != 'user':
+            continue
+        if not _message_matches_pending_text(msg, pending_text):
+            continue
+        if _message_matches_pending_checkpoint(
+            msg,
+            pending_text,
+            _recovered_ts,
+            pending_source,
+            pending_attachments,
+        ):
+            matched_user_idx = i
             break
-    if last_user is None:
+    if matched_user_idx < 0:
         return False
-    # Text must match.
-    if not _message_matches_pending_text(last_user, pending_text):
-        return False
-    # Checkpoint identity must match — confirms it's the same turn,
-    # not a re-send of the same prompt with different metadata.
-    try:
-        _recovered_ts = int(pending_started_at or 0)
-    except (TypeError, ValueError):
-        _recovered_ts = 0
-    if not _message_matches_pending_checkpoint(
-        last_user,
-        pending_text,
-        _recovered_ts,
-        pending_source,
-        pending_attachments,
-    ):
-        return False
-    # Scan forward from the user turn to find a committed final assistant answer.
-    # - Skip tool/tool_calls messages (belong to the same turn).
-    # - Skip context compaction markers (not a real answer).
-    # - Must find an assistant message that:
-    #     1. Has no tool_calls (unfinished tool turn)
-    #     2. Is not _partial or _error
-    #     3. Has visible text content
-    for j in range(last_user_idx + 1, len(messages)):
+    # Classify the whole bounded turn: scan forward from the checkpoint-matched
+    # user and continue past tool rows, context-compaction markers, top-level
+    # tool-call assistants, partial/error/empty rows, and any other non-final
+    # assistant row; stop only at the next user boundary. A committed final
+    # assistant answer after tool use may prove completion.
+    #
+    # The canonical structured-content finality predicate lives in
+    # api.streaming; import it lazily to avoid a circular import
+    # (api.streaming imports api.models at module load). Reusing the canonical
+    # rule keeps the tool-boundary semantics identical across both modules:
+    # visible text BEFORE a tool_use/tool_call block is process text, not a
+    # settled final — only post-tool visible text can prove completion.
+    from api.streaming import _assistant_message_has_final_visible_text
+    for j in range(matched_user_idx + 1, len(messages)):
         next_msg = messages[j]
         if not isinstance(next_msg, dict):
             continue
         role = next_msg.get('role')
+        if role == 'user':
+            break  # Next user row bounds the turn — no committed final found.
         if role in ('tool', 'tool_calls'):
             continue
         if is_context_compression_marker(next_msg):
             continue
         if role == 'assistant':
-            # Skip past assistant tool-call rows — keep scanning for final answer
-            if next_msg.get('tool_calls'):
-                continue
-            # Reject partial or error rows
+            # Partial/error rows are not settled finals — keep scanning in
+            # case a later committed final proves completion.
             if next_msg.get('_partial') or next_msg.get('_error'):
-                return False
-            # Must have visible text content
-            content = next_msg.get('content', '')
-            if isinstance(content, str):
-                if content.strip():
-                    return True
-            elif isinstance(content, list):
-                for part in content:
-                    if not isinstance(part, dict):
-                        if str(part or '').strip():
-                            return True
-                        continue
-                    ptype = str(part.get('type') or '').lower()
-                    if ptype in ('', 'text', 'input_text', 'output_text'):
-                        text = str(
-                            part.get('text')
-                            or part.get('content')
-                            or part.get('input_text')
-                            or part.get('output_text')
-                            or ''
-                        )
-                        if text.strip():
-                            return True
-            return False
-        break  # Any other role means no assistant answer
+                continue
+            # Canonical finality predicate: rejects top-level tool_calls,
+            # empty content, and content-list rows whose visible text only
+            # precedes a tool-use block; accepts post-tool visible text.
+            if _assistant_message_has_final_visible_text(next_msg):
+                return True
+            continue
+        # Any other role is not a committed final answer — keep scanning
+        # within the bounded turn.
+        continue
     return False
 
 
