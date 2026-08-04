@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 from io import BytesIO
-from types import SimpleNamespace
 
 SNAPSHOT_ID = "snap123"
 CONT_ID = "cont456"
@@ -50,9 +49,31 @@ def _seed_session_dir(monkeypatch, tmp_path):
     return models
 
 
+class _FakeHandler:
+    """Minimal BaseHTTPRequestHandler-shaped fake: bad() writes the status
+    via handler.send_response, so the error-path tests can assert the real
+    status code the client would receive."""
+
+    def __init__(self):
+        self.wfile = BytesIO()
+        self.response_status = None
+        self.headers = {}
+        self.rfile = BytesIO()
+
+    def send_response(self, status):
+        self.response_status = status
+
+    def send_header(self, *args, **kwargs):
+        pass
+
+    def end_headers(self):
+        pass
+
+
 def _call_chat_start(monkeypatch, session_id, message="continue this work"):
     """Invoke the real POST /api/chat/start handler and capture which session
-    the agent turn would be started on (via the _start_run seam)."""
+    the agent turn would be started on (via the _start_run seam) plus the
+    response status (via the fake handler / j seam)."""
     import api.routes as routes
 
     captured = {}
@@ -88,11 +109,11 @@ def _call_chat_start(monkeypatch, session_id, message="continue this work"):
 
     body = {"session_id": session_id, "message": message}
     body_bytes = json.dumps(body).encode()
-    handler = SimpleNamespace(
-        headers={"Content-Length": str(len(body_bytes))},
-        rfile=BytesIO(body_bytes),
-    )
+    handler = _FakeHandler()
+    handler.headers = {"Content-Length": str(len(body_bytes))}
+    handler.rfile = BytesIO(body_bytes)
     routes._handle_chat_start(handler, body)
+    captured["handler"] = handler
     return captured
 
 
@@ -152,12 +173,119 @@ def test_chat_start_follows_multi_hop_snapshot_chain(monkeypatch, tmp_path):
     assert captured["session_id"] == CONT_ID
 
 
-def test_chat_start_snapshot_without_continuation_falls_through(monkeypatch, tmp_path):
-    """A snapshot with no visible continuation degrades to the requested
-    session instead of erroring — the gateway still owns the final refusal."""
+def test_chat_start_snapshot_without_continuation_is_refused(monkeypatch, tmp_path):
+    """A sealed snapshot with no uniquely resolvable continuation must NOT
+    start a turn on the snapshot — the gateway rejects appends to archived
+    sessions, so the turn would run and then fail to persist. Fail closed
+    with a retryable 409 (#6745 review: the previous fallthrough enshrined
+    the defect)."""
     _seed_session_dir(monkeypatch, tmp_path)
     _make_session(SNAPSHOT_ID, pre_compression_snapshot=True)
 
     captured = _call_chat_start(monkeypatch, SNAPSHOT_ID)
 
-    assert captured["session_id"] == SNAPSHOT_ID
+    assert captured["handler"].response_status == 409
+    assert "session_id" not in captured  # _start_run must never be reached
+
+
+def test_chat_start_unloadable_continuation_is_refused(monkeypatch, tmp_path):
+    """Resolver found a continuation, but materializing it raises KeyError
+    (stale/racy lineage): refuse with a retryable 409 carrying both ids
+    instead of falling through to the sealed snapshot (#6745 review)."""
+    import api.routes as routes
+
+    _seed_session_dir(monkeypatch, tmp_path)
+    _make_session(SNAPSHOT_ID, pre_compression_snapshot=True)
+    _make_session(CONT_ID, parent_session_id=SNAPSHOT_ID)
+
+    real = routes._get_or_materialize_session
+
+    def selective_materialize(sid, **kwargs):
+        if sid == CONT_ID:
+            raise KeyError(sid)
+        return real(sid, **kwargs)
+
+    monkeypatch.setattr(routes, "_get_or_materialize_session", selective_materialize)
+
+    captured = _call_chat_start(monkeypatch, SNAPSHOT_ID)
+
+    assert captured["handler"].response_status == 409
+    assert "session_id" not in captured  # _start_run must never be reached
+
+
+def test_chat_start_read_only_continuation_is_refused(monkeypatch, tmp_path):
+    """A read-only continuation (imported/subagent) must return the same 403
+    as the direct-id path, not escape to a 500 (#6745 review finding 2)."""
+    import api.routes as routes
+
+    _seed_session_dir(monkeypatch, tmp_path)
+    _make_session(SNAPSHOT_ID, pre_compression_snapshot=True)
+    _make_session(CONT_ID, parent_session_id=SNAPSHOT_ID)
+
+    real = routes._get_or_materialize_session
+
+    def selective_materialize(sid, **kwargs):
+        if sid == CONT_ID:
+            raise PermissionError("read-only imported session")
+        return real(sid, **kwargs)
+
+    monkeypatch.setattr(routes, "_get_or_materialize_session", selective_materialize)
+
+    captured = _call_chat_start(monkeypatch, SNAPSHOT_ID)
+
+    assert captured["handler"].response_status == 403
+    assert "session_id" not in captured  # _start_run must never be reached
+
+
+def test_chat_start_ambiguous_continuations_are_refused(monkeypatch, tmp_path):
+    """Two non-fork children of the snapshot = ambiguous lineage: the
+    resolver must not guess. Refuse with 409 (#6745 review)."""
+    _seed_session_dir(monkeypatch, tmp_path)
+    _make_session(SNAPSHOT_ID, pre_compression_snapshot=True)
+    _make_session("cont456", parent_session_id=SNAPSHOT_ID)
+    _make_session("cont789", parent_session_id=SNAPSHOT_ID)
+
+    captured = _call_chat_start(monkeypatch, SNAPSHOT_ID)
+
+    assert captured["handler"].response_status == 409
+    assert "session_id" not in captured
+
+
+def test_chat_start_fork_child_is_not_used_as_continuation(monkeypatch, tmp_path):
+    """A user fork of the snapshot (session_source="fork") is not a
+    compression continuation: the turn must land on the real continuation,
+    even when the fork is the newest child (#6745 review).
+
+    The fork is saved AFTER the continuation so the pre-fix resolver (which
+    picked the newest candidate) would choose the fork — this test is red
+    without the fork exclusion.
+    """
+    _seed_session_dir(monkeypatch, tmp_path)
+    _make_session(SNAPSHOT_ID, pre_compression_snapshot=True)
+    _make_session(CONT_ID, parent_session_id=SNAPSHOT_ID)
+    _make_session(
+        "fork999",
+        parent_session_id=SNAPSHOT_ID,
+        session_source="fork",
+    )
+
+    captured = _call_chat_start(monkeypatch, SNAPSHOT_ID)
+
+    assert captured["session_id"] == CONT_ID
+
+
+def test_chat_start_fork_only_child_does_not_unblock_snapshot(monkeypatch, tmp_path):
+    """A snapshot whose only child is a fork still has no continuation: 409,
+    no run. The fork must not be mistaken for the live lineage."""
+    _seed_session_dir(monkeypatch, tmp_path)
+    _make_session(SNAPSHOT_ID, pre_compression_snapshot=True)
+    _make_session(
+        "fork999",
+        parent_session_id=SNAPSHOT_ID,
+        session_source="fork",
+    )
+
+    captured = _call_chat_start(monkeypatch, SNAPSHOT_ID)
+
+    assert captured["handler"].response_status == 409
+    assert "session_id" not in captured
