@@ -120,6 +120,38 @@ def scoped_agent_home(home: Path):
         hermes_constants.reset_hermes_home_override(token)
 
 
+# ── per-authority transaction locks ──────────────────────────────────────────
+
+# Serializes the FULL read-modify-write transaction (authoritative read →
+# masked-value merge/mutation → validation → secret/config persistence) per
+# config authority/home.  Without it, two request threads can read the same
+# snapshot and silently lose one independent mutation via last-writer-wins.
+_tx_locks: Dict[str, threading.RLock] = {}
+_tx_locks_guard = threading.Lock()
+
+
+def _tx_lock_for(home: Path) -> threading.RLock:
+    key = str(home)
+    with _tx_locks_guard:
+        lock = _tx_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _tx_locks[key] = lock
+        return lock
+
+
+@contextmanager
+def config_transaction(home: Path):
+    """Serialize the full authoritative read → masked-value merge/mutation →
+    validation → secret/config persistence transaction for one config
+    authority/home. Reentrant, so a route can hold the lock across a
+    multi-step transaction while nested bridge calls (save_mcp_server and
+    friends) re-acquire it safely on the same thread.
+    """
+    with _tx_lock_for(home):
+        yield
+
+
 # ── config.yaml ──────────────────────────────────────────────────────────────
 
 def load_agent_config(home: Path) -> Dict[str, Any]:
@@ -146,14 +178,27 @@ def validate_mcp_entry(name: str, entry: Dict[str, Any]) -> List[str]:
     return list(validate_mcp_server_entry(name, entry) or [])
 
 
+def build_mcp_bearer_header(name: str) -> Dict[str, str]:
+    """Build the Authorization header template WITHOUT persisting anything.
+
+    Mirrors the agent CLI/Dashboard convention (secret lives in ``.env``,
+    template in ``config.yaml``) so a route can validate the complete
+    candidate entry — including the header template — before any secret is
+    written to disk.
+    """
+    from hermes_cli.mcp_config import _bearer_auth_headers
+
+    return _bearer_auth_headers(name)
+
+
 def save_mcp_server(name: str, server_config: Dict[str, Any], home: Path) -> List[str]:
     """Validate and persist one MCP server. Returns issues; empty on success."""
-    issues = validate_mcp_entry(name, server_config)
-    if issues:
-        return issues
     from hermes_cli.config import load_config, save_config
 
-    with scoped_agent_home(home):
+    with _tx_lock_for(home), scoped_agent_home(home):
+        issues = validate_mcp_entry(name, server_config)
+        if issues:
+            return issues
         config = load_config()
         config.setdefault("mcp_servers", {})[name] = server_config
         save_config(config)
@@ -164,7 +209,7 @@ def remove_mcp_server(name: str, home: Path) -> bool:
     """Remove one MCP server. Returns True when it existed."""
     from hermes_cli.config import load_config, save_config
 
-    with scoped_agent_home(home):
+    with _tx_lock_for(home), scoped_agent_home(home):
         config = load_config()
         servers = config.get("mcp_servers", {})
         if not isinstance(servers, dict) or name not in servers:
@@ -182,7 +227,7 @@ def set_mcp_server_enabled(name: str, enabled: bool, home: Path) -> bool:
     """Flip one server's ``enabled`` flag. Returns False when it is missing."""
     from hermes_cli.config import load_config, save_config
 
-    with scoped_agent_home(home):
+    with _tx_lock_for(home), scoped_agent_home(home):
         config = load_config()
         servers = config.get("mcp_servers", {})
         if not isinstance(servers, dict) or not isinstance(servers.get(name), dict):
@@ -210,7 +255,7 @@ def save_skills_config(skills_cfg: Dict[str, Any], home: Path) -> None:
     """Persist the ``skills`` section (disabled / platform_disabled lists)."""
     from hermes_cli.config import load_config, save_config
 
-    with scoped_agent_home(home):
+    with _tx_lock_for(home), scoped_agent_home(home):
         config = load_config()
         config["skills"] = skills_cfg
         save_config(config)
