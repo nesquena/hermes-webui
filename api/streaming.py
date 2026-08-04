@@ -7947,8 +7947,32 @@ def _run_agent_streaming(
                 exc_info=True,
             )
         return
+    from api.session_lineage import resolve_session_lineage
+
+    try:
+        _initial_lineage = resolve_session_lineage(session_id)
+    except Exception:
+        logger.error(
+            "agent turn blocked because session lineage is unresolved: %s",
+            session_id,
+            exc_info=True,
+        )
+        try:
+            q.put_nowait(("apperror", {
+                "type": "session_lineage_unresolved",
+                "message": "Session lineage could not be verified; no agent turn was started.",
+                "retryable": True,
+                "session_id": session_id,
+            }))
+        except Exception:
+            pass
+        unregister_stream_owner(stream_id)
+        return
+    _lineage_root_session_id = _initial_lineage.root_session_id
     register_active_run(
         stream_id,
+        lineage_id=_lineage_root_session_id,
+        delivery_session_id=_initial_lineage.delivery_session_id,
         session_id=session_id,
         started_at=time.time(),
         phase="starting",
@@ -7972,6 +7996,23 @@ def _run_agent_streaming(
         except Exception:
             logger.debug("Failed to append worker_started turn journal event", exc_info=True)
     s = None
+    _compression_transition = None
+
+    def _commit_compression_transition() -> None:
+        nonlocal _compression_transition
+        if not _compression_transition:
+            return
+        from api.session_lineage import record_lineage_transition
+
+        record_lineage_transition(
+            root_session_id=_compression_transition["root_session_id"],
+            previous_tip_session_id=_compression_transition["previous_tip_session_id"],
+            delivery_session_id=_compression_transition["delivery_session_id"],
+            profile=_compression_transition["profile"],
+            state="committed",
+        )
+        _compression_transition = None
+
     _rt = {}
     old_cwd = None
     old_exec_ask = None
@@ -10114,6 +10155,19 @@ def _run_agent_streaming(
                     new_sid = _agent_sid
                     _compression_origin_session_id = old_sid
                     _compression_continuation_session_id = new_sid
+                    from api.session_lineage import record_lineage_transition
+
+                    _compression_transition = {
+                        "root_session_id": _lineage_root_session_id,
+                        "previous_tip_session_id": old_sid,
+                        "delivery_session_id": new_sid,
+                        "profile": getattr(s, "profile", None)
+                        or _resolved_profile_name,
+                    }
+                    record_lineage_transition(
+                        **_compression_transition,
+                        state="pending",
+                    )
                     s.session_id = new_sid
                     # Carry profile identity across the compression boundary.
                     # Without this, s.profile stays None on the continuation
@@ -10543,6 +10597,7 @@ def _run_agent_streaming(
                         s.messages.append(_error_message)
                         try:
                             s.save()
+                            _commit_compression_transition()
                         except Exception:
                             pass
                         _error_payload['session'] = redact_session_data(
@@ -10991,6 +11046,7 @@ def _run_agent_streaming(
                     return
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
+                    _commit_compression_transition()
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
@@ -11797,6 +11853,22 @@ def _run_agent_streaming(
             _error_payload['old_session_id'] = session_id
         put('apperror', _error_payload)
     finally:
+        # The compression transition is turn-owned state.  Every successful
+        # rotation path persists the continuation before leaving the worker
+        # (normal result, cancelled finalization, or outer-exception
+        # settlement), so release the durable ``pending`` fence from this one
+        # lifecycle owner rather than trying to enumerate return statements.
+        # The helper clears its in-memory ownership only after the committed
+        # record is durably replaced and is idempotent with the earlier
+        # writeback calls.
+        try:
+            _commit_compression_transition()
+        except Exception:
+            logger.error(
+                "Failed to finalize compression lineage transition for stream %s",
+                stream_id,
+                exc_info=True,
+            )
         # #4633/#2476: symmetric metering teardown. begin_session() (top of the
         # outer try) had no paired end_session(), so zero-token turns leaked a
         # _sessions[stream_id] entry that get_stats() pruning never reclaims (its
@@ -11903,7 +11975,7 @@ def _run_agent_streaming(
         try:
             from api.background_process import drain_deferred_wakeups_for_session
 
-            drain_deferred_wakeups_for_session(session_id)
+            drain_deferred_wakeups_for_session(_lineage_root_session_id)
         except Exception:
             logger.debug(
                 "turn-teardown deferred-wakeup drain failed for session %s",

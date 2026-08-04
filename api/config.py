@@ -9084,26 +9084,45 @@ LAST_RUN_FINISHED_AT: float | None = None
 SERVER_START_TIME = time.time()
 
 
-def register_active_run(stream_id: str, **metadata) -> None:
-    """Mark a WebUI agent worker as alive until its outer finally exits."""
+def register_active_run(
+    stream_id: str,
+    *,
+    lineage_id: str | None = None,
+    delivery_session_id: str | None = None,
+    **metadata,
+) -> None:
+    """Mark a worker alive with immutable coordination and delivery identities."""
     if not stream_id:
         return
     now = time.time()
     entry = dict(metadata or {})
+    session_id = str(entry.get("session_id") or "").strip()
+    stable_root = str(lineage_id or session_id).strip()
+    delivery_id = str(delivery_session_id or session_id).strip()
     entry.setdefault("stream_id", stream_id)
     entry.setdefault("started_at", now)
     entry.setdefault("phase", "running")
+    entry["lineage_id"] = stable_root
+    entry["delivery_session_id"] = delivery_id
     with ACTIVE_RUNS_LOCK:
         ACTIVE_RUNS[stream_id] = entry
 
 
 def update_active_run(stream_id: str, **metadata) -> None:
-    """Update active-run metadata without creating a new run implicitly."""
+    """Update mutable worker metadata without changing its lineage identities."""
     if not stream_id:
         return
     with ACTIVE_RUNS_LOCK:
         entry = ACTIVE_RUNS.get(stream_id)
         if entry is not None:
+            for key in ("lineage_id", "delivery_session_id"):
+                if key in metadata and metadata[key] != entry.get(key):
+                    logger.warning(
+                        "ignored active-run identity mutation: stream=%s field=%s",
+                        stream_id,
+                        key,
+                    )
+                    metadata.pop(key, None)
             entry.update(metadata)
 
 
@@ -9161,12 +9180,31 @@ def _evict_session_agent(session_id: str) -> None:
     _run_active = False
     try:
         with ACTIVE_RUNS_LOCK:
-            for _entry in (ACTIVE_RUNS or {}).values():
-                if (_entry or {}).get("session_id") == session_id:
-                    _run_active = True
-                    break
+            _active_entries = list((ACTIVE_RUNS or {}).values())
+        try:
+            from api.session_lineage import resolve_session_lineage
+
+            _target_lineage_id = resolve_session_lineage(
+                session_id
+            ).root_session_id
+        except Exception:
+            _target_lineage_id = None
+        for _entry in _active_entries:
+            _entry = _entry if isinstance(_entry, dict) else {}
+            if session_id in {
+                _entry.get("session_id"),
+                _entry.get("delivery_session_id"),
+            }:
+                _run_active = True
+                break
+            if _target_lineage_id is None:
+                _run_active = True
+                break
+            if _entry.get("lineage_id") == _target_lineage_id:
+                _run_active = True
+                break
     except Exception:
-        _run_active = False
+        _run_active = True
     if _run_active:
         return
     should_close = True

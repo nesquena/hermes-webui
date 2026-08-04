@@ -2850,7 +2850,6 @@ from api.config import (
     register_stream_owner,
     register_session_writeback_owner,
     stream_owner_session_id,
-    unregister_stream_owner,
     CHAT_LOCK,
     _get_session_agent_lock,
     CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
@@ -9662,173 +9661,29 @@ _COMPRESSION_RECOVERY_START_LOCK = threading.Lock()
 
 
 def _pre_compression_continuation_session_id(session) -> str | None:
-    """Return the newest visible descendant for a hidden compression snapshot.
-
-    Mobile browsers can miss the final SSE `done` handoff while backgrounded.
-    On reload they may request the archived pre-compression session id from the
-    stale URL/localStorage. The old snapshot is intentionally hidden from the
-    sidebar, so expose a lightweight recovery hint when a child continuation
-    exists either in memory or on disk. Follow bounded snapshot-to-snapshot hops
-    so repeated compression still lands on the latest visible continuation.
-    """
+    """Project a hidden compression snapshot to the shared resolver's tip."""
     if not getattr(session, "pre_compression_snapshot", False):
         return None
-    sid = _safe_first(getattr(session, "session_id", None))
-    if not sid:
+    session_id = str(getattr(session, "session_id", None) or "").strip()
+    if not session_id:
         return None
-    # #2980 hardening: the resolved continuation is written to the client's
-    # URL/localStorage, so it must stay within the requested snapshot's own
-    # profile. Children are matched only by parent_session_id below; a
-    # crafted/corrupt foreign-profile sidecar whose parent_session_id collided
-    # with this snapshot's id would otherwise leak cross-profile. Pin the
-    # snapshot's profile and reject any child that isn't profile-matched.
-    snapshot_profile = getattr(session, "profile", None)
+    try:
+        from api.session_lineage import resolve_session_lineage
 
-    def _child_rows_from_memory(seen_ids: set[str]) -> list:
-        rows = []
-        try:
-            with LOCK:
-                memory_sessions = list(SESSIONS.values())
-            for child in memory_sessions:
-                child_sid = _safe_first(getattr(child, "session_id", None))
-                if not child_sid or child_sid in seen_ids:
-                    continue
-                seen_ids.add(child_sid)
-                rows.append(child)
-        except Exception:
-            pass
-        return rows
-
-    def _child_rows_from_index(seen_ids: set[str]) -> list | None:
-        if not SESSION_INDEX_FILE.exists():
-            return None
-        try:
-            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
-        except Exception:
-            return None
-        if not isinstance(entries, list):
-            return None
-        try:
-            persisted_sidecar_ids = {
-                path.stem
-                for path in SESSION_DIR.glob("*.json")
-                if not path.name.startswith("_") and is_safe_session_id(path.stem)
-            }
-        except Exception:
-            return None
-        indexed_ids: set[str] = set()
-        row_seen_ids = set(seen_ids)
-        rows = []
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            child_sid = _safe_first(entry.get("session_id"))
-            if not child_sid or not is_safe_session_id(child_sid):
-                continue
-            indexed_ids.add(child_sid)
-            if child_sid in row_seen_ids or not _safe_first(entry.get("parent_session_id")):
-                continue
-            row_seen_ids.add(child_sid)
-            rows.append(entry)
-        # Guarantee here is index MEMBERSHIP-completeness, not per-entry content
-        # freshness: if any persisted continuation sidecar is absent from the index
-        # we bail to the full scan. A sidecar that IS in the index but whose entry is
-        # content-stale (mid-write) still yields a valid continuation of the same
-        # snapshot; proving freshness would require reading every sidecar, defeating
-        # the optimization, so membership-completeness is the intended bar.
-        if persisted_sidecar_ids - indexed_ids - seen_ids:
-            return None
-        return rows
-
-    def _child_rows_from_sidecars(seen_ids: set[str]) -> list:
-        rows = []
-        try:
-            for path in SESSION_DIR.glob("*.json"):
-                if path.name.startswith("_"):
-                    continue
-                child_sid = path.stem
-                if not child_sid or child_sid in seen_ids:
-                    continue
-                child = Session.load_metadata_only(child_sid)
-                if child:
-                    seen_ids.add(child_sid)
-                    rows.append(child)
-        except Exception:
-            pass
-        return rows
-
-    def _row_value(row, key, default=None):
-        return row.get(key, default) if isinstance(row, dict) else getattr(row, key, default)
-
-    def _row_has_backing_state(row) -> bool:
-        child_sid = _safe_first(_row_value(row, "session_id"))
-        if not child_sid or not is_safe_session_id(child_sid):
-            return False
-        if not isinstance(row, dict):
-            return True
-        return (SESSION_DIR / f"{child_sid}.json").exists()
-
-    def _resolve_from_rows(rows: list) -> str | None:
-        children_by_parent: dict[str, list] = {}
-        for child in rows:
-            parent_sid = _safe_first(_row_value(child, "parent_session_id"))
-            child_sid = _safe_first(_row_value(child, "session_id"))
-            if not parent_sid or not child_sid or child_sid == sid:
-                continue
-            # Cross-profile guard: only follow continuations within the snapshot's profile.
-            if not _profiles_match(_row_value(child, "profile"), snapshot_profile):
-                continue
-            children_by_parent.setdefault(parent_sid, []).append(child)
-
-        candidates = []
-        frontier = [sid]
-        seen = {sid}
-        for _ in range(20):
-            if not frontier:
-                break
-            parent_sid = frontier.pop(0)
-            for child in children_by_parent.get(parent_sid, []):
-                child_sid = _safe_first(_row_value(child, "session_id"))
-                if not child_sid or child_sid in seen or not _row_has_backing_state(child):
-                    continue
-                seen.add(child_sid)
-                if _row_value(child, "pre_compression_snapshot", False):
-                    frontier.append(child_sid)
-                else:
-                    candidates.append(child)
-
-        if not candidates:
-            return None
-        latest = max(
-            candidates,
-            key=lambda child: (
-                float(
-                    _safe_first(
-                        _row_value(child, "updated_at"),
-                        _row_value(child, "created_at"),
-                        0,
-                    ) or 0
-                ),
-                # Secondary tiebreaker so the index-fast-path and the sidecar-scan
-                # path resolve byte-identically on an updated_at/created_at tie
-                # (otherwise the chosen sid could differ by iteration order).
-                str(_safe_first(_row_value(child, "session_id"), "") or ""),
-            ),
+        resolution = resolve_session_lineage(
+            session_id,
+            expected_profile=getattr(session, "profile", None),
         )
-        latest_sid = _safe_first(_row_value(latest, "session_id", None)) or None
-        # Only hand the client a well-formed session id (it gets written to URL/localStorage).
-        if latest_sid and not is_safe_session_id(latest_sid):
-            return None
-        return latest_sid
-
-    memory_seen_ids: set[str] = set()
-    rows = _child_rows_from_memory(memory_seen_ids)
-    index_rows = _child_rows_from_index(memory_seen_ids)
-    if index_rows is not None:
-        return _resolve_from_rows(rows + index_rows)
-
-    rows.extend(_child_rows_from_sidecars(memory_seen_ids))
-    return _resolve_from_rows(rows)
+    except Exception:
+        logger.warning(
+            "compression continuation resolution failed closed for %s",
+            session_id,
+            exc_info=True,
+        )
+        return None
+    if resolution.delivery_session_id == session_id:
+        return None
+    return resolution.delivery_session_id
 
 from api.workspace import (
     load_workspaces,
@@ -21374,7 +21229,11 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     try:
         from api import config as _live_config
         with _live_config.ACTIVE_RUNS_LOCK:
-            if stream_id in (_live_config.ACTIVE_RUNS or {}):
+            active_row = (_live_config.ACTIVE_RUNS or {}).get(stream_id)
+            if active_row is not None:
+                # ACTIVE_RUNS rows carry the stable root.  This exact stream-id
+                # lookup is already sufficient to block, and no timestamp can
+                # release that worker-owned lifecycle row.
                 return True
     except Exception:
         pass
@@ -21394,98 +21253,53 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
 
 
 def _active_run_stream_for_session(session_id: str | None) -> str | None:
-    """Return a live worker stream for this session even if sidecar stream id is clear.
-
-    cancel_stream() intentionally clears ``session.active_stream_id`` before the
-    worker thread fully exits so Stop remains responsive. During that unwind
-    window ACTIVE_RUNS is the worker-lifecycle truth; a successor chat/start for
-    the same session must wait or it can reuse the cached agent while the old
-    interrupt is still landing (#3808).
-
-    Bounded: the post-cancel unwind is short (dominated by the worker finally's
-    ``_ckpt_thread.join(timeout=15)``), and ``unregister_active_run`` runs in that
-    finally, so a healthy worker leaves ACTIVE_RUNS within seconds. A detached /
-    wedged worker that never reaches its finally (e.g. stuck in a provider call,
-    or leaked by SIGKILL without restart) must NOT 409 the session forever — so an
-    entry older than the unwind ceiling (180s) is treated as stale and ignored
-    here. For a phase="cancelling" row the ceiling is anchored on the cancel time
-    (``cancelled_at``), never on the original run start: cancel_stream() removes
-    STREAMS itself, so absence from STREAMS is not worker-death proof, and a
-    long-running turn that was just cancelled must not be reaped (and a successor
-    admitted) while the old worker is still alive (#6623). A legitimately
-    long-running turn keeps ``active_stream_id`` SET and is handled by
-    ``_active_stream_blocks_chat_start`` above; this guard only covers the
-    cleared-stream-id unwind window. (Codex brick-gate hardening, #3822.)
-    """
-    sid = str(session_id or "").strip()
-    if not sid:
+    """Return the worker that owns the requested session's stable lineage root."""
+    requested_session_id = str(session_id or "").strip()
+    if not requested_session_id:
         return None
-    ceiling = 180.0  # generous vs the 15s checkpoint-join unwind; finite to avoid permanent-409
-    now = time.time()
     try:
-        from api import config as _live_config
-        # Snapshot the live-worker set BEFORE taking ACTIVE_RUNS_LOCK (sequential,
-        # not nested, so no lock-ordering/deadlock risk). A long turn whose
-        # active_stream_id was already cleared during final writeback can still be
-        # mid-teardown — its STREAMS entry present — past the age ceiling, so age
-        # alone must NOT pop its lifecycle row (health / background-wakeup /
-        # active-agent-cache consumers read ACTIVE_RUNS as worker-lifecycle truth).
-        with _live_config.STREAMS_LOCK:
-            live_stream_ids = set(_live_config.STREAMS.keys())
-        stale_stream_ids = []
-        with _live_config.ACTIVE_RUNS_LOCK:
-            for run_stream_id, raw in list((_live_config.ACTIVE_RUNS or {}).items()):
-                stream_id = str((raw or {}).get("stream_id") or run_stream_id or "").strip()
-                run_sid = str((raw or {}).get("session_id") or "").strip()
-                if run_sid != sid or not stream_id:
-                    continue
-                try:
-                    started_at = float((raw or {}).get("started_at") or 0)
-                except (TypeError, ValueError):
-                    started_at = 0.0
-                # #6623 re-gate: cancel_stream() removes STREAMS itself, so a
-                # missing SSE channel is NOT proof that a cancelled worker is
-                # dead. For a phase="cancelling" row the unwind ceiling must be
-                # anchored on the CANCEL time (cancelled_at, started_at as a
-                # legacy fallback), never on the original run start: a turn that
-                # ran for minutes and was just cancelled would otherwise be
-                # reaped the instant its started_at crosses the ceiling and a
-                # successor admitted while the old worker is still alive. A
-                # recently cancelled run therefore keeps blocking a successor
-                # (this function returns its stream id) until the worker either
-                # unwinds (its finally unregisters the row within seconds) or
-                # the cancel itself has been outstanding past the ceiling.
-                _run_phase = str((raw or {}).get("phase") or "").strip()
-                if _run_phase == "cancelling":
-                    try:
-                        _age_anchor = float(
-                            (raw or {}).get("cancelled_at") or started_at or 0
-                        )
-                    except (TypeError, ValueError):
-                        _age_anchor = started_at
-                else:
-                    _age_anchor = started_at
-                # Past the unwind ceiling: never block a successor on it (the
-                # anti-permanent-409 guarantee, #3822). Additionally reconcile the
-                # zombie out of ACTIVE_RUNS so health/recovery polling stops seeing a
-                # half-alive run — but ONLY when the worker is truly gone from
-                # STREAMS, so a still-live / still-tearing-down worker keeps its
-                # lifecycle row. Pop by the real dict key. (Codex gate, #4492)
-                if _age_anchor and (now - _age_anchor) > ceiling:
-                    if run_stream_id not in live_stream_ids and stream_id not in live_stream_ids:
-                        stale_stream_ids.append(run_stream_id)
-                    continue
+        from api import config as live_config
+        from api.session_lineage import resolve_session_lineage
+
+        try:
+            requested_root = resolve_session_lineage(
+                requested_session_id
+            ).root_session_id
+        except Exception:
+            requested_root = None
+
+        with live_config.ACTIVE_RUNS_LOCK:
+            active_rows = list((live_config.ACTIVE_RUNS or {}).items())
+        for run_stream_id, raw in active_rows:
+            metadata = raw if isinstance(raw, dict) else {}
+            stream_id = str(
+                metadata.get("stream_id") or run_stream_id or ""
+            ).strip()
+            if not stream_id:
+                continue
+            row_root = str(metadata.get("lineage_id") or "").strip()
+            row_session_id = str(
+                metadata.get("delivery_session_id")
+                or metadata.get("session_id")
+                or ""
+            ).strip()
+            try:
+                verified_row_root = resolve_session_lineage(
+                    row_session_id
+                ).root_session_id
+            except Exception:
+                # An unresolved active owner is not evidence of idleness.  Keep
+                # it foreign/busy rather than using age or cleanup as authority.
                 return stream_id
-            for stale_stream_id in stale_stream_ids:
-                (_live_config.ACTIVE_RUNS or {}).pop(stale_stream_id, None)
-                # The zombie run is pruned directly here (not via the normal teardown
-                # finally / unregister_active_run), so release its stream-owner entry too
-                # or STREAM_SESSION_OWNERS leaks for every reconciled zombie. (#5198 gate)
-                unregister_stream_owner(stale_stream_id)
+            if row_root and row_root != verified_row_root:
+                return stream_id
+            if requested_root is None:
+                return stream_id
+            if verified_row_root == requested_root:
+                return stream_id
     except Exception:
         return None
     return None
-
 
 def _agent_runtime_barrier_response(
     *,
@@ -21567,8 +21381,17 @@ def _start_chat_stream_for_session(
     # discard it atomically here. Mirrors the goal_continue pattern (#1932).
     # The marker is server-internal telemetry; the actual wakeup is delivered
     # either server-side (Option Z) or via the PR #2279 next-turn drain.
-    if s.session_id in PENDING_BG_TASK_COMPLETIONS:
-        PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
+    try:
+        from api.session_lineage import resolve_session_lineage
+
+        pending_completion_key = resolve_session_lineage(
+            s.session_id,
+            expected_profile=getattr(s, "profile", None),
+        ).root_session_id
+    except Exception:
+        pending_completion_key = None
+    if pending_completion_key in PENDING_BG_TASK_COMPLETIONS:
+        PENDING_BG_TASK_COMPLETIONS.discard(pending_completion_key)
 
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
