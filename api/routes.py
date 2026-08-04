@@ -12980,6 +12980,14 @@ def handle_get(handler, parsed) -> bool:
                 raw["model"] = effective_model
             if effective_provider:
                 raw["model_provider"] = effective_provider
+            # model_selection_mode == "auto" restores the __default__ sentinel
+            # from server-side persisted intent so the sentinel survives browser
+            # switches, cleared site data, and the 200-entry localStorage prune.
+            # The compact response may have a concrete model; override it here
+            # so the frontend never needs a localStorage-based fallback.
+            if raw.get("model_selection_mode") == "auto":
+                raw["model"] = "__default__"
+                raw["model_provider"] = None
             # A subagent child (#5307) is view-only regardless of what a stale
             # sidecar stored: coerce the serialized flags so the browser never
             # treats an existing subagent sidecar as writable / CLI-classified.
@@ -14890,6 +14898,9 @@ def handle_post(handler, parsed) -> bool:
                     from api.config import _evict_session_agent
 
                     _evict_session_agent(body["session_id"])
+            if "model_selection_mode" in body:
+                selection_mode = body["model_selection_mode"]
+                s.model_selection_mode = selection_mode if selection_mode == "auto" else None
             s.save()
         if str(old_ws or "") != str(new_ws or ""):
             try:
@@ -22291,6 +22302,15 @@ def _handle_chat_start(handler, body, diag=None):
             profile_model_config = _pp_cfg.get("model") or {}
             if isinstance(profile_model_config, dict):
                 catalog_profile_provider = profile_model_config.get("provider")
+        # Persist model_selection_mode on the session so the auto-default intent
+        # is server-owned and survives browser switches, cleared site data,
+        # and localStorage pruning.
+        requested_model_selection_mode = body.get("model_selection_mode")
+        if requested_model_selection_mode == "auto":
+            s.model_selection_mode = "auto"
+        elif requested_model_selection_mode is None and "model_selection_mode" in body:
+            # Explicit null/empty → clear auto mode
+            s.model_selection_mode = None
         model_provider = _repair_foreign_session_model_provider(
             s,
             requested_model=requested_model,

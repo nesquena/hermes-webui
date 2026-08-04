@@ -2866,12 +2866,16 @@ async function _refreshDefaultModelCache(){
   }
 }
 // ── Default (auto) model session tracking ──────────────────────────────
-// Sessions set to "Default (auto)" store the __default__ sentinel as their
-// model. Because the server resolves and persists the concrete model, the
-// sentinel would be lost on every server round-trip (SSE done, session
-// re-fetch, page reload). We track which sessions are in "default auto"
-// mode in localStorage and restore the sentinel after every S.session
-// replacement from server data.
+// Sessions set to "Default (auto)" store `model_selection_mode: "auto"` as a
+// server-owned session attribute. This survives browser switches, cleared site
+// data, and the 200-entry localStorage prune. The server returns
+// `model = "__default__"` in the response when model_selection_mode is "auto",
+// so the sentinel is restored from server data on every load.
+//
+// The legacy localStorage map (`hermes-webui-default-sessions`) is kept as a
+// one-time migration aid. On first load of a session with no server-side
+// model_selection_mode, the localStorage entry is promoted to the server.
+// After that, the server is authoritative.
 function _defaultModelSessionsKey(){ return 'hermes-webui-default-sessions'; }
 function _readDefaultModelSessions(){
   try{
@@ -2890,25 +2894,48 @@ function _writeDefaultModelSessions(map){
     localStorage.setItem(_defaultModelSessionsKey(),JSON.stringify(map));
   }catch(_){}
 }
+/** Set the active session to "Default (auto)" mode. Persists to server. */
 function _setDefaultModelSession(sid){
   if(!sid) return;
-  const map=_readDefaultModelSessions();
-  map[String(sid)]=true;
-  _writeDefaultModelSessions(map);
+  if(S.session && S.session.session_id===sid){
+    S.session.model_selection_mode='auto';
+    S.session.model='__default__';
+    S.session.model_provider=null;
+    // Also write to legacy localStorage for migration of sessions that may
+    // be loaded on an older server that doesn't return model_selection_mode.
+    const map=_readDefaultModelSessions();
+    map[String(sid)]=true;
+    _writeDefaultModelSessions(map);
+  }
 }
+/** Clear "Default (auto)" mode from the active session. */
 function _clearDefaultModelSession(sid){
   if(!sid) return;
+  if(S.session && S.session.session_id===sid){
+    S.session.model_selection_mode=null;
+  }
+  // Clear legacy localStorage entry
   const map=_readDefaultModelSessions();
   delete map[String(sid)];
   _writeDefaultModelSessions(map);
 }
+/** Check if the session is in "Default (auto)" mode. */
 function _isDefaultModelSession(sid){
   if(!sid) return false;
+  // Server-side field is authoritative
+  if(S.session && S.session.session_id===sid){
+    if(S.session.model_selection_mode==='auto') return true;
+    if(S.session.model==='__default__') return true;
+  }
+  // Fall back to legacy localStorage as migration aid
   return !!_readDefaultModelSessions()[String(sid)];
 }
 /** Restore the __default__ sentinel on a session that was set to
  * "Default (auto)". Call after every S.session replacement from server
- * data (SSE events, session re-fetch, page reload). */
+ * data (SSE events, session re-fetch, page reload).
+ * The server already sets model to __default__ when model_selection_mode
+ * is "auto", but this helper ensures backward compatibility with older
+ * server versions that don't return model_selection_mode. */
 function _preserveDefaultModelSentinel(session){
   if(!session||!session.session_id) return session;
   if(_isDefaultModelSession(session.session_id)){

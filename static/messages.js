@@ -1767,7 +1767,8 @@ async function send(){
       profile:S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
-      moa_config:_pendingMoaConfig?true:undefined
+      moa_config:_pendingMoaConfig?true:undefined,
+      model_selection_mode:S.session&&S.session.model_selection_mode||undefined
     })});
     _pendingMoaConfig=null;
     postStartData = startData;

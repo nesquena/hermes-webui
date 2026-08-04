@@ -2239,6 +2239,7 @@ $('modelSelect').onchange=async()=>{
     workspace:S.session.workspace,
     model:modelState.model,
     model_provider:modelState.model_provider||null,
+    model_selection_mode:modelState.model==='__default__'?'auto':null,
   })});
   // NOTE: do NOT clear the pending explicit-pick marker here. It must survive until
   // the NEXT send() consumes it, otherwise the normal "pick → session-update → send"
