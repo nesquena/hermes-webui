@@ -946,6 +946,9 @@ def test_settled_anchor_scene_does_not_persist_running_live_activity_rows():
     assert "row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);" in complete
     assert "String(value||'').startsWith('live-')" in live_identity
     assert "const group=row.group&&typeof row.group==='object'?row.group:{};" in live_identity
+    assert "const hasStreamOwner=!!(row.stream_id||row.run_id||identity.stream_id||identity.run_id);" in live_identity
+    assert "const hasAssistantMessageIndex=group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null;" in live_identity
+    assert "return hasStreamOwner&&!hasAssistantMessageIndex;" in live_identity
     assert "if(row.role==='thinking'&&hasSettledThinking) return null;" in settle_live
     assert "const sealed={...row,status:'completed'};" in settle_live
     assert "sealed.payload={...row.payload,status:'completed'};" in settle_live

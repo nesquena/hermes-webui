@@ -3476,6 +3476,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Provider tool-call IDs do not use the live prefix. A stream owner without
     // a settled assistant index still identifies a projected live row.
     const group=row.group&&typeof row.group==='object'?row.group:{};
+    const hasStreamOwner=!!(row.stream_id||row.run_id||identity.stream_id||identity.run_id);
+    const hasAssistantMessageIndex=group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null;
+    return hasStreamOwner&&!hasAssistantMessageIndex;
   }
   function _anchorSceneMessageRowsHaveThinking(messageRows){
     if(!(messageRows instanceof Map)) return false;
@@ -3576,33 +3579,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const seenTextKeys=[];
     const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];
     // ── provenance-aware projection mirror tracking ────────────
-    // Each distinct projected prose/thinking identity allocates one
-    // mirror slot, so settled/backfill rows with matching text are
-    // consumed one-for-one without collapsing distinct identities.
-    // Same-ID updates (identity re-appears with new text) update the
-    // slot to the latest text key rather than allocating a second slot.
-    const projectedMirrorSlots={};
-    const _idToLatestText={};
-    for(const row of projectedRows){
-      if(!row||row.role==='terminal'||(row.role!=='prose'&&row.role!=='thinking')) continue;
-      const key=_anchorSceneExistingRowKey(row)||'__no_key__';
-      const tk=_anchorSceneTextKey(row.text);
-      if(!tk) continue;
-      if(_idToLatestText[key]!==undefined){
-        const oldTk=_idToLatestText[key];
-        if(oldTk!==tk){
-          projectedMirrorSlots[oldTk]=(projectedMirrorSlots[oldTk]||1)-1;
-          if(projectedMirrorSlots[oldTk]<=0) delete projectedMirrorSlots[oldTk];
-        }
-        _idToLatestText[key]=tk;
-        projectedMirrorSlots[tk]=(projectedMirrorSlots[tk]||0)+1;
-      }else{
-        _idToLatestText[key]=tk;
-        projectedMirrorSlots[tk]=(projectedMirrorSlots[tk]||0)+1;
-      }
-    }
-    const _projectedTextKeys=Object.keys(projectedMirrorSlots);
-    // ── end provenance tracking ────────────────────────────────
+    // (allocated below, after the final-answer guards are defined, so slots
+    // are reserved only by projected rows that survive running-row
+    // settlement, final-answer filtering, and same-ID coalescing)
     // #5758 gap: final-segment eligibility must be judged against the LIVE
     // projection's own chronology. The settled per-message tool rows appended
     // into orderedRows above re-list tools that ran EARLIER in the turn, so an
@@ -3618,6 +3597,47 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(idx>lastProjectedToolIndex&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')) finalSegmentLiveProseRows.add(row);
     });
     const rowIsLiveTokenFinalPrefix=(row,textKey,finalSegmentEligible)=>finalSegmentEligible&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')&&textKey&&finalKey&&textKey.length<finalKey.length&&finalKey.startsWith(textKey);
+    // ── provenance-aware projection mirror tracking ────────────
+    // Mirror slots are allocated ONLY from projected rows that survive
+    // running-row settlement (_anchorSceneSettleLiveRunningRow), the
+    // final-answer guards, and same-ID coalescing. A projected running
+    // thinking row that is discarded because settled thinking replaced it
+    // must not reserve a mirror slot, or its settled replacement would be
+    // consumed as a mirror and the thinking would disappear entirely.
+    const projectedMirrorSlots={};
+    const _idToLatestText={};
+    for(const row of projectedRows){
+      if(!row||row.role==='terminal'||(row.role!=='prose'&&row.role!=='thinking')) continue;
+      // Running rows discarded by settlement (e.g. projected running thinking
+      // with a settled-thinking replacement) allocate no slot.
+      const settledRow=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
+      if(!settledRow||typeof settledRow!=='object') continue;
+      const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
+      const textKey=_anchorSceneTextKey(settledRow.text);
+      if(!textKey) continue;
+      // Rows dropped by the final-answer guards allocate no slot either.
+      if(rowIsLiveTokenFinalPrefix(settledRow,textKey,finalSegmentEligible)) continue;
+      if(_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) continue;
+      const key=_anchorSceneExistingRowKey(settledRow)||'__no_key__';
+      if(_idToLatestText[key]!==undefined){
+        const oldTk=_idToLatestText[key];
+        if(oldTk!==textKey){
+          // Same identity re-appeared with newer text: move its single slot
+          // to the latest text key instead of allocating a second slot.
+          projectedMirrorSlots[oldTk]=(projectedMirrorSlots[oldTk]||1)-1;
+          if(projectedMirrorSlots[oldTk]<=0) delete projectedMirrorSlots[oldTk];
+          _idToLatestText[key]=textKey;
+          projectedMirrorSlots[textKey]=(projectedMirrorSlots[textKey]||0)+1;
+        }
+        // Same key + same text: the identity already holds one slot; do not
+        // double-count repeated snapshots of the same identity.
+      }else{
+        _idToLatestText[key]=textKey;
+        projectedMirrorSlots[textKey]=(projectedMirrorSlots[textKey]||0)+1;
+      }
+    }
+    const _projectedTextKeys=Object.keys(projectedMirrorSlots);
+    // ── end provenance tracking ────────────────────────────────
     const _consumeMirror=(textKey)=>{
       if(!textKey||!projectedMirrorSlots[textKey]) return false;
       if(projectedMirrorSlots[textKey]<=0) return false;

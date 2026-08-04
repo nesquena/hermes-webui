@@ -405,3 +405,118 @@ process.stdout.write(JSON.stringify(rows));
     assert "Intermediate step description" in texts, f"Intermediate prose should survive: {texts}"
     # Total count check: 4 rows (tool + intermediate + short prefix + near-overlap)
     assert len(result) == 4, f"Expected 4 rows (tool + intermediate + short prefix + near-overlap), got {len(result)}: {texts}"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_settlement_projected_running_thinking_with_settled_replacement():
+    """A projected RUNNING thinking row that is replaced by settled thinking
+    must not reserve a mirror slot: the projected row is discarded by
+    _anchorSceneSettleLiveRunningRow() at settlement, so if its text had been
+    counted as a projected mirror, the settled replacement would be consumed
+    as a mirror and the thinking would disappear entirely. Exactly one
+    completed/settled thinking row must remain."""
+    script = (
+        _SETTLEMENT_JS_BOOT
+        + """
+function _anchorSceneRowsByMessageIndex(){ return new Map([
+  [1, [
+    // Settled replacement thinking (production: settled rows carry their own
+    // independently derived durable IDs, NOT the projected row's local_id).
+    {role:'thinking', text:'Reasoning about the request', local_id:'settled-thinking:1', row_id:'st1', source_event_type:'reasoning', status:'completed'},
+  ]]
+]); }
+const messages = [
+  {role:'user', content:'Prompt', id:'user-1'},
+  {role:'assistant', content:'Final answer', id:'asst-1'},
+];
+const projectedScene = {
+  mode:'compact_worklog',
+  final_answer:'Final answer',
+  identity:{source_message_refs:['asst-1']},
+  lifecycle:{},
+  activity_rows:[
+    // Projected RUNNING thinking row — hasSettledThinking=true, so settlement
+    // discards it. Its text must NOT allocate a mirror slot.
+    {role:'thinking', text:'Reasoning about the request', local_id:'live-thinking:1', row_id:'lt1', source_event_type:'reasoning', status:'running'},
+  ]
+};
+const scene = _completeSettledAnchorSceneForTurn(messages, 1, projectedScene);
+const rows = (scene && scene.activity_rows || []).map(r => ({role:r.role, text:r.text, local_id:r.local_id, status:r.status}));
+process.stdout.write(JSON.stringify(rows));
+"""
+    )
+    result = _run_node_script(script)
+    thinking_rows = [r for r in result if r["role"] == "thinking"]
+    # Exactly ONE thinking row remains — the settled replacement, completed.
+    assert len(thinking_rows) == 1, f"Expected exactly 1 thinking row, got {len(thinking_rows)}: {result}"
+    assert thinking_rows[0]["status"] == "completed", f"Expected completed settled thinking, got: {thinking_rows[0]}"
+    assert thinking_rows[0]["local_id"] == "settled-thinking:1", f"Expected the settled replacement, got: {thinking_rows[0]}"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_settlement_opaque_stream_owned_row_sealed():
+    """Opaque/provider-ID stream-owned rows (no `live-` prefix, but with a
+    stream owner and no settled assistant index) are still live identities:
+    a running row of this shape is sealed to completed at settlement instead
+    of leaking through as `running` (restored master fallback)."""
+    script = (
+        _SETTLEMENT_JS_BOOT
+        + """
+function _anchorSceneRowsByMessageIndex(){ return new Map(); }
+const messages = [
+  {role:'user', content:'Prompt', id:'user-1'},
+  {role:'assistant', content:'Final answer', id:'asst-1'},
+];
+const projectedScene = {
+  mode:'compact_worklog',
+  final_answer:'Final answer',
+  identity:{source_message_refs:['asst-1']},
+  lifecycle:{},
+  activity_rows:[
+    // Opaque provider ID, stream owner present, NO assistant index → live.
+    {role:'thinking', text:'Provider reasoning', local_id:'provider-call-abc123', row_id:'pr1', stream_id:'stream-1', source_event_type:'reasoning', status:'running'},
+  ]
+};
+const scene = _completeSettledAnchorSceneForTurn(messages, 1, projectedScene);
+const rows = (scene && scene.activity_rows || []).map(r => ({role:r.role, text:r.text, local_id:r.local_id, status:r.status}));
+process.stdout.write(JSON.stringify(rows));
+"""
+    )
+    result = _run_node_script(script)
+    assert len(result) == 1, f"Expected 1 row, got {len(result)}: {result}"
+    assert result[0]["status"] == "completed", f"Opaque stream-owned running row must be sealed to completed, got: {result[0]}"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_settlement_assistant_index_negative_control():
+    """A stream-owned row that ALSO carries a settled assistant index is NOT a
+    live identity (negative control): its running status must NOT be sealed,
+    because it belongs to a settled message, not the live projection."""
+    script = (
+        _SETTLEMENT_JS_BOOT
+        + """
+function _anchorSceneRowsByMessageIndex(){ return new Map(); }
+const messages = [
+  {role:'user', content:'Prompt', id:'user-1'},
+  {role:'assistant', content:'Final answer', id:'asst-1'},
+];
+const projectedScene = {
+  mode:'compact_worklog',
+  final_answer:'Final answer',
+  identity:{source_message_refs:['asst-1']},
+  lifecycle:{},
+  activity_rows:[
+    // Stream owner present BUT a settled assistant index → NOT live.
+    {role:'thinking', text:'Settled-index thinking', local_id:'settled-idx:1', row_id:'si1', stream_id:'stream-1', group:{assistant_msg_idx:1}, source_event_type:'reasoning', status:'running'},
+  ]
+};
+const scene = _completeSettledAnchorSceneForTurn(messages, 1, projectedScene);
+const rows = (scene && scene.activity_rows || []).map(r => ({role:r.role, text:r.text, local_id:r.local_id, status:r.status}));
+process.stdout.write(JSON.stringify(rows));
+"""
+    )
+    result = _run_node_script(script)
+    # Not a live identity → settle leaves the running status untouched
+    # (no fabricated sealing of a settled-index row).
+    assert len(result) == 1, f"Expected 1 row, got {len(result)}: {result}"
+    assert result[0]["status"] == "running", f"Assistant-index row must NOT be sealed, got: {result[0]}"
