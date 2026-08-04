@@ -12283,24 +12283,24 @@ def handle_get(handler, parsed) -> bool:
         except Exception:
             pass
         # Inject the running version so the UI badge stays in sync with git tags
-        # without any manual release step.
+        # without any manual release step. The gateway-health probe is served
+        # from a single-flight TTL cache refreshed off the request thread, so
+        # /api/settings never performs synchronous network I/O; the fallback is
+        # pre-assigned before any probe so an error path can never blank the
+        # badge.
         try:
-            from api.updates import AGENT_VERSION, WEBUI_VERSION, _detect_agent_version_from_gateway_health
-            settings["webui_version"] = WEBUI_VERSION
-            settings["agent_version"] = (
-                _detect_agent_version_from_gateway_health(timeout=2.0)
-                or AGENT_VERSION
+            from api.updates import (
+                AGENT_VERSION,
+                WEBUI_VERSION,
+                _schedule_agent_version_refresh,
+                get_cached_agent_version,
             )
-        except Exception:
-            pass
-        # Channel-scoped display badge — SEPARATE from webui_version (which is
-        # load-bearing for asset cache-busting / SW cache / skew detection and
-        # must stay channel-neutral). update_channel_version is display-only.
-        try:
-            from api.updates import channel_version_badge, _read_update_channel
-            channel = _read_update_channel()
-            settings["update_channel"] = channel
-            settings["update_channel_version"] = channel_version_badge(channel)
+            settings["webui_version"] = WEBUI_VERSION
+            settings["agent_version"] = AGENT_VERSION
+            cached_agent_version = get_cached_agent_version()
+            if cached_agent_version:
+                settings["agent_version"] = cached_agent_version
+            _schedule_agent_version_refresh()
         except Exception:
             pass
         # Channel-scoped display badge — SEPARATE from webui_version (which is

@@ -506,6 +506,21 @@ def _read_agent_source_version(agent_dir: Path) -> str | None:
     return None
 
 
+# --- Agent-version gateway-health probe: single-flight TTL cache -------------
+# The probe must never run synchronously inside the /api/settings request path
+# (page-boot / Settings-open / profile-switch hot paths). We serve an immediate
+# value from this TTL cache and refresh it in a background daemon thread,
+# single-flight so concurrent requests never stack probes.
+_AGENT_VERSION_CACHE_TTL_SECONDS = 60.0
+_AGENT_VERSION_PROBE_DEADLINE_SECONDS = 1.5
+_AGENT_VERSION_MAX_BODY_BYTES = 64 * 1024
+
+_agent_version_cache = {'value': None, 'expires_at': 0.0}
+_agent_version_cache_lock = threading.Lock()
+_agent_version_refresh_in_progress = False
+_agent_version_refresh_lock = threading.Lock()
+
+
 def _gateway_health_base_url() -> str:
     """Return the configured/default Hermes Agent gateway base URL."""
     raw = (
@@ -537,23 +552,82 @@ def _version_from_gateway_health_payload(payload: object) -> str | None:
 
 
 def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | None:
-    """Best-effort cross-container gateway API fallback for Agent version."""
+    """Best-effort cross-container gateway API fallback for Agent version.
+
+    Uses ONE overall deadline across all probe paths (not per-path) and caps
+    the response body, so a slow or chatty gateway cannot stall the caller
+    past ``timeout``.
+    """
     base = _gateway_health_base_url()
     if not base:
         return None
     parsed = urlparse(base)
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:
         return None
+    deadline = time.monotonic() + timeout
     for path in ('/health', '/health/detailed'):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         try:
-            with urllib.request.urlopen(f'{base}{path}', timeout=timeout) as resp:
-                payload = json.loads(resp.read().decode('utf-8'))
-        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
+            with urllib.request.urlopen(f'{base}{path}', timeout=remaining) as resp:
+                raw = resp.read(_AGENT_VERSION_MAX_BODY_BYTES + 1)
+                if len(raw) > _AGENT_VERSION_MAX_BODY_BYTES:
+                    # Oversized / slow-trickling body — treat as no answer so
+                    # an unbounded response cannot stall the probe deadline.
+                    continue
+                payload = json.loads(raw.decode('utf-8'))
+        except Exception:
+            # Every probe failure (OSError, URLError, TimeoutError, ValueError,
+            # http.client.IncompleteRead, bad JSON, ...) just moves to the next
+            # path; callers keep their fallback when nothing is detected.
             continue
         version = _version_from_gateway_health_payload(payload)
         if version:
             return version
     return None
+
+
+def get_cached_agent_version() -> str | None:
+    """Return the fresh cached gateway agent version, or ``None`` when cold.
+
+    Never performs network I/O — the caller serves an immediate value
+    (``AGENT_VERSION`` fallback when this returns ``None``) and refreshes the
+    cache outside the request thread via ``_schedule_agent_version_refresh``.
+    """
+    with _agent_version_cache_lock:
+        if _agent_version_cache['value'] and time.monotonic() < _agent_version_cache['expires_at']:
+            return _agent_version_cache['value']
+    return None
+
+
+def _schedule_agent_version_refresh() -> None:
+    """Single-flight, off-thread refresh of the cached agent version.
+
+    Safe to call on every settings request: if a refresh is already in flight
+    this returns immediately, so concurrent requests never stack probes.
+    """
+    global _agent_version_refresh_in_progress
+    with _agent_version_refresh_lock:
+        if _agent_version_refresh_in_progress:
+            return
+        _agent_version_refresh_in_progress = True
+
+    def _run() -> None:
+        try:
+            version = _detect_agent_version_from_gateway_health(
+                timeout=_AGENT_VERSION_PROBE_DEADLINE_SECONDS
+            )
+        except Exception:
+            version = None
+        with _agent_version_cache_lock:
+            _agent_version_cache['value'] = version
+            _agent_version_cache['expires_at'] = time.monotonic() + _AGENT_VERSION_CACHE_TTL_SECONDS
+        global _agent_version_refresh_in_progress
+        with _agent_version_refresh_lock:
+            _agent_version_refresh_in_progress = False
+
+    threading.Thread(target=_run, name='agent-version-refresh', daemon=True).start()
 
 
 def _detect_agent_version() -> str:
