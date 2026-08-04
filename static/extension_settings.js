@@ -309,6 +309,21 @@
     };
   }
 
+  // ── Host capabilities manifest ──────────────────────────────────────────────
+  // Extensions query this object to discover which optional host APIs are
+  // available before calling them.  Adding a key here is the only thing needed
+  // to advertise a new capability; the actual implementation lives in the module
+  // that owns the feature (e.g. registerHermesRenderer in boot.js).
+  //
+  // Rules:
+  //   • Keys are lower-kebab-case strings, e.g. 'hermes-webui-message-renderer'
+  //   • Values are `true` (feature present) — never version numbers or objects
+  //     (keeps consumer checks simple: `if (caps['some-key'])`)
+  //   • Remove a key only when the corresponding API is removed; never set false
+  const HERMES_HOST_CAPABILITIES = Object.freeze({
+    'hermes-webui-message-renderer': true,
+  });
+
   const api={
     normalizeSchemas,
     primeFromStatus,
@@ -317,6 +332,8 @@
     storageForExtension,
     resetSettingsForExtension(id){return settingsForExtension(id).reset();},
     clearStorageForExtension(id){return storageForExtension(id).clear();},
+    /** Returns a frozen copy of the host capabilities manifest. */
+    getCapabilities(){return HERMES_HOST_CAPABILITIES;},
   };
 
   window.HermesExtensionSettings=api;
@@ -325,5 +342,8 @@
   window.hermesExt.storage=window.hermesExt.storage||{};
   window.hermesExt.settings.forExtension=settingsForExtension;
   window.hermesExt.storage.forExtension=storageForExtension;
+  // Expose capabilities so extensions can query them without going through the
+  // full HermesExtensionSettings API.
+  window.hermesExt.capabilities=HERMES_HOST_CAPABILITIES;
   primeFromStatus(window.__HERMES_EXTENSION_CONFIG__||{});
 })();
