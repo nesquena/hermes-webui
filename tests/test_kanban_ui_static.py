@@ -1338,3 +1338,88 @@ def test_kanban_unassigned_lane_in_sidebar_meta():
     meta_body = meta_match.group(1)
     # Must emit unassigned label when task.assignee is falsy.
     assert "t('kanban_unassigned')" in meta_body
+
+
+def test_kanban_card_exposes_execution_model_override():
+    """A task with a model_override must surface the model on the board card
+    and in the task meta, so the executing model is visible at a glance."""
+    # _kanbanTaskMeta appends a 🧠 chip carrying the override (provider wins the
+    # label when both are set, since it disambiguates the backend).
+    meta_match = re.search(
+        r"function _kanbanTaskMeta\(task\)\{(.*?)\n\}",
+        PANELS,
+        re.DOTALL,
+    )
+    assert meta_match, "_kanbanTaskMeta() not found"
+    meta_body = meta_match.group(1)
+    assert "task.model_override" in meta_body
+    assert "task.provider_override || task.model_override" in meta_body
+    assert "🧠" in meta_body
+
+    # _kanbanCard renders a .kanban-badge.model chip in the card top line when
+    # an override is set, and omits it when there is none.
+    card_match = re.search(
+        r"function _kanbanCard\(task, status\)\{(.*?)\n\}",
+        PANELS,
+        re.DOTALL,
+    )
+    assert card_match, "_kanbanCard() not found"
+    card_body = card_match.group(1)
+    assert "kanban-badge model" in card_body
+    assert "task.model_override ?" in card_body or "task.model_override\n" in card_body
+
+    # Detail panel shows an explicit Model row (override or 'profile default').
+    detail_match = re.search(
+        r"function _kanbanRenderTaskDetail\(data\)\{(.*?)\n\}",
+        PANELS,
+        re.DOTALL,
+    )
+    assert detail_match, "_kanbanRenderTaskDetail() not found"
+    detail_body = detail_match.group(1)
+    assert "kanban-detail-model" in detail_body
+    assert "kanban_no_model_override" in detail_body
+
+    # i18n keys exist (English block) so the labels/tooltips resolve.
+    assert "kanban_model:" in I18N
+    assert "kanban_provider:" in I18N
+    assert "kanban_no_model_override:" in I18N
+    assert "kanban_card_model_hint:" in I18N
+
+
+def test_kanban_model_badge_static_render_e2e():
+    """Execute _kanbanCard() with override present/absent to prove the badge is
+    genuinely emitted into the returned HTML, not just referenced in source."""
+    import json
+    import subprocess
+
+    fn_source = extract_function(PANELS, "_kanbanCard")
+    script = (
+        "const fnSource = " + json.dumps(fn_source) + ";\n"
+        "const out = {};\n"
+        "new Function('out', fnSource + '; out.fn = _kanbanCard;')(out);\n"
+        "const t = () => '';\n"
+        "const esc = (s) => String(s == null ? '' : s)"
+                "  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')\n"
+                "  .replace(/\\\"/g,'&quot;').replace(/'/g,'&#39;');\n"
+                "const _kanbanTaskAge = () => '';\n"
+                "const _kanbanTaskBody = (task) => task.body || task.description || task.prompt || '';\n"
+                "const _kanbanCardStalenessClass = () => '';\n"
+                "const _kanbanTaskTitle = (task) => task.title || task.id || '';\n"
+                "const _kanbanCardQuickActions = () => '';\n"
+                "const taskWith = { id:'t1', model_override:'gpt-5.6-sol', provider_override:'openai' };\n"
+        "const withModel = out.fn(taskWith, 'ready');\n"
+        "const without = out.fn({ id:'t2' }, 'todo');\n"
+        "out.withModel = withModel;\n"
+        "out.without = without;\n"
+        "out.hasBadge = /kanban-badge model/.test(withModel) && /🧠 gpt-5.6-sol/.test(withModel);\n"
+        "out.noBadge = !/kanban-badge model/.test(without);\n"
+        "console.log(JSON.stringify(out));\n"
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, f"node -e failed: {result.stderr}"
+    payload = json.loads(result.stdout)
+    assert payload["hasBadge"] is True, "model_override must render a model badge on the card"
+    assert payload["noBadge"] is True, "card without model_override must not render a model badge"
