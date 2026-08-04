@@ -56,24 +56,38 @@ def test_measurement_rerenders_are_bounded_per_virtual_window_cycle():
     assert "const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=2;" in UI_JS
     assert "function _messageVirtualMeasurementCycleKeyFor(windowMetrics)" in UI_JS
     assert "function _scheduleMessageVirtualMeasurementRefresh(windowMetrics)" in UI_JS
-    assert "if(_messageVirtualMeasurementRetryCount>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS) return;" in UI_JS
+    assert "if(_messageVirtualMeasurementRetryCount>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS){" in UI_JS
     assert "_scheduleMessageVirtualMeasurementRefresh(virtualWindow);" in UI_JS
     assert "_markMessageVirtualMeasurementsSettled(virtualWindow);" in UI_JS
 
 
 def test_measurement_retry_budget_not_reset_by_cycle_key_change():
-    """#6654: the cycle-key branch of _scheduleMessageVirtualMeasurementRefresh
+    """#6654/#6717: the cycle-key branch of _scheduleMessageVirtualMeasurementRefresh
     must record the new key but never reset _messageVirtualMeasurementRetryCount.
     Resetting on key change lets WebKit's A->B->A->B metric oscillation renew
-    the two-render budget forever, keeping the rAF/measure loop alive."""
+    the two-render budget forever, keeping the rAF/measure loop alive. The ONLY
+    reset allowed inside the scheduler is the per-burst one: when a NEW
+    externally initiated cycle begins (no burst active), guarded by
+    if(!_messageVirtualMeasurementBurstActive)."""
     idx = UI_JS.index("function _scheduleMessageVirtualMeasurementRefresh(windowMetrics)")
     end = UI_JS.index("function _markMessageVirtualMeasurementsSettled", idx)
     body = UI_JS[idx:end]
     # The key-change branch must only assign the key.
     assert "if(_messageVirtualMeasurementCycleKey!==cycleKey){" in body
-    assert "_messageVirtualMeasurementRetryCount=0;" not in body, (
+    key_branch_start = body.index("if(_messageVirtualMeasurementCycleKey!==cycleKey){")
+    key_branch_end = body.index("}", key_branch_start)
+    key_branch = body[key_branch_start:key_branch_end]
+    assert "_messageVirtualMeasurementRetryCount=0;" not in key_branch, (
         "cycle-key change must not reset the retry budget (issue #6654)"
     )
+    # The per-burst reset is allowed only at the start of a new external cycle.
+    assert "if(!_messageVirtualMeasurementBurstActive){" in body
+    guard_pos = body.index("if(!_messageVirtualMeasurementBurstActive){")
+    reset_pos = body.index("_messageVirtualMeasurementRetryCount=0;")
+    assert guard_pos < reset_pos, (
+        "the budget reset must be guarded by the burst-active check "
+        "(per-burst lifecycle, issue #6717)"
+    )
     # The budget guard and increment must still be present.
-    assert "if(_messageVirtualMeasurementRetryCount>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS) return;" in body
+    assert "if(_messageVirtualMeasurementRetryCount>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS){" in body
     assert "_messageVirtualMeasurementRetryCount++;" in body

@@ -1112,6 +1112,7 @@ let _messageVirtualEstimatedRowHeight = 200;
 let _messageVirtualWindowKey = 'old-key';
 let _messageVirtualMeasurementCycleKey = 'old-cycle';
 let _messageVirtualMeasurementRetryCount = 3;
+let _messageVirtualMeasurementBurstActive = false;
 const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT = 140;
 // #4367 introduced per-role default heights; the combined _clearMessageVirtualHeightCache
 // resets the estimate via _messageVirtualDefaultHeightForRole('default'), so the harness
@@ -1146,81 +1147,116 @@ console.log(JSON.stringify({
 def test_measurement_retry_budget_is_global_across_cycle_key_oscillation():
     """#6654: _scheduleMessageVirtualMeasurementRefresh must NOT reset
     _messageVirtualMeasurementRetryCount when _messageVirtualMeasurementCycleKey
-    changes. If WebKit alternates between two measured window-metric sets
-    (A -> B -> A -> B), each key transition used to reset the two-render budget,
-    so the rAF/geometry-measurement loop never terminated (~30% WebContent CPU).
-    The MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS budget must cap the whole
-    convergence burst globally; it resets only when measurement settles
-    (_markMessageVirtualMeasurementsSettled) or the cache/session resets
-    (_clearMessageVirtualHeightCache)."""
+    changes INSIDE one measurement burst. If WebKit alternates between two
+    measured window-metric sets (A -> B -> A -> B), each key transition used to
+    reset the two-render budget, so the rAF/geometry-measurement loop never
+    terminated (~30% WebContent CPU). The MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS
+    budget must cap the whole convergence burst; the burst ends at the cap (or
+    when measurement settles), so the NEXT externally initiated cycle gets a
+    fresh budget. The harness drives the thrash causally through the internal
+    chain (each scheduled render re-measures the next oscillating key)."""
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
 let scheduled = 0;
 let _messageVirtualMeasurementCycleKey = '';
 let _messageVirtualMeasurementRetryCount = 0;
+let _messageVirtualMeasurementBurstActive = false;
 let _messageVirtualScrollActive = false;
 let _messageVirtualDeferredMeasurement = null;
 const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS = 2;
 function _messageVirtualMeasurementCycleKeyFor(w) { return w.key; }
-function _scheduleMessageVirtualizedRender(force) { scheduled++; }
-function requestAnimationFrame(cb) { cb(); }
-eval(extractFunc('_scheduleMessageVirtualMeasurementRefresh'));
-// WebKit alternates between two adjacent window-metric keys across
-// getBoundingClientRect passes. Before the fix every key transition reset the
-// budget, so all four passes scheduled a re-render.
-for (const key of ['A','B','A','B']) {
-  _scheduleMessageVirtualMeasurementRefresh({ key: key });
+// Drive the burst causally: each internally scheduled render re-measures and
+// re-enters the scheduler with the next WebKit-oscillated key.
+let keys = ['B','A','B','A'];
+let idx = 0;
+function _scheduleMessageVirtualizedRender(force){
+  scheduled++;
+  if(idx<keys.length){
+    _scheduleMessageVirtualMeasurementRefresh({ key: keys[idx++] });
+  }
 }
-console.log(JSON.stringify({
-  scheduled: scheduled,
-  retries: _messageVirtualMeasurementRetryCount,
-}));
-"""
-    metrics = json.loads(_run_node(source))
-    assert metrics["scheduled"] == 2, (
-        "cycle-key oscillation must not reset the retry budget: "
-        f"scheduled {metrics['scheduled']} re-renders (expected 2, the "
-        "MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS cap for the whole burst)"
-    )
-    assert metrics["retries"] == 2, (
-        "retry count must keep accumulating across key changes: "
-        f"ended at {metrics['retries']} (expected 2)"
-    )
-
-
-def test_measurement_retry_budget_still_caps_stable_key_burst():
-    """#6654 guard: with a stable cycle key the budget must still cap the burst
-    at MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS (the removed per-key reset
-    must not have weakened the stable-key path)."""
-    js = UI_JS_PATH.read_text(encoding="utf-8")
-    source = _extract_func_script(js) + """
-let scheduled = 0;
-let _messageVirtualMeasurementCycleKey = '';
-let _messageVirtualMeasurementRetryCount = 0;
-let _messageVirtualScrollActive = false;
-let _messageVirtualDeferredMeasurement = null;
-const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS = 2;
-function _messageVirtualMeasurementCycleKeyFor(w) { return w.key; }
-function _scheduleMessageVirtualizedRender(force) { scheduled++; }
-function requestAnimationFrame(cb) { cb(); }
+function requestAnimationFrame(cb){ cb(); }
 eval(extractFunc('_scheduleMessageVirtualMeasurementRefresh'));
-for (let i = 0; i < 6; i++) {
-  _scheduleMessageVirtualMeasurementRefresh({ key: 'A' });
-}
-// The budget is exhausted after two renders; a settled measurement resets it.
-_messageVirtualMeasurementRetryCount = 0;
+// External trigger measures key A; the internal chain then oscillates A->B->A->B.
 _scheduleMessageVirtualMeasurementRefresh({ key: 'A' });
 console.log(JSON.stringify({
   scheduled: scheduled,
   retries: _messageVirtualMeasurementRetryCount,
+  burstActive: _messageVirtualMeasurementBurstActive,
 }));
 """
     metrics = json.loads(_run_node(source))
-    assert metrics["scheduled"] == 3, (
-        "stable-key burst must stop at MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS "
-        f"and resume only after a budget reset: scheduled {metrics['scheduled']} "
-        "(expected 3: 2 capped + 1 after explicit reset)"
+    assert metrics["scheduled"] == 2, (
+        "cycle-key oscillation must not reset the retry budget within a burst: "
+        f"scheduled {metrics['scheduled']} re-renders (expected 2, the "
+        "MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS cap for the whole burst)"
     )
-    assert metrics["retries"] == 1, (
-        f"retry count after explicit reset must be 1, got {metrics['retries']}"
+    assert metrics["retries"] == 2, (
+        "retry count must keep accumulating across key changes within the burst: "
+        f"ended at {metrics['retries']} (expected 2)"
+    )
+    assert metrics["burstActive"] is False, (
+        "the burst must end once the budget is exhausted so the next externally "
+        f"initiated cycle can reset it: burstActive {metrics['burstActive']}"
+    )
+
+
+def test_external_measurement_after_thrash_gets_fresh_retry_budget():
+    """#6717 re-gate: exhausting the budget with the WebKit A/B thrash must NOT
+    starve a genuinely new externally initiated measurement cycle. Drive the
+    A/B oscillation causally until the per-burst budget is exhausted, then start
+    an independent changed-C measurement WITHOUT touching private state:
+    (a) C must still receive its own retries, and (b) C's own internal
+    oscillation must remain capped at MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+let scheduled = 0;
+let _messageVirtualMeasurementCycleKey = '';
+let _messageVirtualMeasurementRetryCount = 0;
+let _messageVirtualMeasurementBurstActive = false;
+let _messageVirtualScrollActive = false;
+let _messageVirtualDeferredMeasurement = null;
+const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS = 2;
+function _messageVirtualMeasurementCycleKeyFor(w) { return w.key; }
+let keys = [];
+let idx = 0;
+function _scheduleMessageVirtualizedRender(force){
+  scheduled++;
+  if(idx<keys.length){
+    _scheduleMessageVirtualMeasurementRefresh({ key: keys[idx++] });
+  }
+}
+function requestAnimationFrame(cb){ cb(); }
+eval(extractFunc('_scheduleMessageVirtualMeasurementRefresh'));
+// Phase 1 — drive the A/B thrash causally until the burst budget is exhausted.
+keys = ['B','A','B','A'];
+idx = 0;
+_scheduleMessageVirtualMeasurementRefresh({ key: 'A' });
+const afterThrash = scheduled;
+// Phase 2 — an independent genuine content change C arrives. It must NOT be
+// starved: it gets a fresh per-burst budget, and its own oscillation is capped.
+keys = ['D','C','D','C'];
+idx = 0;
+_scheduleMessageVirtualMeasurementRefresh({ key: 'C' });
+console.log(JSON.stringify({
+  afterThrash: afterThrash,
+  scheduled: scheduled,
+  retries: _messageVirtualMeasurementRetryCount,
+  burstActive: _messageVirtualMeasurementBurstActive,
+}));
+"""
+    metrics = json.loads(_run_node(source))
+    assert metrics["afterThrash"] == 2, (
+        "the A/B thrash burst must stop at MESSAGE_VIRTUAL_MEASUREMENT_"
+        f"MAX_RERENDERS: scheduled {metrics['afterThrash']} (expected 2)"
+    )
+    assert metrics["scheduled"] == 4, (
+        "a genuinely new external measurement cycle C must still receive its "
+        "own retries after the thrash exhausted the budget: "
+        f"scheduled {metrics['scheduled']} (expected 4 = 2 thrash + 2 for C)"
+    )
+    assert metrics["retries"] == 2, (
+        "C's own internal oscillation must remain capped at "
+        f"MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS: retries "
+        f"{metrics['retries']} (expected 2)"
     )

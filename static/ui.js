@@ -548,6 +548,7 @@ let _messageVirtualScrollRaf=0;
 let _messageVirtualWindowKey='';
 let _messageVirtualMeasurementCycleKey='';
 let _messageVirtualMeasurementRetryCount=0;
+let _messageVirtualMeasurementBurstActive=false;
 let _messageVirtualScrollActive=false;
 let _messageVirtualScrollSettleTimer=0;
 let _messageVirtualDeferredMeasurement=null;
@@ -595,6 +596,7 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualWindowKey='';
   _messageVirtualMeasurementCycleKey='';
   _messageVirtualMeasurementRetryCount=0;
+  _messageVirtualMeasurementBurstActive=false;
   _messageVirtualScrollActive=false;
   clearTimeout(_messageVirtualScrollSettleTimer);
   _messageVirtualScrollSettleTimer=0;
@@ -728,13 +730,32 @@ function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
   if(_messageVirtualMeasurementCycleKey!==cycleKey){
     _messageVirtualMeasurementCycleKey=cycleKey;
   }
-  if(_messageVirtualMeasurementRetryCount>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS) return;
+  // Per-burst retry budget (#6717): the counter is preserved across ONLY the
+  // internally measurement-scheduled chain (requestAnimationFrame ->
+  // _scheduleMessageVirtualizedRender -> renderMessages -> re-measure -> here),
+  // so WebKit's A/B window-metric oscillation can never renew the budget and
+  // keep the rAF/measure loop alive (#6654). It is reset exactly once when a
+  // later EXTERNALLY initiated render begins a genuinely new measurement cycle
+  // (session load, message append, real content change) — never on cycle-key
+  // changes. A cycle-key change alone just records the new key above.
+  if(!_messageVirtualMeasurementBurstActive){
+    _messageVirtualMeasurementRetryCount=0;
+    _messageVirtualMeasurementBurstActive=true;
+  }
+  if(_messageVirtualMeasurementRetryCount>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS){
+    // Budget exhausted: this burst is over (no further internal re-render is
+    // scheduled), so the next externally initiated cycle starts fresh instead
+    // of being starved of its own retries.
+    _messageVirtualMeasurementBurstActive=false;
+    return;
+  }
   _messageVirtualMeasurementRetryCount++;
   requestAnimationFrame(()=>{ _scheduleMessageVirtualizedRender(true); });
 }
 function _markMessageVirtualMeasurementsSettled(windowMetrics){
   _messageVirtualMeasurementCycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
   _messageVirtualMeasurementRetryCount=0;
+  _messageVirtualMeasurementBurstActive=false;
 }
 function _messageVirtualHeightEntryMatches(previousEntry, nextEntry){
   return !!(
