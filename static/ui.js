@@ -2841,22 +2841,24 @@ function _getOptionProviderId(opt){
  * and a warning is logged for diagnostics. */
 async function _refreshDefaultModelCache(){
   try{
-    const res=await fetch('/api/settings',{credentials:'include'});
+    const settingsUrl=new URL('api/settings',document.baseURI||location.href);
+    const res=await fetch(settingsUrl.href,{credentials:'include'});
     if(!res.ok){
       console.warn('[default-model] /api/settings returned',res.status);
       return false;
     }
     const data=await res.json();
-    // Model and provider form one routing state. Update them atomically from
-    // the same settings response, including explicit null/empty clears, so an
-    // admin default switch cannot send a new model through the old provider.
-    if(!Object.prototype.hasOwnProperty.call(data,'default_model')
-      ||!Object.prototype.hasOwnProperty.call(data,'default_model_provider')){
-      console.warn('[default-model] /api/settings response lacks default routing state');
+    // A provider is optional: an unset provider lets the backend resolve its
+    // configured default. Model + provider are still updated together, and a
+    // missing provider explicitly clears any stale provider cache.
+    if(!Object.prototype.hasOwnProperty.call(data,'default_model')){
+      console.warn('[default-model] /api/settings response lacks default model');
       return false;
     }
     window._defaultModel=data.default_model||null;
-    window._activeProvider=data.default_model_provider||null;
+    window._activeProvider=Object.prototype.hasOwnProperty.call(data,'default_model_provider')
+      ?(data.default_model_provider||null)
+      :null;
     return true;
   }catch(e){
     console.warn('[default-model] failed to refresh default model:',e.message||e);

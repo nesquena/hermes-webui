@@ -289,12 +289,18 @@ const response = JSON.parse(process.argv[3]);
 const S = { session: { model: '__default__', model_provider: null } };
 const window = { _defaultModel: 'old-model', _activeProvider: 'old-provider' };
 const warnings = [];
+const fetchedUrls = [];
 const console = { warn: (...args) => warnings.push(args.join(' ')) };
-const fetch = async () => ({
-  ok: response.ok,
-  status: response.status || 200,
-  json: async () => response.body,
-});
+const document = { baseURI: response.base_uri || 'https://example.test/hermes/' };
+const location = { href: document.baseURI };
+const fetch = async (url) => {
+  fetchedUrls.push(String(url));
+  return {
+    ok: response.ok,
+    status: response.status || 200,
+    json: async () => response.body,
+  };
+};
 const $ = () => null;
 eval(refreshSrc);
 eval(providerSrc);
@@ -311,6 +317,7 @@ eval(payloadSrc);
     provider: window._activeProvider,
     body,
     warnings,
+    fetchedUrls,
   }));
 })();
 """
@@ -341,7 +348,28 @@ class TestDefaultModelRefreshRuntime:
             "provider": "new-provider",
             "body": {"model": "new-model", "model_provider": "new-provider"},
             "warnings": [],
+            "fetchedUrls": ["https://example.test/hermes/api/settings"],
         }
+
+    def test_refresh_accepts_default_model_without_explicit_provider(self):
+        got = self._refresh({
+            "ok": True,
+            "body": {"default_model": "provider-default-model"},
+        })
+        assert got["refreshed"] is True
+        assert got["model"] == "provider-default-model"
+        assert got["provider"] is None
+        assert got["body"] == {"model": "provider-default-model", "model_provider": None}
+        assert got["warnings"] == []
+
+    def test_refresh_uses_document_base_uri_for_subpath(self):
+        got = self._refresh({
+            "ok": True,
+            "base_uri": "https://example.test/hermes/",
+            "body": {"default_model": "subpath-model"},
+        })
+        assert got["refreshed"] is True
+        assert got["fetchedUrls"] == ["https://example.test/hermes/api/settings"]
 
     def test_refresh_explicitly_clears_model_and_provider_as_one_pair(self):
         got = self._refresh({
@@ -351,13 +379,11 @@ class TestDefaultModelRefreshRuntime:
                 "default_model_provider": None,
             },
         })
-        assert got == {
-            "refreshed": True,
-            "model": None,
-            "provider": None,
-            "body": {"model": "", "model_provider": None},
-            "warnings": [],
-        }
+        assert got["refreshed"] is True
+        assert got["model"] is None
+        assert got["provider"] is None
+        assert got["body"] == {"model": "", "model_provider": None}
+        assert got["warnings"] == []
 
     def test_refresh_failure_keeps_previous_pair_but_blocks_auto_send(self):
         got = self._refresh({"ok": False, "status": 503, "body": {}})
