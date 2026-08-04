@@ -231,6 +231,9 @@ def test_stream_done_collapses_in_place_after_disarm_with_render_fallback():
 
 def test_in_place_settled_worklog_collapse_defers_rows_without_full_rebuild():
     body = _function_body(UI_JS, "_collapseJustSettledWorklogInPlace")
+    assert "_assistantTurnHasVisibleRenderedSegment(ownerTurn)" in body
+    assert "if(ownerHasVisibleSegment===null) return false" in body
+    assert "const keepOpen=!ownerHasVisibleSegment" in body
     assert "[data-anchor-settled-scene-owner=\"1\"]" in body
     assert "data-anchor-stream-id" in body
     assert "_deferredWorklogRowsFromGroup(group)" in body
@@ -305,6 +308,7 @@ def test_in_place_collapse_preserves_detail_disclosure_for_deferred_materialize(
     detail is lost when the user expands the collapsed settled Worklog.
     """
     collapse = _extract("_collapseJustSettledWorklogInPlace")
+    visible_segment = _extract("_assistantTurnHasVisibleRenderedSegment")
     materialize = _extract("_materializeDeferredWorklogRows")
     harness = textwrap.dedent(f"""
         const assert = require('assert');
@@ -315,9 +319,15 @@ def test_in_place_collapse_preserves_detail_disclosure_for_deferred_materialize(
         let restoredState = null;
         let removedRows = false;
         let syncCount = 0;
+        let ownerHasVisibleSegment = true;
         const S = {{
           session: {{session_id: 'session-1'}},
-          messages: [{{_anchor_activity_scene: {{terminal_state: 'completed'}}}}],
+          // Keep the session-wide no-response guard false: a normal answered
+          // turn precedes the completed tool/reasoning-only turn under test.
+          messages: [
+            {{role: 'assistant', content: 'previous final answer'}},
+            {{role: 'assistant', content: '', _anchor_activity_scene: {{terminal_state: 'completed'}}}},
+          ],
         }};
         const summary = {{
           attrs: {{}},
@@ -332,15 +342,29 @@ def test_in_place_collapse_preserves_detail_disclosure_for_deferred_materialize(
             return [];
           }},
         }};
+        const visibleSegment = {{
+          textContent: 'previous final answer',
+          classList: {{ contains() {{ return false; }} }},
+        }};
+        const ownerTurn = {{
+          querySelectorAll(selector) {{
+            assert.strictEqual(selector, '.assistant-segment');
+            return ownerHasVisibleSegment ? [visibleSegment] : [];
+          }},
+        }};
         function makeGroup() {{
           return {{
             attrs: {{
               'data-anchor-stream-id': 'stream-1',
-              'data-activity-disclosure-key': 'anchor-scene:0',
+              'data-activity-disclosure-key': 'anchor-scene:1',
             }},
             isConnected: true,
             _deferredWorklogRows: null,
             _deferredWorklogDisclosure: 'stale',
+            closest(selector) {{
+              assert.strictEqual(selector, '.assistant-turn');
+              return ownerTurn;
+            }},
             getAttribute(name) {{ return this.attrs[name] || ''; }},
             setAttribute(name, value) {{ this.attrs[name] = String(value); }},
             removeAttribute(name) {{ delete this.attrs[name]; }},
@@ -381,6 +405,7 @@ def test_in_place_collapse_preserves_detail_disclosure_for_deferred_materialize(
           return detailState;
         }}
         function _worklogDetailsExpandedDefault() {{ return defaultExpanded; }}
+        {visible_segment}
         {collapse}
         {materialize}
 
@@ -415,6 +440,7 @@ def test_in_place_collapse_preserves_detail_disclosure_for_deferred_materialize(
         activeGroup = makeGroup();
         detailState = null;
         defaultExpanded = true;
+        ownerHasVisibleSegment = true;
         assert.strictEqual(_collapseJustSettledWorklogInPlace('stream-1'), true);
         assert.strictEqual(activeGroup._deferredWorklogRows, null);
         assert.strictEqual(activeGroup.classList.contains('open'), true);
@@ -423,10 +449,22 @@ def test_in_place_collapse_preserves_detail_disclosure_for_deferred_materialize(
 
         activeGroup = makeGroup();
         detailState = 'closed';
+        ownerHasVisibleSegment = true;
         assert.strictEqual(_collapseJustSettledWorklogInPlace('stream-1'), true);
         assert.strictEqual(activeGroup._deferredWorklogRows, rows);
         assert.strictEqual(activeGroup.classList.contains('tool-call-group-collapsed'), true);
         assert.strictEqual(removedRows, true);
+
+        removedRows = false;
+        activeGroup = makeGroup();
+        detailState = 'closed';
+        defaultExpanded = false;
+        ownerHasVisibleSegment = false;
+        assert.strictEqual(_collapseJustSettledWorklogInPlace('stream-1'), true);
+        assert.strictEqual(activeGroup._deferredWorklogRows, null);
+        assert.strictEqual(activeGroup.classList.contains('open'), true);
+        assert.strictEqual(activeGroup.classList.contains('tool-call-group-collapsed'), false);
+        assert.strictEqual(removedRows, false);
         console.log(JSON.stringify({{ok: true}}));
     """)
     res = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=30)

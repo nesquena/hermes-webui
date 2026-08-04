@@ -13650,6 +13650,15 @@ function _armKeepSettledWorklogOpen(streamId){
 function _disarmKeepSettledWorklogOpen(){
   _keepSettledWorklogOpenForStreamId=null;
 }
+function _assistantTurnHasVisibleRenderedSegment(turn){
+  if(!turn||typeof turn.querySelectorAll!=='function') return null;
+  for(const seg of turn.querySelectorAll('.assistant-segment')){
+    if(seg.classList.contains('assistant-segment-worklog-source')) continue;
+    if(seg.classList.contains('assistant-segment-anchor')) continue;
+    if((seg.textContent||'').trim()) return true;
+  }
+  return false;
+}
 function _collapseJustSettledWorklogInPlace(streamId){
   // #6414: STREAM_DONE used to render the settled turn once with its Worklog
   // forced open, then immediately run a second full render only to collapse it.
@@ -13664,6 +13673,9 @@ function _collapseJustSettledWorklogInPlace(streamId){
     .filter(candidate=>candidate.getAttribute('data-anchor-stream-id')===String(streamId))
     .pop();
   if(!group) return false;
+  const ownerTurn=typeof group.closest==='function'?group.closest('.assistant-turn'):null;
+  const ownerHasVisibleSegment=_assistantTurnHasVisibleRenderedSegment(ownerTurn);
+  if(ownerHasVisibleSegment===null) return false;
   const disclosureKey=group.getAttribute('data-activity-disclosure-key')||'';
   const savedDisclosure=_readActivityDisclosureState(disclosureKey);
   const rows=_deferredWorklogRowsFromGroup(group);
@@ -13672,7 +13684,8 @@ function _collapseJustSettledWorklogInPlace(streamId){
   const message=match&&S.messages&&S.messages[Number(match[1])];
   const errored=!!(message&&message._anchor_activity_scene&&
     _anchorSceneHasErroredTerminalState(message._anchor_activity_scene));
-  const keepOpen=savedDisclosure==='open'
+  const keepOpen=!ownerHasVisibleSegment
+    || savedDisclosure==='open'
     || (errored&&savedDisclosure!=='closed')
     || (_worklogDetailsExpandedDefault()&&savedDisclosure!=='closed');
   if(!keepOpen){
@@ -17334,18 +17347,7 @@ function renderMessages(options){
   // historical blank turn must not re-paint blank during a follow-up stream
   // (Opus advisor, stage-342).
   {
-    const _turnHasVisibleContent=(turn)=>{
-      const segs=turn.querySelectorAll('.assistant-segment');
-      for(const seg of segs){
-        // A segment shows real content only when it is NOT worklog-folded AND its
-        // body/files/status actually painted (the anchor-only placeholder class
-        // carries no visible body).
-        if(seg.classList.contains('assistant-segment-worklog-source')) continue;
-        if(seg.classList.contains('assistant-segment-anchor')) continue;
-        if((seg.textContent||'').trim()) return true;
-      }
-      return false;
-    };
+    const _turnHasVisibleContent=(turn)=>_assistantTurnHasVisibleRenderedSegment(turn)===true;
     for(const turn of inner.querySelectorAll('.assistant-turn')){
       if(turn.id==='liveAssistantTurn') continue; // live turn drives its own state
       if(_turnHasVisibleContent(turn)) continue;
