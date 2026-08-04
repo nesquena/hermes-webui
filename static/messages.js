@@ -4104,14 +4104,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(role==='lifecycle'||kind==='lifecycle_status'){
       const phase=String(row&&(row.phase||row.status)||'').trim().toLowerCase();
       const text=String(row&&(row.text||row.message||row.label)||'').trim().toLowerCase();
+      // Skip / cooldown / defer notices mention compression but mean the
+      // opposite: nothing ran. Reject them before the cue checks below, which
+      // would otherwise match on substrings like "preflight compression".
+      // Mirrors _is_agent_compression_start_status() in api/streaming.py.
       if(
-        phase==='done'||phase==='completed'||phase==='compressed'
+        text.includes('skipping')
+        || text.includes('defer')
+        || text.includes('cooldown')
+        || text.includes('will not start')
+      ) return '';
+      if(
+        phase==='compressed'
         || text.includes('auto-compressed')
         || text.includes('compression finished')
         || (text.includes('compressed')&&!text.includes('compressing'))
       ) return 'compressed';
       if(
-        phase==='running'||phase==='compressing'
+        phase==='compressing'
         || text.includes('compressing context')
         || text.includes('compacting context')
         || text.includes('preflight compression')
