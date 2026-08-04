@@ -1429,7 +1429,14 @@ async function newSession(flash, options={}){
     }else if(window._defaultModel){
       // Configured default wins over stale picker/persisted state even with no
       // loaded session (deleting the last session left S.session null + stale picker) (#4728).
-      newModelState={model:window._defaultModel,model_provider:null};
+      // If the dropdown shows "Default (auto)", send the __default__ sentinel so
+      // the session dynamically picks up future default-model changes.
+      const _ddValue=modelSelForNew&&modelSelForNew.value;
+      if(_ddValue==='__default__'){
+        newModelState={model:'__default__',model_provider:null};
+      }else{
+        newModelState={model:window._defaultModel,model_provider:null};
+      }
       usingConfiguredDefault=true;
     }else if(modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
       newModelState=_modelStateForSelect(modelSelForNew,modelSelForNew.value);

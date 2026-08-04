@@ -3098,7 +3098,7 @@ function _clearPendingSessionModel(sessionId){
 function _deliberateSessionModelPick(sessionId){
   if(!S.session||S.session.session_id!==sessionId) return null;
   const model=String(S.session.model||'').trim();
-  if(!model) return null;
+  if(!model||model==='__default__') return null;
   // Require SESSION-OWNED provider evidence — a stored model_provider on the
   // session itself. Do NOT infer a provider from the model string: an
   // unreachable/renamed model like "@removed:mistral-large" with no stored
@@ -3462,6 +3462,14 @@ async function populateModelDropdown(opts={}){
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
+    // Add "Default (auto)" as the first option — dynamically resolves to
+    // whatever the profile default model is at send time.
+    const _defaultOpt=document.createElement('option');
+    _defaultOpt.value='__default__';
+    _defaultOpt.textContent='Default (auto)';
+    _defaultOpt.dataset.default='1';
+    sel.appendChild(_defaultOpt);
+    _dynamicModelLabels['__default__']='Default (auto)';
     for(const g of groups){
       const og=document.createElement('optgroup');
       og.label=g.provider;
@@ -6948,6 +6956,7 @@ function _fmtOllamaLabel(mid){
 
 function getModelLabel(modelId){
   if(!modelId) return 'Unknown';
+  if(modelId==='__default__') return 'Default (auto)';
   const rawId=String(modelId||'');
   // Preserve custom gateway model IDs exactly as configured.
   // Examples:

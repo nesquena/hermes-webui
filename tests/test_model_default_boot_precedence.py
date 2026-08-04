@@ -265,11 +265,13 @@ def test_non_boot_refresh_does_not_reapply_default_when_previous_model_disappear
         ],
     )
 
-    # The old value is gone, so the browser/select fallback can land on the
-    # refreshed first option. The important invariant is that the profile default
-    # is not reapplied as a special policy outside fresh boot.
-    assert got["selectValue"] == "@safe:gpt-4o-mini"
-    assert got["selectedProvider"] == "safe"
+    # The old value is gone, so the browser/select fallback lands on the
+    # first option. With the "Default (auto)" feature, __default__ is the
+    # first option, which is a safe fallback that resolves to the profile
+    # default at send time.
+    assert got["selectValue"] == "__default__"
+    # __default__ carries no provider — it resolves dynamically at send time.
+    assert got["selectedProvider"] in ("", None)
 
 
 def _run_populate_driver(

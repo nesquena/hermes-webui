@@ -96,7 +96,11 @@ function _markActiveSessionViewedOnReturn() {
 }
 
 function _chatPayloadModel(){
-  return S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'';
+  const sessionModel=S.session&&S.session.model;
+  // __default__ sentinel: dynamically resolve to the current profile default
+  // model, so "Default (auto)" sessions follow admin default-model changes.
+  if(sessionModel==='__default__') return window._defaultModel||'';
+  return sessionModel||($('modelSelect')&&$('modelSelect').value)||'';
 }
 
 function _chatPayloadModelProvider(model){
@@ -1844,11 +1848,16 @@ async function send(){
       if(_explicitPick && _sentModel && startData.effective_model!==_sentModel && typeof showToast==='function'){
         showToast('Model '+_sentModel+' changed to '+startData.effective_model+' — profile provider mismatch', 5000);
       }
-      S.session.model=startData.effective_model;
+      // Preserve the __default__ sentinel so "Default (auto)" sessions
+      // dynamically follow admin default-model changes (#custom).
+      if(S.session.model!=='__default__'){
+        S.session.model=startData.effective_model;
+      }
       S.session.model_provider=startData.effective_model_provider||S.session.model_provider||null;
-      localStorage.setItem('hermes-webui-model', startData.effective_model);
-      if(typeof _writePersistedModelState==='function') _writePersistedModelState(startData.effective_model,S.session.model_provider||null);
-      if($('modelSelect')) _applyModelToDropdown(startData.effective_model, $('modelSelect'),S.session.model_provider||null);
+      const _storeModel=S.session.model||'';
+      localStorage.setItem('hermes-webui-model', _storeModel);
+      if(typeof _writePersistedModelState==='function') _writePersistedModelState(_storeModel,S.session.model_provider||null);
+      if($('modelSelect')) _applyModelToDropdown(S.session.model, $('modelSelect'),S.session.model_provider||null);
       if(typeof syncTopbar==='function') syncTopbar();
     }else if(startData&&startData.effective_model_provider && S.session){
       S.session.model_provider=startData.effective_model_provider;
