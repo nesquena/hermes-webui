@@ -10825,6 +10825,53 @@ def _handle_insights(handler, parsed) -> bool:
     def _session_usage_ts(session: dict) -> float:
         return session.get("updated_at", session.get("created_at", 0)) or session.get("created_at", 0) or 0
 
+    def _insights_model(session: dict) -> str:
+        """Return the concrete model for an Insights row.
+
+        ``__default__`` is a browser-side intent sentinel, not a model that can
+        process a request. The turn journal records the resolved model on every
+        submitted turn, so use its newest valid value for the session aggregate.
+        Sessions created before journals existed have no authoritative resolved
+        model and deliberately fall back to ``unknown`` instead of assigning
+        their historical usage to today's configured default.
+        """
+        model = str(session.get("model") or "").strip()
+        if model != "__default__":
+            return model or "unknown"
+        session_id = str(session.get("session_id") or "").strip()
+        if not session_id:
+            return "unknown"
+        journal_dir = SESSION_DIR / "_turn_journal"
+        latest_at = float("-inf")
+        latest_model = ""
+        try:
+            # Do not interpolate session_id into a glob: it is persisted data,
+            # and journal names are matched as plain strings after enumeration.
+            prefix = f"{session_id}~"
+            for journal in journal_dir.glob("*.jsonl"):
+                if not journal.name.startswith(prefix):
+                    continue
+                for line in journal.read_text(encoding="utf-8").splitlines():
+                    try:
+                        event = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(event, dict) or event.get("event") != "submitted":
+                        continue
+                    resolved = str(event.get("model") or "").strip()
+                    if not resolved or resolved == "__default__":
+                        continue
+                    try:
+                        created_at = float(event.get("created_at") or 0)
+                    except (TypeError, ValueError):
+                        created_at = 0.0
+                    if created_at >= latest_at:
+                        latest_at = created_at
+                        latest_model = resolved
+        except OSError:
+            pass
+        return latest_model or "unknown"
+
     # Walk session index (fast, no full JSON parse)
     sessions_data = []
     idx_path = SESSION_DIR / "_index.json"
@@ -10869,7 +10916,7 @@ def _handle_insights(handler, parsed) -> bool:
         total_cache_read_tokens += cache_read_tokens
         total_cost += cost_value
 
-        model = s.get("model") or "unknown"
+        model = _insights_model(s)
         bucket = model_stats.setdefault(model, {
             "sessions": 0,
             "input_tokens": 0,

@@ -140,8 +140,11 @@ class TestCodePatterns:
         assert "_refreshDefaultModelCache" in src, (
             "send() must call _refreshDefaultModelCache before _chatPayloadModelState"
         )
-        assert "S.session.model==='__default__'&&typeof _refreshDefaultModelCache==='function'" in src, (
+        assert "if(S.session&&S.session.model==='__default__')" in src, (
             "Refresh must be gated on __default__ session model"
+        )
+        assert "if(!refreshed) throw new Error" in src, (
+            "Refresh failure must block stale default model/provider routing"
         )
 
     def test_refresh_default_model_cache_exists(self):
@@ -262,6 +265,107 @@ const fnSrc = msgs.slice(
 );
 console.log(JSON.stringify({ found: fnSrc.includes("__default__") }));
 """
+
+
+_DEFAULT_MODEL_REFRESH_DRIVER = r"""
+const fs = require('fs');
+const ui = fs.readFileSync(process.argv[1], 'utf8');
+const messages = fs.readFileSync(process.argv[2], 'utf8');
+function extract(source, signature) {
+  const start = source.indexOf(signature);
+  if (start < 0) throw new Error(signature + ' not found');
+  const open = source.indexOf('{', start);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}' && --depth === 0) return source.slice(start, i + 1);
+  }
+  throw new Error(signature + ' not closed');
+}
+const refreshSrc = extract(ui, 'async function _refreshDefaultModelCache(');
+const providerSrc = extract(ui, 'function _modelProviderForSend(');
+const payloadSrc = extract(messages, 'function _chatPayloadModel(');
+const response = JSON.parse(process.argv[3]);
+const S = { session: { model: '__default__', model_provider: null } };
+const window = { _defaultModel: 'old-model', _activeProvider: 'old-provider' };
+const warnings = [];
+const console = { warn: (...args) => warnings.push(args.join(' ')) };
+const fetch = async () => ({
+  ok: response.ok,
+  status: response.status || 200,
+  json: async () => response.body,
+});
+const $ = () => null;
+eval(refreshSrc);
+eval(providerSrc);
+eval(payloadSrc);
+(async () => {
+  const refreshed = await _refreshDefaultModelCache();
+  const body = refreshed ? {
+    model: _chatPayloadModel(),
+    model_provider: _modelProviderForSend(_chatPayloadModel()),
+  } : null;
+  process.stdout.write(JSON.stringify({
+    refreshed,
+    model: window._defaultModel,
+    provider: window._activeProvider,
+    body,
+    warnings,
+  }));
+})();
+"""
+
+
+class TestDefaultModelRefreshRuntime:
+    """Execute the live refresh helper so routing state cannot drift."""
+
+    def _refresh(self, response):
+        proc = subprocess.run(
+            [NODE, "-e", _DEFAULT_MODEL_REFRESH_DRIVER, str(UI_JS), str(MESSAGES_JS), json.dumps(response)],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert proc.returncode == 0, f"node driver failed: {proc.stderr}"
+        return json.loads(proc.stdout)
+
+    def test_refresh_updates_model_and_provider_as_one_routing_pair(self):
+        got = self._refresh({
+            "ok": True,
+            "body": {
+                "default_model": "new-model",
+                "default_model_provider": "new-provider",
+            },
+        })
+        assert got == {
+            "refreshed": True,
+            "model": "new-model",
+            "provider": "new-provider",
+            "body": {"model": "new-model", "model_provider": "new-provider"},
+            "warnings": [],
+        }
+
+    def test_refresh_explicitly_clears_model_and_provider_as_one_pair(self):
+        got = self._refresh({
+            "ok": True,
+            "body": {
+                "default_model": None,
+                "default_model_provider": None,
+            },
+        })
+        assert got == {
+            "refreshed": True,
+            "model": None,
+            "provider": None,
+            "body": {"model": "", "model_provider": None},
+            "warnings": [],
+        }
+
+    def test_refresh_failure_keeps_previous_pair_but_blocks_auto_send(self):
+        got = self._refresh({"ok": False, "status": 503, "body": {}})
+        assert got["refreshed"] is False
+        assert got["model"] == "old-model"
+        assert got["provider"] == "old-provider"
+        assert got["body"] is None, "auto send must not use a stale routing pair"
+        assert got["warnings"], "refresh failure must be diagnosable"
 
 
 class TestChatPayloadModelLogic:

@@ -43,7 +43,7 @@ def _call_insights(monkeypatch, tmp_path, entries, days="7", now=None):
     import api.routes as routes
 
     session_dir = tmp_path / "sessions"
-    session_dir.mkdir()
+    session_dir.mkdir(exist_ok=True)
     (session_dir / "_index.json").write_text(json.dumps(entries), encoding="utf-8")
     monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
     if now is not None:
@@ -112,6 +112,35 @@ def test_insights_daily_tokens_zero_fills_selected_range_and_parses_cost(monkeyp
     assert by_date[_day(two_days_ago)]["output_tokens"] == 250
     assert by_date[_day(two_days_ago)]["cost"] == 0.02
     assert data["total_cost"] == 0.0323
+
+
+def test_insights_default_sentinel_uses_latest_resolved_turn_model(monkeypatch, tmp_path):
+    """Default(auto) sessions must not expose the internal __default__ sentinel."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    session_id = "default-session"
+    entries = [{
+        "session_id": session_id,
+        "updated_at": now,
+        "message_count": 2,
+        "model": "__default__",
+        "input_tokens": 200,
+        "output_tokens": 50,
+        "estimated_cost": 0.01,
+    }]
+    journal_dir = tmp_path / "sessions" / "_turn_journal"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / f"{session_id}~1.jsonl").write_text(
+        "\n".join([
+            json.dumps({"event": "submitted", "created_at": now - 10, "model": "older-model"}),
+            json.dumps({"event": "submitted", "created_at": now, "model": "actual-model"}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now)
+
+    assert [row["model"] for row in data["models"]] == ["actual-model"]
+    assert data["models"][0]["total_tokens"] == 250
 
 
 def test_insights_model_breakdown_tracks_tokens_cost_and_shares(monkeypatch, tmp_path):

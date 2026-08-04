@@ -1719,13 +1719,15 @@ async function send(){
   let postStartData;
   let modelStateForPostStart;
   let explicitPickForPostStart;
-  // When the session uses the __default__ sentinel, refresh the cached
-  // default model from the server so a mid-session admin default-model
-  // change is picked up on the very next message — not just on page reload.
-  if(S.session&&S.session.model==='__default__'&&typeof _refreshDefaultModelCache==='function'){
-    try{await _refreshDefaultModelCache();}catch(_e){}
-  }
   try{
+    // __default__ must resolve from a fresh server routing pair. Do not silently
+    // send a stale model/provider pair when that refresh fails; the normal
+    // chat/start failure path restores the draft and leaves the user retryable.
+    if(S.session&&S.session.model==='__default__'){
+      const refreshed=typeof _refreshDefaultModelCache==='function'
+        &&await _refreshDefaultModelCache();
+      if(!refreshed) throw new Error('Could not refresh the current default model. Please retry.');
+    }
     const _modelState=_chatPayloadModelState();
     modelStateForPostStart=_modelState;
     const _pendingPick=(typeof _readPendingSessionModel==='function')

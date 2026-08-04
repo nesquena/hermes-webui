@@ -2843,13 +2843,24 @@ async function _refreshDefaultModelCache(){
   try{
     const res=await fetch('/api/settings',{credentials:'include'});
     if(!res.ok){
-      console.warn('[default-model] /api/settings returned',res.status,'— keeping stale default');
-      return;
+      console.warn('[default-model] /api/settings returned',res.status);
+      return false;
     }
     const data=await res.json();
-    if(data.default_model) window._defaultModel=data.default_model;
+    // Model and provider form one routing state. Update them atomically from
+    // the same settings response, including explicit null/empty clears, so an
+    // admin default switch cannot send a new model through the old provider.
+    if(!Object.prototype.hasOwnProperty.call(data,'default_model')
+      ||!Object.prototype.hasOwnProperty.call(data,'default_model_provider')){
+      console.warn('[default-model] /api/settings response lacks default routing state');
+      return false;
+    }
+    window._defaultModel=data.default_model||null;
+    window._activeProvider=data.default_model_provider||null;
+    return true;
   }catch(e){
-    console.warn('[default-model] failed to refresh default model:',e.message||e,'— keeping stale default');
+    console.warn('[default-model] failed to refresh default model:',e.message||e);
+    return false;
   }
 }
 // ── Default (auto) model session tracking ──────────────────────────────
