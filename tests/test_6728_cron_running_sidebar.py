@@ -9,6 +9,120 @@ or after the tracked start belongs to the live execution — older runs of the
 same job must stay completed.
 """
 
+import json
+import pathlib
+import shutil
+import subprocess
+import tempfile
+
+import pytest
+
+ROOT = pathlib.Path(__file__).parent.parent
+SESSIONS_JS_PATH = ROOT / "static" / "sessions.js"
+NODE = shutil.which("node")
+
+pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
+
+
+def _run_node(source: str) -> str:
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".cjs", encoding="utf-8", dir=ROOT, delete=False
+    ) as script:
+        script.write(source)
+        script_path = pathlib.Path(script.name)
+    try:
+        result = subprocess.run(
+            [NODE, str(script_path)],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        script_path.unlink(missing_ok=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr)
+    return result.stdout.strip()
+
+
+def _extract_func_script(js: str) -> str:
+    # Brace-matches a function body while skipping braces inside string / template
+    # / regex literals and comments (same hardened extractor as the sibling #5744
+    # suite).
+    prelude = "const src = " + json.dumps(js) + ";\n"
+    body = r"""
+function extractFunc(name) {
+  const re = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start);
+  let depth = 1; i++;
+  let str = null;
+  let inLine = false;
+  let inBlock = false;
+  let inRegex = false;
+  let prev = '';
+  while (depth > 0 && i < src.length) {
+    const c = src[i];
+    const n = src[i + 1];
+    if (inLine) { if (c === '\n') inLine = false; i++; continue; }
+    if (inBlock) { if (c === '*' && n === '/') { inBlock = false; i++; } i++; continue; }
+    if (str) {
+      if (c === '\\') { i += 2; continue; }
+      if (c === str) str = null;
+      i++; continue;
+    }
+    if (inRegex) {
+      if (c === '\\') { i += 2; continue; }
+      if (c === '/') inRegex = false;
+      i++; continue;
+    }
+    if (c === '/' && n === '/') { inLine = true; i += 2; continue; }
+    if (c === '/' && n === '*') { inBlock = true; i += 2; continue; }
+    if (c === '"' || c === "'" || c === '`') { str = c; i++; continue; }
+    if (c === '/' && !'})]0123456789'.includes(prev) && !/[A-Za-z_$]/.test(prev)) {
+      inRegex = true; i++; continue;
+    }
+    if (c === '{') depth++;
+    else if (c === '}') depth--;
+    if (c.trim()) prev = c;
+    i++;
+  }
+  return src.slice(start, i);
+}
+"""
+    return prelude + body
+
+
+def _js_prelude() -> str:
+    """Globals/stubs needed by the extracted sessions.js functions.
+
+    `_markPollingCompletionUnreadTransitions` reads/writes the module-level
+    `_sessionStreamingById` / `_sessionListSnapshotById` Maps directly, and
+    calls `_isSessionEffectivelyStreaming` (real), `_isSessionActivelyViewedForList`,
+    `_getSessionObservedStreaming`, `_markSessionCompletionUnread`,
+    `_setSessionViewedCount`, `_rememberObservedStreamingSession` and
+    `_forgetObservedStreamingSession`. All the `typeof`-guarded collaborators
+    (`_sessionListSourceById`, `_allSessionsScope`, `_rememberSessionListSource`,
+    `_cronCompletionUnreadMetaForSession`, `_showAllProfiles`,
+    `_cronMarkerProfileMatchesActive`) are intentionally left undefined so the
+    guards take their safe branches.
+    """
+    return r"""
+const _sessionStreamingById = new Map();
+const _sessionListSnapshotById = new Map();
+const _observedStreaming = {};
+let markCount = 0;
+const markedSids = [];
+function _getSessionObservedStreaming() { return _observedStreaming; }
+function _markSessionCompletionUnread(sid, messageCount, meta) { markCount += 1; markedSids.push(sid); }
+function _setSessionViewedCount(sid, messageCount) {}
+function _isSessionActivelyViewedForList(sid) { return false; }
+function _rememberObservedStreamingSession(s) {}
+function _forgetObservedStreamingSession(sid) {}
+let S = { session: null, busy: false };
+"""
+
 
 def _cron_row(sid, created_at, **overrides):
     row = {
@@ -117,3 +231,80 @@ def test_payload_response_roundtrip_stamps_running_cron(monkeypatch):
     matching = [row for row in rows if row["session_id"] == "cron_job6728_20260803_100000"]
     assert len(matching) == 1
     assert matching[0]["cron_running"] is True
+
+
+def test_running_cron_row_renders_effectively_streaming():
+    """A row with cron_running=true must render ACTIVE in the sidebar.
+
+    Rendering, sorting, polling and completion-transition tracking all key off
+    `_isSessionEffectivelyStreaming` (static/sessions.js). Before the fix the
+    predicate ignored `cron_running`, so a running cron row rendered visually
+    idle and could lose its eventual completion/unread transition.
+    """
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + _js_prelude() + r"""
+eval(extractFunc('_hasPendingUserMessageSignal'));
+eval(extractFunc('_isSessionLocallyStreaming'));
+eval(extractFunc('_isSessionEffectivelyStreaming'));
+const running = { session_id: 'cron_job6728_20260803_100000', cron_running: true, is_streaming: false };
+const idle = { session_id: 'cron_job6728_20260701_050000', cron_running: false, is_streaming: false };
+console.log(JSON.stringify({
+  runningActive: _isSessionEffectivelyStreaming(running),
+  idleInactive: _isSessionEffectivelyStreaming(idle),
+}));
+"""
+    m = json.loads(_run_node(source))
+    assert m["runningActive"] is True
+    assert m["idleInactive"] is False
+
+
+def test_cron_running_defers_completion_unread_until_flag_clears():
+    """A cron_running row with advanced message_count must NOT be marked
+    completed-unread; exactly ONE true->false completion transition happens
+    when the flag clears.
+
+    The `!cronRunning` guards in `_markPollingCompletionUnreadTransitions`
+    defer all three completion signals while the job runs; the focused
+    regression proves the row is only marked once, on the poll where
+    cron_running flips to false.
+    """
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + _js_prelude() + r"""
+eval(extractFunc('_hasPendingUserMessageSignal'));
+eval(extractFunc('_isSessionLocallyStreaming'));
+eval(extractFunc('_isSessionEffectivelyStreaming'));
+eval(extractFunc('_markPollingCompletionUnreadTransitions'));
+const sid = 'cron_job6728_20260803_100000';
+_sessionListSnapshotById.set(sid, { message_count: 1, last_message_at: 1000 });
+let row = {
+  session_id: sid,
+  cron_running: true,
+  is_streaming: false,
+  message_count: 2,
+  last_message_at: 1100,
+};
+// Poll 1: cron still running, message_count advanced -> no completion mark.
+_markPollingCompletionUnreadTransitions([row]);
+const marksWhileRunning = markCount;
+const streamWhileRunning = _sessionStreamingById.get(sid);
+// Poll 2: cron flag clears -> exactly one true->false completion transition.
+row.cron_running = false;
+_markPollingCompletionUnreadTransitions([row]);
+const marksAfterClear = markCount;
+const streamAfterClear = _sessionStreamingById.get(sid);
+console.log(JSON.stringify({
+  marksWhileRunning,
+  marksAfterClear,
+  streamWhileRunning,
+  streamAfterClear,
+  markedSids,
+}));
+"""
+    m = json.loads(_run_node(source))
+    assert m["marksWhileRunning"] == 0, (
+        "cron_running row with advanced message_count must not be marked completed-unread"
+    )
+    assert m["marksAfterClear"] == 1, "exactly one completion transition when the flag clears"
+    assert m["streamWhileRunning"] is True, "row must render active while cron_running"
+    assert m["streamAfterClear"] is False
+    assert m["markedSids"] == ["cron_job6728_20260803_100000"]
