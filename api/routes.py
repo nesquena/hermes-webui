@@ -7814,10 +7814,6 @@ def _session_model_state_from_request(
         _bare, explicit_provider = _split_provider_qualified_model(model_value)
         if explicit_provider:
             provider = explicit_provider
-            # The provider now travels in its own field, so the model must be
-            # the bare name. Leaving the "@provider:" prefix on model_value is
-            # what reached the gateway verbatim and 404'd upstream (#6722).
-            model_value = _bare
         elif requested_provider is None:
             provider = _clean_session_model_provider(current_provider)
         model_value, provider, _changed = _resolve_compatible_session_model_state(

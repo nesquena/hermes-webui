@@ -104,28 +104,67 @@ class TestCleanSessionModelProvider:
             assert _clean_session_model_provider(value) is None
 
 
-class TestSessionModelStateStripsQualifier:
-    """The request path must hand back a bare model plus a separate provider."""
+class TestSessionModelStatePreservesQualifierForRepair:
+    """The request path must keep the @provider: qualifier through resolution so
+    the compatibility/repair step (and PR #6718's custom-provider normalizer) can
+    still see the qualified form. The qualifier is stripped to the bare model ONLY
+    at the gateway boundary (see TestGatewayModelField)."""
 
-    def test_model_value_is_bare_and_provider_is_split_out(self, monkeypatch):
+    def test_unavailable_qualified_provider_repairs_to_active_default(self, monkeypatch):
+        """A session pinned to a removed/unconfigured provider must revert to the
+        active default on a non-explicit resolve — the premature strip in the
+        previous revision returned (bare_model, removed) instead."""
         import api.routes as routes
 
-        # Pin the catalog-dependent repair step so this test targets the
-        # qualifier split rather than catalog compatibility behavior.
         monkeypatch.setattr(
             routes,
-            "_resolve_compatible_session_model_state",
-            lambda model, provider: (model, provider, False),
+            "get_available_models",
+            lambda: {
+                "active_provider": "openai-codex",
+                "default_model": "gpt-5.5",
+                "groups": [
+                    {
+                        "provider_id": "openai-codex",
+                        "models": [{"id": "@openai-codex:gpt-5.5"}],
+                    },
+                ],
+            },
         )
+        model_value, provider = routes._session_model_state_from_request(
+            "@removed:mistral-large", None, "removed"
+        )
+        assert model_value == "gpt-5.5", (
+            f"removed/unconfigured qualified provider must repair to the active "
+            f"default, got model_value={model_value!r}"
+        )
+        assert provider == "openai-codex"
 
-        for value, expected_model, expected_provider in QUALIFIED_MODEL_CASES:
-            model_value, provider = routes._session_model_state_from_request(
-                value, None, None
-            )
-            assert model_value == expected_model, (
-                f"{value!r} must send bare model {expected_model!r}, got {model_value!r}"
-            )
-            assert provider == expected_provider
+    def test_active_provider_qualified_model_preserves_qualifier_for_routing(self, monkeypatch):
+        """A qualified model naming the active provider is preserved intact so
+        downstream routing (resolve_model_provider) can use the provider."""
+        import api.routes as routes
+
+        monkeypatch.setattr(
+            routes,
+            "get_available_models",
+            lambda: {
+                "active_provider": "openai-codex",
+                "default_model": "gpt-5.5",
+                "groups": [
+                    {
+                        "provider_id": "openai-codex",
+                        "models": [{"id": "@openai-codex:gpt-5.5"}],
+                    },
+                ],
+            },
+        )
+        model_value, provider = routes._session_model_state_from_request(
+            "@openai-codex:gpt-5.5", "openai-codex"
+        )
+        assert model_value == "@openai-codex:gpt-5.5", (
+            f"qualifier must survive session-state resolution for routing, got {model_value!r}"
+        )
+        assert provider == "openai-codex"
 
 
 class TestGatewayModelField:
