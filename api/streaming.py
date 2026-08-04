@@ -1982,25 +1982,27 @@ def _resolve_current_session_for_write(session):
     snapshot after that point serializes stale state over the successor
     (#6623 re-gate), so delayed-cancel writes MUST target the object that
     ``get_session()`` currently resolves under the canonical per-session
-    lock. Falls back to the passed object when the session cannot be
-    resolved (missing file, transient error).
+    lock.
+
+    Returns ``None`` (fail closed) when the current object cannot be
+    resolved — missing/deleted session, transient error, or no session id.
+    Callers MUST no-op on ``None`` and must NEVER fall back to the
+    worker-held snapshot: that object may be a detached LRU-evicted
+    generation whose save would overwrite the current session state.
     """
     sid = getattr(session, "session_id", None)
     if not sid:
-        return session
+        return None
     try:
-        current = get_session(sid)
+        return get_session(sid)
     except Exception:
         logger.debug(
             "Failed to resolve current session %s for delayed-cancel write; "
-            "falling back to worker-held snapshot",
+            "failing closed (no write)",
             sid,
             exc_info=True,
         )
-        return session
-    if current is None:
-        return session
-    return current
+        return None
 
 
 def _merge_process_wakeup_pause_into_current_session(
@@ -2019,9 +2021,18 @@ def _merge_process_wakeup_pause_into_current_session(
     resolved under the canonical per-session lock — and saved there. Saving
     the worker's snapshot instead would serialize stale state over the
     successor even when the generation-guarded finalizer later no-ops
-    (#6623 re-gate).
+    (#6623 re-gate). If the current object cannot be resolved the pause is
+    skipped (fail closed) — it is never written through the worker-held
+    snapshot.
     """
     current = _resolve_current_session_for_write(session)
+    if current is None:
+        logger.info(
+            "Skipping process-wakeup pause for unresolvable session %s "
+            "(fail closed — no detached-snapshot save)",
+            getattr(session, "session_id", None),
+        )
+        return None
     recorded = record_process_wakeup_provider_unavailable_pause(
         current,
         classification=classification,
@@ -2059,21 +2070,33 @@ def _finalize_cancelled_turn(
     of clearing pending fields, materializing the pending user turn, appending
     markers, unlinking the session, or saving. ``active_stream_id is None`` on
     a worker-held snapshot is NOT proof that no successor exists — cancel
-    cleanup clears that field eagerly.
+    cleanup clears that field eagerly. And a MISSING ownership record is NOT
+    proof that the session is idle: the successor's own teardown clears the
+    record when it completes, so ``owner is None`` must fail closed too.
     """
     if stream_id:
         session_id = getattr(session, "session_id", None)
-        current = _resolve_current_session_for_write(session) if session_id else session
-        # Immutable stream/generation authority: the writeback-ownership record
-        # survives cancel cleanup and is replaced only by a successor admission,
-        # so ``owner != stream_id`` is proof the session has advanced past this
-        # worker's stream — even when the current object's active_stream_id has
-        # since been cleared again (successor completed or was itself cancelled).
-        owner = session_writeback_owner(session_id) if session_id else None
-        if owner is not None and owner != stream_id:
+        current = _resolve_current_session_for_write(session) if session_id else None
+        if current is None:
             logger.info(
                 "Skipping stale cancelled-turn finalize for session %s stream %s; "
-                "writeback owner=%s (successor owns the session)",
+                "current session cannot be resolved (fail closed)",
+                session_id,
+                stream_id,
+            )
+            return
+        # Immutable stream/generation authority: the writeback-ownership record
+        # survives cancel cleanup and is replaced only by a successor admission,
+        # so authority must EQUAL this worker's exact stream_id. ``None`` —
+        # successor completed and its teardown cleared the entry, record never
+        # registered, or already reaped/deleted — must FAIL CLOSED: it is not
+        # proof that no successor exists, and the old worker would otherwise
+        # append/save its obsolete cancellation over the completed successor.
+        owner = session_writeback_owner(session_id) if session_id else None
+        if owner != stream_id:
+            logger.info(
+                "Skipping stale cancelled-turn finalize for session %s stream %s; "
+                "writeback owner=%r (missing, replaced, or unresolvable — fail closed)",
                 session_id,
                 stream_id,
                 owner,
@@ -11490,21 +11513,17 @@ def _run_agent_streaming(
             with _lock_ctx:
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
                     if _turn_pending_source == 'process_wakeup':
-                        _pause = record_process_wakeup_provider_unavailable_pause(
+                        # #6623 re-gate: merge the pause into the CURRENT
+                        # session object under the canonical lock — never save
+                        # the worker's detached snapshot. The helper fails
+                        # closed (no write) when the current object cannot be
+                        # resolved.
+                        _merge_process_wakeup_pause_into_current_session(
                             s,
                             classification=_exc_type,
                             model=_turn_route_model,
                             provider=_turn_route_provider,
                         )
-                        if _pause is not None:
-                            try:
-                                s.save(touch_updated_at=False)
-                            except Exception:
-                                logger.debug(
-                                    "Failed to persist stale-stream process_wakeup pause for session %s",
-                                    getattr(s, 'session_id', session_id),
-                                    exc_info=True,
-                                )
                     logger.info(
                         "Skipping stale stream error writeback for session %s stream %s; active_stream_id=%s",
                         getattr(s, 'session_id', session_id),
