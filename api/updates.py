@@ -579,10 +579,12 @@ def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | No
 # the gateway is unreachable (#6150, #6289).  Negative results (None)
 # are cached with a shorter TTL so a recovering gateway is picked up
 # promptly.
-_GATEWAY_AGENT_VERSION_CACHE: dict[str, object] = {
-    "value": None,
-    "at": 0.0,
-}
+#
+# The cache is a single immutable ``(value, completed_at)`` snapshot,
+# published/replaced in ONE assignment.  Lock-free readers snapshot the
+# whole tuple in a single read, so they can never combine a value from one
+# cache generation with a completion timestamp from another (#6289).
+_GATEWAY_AGENT_VERSION_CACHE: tuple[str | None, float] | None = None
 _GATEWAY_AGENT_VERSION_TTL = 30.0
 _GATEWAY_AGENT_VERSION_NEGATIVE_TTL = 5.0
 _gateway_version_lock = threading.Lock()
@@ -595,22 +597,11 @@ def _cached_agent_version_from_gateway() -> str | None:
     that at most one thread performs the gateway probe per TTL window, even
     under the ``ThreadingHTTPServer`` (128 workers) request model (#6289).
     """
+    global _GATEWAY_AGENT_VERSION_CACHE
     now = time.monotonic()
-    cached = _GATEWAY_AGENT_VERSION_CACHE["value"]
-    cached_at = _GATEWAY_AGENT_VERSION_CACHE["at"]
-    ttl = (
-        _GATEWAY_AGENT_VERSION_NEGATIVE_TTL
-        if cached is None
-        else _GATEWAY_AGENT_VERSION_TTL
-    )
-    if cached_at and (now - cached_at) < ttl:
-        return cached
-
-    with _gateway_version_lock:
-        # Double-check: another thread may have refreshed while we waited
-        now = time.monotonic()
-        cached = _GATEWAY_AGENT_VERSION_CACHE["value"]
-        cached_at = _GATEWAY_AGENT_VERSION_CACHE["at"]
+    snapshot = _GATEWAY_AGENT_VERSION_CACHE
+    if snapshot is not None:
+        cached, cached_at = snapshot
         ttl = (
             _GATEWAY_AGENT_VERSION_NEGATIVE_TTL
             if cached is None
@@ -619,9 +610,24 @@ def _cached_agent_version_from_gateway() -> str | None:
         if cached_at and (now - cached_at) < ttl:
             return cached
 
+    with _gateway_version_lock:
+        # Double-check: another thread may have refreshed while we waited
+        now = time.monotonic()
+        snapshot = _GATEWAY_AGENT_VERSION_CACHE
+        if snapshot is not None:
+            cached, cached_at = snapshot
+            ttl = (
+                _GATEWAY_AGENT_VERSION_NEGATIVE_TTL
+                if cached is None
+                else _GATEWAY_AGENT_VERSION_TTL
+            )
+            if cached_at and (now - cached_at) < ttl:
+                return cached
+
         result = _detect_agent_version_from_gateway_health(timeout=0.75)
-        _GATEWAY_AGENT_VERSION_CACHE["value"] = result
-        _GATEWAY_AGENT_VERSION_CACHE["at"] = time.monotonic()
+        # Publish the value and its completion time as ONE immutable
+        # snapshot in a single assignment — never two.
+        _GATEWAY_AGENT_VERSION_CACHE = (result, time.monotonic())
     return result
 
 
