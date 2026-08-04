@@ -7406,10 +7406,25 @@ def _run_agent_streaming(
                 register_gateway_notify as _reg_notify,
                 unregister_gateway_notify as _unreg_notify,
             )
+            # Generation-aware enqueue ownership (#6208): open the notify
+            # ownership generation BEFORE registering the callback so a
+            # callback snapshotted by a worker from a previous stream is
+            # recognized as stale at enqueue time.
+            _approval_gen = None
+            try:
+                from api.route_approvals import begin_gateway_notify_ownership as _begin_gateway_notify_ownership
+                _approval_gen = _begin_gateway_notify_ownership(session_id)
+            except Exception:
+                _approval_gen = None
             def _approval_notify_cb(approval_data):
                 if _submit_pending_for_polling is not None:
                     try:
-                        _submit_pending_for_polling(session_id, approval_data)
+                        if not _submit_pending_for_polling(session_id, approval_data, generation=_approval_gen):
+                            # Stale callback: the owning stream has already
+                            # torn down (or a newer stream took ownership) —
+                            # the exact entry was signaled so the worker
+                            # unblocks; no mirror and no SSE event.
+                            return
                     except Exception:
                         logger.warning("Failed to mirror approval into WebUI polling state", exc_info=True)
                 put('approval', approval_data)
@@ -10155,10 +10170,10 @@ def _run_agent_streaming(
                 except Exception:
                     logger.debug("Failed to unregister approval callback")
                 try:
-                    from api.route_approvals import mark_approval_tombstone
-                    mark_approval_tombstone(session_id)
+                    from api.route_approvals import end_gateway_notify_ownership
+                    end_gateway_notify_ownership(session_id)
                 except Exception:
-                    logger.debug("Failed to mark approval tombstone")
+                    logger.debug("Failed to close approval notify ownership")
             if _cleanup_gateway_pending_mirror is not None:
                 try:
                     _cleanup_gateway_pending_mirror()

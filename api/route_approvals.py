@@ -215,13 +215,29 @@ def _gateway_mirrored_pending_run_id(session_key: str, approval_id: str) -> str 
     return None
 
 
-def submit_gateway_pending_mirror(session_key: str, approval: dict) -> None:
-    """Mirror the live gateway head into WebUI polling state under a typed tag."""
-    del approval  # mirror from the live gateway head under `_lock`, not from callback input
+def submit_gateway_pending_mirror(
+    session_key: str, approval: dict, generation: int | None = None
+) -> bool:
+    """Mirror the live gateway head into WebUI polling state under a typed tag.
+
+    Mirrors from the live gateway head under ``_lock`` — not from callback
+    input — so the typed ``approval_id``/``run_id`` mirror always reflects
+    the current head.
+
+    When *generation* is provided (the callback-owned path), a stale
+    generation means the owning stream has already torn down or a newer
+    stream took ownership: the callback is a late survivor that must signal
+    only its exact entry (so the blocked worker returns promptly) and must
+    NOT create a mirror or notify SSE (#6100).  Returns False in that case.
+    """
     with _lock:
+        if generation is not None and _gateway_notify_generations.get(session_key) != generation:
+            _signal_stale_gateway_entry_locked(session_key, approval)
+            return False
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
     publish_session_list_changed("attention_pending")
+    return True
 
 
 def submit_pending(session_key: str, approval: dict) -> None:
@@ -253,30 +269,75 @@ def submit_pending(session_key: str, approval: dict) -> None:
     # unaffected by _pending. The _pending dict is only used for UI polling.
 
 
-# ── Post-unregister tombstone set ───────────────────────────────────────────
-# Sessions whose approval callback has been unregistered (teardown).  When
-# a surviving sub-agent thread later calls submit_pending / the gateway
-# mirror callback under the old session key, the tombstone prevents new
-# mirrors or pending entries from being created for a dead stream (#6100).
-_approval_tombstones: set[str] = set()
+# ── Gateway notify ownership lifecycle ─────────────────────────────────────
+# The agent-side gateway approval path
+# (tools.approval._await_gateway_decision) appends its ``_ApprovalEntry``
+# and THEN invokes the registered notify callback with the same dict
+# object.  A worker can snapshot the callback, lose the race to
+# ``unregister_gateway_notify()`` at stream teardown, and append its entry
+# after the queue was drained.  The callback wrapper therefore carries a
+# generation: if it fires with a stale generation it signals ONLY its exact
+# entry (never the whole session queue) so the worker unblocks and no
+# phantom mirror/red dot reappears (#6100).  The generation advances on
+# every register (begin) and every teardown (end), so a later turn on the
+# same session reopens the lifecycle instead of staying permanently
+# tombstoned.
+_approval_tombstones: set[str] = set()  # dead interval between end→begin
+_gateway_notify_generations: dict[str, int] = {}  # session_key → current generation
 
 
-def mark_approval_tombstone(session_key: str) -> None:
-    """Mark *session_key* as tombstoned — no new mirrors/pendings are accepted.
+def begin_gateway_notify_ownership(session_key: str) -> int:
+    """Open a new notify ownership generation for *session_key*.
 
-    Must be called after ``unregister_gateway_notify`` so the agent-side
-    callback is already dropped.  Any surviving sub-agent thread that tries
-    to enqueue an approval under the old session key will see the tombstone
-    and skip creating a stale entry.
+    Call BEFORE ``register_gateway_notify`` when a new stream starts.
+    Advances the generation — invalidating any callback snapshotted by a
+    previous stream — and clears the tombstone so the session lifecycle
+    reopens: a later turn on the same session can rebuild its typed
+    mirror.  Returns the generation the callback must capture.
     """
     with _lock:
+        _approval_tombstones.discard(session_key)
+        current = _gateway_notify_generations.get(session_key, 0)
+        _gateway_notify_generations[session_key] = current + 1
+        return current + 1
+
+
+def end_gateway_notify_ownership(session_key: str) -> None:
+    """Close the notify ownership generation for *session_key*.
+
+    Call AFTER ``unregister_gateway_notify`` at stream teardown.  Advances
+    the generation so a surviving callback snapshot is recognized as
+    stale, and re-tombstones the session for the dead interval.
+    """
+    with _lock:
+        current = _gateway_notify_generations.get(session_key, 0)
+        _gateway_notify_generations[session_key] = current + 1
         _approval_tombstones.add(session_key)
 
 
-def clear_approval_tombstone(session_key: str) -> None:
-    """Remove the tombstone, e.g. when a new stream starts for this session."""
-    with _lock:
-        _approval_tombstones.discard(session_key)
+def _signal_stale_gateway_entry_locked(session_key: str, approval: dict) -> None:
+    """Signal ONLY the exact gateway entry that triggered a stale callback.
+
+    CALLER MUST HOLD ``_lock``.
+
+    ``tools.approval._await_gateway_decision`` appends
+    ``_ApprovalEntry(approval_data)`` and then invokes the notify callback
+    with the SAME dict object, so ``entry.data is approval`` identifies the
+    exact entry — entries owned by a newer stream in the same queue are
+    untouched.  The entry is removed and its event set so the blocked
+    worker returns promptly (matching ``unregister_gateway_notify``
+    semantics).
+    """
+    queue = _gateway_queues.get(session_key)
+    if not queue:
+        return
+    for entry in queue:
+        if getattr(entry, "data", None) is approval:
+            queue.remove(entry)
+            entry.event.set()
+            break
+    if not queue:
+        _gateway_queues.pop(session_key, None)
 
 
 def force_clean_pending_approvals(session_key: str) -> None:
@@ -294,11 +355,12 @@ def force_clean_pending_approvals(session_key: str) -> None:
     approvals it did not own, including a still-live gateway mirror and
     non-gateway local approvals that should survive teardown.
 
-    The post-unregister re-enqueue race is closed by the
-    ``_approval_tombstones`` set: after ``unregister_gateway_notify`` the
-    teardown path calls ``mark_approval_tombstone``, and
-    ``reconcile_gateway_pending_mirror_locked`` will refuse to create new
-    mirrors from the live gateway queue for tombstoned sessions.
+    The post-unregister re-enqueue race is closed by the generation-aware
+    notify ownership: after ``unregister_gateway_notify`` the teardown path
+    calls ``end_gateway_notify_ownership``, and any surviving callback that
+    fires with a stale generation signals only its exact entry.  For the
+    dead interval, ``reconcile_gateway_pending_mirror_locked`` still treats
+    the live gateway queue as empty for tombstoned sessions.
     """
     with _lock:
         head, total, changed = reconcile_gateway_pending_mirror_locked(session_key)

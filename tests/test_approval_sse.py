@@ -113,10 +113,12 @@ class TestSSEStaticAnalysis:
         cb_start = streaming_src.find("def _approval_notify_cb(approval_data):")
         cb_end = streaming_src.find("_reg_notify(session_id, _approval_notify_cb)", cb_start)
         cb_body = streaming_src[cb_start:cb_end]
-        assert "_submit_pending_for_polling(session_id, approval_data)" in cb_body, \
+        assert "_submit_pending_for_polling(session_id, approval_data, generation=" in cb_body, \
             "_approval_notify_cb must mirror approval data into polling state before SSE"
         assert "put('approval', approval_data)" in cb_body, \
             "_approval_notify_cb must still emit the approval SSE event"
+        assert cb_body.find("put('approval', approval_data)") > cb_body.find("_submit_pending_for_polling"), \
+            "_approval_notify_cb must mirror polling state before the SSE push"
 
     def test_unsubscribe_in_finally(self):
         """SSE handler must unsubscribe in a finally block."""

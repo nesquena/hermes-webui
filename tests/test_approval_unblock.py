@@ -232,10 +232,12 @@ class TestApprovalModuleExports:
         assert cb_start != -1, "_approval_notify_cb must exist"
         cb_end = STREAMING_SRC.find("_reg_notify(session_id, _approval_notify_cb)", cb_start)
         cb_body = STREAMING_SRC[cb_start:cb_end]
-        assert "_submit_pending_for_polling(session_id, approval_data)" in cb_body, \
+        assert "_submit_pending_for_polling(session_id, approval_data, generation=" in cb_body, \
             "approval notify callback must mirror approval data into polling state"
         assert "put('approval', approval_data)" in cb_body, \
             "approval notify callback must still push the SSE event"
+        assert cb_body.find("put('approval', approval_data)") > cb_body.find("_submit_pending_for_polling"), \
+            "approval notify callback must mirror polling state before the SSE push"
 
 
 # ── HTTP regression tests (test server, port 8788) ───────────────────────────
