@@ -18679,7 +18679,7 @@ function loadMarkdownInline(container){
           return;
         }
         const rendered = renderMd(text);
-        el.outerHTML = `<div class="md-inline-wrap"><div class="md-inline-header"><span class="md-preview-title">${esc(fname)}</span><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a></div><div class="md-inline-content">${rendered}</div></div>`;
+        el.outerHTML = `<div class="md-inline-wrap"><div class="md-inline-header"><span class="md-preview-title">${esc(fname)}</span><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(typeof t === 'function' ? t('md_download') : 'Download')}</a></div><div class="md-inline-content">${rendered}</div></div>`;
       })
       .catch(() => {
         el.outerHTML = `<div class="md-inline-fallback"><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${esc(typeof t === 'function' ? t('md_error') : 'Error loading markdown')}</span></div>`;

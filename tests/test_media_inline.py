@@ -299,8 +299,14 @@ class TestMediaEndpointUnit(unittest.TestCase):
                       "_INLINE_IMAGE_TYPES whitelist must exist in _handle_media")
         self.assertIn("_AUDIO_VIDEO_PDF_TYPES", routes_src,
                       "shared audio/video/PDF preview MIME whitelist must exist in _handle_media")
-        self.assertIn('{"text/html"}', routes_src,
-                      "HTML must be added only to the session-token whitelist")
+        self.assertIn('{"text/html", "text/markdown"}', routes_src,
+                      "HTML+Markdown must be added only to the session-token whitelist")
+        # Security intent: HTML/Markdown are granted ONLY via the session-token
+        # allowlist — they must NOT join the general inline preview set.
+        start = routes_src.index("_INLINE_PREVIEW_TYPES = ")
+        inline_block = routes_src[start:start + 300]
+        self.assertNotIn("text/markdown", inline_block,
+                         "Markdown must stay out of the general inline preview set (session-token only)")
 
     def test_media_allowed_roots_env_var_referenced(self):
         """Handler must reference MEDIA_ALLOWED_ROOTS for configurable roots."""
@@ -737,6 +743,108 @@ class TestMediaEndpointUnit(unittest.TestCase):
             self.assertIn("text/html", handler.headers.get("content-type", ""))
             self.assertIn("sandbox", handler.headers.get("content-security-policy", ""))
             self.assertIn(b"Report", handler.body)
+
+    def test_handle_media_session_authorizes_markdown_artifact_outside_roots(self):
+        """An out-of-root .md path succeeds for preview and download=1 when the
+        matching session_id grant exists, and stays denied without that grant."""
+        import shutil
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+                self.body = b""
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, k, v):
+                self.headers[k.lower()] = v
+            def end_headers(self):
+                pass
+            class _W:
+                def __init__(self, owner):
+                    self.owner = owner
+                def write(self, b):
+                    self.owner.body += b
+                def flush(self):
+                    pass
+            @property
+            def wfile(self):
+                return self._W(self)
+
+        with tempfile.TemporaryDirectory() as home:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            # Genuinely out-of-root location: sibling of ~/.hermes (not under
+            # /tmp, HERMES_HOME, ~/.hermes, or the active workspace) so only
+            # the session-token grant can authorize it.
+            outside = pathlib.Path(tempfile.mkdtemp(
+                prefix=".hermes-outside-test-", dir=str(pathlib.Path.home())
+            ))
+            md = outside / "notes.md"
+            md.write_text("# Notes\n\nsecret markdown", encoding="utf-8")
+            session = SimpleNamespace(messages=[{"role": "assistant", "content": f"MEDIA:{md}"}])
+            quoted = urllib.parse.quote(str(md.resolve()))
+            try:
+                with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home), "MEDIA_ALLOWED_ROOTS": ""}), \
+                     mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                     mock.patch.object(routes, "get_session", return_value=session), \
+                     mock.patch("api.auth.is_auth_enabled", lambda: False):
+                    # Preview with the session grant
+                    handler = _Handler()
+                    routes._handle_media(
+                        handler,
+                        SimpleNamespace(
+                            query=f"path={quoted}&session_id=s-media&inline=1",
+                            path="/api/media",
+                        ),
+                    )
+                    self.assertEqual(handler.status, 200)
+                    self.assertIn("text/markdown", handler.headers.get("content-type", ""))
+                    self.assertIn(b"secret markdown", handler.body)
+
+                    # download=1 with the session grant
+                    handler = _Handler()
+                    routes._handle_media(
+                        handler,
+                        SimpleNamespace(
+                            query=f"path={quoted}&session_id=s-media&download=1",
+                            path="/api/media",
+                        ),
+                    )
+                    self.assertEqual(handler.status, 200)
+                    self.assertIn("text/markdown", handler.headers.get("content-type", ""))
+                    self.assertIn("attachment", handler.headers.get("content-disposition", ""))
+
+                    # Denied without the session grant
+                    handler = _Handler()
+                    routes._handle_media(
+                        handler,
+                        SimpleNamespace(
+                            query=f"path={quoted}&inline=1",
+                            path="/api/media",
+                        ),
+                    )
+                    self.assertEqual(handler.status, 403)
+
+                    # Denied when the session never emitted the MEDIA: token
+                    other = SimpleNamespace(
+                        messages=[{"role": "assistant", "content": "MEDIA:/tmp/unrelated.md"}]
+                    )
+                    with mock.patch.object(routes, "get_session", return_value=other):
+                        handler = _Handler()
+                        routes._handle_media(
+                            handler,
+                            SimpleNamespace(
+                                query=f"path={quoted}&session_id=s-other&inline=1",
+                                path="/api/media",
+                            ),
+                        )
+                        self.assertEqual(handler.status, 403)
+            finally:
+                shutil.rmtree(outside, ignore_errors=True)
 
 
 # ── Integration tests: live server on TEST_PORT ───────────────────────────────
