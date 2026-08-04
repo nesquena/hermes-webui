@@ -103,15 +103,20 @@ def _strip_media_references(text: str) -> str:
     Covers every renderer-recognized file:// form (issue #6285 review):
       - Bare file:// URLs (whitespace-delimited)
       - Markdown links: [label](file://...)
-      - Markdown images: ![alt](file://...)
-      - file:path (no slashes), file:/path (single slash)
+      - Markdown images: ![alt](file://...) — including whitespace/newline
+        destinations through the closing ')' (renderer image grammar)
       - file://localhost/path, file://127.0.0.1/path
       - URL-encoded file:// variants (e.g. file://%2Ftmp%2Ffile)
-    while preserving fenced and inline-code regions byte-for-byte (the
-    renderer keeps file:// inert inside code/preformatted content).
+    while preserving fenced code, inline code, raw <pre> blocks, and
+    complete blockquoted fences byte-for-byte (the renderer keeps file://
+    inert inside all of those). Stripping is restricted to the renderer-active
+    lowercase file:// spelling — inert file: and file:/ forms are left as-is.
 
     Process order matches the real renderer's (ui.js) pipeline:
       1. CRLF normalisation (renderer normalises before any parsing)
+      1b. Blockquote pre-pass (renderer groups >-prefixed lines, strips the
+          prefix, recursively renders — mirrors that here; preserves
+          complete blockquoted fences byte-for-byte)
       2. MEDIA: replacement (renderer converts MEDIA: to media tokens
          before fenced/inline code processing, so MEDIA: inside code
          regions is also rendered — matching that here means MEDIA:
@@ -119,8 +124,11 @@ def _strip_media_references(text: str) -> str:
       3. Fenced code stashing (only complete balanced fences — an
          unmatched opener stays as active prose for sanitisation)
       4. Inline code stashing
-      5. file:// URL replacement (bare + markdown forms)
-      6. Code restoration
+      4b. Raw <pre> block stashing (renderer stashes these before its
+          bare file:// pass, so file:// inside them stays inert)
+      5. file:// URL replacement (images with renderer-matched [^\)]+
+         destinations first, then links, then bare URLs)
+      6. Stash restoration (raw <pre>, fences, inline, blockquotes)
     """
     if not isinstance(text, str) or not text:
         return text
@@ -130,6 +138,69 @@ def _strip_media_references(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
 
     placeholder = "[Local attachment omitted from public share]"
+
+    # (1b) Blockquote pre-pass — mirror renderMd()'s _applyBlockquotes
+    # (ui.js ~L7115-7162).  The renderer groups consecutive >-prefixed
+    # lines, strips the "> " prefix, and recursively runs the FULL
+    # pipeline on the stripped text.  We do the same: group, strip,
+    # recurse this sanitizer, re-prefix every line, and stash the result
+    # as a \x00Q token so no outer pass re-processes it.  This keeps
+    # file:// inside a COMPLETE blockquoted fence byte-for-byte
+    # (renderer-inert there: the recursion stashes the fence) while still
+    # stripping file:// in blockquote prose (renderer-active there).
+    # Like the renderer, a ">" line that sits inside a non-blockquote
+    # backtick fence is fence content, NOT a blockquote — track fence
+    # state so it passes through untouched.
+    _bq: list[str] = []
+    _lines = text.split("\n")
+    _bq_out: list[str] = []
+    _in_fence = False
+    _fence_len = 0
+
+    def _bq_flush(end):
+        if _bq_start[0] < 0:
+            return
+        _stripped = "\n".join(
+            re.sub(r"^> ?", "", l) for l in _lines[_bq_start[0]:end]
+        )
+        _resanitized = _strip_media_references(_stripped)
+        _reprefixed = "\n".join(
+            ("> " + l) if l else ">" for l in _resanitized.split("\n")
+        )
+        _bq.append(_reprefixed)
+        _bq_out.append("")
+        _bq_out.append(f"\x00Q{len(_bq) - 1}\x00")
+        _bq_out.append("")
+        _bq_start[0] = -1
+
+    _bq_start = [-1]
+    _i = 0
+    while _i < len(_lines):
+        _line = _lines[_i]
+        if _in_fence:
+            _bq_out.append(_line)
+            _cm = re.match(r"^[ ]{0,3}(`{3,})[ \t]*$", _line)
+            if _cm and len(_cm.group(1)) >= _fence_len:
+                _in_fence = False
+            _i += 1
+            continue
+        _om = re.match(r"^[ ]{0,3}(`{3,})([^`]*)$", _line)
+        if _om:
+            _bq_flush(_i)
+            _bq_out.append(_line)
+            _in_fence = True
+            _fence_len = len(_om.group(1))
+            _i += 1
+            continue
+        if _line.startswith(">"):
+            if _bq_start[0] < 0:
+                _bq_start[0] = _i
+        else:
+            _bq_flush(_i)
+            _bq_out.append(_line)
+        _i += 1
+    _bq_flush(len(_lines))
+    text = "\n".join(_bq_out)
 
     # (2) Replace MEDIA: EVERYWHERE before code stashing — the renderer
     # converts MEDIA: to media-stash tokens before fenced/inline code
@@ -183,24 +254,42 @@ def _strip_media_references(text: str) -> str:
         text,
     )
 
-    # (5) file:// URL replacement
-    # Markdown images: ![alt](file:(?://)?...) → placeholder
-    text = re.sub(r"!\[[^\]]*\]\(file:(?://)?[^\s)]+\)", placeholder, text)
+    # (4b) Stash raw <pre> blocks so file:// inside them is preserved.
+    # The renderer stashes raw <pre>...</pre> BEFORE its bare file:// pass
+    # (ui.js ~L7269) and restores it only after all markdown passes, so a
+    # file:// inside a literal <pre> block stays inert text — mirror that.
+    _raw_pre: list[str] = []
+    text = re.sub(
+        r"(<pre\b[^>]*>[\s\S]*?</pre>)",
+        lambda m: _raw_pre.append(m.group(0)) or f"\x00R{len(_raw_pre) - 1}\x00",
+        text,
+        flags=re.IGNORECASE,
+    )
 
-    # Markdown links: [label](file:(?://)?...) → placeholder
-    text = re.sub(r"\[[^\]]+\]\(file:(?://)?[^\s)]+\)", placeholder, text)
+    # (5) file:// URL replacement — grammar matches the renderer (ui.js):
+    #   - Markdown images: destination is [^\)]+ — whitespace AND newline
+    #     destinations are accepted through the closing ')' (L7331/L7473).
+    #     The whole construct is replaced BEFORE the bare-URL pass so a
+    #     space-destination image like ![x](file:///a b.png) can never be
+    #     partially consumed by the bare-URL regex below.
+    #   - Markdown links: destination is [^\s\)]+ — whitespace terminates
+    #     the link destination (L7338/L7479).
+    #   - Bare file:// URLs: whitespace-delimited (L7277).
+    # Restrict to the renderer-active lowercase file:// spelling only —
+    # inert file: / file:/ forms are renderer-inert literals and stay.
+    text = re.sub(r"!\[[^\]]*\]\(file://[^\)]+\)", placeholder, text)
+    text = re.sub(r"\[[^\]]+\]\(file://[^\s\)]+\)", placeholder, text)
+    text = re.sub(r"(^|\s)file://[^\s<>\"')\]]+", r"\1" + placeholder, text)
 
-    # Bare file:(?://)? URLs – preserve the leading delimiter instead of
-    # consuming whitespace and unconditionally inserting a space (review
-    # feedback). The file:(?://)? pattern also catches file:path and
-    # file:/path forms in addition to standard file:// and file:/// variants.
-    text = re.sub(r"(^|\s)file:(?://)?[^\s<>\"')\]]+", r"\1" + placeholder, text)
-
-    # (6) Restore stashed code regions.
+    # (6) Restore stashed regions.
+    for i, s in enumerate(_raw_pre):
+        text = text.replace(f"\x00R{i}\x00", s)
     for i, s in enumerate(_fenced):
         text = text.replace(f"\x00F{i}\x00", s)
     for i, s in enumerate(_inline):
         text = text.replace(f"\x00I{i}\x00", s)
+    for i, s in enumerate(_bq):
+        text = text.replace(f"\x00Q{i}\x00", s)
 
     return text
 

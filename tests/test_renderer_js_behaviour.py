@@ -37,24 +37,22 @@ global.document = { createElement: () => ({ innerHTML: '', textContent: '' }), b
 function _sessionUrlForSid(sid) { return '/app/session/' + encodeURIComponent(String(sid || '')); }
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
   {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// Constants extracted verbatim from ui.js — required by the REAL
+// _inlineMediaHtmlForRef / _mdImageHtml chain that renderMd() delegates to
+// (the file:// → api/media?path= boundary under test).
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
+const _PDF_EXTS=/\.pdf$/i;
+const _HTML_EXTS=/\.(html?|htm)$/i;
 const _SVG_EXTS=/\.svg$/i;
-const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm)$/i;
+const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm|oga)$/i;
 const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
-// Minimal stand-in for ui.js' _inlineMediaHtmlForRef used when the driver
-// extracts only renderMd(). Mirrors the live UI for the cases the existing
-// tests assert against (https image, bare file:// image). The full renderer
-// (ui.js) is preferred on the real page — these nodes only cover what is
-// reachable from a standalone renderMd() invocation.
-function _inlineMediaHtmlForRef(ref){
-  const r = String(ref || '');
-  if (/^https?:\/\//.test(r)) return `<img class="msg-media-img" src="${esc(r)}" alt="image" loading="lazy">`;
-  if (/^file:\/\//.test(r)){
-    const m = r.replace(/^file:\/\//i, '');
-    return `<img class="msg-media-img" src="api/media?path=${encodeURIComponent(m)}" alt="image" loading="lazy">`;
-  }
-  return `<img class="msg-media-img" src="api/media?path=${encodeURIComponent(r)}" alt="image" loading="lazy">`;
-}
+const _CSV_EXTS=/\.csv$/i;
+const _EXCALIDRAW_EXTS=/\.excalidraw$/i;
+const MEDIA_PLAYBACK_RATES=[0.5,0.75,1,1.25,1.5,2];
+const MEDIA_PLAYBACK_STORAGE_KEY='hermes-media-playback-rate';
+const _DATA_IMAGE_RE=/^data:image\/(?:png|jpe?g|gif|webp|avif)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*$/i;
+const _DATA_IMAGE_SVG_RE=/^data:image\/svg\+xml;base64,[a-z0-9+/=]+$/i;
+const _DATA_IMAGE_MAX_LEN=2*1024*1024;
 
 function extractFunc(name) {
   const re = new RegExp('function\\s+' + name + '\\s*\\(');
@@ -69,6 +67,17 @@ function extractFunc(name) {
   }
   return src.slice(start, i);
 }
+// REAL renderer helpers — no stubs. The file:// → api/media?path= boundary
+// only exists in the live _inlineMediaHtmlForRef; a stub would make the
+// cross-boundary tests pass trivially without exercising the leak.
+eval(extractFunc('_isSafeDataImageUri'));
+eval(extractFunc('_dataImageHtml'));
+eval(extractFunc('_mediaKindForName'));
+eval(extractFunc('_getStoredMediaPlaybackRate'));
+eval(extractFunc('_mediaSpeedControlsHtml'));
+eval(extractFunc('_mediaPlayerHtml'));
+eval(extractFunc('_inlineMediaHtmlForRef'));
+eval(extractFunc('_mdImageHtml'));
 eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
 eval(extractFunc('renderMd'));
@@ -863,6 +872,115 @@ class TestPublicShareSanitizerThroughRenderer:
         )
         assert "api/media?path=" not in html, (
             f"Markdown ![alt](file://...) survived sanitizer: {html!r}"
+        )
+
+    # ── Renderer-matched image destinations (re-gate #6285) ────────────
+    # The renderer's image regex accepts [^\)]+ destinations — whitespace
+    # AND newlines through the closing ')' (ui.js L7331/L7473).  The
+    # sanitizer must strip the WHOLE construct so a space-destination image
+    # can never survive into /api/media.  Each case: CONTROL (unsanitized
+    # render shows the private api/media reference EXISTS) → sanitized
+    # render shows it is GONE.
+
+    def test_control_image_no_space_destination_leaks_api_media(self, driver_path):
+        """Control: unsanitized ![x](file:///tmp/chart.png) emits api/media."""
+        html = _render(driver_path, "![chart](file:///tmp/chart.png)")
+        assert "api/media?path=" in html, (
+            f"Control must show the leak before sanitizing: {html!r}"
+        )
+
+    def test_control_image_space_destination_leaks_api_media(self, driver_path):
+        """Control: unsanitized ![x](file:///a b.png) emits api/media."""
+        html = _render(driver_path, "![secret](file:///home/alice/private image.png)")
+        assert "api/media?path=" in html, (
+            f"Control must show the space-destination leak: {html!r}"
+        )
+
+    def test_control_image_multiline_destination_leaks_api_media(self, driver_path):
+        """Control: unsanitized ![x](file:///a\\nb.png) emits api/media."""
+        html = _render(driver_path, "![secret](file:///home/alice/private\nimage.png)")
+        assert "api/media?path=" in html, (
+            f"Control must show the multiline-destination leak: {html!r}"
+        )
+
+    def test_image_no_space_destination_does_not_survive_sanitizer(self, driver_path):
+        html = self._sanitized_render(
+            driver_path,
+            "![chart](file:///tmp/chart.png)",
+        )
+        assert "api/media?path=" not in html, (
+            f"No-space image destination survived sanitizer: {html!r}"
+        )
+
+    def test_image_space_destination_does_not_survive_sanitizer(self, driver_path):
+        html = self._sanitized_render(
+            driver_path,
+            "![secret](file:///home/alice/private image.png)",
+        )
+        assert "api/media?path=" not in html, (
+            f"Space image destination survived sanitizer: {html!r}"
+        )
+
+    def test_image_multiline_destination_does_not_survive_sanitizer(self, driver_path):
+        html = self._sanitized_render(
+            driver_path,
+            "![secret](file:///home/alice/private\nimage.png)",
+        )
+        assert "api/media?path=" not in html, (
+            f"Multiline image destination survived sanitizer: {html!r}"
+        )
+
+    def test_image_multiline_destination_placeholder_present(self, driver_path):
+        from api.shares import _strip_media_references
+        sanitized = _strip_media_references(
+            "![secret](file:///home/alice/private\nimage.png)"
+        )
+        assert "[Local attachment omitted from public share]" in sanitized, (
+            f"Multiline image construct must be replaced wholesale: {sanitized!r}"
+        )
+
+    # ── Renderer-inert literals: raw <pre> and complete blockquoted fences ──
+
+    def test_raw_pre_block_preserves_file_url_literal(self, driver_path):
+        from api.shares import _strip_media_references
+        src = "<pre>file:///etc/passwd</pre>"
+        sanitized = _strip_media_references(src)
+        assert "file:///etc/passwd" in sanitized, (
+            f"file:// inside raw <pre> must be preserved: {sanitized!r}"
+        )
+        html = _render(driver_path, sanitized)
+        assert "api/media?path=" not in html
+
+    def test_complete_blockquoted_fence_preserves_file_url_literal(self, driver_path):
+        from api.shares import _strip_media_references
+        src = "> ```\n> file:///etc/passwd\n> ```"
+        sanitized = _strip_media_references(src)
+        assert "file:///etc/passwd" in sanitized, (
+            f"file:// inside a complete blockquoted fence must be preserved: {sanitized!r}"
+        )
+        html = _render(driver_path, sanitized)
+        assert "api/media?path=" not in html
+
+    def test_blockquoted_fence_with_space_destination_preserved(self, driver_path):
+        from api.shares import _strip_media_references
+        src = "> ```\n> ![x](file:///home/alice/private image.png)\n> ```"
+        sanitized = _strip_media_references(src)
+        assert "file:///home/alice/private image.png" in sanitized, (
+            f"file:// image inside a complete blockquoted fence must be preserved: {sanitized!r}"
+        )
+        html = _render(driver_path, sanitized)
+        assert "api/media?path=" not in html
+
+    def test_inert_file_single_slash_forms_are_preserved(self, driver_path):
+        """file: and file:/ (renderer-inert) must NOT be stripped."""
+        from api.shares import _strip_media_references
+        src = "see file:relative.txt or file:/single/slash.txt"
+        sanitized = _strip_media_references(src)
+        assert "file:relative.txt" in sanitized, (
+            f"inert file: form must be preserved: {sanitized!r}"
+        )
+        assert "file:/single/slash.txt" in sanitized, (
+            f"inert file:/ form must be preserved: {sanitized!r}"
         )
 
     def test_media_token_does_not_survive(self, driver_path):

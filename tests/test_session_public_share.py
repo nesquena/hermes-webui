@@ -457,6 +457,45 @@ def test_share_preserves_delimiter_before_file_url():
         post("/api/session/delete", {"session_id": sid})
 
 
+def test_share_strips_image_destinations_with_spaces_and_newlines():
+    """![alt](file:///path with space.png) and multiline destinations must be
+    stripped — the renderer's image grammar accepts destinations up to the
+    closing ')' including whitespace and newlines."""
+    created, _ = post("/api/session/new", {})
+    sid = created["session"]["session_id"]
+    from api.models import Session
+
+    session = Session.load(sid) or Session(session_id=sid)
+    session.title = "Whitespace Image Destinations"
+    session.messages = [
+        {"role": "user", "content": "Check these files."},
+        {
+            "role": "assistant",
+            "content": (
+                "![secret](file:///home/alice/private image.png)\n"
+                "![secret](file:///home/alice/private\nimage.png)\n"
+                "![chart](file:///tmp/chart.png)\n"
+            ),
+        },
+    ]
+    session.workspace = "/tmp"
+    session.profile = None
+    session.save()
+
+    try:
+        created, _ = post("/api/share/create", {"session_id": sid})
+        token = created["share"]["token"]
+        shared, status, _ = get(f"/api/share/{token}")
+        assert status == 200
+        content = shared["share"]["messages"][1]["content"]
+        # No file:// anywhere — including whitespace/newline destinations
+        assert "file://" not in content
+        placeholder = "[Local attachment omitted from public share]"
+        assert content.count(placeholder) == 3
+    finally:
+        post("/api/session/delete", {"session_id": sid})
+
+
 def test_legacy_snapshot_strips_media_on_read():
     """Pre-fix snapshots with file:// content must be sanitized on read."""
     # Simulate a legacy snapshot written directly to disk without sanitization.
@@ -467,6 +506,8 @@ def test_legacy_snapshot_strips_media_on_read():
     legacy_content = (
         "[the data](file:///old/path.csv)\n"
         "![old chart](file:///old/chart.png)\n"
+        "![private shot](file:///old/private shot.png)\n"
+        "![multi line](file:///old/multi\nline.png)\n"
         "bare file:///old/leak.txt here\n"
     )
     payload = {
@@ -491,7 +532,7 @@ def test_legacy_snapshot_strips_media_on_read():
         content = result["messages"][1]["content"]
         assert "file://" not in content
         placeholder = "[Local attachment omitted from public share]"
-        assert content.count(placeholder) == 3
+        assert content.count(placeholder) == 5
     finally:
         try:
             path.unlink(missing_ok=True)
