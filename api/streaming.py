@@ -2581,9 +2581,14 @@ def _reset_streaming_hermes_home_override(override_mod, override_token, override
 #  5. ONE shared acquisition boundary (terminal_tool.terminal_tool,
 #     file_tools._get_file_ops, code_execution_tool._get_or_create_env)
 #     compares the live env's tag against the CALLING TURN's captured
-#     (thread-local) generation — never the process-global current
+#     (ContextVar) generation — never the process-global current
 #     generation — and never reuses or tears down an env an active
 #     old-backend turn still owns (retire deferred until drain).
+#     Validation, stale compare-and-remove, reuse/create, object tagging,
+#     owner publication and the final exact-object check are ONE
+#     _backend_acquisition_lock transaction (see _acquire_backend_object),
+#     so no concurrent guarded acquisition can install an env between the
+#     ownership check and the real acquire (empty-slot TOCTOU).
 #  6. Retire is compare-and-remove under the registry lock, cleaning up the
 #     exact removed object OUTSIDE the lock, eliminating the
 #     setup-to-tool os.environ race and the read/retire replacement gap.
@@ -2618,8 +2623,10 @@ _BACKEND_IDENTITY_KEYS: tuple[str, ...] = (
     'TERMINAL_DOCKER_RUN_AS_HOST_USER',
     'TERMINAL_DOCKER_NETWORK',
     'TERMINAL_DOCKER_EXTRA_ARGS',
+    'TERMINAL_DOCKER_SHM_SIZE',
     'TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES',
     'TERMINAL_DOCKER_ORPHAN_REAPER',
+    'TERMINAL_VERCEL_RUNTIME',
 )
 
 # Backend identity and generation tracking
@@ -2767,10 +2774,19 @@ def _cleanup_environment_object(env) -> None:
     Called OUTSIDE the registry lock, on the exact object removed by
     ``_retire_generation_env``, so a replacement installed under the same key
     is never torn down.
+
+    Stale-generation retirement must PHYSICALLY destroy the sandbox: a
+    persistent Docker env cleaned without ``force_remove=True`` survives and
+    can be reattached under stale labels by a later backend.  Backends whose
+    ``cleanup()`` does not accept the kwarg raise TypeError and fall back to
+    the plain call (same signature probe ``cleanup_vm`` uses).
     """
     try:
         if hasattr(env, 'cleanup'):
-            env.cleanup()
+            try:
+                env.cleanup(force_remove=True)
+            except TypeError:
+                env.cleanup()
         elif hasattr(env, 'stop'):
             env.stop()
         elif hasattr(env, 'terminate'):
@@ -2850,29 +2866,45 @@ def _publish_backend_identity(profile_runtime_env: dict | None) -> int | None:
 
 
 def _refresh_env_generation_tag() -> None:
-    """After the agent turn, publish ownership of the live environment.
+    """After the agent turn, publish ownership of the environment THIS TURN
+    actually acquired and used.
 
-    Records the CURRENT TURN's generation as the owner of the cached 'default'
-    env (if one exists) and tags the env object with it.  This is the publish
-    side of the generation protocol: without it the invalidator has no
-    recorded owner to compare against and can never retire a stale env.
+    Operates ONLY on the exact object the calling turn's guarded acquisitions
+    validated: the live 'default' env is published iff its generation tag is
+    ALREADY the calling turn's captured (ContextVar) generation — the only
+    state a registered turn can legitimately leave behind (creation-time
+    tagging via the ``_create_environment`` wrapper, or same-generation
+    reuse).  It NO-OPs when:
 
-    The tag MUST be the calling turn's captured (ContextVar) generation, NOT
-    the process-global current generation: a concurrent profile switch may
-    already have bumped the global generation while this turn was still
-    executing, and tagging this turn's env with that newer generation would
-    make the guard consider a stale-backend env "owned" by the new backend.
+      * begin failed / no generation is bound (the ContextVar is None),
+      * the turn acquired no environment (nothing is tagged with its gen),
+      * the registry object changed (a different object now occupies the
+        slot — detected through its tag, which belongs to another gen),
+      * the object's generation differs.
+
+    In particular it NEVER writes the finishing turn's generation onto an
+    environment created by another turn.  The old global-slot retag admitted
+    this schedule: turn A (gen 0) begins while no env exists, turn B (gen 1)
+    begins after an identity switch and creates a gen-1 env, A finishes
+    without ever acquiring anything, and A's ``finally`` retagged B's live
+    object as gen 0 — so the deferred gen-0 drain then retired B's env while
+    B was still using it.  The tag is the immutable provenance record: only
+    the generation that produced the object may publish it.
     """
+    turn_gen = _get_turn_generation()
+    if turn_gen is None:
+        return
     try:
-        from tools.terminal_tool import get_active_env
-
-        env = get_active_env('default')
-        if env is not None:
-            gen = _get_turn_generation()
-            if gen is None:
-                gen = _get_current_backend_generation()
-            _mark_env_backend_generation('default', gen)
-            env._webui_backend_generation = gen
+        tt = importlib.import_module('tools.terminal_tool')
+        with tt._env_lock:
+            env = tt._active_environments.get('default')
+            if env is None:
+                return
+            if getattr(env, '_webui_backend_generation', None) != turn_gen:
+                # Foreign generation (or untagged): never retag or publish.
+                return
+        # Exact-object + exact-generation match: publish the owner record.
+        _mark_env_backend_generation('default', turn_gen)
     except ImportError:
         pass
     except Exception:
@@ -2913,7 +2945,9 @@ def _wait_for_generation_drain(
             _backend_generation_cond.wait(min(remaining, 1.0))
 
 
-def _validate_backend_ownership(tt, effective_task_id: str, raw_task_id) -> None:
+def _validate_backend_ownership(
+    tt, effective_task_id: str, raw_task_id, *, allow_wait: bool = True,
+) -> None:
     """ONE shared acquisition boundary for terminal / file / code-execution.
 
     Guarantees the calling turn never reuses an environment created under a
@@ -2927,14 +2961,24 @@ def _validate_backend_ownership(tt, effective_task_id: str, raw_task_id) -> None
         past the env's tag) and NOT the recorded per-task owner (which a
         concurrent switch may have moved past this turn's capture).
       * An env tagged with a different generation is never reused.
-      * An UNTAGGED env is never reused by a registered WebUI turn: it has no
-        provenance, so it is treated as stale and retired (fail-closed).
-      * If turns still execute under that generation, the retire is deferred:
-        we wait (bounded) for them to drain instead of tearing the env down
-        mid-use.  The retire itself is a compare-and-remove that cleans up the
-        exact removed object OUTSIDE the registry lock, and the loop
-        re-validates afterwards so a replacement installed while we waited is
-        never reused or torn down either.
+      * An UNTAGGED env is never reused by a registered WebUI turn — and it
+        is never DESTROYED speculatively either: it may be in active use by an
+        untracked/non-WebUI caller, so unknown ownership is ISOLATED
+        (compare-and-remove from the registry without running teardown), not
+        accepted and not torn down as if it were inactive.
+      * If turns still execute under a stale env's generation, the retire is
+        deferred: we wait (bounded) for them to drain instead of tearing the
+        env down mid-use.  The retire itself is a compare-and-remove that
+        cleans up the exact removed object OUTSIDE the registry lock, and the
+        loop re-validates afterwards so a replacement installed while we
+        waited is never reused or torn down either.
+
+    ``allow_wait=False`` (the in-transaction re-validation) never blocks: the
+    pre-phase already drained any active foreign generation, and a foreign
+    generation can only become active again through a NEW identity publish,
+    which makes THIS turn the stale owner — refusing is the fail-closed
+    answer, and waiting here would deadlock the active turn, which needs the
+    same acquisition lock to run its own tool calls.
     """
     turn_gen = _get_turn_generation()
     # Untracked callers (non-WebUI flows) fall back to the recorded per-task
@@ -2959,6 +3003,14 @@ def _validate_backend_ownership(tt, effective_task_id: str, raw_task_id) -> None
                 # Non-WebUI caller (no captured turn generation): the agent's
                 # own registry is authoritative — accept untagged envs.
                 return
+            if env_gen is None:
+                # Registered WebUI turn, untagged env: unknown ownership —
+                # isolate (never serve it again) without speculative teardown.
+                tt._active_environments.pop(effective_task_id, None)
+                tt._last_activity.pop(effective_task_id, None)
+                tt._active_environments.pop(raw_task_id, None)
+                tt._last_activity.pop(raw_task_id, None)
+                return
             if turn_gen is not None and env_gen is not None:
                 with _backend_generation_lock:
                     _pending_eviction_generations.add(env_gen)
@@ -2966,6 +3018,16 @@ def _validate_backend_ownership(tt, effective_task_id: str, raw_task_id) -> None
             else:
                 gen_active = False
         if turn_gen is not None and gen_active:
+            if not allow_wait:
+                # A foreign generation became active mid-transaction: this
+                # turn is now the stale owner — refuse (fail-closed) rather
+                # than block the active turn (which needs this lock) or tear
+                # down / reuse its environment.
+                raise RuntimeError(
+                    f'Backend generation {env_gen} is still active; refusing '
+                    'acquisition inside the ownership transaction (would '
+                    'violate the cross-backend boundary)'
+                )
             # An old-backend turn still owns this env — never tear it down.
             # Wait for it to exit, then re-validate (it may have been retired
             # by the drain, or replaced by a concurrent thread).
@@ -2975,10 +3037,15 @@ def _validate_backend_ownership(tt, effective_task_id: str, raw_task_id) -> None
 
 
 def _evict_stale_file_ops_cache_entry(ft, task_key: str, turn_gen: int) -> None:
-    """Drop a cached file_ops object tagged with a stale generation.
+    """Drop a cached file_ops object this turn may not use.
 
     Compare-and-remove under the module's own cache lock so a concurrent
-    replacement installed under the same key is never cleared.
+    replacement installed under the same key is never cleared.  An entry
+    tagged with a DIFFERENT generation OR left UNTAGGED (unknown ownership)
+    is evicted: neither may be served to a registered turn (fail-closed —
+    the old ``cached_gen is None`` early-return accepted unknown ownership).
+    Eviction only drops the wrapper; the underlying env is governed by the
+    registry ownership check.
     """
     try:
         cache = ft._file_ops_cache
@@ -2990,7 +3057,7 @@ def _evict_stale_file_ops_cache_entry(ft, task_key: str, turn_gen: int) -> None:
     if cached is None:
         return
     cached_gen = getattr(cached, '_webui_backend_generation', None)
-    if cached_gen is None or cached_gen == turn_gen:
+    if cached_gen == turn_gen:
         return
     with cache_lock:
         if cache.get(task_key) is cached:
@@ -3065,6 +3132,95 @@ def _end_turn_generation() -> None:
         logger.debug('Turn generation unregister failed', exc_info=True)
 
 
+def _get_registry_env(tt, effective_task_id: str, raw_task_id):
+    """Read the live env for a task key directly under the registry lock.
+
+    Inline lookup only — never a lock-taking accessor like
+    ``get_active_env()`` while the non-reentrant ``_env_lock`` is held.
+    """
+    with tt._env_lock:
+        return (
+            tt._active_environments.get(effective_task_id)
+            or tt._active_environments.get(raw_task_id)
+        )
+
+
+def _final_ownership_check(
+    tt, effective_task_id: str, raw_task_id, turn_gen: int | None,
+):
+    """Final exact-object/exact-generation check inside the transaction.
+
+    After the original acquirer ran, the live env must belong to the calling
+    turn's generation (or be absent — e.g. an execution that produced no
+    sandbox).  A foreign env means the acquirer produced/reused an object
+    this turn may not use: refuse (fail-closed) rather than execute against
+    it or bless a wrapper that wraps it.  Returns the validated env (or
+    None).  The caller must hold ``_backend_acquisition_lock``.
+    """
+    if turn_gen is None:
+        return None
+    env = _get_registry_env(tt, effective_task_id, raw_task_id)
+    if env is None:
+        return None
+    env_gen = getattr(env, '_webui_backend_generation', None)
+    if env_gen != turn_gen:
+        raise RuntimeError(
+            'Backend ownership changed during acquisition: the live '
+            f'environment is tagged generation {env_gen!r} but the calling '
+            f'turn captured {turn_gen!r}; refusing cross-backend reuse'
+        )
+    return env
+
+
+def _acquire_backend_object(
+    tt, effective_task_id: str, raw_task_id, acquire_fn, on_acquired=None,
+):
+    """ONE authoritative acquisition transaction for every guarded path.
+
+    Serializes expected-generation validation, stale compare-and-remove,
+    reuse/create (the original acquirer), object tagging, owner publication
+    and the final exact-object/exact-generation check under
+    ``_backend_acquisition_lock`` — so a concurrent guarded acquisition can
+    never install an env between the ownership check and the real acquire
+    (the empty-slot TOCTOU where generations A and B both validate an empty
+    slot, A creates and registers its env, and B's original fast path then
+    reuses/executes against A's object), and no wrapper can bless an object
+    whose underlying env came from another generation.
+
+    The potentially-blocking stale-generation drain wait runs OUTSIDE the
+    lock (pre-phase): an active old-generation turn still needs the same
+    acquisition lock to run its own tool calls, so waiting under the lock
+    would deadlock it until the drain timeout.  The in-lock re-validation is
+    therefore non-blocking (``allow_wait=False``) and refuses (fail-closed)
+    if a foreign generation somehow became active mid-transaction.
+
+    ``on_acquired(result, turn_gen, validated_env)`` runs inside the
+    transaction, after the final check, and performs object tagging + owner
+    publication for the exact validated object.
+    """
+    turn_gen = _get_turn_generation()
+    # Pre-phase (no global lock): retire/defuse any env this turn may not
+    # use.  Any drain wait happens here — OUTSIDE _backend_acquisition_lock —
+    # so an active old-generation turn can still run its own guarded tool
+    # call (it needs the same lock) and exit, waking this wait.
+    _validate_backend_ownership(tt, effective_task_id, raw_task_id)
+    with _backend_acquisition_lock:
+        # Re-validate: non-blocking here and atomic with the reuse/create
+        # below — no other guarded acquisition can interleave, so the env
+        # this turn validated (or the fresh one the acquirer creates) is the
+        # exact object the turn executes against.
+        _validate_backend_ownership(
+            tt, effective_task_id, raw_task_id, allow_wait=False,
+        )
+        result = acquire_fn()
+        validated_env = _final_ownership_check(
+            tt, effective_task_id, raw_task_id, turn_gen,
+        )
+        if on_acquired is not None:
+            on_acquired(result, turn_gen, validated_env)
+    return result
+
+
 def _install_terminal_env_generation_guard() -> None:
     """Monkey-patch ALL terminal/file/code-execution acquisition paths with a
     single shared backend-ownership boundary.
@@ -3077,12 +3233,14 @@ def _install_terminal_env_generation_guard() -> None:
         env created during a WebUI turn is tagged with the calling turn's
         generation atomically at creation, so no untagged window exists)
 
-    Each wrapped acquisition validates ownership via
-    :func:`_validate_backend_ownership` under the registry lock (inline lookup
-    — never a lock-taking accessor like ``get_active_env()`` while holding the
-    non-reentrant ``_env_lock``) and compares against the calling turn's
-    captured generation, eliminating the setup-to-tool os.environ race for
-    cached environments.
+    Each wrapped acquisition runs the WHOLE validate → reuse/create → tag →
+    publish → final-exact-check sequence through
+    :func:`_acquire_backend_object` — ONE ``_backend_acquisition_lock``
+    transaction — so validation and acquisition cannot be separated by a
+    concurrent guarded acquisition (the empty-slot TOCTOU).  Ownership is
+    compared against the calling turn's captured generation, and the
+    registry is read inline (never a lock-taking accessor like
+    ``get_active_env()`` while holding the non-reentrant ``_env_lock``).
     """
     global _terminal_env_guard_installed
     if _terminal_env_guard_installed:
@@ -3104,19 +3262,37 @@ def _install_terminal_env_generation_guard() -> None:
             notify_on_complete=False, watch_patterns=None,
         ):
             effective_task_id = tt._resolve_container_task_id(task_id)
-            _validate_backend_ownership(tt, effective_task_id, task_id)
-            return original_terminal_tool(
-                command, background=background, timeout=timeout,
-                task_id=task_id, session_id=session_id, force=force,
-                workdir=workdir, pty=pty,
-                notify_on_complete=notify_on_complete,
-                watch_patterns=watch_patterns,
+
+            def _acquire():
+                return original_terminal_tool(
+                    command, background=background, timeout=timeout,
+                    task_id=task_id, session_id=session_id, force=force,
+                    workdir=workdir, pty=pty,
+                    notify_on_complete=notify_on_complete,
+                    watch_patterns=watch_patterns,
+                )
+
+            def _publish(result, gen, validated_env):
+                # Owner publication inside the transaction: the live env was
+                # validated as THIS turn's generation, so the recorded
+                # per-task owner tracks the exact object.
+                if gen is not None and validated_env is not None:
+                    try:
+                        _mark_env_backend_generation(effective_task_id, gen)
+                    except Exception:
+                        pass
+
+            return _acquire_backend_object(
+                tt, effective_task_id, task_id, _acquire,
+                on_acquired=_publish,
             )
 
         tt.terminal_tool = _wrapped_terminal_tool
 
     # 2) file_tools._get_file_ops — previously bypassed the guard entirely:
-    #    it reused _active_environments directly without any ownership check.
+    #    it reused _active_environments directly without any ownership check,
+    #    and its post-hoc tag could bless a wrapper whose underlying env came
+    #    from another generation.  The final exact check now gates the tag.
     try:
         ft = importlib.import_module('tools.file_tools')
     except ImportError:
@@ -3127,17 +3303,32 @@ def _install_terminal_env_generation_guard() -> None:
         def _wrapped_get_file_ops(task_id="default"):
             effective_task_id = tt._resolve_container_task_id(task_id)
             turn_gen = _get_turn_generation()
-            _validate_backend_ownership(tt, effective_task_id, task_id)
-            if turn_gen is not None:
-                _evict_stale_file_ops_cache_entry(ft, effective_task_id, turn_gen)
-            file_ops = original_get_file_ops(task_id)
-            if turn_gen is not None and file_ops is not None:
-                try:
-                    file_ops._webui_backend_generation = turn_gen
-                    _mark_file_backend_generation(effective_task_id, turn_gen)
-                except Exception:
-                    pass
-            return file_ops
+
+            def _acquire():
+                if turn_gen is not None:
+                    _evict_stale_file_ops_cache_entry(
+                        ft, effective_task_id, turn_gen,
+                    )
+                return original_get_file_ops(task_id)
+
+            def _publish(file_ops, gen, validated_env):
+                # Bless the wrapper ONLY for the exact env this transaction
+                # validated as the turn's generation.
+                if (
+                    gen is not None
+                    and file_ops is not None
+                    and validated_env is not None
+                ):
+                    try:
+                        file_ops._webui_backend_generation = gen
+                        _mark_file_backend_generation(effective_task_id, gen)
+                    except Exception:
+                        pass
+
+            return _acquire_backend_object(
+                tt, effective_task_id, task_id, _acquire,
+                on_acquired=_publish,
+            )
 
         ft._get_file_ops = _wrapped_get_file_ops
 
@@ -3153,18 +3344,32 @@ def _install_terminal_env_generation_guard() -> None:
         def _wrapped_get_or_create_env(task_id):
             effective_task_id = tt._resolve_container_task_id(task_id)
             turn_gen = _get_turn_generation()
-            _validate_backend_ownership(tt, effective_task_id, task_id)
-            result = original_get_or_create_env(task_id)
-            if turn_gen is not None and result is not None:
-                try:
-                    env = result[0] if isinstance(result, tuple) else result
-                    if env is not None:
-                        if getattr(env, '_webui_backend_generation', None) is None:
-                            env._webui_backend_generation = turn_gen
-                        _mark_env_backend_generation(effective_task_id, turn_gen)
-                except Exception:
-                    pass
-            return result
+
+            def _acquire():
+                return original_get_or_create_env(task_id)
+
+            def _publish(result, gen, validated_env):
+                if (
+                    gen is not None
+                    and result is not None
+                    and validated_env is not None
+                ):
+                    try:
+                        env = result[0] if isinstance(result, tuple) else result
+                        if (
+                            env is not None
+                            and getattr(env, '_webui_backend_generation', None)
+                            is None
+                        ):
+                            env._webui_backend_generation = gen
+                        _mark_env_backend_generation(effective_task_id, gen)
+                    except Exception:
+                        pass
+
+            return _acquire_backend_object(
+                tt, effective_task_id, task_id, _acquire,
+                on_acquired=_publish,
+            )
 
         cet._get_or_create_env = _wrapped_get_or_create_env
 
@@ -12262,9 +12467,10 @@ def _run_agent_streaming(
                     _unreg_clarify_notify(session_id)
                 except Exception:
                     logger.debug("Failed to unregister clarify callback")
-            # #5937: tag the live env with this turn's generation so the next
-            # turn's setup can detect staleness.  Run before env var restoration
-            # so get_active_env() still works.
+            # #5937: publish ownership of the env THIS turn acquired and used
+            # (exact-object/exact-generation only — never retag an env
+            # another turn created).  Run before env var restoration so the
+            # registry is still readable.  See _refresh_env_generation_tag.
             _refresh_env_generation_tag()
             # Active-use ownership: this turn has finished; release the
             # registration and drain any stale eviction deferred while it was

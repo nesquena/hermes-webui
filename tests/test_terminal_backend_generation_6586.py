@@ -382,8 +382,32 @@ def test_begin_turn_publishes_ownership_after_identity_change(fake_terminal_tool
 
 
 def test_refresh_tags_env_and_publishes_ownership(fake_terminal_tool):
-    """Blocker 2: _refresh_env_generation_tag must tag the live env AND record
-    the owner generation — the publish side of the protocol."""
+    """_refresh_env_generation_tag publishes ownership ONLY for the env the
+    calling turn actually acquired/used: the live object must already be
+    tagged with the turn's captured generation (creation-time tagging or
+    same-generation reuse).  Untagged/foreign envs are never touched."""
+    streaming = importlib.import_module("api.streaming")
+
+    host_a_env = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-a"}
+    streaming._last_backend_identity = streaming._compute_backend_identity(host_a_env)
+    streaming._current_backend_generation = 0
+
+    try:
+        streaming._begin_turn_generation(host_a_env)          # gen 0 (no bump)
+        env = _FakeEnv(generation=0)          # tagged by this turn's creation
+        fake_terminal_tool._active_environments["default"] = env
+
+        streaming._refresh_env_generation_tag()
+
+        assert env._webui_backend_generation == 0
+        assert streaming._env_backend_generations.get("default") == 0
+    finally:
+        streaming._end_turn_generation()
+
+
+def test_refresh_does_not_tag_env_without_active_turn(fake_terminal_tool):
+    """No turn bound (begin failed / non-WebUI): the refresh must NO-OP —
+    it never tags or publishes an env it has no provenance over."""
     streaming = importlib.import_module("api.streaming")
 
     env = _FakeEnv(generation=None)
@@ -391,8 +415,229 @@ def test_refresh_tags_env_and_publishes_ownership(fake_terminal_tool):
 
     streaming._refresh_env_generation_tag()
 
-    assert env._webui_backend_generation == 0
-    assert streaming._env_backend_generations.get("default") == 0
+    assert env._webui_backend_generation is None
+    assert "default" not in streaming._env_backend_generations
+
+
+def test_finally_does_not_retag_foreign_env(fake_terminal_tool):
+    """Must-fix 2: a finishing turn that acquired nothing must NOT retag an
+    env created by another turn (the A-no-env/B-create/A-finish schedule).
+
+    Turn A (gen 0) begins while no env exists; turn B (gen 1) begins after
+    an identity switch and creates a gen-1 env; A finishes WITHOUT ever
+    acquiring an environment.  A's finally (refresh + unregister) must leave
+    B's live env tagged gen 1 and must NOT let the deferred gen-0 drain
+    retire it while B is still using it.
+
+    Two REAL threads: the ContextVar is per-context, so both turns must live
+    on separate threads (nesting begins on one thread is not a valid
+    schedule)."""
+    streaming = importlib.import_module("api.streaming")
+
+    host_a_env = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-a"}
+    host_b_env = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-b"}
+    streaming._last_backend_identity = streaming._compute_backend_identity(host_a_env)
+    streaming._current_backend_generation = 0
+
+    a_registered = threading.Event()
+    b_go = threading.Event()
+    b_created = threading.Event()
+    a_may_finish = threading.Event()
+    b_may_finish = threading.Event()
+    a_done = threading.Event()
+    b_done = threading.Event()
+
+    def _turn_a():
+        streaming._begin_turn_generation(host_a_env)          # gen 0 (no bump)
+        a_registered.set()
+        assert a_may_finish.wait(timeout=15)
+        # A's finally: NEVER retag B's env, then release the registration.
+        streaming._refresh_env_generation_tag()
+        streaming._end_turn_generation()
+        a_done.set()
+
+    def _turn_b():
+        assert b_go.wait(timeout=15)
+        streaming._begin_turn_generation(host_b_env)          # gen 1
+        env_b = _FakeEnv(generation=1)
+        fake_terminal_tool._active_environments["default"] = env_b
+        b_created.set()
+        assert b_may_finish.wait(timeout=15)
+        streaming._end_turn_generation()
+        b_done.set()
+
+    ta = threading.Thread(target=_turn_a)
+    tb = threading.Thread(target=_turn_b)
+    ta.start()
+    assert a_registered.wait(timeout=15)
+    tb.start()
+    b_go.set()
+    assert b_created.wait(timeout=15)
+
+    # A finishes WITHOUT acquiring anything.
+    a_may_finish.set()
+    assert a_done.wait(timeout=15)
+
+    # B's live env was NOT retagged as gen 0 and NOT retired by the drain.
+    env_b = fake_terminal_tool._active_environments.get("default")
+    assert env_b is not None
+    assert env_b._webui_backend_generation == 1
+    assert not env_b.cleaned
+    assert streaming._env_backend_generations.get("default") == 1
+    assert streaming._pending_eviction_generations == set()
+
+    b_may_finish.set()
+    assert b_done.wait(timeout=15)
+    ta.join(timeout=15)
+    tb.join(timeout=15)
+    assert not ta.is_alive() and not tb.is_alive()
+
+
+def test_unknown_ownership_is_isolated_not_accepted_or_destroyed(fake_terminal_tool):
+    """Unknown ownership must be isolated or enrolled, not accepted and not
+    destroyed speculatively: a registered turn NEVER reuses an untagged env
+    and NEVER tears it down (it may be in active use by an untracked
+    caller) — the exact object is dropped from the registry untouched."""
+    streaming = importlib.import_module("api.streaming")
+    streaming._install_terminal_env_generation_guard()
+
+    host_a_env = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-a"}
+    streaming._last_backend_identity = streaming._compute_backend_identity(host_a_env)
+    streaming._current_backend_generation = 0
+
+    untagged = _FakeEnv(generation=None)   # unknown provenance, possibly in use
+    fake_terminal_tool._active_environments["default"] = untagged
+
+    try:
+        streaming._begin_turn_generation(host_a_env)          # gen 0
+        out = fake_terminal_tool.terminal_tool("whoami", session_id="s-u")
+    finally:
+        streaming._end_turn_generation()
+
+    # Isolated: no longer served by the registry, but NOT cleaned up.
+    assert "default" not in fake_terminal_tool._active_environments
+    assert not untagged.cleaned and not untagged.stopped
+    assert out == '{"output": "ok", "exit_code": 0}'
+
+
+def test_untagged_file_cache_entry_is_evicted_for_registered_turn(fake_terminal_tool):
+    """Untagged file-cache entries fail CLOSED for a registered turn: the
+    cached wrapper with no provenance is dropped before the original
+    _get_file_ops runs, so it is never served to the turn."""
+    streaming = importlib.import_module("api.streaming")
+    streaming._install_terminal_env_generation_guard()
+
+    host_a_env = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-a"}
+    streaming._last_backend_identity = streaming._compute_backend_identity(host_a_env)
+    streaming._current_backend_generation = 0
+
+    # Seed an UNTAGGED cached file_ops plus a live env for it to wrap.
+    env = _FakeEnv(generation=0)
+    fake_terminal_tool._active_environments["default"] = env
+    stale_ops = _FakeFileOps(env)
+    fake_terminal_tool.file_tools._file_ops_cache["default"] = stale_ops
+
+    try:
+        streaming._begin_turn_generation(host_a_env)          # gen 0
+        ops = fake_terminal_tool.file_tools._get_file_ops("default")
+    finally:
+        streaming._end_turn_generation()
+
+    assert ops is not stale_ops, "untagged cached file_ops must not be served"
+    assert ops._webui_backend_generation == 0
+    assert streaming._file_backend_generations.get("default") == 0
+
+
+def test_empty_slot_acquisition_is_one_transaction(fake_terminal_tool):
+    """Must-fix 1: validation and acquisition are ONE transaction.
+
+    Generations A (gen 0) and B (gen 1) both race an EMPTY slot through a
+    gate-controlled original.  On the buggy head (validate, release, then
+    call the original acquirer) both validate the empty slot, A creates its
+    env, and B's original fast path reuses A's object — B executes against
+    A's generation.  With the transaction, B's reuse/create is atomic with
+    its re-validation, so each turn executes only against an env tagged with
+    ITS OWN captured generation."""
+    streaming = importlib.import_module("api.streaming")
+
+    host_a_env = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-a"}
+    host_b_env = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-b"}
+    streaming._last_backend_identity = streaming._compute_backend_identity(host_a_env)
+    streaming._current_backend_generation = 0
+
+    first_gate = threading.Event()
+    second_gate = threading.Event()
+    used_tags = {}
+    created_envs = []
+
+    def gated_terminal_tool(
+        command, background=False, timeout=None, task_id=None,
+        session_id=None, force=False, workdir=None, pty=False,
+        notify_on_complete=False, watch_patterns=None,
+    ):
+        # Two-stage gate: on the buggy head both turns can be mid-acquisition
+        # simultaneously (each validated the empty slot); on the fixed head
+        # only the lock holder ever reaches the original.
+        assert first_gate.wait(timeout=20), "first gate never opened"
+        with fake_terminal_tool._env_lock:
+            env = fake_terminal_tool._active_environments.get("default")
+            if env is None:
+                env = _FakeEnv(generation=_tagged_generation(streaming))
+                fake_terminal_tool._active_environments["default"] = env
+                fake_terminal_tool._last_activity["default"] = time.time()
+                created_envs.append(env)
+            used_tags[command] = getattr(env, "_webui_backend_generation", None)
+        assert second_gate.wait(timeout=20), "second gate never opened"
+        return '{"output": "ok", "exit_code": 0}'
+
+    fake_terminal_tool.terminal_tool = gated_terminal_tool
+    streaming._install_terminal_env_generation_guard()
+
+    a_result, b_result = {}, {}
+
+    def _turn_a():
+        streaming._begin_turn_generation(host_a_env)          # gen 0 (no bump)
+        try:
+            a_result["out"] = fake_terminal_tool.terminal_tool("cmd-a")
+        except Exception as exc:  # pragma: no cover - failure path
+            a_result["error"] = repr(exc)
+        finally:
+            streaming._refresh_env_generation_tag()
+            streaming._end_turn_generation()
+
+    def _turn_b():
+        streaming._begin_turn_generation(host_b_env)          # gen 1
+        try:
+            b_result["out"] = fake_terminal_tool.terminal_tool("cmd-b")
+        except Exception as exc:  # pragma: no cover - failure path
+            b_result["error"] = repr(exc)
+        finally:
+            streaming._refresh_env_generation_tag()
+            streaming._end_turn_generation()
+
+    ta = threading.Thread(target=_turn_a)
+    tb = threading.Thread(target=_turn_b)
+    ta.start()
+    time.sleep(0.2)      # A reaches the first gate inside its transaction
+    tb.start()
+    time.sleep(0.5)      # B: fixed head blocks (lock/drain); buggy head reaches gate
+    first_gate.set()
+    time.sleep(0.2)
+    second_gate.set()
+    ta.join(timeout=25)
+    tb.join(timeout=25)
+    assert not ta.is_alive() and not tb.is_alive()
+
+    # Each turn executed against an env tagged with ITS OWN generation —
+    # never against the other turn's object.
+    assert used_tags.get("cmd-a") == 0, used_tags
+    assert used_tags.get("cmd-b") == 1, used_tags
+    assert "error" not in a_result and "error" not in b_result
+    # B's env is the live one; A's env was retired only after A's turn exited.
+    live = fake_terminal_tool._active_environments.get("default")
+    assert live is not None and live._webui_backend_generation == 1
+    assert len(created_envs) == 2
+    assert created_envs[0].cleaned, "A's stale env must be retired after drain"
 
 
 def test_begin_turn_skips_retire_when_env_replaced_by_newer_generation(fake_terminal_tool):
