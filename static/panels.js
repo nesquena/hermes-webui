@@ -3335,6 +3335,8 @@ async function openKanbanEdit(taskId){
     status: initialDisplayedStatus,
     tenant: task.tenant || '',
     priority: typeof task.priority === 'number' ? task.priority : 0,
+    model_override: task.model_override || '',
+    provider_override: task.provider_override || '',
   });
   // Populate the assignee select AFTER reset so the option exists when we
   // call sel.value = currentAssignee.
@@ -3380,6 +3382,8 @@ function _kanbanResetTaskModalFields(values){
   set('kanbanTaskModalPriority', v.priority != null ? v.priority : 0);
   set('kanbanTaskModalSkills', Array.isArray(v.skills) ? v.skills.join(', ') : (v.skills || ''));
   set('kanbanTaskModalMaxRuntimeSeconds', v.max_runtime_seconds != null ? v.max_runtime_seconds : '');
+  set('kanbanTaskModalModel', v.model_override || '');
+  set('kanbanTaskModalProvider', v.provider_override || '');
   set('kanbanTaskModalParents', '');
   const errEl = document.getElementById('kanbanTaskModalError');
   if (errEl) { errEl.textContent = ''; delete errEl.dataset.warningShown; }
@@ -3543,6 +3547,8 @@ async function submitKanbanTaskModal(){
   const skillsEl = document.getElementById('kanbanTaskModalSkills');
   const maxRuntimeEl = document.getElementById('kanbanTaskModalMaxRuntimeSeconds');
   const parentsEl = document.getElementById('kanbanTaskModalParents');
+  const modelEl = document.getElementById('kanbanTaskModalModel');
+  const providerEl = document.getElementById('kanbanTaskModalProvider');
   const errEl = document.getElementById('kanbanTaskModalError');
   const submitBtn = document.getElementById('kanbanTaskModalSubmit');
   const title = titleEl ? titleEl.value.trim() : '';
@@ -3574,6 +3580,17 @@ async function submitKanbanTaskModal(){
   const skillsRaw = skillsEl ? skillsEl.value.trim() : '';
   const maxRuntimeRaw = maxRuntimeEl ? maxRuntimeEl.value.trim() : '';
   const parentsRaw = parentsEl ? parentsEl.value.trim() : '';
+  const modelRaw = modelEl ? modelEl.value.trim() : '';
+  const providerRaw = providerEl ? providerEl.value.trim() : '';
+  // Provider requires a model (mirrors kb.set_model_override / the worker
+  // spawn contract — a bare provider would re-resolve the profile's model
+  // against a different backend).
+  if (providerRaw && !modelRaw) {
+    if (errEl) errEl.textContent = t('kanban_provider_requires_model')
+      || 'Provider requires a model override. Enter a model first, or clear the provider.';
+    if (modelEl) modelEl.focus();
+    return;
+  }
   if (isEdit) {
     payload.body = bodyVal;
     payload.assignee = assigneeVal || null;
@@ -3587,6 +3604,10 @@ async function submitKanbanTaskModal(){
     }
     const n = parseInt(priorityRaw, 10);
     payload.priority = Number.isNaN(n) ? 0 : n;
+    // Send model fields on edit even when empty so users can clear an override
+    // back to the profile default (backend normalises empty → clear both).
+    payload.model_override = modelRaw || null;
+    payload.provider_override = providerRaw || null;
     // Note: workspace_kind and workspace_path are not sent on edit because
     // the backend _patch_task does not handle them (they are dropped).
   } else {
@@ -3613,6 +3634,8 @@ async function submitKanbanTaskModal(){
       payload.max_runtime_seconds = Number(maxRuntimeRaw);
     }
     if (parentsRaw) payload.parents = [parentsRaw];
+    if (modelRaw) payload.model_override = modelRaw;
+    if (providerRaw) payload.provider_override = providerRaw;
   }
   // Soft warning: a Ready task with the explicit "Unassigned" option will sit
   // forever because the dispatcher skips unassigned rows (kanban_db.py:3567).

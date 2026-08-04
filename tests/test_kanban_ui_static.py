@@ -1423,3 +1423,41 @@ def test_kanban_model_badge_static_render_e2e():
     payload = json.loads(result.stdout)
     assert payload["hasBadge"] is True, "model_override must render a model badge on the card"
     assert payload["noBadge"] is True, "card without model_override must not render a model badge"
+
+
+def test_kanban_editor_modal_has_model_and_provider_fields():
+    """Create/edit task modal must expose Model + Provider inputs, and the
+    submit handler must route them to the API so users can configure the
+    card's executing model from the WebUI."""
+    # index.html must define the two fields.
+    for input_id in ("kanbanTaskModalModel", "kanbanTaskModalProvider"):
+        assert f'id="{input_id}"' in INDEX
+
+    # Labels / placeholders wired for i18n.
+    assert 'data-i18n="kanban_model"' in INDEX
+    assert 'data-i18n="kanban_provider"' in INDEX
+
+    # submitKanbanTaskModal reads the fields and sends them (create + edit).
+    submit_match = re.search(
+        r"function submitKanbanTaskModal\(\)\{(.*?)\n\}",
+        PANELS, re.DOTALL,
+    )
+    assert submit_match, "submitKanbanTaskModal() not found"
+    submit_body = submit_match.group(1)
+    assert "kanbanTaskModalModel" in submit_body
+    assert "kanbanTaskModalProvider" in submit_body
+    assert "payload.model_override" in submit_body
+    assert "payload.provider_override" in submit_body
+    # Provider-requires-model guard surfaced client-side.
+    assert "kanban_provider_requires_model" in submit_body
+
+    # openKanbanEdit pre-fills the fields from the fetched task.
+    edit_source = extract_function(PANELS, "openKanbanEdit", prefix="async function")
+    assert "model_override: task.model_override" in edit_source
+    assert "provider_override: task.provider_override" in edit_source
+
+    # New i18n keys exist (English block) for placeholders/hints.
+    for key in ("kanban_model_placeholder", "kanban_model_hint",
+                "kanban_provider_placeholder", "kanban_provider_hint",
+                "kanban_provider_requires_model"):
+        assert f"{key}:" in I18N
