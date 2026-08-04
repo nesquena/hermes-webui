@@ -2,6 +2,7 @@
 
 import io
 import json
+import re
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -808,13 +809,61 @@ def test_goal_kickoff_does_not_stamp_signature_without_explicit_pick(monkeypatch
 
 
 def test_frontend_goal_consumes_pending_model_marker():
-    """#6703: cmdGoal must consume the one-shot pending session-model marker.
+    """#6703/#6705: cmdGoal must consume the one-shot pending session-model marker.
 
     Mirrors the chat/start path (messages.js) so a later /goal with an unchanged
-    dropdown isn't treated as an explicit pick.
+    dropdown isn't treated as an explicit pick. The consume-clear is deferred to
+    AFTER a successful kickoff (r.stream_id) and gated on a re-read of the stored
+    marker that still matches the captured model/provider (#6705), so a control
+    command (e.g. /goal status, which never produces a stream_id) leaves the
+    marker intact for the next real send.
     """
     goal_idx = COMMANDS_JS.find("function cmdGoal")
     assert goal_idx != -1
     goal_fn = COMMANDS_JS[goal_idx : COMMANDS_JS.find("\n}", goal_idx)]
     assert "_clearPendingSessionModel(activeSid)" in goal_fn
-    assert "_pendingPickMatch && typeof _clearPendingSessionModel" in goal_fn
+    assert "_pendingPickMatch && typeof _readPendingSessionModel==='function' && typeof _clearPendingSessionModel==='function'" in goal_fn
+    # The consume-clear must come AFTER the kickoff guard: a control command
+    # (no stream_id) returns before reaching it.
+    assert goal_fn.index("_clearPendingSessionModel(activeSid)") > goal_fn.index("if(!r||!r.stream_id)return;")
+    # Re-check: the marker is re-read and only cleared while it still matches
+    # the captured model/provider.
+    assert "_stillPending.model===_goalModel" in goal_fn
+    assert "_stillPending.model_provider" in goal_fn
+
+
+def test_frontend_goal_control_command_keeps_pending_marker():
+    """#6705: a control-only /goal (e.g. `/goal status`) must NOT consume the
+    pending explicit-pick marker.
+
+    The server skips model resolution for control commands (api/routes.py
+    will_kickoff excludes status/pause/resume/clear/stop/done), so clearing the
+    marker before the request would drop the explicit pick without using it and
+    the next real send would revert to the default model. The marker must
+    survive the control round-trip and still be read for the next kickoff.
+    """
+    goal_idx = COMMANDS_JS.find("function cmdGoal")
+    assert goal_idx != -1
+    goal_fn = COMMANDS_JS[goal_idx : COMMANDS_JS.find("\n}", goal_idx)]
+
+    # 1) No clear may run before the /api/goal request: the marker must
+    #    survive a control command.
+    pre_request = goal_fn.split("const r=await api('/api/goal'")[0]
+    assert "_clearPendingSessionModel" not in pre_request, (
+        "the pending explicit-pick marker must NOT be cleared before /api/goal — "
+        "a control command like /goal status never kicks off, so a pre-request "
+        "clear would drop the pick without using it (#6705)"
+    )
+
+    # 2) The consume-clear sits after the kickoff guard (r.stream_id present).
+    post_request = goal_fn.split("const r=await api('/api/goal'")[1]
+    assert "if(!r||!r.stream_id)return;" in post_request
+    assert "_clearPendingSessionModel(activeSid)" in post_request
+    assert post_request.index("if(!r||!r.stream_id)return;") < post_request.index("_clearPendingSessionModel(activeSid)")
+
+    # 3) The marker is re-read and only cleared while it still matches the
+    #    captured model/provider.
+    assert "_stillPending=_readPendingSessionModel(activeSid)" in post_request
+    assert re.search(r"_stillPending\.model\s*===\s*_goalModel", post_request)
+    assert re.search(r"_stillPending\.model_provider", post_request)
+    assert re.search(r"_clearPendingSessionModel\(activeSid\)", post_request)

@@ -1246,11 +1246,11 @@ async function cmdGoal(args){
       && _goalModel !== _defaultModel
       && String(_goalProvider||'') !== String(_activeProvider||'');
     const _explicitPick=(_pendingPickMatch||_isCrossProviderPick)||undefined;
-    // Consume the pending explicit-pick marker for THIS goal kickoff only,
-    // mirroring the chat/start path (messages.js): the marker is recorded on
-    // modelSelect.onchange; clear it here once read so a later /goal with an
-    // unchanged dropdown isn't treated as an explicit pick.
-    if(_pendingPickMatch && typeof _clearPendingSessionModel==='function') _clearPendingSessionModel(activeSid);
+    // Do NOT consume the pending explicit-pick marker here: a control-only
+    // invocation (e.g. /goal status) skips server-side model resolution, so a
+    // pre-request clear would drop the pick without using it. Consume it below,
+    // only after a successful kickoff (r.stream_id), re-checking that the stored
+    // marker still matches the model/provider captured for this kickoff (#6705).
     const r=await api('/api/goal',{method:'POST',body:JSON.stringify({
       session_id:activeSid,
       args:args||'',
@@ -1277,6 +1277,19 @@ async function cmdGoal(args){
       showToast(msg.split('\n')[0],2600);
     }
     if(!r||!r.stream_id)return;
+    // #6705: consume the one-shot pending explicit-pick marker only after a
+    // successful kickoff. Re-read the stored marker and clear it only if it
+    // still matches the model/provider captured above — a control command (no
+    // stream_id) must leave the marker intact for the next real send, and a
+    // marker re-recorded mid-flight (newer onchange) must not be clobbered.
+    if(_pendingPickMatch && typeof _readPendingSessionModel==='function' && typeof _clearPendingSessionModel==='function'){
+      const _stillPending=_readPendingSessionModel(activeSid);
+      if(_stillPending
+        && _stillPending.model===_goalModel
+        && String(_stillPending.model_provider||'')===String(_goalProvider||'')){
+        _clearPendingSessionModel(activeSid);
+      }
+    }
     S.toolCalls=[];
     if(typeof clearLiveToolCards==='function')clearLiveToolCards();
     appendThinking();setBusy(true);
