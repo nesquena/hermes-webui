@@ -781,9 +781,18 @@ class TestBareFileUrlMediaRendering:
 
     def test_bare_file_url_becomes_media(self, driver_path):
         out = _render(driver_path, "Here is the screenshot file:///tmp/shot.png done")
-        # Routed through /api/media as an inline image, not left as a raw path.
-        assert "api/media?path=" in out
-        assert "msg-media-img" in out or "<img" in out
+        # Routed through /api/media as an inline image with the exact captured
+        # path (not left as a raw path, not truncated at the first space).
+        assert 'src="api/media?path=%2Ftmp%2Fshot.png"' in out, (
+            f"bare file:// must capture the exact path, got: {out!r}"
+        )
+        assert 'class="msg-media-img"' in out
+        # The trailing prose survives OUTSIDE the media node.
+        assert out.rstrip().endswith(" done</p>"), (
+            f"trailing prose must not be swallowed into the media path: {out!r}"
+        )
+        # The captured path must not have swallowed the word "done".
+        assert "shot.png%20done" not in out and "shot.png done" not in out
 
     def test_file_url_inside_fenced_code_stays_literal(self, driver_path):
         out = _render(driver_path, "```\nfile:///tmp/shot.png\n```")

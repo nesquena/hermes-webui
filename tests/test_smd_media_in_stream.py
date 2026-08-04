@@ -35,6 +35,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import tempfile
 import unittest
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
@@ -659,6 +660,130 @@ class TestSmdMediaRealParserBehaviour(unittest.TestCase):
                 self.assertIn("and", result["text"])
                 self.assertIn("done", result["text"])
                 self.assertNotIn("MEDIA:", result["text"])
+
+
+class TestInlineMediaHtmlEncoding(unittest.TestCase):
+    """#6580 re-gate point 2: quoted MEDIA refs stay raw in renderMd() and are
+    normalized exactly once inside the canonical _inlineMediaHtmlForRef().
+
+    Raw-space and already-%20 inputs must both land on the SAME query path
+    with %20 (never %2520). This drives the REAL renderMd() +
+    _inlineMediaHtmlForRef() extracted from ui.js — the simplified harnesses
+    that emit %2520 are exactly what the re-gate flagged.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cases = _run_inline_media_encoding_cases()
+
+    def test_raw_space_ref_encodes_space_once(self):
+        html = self.cases["quotedRawSpace"]
+        self.assertIn("api/media?path=%2Ftmp%2Fmy%20screenshot.png", html)
+        self.assertNotIn("%2520", html)
+        self.assertIn("done", html)
+
+    def test_already_percent20_ref_is_not_double_encoded(self):
+        html = self.cases["quotedAlreadyEncoded"]
+        # Same intended query path as the raw-space form above.
+        self.assertIn("api/media?path=%2Ftmp%2Fmy%20screenshot.png", html)
+        self.assertNotIn("%2520", html)
+        self.assertIn("done", html)
+
+    def test_raw_and_encoded_forms_produce_identical_query_path(self):
+        raw = self.cases["quotedRawSpace"]
+        enc = self.cases["quotedAlreadyEncoded"]
+        path_raw = raw.split('api/media?path=')[1].split('"')[0]
+        path_enc = enc.split('api/media?path=')[1].split('"')[0]
+        self.assertEqual(path_raw, path_enc)
+
+    def test_bare_raw_space_token_stops_at_space(self):
+        # Unquoted MEDIA:/tmp/my screenshot.png done — the bare arm must stop
+        # at the space so "screenshot.png done" stays as prose (first re-gate
+        # regression, still guarded). The bare ref is exactly "/tmp/my".
+        html = self.cases["bareRawSpace"]
+        self.assertIn("api/media?path=%2Ftmp%2Fmy", html)
+        self.assertIn("screenshot.png", html)
+        self.assertIn("done", html)
+
+
+def _run_inline_media_encoding_cases() -> dict:
+    """Drive the REAL renderMd() + _inlineMediaHtmlForRef() from ui.js (not a
+    stub) so the query-path encoding is asserted on production code. Follows
+    the test_data_uri_images.py driver pattern: the node driver extracts the
+    renderer functions from ui.js in source order and runs them with the
+    production extension tables."""
+    driver_src = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+global.window = {};
+global.document = { createElement: () => ({ innerHTML: '', textContent: '' }), baseURI: 'http://localhost/app/' };
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
+  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
+const _SVG_EXTS=/\.svg$/i;
+const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm)$/i;
+const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
+const _PDF_EXTS=/\.pdf$/i;
+const _HTML_EXTS=/\.html?$/i;
+const _CSV_EXTS=/\.(csv|tsv)$/i;
+const _EXCALIDRAW_EXTS=/\.excalidraw$/i;
+const _mediaKindForName=(name='')=>{
+  const clean=String(name||'').split('?')[0].toLowerCase();
+  if(_AUDIO_EXTS.test(clean)) return 'audio';
+  if(_VIDEO_EXTS.test(clean)) return 'video';
+  if(_IMAGE_EXTS.test(clean)) return 'image';
+  return '';
+};
+const _mediaPlayerHtml=(k,s,n)=>`<${k} src="${esc(s)}"></${k}>`;
+const t = k => k;
+const S = {};
+
+function extractFunc(name) {
+  const re = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') depth--;
+    i++;
+  }
+  return src.slice(start, i);
+}
+eval(extractFunc('_isSafeDataImageUri'));
+eval(extractFunc('_dataImageHtml'));
+eval(extractFunc('_mdImageHtml'));
+eval(extractFunc('_inlineMediaHtmlForRef'));
+eval(extractFunc('_matchBacktickFenceLine'));
+eval(extractFunc('_isBacktickFenceClose'));
+eval(extractFunc('renderMd'));
+
+let buf = '';
+process.stdin.on('data', c => { buf += c; });
+process.stdin.on('end', () => { process.stdout.write(renderMd(buf)); });
+"""
+    driver_path = pathlib.Path(tempfile.mkdtemp(prefix="smd_enc_")) / "driver.js"
+    driver_path.write_text(driver_src, encoding="utf-8")
+    results = {}
+    for key, markdown in [
+        ("quotedRawSpace", 'MEDIA:"/tmp/my screenshot.png" done'),
+        ("quotedAlreadyEncoded", 'MEDIA:"/tmp/my%20screenshot.png" done'),
+        ("bareRawSpace", "MEDIA:/tmp/my screenshot.png done"),
+    ]:
+        completed = subprocess.run(
+            [NODE, str(driver_path), str(REPO_ROOT / "static" / "ui.js")],
+            input=markdown,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"node media-encoding probe ({key}) failed: {completed.stderr[-2000:]}"
+            )
+        results[key] = completed.stdout
+    return results
 
 
 if __name__ == "__main__":
