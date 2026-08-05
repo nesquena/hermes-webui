@@ -31,6 +31,29 @@ def test_webhook_visible_when_show_webhook_true():
     ) is False
 
 
+def test_kanban_hidden_by_default():
+    assert _hide_from_default_sidebar({'source_tag': 'kanban', 'session_id': 'kanban_worker_1'}) is True
+
+
+def test_kanban_visible_when_show_kanban_true():
+    assert _hide_from_default_sidebar(
+        {'source_tag': 'kanban', 'session_id': 'kanban_worker_1'},
+        show_kanban=True,
+    ) is False
+
+
+def test_kanban_hidden_with_explicit_false():
+    assert _hide_from_default_sidebar({'source_tag': 'kanban', 'session_id': 'kanban_worker_1'}, show_kanban=False) is True
+
+
+def test_kanban_does_not_leak_when_other_toggles_enabled():
+    assert _hide_from_default_sidebar(
+        {'source_tag': 'kanban', 'session_id': 'kanban_worker_1'},
+        show_cron=True,
+        show_webhook=True,
+    ) is True
+
+
 def test_pre_compression_always_hidden_regardless_of_background_toggles():
     assert _hide_from_default_sidebar({'pre_compression_snapshot': True}, show_cron=True, show_webhook=True) is True
 
@@ -55,6 +78,13 @@ def test_show_webhook_sessions_in_defaults():
     )
 
 
+def test_show_kanban_sessions_in_defaults():
+    src = _read("api/config.py")
+    assert '"show_kanban_sessions": False' in src, (
+        '"show_kanban_sessions": False must appear in _SETTINGS_DEFAULTS'
+    )
+
+
 def test_show_cron_sessions_in_bool_keys():
     src = _read("api/config.py")
     assert '"show_cron_sessions"' in src, (
@@ -76,6 +106,16 @@ def test_show_webhook_sessions_in_bool_keys():
     )
 
 
+def test_show_kanban_sessions_in_bool_keys():
+    src = _read("api/config.py")
+    assert '"show_kanban_sessions"' in src, (
+        '"show_kanban_sessions" must appear in _SETTINGS_BOOL_KEYS'
+    )
+    assert src.count('"show_kanban_sessions"') >= 2, (
+        '"show_kanban_sessions" must appear in both _SETTINGS_DEFAULTS and _SETTINGS_BOOL_KEYS'
+    )
+
+
 # --- api/routes.py string-scan ---
 
 def test_show_cron_sessions_kwarg_passthrough():
@@ -89,6 +129,25 @@ def test_show_webhook_sessions_kwarg_passthrough():
     src = _read("api/routes.py")
     assert "show_webhook_sessions=show_webhook_sessions" in src, (
         "show_webhook_sessions kwarg must be forwarded at the _dedupe_cli_sidebar_sessions_for_api call site"
+    )
+
+
+def test_show_kanban_sessions_kwarg_passthrough():
+    src = _read("api/routes.py")
+    assert "show_kanban_sessions=show_kanban_sessions" in src, (
+        "show_kanban_sessions kwarg must be forwarded at the _dedupe_cli_sidebar_sessions_for_api call site"
+    )
+    assert "show_kanban=show_kanban_sessions" in src, (
+        "show_kanban kwarg must be forwarded to _hide_background in _dedupe_cli_sidebar_sessions_for_api"
+    )
+
+
+def test_show_kanban_sessions_invalidates_session_cache_on_settings_save():
+    src = _read("api/routes.py")
+    invalidation_block = src.split("Settings that change which sessions appear in the sidebar", 1)[1]
+    invalidation_block = invalidation_block.split("auth_enabled_after", 1)[0]
+    assert '"show_kanban_sessions"' in invalidation_block, (
+        "settings POST must explicitly invalidate /api/sessions cache when show_kanban_sessions changes"
     )
 
 
@@ -117,6 +176,13 @@ def test_settings_show_webhook_sessions_in_html():
     )
 
 
+def test_settings_show_kanban_sessions_in_html():
+    src = _read("static/index.html")
+    assert "settingsShowKanbanSessions" in src, (
+        "settingsShowKanbanSessions checkbox must appear in static/index.html"
+    )
+
+
 # --- static/panels.js string-scans ---
 
 def test_panels_save_wiring():
@@ -136,6 +202,12 @@ def test_panels_save_wiring():
     assert "body.show_webhook_sessions=showCliSessions&&showWebhookSessions" in src, (
         "explicit saveSettings() must gate show_webhook_sessions on showCliSessions in static/panels.js"
     )
+    assert "payload.show_kanban_sessions=!!(showCliCb&&showCliCb.checked&&showKanbanCb.checked)" in src, (
+        "autosave wiring must gate show_kanban_sessions on settingsShowCliSessions in static/panels.js"
+    )
+    assert "body.show_kanban_sessions=showCliSessions&&showKanbanSessions" in src, (
+        "explicit saveSettings() must gate show_kanban_sessions on showCliSessions in static/panels.js"
+    )
 
 
 def test_panels_load_wiring():
@@ -145,4 +217,7 @@ def test_panels_load_wiring():
     )
     assert "show_webhook_sessions" in src, (
         "load wiring for show_webhook_sessions must appear in static/panels.js"
+    )
+    assert "show_kanban_sessions" in src, (
+        "load wiring for show_kanban_sessions must appear in static/panels.js"
     )
