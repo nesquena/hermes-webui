@@ -420,6 +420,20 @@ class TestMixedNestedLists:
         ) in out, out
         assert "&lt;/li&gt;" not in out, out
 
+    def test_ordered_item_with_task_marker_keeps_literal_prefix(self, driver_path):
+        """Task-list rendering applies only to unordered items: an ordered
+        item whose text starts with [x]/[ ] must keep its literal prefix
+        (e.g. '1. [x] shipped') instead of being silently converted to a
+        ✅/☐ task icon (review fix for #6700: openItem() dropped `ordered`
+        from the item constructor, so every item looked unordered)."""
+        out = _render(driver_path, "1. [x] shipped\n2. [ ] pending")
+        assert 'class="task-done"' not in out, out
+        assert 'class="task-todo"' not in out, out
+        assert "✅" not in out, out
+        assert "☐" not in out, out
+        assert '<ol><li value="1">[x] shipped</li>' in out, out
+        assert '<li value="2">[ ] pending</li>' in out, out
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Block-level constructs INSIDE blockquotes — the six bugs documented in

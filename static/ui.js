@@ -7408,7 +7408,7 @@ function renderMd(raw){
         if(listStack[depth]) listStack.pop();
         listStack[depth]=openList(depth,ordered);
       }
-      const item={value,content:[content],sublists:[]};
+      const item={ordered,value,content:[content],sublists:[]};
       listStack[depth].items.push(item);
       itemStack[depth]=item;
       for(let k=itemStack.length-1;k>depth;k--) itemStack.pop();
