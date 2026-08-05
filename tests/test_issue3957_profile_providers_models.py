@@ -1426,3 +1426,334 @@ def test_expand_env_vars_does_not_leak_process_env_under_block_scope(monkeypatch
         else:
             config._thread_ctx.env = prev_env
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #6327 — ONE shared full-body process-env ownership lock across entrypoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_background_worker_direct_overlap_detached_direct_first(monkeypatch, tmp_path):
+    """Direct background-worker scope overlapping a detached named scope (#6327).
+
+    A DIRECT ``profile_env_for_background_worker`` scope (alpha) enters first
+    and holds the shared full-body ownership lock.  A detached
+    ``profile_scope_for_detached_worker`` (beta) started mid-body must NOT
+    enter early; after the direct scope exits the detached worker must resolve
+    ITS value on both the raw ``os.getenv()`` and TLS channels, and the
+    ambient process env must be restored exactly (no stale alpha/beta value).
+    """
+    import threading
+    import time as _time
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    for prof, val in (("alpha", "alpha-value"), ("beta", "beta-value")):
+        home = base / "profiles" / prof
+        home.mkdir(parents=True)
+        (home / ".env").write_text(f"OPENROUTER_API_KEY={val}\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ambient-value")
+
+    direct_entered = threading.Event()
+    release_direct = threading.Event()
+    detached_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def direct_worker():
+        try:
+            with profiles.profile_env_for_background_worker("alpha", "test"):
+                direct_entered.set()
+                out["direct_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["direct_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                assert release_direct.wait(5)
+        except BaseException as exc:
+            worker_exc.append(exc)
+
+    def detached_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("beta", "test"):
+                out["detached_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["detached_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            detached_done.set()
+
+    t_direct = threading.Thread(target=direct_worker)
+    t_detached = threading.Thread(target=detached_worker)
+    t_direct.start()
+    assert direct_entered.wait(5)
+    # Start the detached scope while the DIRECT scope is mid-body.  The shared
+    # ownership lock must serialize the full body — no early entry.
+    t_detached.start()
+    _time.sleep(0.1)
+    assert not detached_done.is_set()
+    release_direct.set()
+    t_direct.join(5)
+    t_detached.join(5)
+    if worker_exc:
+        raise worker_exc[0]
+
+    # Direct scope saw its own value on both channels throughout.
+    assert out["direct_raw"] == "alpha-value"
+    assert out["direct_tls"] == "alpha-value"
+    # Detached scope, after the direct scope exited, resolved the BETA value.
+    assert out["detached_raw"] == "beta-value"
+    assert out["detached_tls"] == "beta-value"
+    # Exact ambient restoration — no stale alpha/beta value left behind.
+    assert os.environ.get("OPENROUTER_API_KEY") == "ambient-value"
+
+
+def test_background_worker_direct_overlap_detached_detached_first(monkeypatch, tmp_path):
+    """Detached named scope overlapping a direct background-worker scope (#6327).
+
+    Mirrors test_background_worker_direct_overlap_detached_direct_first with
+    the DETACHED scope entering first: while it holds the shared ownership
+    lock the direct scope must not enter early, and after the detached scope
+    exits the direct scope must resolve ITS value on both channels with exact
+    ambient restoration.
+    """
+    import threading
+    import time as _time
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    for prof, val in (("alpha", "alpha-value"), ("beta", "beta-value")):
+        home = base / "profiles" / prof
+        home.mkdir(parents=True)
+        (home / ".env").write_text(f"OPENROUTER_API_KEY={val}\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ambient-value")
+
+    detached_entered = threading.Event()
+    release_detached = threading.Event()
+    direct_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def detached_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("beta", "test"):
+                detached_entered.set()
+                out["detached_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["detached_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                assert release_detached.wait(5)
+        except BaseException as exc:
+            worker_exc.append(exc)
+
+    def direct_worker():
+        try:
+            with profiles.profile_env_for_background_worker("alpha", "test"):
+                out["direct_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["direct_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            direct_done.set()
+
+    t_detached = threading.Thread(target=detached_worker)
+    t_direct = threading.Thread(target=direct_worker)
+    t_detached.start()
+    assert detached_entered.wait(5)
+    # Start the direct scope while the detached scope is mid-body.  The shared
+    # ownership lock must block it — no early entry.
+    t_direct.start()
+    _time.sleep(0.1)
+    assert not direct_done.is_set()
+    release_detached.set()
+    t_detached.join(5)
+    t_direct.join(5)
+    if worker_exc:
+        raise worker_exc[0]
+
+    # Detached scope saw its own value on both channels throughout.
+    assert out["detached_raw"] == "beta-value"
+    assert out["detached_tls"] == "beta-value"
+    # Direct scope, after the detached scope exited, resolved the ALPHA value.
+    assert out["direct_raw"] == "alpha-value"
+    assert out["direct_tls"] == "alpha-value"
+    # Exact ambient restoration.
+    assert os.environ.get("OPENROUTER_API_KEY") == "ambient-value"
+
+
+def test_active_request_mirrored_overlap_detached_root_active_first(monkeypatch, tmp_path):
+    """Active-request mirrored scope overlapping a detached ROOT scope (#6327).
+
+    The active-request scope (``profile_env_for_active_request`` → the shared
+    ``profile_env_for_background_worker`` path) enters first for the named
+    "work" profile; a detached DEFAULT/root worker started mid-body must not
+    enter early.  After the active scope exits, the root worker resolves the
+    ROOT credential via TLS (raw channel scrubbed of the named value), and the
+    ambient named state is restored exactly.
+    """
+    import threading
+    import time as _time
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    work_home = base / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    (work_home / ".env").write_text(
+        "OPENROUTER_API_KEY=active-value\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    # Load the named profile's .env as the process-wide (ambient) state and
+    # record ownership so the root scope can prove the value is foreign.
+    profiles._reload_dotenv(work_home)
+    assert profiles._loaded_profile_env_owner.get("OPENROUTER_API_KEY") == "work"
+    assert os.environ.get("OPENROUTER_API_KEY") == "active-value"
+    profiles._active_profile = "work"
+
+    active_entered = threading.Event()
+    release_active = threading.Event()
+    detached_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def active_worker():
+        profiles.set_request_profile("work")
+        try:
+            with profiles.profile_env_for_active_request("test"):
+                active_entered.set()
+                out["active_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["active_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                assert release_active.wait(5)
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            profiles.clear_request_profile()
+
+    def detached_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("default", "test"):
+                out["detached_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["detached_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            detached_done.set()
+
+    t_active = threading.Thread(target=active_worker)
+    t_detached = threading.Thread(target=detached_worker)
+    t_active.start()
+    assert active_entered.wait(5)
+    # Start the root detached worker while the active-request scope is
+    # mid-body.  The shared ownership lock must block it — no early entry.
+    t_detached.start()
+    _time.sleep(0.1)
+    assert not detached_done.is_set()
+    release_active.set()
+    t_active.join(5)
+    t_detached.join(5)
+    if worker_exc:
+        raise worker_exc[0]
+
+    # Active-request scope saw the NAMED value on both channels throughout.
+    assert out["active_raw"] == "active-value"
+    assert out["active_tls"] == "active-value"
+    # Root worker, after the active scope exited, resolved the ROOT value via
+    # TLS; the raw channel is scrubbed of the foreign named value.
+    assert out["detached_tls"] == "root-value"
+    assert out["detached_raw"] is None
+    # Exact ambient restoration (the named process-wide state).
+    assert os.environ.get("OPENROUTER_API_KEY") == "active-value"
+    profiles._active_profile = "default"
+    profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
+
+
+def test_active_request_mirrored_overlap_detached_root_detached_first(monkeypatch, tmp_path):
+    """Detached ROOT scope overlapping an active-request mirrored scope (#6327).
+
+    Mirrors test_active_request_mirrored_overlap_detached_root_active_first
+    with the detached DEFAULT/root worker entering first: while it holds the
+    shared ownership lock the active-request scope must not enter early, and
+    after the root worker exits the active scope resolves the NAMED value on
+    both channels with exact ambient restoration.
+    """
+    import threading
+    import time as _time
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    work_home = base / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    (work_home / ".env").write_text(
+        "OPENROUTER_API_KEY=active-value\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    profiles._reload_dotenv(work_home)
+    assert os.environ.get("OPENROUTER_API_KEY") == "active-value"
+    profiles._active_profile = "work"
+
+    detached_entered = threading.Event()
+    release_detached = threading.Event()
+    active_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def detached_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("default", "test"):
+                detached_entered.set()
+                out["detached_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["detached_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                assert release_detached.wait(5)
+        except BaseException as exc:
+            worker_exc.append(exc)
+
+    def active_worker():
+        profiles.set_request_profile("work")
+        try:
+            with profiles.profile_env_for_active_request("test"):
+                out["active_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["active_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            profiles.clear_request_profile()
+            active_done.set()
+
+    t_detached = threading.Thread(target=detached_worker)
+    t_active = threading.Thread(target=active_worker)
+    t_detached.start()
+    assert detached_entered.wait(5)
+    # Start the active-request scope while the root detached scope is
+    # mid-body.  The shared ownership lock must block it — no early entry.
+    t_active.start()
+    _time.sleep(0.1)
+    assert not active_done.is_set()
+    release_detached.set()
+    t_detached.join(5)
+    t_active.join(5)
+    if worker_exc:
+        raise worker_exc[0]
+
+    # Root worker saw the ROOT value via TLS (raw scrubbed) throughout.
+    assert out["detached_tls"] == "root-value"
+    assert out["detached_raw"] is None
+    # Active-request scope, after the root worker exited, resolved the NAMED
+    # value on both channels.
+    assert out["active_raw"] == "active-value"
+    assert out["active_tls"] == "active-value"
+    # Exact ambient restoration.
+    assert os.environ.get("OPENROUTER_API_KEY") == "active-value"
+    profiles._active_profile = "default"
+    profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
