@@ -1774,56 +1774,6 @@
 <script src="static/extension_settings.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
-<!-- Mobile Enter key fix: intercept Enter on touch-only devices BEFORE boot.js runs.
-     Capture-phase listener on document runs before #msg's own listeners, so
-     stopImmediatePropagation() prevents boot.js's keydown handler from calling
-     send(). We do NOT preventDefault(), so the browser inserts the newline
-     natively (preserves undo history and IME state).
-     Phone UA is authoritative here: iOS Safari can report (any-pointer:fine)
-     as true on a plain iPhone, which is why media-query-only detection failed. -->
-<script>
-(function(){
-  function _isTouchOnly(){
-    var ua=navigator.userAgent||'';
-    if(/iPhone|iPod|Android|iPad/i.test(ua)) return true;
-    try{ if(/Macintosh/i.test(ua)&&(navigator.maxTouchPoints||0)>1) return true; }catch(e){}
-    try{ return matchMedia('(pointer:coarse)').matches && !matchMedia('(any-pointer:fine)').matches; }catch(e){}
-    return false;
-  }
-  if(!_isTouchOnly()) return;
-  // Read the user's send-key preference from localStorage (written by panels.js
-  // on save, same key boot.js reads for synchronous init). Default 'enter'.
-  var _sendKey;
-  try{ _sendKey=localStorage.getItem('hermes-pref-send_key')||'enter'; }catch(e){ _sendKey='enter'; }
-  document.addEventListener('keydown',function(e){
-    if(e.key!=='Enter') return;
-    var target=e.target;
-    if(!target || target.id!=='msg') return;
-    // Let the IME commit its own composition.
-    if(e.isComposing || e.keyCode===229) return;
-    // Slash-command autocomplete open: Enter picks the highlighted command.
-    var dd=document.getElementById('cmdDropdown');
-    if(dd && dd.classList.contains('open')) return;
-    // Respect the user's configured send key. Only intercept when the current
-    // key combination should NOT send (i.e. it should insert a newline instead).
-    // - shift+enter mode: Shift+Enter sends, plain Enter = newline
-    // - ctrl+enter mode:  Ctrl/Cmd+Enter sends, plain Enter = newline
-    // - enter mode:       plain Enter sends (but on touch-only we override to
-    //                     newline — the whole point of this interceptor)
-    // In all modes, Numpad Enter behaves like its modifier combination.
-    var _isNumpadEnter = e.code==='NumpadEnter'||e.location===KeyboardEvent.DOM_KEY_LOCATION_NUMPAD;
-    if(e.ctrlKey || e.metaKey) return;  // Ctrl/Cmd+Enter always sends
-    if(_sendKey==='shift+enter' && e.shiftKey) return;  // Shift+Enter sends in that mode
-    if(_isNumpadEnter && (_sendKey==='ctrl+enter'||_sendKey==='shift+enter'||_sendKey==='enter')) {
-      // Numpad Enter is treated as a send trigger in all modes by boot.js,
-      // so don't intercept it.
-      return;
-    }
-    // Block boot.js's handler; let the browser insert the newline itself.
-    e.stopImmediatePropagation();
-  },true);
-})();
-</script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/outline.js?v=__WEBUI_VERSION__" defer></script>
 
