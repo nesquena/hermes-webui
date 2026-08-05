@@ -12734,12 +12734,12 @@ function startCronPolling(){
         }
         // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
         updateCronBadge();
-        // A cron just completed while the panel may be open. The badge above
-        // already counted the unread run, so live-refresh the rendered list
-        // (and any open detail) so the per-job "new run" dot is visible without
-        // a manual refresh — otherwise the badge says "N new" while the list
-        // looks unchanged.
-        if ($('cronList')) loadCrons();
+        // A cron just completed while the Scheduled Tasks panel may be open.
+        // The badge above already counted the unread run; refresh the list only
+        // when this panel is the active view (switchPanel already reloads it on
+        // open), so we don't re-render a hidden panel or fire an avoidable
+        // /api/crons request while the user is on another screen.
+        if (_currentPanel === 'tasks' && $('cronList')) loadCrons();
       }
     }catch(e){}
   },30000);
