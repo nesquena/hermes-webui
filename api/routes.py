@@ -21182,10 +21182,11 @@ def _restore_start_state_after_thread_failure(
     session_id: str,
     original_session,
     pre_start_state: dict,
+    admitted_state: dict,
     claimed_queue_item: dict | None,
     discarded_queue_item_ids=None,
 ) -> None:
-    """Restore admission state without discarding queue writes made meanwhile."""
+    """Restore admission-owned fields without discarding concurrent writes."""
     session_lock = _get_session_agent_lock(session_id)
     with session_lock:
         current = _authoritative_session_locked(session_id, fallback=original_session)
@@ -21208,10 +21209,19 @@ def _restore_start_state_after_thread_failure(
             restored_queue = [copy.deepcopy(claimed_queue_item), *current_queue]
         else:
             restored_queue = current_queue
-        restored = copy.deepcopy(pre_start_state)
-        restored["queue"] = restored_queue
-        current.__dict__.clear()
-        current.__dict__.update(restored)
+        missing = object()
+        for key in pre_start_state.keys() | admitted_state.keys():
+            if key == "queue":
+                continue
+            before = pre_start_state.get(key, missing)
+            admitted = admitted_state.get(key, missing)
+            if before == admitted or current.__dict__.get(key, missing) != admitted:
+                continue
+            if before is missing:
+                current.__dict__.pop(key, None)
+            else:
+                current.__dict__[key] = copy.deepcopy(before)
+        current.queue = restored_queue
         current.save(touch_updated_at=False, backup_on_shrink=False)
         with LOCK:
             SESSIONS[session_id] = current
@@ -21295,6 +21305,7 @@ def _start_chat_stream_for_session(
     pending_queue_item = None
     appended_queue_item_id = None
     pre_start_state = None
+    admitted_state = None
     stream_id = None
     diag.stage("session_lock_wait") if diag else None
     while True:
@@ -21400,6 +21411,7 @@ def _start_chat_stream_for_session(
                     queue_item_id=queue_item_id,
                     pending_queue_item=pending_queue_item,
                 )
+                admitted_state = copy.deepcopy(s.__dict__)
                 break
         if needs_stale_cleanup:
             diag.stage("stale_stream_cleanup") if diag else None
@@ -21471,6 +21483,7 @@ def _start_chat_stream_for_session(
                 s.session_id,
                 s,
                 pre_start_state or {},
+                admitted_state or {},
                 claimed_queue_item,
                 [appended_queue_item_id] if appended_queue_item_id else None,
             )

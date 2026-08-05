@@ -1246,6 +1246,54 @@ def test_empty_eager_thread_start_failure_restores_pre_start_sidecar(monkeypatch
     assert not session.path.with_suffix(".json.bak").exists()
 
 
+def test_thread_start_failure_preserves_concurrent_session_updates(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path)
+    session = _new_session(
+        "queue-concurrent-session-update",
+        tmp_path,
+        queue=[{"id": "head", "text": "queued head", "files": []}],
+    )
+    concurrent_workspace = str(tmp_path / "concurrent-workspace")
+
+    def update_session_then_fail():
+        with routes._get_session_agent_lock(session.session_id):
+            current = routes._authoritative_session_locked(session.session_id, fallback=session)
+            current.title = "Concurrent rename"
+            current.workspace = concurrent_workspace
+            current.model = "concurrent-model"
+            current.model_provider = "concurrent-provider"
+            current.save()
+        raise RuntimeError("start failed")
+
+    _install_start_stubs(monkeypatch, thread_start=update_session_then_fail)
+
+    try:
+        routes._start_chat_stream_for_session(
+            session,
+            msg="ignored",
+            attachments=[],
+            workspace=str(tmp_path / "admitted-workspace"),
+            model="admitted-model",
+            model_provider="admitted-provider",
+            external_runtime_owned=False,
+            queue_item_id="head",
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "start failed"
+    else:
+        raise AssertionError("thread start failure must be surfaced")
+
+    persisted = models.Session.load(session.session_id)
+    assert persisted is not None
+    assert persisted.title == "Concurrent rename"
+    assert persisted.workspace == concurrent_workspace
+    assert persisted.model == "concurrent-model"
+    assert persisted.model_provider == "concurrent-provider"
+    assert [item["id"] for item in persisted.queue] == ["head"]
+    assert persisted.active_stream_id is None
+    assert persisted.pending_queue_item is None
+
+
 def test_thread_start_failure_restores_exact_claimed_item_in_order(monkeypatch, tmp_path):
     _setup(monkeypatch, tmp_path)
     first = {

@@ -240,12 +240,11 @@ def _session_records_clear_sentinel(session_path: Path, bak_path: Path) -> bool:
         'pending_attachments': [],
         'pending_started_at': None,
         'pending_user_source': None,
-        'pending_queue_item': None,
     }
     for key, value in expected.items():
         if key not in data or data.get(key) != value:
             return False
-    return True
+    return data.get('pending_queue_item') is None
 
 
 def _live_supersedes_backup_by_clear_generation(session_path: Path, bak_path: Path) -> bool:

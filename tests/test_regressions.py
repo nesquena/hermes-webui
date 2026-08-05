@@ -845,7 +845,7 @@ def test_inflight_merge_dedupes_uploaded_user_message(cleanup_test_sessions):
     )
     pending_idx = src.find("function _mergePendingSessionMessage")
     assert pending_idx >= 0, "pending session merge helper not found"
-    pending_block = src[pending_idx:pending_idx+500]
+    pending_block = src[pending_idx:pending_idx+1000]
     assert "_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)" in pending_block, (
         "pending-user merge should dedupe only against the current active-turn user row"
     )
