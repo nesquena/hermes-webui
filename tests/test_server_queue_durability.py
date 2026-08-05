@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import copy
 import threading
 import time
 import zipfile
@@ -985,6 +986,264 @@ def test_rejected_queue_claim_leaves_item_queued(monkeypatch, tmp_path):
     assert models.Session.load(session.session_id).queue[0]["id"] == "real-item"
     assert session.active_stream_id is None
     assert not worker.starts
+
+
+def test_start_reloads_authoritative_queue_head_after_cache_replacement(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path)
+    authoritative = _new_session(
+        "queue-authoritative-head",
+        tmp_path,
+        queue=[{"id": "disk", "text": "old disk head", "files": []}],
+    )
+    # The object currently installed in the locked cache is the mutation owner.
+    # A stale caller object must not replace it, and the start path must not
+    # silently downgrade to an older sidecar snapshot.
+    authoritative.queue = [{"id": "authoritative", "text": "use this", "files": []}]
+    stale = Session(
+        session_id=authoritative.session_id,
+        title=authoritative.title,
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        model_provider="openai",
+        messages=list(authoritative.messages),
+        queue=[{"id": "stale", "text": "never start this", "files": []}],
+    )
+    models.SESSIONS[authoritative.session_id] = authoritative
+    routes.SESSIONS[authoritative.session_id] = authoritative
+    worker = _install_start_stubs(monkeypatch)
+
+    response = routes._start_chat_stream_for_session(
+        stale,
+        msg="stale caller prompt",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        model_provider="openai",
+        claim_queue_head=True,
+        external_runtime_owned=False,
+    )
+
+    assert response["stream_id"]
+    assert worker.starts[0][1][1] == "use this"
+    persisted = models.Session.load(authoritative.session_id)
+    assert persisted.queue == []
+    assert persisted.pending_queue_item["id"] == "authoritative"
+    metadata = models.Session.load_metadata_only(authoritative.session_id)
+    assert metadata.pending_queue_item["id"] == "authoritative"
+
+
+def test_cross_source_start_preserves_claimed_head_and_incoming_tail_sources(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path)
+    head = {
+        "id": "human-head",
+        "text": "human turn",
+        "display_text": "human turn",
+        "files": [],
+        "model": "human-model",
+        "model_provider": "human-provider",
+        "source": "webui",
+    }
+    session = _new_session("queue-cross-source", tmp_path, queue=[head])
+    worker = _install_start_stubs(monkeypatch)
+
+    response = routes._start_chat_stream_for_session(
+        session,
+        msg="[IMPORTANT: process completed]",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="wakeup-model",
+        model_provider="wakeup-provider",
+        source="process_wakeup",
+        display_text="[IMPORTANT: process completed]",
+        external_runtime_owned=False,
+    )
+
+    persisted = models.Session.load(session.session_id)
+    assert persisted is not None
+    assert response["source"] == "webui"
+    assert response["queue_item_id"] == "human-head"
+    assert persisted.pending_user_source == "webui"
+    assert persisted.pending_queue_item["source"] == "webui"
+    assert persisted.queue[0]["source"] == "process_wakeup"
+    assert worker.starts[0][1][1] == "human turn"
+
+
+def test_direct_start_appends_retained_queue_tail_then_claims_head(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path)
+    head = {"id": "head", "text": "head turn", "files": [], "model": "head-model", "model_provider": "head-provider"}
+    tail = {"id": "tail", "text": "tail turn", "files": [], "model": "tail-model", "model_provider": "tail-provider"}
+    session = _new_session("queue-direct-order", tmp_path, queue=[head, tail])
+    worker = _install_start_stubs(monkeypatch)
+
+    response = routes._start_chat_stream_for_session(
+        session,
+        msg="new direct turn\n\n[Attached files: /attachments/new.txt]",
+        attachments=[{"name": "new.txt", "path": "/attachments/new.txt"}],
+        workspace=str(tmp_path),
+        model="direct-model",
+        model_provider="direct-provider",
+        source="webui",
+        display_text="new direct turn",
+        external_runtime_owned=False,
+    )
+
+    assert response["queue_item_id"] == "head"
+    assert response["queue_item"]["text"] == "head turn"
+    assert response["queue"] and [item["id"] for item in response["queue"]] == ["tail", response["queue"][1]["id"]]
+    persisted = models.Session.load(session.session_id)
+    assert [item["id"] for item in persisted.queue] == ["tail", response["queue"][1]["id"]]
+    incoming = persisted.queue[1]
+    assert incoming["text"] == "new direct turn"
+    assert incoming["display_text"] == "new direct turn"
+    assert incoming["files"] == [{"name": "new.txt", "path": "/attachments/new.txt"}]
+    assert incoming["model"] == "direct-model"
+    assert incoming["model_provider"] == "direct-provider"
+    assert incoming["source"] == "webui"
+    assert incoming["id"] and incoming["created_at"] and incoming["_queued_at"]
+    assert persisted.pending_user_message == "head turn"
+    assert len(worker.starts) == 1
+
+
+def test_direct_start_at_queue_cap_fails_closed_without_claim(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path)
+    queue = [{"id": str(i), "text": f"turn-{i}", "files": []} for i in range(100)]
+    session = _new_session("queue-direct-cap", tmp_path, queue=queue)
+    worker = _install_start_stubs(monkeypatch)
+
+    response = routes._start_chat_stream_for_session(
+        session,
+        msg="must remain unsent",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        model_provider="openai",
+        external_runtime_owned=False,
+    )
+
+    assert response["_status"] == 409
+    assert models.Session.load(session.session_id).queue == queue
+    assert not worker.starts
+
+
+def test_thread_start_failure_restores_deferred_session_state(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path)
+    session = _new_session("queue-deferred-rollback", tmp_path)
+    session.workspace = str(tmp_path / "before")
+    session.model = "before-model"
+    session.model_provider = "before-provider"
+    session.truncation_watermark = 321.0
+    session.save()
+    before = json.loads(session.path.read_text(encoding="utf-8"))
+    _install_start_stubs(monkeypatch, thread_start=lambda: (_ for _ in ()).throw(RuntimeError("start failed")))
+
+    try:
+        routes._start_chat_stream_for_session(
+            session,
+            msg="never started",
+            attachments=[{"name": "file.txt"}],
+            workspace=str(tmp_path / "after"),
+            model="after-model",
+            model_provider="after-provider",
+            external_runtime_owned=False,
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "start failed"
+    else:
+        raise AssertionError("thread start failure must be surfaced")
+
+    after = json.loads(session.path.read_text(encoding="utf-8"))
+    for key in ("messages", "queue", "workspace", "model", "model_provider", "active_stream_id",
+                "pending_user_message", "pending_attachments", "pending_started_at",
+                "pending_user_source", "truncation_watermark"):
+        assert after.get(key) == before.get(key), key
+    assert routes.STREAMS == {}
+
+
+def test_eager_thread_start_failure_removes_checkpoint_and_preserves_tail_enqueue(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(routes, "get_webui_session_save_mode", lambda: "eager")
+    head = {"id": "eager-head", "text": "queued head", "files": [], "model": "m", "model_provider": "p"}
+    session = _new_session("queue-eager-rollback", tmp_path, queue=[head])
+    before_messages = copy.deepcopy(session.messages)
+    _disable_enqueue_drain(monkeypatch)
+    new_item = {}
+
+    def enqueue_before_failure():
+        _status, response = _queue_action(
+            {
+                "session_id": session.session_id,
+                "action": "enqueue",
+                "text": "concurrent tail",
+                "model": "tail-model",
+                "model_provider": "tail-provider",
+            }
+        )
+        new_item.update(response["item"])
+        raise RuntimeError("start failed")
+
+    _install_start_stubs(monkeypatch, thread_start=enqueue_before_failure)
+
+    try:
+        routes._start_chat_stream_for_session(
+            session,
+            msg="ignored direct prompt",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="gpt-4o",
+            model_provider="openai",
+            external_runtime_owned=False,
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "start failed"
+    else:
+        raise AssertionError("thread start failure must be surfaced")
+
+    persisted = models.Session.load(session.session_id)
+    assert persisted.messages == before_messages
+    assert [item["id"] for item in persisted.queue] == ["eager-head", new_item["id"]]
+    assert persisted.pending_queue_item is None
+    assert persisted.active_stream_id is None
+    assert persisted.pending_user_message is None
+    assert persisted.pending_attachments == []
+    assert persisted.pending_started_at is None
+    assert persisted.pending_user_source is None
+    assert not session.path.with_suffix(".json.bak").exists()
+
+
+def test_empty_eager_thread_start_failure_restores_pre_start_sidecar(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(routes, "get_webui_session_save_mode", lambda: "eager")
+    session = _new_session("queue-empty-eager-rollback", tmp_path)
+    session.messages = []
+    session.save()
+    session.path.with_suffix(".json.bak").unlink(missing_ok=True)
+    _install_start_stubs(
+        monkeypatch,
+        thread_start=lambda: (_ for _ in ()).throw(RuntimeError("start failed")),
+    )
+
+    try:
+        routes._start_chat_stream_for_session(
+            session,
+            msg="never started",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="gpt-4o",
+            model_provider="openai",
+            external_runtime_owned=False,
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "start failed"
+    else:
+        raise AssertionError("thread start failure must be surfaced")
+
+    persisted = models.Session.load(session.session_id)
+    assert persisted is not None
+    assert persisted.messages == []
+    assert persisted.active_stream_id is None
+    assert persisted.pending_user_message is None
+    assert persisted.pending_queue_item is None
+    assert not session.path.with_suffix(".json.bak").exists()
 
 
 def test_thread_start_failure_restores_exact_claimed_item_in_order(monkeypatch, tmp_path):

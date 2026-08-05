@@ -3300,6 +3300,16 @@ function _mergePendingSessionMessage(session,messages){
   const currentTurnMessages=liveAssistantIdx>=0?messages.slice(0,liveAssistantIdx):messages;
   const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,currentTurnMessages):null;
   if(!pendingMsg) return false;
+  const existingIdx=messages.findIndex(m=>m&&m.role==='user'&&m._pending&&_sameTranscriptMessage(m,pendingMsg));
+  if(existingIdx>=0){
+    if(liveAssistantIdx>=0&&existingIdx>liveAssistantIdx){
+      const [existing]=messages.splice(existingIdx,1);
+      const nextLive=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
+      messages.splice(nextLive<0?messages.length:nextLive,0,existing);
+      return true;
+    }
+    return false;
+  }
   if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
   if(liveAssistantIdx>=0){
     const misplacedIdx=messages.findIndex((m,idx)=>

@@ -1880,6 +1880,9 @@ async function send(){
     }
     if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
     else if(typeof appendThinking==='function') appendThinking('',{pending:true});
+    if(Array.isArray(startData.queue)||startData.queue_item||startData.queue_item_id){
+      _reconcileServerTurnStarted(activeSid,startData);
+    }
     // setBusy(true) already ran with activeStreamId=null; refresh now that we
     // have a stream id so the primary button can switch to Stop (see
     // getComposerPrimaryAction).
@@ -7526,6 +7529,80 @@ const _SESSION_STREAM_HIDDEN_POLL_MAX_FALSE = 20; // ~2 min at the 6s cadence
 // signal, a poll that fires while another session is in the current pane
 // would attach nothing AND stop polling, leaving the turn invisible until
 // the next user interaction.
+function _reconcileServerTurnStarted(sid, payload){
+  const data=payload&&typeof payload==='object'?payload:{};
+  if(!(S.session&&S.session.session_id===sid)) return false;
+  if(Array.isArray(data.queue)&&typeof hydrateSessionQueue==='function'){
+    hydrateSessionQueue(sid,data.queue);
+  }
+  let item=data.queue_item||data.pending_queue_item;
+  if(item&&typeof item==='object'){
+    item={...item};
+    if(!Object.prototype.hasOwnProperty.call(item,'display_text')){
+      item.display_text=data.display_text??item.text??'';
+    }
+    if(!Array.isArray(item.files)){
+      item.files=Array.isArray(data.attachments)?data.attachments:[];
+    }
+    if(data.queue_item_id&&!item.id) item.id=data.queue_item_id;
+    S.session.pending_queue_item=item;
+    S.session.pending_attachments=item.files.filter(Boolean);
+  }else if(data.queue_item_id||data.display_text||Array.isArray(data.attachments)){
+    const displayText=String(data.display_text??'');
+    S.session.pending_queue_item={
+      id:data.queue_item_id||null,
+      text:displayText,
+      display_text:displayText,
+      files:Array.isArray(data.attachments)?data.attachments.filter(Boolean):[],
+      source:data.source||S.session.pending_user_source||'webui',
+    };
+    S.session.pending_attachments=S.session.pending_queue_item.files;
+  }
+  if(typeof data.pending_started_at==='number') S.session.pending_started_at=data.pending_started_at;
+  else if(!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
+  if(data.source) S.session.pending_user_source=data.source;
+  const merged=typeof _mergePendingSessionMessage==='function'
+    ? _mergePendingSessionMessage(S.session,S.messages) : false;
+  let reordered=false;
+  if(Array.isArray(data.queue)&&data.queue.length&&S.session.pending_queue_item){
+    const claimedText=Object.prototype.hasOwnProperty.call(S.session.pending_queue_item,'display_text')
+      ? S.session.pending_queue_item.display_text : S.session.pending_queue_item.text;
+    const isQueuedTail=(message)=>{
+      if(!message||message.role!=='user'||!message._pending) return false;
+      const messageText=String(message.content??'').trim();
+      return data.queue.some(entry=>{
+        if(!entry||typeof entry!=='object') return false;
+        const text=Object.prototype.hasOwnProperty.call(entry,'display_text')
+          ? entry.display_text : entry.text;
+        return String(text??'').trim()===messageText;
+      });
+    };
+    let claimedIdx=S.messages.findIndex(message=>
+      message&&message.role==='user'&&message._pending&&
+      String(message.content??'').trim()===String(claimedText??'').trim()
+    );
+    if(claimedIdx>=0){
+      const tails=[];
+      for(let i=S.messages.length-1;i>=0;i--){
+        if(i===claimedIdx||!isQueuedTail(S.messages[i])) continue;
+        tails.unshift(S.messages.splice(i,1)[0]);
+        if(i<claimedIdx) claimedIdx--;
+        reordered=true;
+      }
+      if(tails.length){
+        const liveIdx=S.messages.findIndex(message=>message&&message.role==='assistant'&&message._live);
+        claimedIdx=S.messages.findIndex(message=>
+          message&&message.role==='user'&&message._pending&&
+          String(message.content??'').trim()===String(claimedText??'').trim()
+        );
+        S.messages.splice((liveIdx>=0?liveIdx:claimedIdx)+1,0,...tails);
+      }
+    }
+  }
+  if((merged||reordered)&&typeof renderMessages==='function') renderMessages();
+  return true;
+}
+
 function _attachServerInitiatedStream(sid, streamId, recovered) {
   let handedOff = false;
   try {
@@ -7632,6 +7709,7 @@ function _startHiddenActiveStreamPoll(sid) {
               _sessionStreamHiddenPollFalseStreamId = streamKey;
               _sessionStreamHiddenPollFalseCount = 0;
             }
+            _reconcileServerTurnStarted(sid,d);
             const attached = _attachServerInitiatedStream(sid, streamId, true);
             if (attached) {
               _stopHiddenActiveStreamPoll();
@@ -7829,42 +7907,8 @@ function startSessionStream(sid) {
         // expecting token 0 (which would render a truncated turn). A fresh
         // (non-recovered) frame still attaches from the first token.
         const recovered = !!d.recovered;
-        // Only drive the renderer when this session is the one on screen.
-        const isCurrent = (typeof _isSessionCurrentPane === 'function')
-          ? _isSessionCurrentPane(sid)
-          : (S.session && S.session.session_id === sid);
-        if (!isCurrent) return;
-        // A turn is already rendering in this tab (user-initiated, or we
-        // already attached to this very stream). attachLiveStream is
-        // idempotent per (sid, streamId); bail if we're already on it.
-        if (S.activeStreamId === streamId) return;
-        const existingLive = (typeof LIVE_STREAMS !== 'undefined') ? LIVE_STREAMS[sid] : null;
-        if (existingLive && existingLive.streamId === streamId) return;
-        // Mirror the loadSession reattach setup. For a fresh frame the turn
-        // renders from its first token; for a recovered (replay) frame
-        // attachLiveStream reconstructs the in-progress stream.
-        S.busy = true;
-        S.activeStreamId = streamId;
-        if (S.session && S.session.session_id === sid) {
-          S.session.active_stream_id = streamId;
-          if (typeof d.pending_started_at === 'number') S.session.pending_started_at = d.pending_started_at;
-          else if (!S.session.pending_started_at) S.session.pending_started_at = Date.now()/1000;
-        }
-        if (typeof ensureLiveWorklogShell === 'function') ensureLiveWorklogShell();
-        else if (typeof appendThinking === 'function') appendThinking();
-        if (typeof updateSendBtn === 'function') updateSendBtn();
-        if (typeof setComposerStatus === 'function') setComposerStatus('');
-        if (typeof syncTopbar === 'function') syncTopbar();
-        if (typeof startApprovalPolling === 'function') startApprovalPolling(sid);
-        if (typeof startClarifyPolling === 'function') startClarifyPolling(sid);
-        if (typeof attachLiveStream === 'function') {
-          attachLiveStream(
-            sid, streamId,
-            (S.session && S.session.pending_attachments) || [],
-            recovered ? {reconnecting: true} : {},
-          );
-        }
-        if (typeof renderSessionList === 'function') void renderSessionList();
+        _reconcileServerTurnStarted(sid,d);
+        _attachServerInitiatedStream(sid, streamId, recovered);
       } catch (_) {}
     });
     es.onerror = () => {

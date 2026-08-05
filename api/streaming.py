@@ -1446,13 +1446,28 @@ def _clean_synthetic_control_messages_with_provenance(messages):
 
 def _active_turn_authority(session, stream_id, msg_text):
     """Capture the stream-owned pending turn before settlement mutates it."""
+    pending_item = getattr(session, 'pending_queue_item', None)
+    pending_item = pending_item if isinstance(pending_item, dict) else None
     pending_text = getattr(session, 'pending_user_message', None)
+    pending_display = (
+        pending_item.get('display_text')
+        if pending_item is not None and 'display_text' in pending_item
+        else (pending_item.get('text') if pending_item else None)
+    )
     return {
         'token': build_active_turn_token(stream_id, getattr(session, 'pending_started_at', None)),
-        'text': pending_text if pending_text is not None else msg_text,
+        'text': pending_display if pending_item is not None else (pending_text if pending_text is not None else msg_text),
         'timestamp': getattr(session, 'pending_started_at', None),
-        'source': getattr(session, 'pending_user_source', None) or 'webui',
-        'attachments': copy.deepcopy(getattr(session, 'pending_attachments', None) or []),
+        'source': (
+            (pending_item or {}).get('source')
+            or getattr(session, 'pending_user_source', None)
+            or 'webui'
+        ),
+        'attachments': copy.deepcopy(
+            (pending_item or {}).get('files')
+            or getattr(session, 'pending_attachments', None)
+            or []
+        ),
         'current_turn_user_idx': None,
         'turn_id': '',
     }
@@ -1942,6 +1957,7 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+    session.pending_queue_item = None
     if not _session_has_cancel_marker(session):
         agent_name = _preferred_agent_display_name_for_session(session)
         session.messages.append({
@@ -1961,6 +1977,7 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+    session.pending_queue_item = None
     try:
         import pathlib
         pathlib.Path(session.path).unlink(missing_ok=True)
@@ -4413,12 +4430,14 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             saved_pending_attachments = list(getattr(s, 'pending_attachments', []) or [])
             saved_pending_started_at = getattr(s, 'pending_started_at', None)
             saved_pending_user_source = getattr(s, 'pending_user_source', None)
+            saved_pending_queue_item = copy.deepcopy(getattr(s, 'pending_queue_item', None))
             saved_queue = list(getattr(s, 'queue', []) or [])
             s.active_stream_id = None
             s.pending_user_message = None
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
+            s.pending_queue_item = None
             s.queue = []
             try:
                 # skip_index=False so the snapshot appears in _index.json with
@@ -4439,6 +4458,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 s.pending_attachments = saved_pending_attachments
                 s.pending_started_at = saved_pending_started_at
                 s.pending_user_source = saved_pending_user_source
+                s.pending_queue_item = saved_pending_queue_item
                 s.queue = saved_queue
             return
         # Existing file is already at least as complete as memory; stamp only
@@ -4461,6 +4481,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             snapshot.pending_attachments = []
             snapshot.pending_started_at = None
             snapshot.pending_user_source = None
+            snapshot.pending_queue_item = None
             snapshot.queue = []
             snapshot.save(touch_updated_at=False, skip_index=False)
             logger.info(
@@ -6955,15 +6976,33 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     bubble disappear on reload/reconcile. Return True when a recovered user turn
     was appended.
     """
-    pending_text = str(getattr(session, 'pending_user_message', None) or '')
-    if not pending_text:
-        return False
+    pending_item = getattr(session, 'pending_queue_item', None)
+    pending_item = pending_item if isinstance(pending_item, dict) else None
+    pending_display = (
+        pending_item.get('display_text')
+        if pending_item is not None and 'display_text' in pending_item
+        else (pending_item.get('text') if pending_item else None)
+    )
+    pending_text = str(
+        pending_display if pending_display is not None
+        else (getattr(session, 'pending_user_message', None) or '')
+    )
     recovered_ts = int(time.time())
     pending_started_at = getattr(session, 'pending_started_at', None)
     if isinstance(pending_started_at, (int, float)) and pending_started_at > 0:
         recovered_ts = int(pending_started_at)
-    pending_source = getattr(session, 'pending_user_source', None) or 'webui'
-    pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
+    pending_source = (
+        (pending_item or {}).get('source')
+        or getattr(session, 'pending_user_source', None)
+        or 'webui'
+    )
+    pending_attachments = list(
+        (pending_item or {}).get('files')
+        or getattr(session, 'pending_attachments', None)
+        or []
+    )
+    if not pending_text and not pending_attachments:
+        return False
 
     def is_exact_checkpoint(messages):
         if not isinstance(messages, list) or not messages:
@@ -10177,6 +10216,7 @@ def _run_agent_streaming(
                         s.pending_attachments = []
                         s.pending_started_at = None
                         s.pending_user_source = None
+                        s.pending_queue_item = None
                         try:
                             _snapshot_and_append_partial_on_error(s, stream_id)
                         except Exception:
@@ -10378,6 +10418,7 @@ def _run_agent_streaming(
                 s.pending_attachments = []
                 s.pending_started_at = None
                 s.pending_user_source = None
+                s.pending_queue_item = None
                 # Tag the matching user message with attachment filenames for display on reload
                 # Only tag a user message whose content relates to this turn's text
                 # (msg_text is the full message including the [Attached files: ...] suffix)
@@ -11406,6 +11447,7 @@ def _run_agent_streaming(
                 s.pending_attachments = []
                 s.pending_started_at = None
                 s.pending_user_source = None
+                s.pending_queue_item = None
                 try:
                     _snapshot_and_append_partial_on_error(s, stream_id)
                 except Exception:
@@ -11967,6 +12009,7 @@ def cancel_stream(stream_id: str) -> bool:
                 _cs.pending_attachments = []
                 _cs.pending_started_at = None
                 _cs.pending_user_source = None
+                _cs.pending_queue_item = None
                 # Persist any partial assistant text that was streamed before cancel (#893).
                 # Preserving partial content means the user sees what the agent had
                 # produced rather than losing it entirely.  The marker is _partial=True

@@ -734,6 +734,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
+        session.pending_queue_item = None
         try:
             _snapshot_and_append_partial_on_error(session, stream_id)
         except Exception:
@@ -785,6 +786,7 @@ def _clear_gateway_pending_state(session: Any, stream_id: str) -> None:
     session.pending_attachments = None
     session.pending_started_at = None
     session.pending_user_source = None
+    session.pending_queue_item = None
     session.save()
 
 
@@ -1188,12 +1190,26 @@ def _run_gateway_chat_streaming(
             # same sort key; later transcript merges can then fall back to
             # role/content ordering instead of turn order.
             assistant_ts = now + 0.000001
-            user_msg = {"role": "user", "content": str(msg_text or ""), "timestamp": now}
-            pending_source = getattr(s, "pending_user_source", None) or "webui"
+            pending_item = getattr(s, "pending_queue_item", None)
+            pending_item = pending_item if isinstance(pending_item, dict) else None
+            display_text = (
+                pending_item.get("display_text")
+                if pending_item is not None and "display_text" in pending_item
+                else str(msg_text or "")
+            )
+            display_attachments = list(
+                (pending_item or {}).get("files") or attachments or []
+            )
+            user_msg = {"role": "user", "content": display_text, "timestamp": now}
+            pending_source = (
+                (pending_item or {}).get("source")
+                or getattr(s, "pending_user_source", None)
+                or "webui"
+            )
             if pending_source != "webui":
                 user_msg["_source"] = pending_source
-            if attachments:
-                user_msg["attachments"] = list(attachments)
+            if display_attachments:
+                user_msg["attachments"] = display_attachments
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
             saved_reasoning = STREAM_REASONING_TEXT.get(stream_id, "")
             if saved_reasoning:
@@ -1237,7 +1253,7 @@ def _run_gateway_chat_streaming(
                     display,
                     previous_context,
                     s.context_messages,
-                    str(msg_text or ""),
+                    display_text,
                     source=pending_source,
                 )
             except Exception:
@@ -1247,7 +1263,7 @@ def _run_gateway_chat_streaming(
                     latest = display[-1]
                     if isinstance(latest, dict) and latest.get("role") == "user":
                         latest_text = " ".join(str(latest.get("content") or "").split())
-                        msg_norm = " ".join(str(msg_text or "").split())
+                        msg_norm = " ".join(str(display_text or "").split())
                         if latest_text == msg_norm:
                             display = display[:-1]
                 s.messages = display + [user_msg, assistant_msg]
@@ -1256,6 +1272,7 @@ def _run_gateway_chat_streaming(
             s.pending_attachments = None
             s.pending_started_at = None
             s.pending_user_source = None
+            s.pending_queue_item = None
             s.workspace = str(workspace)
             s.model = model
             s.model_provider = model_provider

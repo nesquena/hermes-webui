@@ -10331,9 +10331,16 @@ function _pendingCurrentTailUserMessage(messages){
 }
 
 function getPendingSessionMessage(session, messagesOverride=null){
-  const text=String(session?.pending_user_message||'').trim();
-  if(!text) return null;
-  const attachments=Array.isArray(session?.pending_attachments)?session.pending_attachments.filter(Boolean):[];
+  const pendingItem=session?.pending_queue_item&&typeof session.pending_queue_item==='object'
+    ? session.pending_queue_item : null;
+  const hasDisplayText=pendingItem&&Object.prototype.hasOwnProperty.call(pendingItem,'display_text');
+  const text=hasDisplayText
+    ? String(pendingItem.display_text??'')
+    : String(session?.pending_user_message||'').trim();
+  const attachments=Array.isArray(pendingItem?.files)
+    ? pendingItem.files.filter(Boolean)
+    : (Array.isArray(session?.pending_attachments)?session.pending_attachments.filter(Boolean):[]);
+  if(!text&&!attachments.length) return null;
   const sourceMessages=Array.isArray(messagesOverride)?messagesOverride:session?.messages;
   const messages=Array.isArray(sourceMessages)?sourceMessages:[];
   const currentTailUser=_pendingCurrentTailUserMessage(messages);
@@ -10353,7 +10360,7 @@ function getPendingSessionMessage(session, messagesOverride=null){
     attachments:attachments.length?attachments:undefined,
     _ts:session?.pending_started_at||Date.now()/1000,
     _pending:true,
-    _source:session?.pending_user_source||undefined,
+    _source:pendingItem?.source||session?.pending_user_source||undefined,
   };
 }
 async function checkInflightOnBoot(sid) {

@@ -139,6 +139,68 @@ def test_set_busy_false_never_drains_runtime_queue():
     assert result == {"busy": False, "drained": 0}
 
 
+def test_server_turn_reconciliation_hydrates_queue_and_dedupes_claimed_user_turn():
+    reconcile = _function(MESSAGES, "_reconcileServerTurnStarted")
+    result = _run(
+        f"""
+        const S={{session:{{session_id:'sid',pending_user_message:'model prompt with [Attached files: /x]'}},messages:[{{role:'user',content:'tail text',_pending:true}},{{role:'assistant',_live:true,content:'live'}}]}};
+        let hydrated=[];
+        function hydrateSessionQueue(sid,queue){{hydrated.push({{sid,queue}});}}
+        function _mergePendingSessionMessage(session,messages){{
+          const item=session.pending_queue_item;
+          const candidate={{role:'user',content:item.display_text,attachments:item.files,_pending:true}};
+          const duplicate=messages.findIndex(m=>m&&m.role==='user'&&m.content===candidate.content);
+          const live=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
+          if(duplicate>=0){{const [row]=messages.splice(duplicate,1);const nextLive=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);messages.splice(nextLive<0?messages.length:nextLive,0,row);}}
+          else messages.splice(live<0?messages.length:live,0,candidate);
+        }}
+        {reconcile}
+        const payload={{stream_id:'stream',queue:[{{id:'tail',text:'tail text',display_text:'tail text'}}],queue_item_id:'claimed',queue_item:{{id:'claimed',text:'raw text',display_text:'raw text',files:[{{name:'a.txt'}}]}}}};
+        _reconcileServerTurnStarted('sid',payload);
+        _reconcileServerTurnStarted('sid',payload);
+        console.log(JSON.stringify({{hydrated,pending:S.session.pending_queue_item,attachments:S.session.pending_attachments,messages:S.messages}}));
+        """
+    )
+    assert result["hydrated"] == [
+        {"sid": "sid", "queue": [{"id": "tail", "text": "tail text", "display_text": "tail text"}]},
+        {"sid": "sid", "queue": [{"id": "tail", "text": "tail text", "display_text": "tail text"}]},
+    ]
+    assert result["pending"]["id"] == "claimed"
+    assert result["attachments"] == [{"name": "a.txt"}]
+    assert [message.get("content") for message in result["messages"]].count("raw text") == 1
+    assert result["messages"][0]["content"] == "raw text"
+    assert [message.get("content") for message in result["messages"]] == [
+        "raw text",
+        "live",
+        "tail text",
+    ]
+
+
+def test_server_turn_reconciliation_moves_optimistic_tail_after_claimed_turn():
+    reconcile = _function(MESSAGES, "_reconcileServerTurnStarted")
+    result = _run(
+        f"""
+        const S={{session:{{session_id:'sid'}},messages:[{{role:'user',content:'tail text',_pending:true}}]}};
+        function hydrateSessionQueue(){{}}
+        function _mergePendingSessionMessage(session,messages){{
+          const item=session.pending_queue_item;
+          const duplicate=messages.findIndex(m=>m&&m.role==='user'&&m.content===item.display_text);
+          if(duplicate>=0) return false;
+          messages.push({{role:'user',content:item.display_text,attachments:item.files,_pending:true}});
+          return true;
+        }}
+        function renderMessages(){{}}
+        {reconcile}
+        _reconcileServerTurnStarted('sid',{{
+          queue:[{{id:'tail',display_text:'tail text'}}],
+          queue_item:{{id:'claimed',display_text:'claimed text',files:[]}}
+        }});
+        console.log(JSON.stringify(S.messages.map(message=>message.content)));
+        """
+    )
+    assert result == ["claimed text", "tail text"]
+
+
 def test_interrupt_waits_for_acceptance_and_restores_input_on_failure():
     interrupt = _function(COMMANDS, "cmdInterrupt")
     result = _run(
