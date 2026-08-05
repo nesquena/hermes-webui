@@ -72,6 +72,12 @@ class TestModelSelectionModeSources:
         assert "model_selection_mode:null" in src
         assert "_clearDefaultModelSession" in src
 
+    def test_messages_js_guards_session_switch_after_refresh(self):
+        """messages.js must guard session identity after async refresh."""
+        src = MESSAGES_JS.read_text(encoding="utf-8")
+        assert "S.session.session_id!==activeSid" in src
+        assert "Session changed during default model resolution" in src
+
 
 # === Persistent intent tests (no Node needed) ===
 

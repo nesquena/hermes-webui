@@ -1723,10 +1723,15 @@ async function send(){
     // __default__ must resolve from a fresh server routing pair. Do not silently
     // send a stale model/provider pair when that refresh fails; the normal
     // chat/start failure path restores the draft and leaves the user retryable.
+    // Guard: a session switch during the async refresh must not mix routing
+    // state across conversations (greptile review on cr-2).
     if(S.session&&S.session.model==='__default__'){
       const refreshed=typeof _refreshDefaultModelCache==='function'
         &&await _refreshDefaultModelCache();
       if(!refreshed) throw new Error('Could not refresh the current default model. Please retry.');
+      if(S.session.session_id!==activeSid){
+        throw new Error('Session changed during default model resolution. Please retry.');
+      }
     }
     const _modelState=_chatPayloadModelState();
     modelStateForPostStart=_modelState;
