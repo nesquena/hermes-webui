@@ -2648,7 +2648,20 @@ function _mediaPathSrc(){
   // stay inside one token. A lazy `${ch}+?` would stop at `C` (because `:`
   // closes a token) and at a nested `MEDIA:`.
   const chNotSentenceEnd = String.raw`(?:(?!${sentenceEnd})${ch})`;
-  const spaced = String.raw`(?!MEDIA:)${ch}+?(?:[^\S\n]${wordNoDot})*?[^\S\n]${finalWithExt}${boundary}`;
+  // Ambiguous prose shape: the FIRST word is already a complete dot-bearing
+  // filename, followed by dot-free prose and then another filename:
+  //
+  //   MEDIA:/tmp/a.png see README.md
+  //
+  // Reject that shape so `/tmp/a.png` wins and the rest remains prose. The
+  // continuation classes exclude `/`, so `/tmp/v1.2 Reports/chart.png` does not
+  // match the rejection and dotted-directory support remains intact. A genuinely
+  // ambiguous spaced filename can use the already-supported quoted form.
+  const noSlash = String.raw`[^\s\)\]/]`;
+  const wordNoDotNoSlash = String.raw`(?!MEDIA:)[^\s\)\]\./]+`;
+  const finalWithExtNoSlash = String.raw`(?!MEDIA:)${noSlash}+?\.[A-Za-z0-9]+`;
+  const dottedFirstThenDottedProse = String.raw`(?!MEDIA:)${ch}+?\.[A-Za-z0-9]+(?:[^\S\n]${wordNoDotNoSlash})*?[^\S\n]${finalWithExtNoSlash}${boundary}`;
+  const spaced = String.raw`(?!(?:${dottedFirstThenDottedProse}))(?!MEDIA:)${ch}+?(?:[^\S\n]${wordNoDot})*?[^\S\n]${finalWithExt}${boundary}`;
   const nospace = String.raw`(?!MEDIA:)${ch}+?\.[A-Za-z0-9]+${boundaryOrSentence}`;
   // A real HTTP(S) URL is one tempered-greedy run, tried BEFORE the bare forms so
   // `://host/...` (and a nested `MEDIA:` in its path/query) stays in one token. A

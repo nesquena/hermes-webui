@@ -353,7 +353,62 @@ def test_js_terminal_punctuation_ownership_matches_python():
     cases = [text for text, _, _ in _PUNCTUATION_OWNERSHIP]
     results = _js_media_capture_and_remainder(cases)
     for (text, expected_capture, expected_remainder), (capture, remainder) in zip(
-        _PUNCTUATION_OWNERSHIP, results
+        _PUNCTUATION_OWNERSHIP, results, strict=True
+    ):
+        assert capture == expected_capture, f"JS capture diverged for {text!r}"
+        assert remainder == expected_remainder, f"JS remainder diverged for {text!r}"
+
+
+# Ambiguous unquoted spaced refs. If the first word already ends in a filename
+# extension, it owns the token and ordinary prose after it must remain prose.
+# Dotted-directory support is still unambiguous when the continuation contains
+# a path separator (`/tmp/v1.2 Reports/chart.png`). A genuinely ambiguous spaced
+# filename can use the already-supported quoted form.
+_SPACED_AMBIGUITY_OWNERSHIP = [
+    (
+        "MEDIA:/tmp/a.png see README.md",
+        "/tmp/a.png",
+        " see README.md",
+    ),
+    (
+        "MEDIA:/tmp/a.png see README.md next",
+        "/tmp/a.png",
+        " see README.md next",
+    ),
+    (
+        "MEDIA:/tmp/v1.2 Reports/chart.png",
+        "/tmp/v1.2 Reports/chart.png",
+        "",
+    ),
+    (
+        "MEDIA:/tmp/My Files/final report.png done",
+        "/tmp/My Files/final report.png",
+        " done",
+    ),
+]
+
+
+@pytest.mark.parametrize("text,expected_capture,expected_remainder", _SPACED_AMBIGUITY_OWNERSHIP)
+def test_python_spaced_path_does_not_absorb_dotted_prose(
+    text, expected_capture, expected_remainder
+):
+    """A complete first filename wins over later dot-bearing prose."""
+    import re as _re
+
+    from api.helpers import media_token_pattern
+
+    m = _re.compile(media_token_pattern()).search(text)
+    assert m is not None, f"no match for {text!r}"
+    assert m.group(1) == expected_capture
+    assert text[m.end():] == expected_remainder
+
+
+def test_js_spaced_path_does_not_absorb_dotted_prose():
+    """JavaScript applies the same fixed capture/remainder contract."""
+    cases = [text for text, _, _ in _SPACED_AMBIGUITY_OWNERSHIP]
+    results = _js_media_capture_and_remainder(cases)
+    for (text, expected_capture, expected_remainder), (capture, remainder) in zip(
+        _SPACED_AMBIGUITY_OWNERSHIP, results, strict=True
     ):
         assert capture == expected_capture, f"JS capture diverged for {text!r}"
         assert remainder == expected_remainder, f"JS remainder diverged for {text!r}"

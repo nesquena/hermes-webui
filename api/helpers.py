@@ -1345,8 +1345,33 @@ def media_token_pattern(extra_exclude: str = "", exclude_urls: bool = False) -> 
     word_no_dot = r"(?!MEDIA:)[^\s)\]." + extra_exclude + r"]+"
     # Final word carries the extension.
     final_with_ext = r"(?!MEDIA:)" + ch + r"+?\.[A-Za-z0-9]+"
+    # Ambiguous prose shape: the FIRST word is already a complete dot-bearing
+    # filename, followed by same-line dot-free prose and then another filename:
+    #
+    #   MEDIA:/tmp/a.png see README.md
+    #
+    # The spaced branch used to absorb all of `/tmp/a.png see README.md` as one
+    # nonexistent ref. Reject that shape so the earlier complete `/tmp/a.png`
+    # wins and the rest remains prose. The continuation classes deliberately
+    # exclude `/`: `/tmp/v1.2 Reports/chart.png` therefore does NOT match this
+    # rejection and retains dotted-directory support. A genuinely ambiguous
+    # spaced filename can use the already-supported quoted form.
+    no_slash = r"[^\s)\]" + extra_exclude + r"/]"
+    word_no_dot_no_slash = (
+        r"(?!MEDIA:)[^\s)\]." + extra_exclude + r"/]+"
+    )
+    final_with_ext_no_slash = (
+        r"(?!MEDIA:)" + no_slash + r"+?\.[A-Za-z0-9]+"
+    )
+    dotted_first_then_dotted_prose = (
+        r"(?!MEDIA:)" + ch + r"+?\.[A-Za-z0-9]+"
+        + r"(?:[^\S\n]" + word_no_dot_no_slash + r")*?"
+        + r"[^\S\n]" + final_with_ext_no_slash
+        + _MEDIA_TOKEN_BOUNDARY
+    )
     spaced = (
-        r"(?!MEDIA:)" + ch + r"+?"
+        r"(?!(?:" + dotted_first_then_dotted_prose + r"))"
+        + r"(?!MEDIA:)" + ch + r"+?"
         + r"(?:[^\S\n]" + word_no_dot + r")*?"
         + r"[^\S\n]" + final_with_ext
         + _MEDIA_TOKEN_BOUNDARY
