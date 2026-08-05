@@ -12734,6 +12734,12 @@ function startCronPolling(){
         }
         // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
         updateCronBadge();
+        // A cron just completed while the panel may be open. The badge above
+        // already counted the unread run, so live-refresh the rendered list
+        // (and any open detail) so the per-job "new run" dot is visible without
+        // a manual refresh — otherwise the badge says "N new" while the list
+        // looks unchanged.
+        if ($('cronList')) loadCrons();
       }
     }catch(e){}
   },30000);
