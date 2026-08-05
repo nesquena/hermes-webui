@@ -87,6 +87,15 @@ LONG_CASES = [
     "w" * 4094 + " MEDIA:/tmp/v1.2 Reports/c.png end",
 ]
 
+# Reviewer-authored overflow shape: a COMPLETE media token is followed by more
+# than the tail limit of same-line prose that itself ends in a filename. Settled
+# parsing correctly stops at `/tmp/a.png`; streaming used to buffer the token +
+# prose as one possibly-growing candidate and, on overflow, write the ENTIRE
+# candidate as plain text — silently dropping the already-complete media card.
+LONG_AFTER_CASES = [
+    "MEDIA:/tmp/a.png see " + ("w" * (_TAIL_MAX + 32)) + " README.md",
+]
+
 
 def _extract_js_function(src: str, name: str) -> str:
     start = src.index(f"function {name}(")
@@ -203,6 +212,11 @@ def long_result():
     return _run(LONG_CASES, two_cuts=False)
 
 
+@pytest.fixture(scope="module")
+def long_after_result():
+    return _run(LONG_AFTER_CASES, two_cuts=False)
+
+
 def test_stream_and_settled_agree_over_every_chunk_cut(short_result):
     assert short_result["checks"] > 5000, (
         f"sweep too small: {short_result['checks']} splits"
@@ -229,6 +243,18 @@ def test_long_prose_before_a_ref_does_not_lose_the_card(long_result):
     assert long_result["total"] == 0, (
         "a MEDIA ref preceded by >_MEDIA_TAIL_MAX chars of prose lost its card; "
         f"{long_result['total']} mismatches, first few: {long_result['failures']}"
+    )
+
+
+def test_long_dotted_prose_after_a_complete_ref_does_not_lose_card(long_after_result):
+    """Overflow must partition the candidate, not flatten it to plain text."""
+    assert long_after_result["checks"] > _TAIL_MAX, (
+        f"overflow sweep too small: {long_after_result['checks']}"
+    )
+    assert long_after_result["total"] == 0, (
+        "same-line prose exceeding _MEDIA_TAIL_MAX after a complete ref lost "
+        f"the card; {long_after_result['total']} mismatches, first few: "
+        f"{long_after_result['failures']}"
     )
 
 

@@ -4795,7 +4795,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(candidate.length < _MEDIA_TAIL_MAX){
           unmatchedTail = candidate;
         } else {
-          writeCurrent(candidate);
+          // The candidate exceeded the bounded tail. Do NOT flatten it to plain
+          // text: it can already contain a complete token plus same-line prose
+          // that merely looked extendable (`MEDIA:/tmp/a.png see ... README.md`).
+          // Reuse the stream-end partitioner, which applies the current shared
+          // grammar to every token and preserves every exact prose slice. This
+          // keeps an already-complete card while still bounding memory.
+          _smdMediaTailFlushEntry({
+            chunk:candidate,
+            parent,
+            data,
+            baseAddText,
+            writeText,
+          });
         }
         last = combined.length;
         break;
