@@ -1444,18 +1444,35 @@ def test_kanban_editor_modal_has_model_and_provider_fields():
     assert 'data-i18n="kanban_model_hint"' in INDEX
 
     # The populator reuses the same /api/models catalog + provider grouping +
-    # overflow the composer picker uses (data-extraModels feeds "Show more").
+    # overflow the composer picker uses (data-extraModels feeds "Show more"),
+    # and restores a task's PERSISTED provider on edit so an unrelated edit
+    # doesn't rewrite or strip the saved provider pin.
     populate_match = re.search(
-        r"function _kanbanPopulateModelSelect\(currentValue\)\{(.*?)\n\}",
+        r"function _kanbanPopulateModelSelect\(currentValue, currentProvider\)\{(.*?)\n\}",
         PANELS, re.DOTALL,
     )
-    assert populate_match, "_kanbanPopulateModelSelect() not found"
+    assert populate_match, "_kanbanPopulateModelSelect(currentValue, currentProvider) not found"
     populate_body = populate_match.group(1)
     assert "api/models" in populate_body
     assert "optgroup" in populate_body
     assert "dataset.provider" in populate_body
     assert "dataset.extraModels" in populate_body  # full list: overflow/"Show more"
     assert "kanban_no_model_override" in populate_body
+    assert "currentProvider" in populate_body  # edit preserves persisted provider
+    assert "dataset.provider = currentProvider ? String(currentProvider) : ''" in populate_body
+
+    # A stale in-flight /api/models populate must not clobber a newer modal's
+    # selection (openKanbanCreate fires un-awaited; openKanbanEdit awaits both on
+    # the same select). A sequence token drops late responses.
+    assert "_kanbanModelPopulateSeq" in PANELS
+    populate_tok_src = extract_function(PANELS, "_kanbanPopulateModelSelect")
+    assert "++_kanbanModelPopulateSeq" in populate_tok_src
+    assert "seq !== _kanbanModelPopulateSeq" in populate_tok_src
+
+    # openKanbanEdit passes the persisted provider so the override pair survives
+    # an unrelated edit unchanged.
+    edit_src = extract_function(PANELS, "openKanbanEdit")
+    assert "_kanbanPopulateModelSelect(task.model_override || '', task.provider_override || '')" in edit_src
 
     # The picker drives the shared renderModelDropdown() component with kanban ids.
     assert "function _kanbanOpenModelDropdown" in PANELS

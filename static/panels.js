@@ -3217,6 +3217,11 @@ async function _kanbanLoadProfileNames(){
 // renderModelDropdown() (search, provider groups, overflow "Show more", custom
 // ID input). Zero free-text duplication.
 let _kanbanModelChipBound = false;
+// Sequence token so a stale in-flight /api/models populate never overwrites a
+// newer modal's selection (openKanbanCreate fires un-awaited while openKanbanEdit
+// awaits — both target the same hidden select). A late response from an older
+// invocation is dropped instead of clobbering the current one.
+let _kanbanModelPopulateSeq = 0;
 
 function _kanbanSyncModelChip(){
   const sel = document.getElementById('kanbanTaskModalModel');
@@ -3279,10 +3284,13 @@ function _kanbanOpenModelDropdown(){
   }
 }
 
-async function _kanbanPopulateModelSelect(currentValue){
+async function _kanbanPopulateModelSelect(currentValue, currentProvider){
   // Same /api/models catalog + provider grouping + overflow the composer uses,
   // written into the kanban modal's hidden <select> so renderModelDropdown() can
   // drive search, provider groups, "Show more" overflow, and the custom-ID input.
+  // currentProvider (edit mode) restores the task's PERSISTED provider so an
+  // unrelated edit doesn't rewrite or strip the saved provider pin.
+  const seq = ++_kanbanModelPopulateSeq;
   const sel = document.getElementById('kanbanTaskModalModel');
   if (!sel) return;
   // Leading "Profile default" (no override) -> clears the override on submit.
@@ -3293,8 +3301,11 @@ async function _kanbanPopulateModelSelect(currentValue){
   sel.appendChild(emptyOption);
   try {
     const res = await fetch(new URL('api/models', document.baseURI || location.href), {credentials: 'include'});
-    if (!res.ok) { _kanbanSyncModelChip(); return; }
+    if (!res.ok) { if (seq === _kanbanModelPopulateSeq) _kanbanSyncModelChip(); return; }
     const data = await res.json();
+    // A stale response from an earlier modal invocation must not clobber the
+    // selection a newer one just restored. Drop it without touching the select.
+    if (seq !== _kanbanModelPopulateSeq) { _kanbanSyncModelChip(); return; }
     const groups = Array.isArray(data && data.groups) ? data.groups : [];
     for (const g of groups) {
       const models = Array.isArray(g.models) ? g.models : [];
@@ -3320,15 +3331,29 @@ async function _kanbanPopulateModelSelect(currentValue){
   } catch (_e) {
     // Catalog unavailable — leave just the "Profile default" option.
   }
-  // Restore current override (edit mode); preserve an unknown/imported one.
+  // Restore current override (edit mode). Preserve the MODEL and the PERSISTED
+  // PROVIDER: an unrelated edit must not rewrite the provider (catalog-derived)
+  // or strip it to null (out-of-catalog fallback). Only a deliberate picker
+  // selection changes provider.
   sel.value = currentValue || '';
-  if (currentValue && !Array.from(sel.options).some(o => String(o.value) === String(currentValue))) {
-    const keep = document.createElement('option');
-    keep.value = String(currentValue);
-    keep.textContent = String(currentValue);
-    keep.dataset.provider = '';
-    sel.appendChild(keep);
-    sel.value = String(currentValue);
+  const currentModel = currentValue ? String(currentValue) : '';
+  if (currentModel) {
+    const found = Array.from(sel.options).find(o => String(o.value) === currentModel);
+    if (found) {
+      // Catalog model — overwrite the catalog-derived provider with the PERSISTED
+      // one so a save of an unrelated edit neither re-pins a provider (when the
+      // task had none) nor rewrites it to a catalog default (when it differed).
+      found.dataset.provider = currentProvider ? String(currentProvider) : '';
+    } else {
+      // Out-of-catalog / imported model — synthesize an option that carries the
+      // persisted provider (fall back to catalog provider if none recorded).
+      const keep = document.createElement('option');
+      keep.value = currentModel;
+      keep.textContent = currentModel;
+      keep.dataset.provider = currentProvider ? String(currentProvider) : '';
+      sel.appendChild(keep);
+      sel.value = currentModel;
+    }
   }
   _kanbanSyncModelChip();
 }
@@ -3487,8 +3512,9 @@ async function openKanbanEdit(taskId){
   });
   // Populate the model dropdown (from /api/models, same catalog + grouping as
   // the composer picker) AFTER reset so the option exists when we select the
-  // current value below.
-  await _kanbanPopulateModelSelect(task.model_override || '');
+  // current value below. Pass the PERSISTED provider so an unrelated edit
+  // preserves the saved provider pin on the model.
+  await _kanbanPopulateModelSelect(task.model_override || '', task.provider_override || '');
   _kanbanMountModelChip();
   // Populate the assignee select AFTER reset so the option exists when we
   // call sel.value = currentAssignee.
