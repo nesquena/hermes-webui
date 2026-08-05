@@ -6448,20 +6448,35 @@ def _normalize_custom_qualified_session_model(
         # session stays broken. Walk back colon-by-colon, re-attaching the
         # eaten segments to the model, until the qualifier resolves to a
         # configured named slug. Fail closed: only a REAL configured match
-        # triggers, and endpoint-derived host:port slugs (custom:<host>:<port>)
-        # are preserved (#1776 form, verified unchanged).
-        if not _custom_slug_rest_looks_like_host_port(qualifier.removeprefix("custom:")):
-            parts = qualifier.split(":")
-            for i in range(len(parts) - 1, 1, -1):
-                candidate = ":".join(parts[:i])
-                candidate_slug = _named_custom_provider_slug_for_provider(
-                    candidate,
-                    config_obj=profile_config,
-                )
-                if candidate_slug:
-                    slug = candidate_slug
-                    bare = ":".join(parts[i:] + [bare])
-                    break
+        # triggers.
+        #
+        # The CONFIGURED shorter prefix is authoritative and is checked BEFORE
+        # the endpoint classification (greptile P1 re-gate): a named provider
+        # 'custom:localhost' receiving a colon-bearing model like '8080:Qwen3'
+        # produces qualifier 'custom:localhost:8080', which the host:port
+        # heuristic would otherwise classify as an endpoint before the
+        # configured prefix is ever consulted. Genuine endpoint-derived slugs
+        # (custom:<host>:<port>, #1776 form) stay unchanged because the
+        # walk-back only fires on a REAL configured match, and an
+        # endpoint-shaped qualifier with no configured prefix falls through to
+        # the host:port check below and returns None.
+        parts = qualifier.split(":")
+        for i in range(len(parts) - 1, 1, -1):
+            candidate = ":".join(parts[:i])
+            candidate_slug = _named_custom_provider_slug_for_provider(
+                candidate,
+                config_obj=profile_config,
+            )
+            if candidate_slug:
+                slug = candidate_slug
+                bare = ":".join(parts[i:] + [bare])
+                break
+        if not slug and _custom_slug_rest_looks_like_host_port(
+            qualifier.removeprefix("custom:")
+        ):
+            # Endpoint-derived custom:<host>:<port> slug with no configured
+            # prefix to walk back to: keep the #1776 form untouched.
+            return None
     if not slug:
         return None
     canonical = slug.removeprefix("custom:")
