@@ -86,6 +86,7 @@ let _streamFadeVisibleWords=0;
 let _streamFadeHoldUntilMs=0;
 let _streamFadeCurrentMs=620;
 let _streamFadeDomText='';
+let _streamFadeSilentPrefixChars=0;
 const _STREAM_FADE_MS=620;
 const _STREAM_FADE_MAX_MS=900;
 const _STREAM_FADE_DONE_MAX_MS=1000;
@@ -218,6 +219,7 @@ def test_stream_fade_appends_new_spans_without_replacing_existing_nodes():
 const _STREAM_FADE_MS=620;
 let _streamFadeLatestAnimationEndAt=0;
 let _streamFadeCurrentMs=620;
+let _streamFadeSilentPrefixChars=0;
 const performance={_t:0,now(){return this._t;}};
 function _streamFadeReduceMotionEnabled(){ return false; }
 class FakeNode{
@@ -554,6 +556,133 @@ for(let frame=0;frame<8&&!out.text.includes('\n\n');frame++){
 if(!out.text.includes('\n\n')) throw new Error(`expected paragraph break: ${JSON.stringify(out.text)}`);
 const afterBreak=_streamFadeNextText(pausedTarget);
 if(afterBreak.changed) throw new Error('expected paragraph pause to hold next reveal');
+"""
+    )
+    run_node(script)
+
+
+def test_stream_fade_rewind_keeps_common_prefix_visible():
+    """A display-text REWIND (tool-call XML stripped mid-stream) must not reset
+    the playout to zero — that would replay the fade on every already-visible
+    word and produce a full-message blink per tool call (#fade-flash)."""
+    script = (
+        fade_helper_script()
+        + r"""
+// Phase 1: play out a sentence normally.
+let out=_streamFadeNextText('alpha beta gamma delta');
+for(let frame=0;frame<60&&!out.caughtUp;frame++){
+  performance._t += 33;
+  out=_streamFadeNextText('alpha beta gamma delta');
+}
+if(!out.caughtUp) throw new Error(`never caught up: ${JSON.stringify(out.text)}`);
+const fullText=out.text;
+// Phase 2: the stream text REWINDS (e.g. <function_calls> stripped): the
+// target becomes a strict prefix of what was already shown.
+performance._t += 33;
+out=_streamFadeNextText('alpha beta');
+// The playout must stay at the common prefix, NOT reset to ''.
+if(!out.text.startsWith('alpha beta')) throw new Error(`rewind dropped prefix: ${JSON.stringify(out.text)}`);
+if(out.text.length>fullText.length) throw new Error(`rewind grew text: ${JSON.stringify(out.text)}`);
+if(!out.caughtUp) throw new Error(`rewind to prefix should be caught up, got changed=${out.changed}`);
+"""
+    )
+    run_node(script)
+
+
+def test_stream_fade_rewind_remount_mutes_common_prefix():
+    """When the DOM must be rebuilt after a rewind (smd self-heal), words inside
+    the common prefix must be written as plain text so their fade animation is
+    not replayed; only the post-rewind tail may animate."""
+    script = (
+        function_block(MESSAGES_JS, "_streamFadeAppendText")
+        + r"""
+const _STREAM_FADE_MS=620;
+let _streamFadeLatestAnimationEndAt=0;
+let _streamFadeCurrentMs=620;
+let _streamFadeSilentPrefixChars=0;
+const performance={_t:0,now(){return this._t;}};
+function _streamFadeReduceMotionEnabled(){ return false; }
+class FakeNode{
+  constructor(type,text=''){
+    this.type=type;
+    this.children=[];
+    this.className='';
+    this.textContent=text;
+    this.style={values:{},setProperty:(name,value)=>{this.style.values[name]=value;}};
+  }
+  appendChild(child){
+    if(child&&child.type==='fragment'){
+      child.children.forEach(n=>this.children.push(n));
+    }else{
+      this.children.push(child);
+    }
+    return child;
+  }
+}
+global.document={
+  createDocumentFragment(){ return new FakeNode('fragment'); },
+  createTextNode(text){ return new FakeNode('text',String(text)); },
+  createElement(tag){ const node=new FakeNode(tag); node.tagName=String(tag).toUpperCase(); return node; },
+};
+const body=new FakeNode('div');
+// Simulate a rebuild: the rewind-triggered self-heal mutes the common prefix
+// ("alpha beta" = 10 chars) so those words must NOT become animated spans.
+_streamFadeSilentPrefixChars=10;
+_streamFadeAppendText(body,'alpha beta gamma');
+const spans=body.children.filter(node=>node.className==='stream-fade-word is-new');
+if(spans.length!==1) throw new Error(`expected exactly 1 animated span, got ${spans.length}`);
+if(spans[0].textContent!=='gamma') throw new Error(`wrong animated word: ${spans[0].textContent}`);
+const plain=body.children.filter(node=>node.type==='text').map(n=>n.textContent).join('');
+if(!plain.includes('alpha beta')) throw new Error(`common prefix not written as plain text: ${plain}`);
+if(_streamFadeSilentPrefixChars!==0) throw new Error(`silent prefix not consumed: ${_streamFadeSilentPrefixChars}`);
+"""
+    )
+    run_node(script)
+
+
+def test_stream_fade_smd_write_self_heal_sets_silent_prefix_on_rewind():
+    """_smdWrite's self-heal rebuild (triggered when the display text REWINDS,
+    e.g. tool-call XML stripped mid-stream) must mute the fade renderer for the
+    common prefix. Without this the cleared + rebuilt body would replay the
+    fade on every already-visible word — the full-message blink."""
+    write_block = function_block(MESSAGES_JS, "_smdWrite")
+    script = (
+        write_block
+        + r"""
+let _smdParser=null;
+let _smdWrittenLen=0;
+let _smdWrittenText='';
+let _streamFadeSilentPrefixChars=0;
+let rebuildCalls=0;
+const writes=[];
+global.window={
+  smd:{
+    parser(renderer){ return { renderer }; },
+    parser_write(parser,delta){ writes.push(String(delta)); },
+  },
+};
+const assistantBody={ innerHTML:'', textContent:'' };
+function _smdNewParser(el, fade){ _smdParser={fresh:fade?true:false}; rebuildCalls+=1; }
+function _scheduleStreamingKatex(){}
+// Phase 0: parser already attached (as after _smdNewParser on stream start).
+_smdParser={};
+// Phase 1: normal incremental write of the full text.
+_smdWrite('alpha beta gamma', true);
+if(_smdWrittenText!=='alpha beta gamma') throw new Error(`phase1 writtenText wrong: ${_smdWrittenText}`);
+if(rebuildCalls!==0) throw new Error('phase1 must not rebuild');
+// Phase 2: the display text REWINDS to a strict prefix (tool-call XML tail
+// stripped). The self-heal must fire, compute the 10-char common prefix and
+// mute the fade renderer for it.
+_smdWrite('alpha beta', true);
+if(rebuildCalls!==1) throw new Error(`expected 1 rebuild, got ${rebuildCalls}`);
+if(_streamFadeSilentPrefixChars!==10) throw new Error(`silent prefix wrong: ${_streamFadeSilentPrefixChars}`);
+if(_smdWrittenText!=='alpha beta') throw new Error(`phase2 writtenText wrong: ${_smdWrittenText}`);
+// Phase 3: after the tool call completes, new text continues past the rewind
+// point; the written delta must start exactly at the rewind point (no replay
+// of the prefix).
+writes.length=0;
+_smdWrite('alpha beta new tail', true);
+if(writes.length!==1||writes[0]!==' new tail') throw new Error(`delta wrong: ${JSON.stringify(writes)}`);
 """
     )
     run_node(script)
