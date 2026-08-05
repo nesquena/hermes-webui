@@ -1877,11 +1877,14 @@
     <div class="kanban-modal-row-inline">
       <div class="kanban-modal-row">
         <label for="kanbanTaskModalModel" data-i18n="kanban_model">Model</label>
-        <select id="kanbanTaskModalModel">
-          <!-- Options populated by _kanbanPopulateModelSelect() — same /api/models
-               catalog + grouping as the composer picker, with a leading
-               "Profile default" option. Provider is carried on each option. -->
-        </select>
+        <div class="kanban-model-picker-wrap">
+          <button type="button" id="kanbanTaskModalModelChip" class="settings-model-chip kanban-model-chip" aria-haspopup="listbox" aria-expanded="false" data-i18n="kanban_no_model_override">Profile default</button>
+          <!-- Hidden full-catalog select driven by the shared renderModelDropdown()
+               picker (same /api/models catalog + provider grouping + overflow as the
+               composer and settings). Provider is carried on each option. -->
+          <select id="kanbanTaskModalModel" style="display:none" aria-hidden="true" tabindex="-1"></select>
+          <div class="model-dropdown settings-model-dropdown" id="kanbanTaskModalModelDropdown"></div>
+        </div>
         <div class="kanban-modal-hint" data-i18n="kanban_model_hint">Leave as Profile default to use the assigned profile's configured model. Provider is chosen with the model.</div>
       </div>
     </div>

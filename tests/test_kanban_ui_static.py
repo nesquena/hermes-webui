@@ -1427,22 +1427,24 @@ def test_kanban_model_badge_static_render_e2e():
 
 def test_kanban_editor_modal_has_model_and_provider_fields():
     """Create/edit task modal must expose a Model selector backed by the shared
-    /api/models catalog (not free-text), and the submit handler must route the
-    chosen model + provider to the API so users can configure the card's
-    executing model from the WebUI."""
-    # index.html must render the model as a <select> (grouped by provider),
-    # not a free-text input. No separate provider text field.
+    /api/models catalog via the same searchable renderModelDropdown() picker the
+    composer + settings use (not free-text, not a bare native select), and the
+    submit handler must route the chosen model + provider to the API so users can
+    configure the card's executing model from the WebUI."""
+    # The model field is a chip trigger + hidden full-catalog <select> + dropdown
+    # shell (the renderModelDropdown pattern). No separate provider text field.
+    assert 'id="kanbanTaskModalModelChip"' in INDEX
     assert 'id="kanbanTaskModalModel"' in INDEX
-    assert '<select id="kanbanTaskModalModel">' in INDEX
+    assert 'id="kanbanTaskModalModelDropdown"' in INDEX
+    assert 'class="model-dropdown settings-model-dropdown"' in INDEX
     assert 'id="kanbanTaskModalProvider"' not in INDEX
 
     # Labels / placeholder-free hint wired for i18n.
     assert 'data-i18n="kanban_model"' in INDEX
     assert 'data-i18n="kanban_model_hint"' in INDEX
 
-    # The populator reuses the same /api/models catalog + grouping the composer
-    # picker uses, loading into a <select> with a leading "Profile default"
-    # option and data-provider on each option.
+    # The populator reuses the same /api/models catalog + provider grouping +
+    # overflow the composer picker uses (data-extraModels feeds "Show more").
     populate_match = re.search(
         r"function _kanbanPopulateModelSelect\(currentValue\)\{(.*?)\n\}",
         PANELS, re.DOTALL,
@@ -1452,7 +1454,15 @@ def test_kanban_editor_modal_has_model_and_provider_fields():
     assert "api/models" in populate_body
     assert "optgroup" in populate_body
     assert "dataset.provider" in populate_body
+    assert "dataset.extraModels" in populate_body  # full list: overflow/"Show more"
     assert "kanban_no_model_override" in populate_body
+
+    # The picker drives the shared renderModelDropdown() component with kanban ids.
+    assert "function _kanbanOpenModelDropdown" in PANELS
+    dropdown_src = extract_function(PANELS, "_kanbanOpenModelDropdown")
+    assert "renderModelDropdown({" in dropdown_src
+    assert "dropdownId: 'kanbanTaskModalModelDropdown'" in dropdown_src
+    assert "selectId: 'kanbanTaskModalModel'" in dropdown_src
 
     # submitKanbanTaskModal reads the model select + its data-provider and sends
     # both back as model_override/provider_override (create + edit).
@@ -1467,9 +1477,9 @@ def test_kanban_editor_modal_has_model_and_provider_fields():
     assert "payload.model_override" in submit_body
     assert "payload.provider_override" in submit_body
 
-    # openKanbanEdit inline-create/expose wiring triggers the populator so the
-    # select is populated before a value is chosen.
-    assert "await _kanbanPopulateModelSelect" in PANELS
+    # Wiring mounts the chip so it can open the picker.
+    assert "_kanbanMountModelChip" in PANELS
+    assert "accessKey" not in PANELS  # sanity: unused
 
     # New i18n keys exist (English block) for labels/hints.
     for key in ("kanban_model", "kanban_model_hint", "kanban_no_model_override"):
