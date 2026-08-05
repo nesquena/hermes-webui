@@ -2809,12 +2809,15 @@ def get_providers() -> dict[str, Any]:
                     cp_name,
                 )
                 continue
-            # Collect models from `models` (list or dict) or `model` single
+            # Collect models from `models` (list or dict) or `model` single.
+            # An empty dict/list falls through to the singular `model` field so
+            # the Providers card stays consistent with the model picker, which
+            # always surfaces the configured default model (#6774).
             cp_raw_models = cp.get("models")
             cp_models = []
-            if isinstance(cp_raw_models, list):
+            if isinstance(cp_raw_models, list) and cp_raw_models:
                 cp_models = [{"id": str(m), "label": str(m)} for m in cp_raw_models]
-            elif isinstance(cp_raw_models, dict):
+            elif isinstance(cp_raw_models, dict) and cp_raw_models:
                 cp_models = [
                     {"id": str(k), "label": str(k)}
                     for k in cp_raw_models

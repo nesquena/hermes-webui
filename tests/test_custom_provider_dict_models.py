@@ -192,12 +192,12 @@ class TestCustomProviderModelsDict:
         finally:
             _invalidate()
 
-    def test_empty_dict_models_yields_no_entries(self, monkeypatch):
-        """An empty dict yields zero models and must not crash.
+    def test_empty_dict_falls_through_to_model_field(self, monkeypatch):
+        """An empty dict falls through to the singular ``model`` field.
 
-        Unlike a missing/None ``models`` field (which falls through to the
-        ``model`` single-value branch), an explicitly-empty dict is a valid
-        catalog shape that simply contains no entries.
+        This keeps the Providers card consistent with the model picker
+        (get_available_models), which always surfaces the configured
+        default model regardless of the ``models`` catalog shape.
         """
         prov, _invalidate = _setup_providers_module(monkeypatch)
         monkeypatch.setattr(
@@ -218,9 +218,9 @@ class TestCustomProviderModelsDict:
         try:
             result = prov.get_providers()
             cp = next(p for p in result["providers"] if p.get("is_custom"))
-            # Empty dict yields no entries. The ``model`` field is NOT used
-            # as a fallback here — the elif only fires when ``models`` is
-            # absent or None, not when it's an empty dict.
-            assert cp["models"] == []
+            # Empty dict falls through to the model field, consistent
+            # with the model picker which always shows the default model.
+            model_ids = [m["id"] for m in cp["models"]]
+            assert model_ids == ["Coding"]
         finally:
             _invalidate()
