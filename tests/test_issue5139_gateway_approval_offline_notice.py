@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from api.config import STREAMS, STREAMS_LOCK, invalidate_gateway_caps
-from api.gateway_chat import _run_gateway_chat_streaming
+from api.gateway_chat import _run_gateway_chat_streaming_core
 
 REPO = Path(__file__).resolve().parents[1]
 GATEWAY_CHAT = (REPO / "api" / "gateway_chat.py").read_text(encoding="utf-8")
@@ -63,7 +63,7 @@ def _run_gateway_warning_case(unavailable_reason: str) -> list:
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
                  patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
                  patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]):
-                _run_gateway_chat_streaming(
+                _run_gateway_chat_streaming_core(
                     session_id="sess-warning",
                     msg_text="hi",
                     model="test-model",
@@ -149,7 +149,7 @@ def test_gateway_chat_keeps_unsupported_warning_for_404_capabilities_probe():
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
                  patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
                  patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]):
-                _run_gateway_chat_streaming(
+                _run_gateway_chat_streaming_core(
                     session_id="sess-404",
                     msg_text="hi",
                     model="test-model",
@@ -218,7 +218,7 @@ def test_gateway_chat_keeps_unsupported_warning_for_timeout_capabilities_probe()
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
                  patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
                  patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]):
-                _run_gateway_chat_streaming(
+                _run_gateway_chat_streaming_core(
                     session_id="sess-timeout",
                     msg_text="hi",
                     model="test-model",

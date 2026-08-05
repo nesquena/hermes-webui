@@ -34,6 +34,7 @@ from contextlib import closing
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
+from dataclasses import dataclass
 from api.agent_runtime import (
     AgentRuntimeChangedError,
     ensure_agent_runtime_current,
@@ -2849,6 +2850,7 @@ from api.config import (
     ACTIVE_RUNS_LOCK,
     register_stream_owner,
     register_session_writeback_owner,
+    clear_session_writeback_owner_if_owned,
     stream_owner_session_id,
     CHAT_LOCK,
     _get_session_agent_lock,
@@ -9730,14 +9732,14 @@ from api.upload import (
 from api.streaming import (
     _sse,
     _sse_set_write_deadline,
-    _run_agent_streaming,
+    _run_admitted_agent_streaming,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
     generate_session_title_for_session,
     _compact_for_echo_compare,
     _strip_compact_echo_suffix,
 )
-from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
+from api.gateway_chat import _run_admitted_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
     bound_run_journal_snapshot_args,
@@ -11525,6 +11527,17 @@ def _stream_runtime_diagnostics() -> dict:
     }
 
 
+_RUN_LIFECYCLE_HEALTH_FIELDS = (
+    "started_at",
+    "phase",
+    "model",
+    "provider",
+    "ephemeral",
+    "backend",
+    "latest_tool",
+)
+
+
 def _run_lifecycle_health() -> dict:
     """Return active worker-run state independent of SSE stream presence."""
     # Import the module rather than relying only on imported scalar aliases so
@@ -11535,10 +11548,14 @@ def _run_lifecycle_health() -> dict:
     with _live_config.ACTIVE_RUNS_LOCK:
         runs = []
         for _stream_id, raw in (_live_config.ACTIVE_RUNS or {}).items():
-            item = dict(raw or {})
-            item.pop("session_id", None)
-            item.pop("stream_id", None)
-            item.pop("workspace", None)
+            source = raw if isinstance(raw, dict) else {}
+            item = {}
+            for key in _RUN_LIFECYCLE_HEALTH_FIELDS:
+                value = source.get(key)
+                if key in source and (
+                    value is None or isinstance(value, (str, int, float, bool))
+                ):
+                    item[key] = value
             started_at = item.get("started_at")
             try:
                 age = max(0.0, now - float(started_at))
@@ -20945,6 +20962,78 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     return j(handler, {"ok": True, "cleaned": cleaned})
 
 
+def _discard_hidden_session(session) -> None:
+    """Remove a hidden session from cache and disk after failed admission."""
+    hidden_session_id = str(getattr(session, "session_id", "") or "")
+    with LOCK:
+        SESSIONS.pop(hidden_session_id, None)
+    try:
+        (SESSION_DIR / f"{hidden_session_id}.json").unlink(missing_ok=True)
+    except Exception:
+        logger.debug("failed to remove hidden session %s", hidden_session_id, exc_info=True)
+
+
+def _start_hidden_admitted_turn(
+    session,
+    *,
+    message: str,
+    stream_id: str,
+    model,
+    workspace,
+    model_provider=None,
+    source: str,
+    ephemeral: bool,
+    completion_observer=None,
+    before_thread_start=None,
+):
+    """Prepare and gate one hidden-root turn through the local wrapper."""
+    admission = None
+    try:
+        admission = _reserve_turn_admission(session, stream_id)
+        prepared = _prepare_chat_start_session_for_stream(
+            session,
+            msg=message,
+            attachments=[],
+            workspace=str(workspace),
+            model=model,
+            model_provider=model_provider,
+            stream_id=stream_id,
+            source=source,
+            admission=admission,
+        )
+        stream = create_stream_channel()
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = stream
+        if callable(before_thread_start):
+            before_thread_start()
+        worker = threading.Thread(
+            target=_run_admitted_agent_streaming,
+            args=(session.session_id, message, model, workspace, stream_id, None),
+            kwargs={
+                "admission": admission,
+                "completion_observer": completion_observer,
+                "ephemeral": ephemeral,
+                "model_provider": model_provider,
+            },
+            daemon=True,
+        )
+        worker.start()
+        if not admission.admitted.wait(timeout=5.0):
+            raise RuntimeError("hidden worker failed to park")
+        if admission.abort.is_set():
+            raise RuntimeError("hidden worker aborted before gate")
+        admission.gate.set()
+        return prepared
+    except Exception:
+        _abort_prepared_chat_turn(
+            session,
+            stream_id,
+            admission,
+            delete_hidden=True,
+        )
+        raise
+
+
 def _handle_btw(handler, body):
     """POST /api/btw — ephemeral side question using session context.
 
@@ -20968,13 +21057,15 @@ def _handle_btw(handler, body):
     question = str(body["question"]).strip()
     if not question:
         return bad(handler, "question is required")
-    # Duplicate-stream guard (same pattern as chat/start)
-    current_stream_id = getattr(s, "active_stream_id", None)
-    if current_stream_id:
-        with STREAMS_LOCK:
-            if current_stream_id in STREAMS:
-                return j(handler, {"error": "session already has an active stream"}, status=409)
-        s.active_stream_id = None
+    from api.session_lineage import resolve_session_lineage
+
+    try:
+        parent_lineage = resolve_session_lineage(
+            s.session_id,
+            expected_profile=getattr(s, "profile", None),
+        )
+    except Exception:
+        return bad(handler, "Parent session lineage could not be verified", 409)
     # Create ephemeral hidden session inheriting context
     from api.models import new_session as _new_session
     model_provider = getattr(s, 'model_provider', None)
@@ -20986,25 +21077,41 @@ def _handle_btw(handler, body):
     )
     # Copy conversation history for context (agent reads from messages)
     ephemeral.messages = list(s.messages or [])
+    try:
+        after_copy = resolve_session_lineage(
+            s.session_id,
+            expected_profile=getattr(s, "profile", None),
+        )
+    except Exception:
+        _discard_hidden_session(ephemeral)
+        return bad(handler, "Parent session lineage changed during BTW preparation", 409)
+    if (
+        after_copy.root_session_id != parent_lineage.root_session_id
+        or after_copy.delivery_session_id != parent_lineage.delivery_session_id
+    ):
+        _discard_hidden_session(ephemeral)
+        return bad(handler, "Parent session lineage changed during BTW preparation", 409)
     ephemeral.title = f"btw: {question[:60]}"
     ephemeral.save()
     stream_id = uuid.uuid4().hex
-    ephemeral.active_stream_id = stream_id
-    register_session_writeback_owner(ephemeral.session_id, stream_id)
-    ephemeral.save()
-    stream = create_stream_channel()
-    register_stream_owner(stream_id, ephemeral.session_id)
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
     from api.background import track_btw
-    track_btw(body["session_id"], ephemeral.session_id, stream_id, question)
-    thr = threading.Thread(
-        target=_run_agent_streaming,
-        args=(ephemeral.session_id, question, s.model, s.workspace, stream_id, None),
-        kwargs={"ephemeral": True, "model_provider": model_provider},
-        daemon=True,
-    )
-    thr.start()
+    try:
+        _start_hidden_admitted_turn(
+            ephemeral,
+            message=question,
+            stream_id=stream_id,
+            model=s.model,
+            workspace=s.workspace,
+            model_provider=model_provider,
+            source="btw",
+            ephemeral=True,
+            before_thread_start=lambda: track_btw(
+                body["session_id"], ephemeral.session_id, stream_id, question
+            ),
+        )
+    except Exception:
+        logger.exception("failed to start admitted BTW turn")
+        return bad(handler, "Failed to start BTW turn", 500)
     return j(handler, {"stream_id": stream_id, "session_id": ephemeral.session_id, "parent_session_id": body["session_id"]})
 
 
@@ -21040,35 +21147,14 @@ def _handle_background(handler, body):
     bg.title = f"bg: {prompt[:60]}"
     bg.save()
     stream_id = uuid.uuid4().hex
-    bg.active_stream_id = stream_id
-    register_session_writeback_owner(bg.session_id, stream_id)
-    bg.save()
-    stream = create_stream_channel()
-    register_stream_owner(stream_id, bg.session_id)
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
     task_id = uuid.uuid4().hex[:8]
     from api.background import track_background, complete_background
     parent_sid = body["session_id"]
     bg_sid = bg.session_id
-    track_background(parent_sid, bg_sid, stream_id, task_id, prompt)
 
-    def _run_bg_and_notify():
-        """Run the background agent, then mark the tracked task `done` with the
-        last assistant reply so `/api/background/status` can surface it.  Without
-        this, `complete_background()` is never called and the result is lost —
-        `get_results()` would see a forever-`running` task and return nothing.
-        """
+    def _observe_background_completion():
+        """Project the finished hidden turn into the background-task tracker."""
         try:
-            _run_agent_streaming(
-                bg_sid,
-                prompt,
-                s.model,
-                s.workspace,
-                stream_id,
-                None,
-                model_provider=model_provider,
-            )
             # Reload the bg session from disk and extract the final assistant reply.
             try:
                 from api.models import Session as _Session
@@ -21099,8 +21185,28 @@ def _handle_background(handler, body):
             except Exception:
                 pass
 
-    thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
-    thr.start()
+    try:
+        _start_hidden_admitted_turn(
+            bg,
+            message=prompt,
+            stream_id=stream_id,
+            model=s.model,
+            workspace=s.workspace,
+            model_provider=model_provider,
+            source="background",
+            ephemeral=False,
+            completion_observer=_observe_background_completion,
+            before_thread_start=lambda: track_background(
+                parent_sid, bg_sid, stream_id, task_id, prompt
+            ),
+        )
+    except Exception:
+        logger.exception("failed to start admitted background turn")
+        try:
+            complete_background(parent_sid, task_id, "(background task failed)")
+        except Exception:
+            pass
+        return bad(handler, "Failed to start background turn", 500)
     return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
 
 
@@ -21156,6 +21262,110 @@ def _provisional_title_from_prompt(prompt: str, fallback: str = "Untitled") -> s
     return title_from([{"role": "user", "content": text}], fallback) or fallback
 
 
+@dataclass(frozen=True)
+class PreparedChatTurn:
+    """Durably prepared ordinary turn plus in-process admission authority."""
+
+    session_id: str
+    stream_id: str
+    turn_id: str
+    pending_started_at: float
+    title: str
+    admission: object | None
+
+
+def _reserve_turn_admission(s, stream_id: str):
+    """Acquire and publish one exact server-owned lineage reservation."""
+    from threading import Event
+    from api import config as live_config
+    from api.session_lineage import (
+        TurnAdmission,
+        acquire_lineage_turn_permit,
+        resolve_session_lineage,
+    )
+
+    resolution = resolve_session_lineage(
+        s.session_id,
+        expected_profile=getattr(s, "profile", None),
+    )
+    permit = acquire_lineage_turn_permit(resolution.root_session_id)
+    admission = TurnAdmission(
+        reservation_id=stream_id,
+        stream_id=stream_id,
+        owner_token=uuid.uuid4().hex,
+        root_session_id=resolution.root_session_id,
+        delivery_session_id=resolution.delivery_session_id,
+        permit=permit,
+        admitted=Event(),
+        gate=Event(),
+        abort=Event(),
+    )
+    try:
+        register_stream_owner(stream_id, resolution.delivery_session_id)
+        live_config.register_active_run(
+            stream_id,
+            lineage_id=resolution.root_session_id,
+            delivery_session_id=resolution.delivery_session_id,
+            admission=admission,
+            reservation_create=True,
+            session_id=s.session_id,
+            phase="reserved",
+        )
+    except Exception:
+        permit.release()
+        live_config.unregister_stream_owner(stream_id)
+        raise
+    return admission
+
+
+def _abort_prepared_chat_turn(
+    session,
+    stream_id: str,
+    admission,
+    *,
+    gateway: bool = False,
+    delete_hidden: bool = False,
+) -> None:
+    """Abort and retire every owner published before a worker gate opens."""
+    from api.session_lineage import release_turn_admission
+
+    if admission is not None:
+        admission.abort.set()
+        admission.gate.set()
+        release_turn_admission(admission)
+    with STREAMS_LOCK:
+        STREAMS.pop(stream_id, None)
+    STREAM_GOAL_RELATED.pop(stream_id, None)
+    if gateway:
+        try:
+            from api.gateway_chat import (
+                _clear_gateway_run_starting,
+                _finish_gateway_run_starting,
+            )
+
+            _finish_gateway_run_starting(stream_id)
+            _clear_gateway_run_starting(stream_id)
+        except Exception:
+            logger.debug(
+                "failed to retire gateway start lifecycle for %s",
+                stream_id,
+                exc_info=True,
+            )
+    try:
+        if getattr(session, "active_stream_id", None) == stream_id:
+            session.active_stream_id = None
+            session.pending_user_message = None
+            session.pending_attachments = []
+            session.pending_started_at = None
+            session.pending_user_source = None
+            session.save(touch_updated_at=False)
+    except Exception:
+        logger.debug("failed to roll back prepared turn %s", stream_id, exc_info=True)
+    clear_session_writeback_owner_if_owned(session.session_id, stream_id)
+    if delete_hidden:
+        _discard_hidden_session(session)
+
+
 def _prepare_chat_start_session_for_stream(
     s,
     *,
@@ -21167,6 +21377,8 @@ def _prepare_chat_start_session_for_stream(
     stream_id: str,
     started_at: float | None = None,
     source: str = "webui",
+    admission=None,
+    defer_journal: bool = False,
 ):
     """Persist chat-start state according to webui.session_save_mode.
 
@@ -21201,6 +21413,42 @@ def _prepare_chat_start_session_for_stream(
             source=source,
         )
     s.save()
+    if admission is not None:
+        sidecar_path = getattr(s, "path", None)
+        read_sidecar = getattr(sidecar_path, "read_text", None)
+        if callable(read_sidecar):
+            try:
+                sidecar_text = read_sidecar(encoding="utf-8")
+                if not isinstance(sidecar_text, (str, bytes, bytearray)):
+                    raise TypeError("session sidecar read returned a non-text payload")
+                persisted = json.loads(sidecar_text)
+            except Exception as exc:
+                raise RuntimeError("prepared session sidecar read-back failed") from exc
+            if (
+                str(persisted.get("session_id") or "") != str(s.session_id)
+                or str(persisted.get("active_stream_id") or "") != stream_id
+                or str(persisted.get("pending_user_message") or "") != str(msg)
+            ):
+                raise RuntimeError("prepared session sidecar read-back mismatch")
+    prepared = PreparedChatTurn(
+        session_id=str(s.session_id),
+        stream_id=stream_id,
+        turn_id="",
+        pending_started_at=float(s.pending_started_at),
+        title=str(s.title or ""),
+        admission=admission,
+    )
+    if defer_journal:
+        return prepared
+    return _append_prepared_chat_turn_journal(
+        s,
+        prepared,
+        msg=msg,
+        attachments=attachments,
+        workspace=workspace,
+        model=model,
+        model_provider=model_provider,
+    )
 
 
 def _is_hidden_empty_session(s) -> bool:
@@ -21213,7 +21461,42 @@ def _is_hidden_empty_session(s) -> bool:
     )
 
 
-def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
+def _self_owned_start_matches(session, stream_id: str | None, admission) -> bool:
+    """Prove that one busy row belongs to this exact in-process admission."""
+    if admission is None or str(stream_id or "") != str(getattr(admission, "stream_id", "")):
+        return False
+    try:
+        from api import config as live_config
+        from api.session_lineage import TurnAdmission, resolve_session_lineage
+
+        if not isinstance(admission, TurnAdmission) or not admission.permit.acquired:
+            return False
+        resolution = resolve_session_lineage(
+            session.session_id,
+            expected_profile=getattr(session, "profile", None),
+        )
+        with live_config.ACTIVE_RUNS_LOCK:
+            row = live_config.ACTIVE_RUNS.get(admission.reservation_id)
+        return bool(
+            isinstance(row, dict)
+            and row.get("admission") is admission
+            and row.get("owner_token") == admission.owner_token
+            and row.get("permit") is admission.permit
+            and row.get("lineage_id") == resolution.root_session_id == admission.root_session_id
+            and row.get("delivery_session_id")
+            == resolution.delivery_session_id
+            == admission.delivery_session_id
+        )
+    except Exception:
+        return False
+
+
+def _active_stream_blocks_chat_start(
+    session,
+    stream_id: str | None,
+    *,
+    admission=None,
+) -> bool:
     """Return whether an active_stream_id still owns this session's next turn.
 
     ``active_stream_id`` is written before the SSE channel is registered, so a
@@ -21222,6 +21505,8 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     gap and overwrite the sidecar owner.
     """
     if not stream_id:
+        return False
+    if _self_owned_start_matches(session, stream_id, admission):
         return False
     with STREAMS_LOCK:
         if stream_id in STREAMS:
@@ -21252,8 +21537,18 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     return False
 
 
-def _active_run_stream_for_session(session_id: str | None) -> str | None:
-    """Return the worker that owns the requested session's stable lineage root."""
+def _active_run_stream_for_session(
+    session_id: str | None,
+    *,
+    admission=None,
+) -> str | None:
+    """Return the worker that owns the requested session's stable lineage root.
+
+    Tokenized admissions are authoritative for current workers and are never
+    expired by elapsed time.  A narrow compatibility path retains upstream's
+    cancelled-run cleanup only for legacy, un-tokenized rows after the stream
+    transport is gone; age alone can therefore never retire a current owner.
+    """
     requested_session_id = str(session_id or "").strip()
     if not requested_session_id:
         return None
@@ -21268,6 +21563,8 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
         except Exception:
             requested_root = None
 
+        with STREAMS_LOCK:
+            live_stream_ids = set(STREAMS)
         with live_config.ACTIVE_RUNS_LOCK:
             active_rows = list((live_config.ACTIVE_RUNS or {}).items())
         for run_stream_id, raw in active_rows:
@@ -21277,6 +21574,28 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
             ).strip()
             if not stream_id:
                 continue
+            phase = str(metadata.get("phase") or "")
+            if (
+                metadata.get("admission") is None
+                and phase == "cancelling"
+                and stream_id not in live_stream_ids
+            ):
+                # Compatibility with pre-admission ACTIVE_RUNS rows.  Missing
+                # admission identity + explicit cancellation + absent STREAMS
+                # transport is the stale-owner evidence; the elapsed grace is
+                # only a conservative delay before that legacy cleanup.
+                try:
+                    cancel_anchor = float(
+                        metadata.get("cancelled_at")
+                        or metadata.get("started_at")
+                        or 0
+                    )
+                except (TypeError, ValueError):
+                    cancel_anchor = 0.0
+                if cancel_anchor and time.time() - cancel_anchor >= 180.0:
+                    live_config.unregister_active_run(run_stream_id)
+                    live_config.unregister_stream_owner(stream_id)
+                    continue
             row_root = str(metadata.get("lineage_id") or "").strip()
             row_session_id = str(
                 metadata.get("delivery_session_id")
@@ -21291,6 +21610,25 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
                 # An unresolved active owner is not evidence of idleness.  Keep
                 # it foreign/busy rather than using age or cleanup as authority.
                 return stream_id
+            admission_permit = getattr(admission, "permit", None)
+            if (
+                admission is not None
+                and phase != "cancelling"
+                and metadata.get("admission") is admission
+                and metadata.get("owner_token") == getattr(admission, "owner_token", None)
+                and metadata.get("permit") is admission_permit
+                and bool(getattr(admission_permit, "acquired", False))
+                and stream_id
+                == str(getattr(admission, "stream_id", "") or "")
+                == str(getattr(admission, "reservation_id", "") or "")
+                and row_root
+                == verified_row_root
+                == requested_root
+                == str(getattr(admission, "root_session_id", "") or "")
+                and row_session_id
+                == str(getattr(admission, "delivery_session_id", "") or "")
+            ):
+                continue
             if row_root and row_root != verified_row_root:
                 return stream_id
             if requested_root is None:
@@ -21395,6 +21733,8 @@ def _start_chat_stream_for_session(
 
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
+    admission = None
+    prepared = None
     while True:
         with session_lock:
             locked_stream_id = getattr(s, "active_stream_id", None)
@@ -21420,16 +21760,32 @@ def _start_chat_stream_for_session(
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)
-                _prepare_chat_start_session_for_stream(
-                    s,
-                    msg=msg,
-                    attachments=attachments,
-                    workspace=workspace,
-                    model=model,
-                    model_provider=model_provider,
-                    stream_id=stream_id,
-                    source=source,
-                )
+                try:
+                    admission = _reserve_turn_admission(s, stream_id)
+                    prepared = _prepare_chat_start_session_for_stream(
+                        s,
+                        msg=msg,
+                        attachments=attachments,
+                        workspace=workspace,
+                        model=model,
+                        model_provider=model_provider,
+                        stream_id=stream_id,
+                        source=source,
+                        admission=admission,
+                        defer_journal=True,
+                    )
+                except Exception as exc:
+                    _abort_prepared_chat_turn(s, stream_id, admission)
+                    from api.session_lineage import LineageTurnBusyError
+
+                    if isinstance(exc, LineageTurnBusyError):
+                        return {
+                            "error": "session already has an active stream",
+                            "active_stream_id": stream_id,
+                            "_status": 409,
+                        }
+                    logger.exception("failed to prepare admitted turn %s", stream_id)
+                    return {"error": "failed to prepare chat turn", "_status": 500}
                 break
         if needs_stale_cleanup:
             diag.stage("stale_stream_cleanup") if diag else None
@@ -21448,73 +21804,143 @@ def _start_chat_stream_for_session(
             session_id=getattr(s, "session_id", None),
         )
     diag.stage("turn_journal_submitted") if diag else None
-    journal_event = {}
     try:
-        from api.turn_journal import append_turn_journal_event
-        journal_event = append_turn_journal_event(
-            s.session_id,
-            {
-                "event": "submitted",
-                "stream_id": stream_id,
-                "role": "user",
-                "content": msg,
-                "attachments": attachments,
-                "workspace": workspace,
-                "model": model,
-                "model_provider": model_provider,
-                "created_at": s.pending_started_at,
-            },
+        prepared = _append_prepared_chat_turn_journal(
+            s,
+            prepared,
+            msg=msg,
+            attachments=attachments,
+            workspace=workspace,
+            model=model,
+            model_provider=model_provider,
         )
     except Exception:
-        logger.warning("Failed to append submitted turn journal event", exc_info=True)
+        _abort_prepared_chat_turn(s, stream_id, admission)
+        return {"error": "failed to prepare chat turn", "_status": 500}
     diag.stage("set_last_workspace") if diag else None
     set_last_workspace(workspace)
     diag.stage("stream_registration") if diag else None
     stream = create_stream_channel()
-    register_stream_owner(stream_id, s.session_id)
     with STREAMS_LOCK:
         STREAMS[stream_id] = stream
     # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
     if goal_related:
         STREAM_GOAL_RELATED[stream_id] = True
     diag.stage("worker_thread_start") if diag else None
-    worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    worker_target = (
+        _run_admitted_gateway_chat_streaming
+        if backend_is_gateway
+        else _run_admitted_agent_streaming
+    )
+    worker_kwargs = {
+        "admission": admission,
+        "model_provider": model_provider,
+        "goal_related": goal_related,
+    }
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     if backend_is_gateway:
         from api.gateway_chat import _mark_gateway_run_starting
         _mark_gateway_run_starting(stream_id)
-    thr = threading.Thread(
-        target=worker_target,
-        args=(s.session_id, msg, model, workspace, stream_id, attachments),
-        kwargs=worker_kwargs,
-        daemon=True,
-    )
     try:
+        thr = threading.Thread(
+            target=worker_target,
+            args=(s.session_id, msg, model, workspace, stream_id, attachments),
+            kwargs=worker_kwargs,
+            daemon=True,
+        )
         thr.start()
     except Exception:
-        if backend_is_gateway:
-            try:
-                from api.gateway_chat import _finish_gateway_run_starting
-                _finish_gateway_run_starting(stream_id)
-                from api.gateway_chat import _clear_gateway_run_starting
-                _clear_gateway_run_starting(stream_id)
-            except Exception:
-                logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+        _abort_prepared_chat_turn(
+            s,
+            stream_id,
+            admission,
+            gateway=backend_is_gateway,
+        )
         raise
+    if not admission.admitted.wait(timeout=5.0):
+        _abort_prepared_chat_turn(
+            s,
+            stream_id,
+            admission,
+            gateway=backend_is_gateway,
+        )
+        return {"error": "agent worker failed to park", "_status": 500}
+    if admission.abort.is_set():
+        _abort_prepared_chat_turn(
+            s,
+            stream_id,
+            admission,
+            gateway=backend_is_gateway,
+        )
+        return {"error": "agent worker aborted before gate", "_status": 500}
+    admission.gate.set()
     response = {
         "stream_id": stream_id,
         "session_id": s.session_id,
-        "pending_started_at": s.pending_started_at,
-        "turn_id": journal_event.get("turn_id"),
-        "title": s.title,
+        "pending_started_at": getattr(prepared, "pending_started_at", s.pending_started_at),
+        "turn_id": getattr(prepared, "turn_id", None),
+        "title": getattr(prepared, "title", s.title),
     }
     if normalized_model:
         response["effective_model"] = model
     if model_provider:
         response["effective_model_provider"] = model_provider
     return response
+
+
+def _append_prepared_chat_turn_journal(
+    session,
+    prepared: PreparedChatTurn,
+    *,
+    msg: str,
+    attachments,
+    workspace: str,
+    model: str,
+    model_provider,
+) -> PreparedChatTurn:
+    """Append and re-open the exact submitted event after session mutation unlocks."""
+    try:
+        from api.turn_journal import (
+            append_turn_journal_event,
+            read_turn_journal_event_bounded,
+        )
+
+        journal_event = append_turn_journal_event(
+            session.session_id,
+            {
+                "event": "submitted",
+                "stream_id": prepared.stream_id,
+                "role": "user",
+                "content": msg,
+                "attachments": attachments,
+                "workspace": workspace,
+                "model": model,
+                "model_provider": model_provider,
+                "created_at": prepared.pending_started_at,
+            },
+        )
+        turn_id = str(journal_event.get("turn_id") or "").strip()
+        if not turn_id:
+            raise RuntimeError("submitted turn journal write returned no turn_id")
+        durable_event = read_turn_journal_event_bounded(
+            session.session_id,
+            turn_id=turn_id,
+            stream_id=prepared.stream_id,
+        )
+        if not durable_event or str(durable_event.get("event") or "") != "submitted":
+            raise RuntimeError("prepared turn journal read-back mismatch")
+    except Exception:
+        logger.warning("Failed to append submitted turn journal event", exc_info=True)
+        raise
+    return PreparedChatTurn(
+        session_id=prepared.session_id,
+        stream_id=prepared.stream_id,
+        turn_id=turn_id,
+        pending_started_at=prepared.pending_started_at,
+        title=prepared.title,
+        admission=prepared.admission,
+    )
 
 
 def _runtime_runner_client_factory():
@@ -22259,6 +22685,24 @@ def _handle_chat_start(handler, body, diag=None):
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        internal_fields = {
+            "owner_token",
+            "reservation_id",
+            "root_session_id",
+            "delivery_session_id",
+            "admission_signal",
+            "completion_key",
+            "_completion_context",
+            "admission",
+        }
+        supplied_internal_fields = sorted(internal_fields.intersection(body))
+        if supplied_internal_fields:
+            return bad(
+                handler,
+                "server-owned turn admission fields are not accepted: "
+                + ", ".join(supplied_internal_fields),
+                400,
+            )
         # Reject a stale local Agent runtime before materialising, claiming, or
         # mutating any session state. Gateway-backed turns run in the gateway's
         # process and do not depend on this WebUI process's imported checkout.

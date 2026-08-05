@@ -160,7 +160,7 @@ def test_stream_completion_overwrites_session_usage_with_latest_turn(cleanup_tes
              mock.patch("api.config.get_config", return_value={}), \
              mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
             streaming.STREAMS[fake_stream_id] = fake_queue
-            streaming._run_agent_streaming(
+            streaming._run_agent_streaming_core(
                 session_id=fake_session.session_id,
                 msg_text="new turn",
                 model="gpt-5.4",

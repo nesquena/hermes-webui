@@ -118,7 +118,7 @@ def _run_rotated_turn(tmp_path, monkeypatch, mode: str):
 
         monkeypatch.setattr(streaming, "_alias_session_agent_lock", fail_after_parent_is_bound)
 
-    streaming._run_agent_streaming(
+    streaming._run_agent_streaming_core(
         session_id=old_sid,
         msg_text=session.pending_user_message,
         model="test-model",

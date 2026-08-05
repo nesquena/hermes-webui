@@ -9089,11 +9089,13 @@ def register_active_run(
     *,
     lineage_id: str | None = None,
     delivery_session_id: str | None = None,
+    admission=None,
+    reservation_create: bool = False,
     **metadata,
-) -> None:
-    """Mark a worker alive with immutable coordination and delivery identities."""
+) -> bool:
+    """Reserve or exact-owner merge one worker lifecycle row."""
     if not stream_id:
-        return
+        return False
     now = time.time()
     entry = dict(metadata or {})
     session_id = str(entry.get("session_id") or "").strip()
@@ -9104,8 +9106,53 @@ def register_active_run(
     entry.setdefault("phase", "running")
     entry["lineage_id"] = stable_root
     entry["delivery_session_id"] = delivery_id
+    if admission is not None:
+        admission_permit = getattr(admission, "permit", None)
+        if not bool(getattr(admission_permit, "acquired", False)):
+            raise ValueError("active-run admission requires an acquired lineage permit")
+        if (
+            str(getattr(admission, "reservation_id", "") or "") != stream_id
+            or str(getattr(admission, "stream_id", "") or "") != stream_id
+            or str(getattr(admission, "root_session_id", "") or "") != stable_root
+            or str(getattr(admission, "delivery_session_id", "") or "") != delivery_id
+            or not str(getattr(admission, "owner_token", "") or "")
+        ):
+            raise ValueError("active-run admission identity mismatch")
+        entry["owner_token"] = admission.owner_token
+        entry["admission"] = admission
+        entry["permit"] = admission_permit
     with ACTIVE_RUNS_LOCK:
-        ACTIVE_RUNS[stream_id] = entry
+        if admission is not None and not bool(
+            getattr(entry.get("permit"), "acquired", False)
+        ):
+            raise ValueError("active-run admission requires an acquired lineage permit")
+        existing = ACTIVE_RUNS.get(stream_id)
+        if existing is None:
+            if admission is not None and not reservation_create:
+                raise RuntimeError("active-run reservation no longer exists")
+            ACTIVE_RUNS[stream_id] = entry
+            return True
+        if not isinstance(existing, dict):
+            raise RuntimeError("active-run reservation is not an owned row")
+        if admission is None or (
+            existing.get("owner_token") != getattr(admission, "owner_token", None)
+            or existing.get("admission") is not admission
+            or existing.get("permit") is not getattr(admission, "permit", None)
+            or existing.get("lineage_id") != stable_root
+            or existing.get("delivery_session_id") != delivery_id
+        ):
+            raise RuntimeError("active-run reservation is owned by another turn")
+        for key, value in entry.items():
+            if key not in {
+                "stream_id",
+                "lineage_id",
+                "delivery_session_id",
+                "owner_token",
+                "admission",
+                "permit",
+            }:
+                existing[key] = value
+        return True
 
 
 def update_active_run(stream_id: str, **metadata) -> None:
@@ -9115,7 +9162,14 @@ def update_active_run(stream_id: str, **metadata) -> None:
     with ACTIVE_RUNS_LOCK:
         entry = ACTIVE_RUNS.get(stream_id)
         if entry is not None:
-            for key in ("lineage_id", "delivery_session_id"):
+            for key in (
+                "stream_id",
+                "lineage_id",
+                "delivery_session_id",
+                "owner_token",
+                "admission",
+                "permit",
+            ):
                 if key in metadata and metadata[key] != entry.get(key):
                     logger.warning(
                         "ignored active-run identity mutation: stream=%s field=%s",
@@ -9126,15 +9180,30 @@ def update_active_run(stream_id: str, **metadata) -> None:
             entry.update(metadata)
 
 
-def unregister_active_run(stream_id: str) -> None:
-    """Remove a worker from the active-run registry and record idle start."""
+def unregister_active_run(stream_id: str, *, owner_token: str | None = None) -> bool:
+    """Token-remove one worker row and release its external owners once."""
     if not stream_id:
-        return
+        return False
     global LAST_RUN_FINISHED_AT
+    removed = None
     with ACTIVE_RUNS_LOCK:
-        ACTIVE_RUNS.pop(stream_id, None)
+        existing = ACTIVE_RUNS.get(stream_id)
+        if not isinstance(existing, dict):
+            if existing is None:
+                return False
+        elif existing.get("owner_token") and existing.get("owner_token") != owner_token:
+            return False
+        removed = ACTIVE_RUNS.pop(stream_id, None)
         LAST_RUN_FINISHED_AT = time.time()
+    if isinstance(removed, dict):
+        permit = removed.get("permit")
+        if permit is not None:
+            try:
+                permit.release()
+            except Exception:
+                logger.exception("failed to release lineage permit for stream %s", stream_id)
     unregister_stream_owner(stream_id)
+    return removed is not None
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
 # _user_turn_count survives between turns.  This mirrors the gateway's

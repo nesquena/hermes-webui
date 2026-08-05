@@ -117,7 +117,7 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
         m.setattr("api.config.get_config", lambda *_args, **_kwargs: {})
         m.setattr("api.config._resolve_cli_toolsets", lambda *_args, **_kwargs: [])
         m.setitem(sys.modules, "hermes_state", fake_hermes_state)
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=old_sid,
             msg_text="Do the long task.",
             model="gpt-4o",
@@ -416,7 +416,7 @@ def test_apperror_payload_enriched_before_enqueue(tmp_path, monkeypatch):
         m.setattr("api.config._resolve_cli_toolsets", lambda *_args, **_kwargs: [])
         m.setattr(streaming, "redact_session_data", lambda s: s)
 
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=old_sid,
             msg_text="Do the long task.",
             model="gpt-4o",

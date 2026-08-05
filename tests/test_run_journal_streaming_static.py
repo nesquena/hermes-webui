@@ -28,7 +28,7 @@ def test_streaming_journals_sse_events_before_queue_delivery():
 
 def test_streaming_compacts_all_successful_agent_result_writebacks():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
-    run_src = src[src.index("def _run_agent_streaming("):]
+    run_src = src[src.index("def _run_agent_streaming_core("):]
     settle_src = src[src.index("def _settle_result_messages("):]
     settle_src = settle_src[: settle_src.index("\n\ndef _current_turn_already_has_visible_assistant_answer(")]
 

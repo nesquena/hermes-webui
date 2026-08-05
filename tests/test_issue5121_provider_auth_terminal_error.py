@@ -197,7 +197,7 @@ def _run_stream(monkeypatch, session, stream_id, agent_cls, *, workspace):
          mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
          mock.patch("api.config.get_config", return_value={}), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=session.session_id,
             msg_text=session.pending_user_message,
             model="test-model",
@@ -396,7 +396,7 @@ def test_auth_retry_success_does_not_append_error_turn(tmp_path, monkeypatch):
          mock.patch("api.config.get_config", return_value={}), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
          mock.patch.object(streaming, "_attempt_credential_self_heal", return_value=heal_rt):
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=session.session_id,
             msg_text=session.pending_user_message,
             model="test-model",

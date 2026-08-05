@@ -203,7 +203,7 @@ def test_streaming_passes_target_model_and_prefers_runtime_base_url(monkeypatch)
 
     try:
         streaming.STREAMS[fake_stream_id] = fake_queue
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=fake_session.session_id,
             msg_text="hello from picker",
             model="glm-5.1",

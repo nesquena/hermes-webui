@@ -111,7 +111,7 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
     stream_id = "stream-context-reconcile"
     config.STREAMS[stream_id] = queue.Queue()
     try:
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=sid,
             msg_text="new webui turn",
             model="test-model",
@@ -261,7 +261,7 @@ def test_webui_streaming_normalizes_trailing_prefill_user_before_current_turn(mo
 
     config.STREAMS[stream_id] = queue.Queue()
     try:
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=s.session_id,
             msg_text="new webui turn",
             model="test-model",

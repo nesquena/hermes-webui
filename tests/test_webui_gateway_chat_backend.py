@@ -329,7 +329,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     subscriber = channel.subscribe()
     STREAMS[stream_id] = channel
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id,
         "Say hello",
         "test-model",
@@ -451,7 +451,7 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     s.save()
     STREAMS[stream_id] = channel
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id,
         "Say hello",
         "test-model",
@@ -486,7 +486,7 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     empty_channel = MagicMock()
     empty_channel.put_nowait = lambda item: empty_events.append(item)
     STREAMS[empty_stream_id] = empty_channel
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id,
         "Say hello",
         "test-model",
@@ -509,7 +509,7 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     unknown_channel = MagicMock()
     unknown_channel.put_nowait = lambda item: unknown_events.append(item)
     STREAMS[unknown_stream_id] = unknown_channel
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id,
         "Say hello",
         "test-model",
@@ -536,7 +536,7 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     future_channel = MagicMock()
     future_channel.put_nowait = lambda item: future_events.append(item)
     STREAMS[future_stream_id] = future_channel
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id,
         "Say hello",
         "test-model",
@@ -564,7 +564,7 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     partial_channel = MagicMock()
     partial_channel.put_nowait = lambda item: partial_events.append(item)
     STREAMS[partial_stream_id] = partial_channel
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id,
         "Say hello",
         "test-model",
@@ -635,7 +635,7 @@ def test_gateway_chat_worker_persists_reasoning_and_tool_state_on_terminal_error
     s.save()
     STREAMS[stream_id] = channel
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id,
         "Say hello",
         "test-model",
@@ -703,7 +703,7 @@ def test_gateway_chat_worker_preserves_reasoning_delta_whitespace_and_persists_r
     subscriber = channel.subscribe()
     STREAMS[stream_id] = channel
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id,
         "Say hello",
         "test-model",
@@ -757,7 +757,7 @@ def test_gateway_chat_worker_reads_reasoning_content_deltas_from_chat_completion
     subscriber = channel.subscribe()
     STREAMS[stream_id] = channel
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id,
         "Say hello",
         "test-model",
@@ -826,7 +826,7 @@ def test_gateway_chat_worker_emits_goal_continue_for_goal_related_turn(tmp_path,
     STREAMS[stream_id] = channel
     PENDING_GOAL_CONTINUATION.discard(s.session_id)
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id,
         "finish it",
         "test-model",
@@ -907,7 +907,7 @@ def test_gateway_chat_worker_skips_goal_judge_for_non_goal_turn(tmp_path, monkey
     STREAMS[stream_id] = channel
     PENDING_GOAL_CONTINUATION.discard(s.session_id)
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id,
         "plain turn",
         "test-model",
@@ -987,7 +987,7 @@ def test_gateway_chat_worker_normalizes_prefill_slice_before_system_prefix(tmp_p
     s.save()
     STREAMS[stream_id] = create_stream_channel()
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id,
         "Say hello",
         "test-model",
@@ -1045,7 +1045,7 @@ def test_gateway_chat_worker_backfills_context_only_turns_into_display(tmp_path,
     s.save()
     STREAMS[stream_id] = create_stream_channel()
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id,
         "when done also delete tunesync",
         "test-model",
@@ -1116,7 +1116,7 @@ def test_gateway_chat_worker_preserves_old_visible_turns_when_context_is_compact
     s.save()
     STREAMS[stream_id] = create_stream_channel()
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id,
         "new question",
         "test-model",
@@ -1189,7 +1189,7 @@ def test_gateway_chat_worker_keeps_repeated_identical_visible_turns(tmp_path, mo
     s.save()
     STREAMS[stream_id] = create_stream_channel()
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id,
         "new question",
         "test-model",
@@ -1250,7 +1250,7 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     s.save()
     STREAMS[stream_id] = create_stream_channel()
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id,
         "What is in this image?",
         "test-model",
@@ -1418,7 +1418,7 @@ def test_gateway_runs_api_body_includes_session_id():
     browser session instead of creating a fresh run_<uuid> per message."""
     from unittest.mock import patch, MagicMock
     from api.config import STREAMS, STREAMS_LOCK
-    from api.gateway_chat import _run_gateway_chat_streaming
+    from api.gateway_chat import _run_gateway_chat_streaming_core
 
     captured = {}
     events = []
@@ -1463,7 +1463,7 @@ def test_gateway_runs_api_body_includes_session_id():
                      active_stream_id=stream_id, workspace="/tmp",
                      profile=None, context_messages=[], messages=[],
                  )):
-                _run_gateway_chat_streaming(
+                _run_gateway_chat_streaming_core(
                     session_id="sess-stable-uuid",
                     msg_text="hi",
                     model="test",
@@ -1481,7 +1481,7 @@ def test_gateway_runs_api_classifies_terminal_provider_error(tmp_path, monkeypat
     from unittest.mock import MagicMock, patch
 
     from api.config import STREAMS, STREAMS_LOCK
-    from api.gateway_chat import _run_gateway_chat_streaming
+    from api.gateway_chat import _run_gateway_chat_streaming_core
 
     error_text = "HTTP 400: Invalid model format or no credentials for provider"
     session_dir = tmp_path / "sessions"
@@ -1525,7 +1525,7 @@ def test_gateway_runs_api_classifies_terminal_provider_error(tmp_path, monkeypat
         }, clear=True), \
              patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
              patch("urllib.request.urlopen", side_effect=fake_urlopen):
-            _run_gateway_chat_streaming(
+            _run_gateway_chat_streaming_core(
                 session_id=s.session_id,
                 msg_text="hi",
                 model="test",
@@ -1548,7 +1548,7 @@ def test_gateway_worker_skips_runs_api_when_opt_in_absent():
     """Worker uses chat/completions even when gateway advertises approval support, unless opt-in is set."""
     from unittest.mock import patch, MagicMock
     from api.config import STREAMS, STREAMS_LOCK
-    from api.gateway_chat import _run_gateway_chat_streaming
+    from api.gateway_chat import _run_gateway_chat_streaming_core
 
     events = []
     q = MagicMock()
@@ -1583,7 +1583,7 @@ def test_gateway_worker_skips_runs_api_when_opt_in_absent():
                      active_stream_id=stream_id, workspace="/tmp",
                      profile=None, context_messages=[], messages=[],
                  )):
-                _run_gateway_chat_streaming(
+                _run_gateway_chat_streaming_core(
                     session_id="sess-optin",
                     msg_text="hi",
                     model="test",

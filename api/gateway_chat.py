@@ -30,8 +30,6 @@ from api.config import (
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
     register_active_run,
-    unregister_active_run,
-    unregister_stream_owner,
     update_active_run,
 )
 from api.helpers import _redact_text, redact_session_data
@@ -824,7 +822,84 @@ def _cleanup_gateway_pending_mirror(session_id: str) -> None:
         logger.debug("Failed to reconcile gateway pending mirror during teardown", exc_info=True)
 
 
-def _run_gateway_chat_streaming(
+def _run_admitted_gateway_chat_streaming(
+    session_id,
+    msg_text,
+    model,
+    workspace,
+    stream_id,
+    attachments=None,
+    *,
+    admission,
+    completion_observer=None,
+    model_provider=None,
+    goal_related=False,
+):
+    """Park an admitted gateway worker and release its exact owner once."""
+    from api.session_lineage import TurnAdmission, release_turn_admission
+
+    if not isinstance(admission, TurnAdmission):
+        raise ValueError("gateway streaming requires an exact TurnAdmission")
+    try:
+        try:
+            register_active_run(
+                stream_id,
+                lineage_id=admission.root_session_id,
+                delivery_session_id=admission.delivery_session_id,
+                admission=admission,
+                session_id=session_id,
+                started_at=time.time(),
+                phase="gateway-parked",
+                workspace=str(workspace),
+                model=model,
+                provider=model_provider,
+                backend="gateway",
+            )
+        except (RuntimeError, ValueError):
+            admission.abort.set()
+            admission.admitted.set()
+            return
+        admission.admitted.set()
+        while not admission.gate.wait(timeout=0.05):
+            if admission.abort.is_set():
+                return
+        if admission.abort.is_set():
+            return
+        return _run_gateway_chat_streaming_core(
+            session_id,
+            msg_text,
+            model,
+            workspace,
+            stream_id,
+            attachments,
+            model_provider=model_provider,
+            goal_related=goal_related,
+            lineage_root_session_id=admission.root_session_id,
+        )
+    except BaseException:
+        admission.abort.set()
+        admission.admitted.set()
+        raise
+    finally:
+        try:
+            if callable(completion_observer):
+                completion_observer()
+        finally:
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+            release_turn_admission(admission)
+            try:
+                from api.background_process import drain_deferred_wakeups_for_session
+
+                drain_deferred_wakeups_for_session(admission.root_session_id)
+            except Exception:
+                logger.debug(
+                    "admitted gateway deferred-wakeup drain failed for lineage %s",
+                    admission.root_session_id,
+                    exc_info=True,
+                )
+
+
+def _run_gateway_chat_streaming_core(
     session_id,
     msg_text,
     model,
@@ -834,6 +909,7 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    lineage_root_session_id=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -847,49 +923,33 @@ def _run_gateway_chat_streaming(
     if q is None:
         _finish_gateway_run_starting(stream_id, result="fallback")
         _clear_gateway_run_starting(stream_id)
-        # Cancelled before the worker started; release the owner entry the route
-        # layer registered so STREAM_SESSION_OWNERS does not leak (no teardown finally runs).
-        unregister_stream_owner(stream_id)
-        # Also release the writeback-owner entry the route layer registered, so
+        # Release the writeback-owner entry the route layer registered, so
         # SESSION_WRITEBACK_OWNERS does not leak on this pre-start cancellation
         # path (the teardown finally below never runs when we early-return here).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
         return
-    from api.session_lineage import resolve_session_lineage
+    if not lineage_root_session_id:
+        from api.session_lineage import resolve_session_lineage
 
-    try:
-        lineage = resolve_session_lineage(session_id)
-    except Exception:
-        logger.error(
-            "gateway turn blocked because session lineage is unresolved: %s",
-            session_id,
-            exc_info=True,
-        )
         try:
-            q.put_nowait(("apperror", {
-                "type": "session_lineage_unresolved",
-                "message": "Session lineage could not be verified; no gateway turn was started.",
-                "retryable": True,
-                "session_id": session_id,
-            }))
+            lineage_root_session_id = resolve_session_lineage(session_id).root_session_id
         except Exception:
-            pass
-        unregister_stream_owner(stream_id)
-        clear_session_writeback_owner_if_owned(session_id, stream_id)
-        return
-    lineage_root_session_id = lineage.root_session_id
-    register_active_run(
-        stream_id,
-        lineage_id=lineage_root_session_id,
-        delivery_session_id=lineage.delivery_session_id,
-        session_id=session_id,
-        started_at=time.time(),
-        phase="gateway-starting",
-        workspace=str(workspace),
-        model=model,
-        provider=model_provider,
-        backend="gateway",
-    )
+            logger.error(
+                "gateway turn blocked because session lineage is unresolved: %s",
+                session_id,
+                exc_info=True,
+            )
+            try:
+                q.put_nowait(("apperror", {
+                    "type": "session_lineage_unresolved",
+                    "message": "Session lineage could not be verified; no gateway turn was started.",
+                    "retryable": True,
+                    "session_id": session_id,
+                }))
+            except Exception:
+                pass
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+            return
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
     except Exception:
@@ -1424,20 +1484,8 @@ def _run_gateway_chat_streaming(
         if runs_api_pending_marked and gateway_run_id_pending(stream_id):
             _finish_gateway_run_starting(stream_id)
         _clear_gateway_run_starting(stream_id)
-        unregister_stream_owner(stream_id)
-        unregister_active_run(stream_id)
         # Release the writeback-owner entry the route layer registered for this
         # Gateway run so SESSION_WRITEBACK_OWNERS does not grow unbounded across
         # the process lifetime (compare-and-clear: only clears if still owned by
         # this stream, mirroring the local streaming teardown).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
-        try:
-            from api.background_process import drain_deferred_wakeups_for_session
-
-            drain_deferred_wakeups_for_session(lineage_root_session_id)
-        except Exception:
-            logger.debug(
-                "gateway deferred-wakeup drain failed for lineage %s",
-                lineage_root_session_id,
-                exc_info=True,
-            )

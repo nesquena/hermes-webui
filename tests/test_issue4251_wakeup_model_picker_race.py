@@ -147,7 +147,7 @@ def _run_streaming_turn(
     fake_queue = queue.Queue()
     try:
         streaming.STREAMS[stream_id] = fake_queue
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=fake_session.session_id,
             msg_text="background wakeup turn",
             model=dispatch_model,

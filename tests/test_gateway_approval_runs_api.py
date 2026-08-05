@@ -268,7 +268,7 @@ def test_gateway_capability_cache_keeps_fresher_success_on_probe_race():
 def test_gateway_runs_api_submission():
     """When gateway_supports_approval returns True, the runs-API path is used."""
     from api.config import STREAMS, STREAMS_LOCK
-    from api.gateway_chat import _run_gateway_chat_streaming
+    from api.gateway_chat import _run_gateway_chat_streaming_core
 
     events = []
     q = MagicMock()
@@ -318,7 +318,7 @@ def test_gateway_runs_api_submission():
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
                  patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
                  patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]):
-                _run_gateway_chat_streaming(
+                _run_gateway_chat_streaming_core(
                     session_id="sess1",
                     msg_text="hi",
                     model="test-model",
@@ -1606,7 +1606,7 @@ def test_gateway_worker_marks_run_pending_before_runs_api_prelude():
     from api.gateway_chat import (
         STREAMS,
         _mark_gateway_run_starting,
-        _run_gateway_chat_streaming,
+        _run_gateway_chat_streaming_core,
         gateway_run_id_pending,
     )
 
@@ -1651,7 +1651,7 @@ def test_gateway_worker_marks_run_pending_before_runs_api_prelude():
              patch("api.streaming._normalize_prefill_messages_before_user_turn", side_effect=lambda messages: messages), \
              patch("api.streaming._public_prefill_context_status", return_value={}), \
              patch("api.streaming._webui_ephemeral_system_prompt", return_value="sys"):
-            _run_gateway_chat_streaming(
+            _run_gateway_chat_streaming_core(
                 session_id="sess-worker-run-starting",
                 msg_text="hi",
                 model="test-model",
@@ -1696,6 +1696,7 @@ def test_start_chat_stream_marks_gateway_run_pending_before_thread_start(monkeyp
         def start(self):
             stream_id = recorded["stream_id"]
             assert gateway_chat.gateway_run_id_pending(stream_id) is True
+            self._kwargs["admission"].admitted.set()
             gateway_chat._finish_gateway_run_starting(stream_id, result="fallback")
             gateway_chat._clear_gateway_run_starting(stream_id)
 
@@ -1703,6 +1704,14 @@ def test_start_chat_stream_marks_gateway_run_pending_before_thread_start(monkeyp
         recorded["stream_id"] = stream_id
         session_obj.active_stream_id = stream_id
         session_obj.pending_started_at = 123.0
+        return routes.PreparedChatTurn(
+            session_id=session_obj.session_id,
+            stream_id=stream_id,
+            turn_id="test-turn",
+            pending_started_at=123.0,
+            title=session_obj.title,
+            admission=_kwargs["admission"],
+        )
 
     monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args, **_kwargs: None)
@@ -1712,17 +1721,21 @@ def test_start_chat_stream_marks_gateway_run_pending_before_thread_start(monkeyp
     monkeypatch.setattr(routes, "create_stream_channel", lambda: SimpleNamespace())
     monkeypatch.setattr(routes, "register_stream_owner", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(routes, "set_last_workspace", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        routes,
+        "_append_prepared_chat_turn_journal",
+        lambda _session, prepared, **_kwargs: prepared,
+    )
     monkeypatch.setattr(routes, "threading", SimpleNamespace(Thread=_FakeThread))
 
-    with patch("api.turn_journal.append_turn_journal_event", return_value={}):
-        response = routes._start_chat_stream_for_session(
-            session,
-            msg="hi",
-            attachments=[],
-            workspace="/tmp",
-            model="test-model",
-            external_runtime_owned=True,
-        )
+    response = routes._start_chat_stream_for_session(
+        session,
+        msg="hi",
+        attachments=[],
+        workspace="/tmp",
+        model="test-model",
+        external_runtime_owned=True,
+    )
 
     assert response["stream_id"] == recorded["stream_id"]
     assert gateway_chat.gateway_run_id_pending(recorded["stream_id"]) is False
@@ -1763,6 +1776,14 @@ def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monk
         recorded["stream_id"] = stream_id
         session_obj.active_stream_id = stream_id
         session_obj.pending_started_at = 123.0
+        return routes.PreparedChatTurn(
+            session_id=session_obj.session_id,
+            stream_id=stream_id,
+            turn_id="test-turn",
+            pending_started_at=123.0,
+            title=session_obj.title,
+            admission=_kwargs["admission"],
+        )
 
     monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args, **_kwargs: None)
@@ -1772,18 +1793,22 @@ def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monk
     monkeypatch.setattr(routes, "create_stream_channel", lambda: SimpleNamespace())
     monkeypatch.setattr(routes, "register_stream_owner", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(routes, "set_last_workspace", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        routes,
+        "_append_prepared_chat_turn_journal",
+        lambda _session, prepared, **_kwargs: prepared,
+    )
     monkeypatch.setattr(routes, "threading", SimpleNamespace(Thread=_BoomThread))
 
-    with patch("api.turn_journal.append_turn_journal_event", return_value={}):
-        with pytest.raises(RuntimeError, match="thread start failed"):
-            routes._start_chat_stream_for_session(
-                session,
-                msg="hi",
-                attachments=[],
-                workspace="/tmp",
-                model="test-model",
-                external_runtime_owned=True,
-            )
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        routes._start_chat_stream_for_session(
+            session,
+            msg="hi",
+            attachments=[],
+            workspace="/tmp",
+            model="test-model",
+            external_runtime_owned=True,
+        )
 
     assert gateway_chat.gateway_run_id_pending(recorded["stream_id"]) is False
     assert recorded["stream_id"] not in getattr(gateway_chat, "_STREAM_RUN_LIFECYCLE", {})
@@ -1818,7 +1843,14 @@ def test_chat_cancel_waits_for_worker_published_run_id_before_settlement(
 
     from api import gateway_chat, routes
     import api.route_approvals as approvals
-    from api.config import ACTIVE_RUNS, STREAMS, register_stream_owner, stream_owner_session_id, unregister_stream_owner
+    from api.config import (
+        ACTIVE_RUNS,
+        STREAMS,
+        register_active_run,
+        register_stream_owner,
+        stream_owner_session_id,
+        unregister_stream_owner,
+    )
 
     sid = "sess-cancel-worker-pending"
     stream_id = "stream-cancel-worker-pending"
@@ -1870,14 +1902,34 @@ def test_chat_cancel_waits_for_worker_published_run_id_before_settlement(
     monkeypatch.setattr(routes, "j", fake_j)
     parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
     request_thread = threading.Thread(target=routes.handle_get, args=(object(), parsed), daemon=True)
+    from api.session_lineage import TurnAdmission
+
+    permit = MagicMock()
+    permit.acquired = True
+    admission = TurnAdmission.create_for_test(
+        stream_id=stream_id,
+        root_session_id=sid,
+        delivery_session_id=sid,
+        permit=permit,
+    )
+    register_active_run(
+        admission.stream_id,
+        admission=admission,
+        lineage_id=admission.root_session_id,
+        delivery_session_id=admission.delivery_session_id,
+        phase="reserved",
+        reservation_create=True,
+    )
+    admission.gate.set()
     worker_thread = threading.Thread(
-        target=gateway_chat._run_gateway_chat_streaming,
+        target=gateway_chat._run_admitted_gateway_chat_streaming,
         kwargs={
             "session_id": sid,
             "msg_text": "hi",
             "model": "test-model",
             "workspace": "/tmp",
             "stream_id": stream_id,
+            "admission": admission,
         },
         daemon=True,
     )
@@ -1962,7 +2014,7 @@ def test_gateway_worker_prelude_exception_retires_failed_start_after_waiter_cons
         observed["result"] = wait_for_gateway_run_id(stream_id, 1.0)
 
     worker_thread = threading.Thread(
-        target=gateway_chat._run_gateway_chat_streaming,
+        target=gateway_chat._run_gateway_chat_streaming_core,
         kwargs={
             "session_id": sid,
             "msg_text": "hi",
@@ -2077,7 +2129,7 @@ def test_gateway_missing_stream_releases_pending_start_state_for_local_cancel():
 
     try:
         mark_starting(stream_id)
-        gateway_chat._run_gateway_chat_streaming(
+        gateway_chat._run_gateway_chat_streaming_core(
             session_id="sess-missing-queue",
             msg_text="hi",
             model="test-model",
@@ -2824,7 +2876,7 @@ def test_gateway_runs_api_streaming_preserves_multimodal_input():
 def test_gateway_runs_api_cancel_does_not_emit_empty_response():
     """Cancelled runs-API turns should stop cleanly without empty-response errors."""
     from api.config import STREAMS, STREAMS_LOCK
-    from api.gateway_chat import _run_gateway_chat_streaming
+    from api.gateway_chat import _run_gateway_chat_streaming_core
 
     events = []
     q = MagicMock()
@@ -2855,7 +2907,7 @@ def test_gateway_runs_api_cancel_does_not_emit_empty_response():
             with patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
                  patch("api.gateway_chat._run_gateway_runs_api_streaming", side_effect=fake_runs_streaming), \
                  patch("api.gateway_chat.get_session", return_value=mock_session):
-                _run_gateway_chat_streaming(
+                _run_gateway_chat_streaming_core(
                     session_id="sess-cancel",
                     msg_text="stop",
                     model="test-model",
@@ -3423,7 +3475,7 @@ def test_identityless_gateway_relay_revalidates_head_after_claim_and_releases_ow
 def test_gateway_empty_response_no_approval_banner():
     """Empty response from chat/completions path emits gateway_empty_response, not gateway_approval_unsupported."""
     from api.config import STREAMS, STREAMS_LOCK
-    from api.gateway_chat import _run_gateway_chat_streaming
+    from api.gateway_chat import _run_gateway_chat_streaming_core
 
     events = []
     q = MagicMock()
@@ -3451,7 +3503,7 @@ def test_gateway_empty_response_no_approval_banner():
                      active_stream_id=stream_id, workspace="/tmp",
                      profile=None, context_messages=[], messages=[],
                  )):
-                _run_gateway_chat_streaming(
+                _run_gateway_chat_streaming_core(
                     session_id="sess-fb",
                     msg_text="do something risky",
                     model="test",
@@ -3482,7 +3534,7 @@ def test_gateway_empty_response_no_approval_banner():
 def test_gateway_chat_completions_path_unchanged():
     """Non-stalling chat/completions turn completes without apperror events."""
     from api.config import STREAMS, STREAMS_LOCK
-    from api.gateway_chat import _run_gateway_chat_streaming
+    from api.gateway_chat import _run_gateway_chat_streaming_core
 
     events = []
     q = MagicMock()
@@ -3525,7 +3577,7 @@ def test_gateway_chat_completions_path_unchanged():
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
                  patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
                  patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]):
-                _run_gateway_chat_streaming(
+                _run_gateway_chat_streaming_core(
                     session_id="sess-ok",
                     msg_text="hello",
                     model="test",
@@ -3540,3 +3592,57 @@ def test_gateway_chat_completions_path_unchanged():
     assert not apperrors, f"No apperror expected for a normal response, got: {apperrors}"
     tokens = [e for e in events if isinstance(e, tuple) and e[0] == "token"]
     assert tokens, "Expected at least one token event"
+
+
+def test_gateway_admitted_wrapper_parks_before_core_and_owner_cleans_once(monkeypatch):
+    """Gateway external work cannot begin before the route opens the admission gate."""
+    from api import config, gateway_chat, session_lineage
+
+    wrapper = getattr(gateway_chat, "_run_admitted_gateway_chat_streaming", None)
+    assert callable(wrapper), "gateway production turns require the admitted wrapper"
+    permit = MagicMock()
+    permit.acquired = True
+    admission = session_lineage.TurnAdmission.create_for_test(
+        stream_id="gateway-admitted",
+        root_session_id="gateway-root",
+        delivery_session_id="gateway-root",
+        permit=permit,
+    )
+    config.register_active_run(
+        admission.stream_id,
+        admission=admission,
+        lineage_id=admission.root_session_id,
+        delivery_session_id=admission.delivery_session_id,
+        phase="reserved",
+        reservation_create=True,
+    )
+    config.register_session_writeback_owner(
+        admission.delivery_session_id,
+        admission.stream_id,
+    )
+    calls = []
+    monkeypatch.setattr(
+        gateway_chat,
+        "_run_gateway_chat_streaming_core",
+        lambda *args, **kwargs: calls.append("core"),
+    )
+    monkeypatch.setattr(
+        session_lineage,
+        "release_turn_admission",
+        lambda owned: calls.append(("release", owned.owner_token)),
+    )
+
+    worker = threading.Thread(
+        target=wrapper,
+        args=("gateway-root", "hello", "test", "/tmp", "gateway-admitted"),
+        kwargs={"admission": admission},
+    )
+    worker.start()
+    assert admission.admitted.wait(timeout=1)
+    assert calls == []
+    admission.gate.set()
+    worker.join(timeout=2)
+    assert calls == ["core", ("release", admission.owner_token)]
+    assert config.session_writeback_owner(admission.delivery_session_id) is None
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS.pop(admission.stream_id, None)

@@ -456,6 +456,97 @@ class LineageTurnPermit:
         self.release()
 
 
+@dataclass(frozen=True)
+class TurnAdmission:
+    """Opaque in-process authority for one reserved lineage turn.
+
+    The identity fields are immutable.  The three Events deliberately carry
+    lifecycle state without serialising owner authority into HTTP or journal
+    payloads: the worker announces that it is parked, the route opens the gate
+    only after preparation/read-back succeeds, and either side may abort.
+    """
+
+    reservation_id: str
+    stream_id: str
+    owner_token: str
+    root_session_id: str
+    delivery_session_id: str
+    permit: LineageTurnPermit
+    admitted: threading.Event
+    gate: threading.Event
+    abort: threading.Event
+
+    def __post_init__(self) -> None:
+        if not self.stream_id or self.reservation_id != self.stream_id:
+            raise ValueError("turn admission reservation_id must equal stream_id")
+        if not self.owner_token or not self.root_session_id or not self.delivery_session_id:
+            raise ValueError("turn admission identity fields are required")
+        if self.permit is None or not bool(getattr(self.permit, "acquired", False)):
+            raise ValueError("turn admission requires an acquired lineage permit")
+        for event in (self.admitted, self.gate, self.abort):
+            if not isinstance(event, threading.Event):
+                raise TypeError("turn admission lifecycle fields must be threading.Event instances")
+
+    @classmethod
+    def create_for_test(
+        cls,
+        *,
+        stream_id: str,
+        root_session_id: str,
+        delivery_session_id: str,
+        permit,
+    ) -> "TurnAdmission":
+        """Construct an isolated admission for wrapper behavior tests."""
+        stream = str(stream_id or "").strip()
+        return cls(
+            reservation_id=stream,
+            stream_id=stream,
+            owner_token=uuid.uuid4().hex,
+            root_session_id=str(root_session_id or "").strip(),
+            delivery_session_id=str(delivery_session_id or "").strip(),
+            permit=permit,
+            admitted=threading.Event(),
+            gate=threading.Event(),
+            abort=threading.Event(),
+        )
+
+
+def release_turn_admission(admission: TurnAdmission | None) -> bool:
+    """Release one exact-owner reservation; repeated cleanup is a no-op."""
+    if not isinstance(admission, TurnAdmission):
+        return False
+    from api import config as live_config
+
+    with live_config.ACTIVE_RUNS_LOCK:
+        current = live_config.ACTIVE_RUNS.get(admission.reservation_id)
+        if isinstance(current, dict) and (
+            current.get("owner_token") != admission.owner_token
+            or current.get("admission") is not admission
+            or current.get("permit") is not admission.permit
+        ):
+            return False
+
+    removed = live_config.unregister_active_run(
+        admission.reservation_id,
+        owner_token=admission.owner_token,
+    )
+    if not removed:
+        if not admission.permit.acquired:
+            # Repeated cleanup cannot unregister a later owner that happened to
+            # reuse the same stream ID.
+            return False
+        # Covers setup failure before the reservation row was published.  A
+        # foreign row was rejected above; both releases are idempotent and stay
+        # outside ACTIVE_RUNS_LOCK.
+        admission.permit.release()
+        if live_config.stream_owner_session_id(admission.stream_id) in {
+            None,
+            admission.delivery_session_id,
+        }:
+            live_config.unregister_stream_owner(admission.stream_id)
+    return bool(removed)
+
+
 def acquire_lineage_turn_permit(
     root_session_id: str,
     *,

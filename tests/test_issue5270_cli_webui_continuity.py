@@ -151,7 +151,7 @@ def _capture_streaming_history(monkeypatch, config, streaming, session, *, strea
     session.save(touch_updated_at=False)
     config.STREAMS[stream_id] = queue.Queue()
     try:
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=session.session_id,
             msg_text=WEBUI_FOLLOWUP,
             model="test-model",
