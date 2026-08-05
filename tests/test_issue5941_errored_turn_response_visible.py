@@ -102,6 +102,7 @@ def test_errored_terminal_states_keep_content_visible_completed_does_not():
         // (1) Provider/agent errors that produced content must keep it visible.
         out.error = _anchorSceneHasErroredTerminalState({{ terminal_state: 'error' }});
         out.no_response = _anchorSceneHasErroredTerminalState({{ terminal_state: 'no_response' }});
+        out.incomplete_final = _anchorSceneHasErroredTerminalState({{ terminal_state: 'incomplete_final' }});
         out.degraded = _anchorSceneHasErroredTerminalState({{ terminal_state: 'degraded' }});
         out.connection_lost = _anchorSceneHasErroredTerminalState({{ terminal_state: 'connection_lost' }});
         out.tool_limit_reached = _anchorSceneHasErroredTerminalState({{ terminal_state: 'tool_limit_reached' }});
@@ -125,6 +126,7 @@ def test_errored_terminal_states_keep_content_visible_completed_does_not():
     for state in (
         "error",
         "no_response",
+        "incomplete_final",
         "degraded",
         "connection_lost",
         "tool_limit_reached",
@@ -135,6 +137,34 @@ def test_errored_terminal_states_keep_content_visible_completed_does_not():
     # Normal completion + user stops + absent state are unchanged (not force-open).
     for state in ("completed", "cancelled", "interrupted", "null_state", "no_field", "no_scene"):
         assert out[state] is False, f"terminal_state '{state}' must NOT be treated as an errored keep-open"
+
+
+@pytest.mark.skipif(NODE is None, reason="node required for behavioral test")
+def test_errored_terminal_rows_render_as_warnings():
+    """No-final error states render warning rows, not normal completion rows."""
+    list_start = UI_JS.index("const isError=[") + len("const isError=")
+    list_end = UI_JS.index(".includes(status);", list_start)
+    error_states = UI_JS[list_start:list_end]
+    harness = textwrap.dedent(f"""
+        const errorStates = {error_states};
+        function terminalRowKind(status) {{
+          const isError = errorStates.includes(status);
+          return isError ? 'warning' : 'done';
+        }}
+        const out = {{}};
+        out.no_response = terminalRowKind('no_response');
+        out.incomplete_final = terminalRowKind('incomplete_final');
+        out.tool_limit_reached = terminalRowKind('tool_limit_reached');
+        out.completed = terminalRowKind('completed');
+        console.log(JSON.stringify(out));
+    """)
+    assert NODE is not None
+    res = subprocess.run([NODE, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout.strip())
+    for state in ("no_response", "incomplete_final", "tool_limit_reached"):
+        assert out[state] == "warning", f"terminal_state '{state}' must render as a warning row"
+    assert out["completed"] == "done", "normal completion must keep its existing done-row styling"
 
 
 @pytest.mark.skipif(NODE is None, reason="node required for behavioral test")

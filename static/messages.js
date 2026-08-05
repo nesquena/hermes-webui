@@ -2155,10 +2155,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _bailOutOfTerminalEventsFromStaleStream(source){
     if(_ownsActiveStreamOrBackground()) return false;
-    // This stale stream no longer owns the session — schedule cleanup of ITS own
-    // anchor registry (identity-guarded, so it can't clobber the newer stream's
-    // registry for the same session) before closing. (Codex leak catch.)
-    _scheduleAnchorRegistryCleanup(120000);
+    // A stale source may close only itself. It must not touch INFLIGHT,
+    // the active source, scene state, timers, or the newer anchor registry.
     _closeSource(source);
     return true;
   }
@@ -5839,8 +5837,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;
-      _clearStreamEndRecovery();
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      _clearStreamEndRecovery();
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
       // _streamFinalized=false, calls _restoreSettledSession(), and overwrites
@@ -6130,12 +6128,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('stream_end',async e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       if(_streamFinalized){
         _closeSource(source);
         return;
       }
       _clearStreamEndRecovery();
-      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
@@ -6412,9 +6410,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('error',async e=>{
-      if(_bailOutOfTerminalEventsFromStaleStream(source) && !_streamFinalized){
-        return;
-      }
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       if(_terminalStateReached || _streamFinalized){
         _closeSource(source);
         return;

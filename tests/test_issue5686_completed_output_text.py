@@ -103,3 +103,25 @@ class TestIssue5686CompletedOutputText:
             },
         ]
         assert streaming._session_lacks_final_assistant_answer(messages) is False
+
+    def test_missing_final_terminal_truth_distinguishes_activity_from_empty_run(self):
+        assert streaming._missing_final_terminal_state(
+            has_activity=True,
+            has_durable_final=False,
+        ) == "incomplete_final"
+        assert streaming._missing_final_terminal_state(
+            has_activity=False,
+            has_durable_final=False,
+        ) == "no_response"
+
+    def test_missing_final_terminal_truth_preserves_final_and_hard_failure(self):
+        assert streaming._missing_final_terminal_state(
+            has_activity=True,
+            has_durable_final=True,
+            hard_failure_state="error",
+        ) == "completed"
+        assert streaming._missing_final_terminal_state(
+            has_activity=True,
+            has_durable_final=False,
+            hard_failure_state="error",
+        ) == "error"

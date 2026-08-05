@@ -705,7 +705,45 @@ def stop_gateway_run(run_id: str) -> bool:
         return False
 
 
-def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error):
+def _gateway_pending_turn_has_durable_final(session) -> bool:
+    """Return whether the exact pending gateway turn already has a saved final."""
+    pending_text = str(getattr(session, "pending_user_message", "") or "")
+    from api.process_event_utils import build_active_turn_token
+
+    expected_token = build_active_turn_token(
+        getattr(session, "active_stream_id", None),
+        getattr(session, "pending_started_at", None),
+    )
+    if not pending_text or not expected_token:
+        return False
+    turn_start = None
+    for idx in range(len(session.messages or []) - 1, -1, -1):
+        message = session.messages[idx]
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "user"
+            and message.get("_active_turn_token") == expected_token
+            and str(message.get("content") or "") == pending_text
+        ):
+            turn_start = idx
+            break
+    if turn_start is None:
+        return False
+    from api.streaming import _session_lacks_final_assistant_answer
+
+    return not _session_lacks_final_assistant_answer(session.messages[turn_start:])
+
+
+def _settle_gateway_terminal_error(
+    session_id,
+    stream_id,
+    workspace,
+    model,
+    model_provider,
+    terminal_error,
+    *,
+    terminal_state=None,
+):
     from api.streaming import (
         _classify_provider_error,
         _materialize_pending_user_turn_before_error,
@@ -719,7 +757,44 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         session = get_session(session_id)
         if not _stream_writeback_is_current(session, stream_id):
             return None
-        error_classification = _classify_provider_error(terminal_error)
+        if _gateway_pending_turn_has_durable_final(session):
+            session.active_stream_id = None
+            session.pending_user_message = None
+            session.pending_attachments = []
+            session.pending_started_at = None
+            session.pending_user_source = None
+            persisted = False
+            try:
+                session.save()
+                persisted = True
+            except Exception:
+                logger.debug("Failed to persist completed gateway settlement", exc_info=True)
+            return {
+                "type": "completed",
+                "terminal_state": "completed",
+                "session": redact_session_data(
+                    _session_payload_with_full_messages(session, tool_calls=[])
+                ),
+                "session_id": session.session_id,
+                "terminal_session_persisted": persisted,
+            }
+        if terminal_state == "incomplete_final":
+            error_classification = {
+                "type": "incomplete_final",
+                "label": "Response incomplete",
+                "hint": (
+                    "The run produced activity but did not commit a final answer. "
+                    "Retry or continue from the visible partial work."
+                ),
+            }
+        elif terminal_state == "no_response":
+            error_classification = {
+                "type": "no_response",
+                "label": "Gateway returned no response",
+                "hint": "Check that Hermes Gateway API server is running and reachable.",
+            }
+        else:
+            error_classification = _classify_provider_error(terminal_error)
         error_payload = _provider_error_payload(
             terminal_error,
             error_classification["type"],
@@ -744,6 +819,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             ) + (f"\n\n*{error_payload['hint']}*" if error_payload.get("hint") else ""),
             "timestamp": int(time.time()),
             "_error": True,
+            "_terminal_state": error_classification["type"],
         }
         if turn_duration is not None:
             error_message["_turnDuration"] = turn_duration
@@ -765,6 +841,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             _session_payload_with_full_messages(session, tool_calls=[])
         )
         error_payload["session_id"] = session.session_id
+        error_payload["terminal_state"] = error_classification["type"]
         error_payload["terminal_session_persisted"] = terminal_session_persisted
         if terminal_session_persisted:
             error_payload["terminal_session_persisted_session_id"] = session.session_id
@@ -915,11 +992,22 @@ def _run_gateway_chat_streaming_core(
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
 
     success_writeback_committed = False
+    semantic_terminal_event: list[str | None] = [None]
     runs_api_pending_marked = True
 
     def put_gateway_event(event, data):
         if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
             return
+        if event in {"done", "cancel", "apperror", "error"}:
+            if semantic_terminal_event[0] is not None:
+                logger.warning(
+                    "Dropping conflicting gateway terminal event %s for stream %s after %s",
+                    event,
+                    stream_id,
+                    semantic_terminal_event[0],
+                )
+                return
+            semantic_terminal_event[0] = event
         if event == "apperror" and isinstance(data, dict):
             data = data.copy()
             data.setdefault("session_id", session_id)
@@ -1039,6 +1127,17 @@ def _run_gateway_chat_streaming_core(
                     str(exc),
                 )
                 if error_payload is None:
+                    return
+                if error_payload.get("terminal_state") == "completed":
+                    put_gateway_event(
+                        "done",
+                        {
+                            "session": error_payload["session"],
+                            "usage": {},
+                            "terminal_state": "completed",
+                        },
+                    )
+                    put_gateway_event("stream_end", {"session_id": session_id})
                     return
                 put_gateway_event("apperror", error_payload)
                 return
@@ -1214,15 +1313,50 @@ def _run_gateway_chat_streaming_core(
             )
             if error_payload is None:
                 return
+            if error_payload.get("terminal_state") == "completed":
+                put_gateway_event(
+                    "done",
+                    {
+                        "session": error_payload["session"],
+                        "usage": usage,
+                        "terminal_state": "completed",
+                    },
+                )
+                put_gateway_event("stream_end", {"session_id": session_id})
+                return
             put_gateway_event("apperror", error_payload)
             return
         if not assistant_text:
-            put_gateway_event("apperror", {
-                "label": "Gateway returned no response",
-                "type": "gateway_empty_response",
-                "message": "Gateway returned no assistant message for this turn.",
-                "hint": "Check that Hermes Gateway API server is running and reachable.",
-            })
+            from api.streaming import _stream_has_observable_activity
+
+            missing_state = (
+                "incomplete_final"
+                if _stream_has_observable_activity(session_id, stream_id)
+                else "no_response"
+            )
+            error_payload = _settle_gateway_terminal_error(
+                session_id,
+                stream_id,
+                workspace,
+                model,
+                model_provider,
+                "Gateway returned no assistant message for this turn.",
+                terminal_state=missing_state,
+            )
+            if error_payload is None:
+                return
+            if error_payload.get("terminal_state") == "completed":
+                put_gateway_event(
+                    "done",
+                    {
+                        "session": error_payload["session"],
+                        "usage": usage,
+                        "terminal_state": "completed",
+                    },
+                )
+                put_gateway_event("stream_end", {"session_id": session_id})
+                return
+            put_gateway_event("apperror", error_payload)
             return
         with _get_session_agent_lock(session_id):
             s = get_session(session_id)

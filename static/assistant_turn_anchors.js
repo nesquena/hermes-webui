@@ -117,6 +117,7 @@
     completed:'completed',
     cancelled:'cancelled',
     interrupted:'interrupted',
+    incomplete_final:'incomplete_final',
     no_response:'no_response',
     tool_limit_reached:'tool_limit_reached',
     compression_exhausted:'compression_exhausted',
@@ -134,6 +135,9 @@
     cancel:TERMINAL_STATES.cancelled,
     interrupted:TERMINAL_STATES.interrupted,
     interrupted_by_user:TERMINAL_STATES.interrupted,
+    incomplete_final:TERMINAL_STATES.incomplete_final,
+    incomplete:TERMINAL_STATES.incomplete_final,
+    partial_without_final:TERMINAL_STATES.incomplete_final,
     no_response:TERMINAL_STATES.no_response,
     no_response_generated:TERMINAL_STATES.no_response,
     tool_limit_reached:TERMINAL_STATES.tool_limit_reached,
@@ -296,7 +300,7 @@
   }
 
   function _statusForSourceEvent(sourceType, kind, payload){
-    const explicit=_cleanString(_firstOwn(payload,['status','state','phase']));
+    const explicit=_cleanString(_firstOwn(payload,['terminal_state','status','state','phase']));
     if(explicit){
       return kind==='terminal_status'
         ?normalizeAssistantTurnAnchorTerminalState(explicit,sourceType)||explicit
@@ -560,6 +564,10 @@
       lifecycle.status='running';
     }
     if(kind==='terminal_status'){
+      if(lifecycle.terminal_state){
+        anchor.lifecycle=lifecycle;
+        return;
+      }
       const terminal=normalizeAssistantTurnAnchorTerminalState(
         status,
         _own(event,'source_event_type')
@@ -591,6 +599,20 @@
       anchor.content=anchor.content||{};
       anchor.content.final_answer=finalAnswer;
       anchor.content.final_message_ref=_messageRefFromPayload(payload,event);
+      const lifecycle=anchor.lifecycle||{};
+      const current=normalizeAssistantTurnAnchorTerminalState(lifecycle.terminal_state);
+      if(!current||[
+        TERMINAL_STATES.incomplete_final,
+        TERMINAL_STATES.no_response,
+        TERMINAL_STATES.error,
+        TERMINAL_STATES.connection_lost,
+        TERMINAL_STATES.degraded,
+      ].indexOf(current)!==-1){
+        lifecycle.status=TERMINAL_STATES.completed;
+        lifecycle.terminal_state=TERMINAL_STATES.completed;
+        lifecycle.completed_at=_own(event,'created_at')||lifecycle.completed_at||null;
+        anchor.lifecycle=lifecycle;
+      }
     }
     const usage=_own(payload,'usage');
     const turnUsage=_own(payload,'_turnUsage');
@@ -757,6 +779,9 @@
       id:messageRef||null,
       content:_hasOwn(ctx,'content')?_own(ctx,'content'):_own(message,'content'),
     };
+    const terminalState=_messageValue(message,['_terminal_state','terminal_state']);
+    if(terminalState) payload.terminal_state=terminalState;
+    if(_messageValue(message,['_error'])) payload._error=true;
     const usage=_own(message,'usage');
     const turnUsage=_own(message,'_turnUsage');
     if(usage&&typeof usage==='object') payload.usage=usage;

@@ -7,6 +7,7 @@ from api.run_journal import (
     find_run_summary,
     latest_run_summary,
     read_run_events,
+    select_authoritative_terminal_event,
     stale_interrupted_event,
 )
 
@@ -26,6 +27,42 @@ def test_run_journal_appends_monotonic_seq_and_reads_after_cursor(tmp_path):
 
     journal = read_run_events("session_1", "run_1", after_seq=1, session_dir=tmp_path)
     assert [event["event"] for event in journal["events"]] == ["done"]
+
+
+def test_stream_end_is_transport_only_and_first_semantic_terminal_wins(tmp_path):
+    writer = RunJournalWriter("session_terminal", "run_terminal", session_dir=tmp_path)
+    stream_end = writer.append_sse_event("stream_end", {})
+    failure = writer.append_sse_event(
+        "apperror",
+        {"type": "incomplete_final", "terminal_state": "incomplete_final"},
+    )
+    later_done = writer.append_sse_event("done", {"terminal_state": "completed"})
+
+    assert stream_end["terminal"] is False
+    assert stream_end["terminal_state"] is None
+    assert failure["terminal_state"] == "incomplete_final"
+    assert later_done["terminal_state"] == "completed"
+    selected = select_authoritative_terminal_event(
+        read_run_events(
+            "session_terminal", "run_terminal", session_dir=tmp_path
+        )["events"]
+    )
+    assert selected["event_id"] == failure["event_id"]
+    assert selected["terminal_state"] == "incomplete_final"
+
+
+def test_durable_done_remains_authoritative_over_late_error(tmp_path):
+    writer = RunJournalWriter("session_done", "run_done", session_dir=tmp_path)
+    done = writer.append_sse_event("done", {"terminal_state": "completed"})
+    writer.append_sse_event("apperror", {"type": "provider_error"})
+
+    selected = select_authoritative_terminal_event(
+        read_run_events("session_done", "run_done", session_dir=tmp_path)[
+            "events"
+        ]
+    )
+    assert selected["event_id"] == done["event_id"]
+    assert selected["terminal_state"] == "completed"
 
 
 def test_run_journal_reads_bounded_replay_window(tmp_path):
@@ -184,7 +221,7 @@ def test_summary_cache_does_not_store_result_when_journal_changes_during_read(tm
     second = latest_run_summary("session_1", "run_1", session_dir=tmp_path)
 
     assert first["terminal_state"] == "completed"
-    assert second["terminal_state"] == "interrupted-by-user"
+    assert second["terminal_state"] == "completed"
 
 
 

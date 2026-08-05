@@ -495,7 +495,7 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
         [],
     )
     empty_errors = [item[1] for item in empty_events if item[0] == "apperror"]
-    assert empty_errors[-1]["type"] == "gateway_empty_response"
+    assert empty_errors[-1]["type"] == "no_response"
     assert empty_errors[-1]["session_id"] == s.session_id
 
     response_error[0] = "Gateway provider failed without a known classification"
