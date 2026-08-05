@@ -120,8 +120,13 @@ class TestCustomProviderModelsDict:
         finally:
             _invalidate()
 
-    def test_dict_models_include_default_model_field(self, monkeypatch):
-        """When models is a dict, the ``model`` field must also appear."""
+    def test_dict_models_ignore_legacy_model_field(self, monkeypatch):
+        """When models is a dict, the singular ``model`` field is NOT appended.
+
+        The dict is the authoritative catalog — the legacy ``model`` field is
+        sticky metadata (default/sticky selection) and is not merged into the
+        list.  This holds whether or not ``model`` matches a dict key.
+        """
         prov, _invalidate = _setup_providers_module(monkeypatch)
         monkeypatch.setattr(
             prov,
@@ -145,11 +150,45 @@ class TestCustomProviderModelsDict:
             result = prov.get_providers()
             cp = next(p for p in result["providers"] if p.get("is_custom"))
             model_ids = [m["id"] for m in cp["models"]]
-            # ``model`` field ("glm-5.2") is NOT in the dict, so only dict keys.
-            # If it WERE in the dict, it must not duplicate.
-            assert "Best" in model_ids
-            assert "Fast" in model_ids
-            assert "glm-5.2" not in model_ids  # model field alone doesn't add
+            # Only dict keys; legacy model field is not appended.
+            assert model_ids == ["Best", "Fast"]
+            assert "glm-5.2" not in model_ids
+        finally:
+            _invalidate()
+
+    def test_dict_models_no_duplicate_when_model_is_also_key(self, monkeypatch):
+        """No duplicate entry when the singular ``model`` is also a dict key.
+
+        Regression for the dedup contract: when ``model: Best`` and
+        ``models: {Best: {}, ...}``, "Best" must appear exactly once.
+        """
+        prov, _invalidate = _setup_providers_module(monkeypatch)
+        monkeypatch.setattr(
+            prov,
+            "get_config",
+            lambda: {
+                "model": {"provider": "custom:litellm"},
+                "custom_providers": [
+                    {
+                        "name": "litellm",
+                        "model": "Best",  # also a dict key
+                        "api_key": "sk-test",
+                        "models": {
+                            "Best": {"context_length": 128000},
+                            "Coding": {"context_length": 1000000},
+                            "Fast": {},
+                        },
+                    },
+                ],
+            },
+        )
+        try:
+            result = prov.get_providers()
+            cp = next(p for p in result["providers"] if p.get("is_custom"))
+            model_ids = [m["id"] for m in cp["models"]]
+            # No duplicates, dict insertion order preserved.
+            assert model_ids == ["Best", "Coding", "Fast"]
+            assert model_ids.count("Best") == 1
         finally:
             _invalidate()
 
