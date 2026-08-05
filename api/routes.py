@@ -6631,12 +6631,36 @@ def _normalize_custom_qualified_session_model(
 
     try:
         from api.config import _named_custom_provider_slug_for_provider
+        from api.config import _custom_slug_rest_looks_like_host_port
     except Exception:
         return None
     slug = _named_custom_provider_slug_for_provider(
         qualifier,
         config_obj=profile_config,
     )
+    if not slug and model.startswith("@") and ":" in qualifier:
+        # #6718 (greptile-apps[bot]): a model id that itself contains ':' (e.g.
+        # "@custom:sensenova-primary:model:free" where the model is
+        # "model:free") makes _split_provider_qualified_model's rsplit fold the
+        # model's tail into the qualifier ("custom:sensenova-primary:model"),
+        # which matches no configured slug, so normalization is skipped and the
+        # session stays broken. Walk back colon-by-colon, re-attaching the
+        # eaten segments to the model, until the qualifier resolves to a
+        # configured named slug. Fail closed: only a REAL configured match
+        # triggers, and endpoint-derived host:port slugs (custom:<host>:<port>)
+        # are preserved (#1776 form, verified unchanged).
+        if not _custom_slug_rest_looks_like_host_port(qualifier.removeprefix("custom:")):
+            parts = qualifier.split(":")
+            for i in range(len(parts) - 1, 1, -1):
+                candidate = ":".join(parts[:i])
+                candidate_slug = _named_custom_provider_slug_for_provider(
+                    candidate,
+                    config_obj=profile_config,
+                )
+                if candidate_slug:
+                    slug = candidate_slug
+                    bare = ":".join(parts[i:] + [bare])
+                    break
     if not slug:
         return None
     canonical = slug.removeprefix("custom:")
