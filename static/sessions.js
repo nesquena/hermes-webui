@@ -3267,7 +3267,7 @@ function _sameTranscriptMessage(a,b){
   return false;
 }
 
-function _currentTailUserMessage(messages){
+function _currentTailUserMessage(messages,candidateStart,candidateTimestamp){
   const list=Array.isArray(messages)?messages:[];
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
@@ -3277,7 +3277,12 @@ function _currentTailUserMessage(messages){
       if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
       return msg;
     }
-    if(msg._live||String(msg.role||'')==='tool') continue;
+    if(_isCanonicalAssistantToolCallEnvelope(msg)||String(msg.role||'')==='tool'){
+      if(typeof _isTailActivityOwnedByCandidateTurn!=='function'||
+         !_isTailActivityOwnedByCandidateTurn(msg,candidateStart,candidateTimestamp)) return null;
+      continue;
+    }
+    if(msg._live) continue;
     return null;
   }
   return null;
@@ -3285,7 +3290,7 @@ function _currentTailUserMessage(messages){
 
 function _hasCurrentTailUserDuplicate(messages,candidate){
   if(!candidate||String(candidate.role||'')!=='user') return false;
-  const existing=_currentTailUserMessage(messages);
+  const existing=_currentTailUserMessage(messages,candidate._ts,candidate.timestamp);
   return !!(existing&&_sameTranscriptMessage(existing,candidate));
 }
 

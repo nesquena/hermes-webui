@@ -6301,6 +6301,11 @@ function _firstValidTimestampSeconds(...values){
   }
   return null;
 }
+function _isTailActivityOwnedByCandidateTurn(message,...candidateStarts){
+  const candidateStart=_firstValidTimestampSeconds(...candidateStarts);
+  const activityTimestamp=_firstValidTimestampSeconds(message&&message._ts,message&&message.timestamp);
+  return candidateStart!==null&&activityTimestamp!==null&&activityTimestamp>=candidateStart;
+}
 function _transparentEventTimestampSeconds(row, opts){
   opts=opts||{};
   for(const key of ['ts','timestamp','created_at']){
@@ -10357,7 +10362,25 @@ async function _waitForServerThenReload(opts){
   if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
 }
 
-function _pendingCurrentTailUserMessage(messages){
+function _isCanonicalAssistantToolCallEnvelope(msg){
+  if(!msg||String(msg.role||'')!=='assistant') return false;
+  const calls=msg.tool_calls;
+  if(!Array.isArray(calls)||calls.length===0) return false;
+  for(let i=0;i<calls.length;i++){
+    const call=calls[i];
+    if(!call||typeof call!=='object'||Array.isArray(call)) return false;
+    const hasCallId = (typeof call.id === 'string' && call.id.trim().length>0)
+      || (typeof call.call_id === 'string' && call.call_id.trim().length>0);
+    if(!hasCallId) return false;
+    const fnName = (typeof call.name === 'string' && call.name.trim().length>0)
+      || (call.function && typeof call.function === 'object'
+          && typeof call.function.name === 'string' && call.function.name.trim().length>0);
+    if(!fnName) return false;
+  }
+  return true;
+}
+
+function _pendingCurrentTailUserMessage(messages,candidateStart,candidateTimestamp){
   const list=Array.isArray(messages)?messages:[];
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
@@ -10367,7 +10390,11 @@ function _pendingCurrentTailUserMessage(messages){
       if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
       return msg;
     }
-    if(msg._live||String(msg.role||'')==='tool') continue;
+    if(_isCanonicalAssistantToolCallEnvelope(msg)||String(msg.role||'')==='tool'){
+      if(!_isTailActivityOwnedByCandidateTurn(msg,candidateStart,candidateTimestamp)) return null;
+      continue;
+    }
+    if(msg._live) continue;
     return null;
   }
   return null;
@@ -10379,7 +10406,7 @@ function getPendingSessionMessage(session, messagesOverride=null){
   const attachments=Array.isArray(session?.pending_attachments)?session.pending_attachments.filter(Boolean):[];
   const sourceMessages=Array.isArray(messagesOverride)?messagesOverride:session?.messages;
   const messages=Array.isArray(sourceMessages)?sourceMessages:[];
-  const currentTailUser=_pendingCurrentTailUserMessage(messages);
+  const currentTailUser=_pendingCurrentTailUserMessage(messages,session?.pending_started_at);
   if(currentTailUser){
     const pendingCandidate={role:'user',content:text};
     const sameCurrentTurn=typeof _sameTranscriptMessage==='function'
