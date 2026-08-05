@@ -987,12 +987,28 @@ def test_rejected_queue_claim_leaves_item_queued(monkeypatch, tmp_path):
     assert not worker.starts
 
 
-def test_thread_start_failure_leaves_pending_intent_recoverable(monkeypatch, tmp_path):
+def test_thread_start_failure_restores_exact_claimed_item_in_order(monkeypatch, tmp_path):
     _setup(monkeypatch, tmp_path)
+    first = {
+        "id": "thread-item",
+        "text": "recover me",
+        "files": [{"name": "photo.png", "path": "/attachments/photo.png", "mime": "image/png"}],
+        "model": "queued-model",
+        "model_provider": "queued-provider",
+        "created_at": 123.0,
+        "_queued_at": 456,
+    }
+    second = {
+        "id": "later-item",
+        "text": "run me next",
+        "files": [],
+        "model": "later-model",
+        "model_provider": "later-provider",
+    }
     session = _new_session(
         "queue-thread-failure",
         tmp_path,
-        queue=[{"id": "thread-item", "text": "recover me", "files": []}],
+        queue=[first, second],
     )
     _install_start_stubs(monkeypatch, thread_start=lambda: (_ for _ in ()).throw(RuntimeError("start failed")))
 
@@ -1013,8 +1029,13 @@ def test_thread_start_failure_leaves_pending_intent_recoverable(monkeypatch, tmp
         raise AssertionError("thread start failure must be surfaced")
 
     persisted = models.Session.load(session.session_id)
-    assert persisted.queue == [] or persisted.queue[0]["id"] == "thread-item"
-    assert persisted.queue or persisted.active_stream_id or persisted.pending_user_message
+    assert persisted.queue == [first, second]
+    assert [item["id"] for item in persisted.queue] == ["thread-item", "later-item"]
+    assert persisted.active_stream_id is None
+    assert persisted.pending_user_message is None
+    assert persisted.pending_attachments == []
+    assert persisted.pending_started_at is None
+    assert persisted.pending_user_source is None
 
 
 def test_drain_starts_one_item_per_teardown_in_order(monkeypatch, tmp_path):

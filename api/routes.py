@@ -21229,6 +21229,7 @@ def _start_chat_stream_for_session(
         PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
 
     session_lock = _get_session_agent_lock(s.session_id)
+    claimed_queue_item = None
     diag.stage("session_lock_wait") if diag else None
     while True:
         with session_lock:
@@ -21261,6 +21262,7 @@ def _start_chat_stream_for_session(
                             "_status": 409,
                         }
                     queued_item = queue[0]
+                    claimed_queue_item = copy.deepcopy(queued_item)
                     attachments = list(queued_item.get("files") or [])
                     msg = _compose_queued_turn_message(queued_item.get("text"), attachments)
                     model = queued_item.get("model") or model
@@ -21342,6 +21344,27 @@ def _start_chat_stream_for_session(
     try:
         thr.start()
     except Exception:
+        if queue_item_id is not None and claimed_queue_item is not None:
+            try:
+                with session_lock:
+                    queue = [
+                        item
+                        for item in (getattr(s, "queue", None) or [])
+                        if not isinstance(item, dict)
+                        or str(item.get("id") or "") != str(queue_item_id)
+                    ]
+                    s.queue = [claimed_queue_item, *queue]
+                    s.active_stream_id = None
+                    s.pending_user_message = None
+                    s.pending_attachments = []
+                    s.pending_started_at = None
+                    s.pending_user_source = None
+                    s.save(touch_updated_at=False)
+            except Exception:
+                logger.exception(
+                    "failed to restore queued item after worker start failure for session %s",
+                    s.session_id,
+                )
         if backend_is_gateway:
             try:
                 from api.gateway_chat import _finish_gateway_run_starting
@@ -21350,6 +21373,11 @@ def _start_chat_stream_for_session(
                 _clear_gateway_run_starting(stream_id)
             except Exception:
                 logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+        if queue_item_id is not None:
+            with STREAMS_LOCK:
+                STREAMS.pop(stream_id, None)
+                STREAM_GOAL_RELATED.pop(stream_id, None)
+            unregister_stream_owner(stream_id)
         raise
     response = {
         "stream_id": stream_id,
