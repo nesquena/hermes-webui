@@ -208,6 +208,109 @@ def read_turn_journal_event_bounded(
     return matches[0] if matches else None
 
 
+def inspect_submitted_turn_journal_events(
+    session_id: str,
+    completion_key: str,
+    *,
+    session_dir: Path | None = None,
+) -> tuple[dict, ...]:
+    """Inspect exact completion-key rows from one target-session journal."""
+    expected_key = str(completion_key or "").strip()
+    if not expected_key:
+        raise ValueError("completion key is required")
+    journal = read_turn_journal(session_id, session_dir=session_dir)
+    if journal.get("malformed"):
+        raise RuntimeError("malformed durable completion turn journal")
+    return tuple(
+        row
+        for row in journal.get("events") or []
+        if isinstance(row, dict)
+        and row.get("event") == "submitted"
+        and (
+            (row.get("_completion_delivery") or {}).get("completion_key")
+            == expected_key
+            or str(row.get("completion_key") or "") == expected_key
+        )
+    )
+
+
+def ensure_submitted_turn_journal_event(
+    session_id: str,
+    event: dict,
+    *,
+    inspected_events: tuple[dict, ...] | None = None,
+    session_dir: Path | None = None,
+) -> dict:
+    """Ensure one exact deterministic completion ``submitted`` event."""
+    if not isinstance(event, dict):
+        raise TypeError("event must be a dict")
+    candidate = dict(event)
+    if str(candidate.get("event") or "") != "submitted":
+        raise ValueError("completion turn journal event must be submitted")
+    metadata = candidate.get("_completion_delivery")
+    if not isinstance(metadata, dict):
+        raise ValueError("completion delivery metadata is required")
+    turn_id = str(candidate.get("turn_id") or "").strip()
+    completion_key = str(metadata.get("completion_key") or "").strip()
+    correlation = str(metadata.get("correlation_id") or "").strip()
+    if (
+        not turn_id
+        or turn_id != str(metadata.get("turn_id") or "").strip()
+        or not completion_key
+        or len(correlation) != 64
+        or str(candidate.get("completion_key") or "") != completion_key
+        or str(candidate.get("completion_correlation_sha256") or "") != correlation
+    ):
+        raise ValueError("completion turn identity is incomplete")
+    if (
+        "owner_token" in candidate
+        or "completion_owner_token" in candidate
+        or "owner_token" in metadata
+        or "completion_owner_token" in metadata
+    ):
+        raise ValueError("completion owner token must not enter the journal")
+
+    matches = list(
+        inspected_events
+        if inspected_events is not None
+        else inspect_submitted_turn_journal_events(
+            session_id,
+            completion_key,
+            session_dir=session_dir,
+        )
+    )
+    exact_fields = (
+        "event",
+        "turn_id",
+        "stream_id",
+        "role",
+        "content",
+        "attachments",
+        "source",
+        "completion_key",
+        "completion_correlation_sha256",
+        "_completion_delivery",
+    )
+    if matches:
+        if len(matches) != 1 or any(
+            matches[0].get(key) != candidate.get(key) for key in exact_fields
+        ):
+            raise RuntimeError("conflicting durable completion turn")
+        return matches[0]
+
+    append_turn_journal_event(session_id, candidate, session_dir=session_dir)
+    durable_matches = inspect_submitted_turn_journal_events(
+        session_id,
+        completion_key,
+        session_dir=session_dir,
+    )
+    if len(durable_matches) != 1 or any(
+        durable_matches[0].get(key) != candidate.get(key) for key in exact_fields
+    ):
+        raise RuntimeError("completion turn journal read-back failed")
+    return durable_matches[0]
+
+
 def derive_turn_journal_states(events: Iterable[dict]) -> tuple[dict[str, dict], list[dict]]:
     '''Return the latest event per ``turn_id`` and any terminal-collision entries.
 

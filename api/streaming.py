@@ -46,6 +46,7 @@ from api.config import (
     coerce_reasoning_effort_for_model,
     _main_model_request_overrides,
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
+    BG_TASK_COMPLETE_EVENTS_SEEN, BG_TASK_COMPLETE_EVENTS_SEEN_LOCK,
 )
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
@@ -2619,6 +2620,22 @@ def _drain_webui_process_notifications(
                     "(age %.0fs > cap %.0fs)",
                     evt_sid, stale_age, stale_completion_max_age,
                 )
+            continue
+
+        # The background completion worker may already own this event in its
+        # durable receipt flow. Its process-local seen marker is diagnostic,
+        # not an ACK: skip this duplicate queue copy without marking the core
+        # completion consumed. The deferred/receipt path remains restart-safe
+        # and performs the only terminal ACK after incorporation.
+        try:
+            with BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+                owned_by_receipt_flow = any(
+                    evt_sid in process_ids
+                    for process_ids in BG_TASK_COMPLETE_EVENTS_SEEN.values()
+                )
+        except Exception:
+            owned_by_receipt_flow = False
+        if owned_by_receipt_flow:
             continue
 
         if is_stale:

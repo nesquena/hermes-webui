@@ -76,6 +76,55 @@ def test_bounded_readback_finds_exact_append_and_rejects_duplicate(tmp_path):
         )
 
 
+def test_ensure_completion_submitted_event_is_idempotent_and_conflict_strict(tmp_path):
+    payload = {
+        "event": "submitted",
+        "turn_id": "completion-turn-1",
+        "stream_id": "stream-completion-1",
+        "role": "user",
+        "content": "durable completion prompt",
+        "attachments": [],
+        "source": "process_wakeup",
+        "completion_key": "process:proc-1",
+        "completion_correlation_sha256": "a" * 64,
+        "_completion_delivery": {
+            "version": 1,
+            "completion_kind": "process",
+            "completion_id": "proc-1",
+            "completion_key": "process:proc-1",
+            "correlation_id": "a" * 64,
+            "turn_id": "completion-turn-1",
+            "lineage_id": "root",
+            "origin_session_id": "root",
+            "delivery_session_id": "sid-completion",
+        },
+    }
+
+    first = turn_journal.ensure_submitted_turn_journal_event(
+        "sid-completion",
+        payload,
+        session_dir=tmp_path,
+    )
+    second = turn_journal.ensure_submitted_turn_journal_event(
+        "sid-completion",
+        payload,
+        session_dir=tmp_path,
+    )
+
+    assert first == second
+    journal = read_turn_journal("sid-completion", session_dir=tmp_path)
+    assert [event["turn_id"] for event in journal["events"]] == ["completion-turn-1"]
+
+    conflicting = dict(payload, content="different prompt")
+    with pytest.raises(RuntimeError, match="conflicting durable completion turn"):
+        turn_journal.ensure_submitted_turn_journal_event(
+            "sid-completion",
+            conflicting,
+            session_dir=tmp_path,
+        )
+    assert len(read_turn_journal("sid-completion", session_dir=tmp_path)["events"]) == 1
+
+
 def test_read_turn_journal_tolerates_malformed_lines(tmp_path):
     journal_dir = tmp_path / "_turn_journal"
     journal_dir.mkdir()

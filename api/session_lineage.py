@@ -23,6 +23,11 @@ _TRANSITION_VERSION = 1
 _TRANSITION_STATES = frozenset({"pending", "committed"})
 _TRANSITION_DIR_NAME = "_session_lineage_transitions"
 _PERMIT_DIR_NAME = "_session_lineage_permits"
+_COMPLETION_CLAIM_DIR_NAME = "_completion_delivery_claims"
+_COMPLETION_RECEIPT_FILE_NAME = "_completion_delivery_receipts.json"
+_COMPLETION_RECEIPT_LOCK_NAME = "_completion_delivery_receipts.lock"
+_COMPLETION_RECEIPT_VERSION = 2
+_COMPLETION_RECEIPT_STATES = frozenset({"accepted", "incorporated"})
 _SAFE_SESSION_ID_CHARS = frozenset(
     "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-"
 )
@@ -41,12 +46,86 @@ class LineagePermitUnsupportedError(RuntimeError):
     """Raised before mutation when this platform has no supported lock primitive."""
 
 
+class CompletionDeliveryBusyError(RuntimeError):
+    """Raised when another process owns the exact completion receipt claim."""
+
+
+class CompletionDeliveryReceiptError(RuntimeError):
+    """Raised when a durable completion receipt is malformed or conflicting."""
+
+
 @dataclass(frozen=True)
 class LineageResolution:
     root_session_id: str
     delivery_session_id: str
     profile: str
     hop_count: int
+
+
+@dataclass(frozen=True)
+class CompletionDeliveryContext:
+    """Immutable spawn-time identity for one autonomous completion delivery."""
+
+    kind: str
+    completion_id: str
+    completion_key: str
+    session_key: str
+    origin_ui_session_id: str
+    root_session_id: str
+    delivery_session_id: str
+    profile: str
+    correlation_sha256: str
+    turn_id: str
+
+    @property
+    def completion_kind(self) -> str:
+        return self.kind
+
+    @property
+    def correlation_id(self) -> str:
+        return self.correlation_sha256
+
+    @property
+    def lineage_id(self) -> str:
+        return self.root_session_id
+
+    @property
+    def origin_session_id(self) -> str:
+        return self.origin_ui_session_id
+
+
+class CompletionDeliveryClaim:
+    """Process-local authority for one locked durable completion receipt."""
+
+    def __init__(
+        self,
+        *,
+        context: CompletionDeliveryContext,
+        receipt_path: Path,
+        lock_path: Path,
+        state: str,
+        backend: str,
+        handle: BinaryIO,
+        lock_module,
+        owner_token: str,
+        attempt: int,
+        reservation_id: str,
+    ) -> None:
+        self.context = context
+        self.receipt_path = receipt_path
+        self.lock_path = lock_path
+        self.state = state
+        self.backend = backend
+        self._handle = handle
+        self._lock_module = lock_module
+        self.owner_token = owner_token
+        self.attempt = attempt
+        self.reservation_id = reservation_id
+        self._released = False
+
+    @property
+    def acquired(self) -> bool:
+        return not self._released
 
 
 def _safe_session_id(value: object) -> str:
@@ -624,3 +703,572 @@ def acquire_lineage_turn_permit(
         handle=handle,
         lock_module=lock_module,
     )
+
+
+def build_completion_delivery_context(
+    event: dict,
+    session_id: str,
+    *,
+    session_dir: Path | str | None = None,
+) -> CompletionDeliveryContext:
+    """Bind one process/delegation completion to a verified lineage tip.
+
+    Only immutable routing identity is retained. The eventual completion prompt
+    remains in the session checkpoint and turn journal, never in the receipt.
+    """
+    if not isinstance(event, dict):
+        raise TypeError("completion event must be a dict")
+    completion_kind = (
+        "async_delegation"
+        if str(event.get("type") or "") == "async_delegation"
+        else "process"
+    )
+    if completion_kind == "async_delegation":
+        completion_id = str(event.get("delegation_id") or event.get("task_id") or "").strip()
+    else:
+        completion_id = str(event.get("process_id") or event.get("task_id") or "").strip()
+    if not completion_id:
+        raise CompletionDeliveryReceiptError("completion id is required")
+
+    session_key = str(event.get("session_key") or "").strip()
+    if not session_key:
+        raise CompletionDeliveryReceiptError("completion session_key is required")
+    requested_origin = str(event.get("origin_ui_session_id") or session_id or "").strip()
+    if not requested_origin:
+        raise CompletionDeliveryReceiptError("completion origin UI session is required")
+    expected_profile = str(
+        event.get("origin_profile") or event.get("profile") or ""
+    ).strip() or None
+    directory = _resolved_session_dir(session_dir)
+    target = resolve_session_lineage(
+        session_id,
+        session_dir=directory,
+        expected_profile=expected_profile,
+    )
+    origin = resolve_session_lineage(
+        requested_origin,
+        session_dir=directory,
+        expected_profile=target.profile,
+    )
+    if origin.root_session_id != target.root_session_id:
+        raise LineageResolutionError("cross-lineage completion origin")
+
+    completion_key = f"{completion_kind}:{completion_id}"
+    correlation = hashlib.sha256(completion_key.encode("utf-8")).hexdigest()
+    return CompletionDeliveryContext(
+        kind=completion_kind,
+        completion_id=completion_id,
+        completion_key=completion_key,
+        session_key=session_key,
+        origin_ui_session_id=origin.root_session_id,
+        root_session_id=target.root_session_id,
+        delivery_session_id=target.delivery_session_id,
+        profile=target.profile,
+        correlation_sha256=correlation,
+        turn_id=f"completion-{correlation[:32]}",
+    )
+
+
+def completion_delivery_context(
+    event: dict,
+    delivery_session_id: str,
+    *,
+    session_dir: Path | str | None = None,
+) -> CompletionDeliveryContext:
+    """Canonical P0 name for deterministic completion-delivery identity."""
+    return build_completion_delivery_context(
+        event,
+        delivery_session_id,
+        session_dir=session_dir,
+    )
+
+
+def completion_delivery_metadata(context: CompletionDeliveryContext) -> dict:
+    """Return the prompt-free identity copied to one row and journal event."""
+    if not isinstance(context, CompletionDeliveryContext):
+        raise TypeError("completion context is required")
+    return {
+        "version": 1,
+        "completion_kind": context.completion_kind,
+        "completion_id": context.completion_id,
+        "completion_key": context.completion_key,
+        "correlation_id": context.correlation_id,
+        "turn_id": context.turn_id,
+        "lineage_id": context.lineage_id,
+        "origin_session_id": context.origin_session_id,
+        "delivery_session_id": context.delivery_session_id,
+    }
+
+
+def _completion_receipt_paths(
+    context: CompletionDeliveryContext,
+    session_dir: Path | str | None,
+) -> tuple[Path, Path]:
+    directory = _resolved_session_dir(session_dir)
+    claim_directory = directory / _COMPLETION_CLAIM_DIR_NAME
+    claim_digest = hashlib.sha256(context.completion_key.encode("utf-8")).hexdigest()
+    return (
+        directory / _COMPLETION_RECEIPT_FILE_NAME,
+        claim_directory / f"{claim_digest}.lock",
+    )
+
+
+def _completion_receipt_store_lock_path(session_dir: Path | str | None) -> Path:
+    return _resolved_session_dir(session_dir) / _COMPLETION_RECEIPT_LOCK_NAME
+
+
+def _completion_receipt_identity(context: CompletionDeliveryContext) -> dict:
+    return {
+        "completion_kind": context.completion_kind,
+        "completion_id": context.completion_id,
+        "lineage_id": context.lineage_id,
+        "origin_session_id": context.origin_session_id,
+        "delivery_session_id": context.delivery_session_id,
+        "correlation_id": context.correlation_id,
+        "turn_id": context.turn_id,
+    }
+
+
+def _new_completion_receipt_record(
+    context: CompletionDeliveryContext,
+    *,
+    owner_token: str,
+    attempt: int,
+    reservation_id: str,
+    accepted_at: float,
+) -> dict:
+    return {
+        **_completion_receipt_identity(context),
+        "state": "accepted",
+        "owner_token": owner_token,
+        "attempt": attempt,
+        "accepted_at": accepted_at,
+        "reservation_id": reservation_id,
+    }
+
+
+def _write_completion_receipt(path: Path, document: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    encoded = (
+        json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    temporary = path.parent / f".{path.name}.tmp-{uuid.uuid4().hex}"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        _fsync_directory(path.parent)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _read_completion_receipt_document(path: Path) -> dict:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"version": _COMPLETION_RECEIPT_VERSION, "receipts": {}}
+    except (OSError, UnicodeError) as exc:
+        raise CompletionDeliveryReceiptError("unreadable completion receipt") from exc
+
+    duplicate_keys: list[str] = []
+
+    def reject_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                duplicate_keys.append(str(key))
+            value[key] = item
+        return value
+
+    try:
+        document = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise CompletionDeliveryReceiptError("malformed completion receipt") from exc
+    if duplicate_keys:
+        raise CompletionDeliveryReceiptError("malformed duplicate completion receipt key")
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"version", "receipts"}
+        or document.get("version") != _COMPLETION_RECEIPT_VERSION
+        or not isinstance(document.get("receipts"), dict)
+    ):
+        raise CompletionDeliveryReceiptError("malformed completion receipt")
+    return document
+
+
+def _validated_completion_receipt_record(
+    context: CompletionDeliveryContext,
+    record: object,
+) -> dict:
+    if not isinstance(record, dict):
+        raise CompletionDeliveryReceiptError("malformed completion receipt")
+    if record.get("completion_key") is not None:
+        raise CompletionDeliveryReceiptError("malformed completion receipt identity")
+    for key, value in _completion_receipt_identity(context).items():
+        if record.get(key) != value:
+            raise CompletionDeliveryReceiptError("conflicting completion receipt identity")
+    state = str(record.get("state") or "")
+    if state not in _COMPLETION_RECEIPT_STATES:
+        raise CompletionDeliveryReceiptError("malformed completion receipt state")
+    owner_token = record.get("owner_token")
+    attempt = record.get("attempt")
+    reservation_id = record.get("reservation_id")
+    accepted_at = record.get("accepted_at")
+    if not isinstance(owner_token, str) or not owner_token.strip():
+        raise CompletionDeliveryReceiptError("malformed completion receipt owner")
+    if type(attempt) is not int or attempt <= 0:
+        raise CompletionDeliveryReceiptError("malformed completion receipt attempt")
+    if not isinstance(reservation_id, str) or not reservation_id.strip():
+        raise CompletionDeliveryReceiptError("malformed completion reservation")
+    if not isinstance(accepted_at, (int, float)) or isinstance(accepted_at, bool):
+        raise CompletionDeliveryReceiptError("malformed completion accepted timestamp")
+    incorporated_at = record.get("incorporated_at")
+    if state == "incorporated":
+        if (
+            not isinstance(incorporated_at, (int, float))
+            or isinstance(incorporated_at, bool)
+            or incorporated_at < accepted_at
+        ):
+            raise CompletionDeliveryReceiptError("malformed completion incorporated timestamp")
+    elif incorporated_at is not None:
+        raise CompletionDeliveryReceiptError("accepted completion has incorporated timestamp")
+    for forbidden in ("prompt", "wakeup_prompt", "output", "tool_output"):
+        if forbidden in record:
+            raise CompletionDeliveryReceiptError("completion receipt contains prompt payload")
+    return dict(record)
+
+
+def _read_completion_receipt_from_document(
+    document: dict,
+    context: CompletionDeliveryContext,
+) -> dict | None:
+    receipts = document["receipts"]
+    if context.completion_key not in receipts:
+        return None
+    return _validated_completion_receipt_record(
+        context,
+        receipts[context.completion_key],
+    )
+
+
+def read_completion_delivery_receipt(
+    context: CompletionDeliveryContext,
+    *,
+    session_dir: Path | str | None = None,
+) -> dict | None:
+    receipt_path, _ = _completion_receipt_paths(context, session_dir)
+    document = _read_completion_receipt_document(receipt_path)
+    return _read_completion_receipt_from_document(document, context)
+
+
+def accepted_completion_delivery_contexts(
+    *,
+    session_dir: Path | str | None = None,
+) -> list[CompletionDeliveryContext]:
+    """Return validated accepted-only receipts for restart repair."""
+    directory = _resolved_session_dir(session_dir)
+    path = directory / _COMPLETION_RECEIPT_FILE_NAME
+    document = _read_completion_receipt_document(path)
+    accepted: list[CompletionDeliveryContext] = []
+    for completion_key, record in sorted(document["receipts"].items()):
+        if not isinstance(record, dict):
+            raise CompletionDeliveryReceiptError("malformed completion receipt remains visible")
+        completion_kind = str(record.get("completion_kind") or "")
+        completion_id = str(record.get("completion_id") or "")
+        if (
+            completion_kind not in {"process", "async_delegation"}
+            or completion_key != f"{completion_kind}:{completion_id}"
+        ):
+            raise CompletionDeliveryReceiptError("conflicting completion receipt remains visible")
+        event = {
+            "type": "async_delegation" if completion_kind == "async_delegation" else "process_complete",
+            "session_key": f"ui:{record.get('lineage_id') or ''}",
+            "origin_ui_session_id": record.get("origin_session_id"),
+        }
+        event["delegation_id" if completion_kind == "async_delegation" else "process_id"] = completion_id
+        try:
+            context = build_completion_delivery_context(
+                event,
+                str(record.get("delivery_session_id") or ""),
+                session_dir=directory,
+            )
+        except Exception as exc:
+            raise CompletionDeliveryReceiptError(
+                "conflicting completion receipt remains visible"
+            ) from exc
+        validated = _validated_completion_receipt_record(context, record)
+        if validated["state"] == "accepted":
+            accepted.append(context)
+    return accepted
+
+
+def _lock_completion_receipt(path: Path, *, nonblocking: bool = True):
+    backend = "msvcrt" if os.name == "nt" else "fcntl"
+    lock_module = _load_msvcrt() if backend == "msvcrt" else _load_fcntl()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    handle = path.open("a+b", buffering=0)
+    try:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        if backend == "fcntl":
+            operation = lock_module.LOCK_EX
+            if nonblocking:
+                operation |= lock_module.LOCK_NB
+            lock_module.flock(handle.fileno(), operation)
+        else:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                os.fsync(handle.fileno())
+            handle.seek(0)
+            operation = lock_module.LK_NBLCK if nonblocking else lock_module.LK_LOCK
+            lock_module.locking(handle.fileno(), operation, 1)
+    except OSError as exc:
+        handle.close()
+        if nonblocking and exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+            raise CompletionDeliveryBusyError("completion receipt already claimed") from exc
+        raise
+    return backend, handle, lock_module
+
+
+def _unlock_completion_file(backend: str, handle: BinaryIO, lock_module) -> None:
+    try:
+        if backend == "fcntl":
+            lock_module.flock(handle.fileno(), lock_module.LOCK_UN)
+        else:
+            handle.seek(0)
+            lock_module.locking(handle.fileno(), lock_module.LK_UNLCK, 1)
+    finally:
+        handle.close()
+
+
+def claim_completion_delivery(
+    context: CompletionDeliveryContext,
+    *,
+    session_dir: Path | str | None = None,
+    reservation_id: str | None = None,
+) -> CompletionDeliveryClaim | None:
+    """Claim or create one accepted receipt; incorporated receipts are final."""
+    if not isinstance(context, CompletionDeliveryContext):
+        raise TypeError("completion context is required")
+    receipt_path, claim_lock_path = _completion_receipt_paths(context, session_dir)
+    receipt_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    backend, handle, lock_module = _lock_completion_receipt(claim_lock_path)
+    owner_token = uuid.uuid4().hex
+    selected_reservation = str(
+        reservation_id or context.correlation_sha256[:32]
+    ).strip()
+    if not selected_reservation:
+        _unlock_completion_file(backend, handle, lock_module)
+        raise CompletionDeliveryReceiptError("completion reservation is required")
+    try:
+        store_backend, store_handle, store_module = _lock_completion_receipt(
+            _completion_receipt_store_lock_path(session_dir),
+            nonblocking=False,
+        )
+        try:
+            document = _read_completion_receipt_document(receipt_path)
+            current = _read_completion_receipt_from_document(document, context)
+            if current is not None and current["state"] == "incorporated":
+                _unlock_completion_file(backend, handle, lock_module)
+                return None
+            attempt = int(current["attempt"]) + 1 if current is not None else 1
+            accepted_at = float(current["accepted_at"]) if current is not None else time.time()
+            record = _new_completion_receipt_record(
+                context,
+                owner_token=owner_token,
+                attempt=attempt,
+                reservation_id=selected_reservation,
+                accepted_at=accepted_at,
+            )
+            document["receipts"][context.completion_key] = record
+            _write_completion_receipt(receipt_path, document)
+            durable_document = _read_completion_receipt_document(receipt_path)
+            durable = _read_completion_receipt_from_document(durable_document, context)
+            if durable != record:
+                raise CompletionDeliveryReceiptError("completion receipt read-back failed")
+        finally:
+            _unlock_completion_file(store_backend, store_handle, store_module)
+        return CompletionDeliveryClaim(
+            context=context,
+            receipt_path=receipt_path,
+            lock_path=claim_lock_path,
+            state="accepted",
+            backend=backend,
+            handle=handle,
+            lock_module=lock_module,
+            owner_token=owner_token,
+            attempt=attempt,
+            reservation_id=selected_reservation,
+        )
+    except Exception:
+        if not handle.closed:
+            _unlock_completion_file(backend, handle, lock_module)
+        raise
+
+
+def release_completion_delivery_claim(claim: CompletionDeliveryClaim | None) -> bool:
+    if not isinstance(claim, CompletionDeliveryClaim) or not claim.acquired:
+        return False
+    claim._released = True
+    _unlock_completion_file(claim.backend, claim._handle, claim._lock_module)
+    return True
+
+
+def mark_completion_incorporated(
+    claim: CompletionDeliveryClaim,
+    *,
+    session_dir: Path | str | None = None,
+) -> dict:
+    """CAS one held accepted receipt to incorporated and read it back."""
+    if not isinstance(claim, CompletionDeliveryClaim) or not claim.acquired:
+        raise CompletionDeliveryReceiptError("completion claim is not held")
+    context = claim.context
+    receipt_path, claim_lock_path = _completion_receipt_paths(context, session_dir)
+    if receipt_path != claim.receipt_path or claim_lock_path != claim.lock_path:
+        raise CompletionDeliveryReceiptError("completion claim belongs to another receipt store")
+    store_backend, store_handle, store_module = _lock_completion_receipt(
+        _completion_receipt_store_lock_path(session_dir),
+        nonblocking=False,
+    )
+    try:
+        document = _read_completion_receipt_document(receipt_path)
+        current = _read_completion_receipt_from_document(document, context)
+        if current is None or current.get("state") != "accepted":
+            raise CompletionDeliveryReceiptError("completion receipt is not accepted")
+        if (
+            current.get("owner_token") != claim.owner_token
+            or current.get("attempt") != claim.attempt
+            or current.get("reservation_id") != claim.reservation_id
+        ):
+            raise CompletionDeliveryReceiptError("completion receipt owner CAS failed")
+        updated = dict(current)
+        updated["state"] = "incorporated"
+        updated["incorporated_at"] = time.time()
+        document["receipts"][context.completion_key] = updated
+        _write_completion_receipt(receipt_path, document)
+        durable_document = _read_completion_receipt_document(receipt_path)
+        durable = _read_completion_receipt_from_document(durable_document, context)
+        if durable != updated or durable.get("state") != "incorporated":
+            raise CompletionDeliveryReceiptError("incorporated receipt read-back failed")
+    finally:
+        _unlock_completion_file(store_backend, store_handle, store_module)
+    claim.state = "incorporated"
+    return durable
+
+
+def verify_completion_incorporation_artifacts(
+    claim: CompletionDeliveryClaim,
+    *,
+    turn_admission: TurnAdmission,
+    message: str,
+    session_dir: Path | str | None = None,
+) -> dict:
+    """Prove the parked completion turn exists once at the verified tip."""
+    if not isinstance(claim, CompletionDeliveryClaim) or not claim.acquired:
+        raise CompletionDeliveryReceiptError("completion claim is not held")
+    if not isinstance(turn_admission, TurnAdmission):
+        raise CompletionDeliveryReceiptError("completion admission is invalid")
+    context = claim.context
+    receipt = read_completion_delivery_receipt(context, session_dir=session_dir)
+    if (
+        receipt is None
+        or receipt.get("state") != "accepted"
+        or receipt.get("owner_token") != claim.owner_token
+        or receipt.get("attempt") != claim.attempt
+        or receipt.get("reservation_id") != claim.reservation_id
+    ):
+        raise CompletionDeliveryReceiptError("completion receipt owner is not accepted")
+    if (
+        not turn_admission.admitted.is_set()
+        or turn_admission.gate.is_set()
+        or turn_admission.abort.is_set()
+        or not turn_admission.permit.acquired
+        or turn_admission.root_session_id != context.root_session_id
+        or turn_admission.delivery_session_id != context.delivery_session_id
+        or turn_admission.stream_id != claim.reservation_id
+    ):
+        raise CompletionDeliveryReceiptError("completion worker is not safely parked")
+
+    directory = _resolved_session_dir(session_dir)
+    tip = _load_sidecar(
+        directory / f"{context.delivery_session_id}.json",
+        context.delivery_session_id,
+    )
+    if (
+        tip.get("active_stream_id") != turn_admission.stream_id
+        or tip.get("pending_user_message") != message
+        or tip.get("pending_turn_id") != context.turn_id
+        or tip.get("pending_completion_key") != context.completion_key
+        or tip.get("pending_completion_correlation_sha256")
+        != context.correlation_sha256
+    ):
+        raise CompletionDeliveryReceiptError("completion sidecar identity mismatch")
+
+    metadata = completion_delivery_metadata(context)
+
+    def owned_rows(value) -> list[dict]:
+        return [
+            row
+            for row in (value if isinstance(value, list) else [])
+            if isinstance(row, dict)
+            and row.get("role") == "user"
+            and row.get("_completion_delivery") == metadata
+            and row.get("content") == message
+        ]
+
+    if len(owned_rows(tip.get("messages"))) != 1:
+        raise CompletionDeliveryReceiptError("completion display checkpoint is not exact")
+    if len(owned_rows(tip.get("context_messages"))) != 1:
+        raise CompletionDeliveryReceiptError("completion context checkpoint is not exact")
+    if context.root_session_id != context.delivery_session_id:
+        root = _load_sidecar(
+            directory / f"{context.root_session_id}.json",
+            context.root_session_id,
+        )
+        if owned_rows(root.get("messages")) or owned_rows(root.get("context_messages")):
+            raise CompletionDeliveryReceiptError("completion checkpoint leaked to lineage root")
+
+    from api.turn_journal import read_turn_journal
+
+    journal = read_turn_journal(context.delivery_session_id, session_dir=directory)
+    if journal.get("malformed"):
+        raise CompletionDeliveryReceiptError("malformed completion turn journal")
+    matches = [
+        row
+        for row in journal.get("events") or []
+        if isinstance(row, dict)
+        and row.get("event") == "submitted"
+        and row.get("turn_id") == context.turn_id
+        and row.get("_completion_delivery") == metadata
+        and row.get("stream_id") == turn_admission.stream_id
+        and row.get("content") == message
+    ]
+    if len(matches) != 1:
+        raise CompletionDeliveryReceiptError("completion turn journal is not exact")
+    return {"sidecar": tip, "journal_event": matches[0]}
+
+
+def verify_completion_artifacts(*args, **kwargs) -> dict:
+    """Canonical P0 name for the durable incorporation read-back barrier."""
+    return verify_completion_incorporation_artifacts(*args, **kwargs)

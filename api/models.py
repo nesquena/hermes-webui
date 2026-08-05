@@ -874,6 +874,9 @@ def _append_recovered_context_projection(
                 recovered.get('timestamp'),
                 recovered.get('_source'),
                 recovered.get('attachments'),
+                recovered.get('_completion_key'),
+                recovered.get('_completion_correlation_sha256'),
+                recovered.get('_turn_id'),
             ):
                 return
         else:
@@ -921,6 +924,13 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
     }
     pending_source = getattr(session, 'pending_user_source', None)
     stamp_message_source(recovered, pending_source)
+    pending_completion_key = getattr(session, 'pending_completion_key', None)
+    if pending_completion_key:
+        recovered['_completion_key'] = pending_completion_key
+        recovered['_completion_correlation_sha256'] = getattr(
+            session, 'pending_completion_correlation_sha256', None
+        )
+        recovered['_turn_id'] = getattr(session, 'pending_turn_id', None)
     if session.pending_attachments:
         recovered['attachments'] = list(session.pending_attachments)
     session.messages.append(recovered)
@@ -1200,6 +1210,9 @@ class Session:
                  pending_attachments=None,
                  pending_started_at=None,
                  pending_user_source: str=None,
+                 pending_turn_id: str | None=None,
+                 pending_completion_key: str | None=None,
+                 pending_completion_correlation_sha256: str | None=None,
                  context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
@@ -1269,6 +1282,9 @@ class Session:
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
         self.pending_user_source = pending_user_source
+        self.pending_turn_id = pending_turn_id
+        self.pending_completion_key = pending_completion_key
+        self.pending_completion_correlation_sha256 = pending_completion_correlation_sha256
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
@@ -1363,6 +1379,14 @@ class Session:
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
             )
+        if not self.pending_user_message:
+            # Completion identity is turn-scoped. Every terminal settlement
+            # already clears pending_user_message; centralizing the companion
+            # cleanup here prevents one forgotten exit path from leaking a
+            # stale completion key into the next turn.
+            self.pending_turn_id = None
+            self.pending_completion_key = None
+            self.pending_completion_correlation_sha256 = None
         if touch_updated_at:
             self.updated_at = time.time()
         # Write metadata fields first so load_metadata_only() can read them
@@ -1375,6 +1399,7 @@ class Session:
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
+            'pending_turn_id', 'pending_completion_key', 'pending_completion_correlation_sha256',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
@@ -1446,15 +1471,12 @@ class Session:
                     and incoming_msg_count == 0
                     and (self.active_stream_id or self.pending_user_message)
                 ):
-                    logger.warning(
-                        "refusing to overwrite session %s messages with empty active/pending snapshot "
-                        "(existing=%s, incoming=%s, stream=%s)",
-                        self.session_id,
-                        existing_msg_count,
-                        incoming_msg_count,
-                        self.active_stream_id,
+                    raise RuntimeError(
+                        "refusing to overwrite session "
+                        f"{self.session_id!r} messages with empty active/pending snapshot "
+                        f"(existing={existing_msg_count}, incoming={incoming_msg_count}, "
+                        f"stream={self.active_stream_id})"
                     )
-                    return
                 if existing_msg_count > incoming_msg_count:
                     bak_path = self.path.with_suffix('.json.bak')
                     # SHOULD-FIX #2 (Opus): atomic write via tmp+replace,
@@ -2280,7 +2302,16 @@ def _normalize_journal_recovery_text(value) -> str:
     return " ".join(str(value or "").split())
 
 
-def _message_matches_pending_checkpoint(message, pending_text, timestamp, source, attachments):
+def _message_matches_pending_checkpoint(
+    message,
+    pending_text,
+    timestamp,
+    source,
+    attachments,
+    completion_key=None,
+    completion_correlation_sha256=None,
+    turn_id=None,
+):
     if not isinstance(message, dict) or message.get('role') != 'user':
         return False
     try:
@@ -2288,13 +2319,23 @@ def _message_matches_pending_checkpoint(message, pending_text, timestamp, source
         expected_timestamp = int(timestamp)
     except (TypeError, ValueError):
         return False
-    return (
+    matches = (
         _normalize_journal_recovery_text(message.get('content'))
         == _normalize_journal_recovery_text(pending_text)
         and message_timestamp == expected_timestamp
         and (message.get('_source') or 'webui') == (source or 'webui')
         and list(message.get('attachments') or []) == list(attachments or [])
     )
+    if not matches:
+        return False
+    if completion_key:
+        return (
+            message.get('_completion_key') == completion_key
+            and message.get('_completion_correlation_sha256')
+            == completion_correlation_sha256
+            and message.get('_turn_id') == turn_id
+        )
+    return not message.get('_completion_key')
 
 
 def _message_matches_pending_text(message, pending_text):
@@ -2619,7 +2660,13 @@ def _pending_recovery_turn_start(session) -> int | None:
             session.pending_started_at,
             session.pending_user_source,
             session.pending_attachments,
-        ) or _message_matches_pending_text(message, pending_text):
+            getattr(session, 'pending_completion_key', None),
+            getattr(session, 'pending_completion_correlation_sha256', None),
+            getattr(session, 'pending_turn_id', None),
+        ) or (
+            not getattr(session, 'pending_completion_key', None)
+            and _message_matches_pending_text(message, pending_text)
+        ):
             return idx
     return None
 
@@ -2787,6 +2834,9 @@ def _append_journaled_partial_output(
             session.pending_started_at,
             session.pending_user_source,
             session.pending_attachments,
+            getattr(session, 'pending_completion_key', None),
+            getattr(session, 'pending_completion_correlation_sha256', None),
+            getattr(session, 'pending_turn_id', None),
         ):
             return False
 
@@ -2801,6 +2851,9 @@ def _append_journaled_partial_output(
                 session.pending_started_at,
                 session.pending_user_source,
                 session.pending_attachments,
+                getattr(session, 'pending_completion_key', None),
+                getattr(session, 'pending_completion_correlation_sha256', None),
+                getattr(session, 'pending_turn_id', None),
             )
             if candidate_matches_checkpoint and candidate.get('_recovered'):
                 continue
@@ -3365,10 +3418,16 @@ def _apply_core_sync_or_error_marker(
             _recovered_ts,
             session.pending_user_source,
             session.pending_attachments,
+            getattr(session, 'pending_completion_key', None),
+            getattr(session, 'pending_completion_correlation_sha256', None),
+            getattr(session, 'pending_turn_id', None),
         )
-        _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-            session.messages[-1],
-            session.pending_user_message,
+        _tail_user_already_checkpointed = _already_checkpointed or (
+            not getattr(session, 'pending_completion_key', None)
+            and _message_matches_pending_text(
+                session.messages[-1],
+                session.pending_user_message,
+            )
         )
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
@@ -3455,10 +3514,16 @@ def _apply_core_sync_or_error_marker(
                 _recovered_ts,
                 session.pending_user_source,
                 session.pending_attachments,
+                getattr(session, 'pending_completion_key', None),
+                getattr(session, 'pending_completion_correlation_sha256', None),
+                getattr(session, 'pending_turn_id', None),
             )
-            _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
+            _tail_user_already_checkpointed = _already_checkpointed or (
+                not getattr(session, 'pending_completion_key', None)
+                and _message_matches_pending_text(
+                    session.messages[-1] if session.messages else None,
+                    session.pending_user_message,
+                )
             )
             if (
                 _pending_text
