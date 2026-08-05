@@ -2809,10 +2809,17 @@ def get_providers() -> dict[str, Any]:
                     cp_name,
                 )
                 continue
-            # Collect models from `models` list or `model` single
+            # Collect models from `models` (list or dict) or `model` single
+            cp_raw_models = cp.get("models")
             cp_models = []
-            if isinstance(cp.get("models"), list):
-                cp_models = [{"id": str(m), "label": str(m)} for m in cp["models"]]
+            if isinstance(cp_raw_models, list):
+                cp_models = [{"id": str(m), "label": str(m)} for m in cp_raw_models]
+            elif isinstance(cp_raw_models, dict):
+                cp_models = [
+                    {"id": str(k), "label": str(k)}
+                    for k in cp_raw_models
+                    if isinstance(k, str)
+                ]
             elif cp.get("model"):
                 cp_models = [{"id": cp["model"], "label": cp["model"]}]
             # Check for env var reference (${VAR_NAME} pattern)
