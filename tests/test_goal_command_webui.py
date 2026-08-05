@@ -426,21 +426,27 @@ def test_chat_start_forwards_goal_related_to_gateway_worker(monkeypatch, tmp_pat
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
     monkeypatch.setattr(routes.uuid, "uuid4", lambda: SimpleNamespace(hex="goal-stream-id"))
 
-    response = routes._start_chat_stream_for_session(
-        FakeSession(),
-        msg="continue the goal",
-        attachments=[],
-        workspace=str(tmp_path),
-        model="gpt-5.5",
-        model_provider="openai-codex",
-        goal_related=True,
-    )
+    sid = FakeSession.session_id
+    routes.SESSIONS.pop(sid, None)
+    try:
+        response = routes._start_chat_stream_for_session(
+            FakeSession(),
+            msg="continue the goal",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="gpt-5.5",
+            model_provider="openai-codex",
+            goal_related=True,
+        )
 
-    assert response["stream_id"] == "goal-stream-id"
-    assert captured["target"] is routes._run_gateway_chat_streaming
-    assert captured["kwargs"]["goal_related"] is True
-    assert captured["kwargs"]["model_provider"] == "openai-codex"
-    assert captured["started"] is True
+        assert response["stream_id"] == "goal-stream-id"
+        assert captured["target"] is routes._run_gateway_chat_streaming
+        assert captured["kwargs"]["goal_related"] is True
+        assert captured["kwargs"]["model_provider"] == "openai-codex"
+        assert captured["started"] is True
+        assert sid not in routes.SESSIONS
+    finally:
+        routes.SESSIONS.pop(sid, None)
 
 
 def test_streaming_post_turn_goal_hook_surfaces_and_continues():

@@ -20991,9 +20991,6 @@ def _authoritative_session_locked(session_id: str, fallback=None):
         session = fallback
     if session is None or str(getattr(session, "session_id", "") or "") != sid:
         raise KeyError(sid)
-    with LOCK:
-        SESSIONS[sid] = session
-        SESSIONS.move_to_end(sid)
     return session
 
 
