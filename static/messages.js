@@ -4258,6 +4258,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         || text.includes('compression finished')
         || (text.includes('compressed')&&!text.includes('compressing'))
       ) return 'compressed';
+      // Positive cues mirror _is_agent_compression_start_status() in
+      // api/streaming.py, which is the authority for "compression actually
+      // started". Preflight compression (turn_context) is intentionally NOT a
+      // cue there or here: it announces an intent, and the later authoritative
+      // "Compacting context" marker is what proves compaction proceeded.
+      // Accepting it client-side would paint a divider on replay for turns the
+      // live SSE path never flagged.
       if(
         // Positive cues are an EXACT mirror of the accept list in
         // _is_agent_compression_start_status() (api/streaming.py), which is the
