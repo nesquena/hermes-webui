@@ -8,11 +8,36 @@ Tests cover the four new branches in _apply_update_inner():
   3. pull fails + no upstream tracking  → recovery command with set-upstream-to
   4. pull fails + generic fallback  → raw git output truncated at 300 chars
 """
-from pathlib import Path
-from unittest.mock import patch, call
-import subprocess
-
 import pytest
+from unittest.mock import patch
+
+
+# ---------------------------------------------------------------------------
+# Module-level safety guard
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _block_real_subprocess_and_restart(monkeypatch):
+    """Default-fail guard: subprocess.run, subprocess.Popen, and
+    _schedule_restart raise AssertionError if reached without an explicit
+    per-test stub.
+
+    Tests that need these provide their own monkeypatch.setattr or patch()
+    override, which takes precedence because it is applied after this fixture.
+    """
+    import api.updates as _upd
+
+    def _blocked(name):
+        def _raise(*args, **kwargs):
+            raise AssertionError(
+                f'{name} reached without a test-level stub; '
+                'add monkeypatch.setattr or patch() before calling the SUT'
+            )
+        return _raise
+
+    monkeypatch.setattr(_upd.subprocess, 'run', _blocked('subprocess.run'))
+    monkeypatch.setattr(_upd.subprocess, 'Popen', _blocked('subprocess.Popen'))
+    monkeypatch.setattr(_upd, '_schedule_restart', _blocked('_schedule_restart'))
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +315,8 @@ class TestApplyUpdateDiagnostics:
         with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
              patch(f'{_MODULE}._run_git') as mock_run_git, \
              patch(f'{_MODULE}._update_cache', fake_cache), \
-             patch(f'{_MODULE}._cache_lock'):
+             patch(f'{_MODULE}._cache_lock'), \
+             patch(f'{_MODULE}._schedule_restart'):
             mock_run_git.side_effect = [
                 ('', True),                       # fetch succeeds
                 ('', True),                       # no release tags
@@ -307,21 +333,27 @@ class TestApplyUpdateDiagnostics:
     # ------------------------------------------------------------------
 
     def test_fetch_failure_for_agent_target(self, tmp_path):
-        """Fetch failure path also works when target='agent'."""
+        """agent target delegates to the official updater, not to _run_git.
+
+        When the Agent venv contains no hermes executable the delegation fails
+        immediately with a 'not found' message.  This test confirms that the
+        old git-fetch path is never entered for target='agent'.
+        """
         (tmp_path / '.git').mkdir()
 
         from api import updates
+        # No hermes exe is present; _run_git must never be called.
         with patch(f'{_MODULE}._AGENT_DIR', tmp_path), \
+             patch(f'{_MODULE}.PYTHON_EXE', str(tmp_path / 'missing-python')), \
+             patch(f'{_MODULE}._resolve_hermes_command', return_value='hermes'), \
              patch(f'{_MODULE}._run_git') as mock_run_git:
-            mock_run_git.side_effect = [
-                ('', False),   # fetch fails
-            ]
             result = updates._apply_update_inner('agent')
 
         assert result['ok'] is False
-        assert 'could not reach' in result['message'].lower() or \
-               'internet' in result['message'].lower() or \
-               'remote' in result['message'].lower()
+        assert 'not found' in result['message'].lower(), (
+            f'Expected "not found" for missing exe; got: {result["message"]!r}'
+        )
+        mock_run_git.assert_not_called()
 
 
 # Issue #4085 regression: a dirty install at-or-past the latest release tag

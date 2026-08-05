@@ -216,7 +216,7 @@ def test_update_apply_rejects_zero_target_success_path():
 def test_apply_updates_queues_agent_before_webui():
     result = _run_apply_updates_harness(
         {"agent": {"behind": 1}, "webui": {"behind": 1}},
-        [{"ok": True}, {"ok": True}],
+        [{"ok": True, "restart_scheduled": True}, {"ok": True}],
     )
     assert result["apiCalls"] == ["agent", "webui"]
     assert result["waitCalls"] == [

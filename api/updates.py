@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -25,9 +26,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from api.agent_health import get_active_profile_gateway_running_pid
-from api.gateway_restart import restart_active_profile_gateway
+from api.gateway_restart import _resolve_hermes_command, restart_active_profile_gateway
 from api.profiles import get_active_profile_name
-from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
+from api.config import PYTHON_EXE, REPO_ROOT, STREAMS, STREAMS_LOCK
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,6 @@ _cache_lock = threading.Lock()
 _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
-_AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
 _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
@@ -61,6 +61,60 @@ _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'tls connection was non-properly terminated',
     'ssl certificate problem',
 )
+# These markers mirror the current Agent updater source at
+# hermes_cli/update_cmd.py and hermes_cli/update_lock.py. The completion line is
+# the updater's explicit transaction output; refusal/failure lines remain
+# failures even when the CLI catches an exception and exits zero.
+_AGENT_UPDATE_COMPLETION_MARKER = "✓ Update complete!"
+_AGENT_UPDATE_PARTIAL_REFRESH_FAILURE_RE = re.compile(
+    r"⚠\s+.+?(?:dependencies )?failed to refresh:"
+)
+_AGENT_UPDATE_FAILURE_MARKERS = (
+    "Cannot update Hermes Agent:",
+    "✗ Update failed",
+    "✗ Failed to fetch updates from origin.",
+    "✗ Authentication failed",
+    "✗ Failed to reset to origin/",
+    "⚠ npm install failed",
+    "⚠ npm workspace install failed",
+    "⚠ Desktop build failed",
+    "⚠️  Config format update failed:",
+    "✗ Auto-restore FAILED",
+    "✗ Auto-restore file copy failed:",
+    "⚠ Venv still unhealthy after repair:",
+    "still fails to import after updating:",
+    "⚠ state.db integrity check FAILED after snapshot:",
+    "✗ Snapshot copy ALSO failed integrity",
+    "⚠ Snapshot does not contain state.db",
+    "⚠ Pre-update backup: could not load backup module",
+    "⚠ Backup failed:",
+    "⚠ Backup skipped (no files found or write failed);",
+    "⚠ state.db is corrupted after update:",
+    "✗ Pre-update snapshot also failed integrity",
+    "⚠ Pre-update snapshot does not contain state.db",
+    "⚠ No pre-update snapshot was taken",
+    "⚠️  cron/jobs.json lost jobs during this update",
+    "⚠ Lazy refresh failed unexpectedly:",
+    "⚠ Lazy refresh failed; rerun `hermes update` once resolved.",
+    "⚠ Lazy-refresh recovery incomplete",
+    "⚠ Update partially complete — Node.js dependencies",
+    "⚠ Update incomplete — some gateway units were not restarted:",
+    "⚠ Gateway restart failed:",
+)
+_AGENT_UPDATE_NOOP_MARKERS = (
+    "✓ Already up to date!",
+)
+_AGENT_UPDATE_HANDOFF_MARKERS = (
+    "✓ Dependencies repaired!",
+    "⚠ Restart required to finish the managed Python runtime repair.",
+)
+_AGENT_UPDATE_LOCK_MARKERS = (
+    ".hermes-update-in-progress",
+    "another hermes update is already running",
+    "update is already running",
+)
+_AGENT_GATEWAY_OBSERVATION_TIMEOUT_S = 10.0
+_AGENT_GATEWAY_OBSERVATION_POLL_S = 0.25
 _RELEASE_TAG_RE = re.compile(r'^v[0-9][0-9A-Za-z.+-]*$')
 # Phrases git emits when its own short-lived index/refs lock files block a
 # subsequent operation. Tuned to match only the true "lock file already exists"
@@ -242,6 +296,90 @@ def _is_git_lock_error(output: str) -> bool:
     return any(sig in lower_out for sig in _GIT_LOCK_SIGNATURES)
 
 
+def _is_agent_update_lock_error(output: str) -> bool:
+    if not output:
+        return False
+    lower_out = output.lower()
+    return any(sig in lower_out for sig in _AGENT_UPDATE_LOCK_MARKERS)
+
+
+def _agent_update_lock_path() -> Path | None:
+    """Return the marker path used by the official Agent updater."""
+    try:
+        from hermes_cli.update_lock import update_marker_path
+
+        return Path(update_marker_path())
+    except Exception:
+        hermes_home = os.getenv('HERMES_HOME')
+        return Path(hermes_home) / '.hermes-update-in-progress' if hermes_home else None
+
+
+def _agent_update_lock_state(path: Path | None = None) -> dict:
+    """Read the official lock without deleting a live marker."""
+    path = path or _agent_update_lock_path()
+    if path is None:
+        return {'path': None, 'holder': None, 'present': False}
+    holder = None
+    try:
+        from hermes_cli.update_lock import read_live_update
+
+        holder = read_live_update(path=path)
+    except Exception:
+        holder = None
+    try:
+        present = path.exists()
+    except OSError:
+        present = True
+    return {'path': path, 'holder': holder, 'present': present}
+
+
+def _manual_remove_command(path: Path) -> str:
+    """Return a literal-path removal command for the operator's host shell."""
+    value = str(path)
+    if os.name == 'nt':
+        escaped = value.replace("'", "''")
+        return f"Remove-Item -LiteralPath '{escaped}' -Force"
+    return f'rm -f -- {shlex.quote(value)}'
+
+
+def _resolve_git_directories(path: Path) -> list[Path]:
+    """Resolve the worktree Git directory and its shared common directory."""
+    git_entry = path / '.git'
+    try:
+        if git_entry.is_dir():
+            git_dir = git_entry.resolve()
+        elif git_entry.is_file():
+            line = git_entry.read_text(encoding='utf-8').splitlines()[0].strip()
+            if not line.lower().startswith('gitdir:'):
+                return []
+            git_dir = Path(line[7:].strip())
+            if not git_dir.is_absolute():
+                git_dir = path / git_dir
+            git_dir = git_dir.resolve()
+        else:
+            return []
+    except (OSError, IndexError, UnicodeError):
+        return []
+
+    directories = [git_dir]
+    commondir_file = git_dir / 'commondir'
+    try:
+        if commondir_file.is_file():
+            common_dir = Path(commondir_file.read_text(encoding='utf-8').strip())
+            if not common_dir.is_absolute():
+                common_dir = git_dir / common_dir
+            common_dir = common_dir.resolve()
+        elif git_dir.parent.name == 'worktrees':
+            common_dir = git_dir.parent.parent.resolve()
+        else:
+            common_dir = None
+    except (OSError, UnicodeError):
+        common_dir = None
+    if common_dir is not None and common_dir not in directories:
+        directories.append(common_dir)
+    return directories
+
+
 def _inventory_locks(path: Path) -> dict:
     """Return a snapshot of lock files currently present under ``path/.git``.
 
@@ -255,37 +393,104 @@ def _inventory_locks(path: Path) -> dict:
     the response. Once the lock is gone, the user re-clicks Update Now
     and the normal non-destructive apply path runs.
     """
-    git_dir = path / '.git'
     out = {
         'well_known_lock_present': False,  # ``.git/index.lock`` exists?
         'well_known_lock_path': None,      # absolute path of ``.git/index.lock``
         'other_locks': [],                  # any other lock files, by relative path
     }
-    if not git_dir.exists():
+    git_dirs = _resolve_git_directories(path)
+    if not git_dirs:
         return out
-    well_known = git_dir / 'index.lock'
-    try:
-        out['well_known_lock_present'] = well_known.exists()
-    except OSError:
-        # Permission problem reading the directory -- treat conservatively.
-        out['well_known_lock_present'] = True
-    out['well_known_lock_path'] = str(well_known)
 
-    # Enumerate every other lock file under .git/ for diagnostic reporting.
+    index_locks = [git_dir / 'index.lock' for git_dir in git_dirs]
+    for well_known in index_locks:
+        try:
+            present = well_known.exists()
+        except OSError:
+            # Permission problem reading the directory -- treat conservatively.
+            present = True
+        if present:
+            out['well_known_lock_present'] = True
+            out['well_known_lock_path'] = str(well_known)
+            break
+    if out['well_known_lock_path'] is None:
+        out['well_known_lock_path'] = str(index_locks[0])
+
+    # Enumerate every other lock file under the private and common Git dirs.
     # We never touch them; this is purely an inventory.
+    other_locks = []
+    seen = set()
     try:
-        for entry in sorted(git_dir.rglob('*.lock')):
-            try:
-                rel = entry.relative_to(git_dir).as_posix()
-            except ValueError:
-                continue
-            if rel == 'index.lock':
-                continue
-            out['other_locks'].append(rel)
+        for git_dir in git_dirs:
+            for entry in sorted(git_dir.rglob('*.lock')):
+                if entry.name == 'index.lock':
+                    continue
+                if git_dir == git_dirs[0]:
+                    lock_name = entry.relative_to(git_dir).as_posix()
+                else:
+                    # A common-dir lock has no path relative to the worktree's
+                    # private Git dir; retain its absolute path for recovery.
+                    lock_name = str(entry)
+                if lock_name not in seen:
+                    seen.add(lock_name)
+                    other_locks.append(lock_name)
     except OSError:
         # rglob can fail on unreadable subtrees; skip quietly.
         pass
+    out['other_locks'] = sorted(other_locks)
     return out
+
+
+def _select_git_lock_path(path: Path, inventory: dict) -> Path | None:
+    """Return an actually present Git lock, preserving non-index ownership."""
+    if inventory.get('well_known_lock_present'):
+        lock_path = inventory.get('well_known_lock_path')
+        return Path(lock_path) if lock_path else None
+    other_locks = inventory.get('other_locks') or []
+    if other_locks:
+        candidate = Path(other_locks[0])
+        if candidate.is_absolute():
+            return candidate
+        git_dirs = _resolve_git_directories(path)
+        if git_dirs:
+            return git_dirs[0] / candidate
+    return None
+
+
+def _git_lock_recovery(path: Path, inventory: dict, diagnostic: str = '') -> dict:
+    """Build manual recovery details for the lock found by the inventory."""
+    lock_path = _select_git_lock_path(path, inventory)
+    if lock_path is None and diagnostic:
+        match = re.search(r"\.git[\\/][^'\"\s]+\.lock", diagnostic)
+        if match:
+            relative = match.group(0)[5:].replace('\\', '/')
+            candidate = Path(relative)
+            if '..' not in candidate.parts:
+                fallback = None
+                for git_dir in _resolve_git_directories(path):
+                    candidate_path = git_dir / candidate
+                    fallback = fallback or candidate_path
+                    if candidate_path.exists():
+                        lock_path = candidate_path
+                        break
+                if lock_path is None:
+                    lock_path = fallback
+    if lock_path is None:
+        return {
+            'lock_kind': 'git-unknown',
+            'git_lock_path': None,
+            'manual_command': (
+                'Inspect the Agent checkout for the Git lock reported by the '
+                'updater, remove it after confirming no Git process is running, '
+                'then retry'
+            ),
+        }
+    lock_kind = 'git-index' if lock_path.name == 'index.lock' else 'git-other'
+    return {
+        'lock_kind': lock_kind,
+        'git_lock_path': str(lock_path),
+        'manual_command': _manual_remove_command(lock_path),
+    }
 
 
 def apply_clear_lock(target: str) -> dict:
@@ -318,17 +523,85 @@ def apply_clear_lock(target: str) -> dict:
         if target == 'webui':
             path = REPO_ROOT
         elif target == 'agent':
-            path = _AGENT_DIR
+            path = Path(_AGENT_DIR) if _AGENT_DIR is not None else None
+            if path is None:
+                return {'ok': False, 'message': 'Hermes Agent installation was not found'}
+
+            # The official updater uses this shared marker for every install
+            # layout, including ZIP and pip-style roots without .git.
+            lock_state = _agent_update_lock_state()
+            lock_path = lock_state.get('path')
+            if lock_state.get('holder') is not None or lock_state.get('present'):
+                manual_command = (
+                    _manual_remove_command(lock_path)
+                    if lock_path else 'Retry after the Hermes updater exits'
+                )
+                holder = lock_state.get('holder')
+                holder_detail = (
+                    f' (PID {holder.pid} is still running)'
+                    if holder is not None else ''
+                )
+                return {
+                    'ok': False,
+                    'message': (
+                        'The official Hermes update lock is still present'
+                        f'{holder_detail}. Confirm that no Hermes updater is '
+                        'running, remove the marker manually, then click Retry. '
+                        f'Run: {manual_command}'
+                    ),
+                    'lock_held': True,
+                    'lock_conflict': True,
+                    'target': target,
+                    'manual_command': manual_command,
+                    'well_known_lock_path': str(lock_path) if lock_path else None,
+                    'lock_kind': 'official-update',
+                }
+            git_inventory = _inventory_locks(path)
+            if git_inventory.get('well_known_lock_present') or git_inventory.get('other_locks'):
+                git_recovery = _git_lock_recovery(path, git_inventory)
+                return {
+                    'ok': False,
+                    'message': (
+                        'A Git lock is present in the Agent checkout. '
+                        'Confirm that no Git process is running, remove the '
+                        f'lock manually, then click Retry. Run: {git_recovery["manual_command"]}'
+                    ),
+                    'lock_held': True,
+                    'lock_conflict': True,
+                    'target': target,
+                    'manual_command': git_recovery['manual_command'],
+                    'well_known_lock_path': git_inventory['well_known_lock_path'],
+                    'other_locks': git_inventory['other_locks'],
+                    **git_recovery,
+                }
         else:
             return {'ok': False, 'message': f'Unknown target: {target}'}
 
-        if path is None or not (path / '.git').exists():
+        if path is None or (target == 'webui' and not (path / '.git').exists()):
             return {'ok': False, 'message': 'Not a git repository'}
 
-        inv = _inventory_locks(path)
-        manual_command = f"rm -f {inv['well_known_lock_path']}"
+        if target == 'agent':
+            with _cache_lock:
+                _update_cache['checked_at'] = 0
+            retry_result = dict(_apply_update_inner(target, _read_update_channel()))
+            retry_result['lock_recovery'] = {
+                'action': 'no-lock-found',
+                'manual_command': (
+                    _manual_remove_command(lock_state['path'])
+                    if lock_state.get('path') else ''
+                ),
+            }
+            return retry_result
 
-        if not inv['well_known_lock_present']:
+        inv = _inventory_locks(path)
+        git_recovery = _git_lock_recovery(path, inv)
+        manual_command = (
+            _manual_remove_command(Path(inv['well_known_lock_path']))
+            if not inv['well_known_lock_present'] and not inv['other_locks']
+            else git_recovery['manual_command']
+        )
+
+        if not inv['well_known_lock_present'] and not inv['other_locks']:
             # Lock is gone. Run the normal non-destructive update flow and
             # annotate the response with what we found for the user's
             # records. Pass the configured channel through — otherwise an
@@ -348,7 +621,7 @@ def apply_clear_lock(target: str) -> dict:
         # Lock is present. The server cannot prove it's safe to delete;
         # the only safe path is to ask the operator.
         message = (
-            'A git lock file (.git/index.lock) is present. The server does '
+            'A git lock file is present. The server does '
             'not delete locks automatically -- git uses O_CREAT|O_EXCL '
             'locking, which cannot be detected with advisory probes. To '
             'recover: confirm no other git process is running against '
@@ -362,6 +635,7 @@ def apply_clear_lock(target: str) -> dict:
             'target': target,
             'manual_command': manual_command,
             'well_known_lock_path': inv['well_known_lock_path'],
+            **git_recovery,
             'other_locks': inv['other_locks'],
         }
     finally:
@@ -520,16 +794,32 @@ def _read_agent_source_version(agent_dir: Path) -> str | None:
 
 def _gateway_health_base_url() -> str:
     """Return the configured/default Hermes Agent gateway base URL."""
-    raw = (
-        os.environ.get('GATEWAY_HEALTH_URL')
-        or os.environ.get('HERMES_GATEWAY_HEALTH_URL')
-        or 'http://hermes-agent:8642'
-    ).strip()
-    if raw.endswith('/health/detailed'):
-        raw = raw[: -len('/health/detailed')]
-    elif raw.endswith('/health'):
-        raw = raw[: -len('/health')]
-    return raw.rstrip('/')
+    raw = next(
+        (
+            os.environ.get(name, '').strip()
+            for name in (
+                'GATEWAY_HEALTH_URL',
+                'HERMES_GATEWAY_HEALTH_URL',
+                'HERMES_API_URL',
+            )
+            if os.environ.get(name, '').strip()
+        ),
+        '',
+    )
+    if not raw:
+        try:
+            from api import config as webui_config
+            from api.gateway_chat import _gateway_base_url
+
+            raw = _gateway_base_url(webui_config.get_config())
+        except Exception:
+            raw = 'http://127.0.0.1:8642'
+    raw = raw.rstrip('/')
+    for suffix in ('/health/detailed', '/v1/health', '/health', '/status'):
+        if raw.endswith(suffix):
+            raw = raw[: -len(suffix)].rstrip('/')
+            break
+    return raw
 
 
 def _version_from_gateway_health_payload(payload: object) -> str | None:
@@ -548,24 +838,43 @@ def _version_from_gateway_health_payload(payload: object) -> str | None:
     return None
 
 
-def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | None:
-    """Best-effort cross-container gateway API fallback for Agent version."""
+def _probe_gateway_health(timeout: float = 0.75) -> dict:
+    """Read a real Agent gateway health response for post-update proof."""
     base = _gateway_health_base_url()
     if not base:
-        return None
+        return {}
     parsed = urlparse(base)
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:
-        return None
+        return {}
+
+    first_observation = None
     for path in ('/health', '/health/detailed'):
         try:
             with urllib.request.urlopen(f'{base}{path}', timeout=timeout) as resp:
                 payload = json.loads(resp.read().decode('utf-8'))
         except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
             continue
-        version = _version_from_gateway_health_payload(payload)
-        if version:
-            return version
-    return None
+        if not isinstance(payload, dict):
+            continue
+        status = payload.get('gateway_state')
+        if status is None and payload.get('status') == 'ok':
+            status = 'running'
+        observation = {
+            'health': status,
+            'version': _version_from_gateway_health_payload(payload),
+            'pid': payload.get('pid'),
+            'start_time': payload.get('start_time'),
+        }
+        if first_observation is None:
+            first_observation = observation
+        if observation['version']:
+            return observation
+    return first_observation or {}
+
+
+def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | None:
+    """Best-effort cross-container gateway API fallback for Agent version."""
+    return _probe_gateway_health(timeout).get('version')
 
 
 def _detect_agent_version() -> str:
@@ -1821,8 +2130,12 @@ def _schedule_restart(delay: float = 2.0) -> None:
     threading.Thread(target=_do, daemon=True).start()
 
 
-def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
-    """Run the active-profile gateway restart when agent checkout changed.
+def _ensure_gateway_restart_for_agent_update(
+    previous_snapshot: dict | None = None,
+    expected_version: str | None = None,
+    restart_required: bool = False,
+) -> tuple[bool, dict]:
+    """Restart when the Agent hands off repair, then verify gateway health.
 
     Returns:
         (ok, restart_payload) where:
@@ -1830,61 +2143,67 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
         - restart_payload contains helper status fields for response shaping.
     """
     target_profile = str(get_active_profile_name() or "default").strip() or "default"
-    gateway_pid_before_restart = get_active_profile_gateway_running_pid(profile=target_profile)
-    restart_result = restart_active_profile_gateway(profile=target_profile)
-    status = str(restart_result.get("status") or "")
-    if status in {"completed", "in_progress"}:
-        return True, restart_result
-    if status != "failed":
-        return False, restart_result
-
-    # launchd can briefly fail to spawn the replacement gateway while it is
-    # rotating the supervised process (#6045). Retry exactly once after a
-    # bounded delay so an already-applied Agent update is not reported as a
-    # complete failure because of that transient process handoff.
-    time.sleep(_AGENT_GATEWAY_RESTART_RETRY_DELAY_S)
-    retry_result = restart_active_profile_gateway(profile=target_profile)
-    retry_status = str(retry_result.get("status") or "")
-    if retry_status in {"completed", "in_progress"}:
-        return True, {
-            **retry_result,
-            "retry_attempted": True,
-            "initial_failure": restart_result.get("message"),
-        }
-    if retry_status != "failed":
-        return False, {
-            **retry_result,
-            "retry_attempted": True,
-            "initial_failure": restart_result.get("message"),
-        }
-
-    # A restart command can still exit non-zero after launchd has recovered the
-    # service. Only accept that recovery when the confirmed local PID changed;
-    # a merely-alive old gateway has not loaded the updated Agent checkout.
-    time.sleep(_AGENT_GATEWAY_RESTART_RETRY_DELAY_S)
-    gateway_pid_after_retry = get_active_profile_gateway_running_pid(profile=target_profile)
-    if (
-        gateway_pid_before_restart is not None
-        and gateway_pid_after_retry is not None
-        and gateway_pid_after_retry != gateway_pid_before_restart
-    ):
-        return True, {
-            "status": "completed",
-            "message": "Gateway service recovered after a transient restart failure",
-            "retry_attempted": True,
-            "process_replaced": True,
-            "initial_failure": restart_result.get("message"),
-            "retry_failure": retry_result.get("message"),
-        }
-
-    initial_message = str(restart_result.get("message") or "Restart failed")
-    retry_message = str(retry_result.get("message") or "retry did not complete")
-    return False, {
-        **retry_result,
-        "message": f"{initial_message}; recovery retry did not complete: {retry_message}",
-        "retry_attempted": True,
-        "initial_failure": restart_result.get("message"),
-    }
+    restart_result = {'status': 'not_required', 'observation': 'passive'}
+    if restart_required:
+        restart_result = restart_active_profile_gateway(profile=target_profile)
+        if restart_result.get('status') not in ('completed', 'in_progress'):
+            return False, {
+                **restart_result,
+                'observation': 'active',
+            }
+    deadline = time.monotonic() + _AGENT_GATEWAY_OBSERVATION_TIMEOUT_S
+    while True:
+        snapshot = _gateway_observation_snapshot(target_profile)
+        gateway_pid = snapshot.get('pid')
+        start_time = snapshot.get('start_time')
+        version = snapshot.get('version')
+        identity_changed = previous_snapshot is None
+        if previous_snapshot is not None:
+            pid_changed = gateway_pid is not None and gateway_pid != previous_snapshot.get('pid')
+            start_changed = (
+                start_time is not None
+                and previous_snapshot.get('start_time') is not None
+                and start_time != previous_snapshot.get('start_time')
+            )
+            version_changed = (
+                version is not None
+                and previous_snapshot.get('version') is not None
+                and version != previous_snapshot.get('version')
+            )
+            identity_changed = pid_changed or start_changed or version_changed
+        health_ok = snapshot.get('health') == 'running'
+        version_ok = expected_version is not None and version == expected_version
+        if identity_changed and health_ok and version_ok:
+            return True, {
+                "status": "completed",
+                "observation": "active" if restart_required else "passive",
+                "gateway_pid": gateway_pid,
+                "gateway_start_time": start_time,
+                "gateway_version": version,
+                "gateway_health": snapshot.get('health'),
+            }
+        if time.monotonic() >= deadline:
+            if gateway_pid is not None and not identity_changed:
+                detail = 'the pre-update gateway identity is still running'
+            elif expected_version is None:
+                detail = 'the updated Agent version could not be determined'
+            elif version is None:
+                detail = 'the gateway did not report an Agent version'
+            elif not version_ok:
+                detail = 'the gateway reported a different Agent version'
+            elif snapshot.get('health') is None:
+                detail = 'the gateway did not report health'
+            elif not health_ok:
+                detail = 'the replacement gateway is not healthy'
+            else:
+                detail = 'no healthy replacement gateway was observed'
+            return False, {
+                "status": "failed",
+                "observation": "active" if restart_required else "passive",
+                "message": f'Active-profile gateway check failed: {detail}',
+                **({'restart_status': restart_result.get('status')} if restart_required else {}),
+            }
+        time.sleep(_AGENT_GATEWAY_OBSERVATION_POLL_S)
 
 
 def _agent_gateway_restart_failure_message(target: str, restart_result: dict) -> str:
@@ -1927,6 +2246,7 @@ def apply_force_update(target: str, channel=None) -> dict:
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
+    agent_update_lock = None
     try:
         if target == 'webui':
             path = REPO_ROOT
@@ -1934,11 +2254,42 @@ def apply_force_update(target: str, channel=None) -> dict:
             path = _AGENT_DIR
             # Channel is WebUI-only — the Agent always uses the default channel.
             channel = DEFAULT_UPDATE_CHANNEL
+            # Force-update intentionally does NOT delegate to `hermes update
+            # --yes`. The official updater refuses diverged or conflict
+            # checkouts and cannot recover from them, which is the only reason
+            # the user reaches this path. git fetch + reset --hard is the
+            # correct recovery tool here.
         else:
             return {'ok': False, 'message': f'Unknown target: {target}'}
 
         if path is None or not (path / '.git').exists():
             return {'ok': False, 'message': 'Not a git repository'}
+
+        if target == 'agent':
+            try:
+                from hermes_cli.update_lock import UPDATE_EXIT_CONCURRENT, UpdateLock, describe_holder
+            except Exception as exc:
+                return {
+                    'ok': False,
+                    'message': f'The official Hermes Agent update lock is unavailable: {exc}',
+                    'target': target,
+                }
+            agent_update_lock = UpdateLock()
+            if not agent_update_lock.acquire():
+                holder = getattr(agent_update_lock, 'holder', None)
+                message = (
+                    describe_holder(holder)
+                    if holder is not None
+                    else 'Another Hermes update is already running. Retry after it exits.'
+                )
+                return {
+                    'ok': False,
+                    'message': message,
+                    'target': target,
+                    'lock_conflict': True,
+                    'agent_update_exit_code': UPDATE_EXIT_CONCURRENT,
+                    'lock_recovery': {'action': 'retry-after-official-update'},
+                }
 
         # NOTE: v2 of PR #5688 removed the prior stale-lock cleanup loop from
         # this entry point. The mtime-based heuristic was empirically proven
@@ -2023,7 +2374,10 @@ def apply_force_update(target: str, channel=None) -> dict:
             _update_cache['checked_at'] = 0
 
         if target == 'agent':
-            gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
+            gateway_result = restart_active_profile_gateway(
+                profile=str(get_active_profile_name() or 'default').strip() or 'default'
+            )
+            gateway_ok = gateway_result.get('status') == 'completed'
             if not gateway_ok:
                 return {
                     'ok': False,
@@ -2044,6 +2398,8 @@ def apply_force_update(target: str, channel=None) -> dict:
             response['gateway_restart'] = gateway_result.get('status')
         return response
     finally:
+        if agent_update_lock is not None:
+            agent_update_lock.release()
         _apply_lock.release()
 
 
@@ -2099,16 +2455,317 @@ def _restore_stash_after_pull_failure(
     )
 
 
+def _find_agent_executable(agent_dir: Path):
+    """Resolve the Agent CLI through the WebUI's existing command authority."""
+    configured_python = Path(PYTHON_EXE)
+    for candidate in (
+        configured_python.parent / 'hermes.exe',
+        configured_python.parent / 'hermes',
+    ):
+        if candidate.is_file():
+            return candidate
+
+    resolved = _resolve_hermes_command()
+    if resolved != 'hermes':
+        return Path(resolved)
+    return None
+
+
+def _agent_source_version(agent_dir: Path | None) -> str | None:
+    """Read the installed Agent version without importing mutable modules."""
+    if agent_dir is None:
+        return None
+    version_file = agent_dir / 'hermes_cli' / '__init__.py'
+    try:
+        source = version_file.read_text(encoding='utf-8')
+    except (OSError, UnicodeDecodeError):
+        return None
+    match = re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", source)
+    return match.group(1) if match else None
+
+
+def _gateway_observation_snapshot(profile: str) -> dict:
+    """Read active gateway identity and health from Agent-owned signals."""
+    snapshot = {
+        'pid': get_active_profile_gateway_running_pid(profile=profile),
+        'start_time': None,
+        'version': None,
+        'health': None,
+    }
+    try:
+        from api.agent_health import _gateway_status_module, _read_gateway_runtime_status
+        from api.profiles import get_hermes_home_for_profile
+
+        home = Path(get_hermes_home_for_profile(profile))
+        status = _gateway_status_module()
+        runtime = _read_gateway_runtime_status(status, home / 'gateway.pid')
+        if isinstance(runtime, dict):
+            snapshot['start_time'] = runtime.get('start_time')
+            snapshot['health'] = runtime.get('gateway_state')
+            for key in ('version', 'hermes_version', 'agent_version'):
+                value = runtime.get(key)
+                if isinstance(value, str) and value:
+                    snapshot['version'] = value
+                    break
+    except Exception:
+        pass
+    health_probe = _probe_gateway_health()
+    for key in ('health', 'version', 'pid', 'start_time'):
+        if health_probe.get(key) is not None:
+            snapshot[key] = health_probe[key]
+    if snapshot['pid'] is not None and snapshot['start_time'] is None:
+        try:
+            from gateway.status import get_process_start_time
+
+            snapshot['start_time'] = get_process_start_time(snapshot['pid'])
+        except Exception:
+            pass
+    return snapshot
+
+
+def _agent_update_failure_detail(output: str) -> str:
+    """Sanitize all updater output before retaining its diagnostic tail."""
+    if not output:
+        return "(no output from updater)"
+    sanitized = _sanitize_git_diagnostic(output, limit=max(len(output), 1))
+    return sanitized[-500:] or "(no output from updater)"
+
+
+def _agent_update_output_failure(output: str) -> str | None:
+    """Classify explicit refusal and failure markers emitted by Agent source."""
+    for marker in _AGENT_UPDATE_FAILURE_MARKERS:
+        if marker in output:
+            return marker
+    partial_refresh_failure = _AGENT_UPDATE_PARTIAL_REFRESH_FAILURE_RE.search(output)
+    if partial_refresh_failure:
+        return partial_refresh_failure.group(0)
+    if any(marker in output for marker in _AGENT_UPDATE_NOOP_MARKERS):
+        return None
+    if any(marker in output for marker in _AGENT_UPDATE_HANDOFF_MARKERS):
+        return None
+    if _AGENT_UPDATE_COMPLETION_MARKER not in output:
+        return "completion marker was not emitted"
+    return None
+
+
+def _agent_update_output_noop(output: str) -> str | None:
+    for marker in _AGENT_UPDATE_NOOP_MARKERS:
+        if marker in output:
+            return marker
+    return None
+
+
+def _agent_update_output_handoff(output: str) -> dict[str, bool]:
+    return {
+        'dependencies_repaired': '✓ Dependencies repaired!' in output,
+        'restart_required': any(
+            marker in output
+            for marker in _AGENT_UPDATE_HANDOFF_MARKERS[1:]
+        ),
+    }
+
+
+def _gateway_observation_has_evidence(snapshot: dict | None) -> bool:
+    return bool(snapshot) and any(
+        snapshot.get(key) is not None
+        for key in ('pid', 'start_time', 'version', 'health')
+    )
+
+
+def _apply_agent_update_inner():
+    """Delegate the Agent update to the official hermes update entry point.
+
+    Called from _apply_update_inner when target='agent', under _apply_lock.
+    Invokes ``hermes update --yes`` as a subprocess so the complete official
+    transaction (dependency install, build, migration, skill sync, cron
+    repair, rollback) runs exactly once.  Never falls back to a local git
+    sequence when the official entry point is unavailable.
+    """
+    agent_dir = Path(_AGENT_DIR) if _AGENT_DIR is not None else None
+    if agent_dir is None or not agent_dir.exists():
+        return {'ok': False, 'message': 'Hermes Agent installation was not found'}
+
+    agent_exe = _find_agent_executable(agent_dir)
+    if agent_exe is None:
+        return {
+            'ok': False,
+            'message': (
+                'The Hermes Agent updater executable was not found in the '
+                'Agent venv. Reinstall the Agent to restore it. '
+                'No fallback to a local git sequence is attempted.'
+            ),
+        }
+
+    target_profile = str(get_active_profile_name() or 'default').strip() or 'default'
+    previous_gateway = _gateway_observation_snapshot(target_profile)
+
+    try:
+        # --yes suppresses every interactive prompt (stash restore:
+        # hermes_cli/main.py:9772; config migration: 10308).  --gateway is
+        # intentionally omitted: it writes a .update_exit_code marker into
+        # HERMES_HOME that only a real gateway's update watcher should produce,
+        # and it skips SIGHUP protection during a long transaction.
+        # 1800 s matches a realistic cold dependency sync on a slow machine;
+        # the Agent's own guards own the per-step timeouts inside.
+        proc = subprocess.run(
+            [str(agent_exe), 'update', '--yes'],
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            timeout=1800,
+            creationflags=(
+                subprocess.CREATE_NO_WINDOW
+                if sys.platform == 'win32' else 0
+            ),
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            'ok': False,
+            'message': (
+                'Agent update subprocess exceeded 1800 s. The install state '
+                'is indeterminate; the update may still be running in a '
+                'background process. Do not restart manually until the Agent '
+                'process has fully exited.'
+            ),
+            'target': 'agent',
+        }
+    except OSError as exc:
+        return {
+            'ok': False,
+            'message': f'Agent updater could not be launched: {exc}',
+            'target': 'agent',
+        }
+
+    combined = "\n".join(
+        part for part in (proc.stdout or '', proc.stderr or '') if part
+    ).strip()
+    output_failure = _agent_update_output_failure(combined)
+    if proc.returncode != 0 or output_failure is not None:
+        detail = _agent_update_failure_detail(combined)
+        reason = f" ({output_failure})" if output_failure else ""
+        response = {
+            'ok': False,
+            'message': f'Agent update failed{reason}: {detail}',
+            'target': 'agent',
+        }
+        if _is_agent_update_lock_error(combined):
+            response['lock_conflict'] = True
+            lock_state = _agent_update_lock_state()
+            if lock_state.get('path') is not None:
+                response['lock_recovery'] = {
+                    'action': 'clear-lock-retry',
+                    'marker_path': str(lock_state['path']),
+                    'manual_command': _manual_remove_command(lock_state['path']),
+                }
+                response['lock_kind'] = 'official-update'
+        elif _is_git_lock_error(combined):
+            response['lock_conflict'] = True
+            inventory = _inventory_locks(agent_dir)
+            git_recovery = _git_lock_recovery(agent_dir, inventory, combined)
+            response.update(git_recovery)
+            response['lock_recovery'] = {
+                'action': 'clear-git-lock-retry',
+                'well_known_lock_path': inventory['well_known_lock_path'],
+                **git_recovery,
+                'other_locks': inventory['other_locks'],
+            }
+        return response
+
+    handoff = _agent_update_output_handoff(combined)
+    noop_marker = _agent_update_output_noop(combined)
+    if noop_marker is not None and not any(handoff.values()):
+        with _cache_lock:
+            _update_cache['checked_at'] = 0
+        return {
+            'ok': True,
+            'message': (
+                'agent is already up to date'
+                if noop_marker == '✓ Already up to date!'
+                else 'agent dependencies repaired successfully'
+            ),
+            'target': 'agent',
+            'up_to_date': noop_marker == '✓ Already up to date!',
+            'dependencies_repaired': noop_marker == '✓ Dependencies repaired!',
+            'no_op': True,
+            'gateway_restart': 'not_required',
+        }
+
+    # Invalidate before the gateway gate so any early-return path below still
+    # reflects the newly-installed version rather than the pre-update state.
+    with _cache_lock:
+        _update_cache['checked_at'] = 0
+
+    # The Agent's subprocess already restarts all gateways before it exits.
+    # Observe the active profile without issuing a second restart, and require
+    # replacement identity, version compatibility, and health before success.
+    expected_version = _agent_source_version(agent_dir)
+    gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update(
+        previous_snapshot=previous_gateway,
+        expected_version=expected_version,
+        restart_required=handoff['dependencies_repaired'] or handoff['restart_required'],
+    )
+    if not gateway_ok:
+        non_git_install = not (agent_dir / '.git').exists()
+        if non_git_install and not _gateway_observation_has_evidence(previous_gateway):
+            return {
+                'ok': False,
+                'message': (
+                    'Agent update completed, but this ZIP/non-Git installation '
+                    'does not expose a gateway identity, version, and health '
+                    'signal that WebUI can use to verify replacement. The '
+                    'gateway was not claimed healthy; restart it manually and '
+                    'retry the update.'
+                ),
+                'target': 'agent',
+                'gateway_restart': 'unsupported',
+                'gateway_handoff': 'unsupported',
+                'unsupported_gateway_replacement': True,
+            }
+        return {
+            'ok': False,
+            'message': _agent_gateway_restart_failure_message('agent', gateway_result),
+            'target': 'agent',
+            'gateway_restart': gateway_result.get('status'),
+        }
+
+    # `in_progress` means the restart command was accepted but the gateway has
+    # not yet confirmed healthy — treat it as a failure so the client can retry
+    # rather than reporting success before the gateway is back up.
+    if gateway_result.get('status') == 'in_progress':
+        return {
+            'ok': False,
+            'message': (
+                'Gateway restart acknowledged but did not complete within the '
+                'observed window. The Agent install succeeded; the gateway may '
+                'still be coming up. Check gateway status and retry if needed.'
+            ),
+            'target': 'agent',
+            'gateway_restart': 'in_progress',
+        }
+
+    # Schedule WebUI self-restart. The 2 s delay guarantees the HTTP response
+    # has been flushed to the client before os.execv() replaces this process.
+    _schedule_restart()
+
+    return {
+        'ok': True,
+        'message': 'agent updated successfully',
+        'target': 'agent',
+        'restart_scheduled': True,
+        'gateway_restart': gateway_result.get('status'),
+        'dependencies_repaired': handoff['dependencies_repaired'],
+        'restart_required': handoff['restart_required'],
+    }
+
+
 def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
     """Inner implementation of apply_update, called under _apply_lock."""
     channel = _normalize_channel(channel)
+    if target == 'agent':
+        return _apply_agent_update_inner()
     if target == 'webui':
         path = REPO_ROOT
-    elif target == 'agent':
-        path = _AGENT_DIR
-        # Channel is WebUI-only — the Agent always uses the default channel
-        # regardless of the user's WebUI selection (see check_for_updates).
-        channel = DEFAULT_UPDATE_CHANNEL
     else:
         return {'ok': False, 'message': f'Unknown target: {target}'}
 
@@ -2336,15 +2993,6 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
             with _cache_lock:
                 _update_cache['checked_at'] = 0
 
-            if target == 'agent':
-                gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
-                if not gateway_ok:
-                    return {
-                        'ok': False,
-                        'message': _agent_gateway_restart_failure_message(target, gateway_result),
-                        'target': target,
-                        'gateway_restart': gateway_result.get('status'),
-                    }
             _schedule_restart()
             response = {
                 'ok': True,
@@ -2360,23 +3008,11 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                 'restart_scheduled': True,
                 'stash_conflict': True,
             }
-            if target == 'agent':
-                response['gateway_restart'] = gateway_result.get('status')
             return response
 
     # Invalidate cache
     with _cache_lock:
         _update_cache['checked_at'] = 0
-
-    if target == 'agent':
-        gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
-        if not gateway_ok:
-            return {
-                'ok': False,
-                'message': _agent_gateway_restart_failure_message(target, gateway_result),
-                'target': target,
-                'gateway_restart': gateway_result.get('status'),
-            }
 
     # Schedule a self-restart so the updated code is loaded fresh.  A plain
     # git pull leaves stale Python modules in sys.modules — agent imports that
@@ -2397,12 +3033,9 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
             'entry may still be present because git stash drop failed.'
         )
 
-    response = {
+    return {
         'ok': True,
         'message': message,
         'target': target,
         'restart_scheduled': True,
     }
-    if target == 'agent':
-        response['gateway_restart'] = gateway_result.get('status')
-    return response
