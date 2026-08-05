@@ -7037,6 +7037,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   async function _restoreSettledSession(source, options=null){
     const returnStatus=!!(options&&options.status);
     const preserveVisibleOnShorterTerminalSnapshot=!!(options&&options.preserveVisibleOnShorterTerminalSnapshot);
+    // #6689 re-gate (finding #2 of #6689): a `compressed` event can rotate
+    // _streamCompressionContinuationSid WHILE the /api/session poll is in
+    // flight. A payload resolved against the pre-await sid then describes the
+    // archived parent session — settling it would clobber the continuation
+    // turn (STALE-OLD). So after every await the CURRENT continuation target
+    // is re-read and required to equal the sid we polled; a rotation discards
+    // the stale payload and retries against the current continuation id. The
+    // recursive call re-runs the same stream-ownership guard, and a stale
+    // payload never sets _streamFinalized nor mutates S.session / S.messages
+    // / S.activeStreamId. The retry is bounded so pathological repeated
+    // rotation cannot loop forever.
+    const _rotationRetries=(options&&options._rotationRetries)||0;
     if(_isActiveSession() && S.activeStreamId!==streamId){
       _closeSource(source);
       return returnStatus?'stale':false;
@@ -7056,6 +7068,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
+      // #6689 re-gate (finding #2 of #6689): the continuation id captured
+      // BEFORE the await may already be stale. Re-read the CURRENT
+      // continuation target and require it to equal the sid we polled; if it
+      // rotated during the await, this payload belongs to the archived parent
+      // session — discard it and retry against the current continuation id
+      // under the same stream-ownership guard.
+      const _currentSid=(_streamCompressionContinuationSid&&_streamCompressionContinuationSid!==activeSid)
+        ? _streamCompressionContinuationSid
+        : activeSid;
+      if(_currentSid!==_restoreSid){
+        if(_rotationRetries>=4) return returnStatus?'stale':false;
+        return _restoreSettledSession(source,{...options,_rotationRetries:_rotationRetries+1});
+      }
       const session=data&&data.session;
       if(!session) return returnStatus?'missing':false;
       if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;

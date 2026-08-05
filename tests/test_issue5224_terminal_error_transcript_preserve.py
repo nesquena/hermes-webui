@@ -242,6 +242,37 @@ function buildRuntime() {
     return;
   }
 
+  if (scenario.action === 'restore_rotation_during_await') {
+    // #6689 re-gate (finding #2): the continuation session id rotates WHILE
+    // the /api/session poll for the archived parent session is in flight. The
+    // stale archived-parent payload must be discarded (no settle, no state
+    // mutation, no _streamFinalized), and the recovery must re-poll the
+    // CURRENT continuation id so ONLY the continuation payload settles.
+    let apiCalls = 0;
+    globalThis.api = async () => {
+      apiCalls += 1;
+      if (apiCalls === 1) {
+        // Rotation arrives during request #1 (archived parent) — as if the
+        // `compressed` SSE event landed mid-roundtrip.
+        _streamCompressionContinuationSid = 'session-cont-1';
+        return scenario.parentPayload || { session: null };
+      }
+      return scenario.contPayload || { session: null };
+    };
+    const status = await _restoreSettledSession({}, { status: true });
+    const messages = Array.isArray(S.messages) ? S.messages : [];
+    console.log(JSON.stringify({
+      action: scenario.action,
+      status,
+      apiCalls,
+      session: S.session ? { session_id: S.session.session_id } : null,
+      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      streamFinalized: !!_streamFinalized,
+      calls,
+    }));
+    return;
+  }
+
   throw new Error(`unknown action: ${scenario.action}`);
 })().catch((err) => {
   console.error(err && err.stack ? err.stack : String(err));
@@ -536,3 +567,74 @@ def test_two_stream_recovery_newer_continuation_wins_over_stale_done(driver_path
     assert "B final answer" in b_contents, (
         f"B's final answer must land in the transcript: {b_contents}"
     )
+
+
+def test_rotation_during_await_settles_only_continuation_payload(driver_path):
+    """Deferred-request regression (#6689 re-gate finding #2): the continuation
+    session id rotates WHILE the archived-parent /api/session poll is in flight
+    (the `compressed` SSE event lands mid-roundtrip). The stale archived-parent
+    payload must be discarded — no settle, no S.session / S.messages /
+    S.activeStreamId mutation, no _streamFinalized — and the recovery must
+    re-poll the CURRENT continuation id so ONLY the continuation payload
+    settles."""
+    outcome = _run_scenario(driver_path, {
+        "action": "restore_rotation_during_await",
+        "state": {
+            "session": {"session_id": "session-2761", "message_count": 5},
+            "messages": [
+                {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                {"role": "assistant", "content": "Live pre-compression fragment", "_ts": "a1"},
+            ],
+            "activeStreamId": "stream-2761",
+        },
+        "parentPayload": {
+            "session": {
+                "session_id": "session-2761",
+                "active_stream_id": None,
+                "pending_user_message": None,
+                "messages": [
+                    {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                    {"role": "assistant", "content": "ARCHIVED parent answer (must be discarded)", "_ts": "aParent"},
+                ],
+            },
+        },
+        "contPayload": {
+            "session": {
+                "session_id": "session-cont-1",
+                "active_stream_id": None,
+                "pending_user_message": None,
+                "messages": [
+                    {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                    {"role": "assistant", "content": "CONTINUATION final answer", "_ts": "aCont"},
+                ],
+            },
+        },
+        "activeSid": "session-2761",
+        "streamId": "stream-2761",
+        "isActiveSession": True,
+        "isSessionCurrentPane": True,
+        "isSessionActivelyViewed": False,
+    })
+
+    # The recovery must settle ('restored'), not give up or settle the archive.
+    assert outcome["status"] == "restored", f"got {outcome['status']}"
+    # Exactly two polls: the discarded archived-parent fetch + the retry
+    # against the current continuation id. The stale payload must NOT settle.
+    assert outcome["apiCalls"] == 2, (
+        f"expected archived-parent poll + continuation retry (2 calls), got {outcome['apiCalls']}"
+    )
+    # Only the continuation payload may settle: S.session is the continuation
+    # session and the archived-parent answer never lands in the transcript.
+    assert outcome["session"] == {"session_id": "session-cont-1"}, (
+        f"archived parent settled instead of continuation: {outcome['session']}"
+    )
+    contents = [item["content"] for item in outcome["messages"]]
+    assert "CONTINUATION final answer" in contents, (
+        f"continuation payload did not settle: {contents}"
+    )
+    assert "ARCHIVED parent answer" not in contents, (
+        f"stale archived-parent payload settled: {contents}"
+    )
+    # A legit settle finalizes the stream; the stale payload must not have been
+    # the one to do it (it never reached the mutation block).
+    assert outcome["streamFinalized"] is True

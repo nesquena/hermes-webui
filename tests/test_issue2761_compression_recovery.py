@@ -131,3 +131,36 @@ def test_continuation_sid_is_reset_per_turn():
     # No implicit-global send() binding may remain.
     send_decl = src.find("let _streamCompressionContinuationSid='';", 0, attach_start)
     assert send_decl == -1, "send() must not bind the continuation sid (implicit global)"
+
+
+def test_restore_settled_session_requeries_continuation_id_after_await():
+    """Gate B (finding #2 of #6689): _restoreSettledSession must re-read the
+    CURRENT continuation id AFTER the /api/session await and discard/requery
+    when it rotated during the in-flight request. The pre-await captured
+    _restoreSid alone lets the archived-parent payload settle (STALE-OLD): the
+    concurrent continuation request returns 'restored' but gets suppressed by
+    _streamFinalized, so the wrong session settles. The re-read must compare
+    the current continuation target against the sid that was polled, and the
+    stale-payload path must retry — never set _streamFinalized or mutate
+    S.session / S.messages / S.activeStreamId."""
+    block = _restore_settled_session_block()
+
+    # The post-await re-read of the current continuation target must exist and
+    # be compared against the sid that was actually polled.
+    assert "_currentSid=" in block
+    assert "_currentSid!==_restoreSid" in block
+    # The re-read must happen AFTER the await and BEFORE any settle mutation
+    # (the settle sets _streamFinalized).
+    requery_idx = block.find("_currentSid!==_restoreSid")
+    assert requery_idx != -1
+    await_idx = block.find("await api(`/api/session?session_id=${encodeURIComponent(_restoreSid)}`)")
+    assert await_idx != -1 and requery_idx > await_idx, (
+        "continuation re-read must happen after the /api/session await"
+    )
+    finalized_idx = block.find("_streamFinalized=true;")
+    assert finalized_idx != -1 and requery_idx < finalized_idx, (
+        "continuation re-read must precede any settle mutation"
+    )
+    # The stale-payload path must retry against the current continuation id
+    # (recursive call re-runs the stream-ownership guard), not settle.
+    assert "_restoreSettledSession(source,{...options,_rotationRetries:_rotationRetries+1})" in block
