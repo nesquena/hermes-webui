@@ -13017,12 +13017,25 @@ def handle_get(handler, parsed) -> bool:
             # the wire shape stays byte-equivalent to the previous inline
             # synthesis (the frontend has been reading these exact keys).
             msgs = list(synth.messages or [])
+            _all_msgs_count = len(msgs)
+            # Apply msg_limit/msg_before windowing for foreign sessions,
+            # matching the native WebUI path above (#6491). Without this, CLI/
+            # TUI/Desktop sessions return the full transcript on every load —
+            # ignoring msg_limit and omitting _messages_truncated / _messages_offset.
+            _truncated_msgs, _messages_offset = [], 0
+            if load_messages:
+                _truncated_msgs, _messages_offset = _message_window_for_display(
+                    msgs,
+                    msg_limit=msg_limit,
+                    msg_before=msg_before,
+                    expand_renderable=expand_renderable,
+                )
             sess = {
                 "session_id": synth.session_id,
                 "title": synth.title,
                 "workspace": synth.workspace,
                 "model": synth.model,
-                "message_count": len(msgs),
+                "message_count": _all_msgs_count,
                 "created_at": synth.created_at,
                 "updated_at": synth.updated_at,
                 "last_message_at": (
@@ -13056,10 +13069,24 @@ def handle_get(handler, parsed) -> bool:
                 # sessions and the user only discovers the block at
                 # POST time with a confusing 403.
                 "read_only": bool(getattr(synth, "read_only", False)),
-                "messages": msgs,
+                "messages": _truncated_msgs,
                 "tool_calls": [],
             }
-            attach_todo_state(sess, msgs)
+            # Cold-load: derive the latest settled todo snapshot from the full
+            # merged transcript, not the truncated display window. This keeps
+            # the Todos panel correct after refresh even when the latest todo
+            # tool result is outside msg_limit, and treats an explicit empty
+            # todo list as the current state instead of falling through to an
+            # older non-empty write.
+            if load_messages and msgs:
+                attach_todo_state(sess, msgs)
+            # Signal to the frontend that older messages were omitted. The
+            # message window cursor already reflects visible-row pagination and
+            # avoids false positives when raw hidden tool rows exceed msg_limit.
+            _truncated = load_messages and msg_limit is not None and _messages_offset > 0
+            sess["_messages_truncated"] = _truncated
+            sess["_messages_offset"] = _messages_offset
+            sess["_msg_limit_max"] = _MAX_MSG_LIMIT
             sess = _merge_cli_sidebar_metadata(sess, cli_meta)
             return j(handler, {"session": redact_session_data(sess)})
 
@@ -20597,7 +20624,30 @@ def _read_active_project_context(workspace: Path | None) -> dict:
     return payload
 
 
+def _memory_config_flags():
+    """Return (memory_enabled, user_profile_enabled) from the active profile config.
+
+    Falls back to (True, True) on any error so a broken config doesn't lock
+    the user out of the Memory panel entirely.
+    """
+    config_path = _active_profile_config_path()
+    try:
+        if config_path.exists():
+            cfg = _load_yaml_config_file(config_path)
+            if isinstance(cfg, dict):
+                mem_cfg = cfg.get("memory", {})
+                if isinstance(mem_cfg, dict):
+                    return (
+                        mem_cfg.get("memory_enabled", True),
+                        mem_cfg.get("user_profile_enabled", True),
+                    )
+    except Exception:
+        pass
+    return True, True
+
+
 def _handle_memory_read(handler, parsed=None):
+    memory_enabled, user_profile_enabled = _memory_config_flags()
     try:
         from api.profiles import get_active_hermes_home
 
@@ -20611,12 +20661,12 @@ def _handle_memory_read(handler, parsed=None):
     soul_file = home / "SOUL.md"
     memory = (
         mem_file.read_text(encoding="utf-8", errors="replace")
-        if mem_file.exists()
+        if mem_file.exists() and memory_enabled
         else ""
     )
     user = (
         user_file.read_text(encoding="utf-8", errors="replace")
-        if user_file.exists()
+        if user_file.exists() and user_profile_enabled
         else ""
     )
     soul = (
@@ -25701,6 +25751,14 @@ def _handle_memory_write(handler, body):
         require(body, "section", "content")
     except ValueError as e:
         return bad(handler, str(e))
+    section = body["section"]
+    memory_enabled, user_profile_enabled = _memory_config_flags()
+    if section == "memory" and not memory_enabled:
+        return bad(handler, "Memory is disabled", 403)
+    if section == "user" and not user_profile_enabled:
+        return bad(handler, "User profile is disabled", 403)
+    if section == "soul" and not memory_enabled:
+        return bad(handler, "Memory is disabled", 403)
     try:
         from api.profiles import get_active_hermes_home
 
@@ -25710,7 +25768,6 @@ def _handle_memory_write(handler, body):
         home = Path.home() / ".hermes"
         mem_dir = home / "memories"
     mem_dir.mkdir(parents=True, exist_ok=True)
-    section = body["section"]
     if section == "memory":
         target = mem_dir / "MEMORY.md"
     elif section == "user":
