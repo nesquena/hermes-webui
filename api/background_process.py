@@ -55,6 +55,7 @@ from api.process_event_utils import (
     completion_delivery_id,
     release_async_delegation_delivery,
     requeue_async_delegation_event,
+    requeue_completion_event,
     schedule_async_delegation_claim_retry,
 )
 
@@ -75,6 +76,13 @@ _PROCESS_RECOVERY_LOCK = threading.Lock()
 _REAPER_THREAD: Optional[threading.Thread] = None
 _REAPER_STOP = threading.Event()
 _REAPER_INTERVAL_SECS = 60.0
+
+# Completion ids held here are active, pre-incorporation attempts. They
+# intentionally diverge from the registry's durable ``_completion_consumed``
+# set only until the attempt is incorporated or handed back to the deferred
+# owner. ``BG_TASK_COMPLETE_EVENTS_SEEN`` spans both active and deferred local
+# ownership; the reaper therefore checks both this set and the deferred map.
+_PREINCORPORATION_COMPLETION_IDS: set[str] = set()
 
 # Serializes the check-then-start of the module's daemon threads
 # (``start_drain_thread`` / ``start_session_channel_reaper``). Without it two
@@ -416,18 +424,31 @@ def _reaper_loop() -> None:
             # ``session_id`` removed from ``PENDING_BG_TASK_COMPLETIONS``), the
             # short ``_move_to_finished`` dedup window is closed and the entry is
             # pure leak — so sweep every delivered (not-pending) session here,
-            # every tick. The registry's own per-``process_id``
+            # every tick, except while an id is an active attempt or has one
+            # deferred owner. The registry's own per-``process_id``
             # ``_completion_consumed`` gate remains the primary idempotency
             # backstop, so sweeping a delivered session's set can never resurrect
             # an already-delivered completion (even in the tiny window between
             # this module's ``SEEN.add`` and ``PENDING.add`` in ``_process_one``).
             from api import config as _cfg
 
+            with _cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
+                deferred_ids = {
+                    sid: {
+                        str((entry or {}).get("process_id") or "")
+                        for entry in entries or []
+                    }
+                    for sid, entries in _cfg.DEFERRED_PROCESS_WAKEUPS.items()
+                }
             with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
                 for sid in [
                     s
-                    for s in _cfg.BG_TASK_COMPLETE_EVENTS_SEEN
+                    for s, process_ids in _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.items()
                     if s not in _cfg.PENDING_BG_TASK_COMPLETIONS
+                    and not (
+                        set(process_ids) & _PREINCORPORATION_COMPLETION_IDS
+                    )
+                    and not (set(process_ids) & deferred_ids.get(s, set()))
                 ]:
                     _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(sid, None)
         except Exception:
@@ -796,7 +817,7 @@ def _mark_registry_completion_consumed(process_id: str) -> None:
     try:
         lock = _pr._lock
         consumed = _pr._completion_consumed
-    except AttributeError:
+    except AttributeError as exc:
         logger.error(
             "ProcessRegistry coupling contract VIOLATED: expected private "
             "attrs %s for cross-A/B wakeup dedupe are missing — an upstream "
@@ -806,11 +827,11 @@ def _mark_registry_completion_consumed(process_id: str) -> None:
             _REGISTRY_CONSUMED_CONTRACT,
             exc_info=True,
         )
-        return
+        raise RuntimeError("ProcessRegistry completion-consumed contract is unavailable") from exc
     try:
         with lock:
             consumed.add(process_id)
-    except (AttributeError, TypeError):
+    except (AttributeError, TypeError) as exc:
         logger.error(
             "ProcessRegistry coupling contract VIOLATED: _lock/"
             "_completion_consumed changed shape (not a Lock / not a set) — "
@@ -819,6 +840,13 @@ def _mark_registry_completion_consumed(process_id: str) -> None:
             "(Copilot #2242 review #4).",
             exc_info=True,
         )
+        raise RuntimeError("ProcessRegistry completion-consumed contract changed shape") from exc
+    if not _pr.is_completion_consumed(process_id):
+        raise RuntimeError("ProcessRegistry completion ACK read-back failed")
+    from api import config as _cfg
+
+    with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+        _PREINCORPORATION_COMPLETION_IDS.discard(process_id)
 
 
 # ── xsession wakeup misroute defense-in-depth (Option 3) ───────────────────
@@ -980,11 +1008,29 @@ def _start_async_delegation_wakeup_turn(
     def _runner() -> None:
         try:
             from api.routes import start_session_turn
+            from api.session_lineage import build_completion_delivery_context
+
+            context_event = dict(evt)
+            context_event.setdefault("origin_ui_session_id", session_id)
+            context_event.setdefault("session_key", f"ui:{session_id}")
+            completion_context = build_completion_delivery_context(
+                context_event,
+                session_id,
+            )
+
+            def accept_completion() -> None:
+                _record_async_delegation_accepted(
+                    evt,
+                    session_id=session_id,
+                    claim=claim,
+                )
 
             resp = start_session_turn(
                 session_id,
                 wakeup_prompt,
                 source="process_wakeup",
+                completion_context=completion_context,
+                completion_acceptance=accept_completion,
             )
             raw_status = (resp or {}).get("_status")
             if raw_status is None:
@@ -992,11 +1038,6 @@ def _start_async_delegation_wakeup_turn(
             else:
                 status = int(raw_status)
             if 200 <= status < 300:
-                _record_async_delegation_accepted(
-                    evt,
-                    session_id=session_id,
-                    claim=claim,
-                )
                 logger.info(
                     "async delegation wakeup turn accepted for session %s "
                     "(stream_id=%s)",
@@ -1144,6 +1185,105 @@ def _resolve_completion_target(
         return ""
 
 
+def _requeue_unresolved_completion(process_registry, evt: dict, *, delay: float = 0.5) -> bool:
+    completion_queue = getattr(process_registry, "completion_queue", None)
+    return requeue_completion_event(
+        evt,
+        completion_queue,
+        delay=delay,
+        stop_event=_DRAIN_STOP,
+    )
+
+
+
+
+
+def _set_completion_attempt_active(
+    coordination_session_id: str,
+    process_id: str,
+) -> None:
+    """Move one locally owned completion into the active-attempt phase."""
+    if not coordination_session_id or not process_id:
+        return
+    from api import config as _cfg
+
+    with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+        _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.setdefault(
+            coordination_session_id,
+            set(),
+        ).add(process_id)
+        _PREINCORPORATION_COMPLETION_IDS.add(process_id)
+
+
+def _release_completion_attempt(
+    coordination_session_id: str,
+    process_id: str,
+    *,
+    keep_seen: bool,
+) -> None:
+    """End an active attempt, optionally retaining its deferred-owner gate."""
+    if not process_id:
+        return
+    from api import config as _cfg
+
+    with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+        _PREINCORPORATION_COMPLETION_IDS.discard(process_id)
+        if keep_seen:
+            return
+        seen = _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.get(
+            coordination_session_id,
+            set(),
+        )
+        seen.discard(process_id)
+        if coordination_session_id and not seen:
+            _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(
+                coordination_session_id,
+                None,
+            )
+
+
+def _defer_or_requeue_failed_wakeup(
+    coordination_session_id: str,
+    process_id: str,
+    wakeup_prompt: str,
+    *,
+    completion_event: dict | None = None,
+) -> str:
+    """Transfer a failed attempt to one existing recovery owner.
+
+    The idempotent deferred map is the normal bounded owner. If that write
+    fails, release both local claim phases before putting the immutable event
+    back on the existing completion queue exactly once.
+    """
+    if wakeup_prompt and record_deferred_wakeup(
+        coordination_session_id,
+        process_id,
+        wakeup_prompt,
+        completion_event=completion_event,
+    ):
+        _release_completion_attempt(
+            coordination_session_id,
+            process_id,
+            keep_seen=True,
+        )
+        return "deferred"
+
+    _release_completion_attempt(
+        coordination_session_id,
+        process_id,
+        keep_seen=False,
+    )
+    if not isinstance(completion_event, dict):
+        return "unowned"
+    try:
+        from tools.process_registry import process_registry
+    except Exception:
+        return "unowned"
+    if _requeue_unresolved_completion(process_registry, completion_event):
+        return "requeued"
+    return "unowned"
+
+
 def _process_one(evt: dict) -> None:
     """Route a single completion_queue event to the matching WebUI session."""
     from api import config as _cfg
@@ -1194,6 +1334,8 @@ def _process_one(evt: dict) -> None:
         )
         if evt.get("type") == "async_delegation":
             _retry_unclaimed_async_delegation_event(_process_registry, evt)
+        else:
+            _requeue_unresolved_completion(_process_registry, evt)
         return
     session_id = ""
     if session_key:
@@ -1207,6 +1349,8 @@ def _process_one(evt: dict) -> None:
         logger.debug("process_complete drop: no session mapping for key=%r", session_key)
         if evt.get("type") == "async_delegation":
             _retry_unclaimed_async_delegation_event(_process_registry, evt)
+        else:
+            _requeue_unresolved_completion(_process_registry, evt)
         return
     # ── xsession wakeup misroute defense-in-depth (Option 3) ──────────────
     # First retain the process-registry spawn-owner cross-check for legacy
@@ -1236,6 +1380,8 @@ def _process_one(evt: dict) -> None:
         # legacy requeue), so it stays retryable without a spurious ACK.
         if evt.get("type") == "async_delegation":
             _retry_unclaimed_async_delegation_event(_process_registry, evt)
+        else:
+            _requeue_unresolved_completion(_process_registry, evt)
         return
     # ── THE SEAM: async delegations take the durable-claim delivery path,
     # routed to the origin-resolved session. The claim/complete/release
@@ -1250,131 +1396,101 @@ def _process_one(evt: dict) -> None:
             process_registry=_process_registry,
         )
         return
-    try:
-        completion_lineage = _resolve_session_lineage(session_id)
-    except Exception:
-        logger.error(
-            "process_complete blocked: lineage unresolved for %r",
-            session_id,
-            exc_info=True,
-        )
-        return
-    coordination_session_id = completion_lineage.root_session_id
-    session_id = completion_lineage.delivery_session_id
-    # ── Idempotency vs the REAL merged upstream #2279 (shared dedupe key) ──
-    # The real merged #2279 next-turn drain
-    # (api/streaming._drain_webui_process_notifications) dedupes ONLY via
-    # process_registry.is_completion_consumed() / _completion_consumed — it
-    # does NOT populate BG_TASK_COMPLETE_EVENTS_SEEN (that set is ours-original
-    # and private to this module). So the cross-A/B shared dedupe contract is
-    # process_registry._completion_consumed, NOT BG_TASK_COMPLETE_EVENTS_SEEN.
-    # If the upstream A-drain already delivered this process_id (A-first
-    # order), it marked _completion_consumed; B must early-return here or it
-    # would double-fire a wakeup. This guard aligns our B-drain to the real
-    # upstream key (verified against origin/master streaming.py).
     if process_id:
         try:
-            if _process_registry is not None and _process_registry.is_completion_consumed(process_id):
+            if (
+                _process_registry is not None
+                and _process_registry.is_completion_consumed(process_id)
+            ):
                 return
         except Exception:
             logger.debug(
-                "is_completion_consumed check failed on B drain; "
-                "falling back to BG_TASK_COMPLETE_EVENTS_SEEN gate",
+                "is_completion_consumed check failed before durable incorporation",
                 exc_info=True,
             )
-    # Secondary (ours-original) idempotency: if we've already emitted for this
-    # (session_id, process_id) pair via THIS module, skip the duplicate. Two
-    # _move_to_finished() callers (kill_process racing the reader thread) can
-    # occasionally enqueue twice despite the process_registry guard.
-    with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
-        seen = _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.setdefault(
-            coordination_session_id, set()
-        )
-        if process_id and process_id in seen:
-            return
-        if process_id:
-            seen.add(process_id)
-    payload = _build_payload(evt, session_id)
-    _emit_bg_task_complete_events_coalesced(session_id, payload)
-    _cfg.PENDING_BG_TASK_COMPLETIONS.add(coordination_session_id)
-    # Mark the event consumed in the agent's process registry so the REAL
-    # merged PR #2279's next-turn drain
-    # (api/streaming._drain_webui_process_notifications) treats this process_id
-    # as already-delivered and does not re-fire a wakeup (B-first order).
-    # This is the SHARED upstream dedupe key (see _mark_registry_completion_
-    # consumed for the coupling contract + why a future rename now fails loud).
-    if process_id:
-        _mark_registry_completion_consumed(process_id)
-
-    # ── Option Z (PRIMARY): server-side wakeup, NO browser round-trip ──────
-    # The SSE emit above is now demoted to a pure live-view layer (an open tab
-    # streams the turn live via the per-session SSE channel). The ACTUAL agent
-    # wakeup is started HERE, server-side, so a CLOSED tab still gets the turn
-    # — parity with how CLI / Telegram / gateway self-wake from a
-    # notify_on_complete completion. This is the fix for the structural flaw:
-    # "fire a long background task, close the tab, come back later" is THE
-    # primary background-task use case and browser-mediated wakeup could never
-    # serve it.
-    #
-    #   - turn ACTIVE → do NOT start a turn. Leave the PENDING_PROCESS_
-    #     COMPLETIONS marker so PR #2279's next-turn drain
-    #     (api/streaming._drain_webui_process_notifications) injects the wakeup
-    #     when the active turn ends. (That path already works when a turn is
-    #     active — it was never the gap.)
-    #   - turn IDLE → start a new server-side turn directly with wakeup_prompt
-    #     as the user message (the real gap Option Z closes).
-    #
-    # Idempotency is already guaranteed above: BG_TASK_COMPLETE_EVENTS_SEEN +
-    # the registry _completion_consumed marker mean this process_id reached
-    # here at most once, so the wakeup turn starts at most once.
+    coordination_session_id = ""
+    completion_claimed = False
     try:
-        # ``wakeup_prompt`` is server-internal state used only by the
-        # Option Z server-side wakeup; it was previously surfaced on the
-        # SSE payload but T1 trimmed the payload to the minimal shape
-        # `{session_id, task_id, completed_at, summary?, event_id}`, so
-        # we derive the prompt directly from the evt here (same source the
-        # prior _build_payload used).
+        completion_lineage = _resolve_session_lineage(session_id)
+        coordination_session_id = completion_lineage.root_session_id
+        session_id = completion_lineage.delivery_session_id
+        with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+            seen = _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.setdefault(
+                coordination_session_id,
+                set(),
+            )
+            # This is the process-local, pre-incorporation gate. It deliberately
+            # uses the same deterministic completion id that becomes
+            # ``process:<process_id>`` in the durable receipt and that the
+            # registry exposes through ``is_completion_consumed``. The registry
+            # marker remains the cross-drain durable ACK, but it is written only
+            # after incorporation; this earlier atomic claim prevents a racing
+            # duplicate from starting a second turn in that gap. Unresolved
+            # lineage returns above before this claim, so its requeue stays live.
+            if process_id and (
+                process_id in seen
+                or process_id in _PREINCORPORATION_COMPLETION_IDS
+            ):
+                return
+            if process_id:
+                seen.add(process_id)
+                _PREINCORPORATION_COMPLETION_IDS.add(process_id)
+                completion_claimed = True
+        _emit_bg_task_complete_events_coalesced(
+            session_id,
+            _build_payload(evt, session_id),
+        )
         wakeup_prompt_raw = format_wakeup_prompt(evt)
         wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
-        if wakeup_prompt:
-            if _session_has_active_turn(session_id):
-                # Defer-path fix: persist the prompt so a turn-teardown
-                # idle-hook can redeliver it once the session goes idle.
-                # The OLD behavior only logged + left a bare
-                # PENDING_BG_TASK_COMPLETIONS session flag; the prompt was
-                # discarded and the next-turn drain reads completion_queue
-                # (already emptied by THIS drain thread), so for an
-                # autonomous agent with no next user turn the wakeup was
-                # lost forever. process_id is already in
-                # BG_TASK_COMPLETE_EVENTS_SEEN + the registry
-                # _completion_consumed marker (set above), so persisting it
-                # here cannot cause a double-fire — the atomic claim in
-                # ``claim_deferred_wakeups`` guarantees exactly one delivery.
-                record_deferred_wakeup(session_id, process_id, wakeup_prompt)
-                logger.debug(
-                    "server-side wakeup deferred: turn active for session %s "
-                    "(persisted for turn-teardown idle-hook redelivery)",
+        if not wakeup_prompt:
+            raise RuntimeError("process completion could not be formatted")
+        if _session_has_active_turn(session_id):
+            _cfg.PENDING_BG_TASK_COMPLETIONS.add(coordination_session_id)
+            owner = _defer_or_requeue_failed_wakeup(
+                coordination_session_id,
+                process_id,
+                wakeup_prompt,
+                completion_event=evt,
+            )
+            if owner == "unowned":
+                logger.error(
+                    "process completion has no recovery owner for session %s",
                     session_id,
                 )
-            else:
-                # Idle-path sibling of the F1 (409/teardown) fix: pass
-                # ``process_id`` so that if this idle wakeup's daemon thread
-                # loses the per-session lock race and 409s, the re-defer in
-                # ``_start_server_side_wakeup_turn`` records the entry WITH its
-                # process_id — keeping the ``record_deferred_wakeup`` dedup
-                # guard (``if process_id and any(...)``) live on that re-defer
-                # path so a second 409 race cannot accumulate a duplicate
-                # deferred entry (which would deliver the same wakeup twice).
-                _start_server_side_wakeup_turn(
-                    session_id, wakeup_prompt, process_id=process_id
-                )
+        else:
+            _start_server_side_wakeup_turn(
+                session_id,
+                wakeup_prompt,
+                process_id=process_id,
+                completion_event=evt,
+            )
     except Exception:
+        # No dispatch owner exists when this synchronous path raises (format,
+        # emit, deferred-record, or thread-start failure). Release both phases
+        # of the local claim before requeueing so the same immutable completion
+        # can be reclaimed. Once thread.start() returns, failures are handled by
+        # that worker's durable receipt/deferred-retry path and do not reach here.
+        if completion_claimed and process_id:
+            _release_completion_attempt(
+                coordination_session_id,
+                process_id,
+                keep_seen=False,
+            )
+        _requeue_unresolved_completion(_process_registry, evt)
         logger.warning(
-            "server-side wakeup dispatch failed for session %s", session_id, exc_info=True
+            "process completion dispatch failed for session %s; requeued",
+            session_id,
+            exc_info=True,
         )
 
 
-def record_deferred_wakeup(session_id: str, process_id: str, wakeup_prompt: str) -> bool:
+def record_deferred_wakeup(
+    session_id: str,
+    process_id: str,
+    wakeup_prompt: str,
+    *,
+    completion_event: dict | None = None,
+) -> bool:
     """Persist a deferred process-completion wakeup for later redelivery.
 
     Called from ``_process_one`` when a completion arrives while a turn is
@@ -1401,17 +1517,30 @@ def record_deferred_wakeup(session_id: str, process_id: str, wakeup_prompt: str)
             entries = _cfg.DEFERRED_PROCESS_WAKEUPS.setdefault(
                 coordination_session_id, []
             )
-            if process_id and any(
-                e.get("process_id") == process_id for e in entries
-            ):
-                return True
-            entries.append(
-                {
-                    "process_id": process_id,
-                    "wakeup_prompt": wakeup_prompt,
-                    "origin_session_id": session_id,
-                }
-            )
+            if process_id:
+                existing = next(
+                    (
+                        entry
+                        for entry in entries
+                        if entry.get("process_id") == process_id
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    if isinstance(completion_event, dict):
+                        existing.setdefault(
+                            "completion_event",
+                            dict(completion_event),
+                        )
+                    return True
+            entry: dict[str, Any] = {
+                "process_id": process_id,
+                "wakeup_prompt": wakeup_prompt,
+                "origin_session_id": session_id,
+            }
+            if isinstance(completion_event, dict):
+                entry["completion_event"] = dict(completion_event)
+            entries.append(entry)
         return True
     except Exception:
         logger.debug(
@@ -1518,16 +1647,40 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
             # already persisted if the first wakeup's own teardown re-runs this
             # hook and tries to claim them.
             for entry in leftover[1:]:
-                record_deferred_wakeup(
+                _defer_or_requeue_failed_wakeup(
                     coordination_session_id,
                     str((entry or {}).get("process_id") or ""),
                     str((entry or {}).get("wakeup_prompt") or "").strip(),
+                    completion_event=(entry or {}).get("completion_event"),
                 )
-            _start_server_side_wakeup_turn(
-                delivery_session_id,
-                str((first or {}).get("wakeup_prompt") or "").strip(),
-                process_id=str((first or {}).get("process_id") or ""),
+            first_process_id = str((first or {}).get("process_id") or "")
+            first_prompt = str((first or {}).get("wakeup_prompt") or "").strip()
+            first_event = (first or {}).get("completion_event")
+            _set_completion_attempt_active(
+                coordination_session_id,
+                first_process_id,
             )
+            try:
+                _start_server_side_wakeup_turn(
+                    delivery_session_id,
+                    first_prompt,
+                    process_id=first_process_id,
+                    completion_event=first_event,
+                )
+            except Exception:
+                owner = _defer_or_requeue_failed_wakeup(
+                    coordination_session_id,
+                    first_process_id,
+                    first_prompt,
+                    completion_event=first_event,
+                )
+                logger.warning(
+                    "deferred wakeup thread start failed for session %s; owner=%s",
+                    coordination_session_id,
+                    owner,
+                    exc_info=True,
+                )
+                return 0
             started = 1
         if started:
             logger.info(
@@ -1592,7 +1745,11 @@ def _session_has_active_turn(session_id: str) -> bool:
 
 
 def _start_server_side_wakeup_turn(
-    session_id: str, wakeup_prompt: str, *, process_id: str = ""
+    session_id: str,
+    wakeup_prompt: str,
+    *,
+    process_id: str = "",
+    completion_event: dict | None = None,
 ) -> None:
     """Start an agent turn server-side for a process_complete wakeup (Option Z).
 
@@ -1624,17 +1781,46 @@ def _start_server_side_wakeup_turn(
     """
 
     def _runner() -> None:
+        coordination_session_id = session_id
         try:
             from api.routes import start_session_turn
+            from api.session_lineage import build_completion_delivery_context
 
             resolution = _resolve_session_lineage(session_id)
             coordination_session_id = resolution.root_session_id
             delivery_session_id = resolution.delivery_session_id
+            completion_context = build_completion_delivery_context(
+                {
+                    "type": "process_complete",
+                    "process_id": process_id,
+                    "session_key": f"ui:{coordination_session_id}",
+                    "origin_ui_session_id": coordination_session_id,
+                    "origin_profile": resolution.profile,
+                },
+                delivery_session_id,
+            )
+
+            def accept_completion() -> None:
+                if process_id:
+                    _mark_registry_completion_consumed(process_id)
+
             resp = start_session_turn(
-                delivery_session_id, wakeup_prompt, source="process_wakeup"
+                delivery_session_id,
+                wakeup_prompt,
+                source="process_wakeup",
+                completion_context=completion_context,
+                completion_acceptance=accept_completion,
             )
             status = int((resp or {}).get("_status", 200) or 200)
             if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
+                # The persisted pause row is the terminal owner for this
+                # attempt. It is intentionally not auto-retried, but it is no
+                # longer an active pre-incorporation attempt either.
+                _release_completion_attempt(
+                    coordination_session_id,
+                    process_id,
+                    keep_seen=True,
+                )
                 logger.info(
                     "server-side wakeup suppressed for session %s: provider credential state is paused",
                     session_id,
@@ -1649,21 +1835,32 @@ def _start_server_side_wakeup_turn(
                 # ``claim_deferred_wakeups`` still guarantees exactly-once
                 # delivery, and BG_TASK_COMPLETE_EVENTS_SEEN already deduped
                 # this process_id, so re-recording cannot double-fire.
-                if wakeup_prompt:
-                    record_deferred_wakeup(
-                        coordination_session_id, process_id, wakeup_prompt
-                    )
+                owner = _defer_or_requeue_failed_wakeup(
+                    coordination_session_id,
+                    process_id,
+                    wakeup_prompt,
+                    completion_event=completion_event,
+                )
                 logger.debug(
                     "server-side wakeup raced an active turn for session %s; "
-                    "re-deferred for redelivery on next teardown/turn",
+                    "recovery owner=%s",
                     session_id,
+                    owner,
                 )
             elif status >= 400:
+                owner = _defer_or_requeue_failed_wakeup(
+                    coordination_session_id,
+                    process_id,
+                    wakeup_prompt,
+                    completion_event=completion_event,
+                )
                 logger.warning(
-                    "server-side wakeup failed for session %s: status=%s err=%r",
+                    "server-side wakeup failed for session %s: status=%s err=%r; "
+                    "recovery owner=%s",
                     session_id,
                     status,
                     (resp or {}).get("error"),
+                    owner,
                 )
             else:
                 logger.info(
@@ -1672,9 +1869,16 @@ def _start_server_side_wakeup_turn(
                     (resp or {}).get("stream_id"),
                 )
         except Exception:
+            owner = _defer_or_requeue_failed_wakeup(
+                coordination_session_id,
+                process_id,
+                wakeup_prompt,
+                completion_event=completion_event,
+            )
             logger.warning(
-                "server-side wakeup turn raised for session %s",
+                "server-side wakeup turn raised for session %s; recovery owner=%s",
                 session_id,
+                owner,
                 exc_info=True,
             )
 
@@ -1771,9 +1975,33 @@ def recover_processes_for_webui(process_registry=None, get_session_fn=None) -> i
                 )
                 continue
             register_process_session(session_key, session_key)
+        from api.routes import recover_accepted_completion_delivery
+        from api.session_lineage import accepted_completion_delivery_contexts
+
+        repaired_receipts = 0
+        for completion_context in accepted_completion_delivery_contexts():
+            try:
+                if not recover_accepted_completion_delivery(completion_context):
+                    continue
+                repaired_receipts += 1
+                if completion_context.kind == "process":
+                    _mark_registry_completion_consumed(
+                        completion_context.completion_id
+                    )
+            except Exception:
+                logger.error(
+                    "Accepted completion receipt remains unresolved: %s",
+                    completion_context.completion_key,
+                    exc_info=True,
+                )
         _PROCESS_RECOVERY_DONE = True
         if recovered:
             logger.info("Recovered %d background process(es) for WebUI", recovered)
+        if repaired_receipts:
+            logger.info(
+                "Repaired %d accepted completion receipt(s) without execution",
+                repaired_receipts,
+            )
         return recovered
 
 
@@ -1814,7 +2042,8 @@ def forget_bg_task_completion_dedup(session_id: str) -> None:
     from api import config as _cfg
 
     with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
-        _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(str(session_id), None)
+        process_ids = _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(str(session_id), set())
+        _PREINCORPORATION_COMPLETION_IDS.difference_update(process_ids)
 
 
 def start_drain_thread() -> bool:

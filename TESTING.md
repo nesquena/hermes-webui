@@ -15,6 +15,33 @@
 
 ---
 
+## Durable completion incorporation
+
+The completion handoff suite uses isolated session directories and no provider
+credentials. It covers both process drain orders, exact receipt-v2/session/
+journal correlation, accepted-only restart repair without execution,
+incorporated no-replay behavior, same-text distinct completion IDs, async ACK
+ordering, and runner-local refusal before any local mutation.
+
+```bash
+./scripts/test.sh \
+  tests/test_notify_on_complete_webui.py \
+  tests/test_session_lineage_delivery.py \
+  tests/test_background_process_restart_recovery.py \
+  tests/test_runtime_adapter_seam.py \
+  tests/test_async_delegation_webui_bridge.py \
+  -q --timeout=60
+```
+
+Receipt tests must bind both `api.config.SESSION_DIR` and
+`api.models.SESSION_DIR`, then inspect exactly
+`SESSION_DIR/_completion_delivery_receipts.json`. A passing test must prove that
+ACK/consume and the execution gate occur after the durable receipt reaches
+`incorporated`; assertions based only on source strings or in-memory objects are
+not sufficient.
+
+---
+
 ## Static JS runtime lint (brick-class regression guard)
 
 Some JS bugs throw a `TypeError`/`ReferenceError` only when a specific function

@@ -14,11 +14,11 @@
     "expected_direct_calls_by_symbol": {
       "_active_run_stream_for_session": 9,
       "_active_stream_blocks_chat_start": 4,
-      "_prepare_chat_start_session_for_stream": 10,
+      "_prepare_chat_start_session_for_stream": 11,
       "_run_admitted_agent_streaming": 2,
       "register_active_run": 16
     },
-    "expected_direct_calls_total": 41,
+    "expected_direct_calls_total": 42,
     "required_signature_universe": [
       "_run_admitted_agent_streaming",
       "_run_admitted_gateway_chat_streaming",
@@ -893,6 +893,15 @@
       },
       {
         "identity": [
+          "api/routes.py",
+          "recover_accepted_completion_delivery",
+          "_prepare_chat_start_session_for_stream",
+          1,
+          "call"
+        ]
+      },
+      {
+        "identity": [
           "api/streaming.py",
           "_run_admitted_agent_streaming",
           "register_active_run",
@@ -1429,6 +1438,15 @@
           "tests/test_issue5567_profile_home_override.py",
           "test_run_agent_streaming_installs_and_resets_profile_home_override",
           "register_active_run",
+          1,
+          "setattr"
+        ]
+      },
+      {
+        "identity": [
+          "tests/test_notify_on_complete_webui.py",
+          "test_drain_orders_converge_on_one_completion",
+          "_run_admitted_agent_streaming",
           1,
           "setattr"
         ]

@@ -331,6 +331,32 @@ parent lineage before copying context and then admits its independent hidden
 root; background work likewise admits only its hidden root so the parent may run
 in parallel.
 
+### 4.3.3 Durable Completion Incorporation
+
+Process and async-delegation wakeups share one prompt-free
+`CompletionDeliveryContext`. The namespaced completion key determines the
+correlation hash and turn ID; the verified oldest lineage segment is immutable
+origin/ownership identity, while the verified current tip is the only delivery
+target. A single private receipt document lives at
+`SESSION_DIR/_completion_delivery_receipts.json` (schema version 2).
+
+Before completion content can reach a backend, the route acquires the lineage
+permit and a per-completion claim, writes an `accepted` receipt containing only
+identity/owner/reservation metadata, then uses the ordinary prepared-turn writer.
+The prepared sidecar is fsynced and re-opened, the deterministic `submitted`
+journal event is fsynced and re-read, and the admitted worker remains parked.
+Only an exact owner-token/attempt/reservation CAS may advance the receipt to
+`incorporated`. Durable process-consumed/async-ACK state and the worker gate
+follow that CAS; neither is allowed before it.
+
+An `accepted` receipt can be repaired once from its exact pending sidecar and
+journal checkpoint without starting a worker. An `incorporated` receipt is
+terminal no-replay evidence: restart recovery never invokes the provider or
+tools again. Malformed, duplicate, cross-lineage, or conflicting receipt/journal
+evidence fails closed. Receipt/lock files are private (`0600`), atomically
+replaced where applicable, and never contain prompts, tool output, provider
+payloads, credentials, or admission owner tokens in transcript/journal rows.
+
 ### 4.4 Agent Invocation (`_run_agent_streaming_core`)
 
     def _run_agent_streaming_core(session_id, msg_text, model, workspace, stream_id):

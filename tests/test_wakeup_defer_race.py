@@ -311,10 +311,9 @@ def test_next_user_turn_drain_and_teardown_hook_dont_double_fire(monkeypatch):
             cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
 
         bp._process_one(_completion_evt("proc-shared-1", sid))
-        # Shared dedupe contract: _process_one marked it seen + registry-
-        # consumed before deferring.
+        # The seen marker is diagnostic; durable incorporation owns the ACK.
         assert "proc-shared-1" in cfg.BG_TASK_COMPLETE_EVENTS_SEEN[sid]
-        assert fake.is_completion_consumed("proc-shared-1")
+        assert not fake.is_completion_consumed("proc-shared-1")
         assert sid in cfg.DEFERRED_PROCESS_WAKEUPS
 
         # A user turn comes: the next-turn drain runs. Even if a duplicate
@@ -331,6 +330,7 @@ def test_next_user_turn_drain_and_teardown_hook_dont_double_fire(monkeypatch):
         started = bp.drain_deferred_wakeups_for_session(sid)
         assert started == 1
         assert _wait_for_wakeup(holder)
+        assert fake.is_completion_consumed("proc-shared-1")
         assert len(holder["calls"]) == 1, (
             "deferred wakeup delivered more than once across next-turn drain "
             "+ teardown hook"
@@ -533,7 +533,14 @@ def test_paused_process_wakeup_409_does_not_requeue(monkeypatch):
     sid = "sess-paused-409"
     holder = {"calls": [], "event": threading.Event(), "requeued": []}
 
-    def _paused_start_session_turn(session_id, message, *, source="process_wakeup"):
+    def _paused_start_session_turn(
+        session_id,
+        message,
+        *,
+        source="process_wakeup",
+        completion_context=None,
+        completion_acceptance=None,
+    ):
         holder["calls"].append(
             {"session_id": session_id, "message": message, "source": source}
         )
@@ -788,7 +795,14 @@ def test_retryable_409_and_503_redefer_at_lineage_root(monkeypatch, tmp_path):
     calls = []
     event = threading.Event()
 
-    def _retryable_start(session_id, message, *, source="process_wakeup"):
+    def _retryable_start(
+        session_id,
+        message,
+        *,
+        source="process_wakeup",
+        completion_context=None,
+        completion_acceptance=None,
+    ):
         calls.append({"session_id": session_id, "message": message, "source": source})
         response = responses[len(calls) - 1]
         event.set()
