@@ -277,7 +277,17 @@ def test_completeness_is_not_decided_by_a_trailing_extension():
 
 
 def test_flush_partitions_instead_of_matching_the_whole_candidate():
+    """The flush must PARTITION the candidate, not handle one anchored match.
+
+    The behavioral contract (later valid token after a malformed one, no-match
+    passthrough, per-token append-failure fallback) is executed against the real
+    function in tests/test_smd_media_in_stream.py::
+    TestSmdMediaTailFlushPartition. Assert only the wiring here so this cannot
+    pass on a source string while behavior regresses.
+    """
     src = _extract_js_function(MESSAGES_JS, "_smdMediaTailFlushEntry")
     assert "_mediaTokenRe()" in src
-    assert "m.index===0" in src
-    assert "raw.slice(m[0].length)" in src
+    # A partition loop, not a single anchored exec.
+    assert "while((m=re.exec(raw)))" in src
+    # Every token span is preserved, including the trailing suffix.
+    assert "raw.slice(last)" in src

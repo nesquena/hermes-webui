@@ -132,8 +132,9 @@ def test_quoted_ref_from_user_content_is_still_rejected(tmp_path, monkeypatch):
 
 
 # A 1x1 PNG that passes the share inliner's magic-byte and MIME checks.
-# Explicit bytes literal, not bytes.fromhex(...): an opaque hex blob in a test
-# fixture reads like obfuscation to reviewers and to untrusted-code gates.
+# Written as a commented, chunk-by-chunk bytes literal rather than a single
+# bytes.fromhex(...) blob so each PNG chunk is readable in place and the fixture
+# needs no decoding step at import time.
 _TINY_PNG = (
     b"\x89PNG\r\n\x1a\n"                      # signature
     b"\x00\x00\x00\rIHDR"                     # IHDR chunk header
@@ -180,7 +181,182 @@ def test_share_inliner_still_rejects_path_outside_allowed_roots(tmp_path):
     assert "data:image/png;base64," not in out
 
 
+# ── External URLs carrying a nested MEDIA: keyword ───────────────────────────
+#
+# The share matcher used to spell its URL exemption as `exclude_urls=True`, a
+# negative lookahead at the match start. An external URL was therefore rejected
+# by NOT MATCHING, and `re.sub` resumed scanning one character later — INSIDE the
+# token it had just refused. If that URL's own path or query contained the
+# literal `MEDIA:`, the nested occurrence matched as a fresh local token, so the
+# tail of a legitimate external URL was rewritten (and local paths were probed
+# from share text). The fix matches the full canonical token and classifies it in
+# `_replace_ref()`.
+
+
+@pytest.mark.parametrize(
+    "text,label",
+    [
+        (
+            "MEDIA:https://cdn.test/img/MEDIA:/etc/passwd.png",
+            "nested MEDIA: in the URL path",
+        ),
+        (
+            "MEDIA:https://cdn.test/i.png?src=MEDIA:/etc/shadow.png",
+            "nested MEDIA: in the URL query",
+        ),
+        (
+            "MEDIA:HTTPS://cdn.test/a/MEDIA:/etc/passwd.png",
+            "uppercase scheme (schemes are case-insensitive)",
+        ),
+        (
+            'MEDIA:"https://cdn.test/q/MEDIA:/etc/passwd.png"',
+            "quoted external URL",
+        ),
+    ],
+)
+def test_external_url_with_nested_media_keyword_is_preserved_exactly(text, label):
+    """An exempt external token must survive byte-for-byte."""
+    from api import shares
+
+    out = shares._embed_share_media(text, allowed_roots=())
+    assert out == text, f"{label}: external token was rewritten"
+    assert shares._PLACEHOLDER not in out, (
+        f"{label}: a local-path placeholder was spliced into an external URL"
+    )
+
+
+def test_local_path_inside_allowed_root_still_embeds(tmp_path):
+    """Positive control: dropping the pattern-level guard must not stop embedding."""
+    from api import shares
+
+    target = tmp_path / "shot.png"
+    target.write_bytes(_TINY_PNG)
+
+    out = shares._embed_share_media(f"see MEDIA:{target} ok", allowed_roots=(tmp_path,))
+    assert "data:image/png;base64," in out
+
+
+@pytest.mark.parametrize(
+    "ref,label",
+    [
+        ("file:///etc/passwd.png", "file:// is always rejected"),
+        ("/etc/passwd.png", "absolute path outside every allowed root"),
+    ],
+)
+def test_local_negative_controls_still_placeholdered(ref, label):
+    """Negative controls: local refs must still never leak into a share."""
+    from api import shares
+
+    out = shares._embed_share_media(f"MEDIA:{ref}", allowed_roots=())
+    assert shares._PLACEHOLDER in out, f"{label}: expected a placeholder"
+    assert ref not in out, f"{label}: the local path leaked into the share"
+
+
 # ── One grammar, two languages ───────────────────────────────────────────────
+
+
+def _js_media_capture_and_remainder(cases: list[str]) -> list[list[str | None]]:
+    """Return ``[capture, exact remainder]`` per case from the REAL JS grammar."""
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+
+    def extract(src: str, name: str) -> str:
+        start = src.index(f"function {name}(")
+        depth = 0
+        started = False
+        for i in range(start, len(src)):
+            if src[i] == "{":
+                depth += 1
+                started = True
+            elif src[i] == "}":
+                depth -= 1
+                if started and depth == 0:
+                    return src[start:i + 1]
+        raise AssertionError(f"unbalanced braces extracting {name}")
+
+    script = "\n".join([
+        extract(UI_JS, "_mediaPathSrc"),
+        extract(UI_JS, "_mediaTokenRe"),
+        "const cases = JSON.parse(process.argv[1]);",
+        "const out = cases.map((s) => {",
+        "  const re = _mediaTokenRe();",
+        "  const m = re.exec(s);",
+        "  return m ? [m[1], s.slice(m.index + m[0].length)] : [null, null];",
+        "});",
+        "console.log(JSON.stringify(out));",
+    ])
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", script, json.dumps(cases)],
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+    return json.loads(proc.stdout)
+
+
+# Terminal punctuation ownership. `(text, expected capture, exact remainder)` —
+# fixed expectations, NOT a mirrored comparison, so the table pins the intended
+# token/remainder split rather than merely proving the two sides agree.
+#
+# Sentence punctuation is only prose when a REAL delimiter follows it. At
+# absolute end-of-input the token keeps the character on purpose: a streaming
+# chunk can stop mid-token, and splitting there would capture `/tmp/a` out of
+# `MEDIA:/tmp/a.png` on the final chunk and desync the streamed and settled
+# renderings. Each sentence case below is therefore written with following text.
+_PUNCTUATION_OWNERSHIP = [
+    ("see MEDIA:/tmp/a.png. Next", "/tmp/a.png", ". Next"),
+    ("see MEDIA:/tmp/a.png! Next", "/tmp/a.png", "! Next"),
+    ("see MEDIA:/tmp/a.png? Next", "/tmp/a.png", "? Next"),
+    # A newline is a delimiter too, so a period at end-of-line is still prose.
+    ("see MEDIA:/tmp/a.png.\nNext", "/tmp/a.png", ".\nNext"),
+    # A dot genuinely inside the name is still part of the ref.
+    ("MEDIA:/tmp/a.tar.gz ok", "/tmp/a.tar.gz", " ok"),
+    ("MEDIA:/tmp/v1.2/chart.png. Next", "/tmp/v1.2/chart.png", ". Next"),
+    # Real query punctuation stays INSIDE an external URL.
+    ("MEDIA:https://x.test/i.png?w=1&h=2", "https://x.test/i.png?w=1&h=2", ""),
+    ("MEDIA:https://x.test/a.png?q=1. Next", "https://x.test/a.png?q=1", ". Next"),
+    ("MEDIA:HTTPS://x.test/a.png", "HTTPS://x.test/a.png", ""),
+    ("MEDIA:https://fal.media/generated", "https://fal.media/generated", ""),
+    # End-of-input keeps the character: the stream may simply stop here.
+    ("MEDIA:/tmp/a.png", "/tmp/a.png", ""),
+    # Pre-existing contract that already worked; must not regress.
+    ("MEDIA:/tmp/a.png, next", "/tmp/a.png", ", next"),
+    ("MEDIA:/tmp/noext. Next", "/tmp/noext", ". Next"),
+    ('MEDIA:"/tmp/a b.png".', '"/tmp/a b.png"', "."),
+    ("MEDIA:/tmp/v1.2 Reports/chart.png done", "/tmp/v1.2 Reports/chart.png", " done"),
+    ("MEDIA:/a.png MEDIA:/b.png", "/a.png", " MEDIA:/b.png"),
+    ("MEDIA:C:/tmp/live.png ", "C:/tmp/live.png", " "),
+    # Windows-style drive path must survive intact (`:` closes a token, so a lazy
+    # form would truncate this to `C`).
+    ("MEDIA:C:/tmp/live.png. Next", "C:/tmp/live.png", ". Next"),
+]
+
+
+@pytest.mark.parametrize("text,expected_capture,expected_remainder", _PUNCTUATION_OWNERSHIP)
+def test_python_terminal_punctuation_ownership(text, expected_capture, expected_remainder):
+    """Python: sentence punctuation is prose; URL query punctuation is the ref."""
+    import re as _re
+
+    from api.helpers import media_token_pattern
+
+    m = _re.compile(media_token_pattern()).search(text)
+    assert m is not None, f"no match for {text!r}"
+    assert m.group(1) == expected_capture
+    assert text[m.end():] == expected_remainder
+
+
+def test_js_terminal_punctuation_ownership_matches_python():
+    """JS must make the SAME token/remainder split as Python, case by case."""
+    cases = [text for text, _, _ in _PUNCTUATION_OWNERSHIP]
+    results = _js_media_capture_and_remainder(cases)
+    for (text, expected_capture, expected_remainder), (capture, remainder) in zip(
+        _PUNCTUATION_OWNERSHIP, results
+    ):
+        assert capture == expected_capture, f"JS capture diverged for {text!r}"
+        assert remainder == expected_remainder, f"JS remainder diverged for {text!r}"
 
 
 def _js_media_captures(cases: list[str]) -> list[str | None]:

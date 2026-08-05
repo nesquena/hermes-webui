@@ -39,10 +39,9 @@ UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 
 # A 1x1 PNG that satisfies the share inliner's magic-byte + MIME checks.
-# Written as an explicit bytes literal rather than bytes.fromhex(...) so the
-# fixture is readable at a glance and needs no runtime decoding — an opaque hex
-# blob in a test reads like obfuscation to a reviewer (and to automated
-# untrusted-code gates, which is how this file got classified NO-RUN once).
+# Written as a commented, chunk-by-chunk bytes literal rather than a single
+# bytes.fromhex(...) blob so each PNG chunk is readable in place and the fixture
+# needs no decoding step at import time.
 _TINY_PNG = (
     b"\x89PNG\r\n\x1a\n"                      # signature
     b"\x00\x00\x00\rIHDR"                     # IHDR chunk header

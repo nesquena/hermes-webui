@@ -60,6 +60,55 @@ def _extract_js_function(src: str, name: str) -> str:
     return src[start:pos]
 
 
+def _run_tail_flush_partition_cases() -> dict:
+    """Execute the real stream-end partitioner with only its leaf sinks stubbed."""
+    helpers = "\n".join(
+        [
+            _extract_js_function(UI_JS, "_mediaPathSrc"),
+            _extract_js_function(UI_JS, "_mediaTokenRe"),
+            _extract_js_function(UI_JS, "_unquoteMediaRef"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaWriteText"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTailEntryChunk"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTailFlushEntry"),
+        ]
+    )
+    script = f"""
+{helpers}
+function run(raw, failRef=''){{
+  const media=[];
+  const text=[];
+  const parent={{}};
+  globalThis._smdAppendMediaNode=(_parent,ref)=>{{
+    if(ref===failRef) return false;
+    media.push(ref);
+    return true;
+  }};
+  _smdMediaTailFlushEntry({{
+    chunk:raw,
+    parent,
+    data:{{}},
+    baseAddText:null,
+    writeText:(_parent,_data,value)=>text.push(String(value)),
+  }});
+  return {{media,text:text.join('')}};
+}}
+console.log(JSON.stringify({{
+  malformedThenValid:run('MEDIA:"/tmp/bad.png and MEDIA:/tmp/good.png'),
+  noMatch:run('no media here'),
+  appendFailureThenValid:run('MEDIA:/tmp/bad.png then MEDIA:/tmp/good.png','/tmp/bad.png'),
+}}));
+"""
+    completed = subprocess.run(
+        [NODE, "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+    return json.loads(completed.stdout)
+
+
 def _run_real_smd_media_cases() -> dict:
     helpers = "\n".join(
         [
@@ -197,6 +246,22 @@ def _run_real_smd_media_cases() -> dict:
         "  return { html: root.outerHTML, text: root.textContent, liTexts: collectTagTexts(root, 'li'), fadeWords: collectClassTexts(root, 'stream-fade-word'), postProcessCalls, playbackCalls };\n"
         "}\n"
         "function renderModes(chunks){ return { safe: renderChunks(chunks, 'safe'), fade: renderChunks(chunks, 'fade') }; }\n"
+        "function renderCodePolicyModes(chunks){\n"
+        "  const safe=renderChunks(chunks, 'safe');\n"
+        "  _streamFadeReduceMotion=false;\n"
+        "  const fade=renderChunks(chunks, 'fade');\n"
+        "  _streamFadeReduceMotion=true;\n"
+        "  const fadeReduced=renderChunks(chunks, 'fade');\n"
+        "  _streamFadeReduceMotion=false;\n"
+        "  return { safe, fade, fadeReduced };\n"
+        "}\n"
+        "const codePolicy={\n"
+        "  fencedWhole: renderCodePolicyModes(['```\\nMEDIA:/tmp/a.png\\n```\\n']),\n"
+        "  fencedSplit: renderCodePolicyModes(['```\\nMEDIA:/tmp/li', 've.png\\n```\\n']),\n"
+        "  inlineWhole: renderCodePolicyModes(['see `MEDIA:/tmp/a.png` ok\\n']),\n"
+        "  inlineSplit: renderCodePolicyModes(['see `MEDIA:/tmp/li', 've.png` ok\\n']),\n"
+        "  plainControl: renderCodePolicyModes(['look MEDIA:/tmp/a.png ok\\n']),\n"
+        "};\n"
         "const marker='MEDIA:';\n"
         "const prefixSplits={};\n"
         "for(let i=1;i<marker.length;i++) prefixSplits[i]=renderModes(['\\n\\n'+marker.slice(0,i), marker.slice(i)+'C:/tmp/live.png ']);\n"
@@ -205,7 +270,7 @@ def _run_real_smd_media_cases() -> dict:
         "const pdf=renderModes(['MEDIA:C:/tmp/report.pdf ']);\n"
         "const falsePrefix=renderModes(['M', 'aybe plain prose ']);\n"
         "const crossParent=renderModes(['- ME', '\\n- ow']);\n"
-        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent}));\n"
+        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent, codePolicy}));\n"
     )
     completed = subprocess.run(
         [NODE, "--input-type=module", "-e", script],
@@ -216,6 +281,130 @@ def _run_real_smd_media_cases() -> dict:
         timeout=30,
     )
     return json.loads(completed.stdout)
+
+
+class TestSmdMediaCodeFencePolicy(unittest.TestCase):
+    """MEDIA stays active inside fenced/inline code in EVERY streaming mode.
+
+    Settled ``renderMd()`` stashes MEDIA before its fence pass, so a MEDIA token
+    inside code renders as media. ``_safeSmdRenderer`` matched that, but
+    ``_streamFadeRenderer.add_text`` returned early through
+    ``_streamFadeSkipNode(parent)`` (which includes ``pre``/``code``) BEFORE its
+    MEDIA check, so fade streaming was the only mode that showed the raw path.
+
+    These cases drive the real vendored parser (``static/vendor/smd.min.js``) in
+    safe, fade, and reduced-motion fade, and compare against each other rather
+    than against a re-implementation.
+    """
+
+    @classmethod
+    @unittest.skipIf(NODE is None, "node not on PATH")
+    def setUpClass(cls):
+        cls.policy = _run_real_smd_media_cases()["codePolicy"]
+
+    def _assert_all_modes_agree(self, case_name):
+        case = self.policy[case_name]
+        safe, fade, reduced = case["safe"], case["fade"], case["fadeReduced"]
+        for mode_name, mode in (("fade", fade), ("fadeReduced", reduced)):
+            self.assertEqual(
+                mode["text"], safe["text"],
+                f"{case_name}: {mode_name} surrounding text must match safe exactly",
+            )
+            self.assertNotIn(
+                "MEDIA:", mode["text"],
+                f"{case_name}: {mode_name} must not leave a raw MEDIA: path visible",
+            )
+        return case
+
+    def test_fenced_whole_token_renders_media_in_all_modes(self):
+        case = self._assert_all_modes_agree("fencedWhole")
+        for mode_name in ("safe", "fade", "fadeReduced"):
+            self.assertIn(
+                "/tmp/a.png", case[mode_name]["html"],
+                f"fencedWhole: {mode_name} must render the MEDIA token as a node",
+            )
+
+    def test_fenced_split_token_renders_media_in_all_modes(self):
+        case = self._assert_all_modes_agree("fencedSplit")
+        for mode_name in ("safe", "fade", "fadeReduced"):
+            self.assertIn(
+                "/tmp/live.png", case[mode_name]["html"],
+                f"fencedSplit: {mode_name} must complete the split token across chunks",
+            )
+
+    def test_inline_code_whole_token_renders_media_in_all_modes(self):
+        case = self._assert_all_modes_agree("inlineWhole")
+        for mode_name in ("safe", "fade", "fadeReduced"):
+            self.assertIn("/tmp/a.png", case[mode_name]["html"])
+            self.assertIn(
+                "see", case[mode_name]["text"],
+                "surrounding prose must be conserved exactly",
+            )
+            self.assertIn("ok", case[mode_name]["text"])
+
+    def test_inline_code_split_token_renders_media_in_all_modes(self):
+        case = self._assert_all_modes_agree("inlineSplit")
+        for mode_name in ("safe", "fade", "fadeReduced"):
+            self.assertIn("/tmp/live.png", case[mode_name]["html"])
+
+    def test_plain_prose_control_is_unchanged(self):
+        """The reorder must not alter the ordinary (non-code) MEDIA path."""
+        case = self._assert_all_modes_agree("plainControl")
+        for mode_name in ("safe", "fade", "fadeReduced"):
+            self.assertIn("/tmp/a.png", case[mode_name]["html"])
+            self.assertIn("look", case[mode_name]["text"])
+            self.assertIn("ok", case[mode_name]["text"])
+
+
+class TestSmdMediaTailFlushPartition(unittest.TestCase):
+    """Stream-end flush must partition the WHOLE buffered candidate.
+
+    The old flush ran the shared matcher once and required the match at offset 0,
+    then wrote the entire remaining suffix as prose. Any later valid token in the
+    same buffered candidate was emitted as literal ``MEDIA:`` text, while settled
+    ``renderMd()`` scans globally and rendered it — so stream and settled token
+    counts diverged.
+    """
+
+    @unittest.skipIf(NODE is None, "node not on PATH")
+    def setUp(self):
+        self.cases = _run_tail_flush_partition_cases()
+
+    def test_malformed_open_quote_then_later_valid_token(self):
+        """An unterminated quoted ref must not swallow a later valid token."""
+        case = self.cases["malformedThenValid"]
+        self.assertEqual(
+            case["media"], ['"/tmp/bad.png', "/tmp/good.png"],
+            "the later valid MEDIA token must still become a media node",
+        )
+        self.assertEqual(
+            case["text"], " and ",
+            "only the exact prose between tokens may be written as text",
+        )
+        self.assertNotIn(
+            "MEDIA:", case["text"],
+            "no raw MEDIA: keyword may leak into the bubble as prose",
+        )
+
+    def test_no_match_writes_candidate_verbatim(self):
+        case = self.cases["noMatch"]
+        self.assertEqual(case["media"], [])
+        self.assertEqual(
+            case["text"], "no media here",
+            "a candidate with no token must be preserved byte-for-byte",
+        )
+
+    def test_append_failure_preserves_token_and_continues(self):
+        """A failed media append preserves that token's raw span, then continues."""
+        case = self.cases["appendFailureThenValid"]
+        self.assertEqual(
+            case["media"], ["/tmp/good.png"],
+            "the second token must still be appended after the first fails",
+        )
+        self.assertEqual(
+            case["text"], "MEDIA:/tmp/bad.png then ",
+            "the failed token keeps its exact raw span; no bytes are dropped",
+        )
 
 
 class TestSmdMediaInStream(unittest.TestCase):
@@ -466,15 +655,12 @@ class TestSmdMediaInStream(unittest.TestCase):
         # boundary check must therefore treat a complete http(s) ref as complete
         # even when it has no filename extension.
         self.assertIn("function _smdMediaTailFlush", MESSAGES_JS)
-        # The stream-end flush now PARTITIONS the buffered candidate with the
-        # shared global matcher instead of applying the anchored ^...$ matcher to
-        # the whole thing. The anchored form could not handle a candidate that is
-        # a complete token PLUS same-line prose (`MEDIA:/tmp/a.png and after`):
-        # the match failed and production emitted the entire string as literal
-        # prose, losing the media card. Assert the partition contract.
+        # The stream-end flush PARTITIONS the buffered candidate with the shared
+        # global matcher. The behavioral contract is covered by
+        # TestSmdMediaTailFlushPartition, which executes the real function; keep
+        # only the wiring assertions here so this test cannot pass on a source
+        # string while production behavior regresses.
         self.assertIn("_mediaTokenRe()", MESSAGES_JS)
-        self.assertIn("m.index===0", MESSAGES_JS)
-        self.assertIn("raw.slice(m[0].length)", MESSAGES_JS)
         self.assertIn("_smdMediaTailFlush(_smdParser)", MESSAGES_JS)
 
     def test_extensionless_https_tail_waits_until_stream_end(self):

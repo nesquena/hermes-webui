@@ -4493,11 +4493,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     };
     renderer.add_text=(data,text)=>{
       const parent=data&&data.nodes&&data.nodes[data.index];
-      if(!parent||_streamFadeSkipNode(parent)){baseAddText(data,text);return;}
+      if(!parent){baseAddText(data,text);return;}
       // MEDIA-in-stream: if this chunk carries a MEDIA:<ref> token, defer to
       // the shared interceptor so the token becomes a real media element
       // instead of plain text. The fade renderer would otherwise wrap every
       // word in a stream-fade-word span, leaving MEDIA: paths visible.
+      //
+      // This check runs BEFORE the generic pre/code skip below. Settled
+      // renderMd() stashes MEDIA *before* its fence pass, so MEDIA stays active
+      // inside fenced and inline code; the safe renderer matches that. Skipping
+      // to baseAddText first made fade the only mode that rendered a MEDIA token
+      // inside code as literal text. Prose inside a skip node still bypasses fade
+      // spans, because writeFadeText falls back to _smdAppendPlainText there.
       const parser=parserFor(data);
       const hasMediaTail=!!(_SMD_MEDIA_TAIL&&parser&&_SMD_MEDIA_TAIL.has&&_SMD_MEDIA_TAIL.has(parser));
       const value=String(text||'');
@@ -4506,6 +4513,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parser, writeFadeText);
         return;
       }
+      if(_streamFadeSkipNode(parent)){baseAddText(data,text);return;}
       const frag=document.createDocumentFragment();
       const wordRe=/(\S+)(\s*)/g;
       const reduceMotion=_streamFadeReduceMotionEnabled();
@@ -4680,24 +4688,38 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // media card vanished and the raw `MEDIA:` keyword was shown to the user,
     // while settled `renderMd()` rendered the card and kept ` and after`.
     //
-    // So PARTITION instead: match the shared token grammar anchored at offset 0,
-    // emit the normalized capture, and hand the exact unmatched remainder to the
-    // owning text writer. Byte-preserving by construction — the emitted span
-    // plus the remainder reconstruct the candidate. If nothing matches at offset
-    // 0, or the media append fails, fall back to writing the raw candidate so no
-    // text is ever dropped.
+    // So PARTITION instead: walk every shared-grammar match in the whole
+    // candidate, emit each normalized capture, and hand every exact prose slice
+    // (including the trailing suffix) to the owning text writer. If one media
+    // append fails, preserve that token's raw span and continue so a later valid
+    // token is still handled. Byte-preserving by construction: the emitted spans
+    // plus written slices reconstruct the candidate exactly.
     const raw=String(chunk);
+    if(!entry) return;
     const re=_mediaTokenRe();
-    const m=re.exec(raw);
-    const matchedAtStart=!!(m && m.index===0);
-    const emitted=!!(matchedAtStart && entry && entry.parent
-      && _smdAppendMediaNode(entry.parent, _unquoteMediaRef(m[1])));
-    if(!emitted){
-      if(entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, raw);
+    let last=0, m, matched=false;
+    while((m=re.exec(raw))){
+      matched=true;
+      if(m.index>last){
+        _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, raw.slice(last,m.index));
+      }
+      const emitted=!!(entry.parent && _smdAppendMediaNode(entry.parent, _unquoteMediaRef(m[1])));
+      if(!emitted){
+        _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, m[0]);
+      }
+      const next=m.index+m[0].length;
+      last=next;
+      // Defensive only: the shared grammar cannot match an empty span, but do
+      // not let a future grammar change turn stream-end flush into an infinite loop.
+      if(re.lastIndex<=m.index) re.lastIndex=m.index+1;
+    }
+    if(!matched){
+      _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, raw);
       return;
     }
-    const rest=raw.slice(m[0].length);
-    if(rest && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, rest);
+    if(last<raw.length){
+      _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, raw.slice(last));
+    }
   }
   function _smdMediaTailFlush(parser){
     if(!_SMD_MEDIA_TAIL||!parser||!_SMD_MEDIA_TAIL.get) return;

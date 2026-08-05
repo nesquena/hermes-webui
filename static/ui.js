@@ -2630,12 +2630,37 @@ function _mediaPathSrc(){
   // not skip regex literals or comments, so an unmatched brace anywhere in this
   // function truncates the extraction mid-literal.
   const boundary = String.raw`(?=[\s\)\]\x7d"'*_,;:]|MEDIA:|$)`;
+  // Terminal sentence punctuation belongs to the PROSE, not to the ref:
+  // `see MEDIA:/tmp/a.png.` is a sentence about a file, not a file named
+  // `a.png.`. `.`/`!`/`?` only close the token when the NEXT character ends the
+  // token anyway, so a dot genuinely inside a name still belongs to the ref
+  // (`/tmp/a.tar.gz`, `/tmp/v1.2/chart.png`). Kept in lockstep with
+  // _MEDIA_TOKEN_BOUNDARY / _MEDIA_TOKEN_SENTENCE_END in api/helpers.py.
+  // Sentence punctuation only when a REAL delimiter follows. End-of-input does
+  // NOT count: a streaming chunk can stop mid-token, and treating that as a
+  // sentence end would capture `/tmp/a` out of `MEDIA:/tmp/a.png` on the final
+  // chunk, making the streamed and settled renderings disagree.
+  const sentenceEnd = String.raw`[.!?](?=[\s\)\]\x7d"'*_,;:])`;
+  const boundaryOrSentence = String.raw`(?=[\s\)\]\x7d"'*_,;:]|${sentenceEnd}|MEDIA:|$)`;
+  // One path character that is NOT terminal sentence punctuation. TEMPERED
+  // GREEDY, not lazy: it consumes as much as the old greedy `${ch}+` did, so
+  // `C:/tmp/live.png` and a URL's `://` plus any nested `MEDIA:` in its query
+  // stay inside one token. A lazy `${ch}+?` would stop at `C` (because `:`
+  // closes a token) and at a nested `MEDIA:`.
+  const chNotSentenceEnd = String.raw`(?:(?!${sentenceEnd})${ch})`;
   const spaced = String.raw`(?!MEDIA:)${ch}+?(?:[^\S\n]${wordNoDot})*?[^\S\n]${finalWithExt}${boundary}`;
-  const nospace = String.raw`(?!MEDIA:)${ch}+?\.[A-Za-z0-9]+${boundary}`;
+  const nospace = String.raw`(?!MEDIA:)${ch}+?\.[A-Za-z0-9]+${boundaryOrSentence}`;
+  // A real HTTP(S) URL is one tempered-greedy run, tried BEFORE the bare forms so
+  // `://host/...` (and a nested `MEDIA:` in its path/query) stays in one token. A
+  // query string keeps its `?`/`!`; a trailing period stays in the sentence.
+  const externalUrl = String.raw`(?:[hH][tT][tT][pP][sS]?)://${chNotSentenceEnd}+`;
+  // Extension-less legacy shape: greedy over path characters, but a trailing
+  // sentence `.`/`!`/`?` is left to the prose instead of captured.
+  const extensionless = String.raw`${chNotSentenceEnd}+`;
   // Quoted form wins first (can hold any character), then the spaced form, then
   // the no-space form, then the fallback for extension-less paths.
   // Kept in lockstep with media_token_pattern() in api/helpers.py.
-  return String.raw`"[^"\n]+"|'[^'\n]+'|${spaced}|${nospace}|${ch}+`;
+  return String.raw`"[^"\n]+"|'[^'\n]+'|${externalUrl}|${spaced}|${nospace}|${extensionless}|${ch}+`;
 }
 
 /** Global matcher for MEDIA: tokens. Fresh instance per call — a shared /g regex

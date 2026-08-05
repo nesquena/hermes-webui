@@ -1233,7 +1233,23 @@ def clear_profile_cookie(handler) -> None:
 _MEDIA_TOKEN_BARE = (
     r"(?!MEDIA:)[^\s)\]]+?(?:[^\S\n](?!MEDIA:)[^\s)\]]+?)*?\.[A-Za-z0-9]+"
 )
-_MEDIA_TOKEN_BOUNDARY = r"(?=[\s)\]}\"'*_,;:]|MEDIA:|$)"
+# Terminal sentence punctuation belongs to the PROSE, not to the ref:
+# `see MEDIA:/tmp/a.png.` is a sentence about a file, not a file named
+# `a.png.`. `.`/`!`/`?` only close the token when the NEXT character ends the
+# token anyway (whitespace, a closing delimiter, or end of input), so a dot that
+# is genuinely inside a name still belongs to the ref — `/tmp/a.tar.gz` and
+# `/tmp/v1.2/chart.png` keep matching whole. A real HTTP(S) query keeps its `?`
+# and `!` because those are followed by query characters, not by a boundary.
+# Mirrors ``_mediaPathSrc()`` in static/ui.js; keep the two in lockstep.
+# A `.`/`!`/`?` is sentence punctuation only when a REAL delimiter follows it —
+# whitespace or a closing delimiter. End-of-input deliberately does NOT count:
+# during streaming the text simply stops mid-token, and treating that as a
+# sentence end would capture `/tmp/a` out of `MEDIA:/tmp/a.png` on the last
+# chunk, so the streamed and settled renderings of one token would disagree.
+_MEDIA_TOKEN_SENTENCE_END = r"[.!?](?=[\s)\]}\"'*_,;:])"
+_MEDIA_TOKEN_BOUNDARY = (
+    r"(?=[\s)\]}\"'*_,;:]|" + _MEDIA_TOKEN_SENTENCE_END + r"|MEDIA:|$)"
+)
 # Explicit quoted forms. These win before every unquoted alternative so an
 # ambiguous path (spaces, a dotted directory before a space, an internal ``)``
 # or ``]``) has one unambiguous spelling that both languages agree on. A quoted
@@ -1336,12 +1352,36 @@ def media_token_pattern(extra_exclude: str = "", exclude_urls: bool = False) -> 
         + _MEDIA_TOKEN_BOUNDARY
     )
     nospace = r"(?!MEDIA:)" + ch + r"+?\.[A-Za-z0-9]+" + _MEDIA_TOKEN_BOUNDARY
-    fallback = ch + r"+"
+    # One path character that is NOT terminal sentence punctuation. This is a
+    # TEMPERED GREEDY run, not a lazy one: it consumes as much as the old greedy
+    # `ch+` did — so `C:/tmp/live.png` and a URL's own `://` and `MEDIA:`-bearing
+    # query survive intact — but it refuses a `.`/`!`/`?` that is immediately
+    # followed by a token boundary, leaving that character to the prose.
+    #
+    # A lazy `ch+?` plus a boundary lookahead is WRONG here: `:` closes a token,
+    # so the lazy form stops at `C` in `C:/tmp/live.png`, and stops at the nested
+    # `MEDIA:` inside an external URL.
+    ch_not_sentence_end = r"(?:(?!" + _MEDIA_TOKEN_SENTENCE_END + r")" + ch + r")"
+    # Extension-less legacy shape: greedy over path characters, but a trailing
+    # sentence `.`/`!`/`?` is left to the prose instead of being captured.
+    fallback = ch_not_sentence_end + r"+"
+    # A real HTTP(S) URL is one tempered-greedy run, tried BEFORE the bare forms
+    # so `://host/...` (and any nested `MEDIA:` in its path/query) stays inside
+    # one token. `MEDIA:https://h/a.png?q=1.` keeps the query and leaves the final
+    # period to the sentence. Not emitted when the caller skips URLs entirely.
+    external_url = "" if exclude_urls else (
+        r"(?i:https?)://" + ch_not_sentence_end + r"+"
+    )
     return (
         r"MEDIA:" + url_guard + r"("
         + _MEDIA_TOKEN_QUOTED
+        + ((r"|" + external_url) if external_url else "")
         + r"|" + spaced
         + r"|" + nospace
         + r"|" + fallback
+        # Last resort: a token that reaches neither an extension nor a boundary
+        # (e.g. the final bytes of a still-streaming ref) keeps the historic
+        # greedy behavior so nothing that resolved before stops resolving.
+        + r"|" + ch + r"+"
         + r")"
     )
