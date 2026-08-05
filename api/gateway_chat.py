@@ -799,6 +799,20 @@ def _cleanup_gateway_pending_mirror(session_id: str) -> None:
         logger.debug("Failed to reconcile gateway pending mirror during teardown", exc_info=True)
 
 
+def _drain_queued_session_turn_after_teardown(session_id):
+    try:
+        from api.routes import drain_queued_session_turn
+
+        return drain_queued_session_turn(session_id)
+    except Exception:
+        logger.debug(
+            "gateway turn-teardown durable queue drain failed for session %s",
+            session_id,
+            exc_info=True,
+        )
+        return None
+
+
 def _run_gateway_chat_streaming(
     session_id,
     msg_text,
@@ -1371,3 +1385,4 @@ def _run_gateway_chat_streaming(
         _clear_gateway_run_starting(stream_id)
         unregister_stream_owner(stream_id)
         unregister_active_run(stream_id)
+        _drain_queued_session_turn_after_teardown(session_id)

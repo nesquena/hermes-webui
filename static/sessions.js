@@ -1486,6 +1486,7 @@ async function newSession(flash, options={}){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;S.messages=data.session.messages||[];
+    if(typeof hydrateSessionQueue==='function') hydrateSessionQueue(S.session.session_id,data.session.queue);
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -1955,6 +1956,7 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
+  if(typeof hydrateSessionQueue==='function') hydrateSessionQueue(sid,data.session.queue);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.

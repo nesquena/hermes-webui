@@ -41,19 +41,16 @@ def test_restore_skips_suppressed_non_empty_server_draft_only():
 
 def test_busy_send_paths_clear_persisted_composer_draft():
     helper_body = _block(MESSAGES_JS, "function _clearComposerAfterQueuedSelectionSend", "function _flushSelectionBlocksToComposer")
-    assert "function _clearComposerAfterQueuedSelectionSend()" in helper_body
-    assert "const sid=arguments.length?arguments[0]:(S.session&&S.session.session_id);" in helper_body
-    assert "const draftText=composer?String(composer.value||''):'';" in helper_body
-    assert "const draftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];" in helper_body
-    assert "_clearComposerDraft(sid,draftText,draftFiles)" in helper_body
+    assert "function _clearComposerAfterQueuedSelectionSend(sid, expectedText, filesSnapshot)" in helper_body
+    assert "const ownerVisible=!!(S.session&&S.session.session_id===sid);" in helper_body
+    assert "_clearComposerDraft(sid,expected,captured)" in helper_body
 
     in_progress_body = _block(MESSAGES_JS, "if (_sendInProgress) {", "  _sendInProgress = true;")
-    assert "_clearComposerAfterQueuedSelectionSend();" in in_progress_body
-    assert "_clearComposerDraft(_targetSid,_text,S.pendingFiles?[...S.pendingFiles]:[])" in in_progress_body
+    assert "_clearComposerAfterQueuedSelectionSend(_targetSid,_rawText,_filesSnapshot);" in in_progress_body
 
     busy_body = _block(MESSAGES_JS, "if(S.busy||compressionRunning){", "  if(S.session&&(S.session.read_only||S.session.is_read_only))")
-    assert "_clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);" in busy_body
-    assert busy_body.count("_clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);") >= 2
+    assert "_clearComposerAfterQueuedSelectionSend(_sid,text,_filesSnapshot);" in busy_body
+    assert busy_body.count("_clearComposerAfterQueuedSelectionSend(_sid,text,_filesSnapshot);") >= 2
     assert "_clearComposerDraft(S.session.session_id,text" not in busy_body
     try_steer_body = _block(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
     assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in try_steer_body, (

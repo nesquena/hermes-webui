@@ -861,6 +861,7 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
       await loadSession(data.session.session_id);
     }else{
       S.session=data.session;
+      if(typeof hydrateSessionQueue==='function') hydrateSessionQueue(S.session.session_id,data.session.queue);
       S.messages=data.session.messages||[];
       S.toolCalls=data.session.tool_calls||[];
       clearLiveToolCards();
@@ -963,6 +964,7 @@ async function _runManualCompression(focusTopic){
         throw new Error('session no longer available');
       }
       S.session=live.session;
+      if(typeof hydrateSessionQueue==='function') hydrateSessionQueue(S.session.session_id,live.session.queue);
       S.messages=live.session.messages||[];
       S.toolCalls=live.session.tool_calls||[];
       if(typeof _messagesTruncated!=='undefined') _messagesTruncated=false;
@@ -1281,6 +1283,36 @@ async function cmdGoal(args){
 // These commands let users override the default message mode setting for a
 // specific message.  They are only meaningful while the agent is running.
 
+function _restoreQueueCommandDraft(sid, text, files){
+  const input=$('msg');
+  const ownerVisible=!!(S.session&&S.session.session_id===sid);
+  if(ownerVisible&&input&&!String(input.value||'').trim()){
+    input.value=String(text||'');
+    if(typeof autoResize==='function')autoResize();
+  }
+  if(!ownerVisible&&typeof _saveComposerDraftNow==='function') _saveComposerDraftNow(sid,text,files||[]);
+  if(typeof renderTray==='function')renderTray();
+}
+
+function _clearAcceptedQueueCommandDraft(sid, text, files){
+  const ownerVisible=!!(S.session&&S.session.session_id===sid);
+  if(!ownerVisible){
+    if(typeof _clearComposerDraft==='function') _clearComposerDraft(sid,text,files||[]);
+    return;
+  }
+  const input=$('msg');
+  const current=input?String(input.value||''):'';
+  const same=!current.trim()||current.trim()===String(text||'').trim();
+  if(same&&input){input.value='';if(typeof autoResize==='function')autoResize();}
+  if(typeof _clearComposerDraft==='function'&&same)_clearComposerDraft(sid,text,files);
+  else if(!same&&typeof _saveComposerDraftNow==='function')_saveComposerDraftNow(sid,current,S.pendingFiles||[]);
+  if(Array.isArray(files)&&Array.isArray(S.pendingFiles)&&files.length){
+    const delivered=new Set(files);
+    S.pendingFiles=S.pendingFiles.filter(file=>!delivered.has(file));
+  }
+  if(typeof renderTray==='function')renderTray();
+}
+
 /**
  * /queue <message> — Explicitly queue a message for the next turn.
  * Works regardless of the default message mode setting.
@@ -1296,10 +1328,16 @@ async function cmdQueue(args){
     return;
   }
   if(!S.session){showToast(t('no_active_session'));return;}
-  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
-  updateQueueBadge(S.session.session_id);
-  S.pendingFiles=[];renderTray();
-  showToast(t('cmd_queue_confirm'),2000);
+  const sid=S.session.session_id;
+  const files=[...S.pendingFiles];
+  const modelState=typeof _chatPayloadModelState==='function'
+    ? _chatPayloadModelState()
+    : {model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',model_provider:S.session&&S.session.model_provider||''};
+  try{
+    await queueSessionMessage(sid,{text:msg,files,model:modelState.model,model_provider:modelState.model_provider});
+    _clearAcceptedQueueCommandDraft(sid,msg,files);
+    showToast(t('cmd_queue_confirm'),2000);
+  }catch(err){_restoreQueueCommandDraft(sid,msg,files);showToast((err&&err.message)||'Queue failed',3500,'error');}
 }
 
 /**
@@ -1317,11 +1355,16 @@ async function cmdInterrupt(args){
     return;
   }
   if(!S.session){showToast(t('no_active_session'));return;}
-  // Queue the message first (before cancel sets busy=false and drains)
-  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
-  updateQueueBadge(S.session.session_id);
-  S.pendingFiles=[];renderTray();
-  // Cancel the active stream; setBusy(false) will drain the queue
+  // Queue acceptance must precede cancellation.
+  const sid=S.session.session_id;
+  const files=[...S.pendingFiles];
+  const modelState=typeof _chatPayloadModelState==='function'
+    ? _chatPayloadModelState()
+    : {model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',model_provider:S.session&&S.session.model_provider||''};
+  try{
+    await queueSessionMessage(sid,{text:msg,files,model:modelState.model,model_provider:modelState.model_provider});
+  }catch(err){_restoreQueueCommandDraft(sid,msg,files);showToast((err&&err.message)||'Queue failed',3500,'error');return;}
+  _clearAcceptedQueueCommandDraft(sid,msg,files);
   if(typeof cancelStream==='function'){
     if(await cancelStream('slash-interrupt')) showToast(t('cmd_interrupt_confirm'),2000);
     else showToast(t('cancel_failed'),null,'error');
@@ -1554,7 +1597,6 @@ async function _trySteer(msg, explicitSteer){
   const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
   const ownerStreamId=(typeof S!=='undefined'&&(S.activeStreamId||(S.session&&S.session.active_stream_id)))||null;
   const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
-  const ownerProfile=typeof S!=='undefined'&&(S.activeProfile||'default');
   const ownerModelState=typeof _chatPayloadModelState==='function'
     ? _chatPayloadModelState()
     : {model:(typeof S!=='undefined'&&S.session&&S.session.model)||'',model_provider:(typeof S!=='undefined'&&S.session&&S.session.model_provider)||''};
@@ -1625,15 +1667,18 @@ async function _trySteer(msg, explicitSteer){
     return true;
   }
   if(result&&result.fallback==='gateway_steer_queued'&&typeof queueSessionMessage==='function'){
+    try{
+      await queueSessionMessage(ownerSid,{text:originalMsg,files:pendingFilesSnapshot,model:ownerModelState.model,model_provider:ownerModelState.model_provider});
+    }catch(err){
+      if(_steerOwnerIsCurrent(ownerSid)){
+        const inp=$('msg');
+        if(inp&&!String(inp.value||'').trim()){inp.value=_steerRestoreText(originalMsg,explicitSteer);if(typeof autoResize==='function')autoResize();}
+        if(typeof renderTray==='function')renderTray();
+      }else await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
+      showToast((err&&err.message)||'Queue failed',3500,'error');
+      return false;
+    }
     _steerUploadCache=null;
-    queueSessionMessage(ownerSid,{
-      text:originalMsg,
-      files:pendingFilesSnapshot,
-      model:ownerModelState.model,
-      model_provider:ownerModelState.model_provider,
-      profile:ownerProfile,
-    });
-    if(typeof updateQueueBadge==='function')updateQueueBadge(ownerSid);
     if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
     if(_steerOwnerIsCurrent(ownerSid)&&typeof S!=='undefined'&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length&&pendingFilesSnapshot.length){
       const _queued=new Set(pendingFilesSnapshot);

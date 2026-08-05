@@ -1230,6 +1230,7 @@ class Session:
                  worktree_created_at=None,
                  enabled_toolsets=None,
                  composer_draft=None,
+                 queue=None,
                  anchor_activity_scenes=None,
                  process_wakeup_pause=None,
                  share_token=None,
@@ -1318,6 +1319,7 @@ class Session:
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
+        self.queue = [dict(item) for item in queue if isinstance(item, dict)] if isinstance(queue, list) else []
         self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
@@ -1390,7 +1392,7 @@ class Session:
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
-            'enabled_toolsets', 'composer_draft',
+            'enabled_toolsets', 'composer_draft', 'queue',
             'process_wakeup_pause',
             'share_token', 'share_created_at',
         ]
@@ -1773,6 +1775,7 @@ class Session:
             'read_only': self.read_only,
             'enabled_toolsets': self.enabled_toolsets,
             'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
+            'queue': [dict(item) for item in self.queue if isinstance(item, dict)],
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,

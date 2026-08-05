@@ -79,6 +79,20 @@ contributor guidance; it does not change runtime behavior or CI gates.
   `/api/chat/stream` wire names) over the aspirational semantic taxonomy when
   writing clients against current source.
 
+### Durable WebUI queue
+
+Accepted WebUI queue items live in the owning session sidecar, including their
+editable text, uploaded attachment metadata, model/provider choice, creation
+time, and stable item id. The queue is scoped to that session and profile. A
+local-agent or gateway stream teardown claims at most the next item and starts
+it through the normal chat-start path; the claim and pending-turn state share
+one session save.
+
+Sidecar persistence makes accepted items retained and recoverable across a
+WebUI process restart. There is deliberately no startup scheduler, so a
+restart alone does not automatically resume a retained queue. Browser storage
+is only a legacy review-to-composer fallback and never auto-submits an item.
+
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,
 read the relevant RFC before editing. In the PR description, name the state layer

@@ -164,6 +164,35 @@ def _reject_invisible_session(handler, session) -> bool:
     return True
 
 
+def _resolve_upload_session(session_id: str, session):
+    if not getattr(session, 'pre_compression_snapshot', False):
+        return session_id, session
+    from api.routes import _pre_compression_continuation_session_id
+
+    continuation_id = _pre_compression_continuation_session_id(session)
+    if not continuation_id or continuation_id == session_id:
+        raise ValueError('session continuation is unavailable')
+    try:
+        continuation = get_session(continuation_id)
+    except KeyError as exc:
+        raise ValueError('session continuation is unavailable') from exc
+    if getattr(continuation, 'pre_compression_snapshot', False):
+        raise ValueError('session continuation is unavailable')
+    return continuation_id, continuation
+
+
+def _reject_unwritable_session(handler, session_id: str, session) -> bool:
+    from api.routes import _session_is_subagent_view_only
+
+    if _session_is_subagent_view_only(session_id):
+        j(handler, {'error': 'Subagent sessions are view-only'}, status=400)
+        return True
+    if getattr(session, 'read_only', False):
+        j(handler, {'error': 'Read-only imported sessions cannot be modified from WebUI'}, status=403)
+        return True
+    return False
+
+
 def _write_office_upload_sidecar(workspace: Path, dest: Path, file_bytes: bytes) -> dict | None:
     """Write a Markdown preview sidecar for supported Office uploads."""
     if dest.suffix.lower() not in {'.docx', '.xlsx', '.pptx'}:
@@ -222,6 +251,12 @@ def handle_upload(handler):
         except KeyError:
             return j(handler, {'error': 'Session not found'}, status=404)
         if _reject_invisible_session(handler, s):
+            return True
+        try:
+            session_id, s = _resolve_upload_session(session_id, s)
+        except ValueError as exc:
+            return j(handler, {'error': str(exc)}, status=409)
+        if _reject_invisible_session(handler, s) or _reject_unwritable_session(handler, session_id, s):
             return True
         safe_name = _sanitize_upload_name(filename)
         dest = _upload_destination(session_id, safe_name)
@@ -400,6 +435,12 @@ def handle_upload_extract(handler):
         except KeyError:
             return j(handler, {'error': 'Session not found'}, status=404)
         if _reject_invisible_session(handler, s):
+            return True
+        try:
+            session_id, s = _resolve_upload_session(session_id, s)
+        except ValueError as exc:
+            return j(handler, {'error': str(exc)}, status=409)
+        if _reject_invisible_session(handler, s) or _reject_unwritable_session(handler, session_id, s):
             return True
         session_dir = _session_attachment_dir(session_id)
         session_dir.mkdir(parents=True, exist_ok=True)

@@ -545,22 +545,23 @@ def test_newSession_resets_busy_state_for_fresh_chat(cleanup_test_sessions):
         "newSession() must refresh the badge for the new session rather than leaving the old session's queue badge visible"
 
 
-def test_session_scoped_message_queue_frontend_wiring(cleanup_test_sessions):
+def test_session_scoped_message_queue_frontend_wiring():
     """R15bb: queued follow-ups must stay attached to their originating session.
-    The frontend should use a session-keyed queue store and drain only the active
-    session's queued messages when that session becomes idle.
+    The frontend should render a session-keyed server queue and never drain it
+    merely because the visible composer becomes idle.
     """
     ui_src = (REPO_ROOT / "static/ui.js").read_text()
     messages_src = (REPO_ROOT / "static/messages.js").read_text()
     sessions_src = (REPO_ROOT / "static/sessions.js").read_text()
     assert "const SESSION_QUEUES" in ui_src
     assert "function queueSessionMessage" in ui_src
-    assert "function shiftQueuedSessionMessage" in ui_src
-    # _queueDrainSid tracks which session's queue to drain even after session switches
-    assert "_queueDrainSid" in ui_src
-    assert "shiftQueuedSessionMessage(sid)" in ui_src
-    assert "queueSessionMessage(S.session.session_id" in messages_src
-    assert "updateQueueBadge(S.session.session_id);" in messages_src
+    assert "function hydrateSessionQueue" in ui_src
+    assert "api('/api/chat/queue'" in ui_src
+    assert "function shiftQueuedSessionMessage" not in ui_src
+    assert "_queueDrainSid" not in ui_src
+    assert "queueSessionMessage(_sid" in messages_src
+    assert "await queueSessionMessage" in messages_src
+    assert "hydrateSessionQueue(S.session.session_id,data.session.queue)" in sessions_src
     assert "updateQueueBadge(sid);" in sessions_src
 
 

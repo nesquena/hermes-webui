@@ -15333,6 +15333,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/chat/start":
         return _handle_chat_start(handler, body, diag=diag)
 
+    if parsed.path == "/api/chat/queue":
+        return _handle_chat_queue(handler, body)
+
     if parsed.path == "/api/chat":
         return _handle_chat_sync(handler, body)
 
@@ -20963,6 +20966,10 @@ def _provisional_title_from_prompt(prompt: str, fallback: str = "Untitled") -> s
     return title_from([{"role": "user", "content": text}], fallback) or fallback
 
 
+class _QueueClaimRejected(Exception):
+    pass
+
+
 def _prepare_chat_start_session_for_stream(
     s,
     *,
@@ -20974,6 +20981,7 @@ def _prepare_chat_start_session_for_stream(
     stream_id: str,
     started_at: float | None = None,
     source: str = "webui",
+    queue_item_id: str | None = None,
 ):
     """Persist chat-start state according to webui.session_save_mode.
 
@@ -20984,6 +20992,10 @@ def _prepare_chat_start_session_for_stream(
     a normal session message. Empty sessions are never saved here because this
     helper only runs after a non-empty message is validated.
     """
+    if queue_item_id is not None:
+        queue = list(getattr(s, "queue", None) or [])
+        if not queue or str(queue[0].get("id") or "") != str(queue_item_id):
+            raise _QueueClaimRejected("queued item is no longer next")
     s.workspace = workspace
     s.model = model
     s.model_provider = model_provider
@@ -21006,7 +21018,18 @@ def _prepare_chat_start_session_for_stream(
             s.pending_started_at,
             source=source,
         )
-    s.save()
+    queue_before_save = None
+    if queue_item_id is not None:
+        queue_before_save = list(getattr(s, "queue", None) or [])
+        if not queue_before_save or str(queue_before_save[0].get("id") or "") != str(queue_item_id):
+            raise _QueueClaimRejected("queued item is no longer next")
+        s.queue = queue_before_save[1:]
+    try:
+        s.save()
+    except Exception:
+        if queue_before_save is not None:
+            s.queue = queue_before_save
+        raise
 
 
 def _is_hidden_empty_session(s) -> bool:
@@ -21160,6 +21183,7 @@ def _start_chat_stream_for_session(
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
+    queue_item_id: str | None = None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -21229,6 +21253,18 @@ def _start_chat_stream_for_session(
                     }
                 needs_stale_cleanup = False
                 stream_id = uuid.uuid4().hex
+                if queue_item_id is not None:
+                    queue = list(getattr(s, "queue", None) or [])
+                    if not queue or str(queue[0].get("id") or "") != str(queue_item_id):
+                        return {
+                            "error": "queued item is no longer next",
+                            "_status": 409,
+                        }
+                    queued_item = queue[0]
+                    attachments = list(queued_item.get("files") or [])
+                    msg = _compose_queued_turn_message(queued_item.get("text"), attachments)
+                    model = queued_item.get("model") or model
+                    model_provider = queued_item.get("model_provider") or model_provider
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)
                 _prepare_chat_start_session_for_stream(
@@ -21240,6 +21276,7 @@ def _start_chat_stream_for_session(
                     model_provider=model_provider,
                     stream_id=stream_id,
                     source=source,
+                    queue_item_id=queue_item_id,
                 )
                 break
         if needs_stale_cleanup:
@@ -21394,6 +21431,7 @@ def _start_run(
     diag=None,
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
+    queue_item_id: str | None = None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -21422,6 +21460,12 @@ def _start_run(
     )
 
     if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
+        if queue_item_id is not None and runtime_adapter_runner_enabled():
+            return {
+                "error": "durable WebUI queue is unsupported in runner-local mode",
+                "_status": 501,
+            }
+
         def _legacy_start_run(request: StartRunRequest) -> dict:
             return _start_chat_stream_for_session(
                 s,
@@ -21435,6 +21479,7 @@ def _start_run(
                 source=request.source or source,
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
+                queue_item_id=queue_item_id,
             )
 
         def _legacy_adapter_factory():
@@ -21476,6 +21521,7 @@ def _start_run(
         source=source,
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
+        queue_item_id=queue_item_id,
     )
 
 
@@ -21528,6 +21574,72 @@ def _refresh_process_wakeup_pause_credential_fingerprint(session) -> bool:
     updated["credential_state_fingerprint"] = process_wakeup_credential_state_fingerprint(session)
     session.process_wakeup_pause = updated
     return True
+
+
+def _fanout_server_turn_started(session_id: str, response: dict, *, source: str) -> None:
+    try:
+        status = int((response or {}).get("_status", 200) or 200)
+        stream_id = (response or {}).get("stream_id")
+        if status < 400 and stream_id:
+            from api.background_process import get_session_channel
+
+            channel = get_session_channel(session_id)
+            if channel is not None:
+                channel.emit(
+                    "server_turn_started",
+                    {
+                        "session_id": str(session_id),
+                        "stream_id": str(stream_id),
+                        "pending_started_at": (response or {}).get("pending_started_at"),
+                        "source": source,
+                    },
+                )
+    except Exception:
+        logger.debug(
+            "server_turn_started fan-out failed for session %s", session_id, exc_info=True
+        )
+
+
+def drain_queued_session_turn(session_id: str):
+    """Start at most the next durable queue item for one owning session."""
+    from api.runtime_adapter import runtime_adapter_runner_enabled
+
+    if runtime_adapter_runner_enabled():
+        return {
+            "error": "durable WebUI queue is unsupported in runner-local mode",
+            "_status": 501,
+        }
+    try:
+        session = get_session(session_id)
+    except KeyError:
+        return {"error": "Session not found", "_status": 404}
+    if getattr(session, "pre_compression_snapshot", False):
+        return {
+            "error": "cannot drain a pre-compression snapshot",
+            "session_id": session_id,
+            "_status": 409,
+        }
+    if not isinstance(getattr(session, "queue", None), list) or not session.queue:
+        return {"accepted": False, "reason": "empty", "session_id": session_id}
+    item = session.queue[0]
+    item_id = str(item.get("id") or "") if isinstance(item, dict) else ""
+    if not item_id:
+        return {"error": "invalid durable queue item", "_status": 409}
+    response = _start_run(
+        session,
+        msg=_compose_queued_turn_message(item.get("text"), item.get("files") or []),
+        attachments=list(item.get("files") or []),
+        workspace=session.workspace,
+        model=item.get("model") or session.model,
+        model_provider=item.get("model_provider") or getattr(session, "model_provider", None),
+        normalized_model=False,
+        source="webui_queue",
+        route="/api/chat/queue",
+        gateway_chat_enabled=webui_gateway_chat_enabled(get_config()),
+        queue_item_id=item_id,
+    )
+    _fanout_server_turn_started(session_id, response, source="webui_queue")
+    return response
 
 
 def start_session_turn(
@@ -21728,42 +21840,7 @@ def start_session_turn(
         route="start_session_turn",
     )
 
-    # ── Defect B: live-view of server-initiated turns ──────────────────────
-    # Option Z starts this turn server-side, so NO browser EventSource is
-    # attached to the new STREAMS[stream_id] (the browser only opens
-    # /api/chat/stream when IT POSTs /api/chat/start). An already-open tab
-    # would therefore see nothing until a manual refresh re-reads persisted
-    # state. Fix: fan a lightweight `server_turn_started` {stream_id} frame
-    # onto the persistent per-session live-view channel. messages.js handles
-    # it by attaching its EXISTING chat-stream renderer (attachLiveStream) to
-    # that stream_id — no second renderer, no chat/start POST.
-    #
-    # Idempotent with the closed-tab path: get_session_channel() is the
-    # NON-creating accessor, so when no tab is open this is a pure no-op and
-    # the server-side wakeup (the Option Z headline) is completely unaffected.
-    # If the user also has the per-turn chat-stream open, the frontend dedupes
-    # by stream_id so there is no double-render.
-    try:
-        status = int((resp or {}).get("_status", 200) or 200)
-        stream_id = (resp or {}).get("stream_id")
-        if status < 400 and stream_id:
-            from api.background_process import get_session_channel
-
-            ch = get_session_channel(session_id)
-            if ch is not None:
-                ch.emit(
-                    "server_turn_started",
-                    {
-                        "session_id": str(session_id),
-                        "stream_id": str(stream_id),
-                        "pending_started_at": (resp or {}).get("pending_started_at"),
-                        "source": source,
-                    },
-                )
-    except Exception:
-        logger.debug(
-            "server_turn_started fan-out failed for session %s", session_id, exc_info=True
-        )
+    _fanout_server_turn_started(session_id, resp, source=source)
     return resp
 
 
@@ -22383,12 +22460,257 @@ def _normalize_chat_attachments(raw_attachments):
             is_image = item.get("is_image")
             if isinstance(is_image, bool):
                 att["is_image"] = is_image
+            for key in ("extracted", "extracted_count"):
+                value = item.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    att[key] = value
             normalized.append(att)
         else:
             value = str(item).strip()
             if value:
                 normalized.append({"name": value, "path": "", "mime": ""})
     return normalized
+
+
+def _queue_attachment_metadata(session_id: str, raw_attachments):
+    if raw_attachments in (None, []):
+        return []
+    if not isinstance(raw_attachments, list) or len(raw_attachments) > 20:
+        raise ValueError("attachments must be a list of at most 20 uploaded files")
+    from api.upload import _session_attachment_dir
+
+    attachment_root = _session_attachment_dir(session_id).resolve()
+    normalized = _normalize_chat_attachments(raw_attachments)
+    if len(normalized) != len(raw_attachments):
+        raise ValueError("invalid attachment metadata")
+    for attachment in normalized:
+        path = str(attachment.get("path") or "").strip()
+        if not path:
+            raise ValueError("queued attachments must be uploaded before acceptance")
+        resolved = Path(path).expanduser().resolve()
+        extracted = any(
+            key in attachment
+            for key in ("extracted", "extracted_count")
+        )
+        try:
+            resolved.relative_to(attachment_root)
+        except ValueError as exc:
+            raise ValueError("attachment does not belong to this session") from exc
+        if extracted:
+            if not (resolved.is_file() or resolved.is_dir()):
+                raise ValueError("extracted attachment is no longer available")
+        elif not resolved.is_file():
+            raise ValueError("uploaded attachment is no longer available")
+        attachment["path"] = str(resolved)
+    return normalized
+
+
+def _queue_response(session, *, item=None):
+    payload = {
+        "accepted": True,
+        "session_id": session.session_id,
+        "queue": [dict(entry) for entry in getattr(session, "queue", []) if isinstance(entry, dict)],
+    }
+    if item is not None:
+        payload["item"] = dict(item)
+    return payload
+
+
+def _compose_queued_turn_message(text, attachments):
+    base = str(text or "").strip()
+    paths = [
+        str(attachment.get("path") or attachment.get("name") or "").strip()
+        for attachment in (attachments or [])
+        if isinstance(attachment, dict)
+    ]
+    paths = [path for path in paths if path]
+    if not paths:
+        return base
+    if not base:
+        return f"I've uploaded {len(paths)} file(s): {', '.join(paths)}"
+    return f"{base}\n\n[Attached files: {', '.join(paths)}]"
+
+
+def _handle_chat_queue(handler, body):
+    from api.runtime_adapter import runtime_adapter_runner_enabled
+
+    if runtime_adapter_runner_enabled():
+        return j(
+            handler,
+            {"error": "durable WebUI queue is unsupported in runner-local mode"},
+            status=501,
+        )
+    if not isinstance(body, dict):
+        return bad(handler, "queue payload must be an object", 400)
+    sid = body.get("session_id")
+    if not isinstance(sid, str) or not sid.strip() or not is_safe_session_id(sid.strip()):
+        return bad(handler, "valid session_id is required", 400)
+    sid = sid.strip()
+    action = str(body.get("action") or "").strip().lower()
+    if action not in {"enqueue", "edit", "delete", "reorder", "clear", "combine"}:
+        return bad(handler, "invalid queue action", 400)
+    try:
+        session = get_session(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
+        return bad(handler, "Session not found", 404)
+    continuation_sid = _pre_compression_continuation_session_id(session)
+    if getattr(session, "pre_compression_snapshot", False):
+        if not continuation_sid or continuation_sid == sid:
+            return bad(handler, "session continuation is unavailable", 409)
+        sid = continuation_sid
+        try:
+            session = get_session(sid)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+    if _session_is_subagent_view_only(sid):
+        return bad(handler, "Subagent sessions are view-only", 400)
+    if getattr(session, "read_only", False):
+        return bad(handler, "Read-only imported sessions cannot be modified from WebUI", 403)
+
+    item = None
+    enqueue_accepted = False
+    try:
+        with _get_session_agent_lock(sid):
+            session = _ensure_full_session_before_mutation(sid, get_session(sid))
+            if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
+                return bad(handler, "Session not found", 404)
+            if getattr(session, "pre_compression_snapshot", False):
+                return bad(handler, "session continuation is unavailable", 409)
+            if _session_is_subagent_view_only(sid):
+                return bad(handler, "Subagent sessions are view-only", 400)
+            if getattr(session, "read_only", False):
+                return bad(handler, "Read-only imported sessions cannot be modified from WebUI", 403)
+            old_queue = list(getattr(session, "queue", None) or [])
+            queue = [dict(entry) for entry in old_queue if isinstance(entry, dict)]
+            if action == "enqueue":
+                if len(queue) >= 100:
+                    return bad(handler, "queue is full", 409)
+                if not isinstance(body.get("text", ""), str):
+                    return bad(handler, "text must be a string", 400)
+                if "model" in body and body.get("model") is not None and not isinstance(body.get("model"), str):
+                    return bad(handler, "model must be a string", 400)
+                if "model_provider" in body and body.get("model_provider") is not None and not isinstance(body.get("model_provider"), str):
+                    return bad(handler, "model_provider must be a string", 400)
+                text = body.get("text", "")
+                raw_files = body.get("files") if "files" in body else body.get("attachments", [])
+                if not text.strip() and not raw_files:
+                    return bad(handler, "text or attachments are required", 400)
+                files = _queue_attachment_metadata(
+                    sid,
+                    raw_files,
+                )
+                requested_model = body.get("model") or getattr(session, "model", "") or ""
+                requested_provider = (
+                    body.get("model_provider")
+                    if body.get("model_provider") is not None
+                    else getattr(session, "model_provider", None)
+                )
+                profile_provider, profile_default, profile_config = _read_profile_model_config(
+                    session, requested_provider
+                )
+                model, provider, _normalized = _resolve_compatible_session_model_state(
+                    requested_model,
+                    requested_provider,
+                    profile_provider=profile_provider,
+                    profile_default_model=profile_default,
+                    profile_config=profile_config,
+                    explicit_model_pick=bool(body.get("explicit_model_pick")),
+                )
+                provider = _repair_foreign_session_model_provider(
+                    session,
+                    requested_model=str(requested_model or ""),
+                    requested_provider=requested_provider,
+                    resolved_model=model,
+                    resolved_provider=provider,
+                    explicit_model_pick=bool(body.get("explicit_model_pick")),
+                    profile_provider=profile_provider,
+                )
+                if not model:
+                    return bad(handler, "model is required", 400)
+                item = {
+                    "id": uuid.uuid4().hex,
+                    "text": text,
+                    "files": files,
+                    "model": model,
+                    "model_provider": provider,
+                    "created_at": time.time(),
+                    "_queued_at": int(time.time() * 1000),
+                }
+                queue.append(item)
+            elif action in {"edit", "delete"}:
+                item_id = str(body.get("item_id") or "").strip()
+                if not item_id:
+                    return bad(handler, "item_id is required", 400)
+                index = next((i for i, entry in enumerate(queue) if str(entry.get("id") or "") == item_id), -1)
+                if index < 0:
+                    return bad(handler, "queue item not found", 404)
+                if action == "edit":
+                    if not isinstance(body.get("text"), str):
+                        return bad(handler, "text must be a string", 400)
+                    if not body["text"].strip() and not queue[index].get("files"):
+                        return bad(handler, "text or attachments are required", 400)
+                    if any(key in body for key in ("files", "attachments", "model", "model_provider")):
+                        return bad(handler, "queued attachment and model metadata is immutable", 400)
+                    queue[index]["text"] = body["text"]
+                    item = queue[index]
+                else:
+                    item = queue.pop(index)
+            elif action == "reorder":
+                item_ids = body.get("item_ids")
+                if not isinstance(item_ids, list) or any(not isinstance(value, str) for value in item_ids):
+                    return bad(handler, "item_ids must be a list", 400)
+                ids = [str(value).strip() for value in item_ids]
+                current_ids = [str(entry.get("id") or "") for entry in queue]
+                if len(ids) != len(set(ids)) or set(ids) != set(current_ids):
+                    return bad(handler, "item_ids must contain every queued item exactly once", 400)
+                by_id = {str(entry.get("id")): entry for entry in queue}
+                queue = [by_id[value] for value in ids]
+            elif action == "clear":
+                queue = []
+            elif action == "combine":
+                if len(queue) > 1:
+                    first = queue[0]
+                    queue = [{
+                        "id": uuid.uuid4().hex,
+                        "text": "\n\n".join(str(entry.get("text") or "") for entry in queue),
+                        "files": [],
+                        "model": first.get("model") or "",
+                        "model_provider": first.get("model_provider"),
+                        "created_at": time.time(),
+                        "_queued_at": int(time.time() * 1000),
+                    }]
+            session.queue = queue
+            try:
+                session.save()
+            except Exception:
+                session.queue = old_queue
+                raise
+            enqueue_accepted = action == "enqueue"
+            with LOCK:
+                SESSIONS[sid] = session
+                SESSIONS.move_to_end(sid)
+        if enqueue_accepted:
+            try:
+                drain_queued_session_turn(sid)
+            except Exception:
+                logger.exception("immediate durable queue drain failed for session %s", sid)
+            try:
+                session = get_session(sid)
+            except Exception:
+                logger.exception("failed to refresh durable queue state for session %s", sid)
+        _publish_session_list_changed(
+            "session_queue_updated",
+            profile=getattr(session, "profile", None),
+            session_id=sid,
+        )
+        return j(handler, _queue_response(session, item=item))
+    except ValueError as exc:
+        return bad(handler, str(exc), 400)
+    except Exception as exc:
+        logger.exception("failed to mutate durable queue for session %s", sid)
+        return bad(handler, _sanitize_error(exc), 500)
 
 
 def _handle_chat_sync(handler, body):

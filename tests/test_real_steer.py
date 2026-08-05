@@ -705,8 +705,11 @@ class TestFrontendWiring:
               globalThis.$ = id => input;
               globalThis.clearInflightState = sid => clearInflightCalls.push(sid);
               globalThis.updateSendBtn = () => {{updateSendBtnCalls += 1;}};
-              globalThis.queueSessionMessage = (sid, payload) => queued.push({{sid, payload}});
-              globalThis.updateQueueBadge = sid => queueBadges.push(sid);
+              globalThis.queueSessionMessage = async (sid, payload) => {{
+                queued.push({{sid, payload}});
+                queueBadges.push(sid);
+                return {{accepted:true}};
+              }};
               globalThis.__draftClears = draftClears;
               globalThis.__trayRenders = {{count:0}};
               globalThis.__toasts = toasts;
@@ -739,7 +742,7 @@ class TestFrontendWiring:
               assert.deepStrictEqual(queued[0].payload.files, [submittedFile]);
               assert.strictEqual(queued[0].payload.model, 'captured-model');
               assert.strictEqual(queued[0].payload.model_provider, 'captured-provider');
-              assert.strictEqual(queued[0].payload.profile, 'work');
+              assert.ok(!Object.prototype.hasOwnProperty.call(queued[0].payload, 'profile'));
               assert.strictEqual(draftClears.length, 1);
               assert.strictEqual(draftClears[0].sid, 'A');
               assert.strictEqual(draftClears[0].text, 'queue me');

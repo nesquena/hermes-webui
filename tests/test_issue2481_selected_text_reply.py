@@ -173,9 +173,10 @@ def test_selected_text_reply_queue_path_includes_pending_selection_context():
     js = read("static/messages.js")
 
     assert "function _composerTextWithPendingSelections()" in js
-    assert "function _clearComposerAfterQueuedSelectionSend()" in js
+    assert "function _clearComposerAfterQueuedSelectionSend(sid, expectedText, filesSnapshot)" in js
     assert "const _text=_composerTextWithPendingSelections().trim();" in js
-    assert "_clearComposerAfterQueuedSelectionSend();" in js
+    assert "const _rawText=$('msg').value.trim();" in js
+    assert "_clearComposerAfterQueuedSelectionSend(_targetSid,_rawText,_filesSnapshot);" in js
     assert "if(!text&&!S.pendingFiles.length&&!_pendingSelections.length)" in js
     assert "_flushSelectionBlocksToComposer();\n  text=$('msg').value.trim();" in js
 

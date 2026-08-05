@@ -483,13 +483,39 @@ def test_server_started_turn_also_creates_processed_anchor_before_stop_button_re
     assert "if (typeof appendThinking === 'function') appendThinking();" in listener
 
 
-def test_server_started_turn_payload_carries_pending_started_at():
+def test_server_started_turn_payload_carries_pending_started_at(monkeypatch):
     recovery = ROUTES_PY.split("source\": \"subscribe_recovery\"", 1)[0].rsplit("try:", 1)[-1]
     assert "recover_session = get_session(sid, metadata_only=True)" in recovery
     assert "pending_started_at = getattr(recover_session, \"pending_started_at\", None)" in recovery
     assert '"pending_started_at": pending_started_at' in ROUTES_PY
     assert '"pending_started_at": getattr(session, "pending_started_at", None)' not in ROUTES_PY
-    assert '"pending_started_at": (resp or {}).get("pending_started_at")' in ROUTES_PY
+
+    from api import background_process, routes
+
+    emitted = []
+
+    class _Channel:
+        def emit(self, event, payload):
+            emitted.append((event, payload))
+
+    monkeypatch.setattr(background_process, "get_session_channel", lambda _sid: _Channel())
+    routes._fanout_server_turn_started(
+        "sid-1",
+        {"_status": 200, "stream_id": "stream-1", "pending_started_at": 123.5},
+        source="webui_queue",
+    )
+
+    assert emitted == [
+        (
+            "server_turn_started",
+            {
+                "session_id": "sid-1",
+                "stream_id": "stream-1",
+                "pending_started_at": 123.5,
+                "source": "webui_queue",
+            },
+        )
+    ]
 
 
 def test_live_processed_anchor_is_deduped_across_restore_paths():

@@ -4798,6 +4798,7 @@ async function clearConversation() {
     const data = await api('/api/session/clear', {method:'POST',
       body: JSON.stringify({session_id: S.session.session_id})});
     S.session = data.session;
+    if(typeof hydrateSessionQueue==='function') hydrateSessionQueue(S.session.session_id,data.session.queue);
     S.messages = [];
     S.toolCalls = [];
     syncTopbar();
@@ -6307,7 +6308,7 @@ async function promptWorkspacePath(){
       // System-minted session (#6022): worktree:false is explicit so a config
       // worktree default can't leak a worktree from a workspace prompt.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;hydrateSessionQueue(S.session.session_id,r.session.queue);S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
     if(!S.session)return;
   }
@@ -6345,7 +6346,7 @@ async function switchToWorkspace(path,name){
       // System-minted session (#6022): explicit worktree:false — a workspace
       // switch from a blank page is not deliberate New Chat intent.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;hydrateSessionQueue(S.session.session_id,r.session.queue);S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
     if(!S.session)return;
   }

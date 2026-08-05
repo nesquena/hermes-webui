@@ -1,9 +1,5 @@
 """
-Tests for session queue persistence across page refresh and tab restore.
-
-#660 introduced sessionStorage persistence. #3108 hardens it by mirroring queue
-state to localStorage and restoring from the durable copy when sessionStorage is
-missing after browser tab/process restore.
+Tests for the server-owned queue and the legacy browser-only restore fallback.
 """
 import pathlib
 
@@ -15,7 +11,7 @@ sess_src = SESSIONS_JS.read_text(encoding='utf-8')
 
 
 class TestQueuePersistence:
-    """queueSessionMessage persists through the shared dual-storage helper."""
+    """The runtime queue is a server-backed render cache."""
 
     def test_queue_storage_helpers_exist(self):
         """Queue persistence must be centralized so write/delete paths stay symmetric."""
@@ -24,37 +20,35 @@ class TestQueuePersistence:
         assert "function _readPersistedSessionQueue(sid)" in ui_src
         assert "function _clearPersistedSessionQueue(sid)" in ui_src
 
-    def test_queue_writes_to_session_and_local_storage(self):
-        """queueSessionMessage must mirror queue state to sessionStorage and localStorage."""
-        helper_start = ui_src.find("function _persistSessionQueueStorage(sid, queue)")
-        helper_end = ui_src.find("function _readPersistedSessionQueue(sid)", helper_start)
-        assert helper_start != -1 and helper_end != -1, "_persistSessionQueueStorage helper not found"
-        helper = ui_src[helper_start:helper_end]
-        assert "sessionStorage.setItem(key,payload)" in helper
-        assert "localStorage.setItem(key,payload)" in helper
+    def test_queue_posts_to_server_after_uploading_files(self):
+        """queueSessionMessage must upload browser files and call the queue API."""
+        start = ui_src.index("async function queueSessionMessage(sid, payload)")
+        end = ui_src.index("async function mutateSessionQueue", start)
+        body = ui_src[start:end]
+        assert "uploadPendingFiles({files:browserFiles,sessionId:sid,clearPending:false})" in body
+        assert "_postSessionQueue(sid,{action:'enqueue'" in body
+        assert "model_provider:payload.model_provider||null" in body
 
     def test_queue_stamps_queued_at_timestamp(self):
         """Each queue entry must have a _queued_at timestamp for stale-entry detection."""
         assert '_queued_at' in ui_src
 
-    def test_shift_uses_shared_persist_and_clear_helpers(self):
-        """shiftQueuedSessionMessage must update/remove both storage layers through helpers."""
-        start = ui_src.find("function shiftQueuedSessionMessage(sid)")
-        end = ui_src.find("function getQueuedSessionCount(sid)", start)
-        assert start != -1 and end != -1, "shiftQueuedSessionMessage block not found"
-        body = ui_src[start:end]
-        assert "_clearPersistedSessionQueue(sid)" in body
-        assert "_persistSessionQueueStorage(sid,q)" in body
+    def test_runtime_drain_was_removed(self):
+        """The browser must not pop or submit a queue item on idle."""
+        assert "function shiftQueuedSessionMessage" not in ui_src
+        assert "_queueDrainSid" not in ui_src
 
-    def test_queue_card_edit_paths_use_shared_helpers(self):
-        """Queue edit/combine/delete paths must not leave localStorage stale."""
-        assert "_saveAndRefresh()" in ui_src
-        assert "_persistSessionQueueStorage(sid,liveQ)" in ui_src
-        assert "_clearPersistedSessionQueue(sid)" in ui_src
+    def test_queue_card_edit_paths_use_server_actions(self):
+        """Queue controls must be accepted by the server before the cache changes."""
+        assert "return _postSessionQueue(sid,{action,...extra})" in ui_src
+        assert "_saveAndRefresh('combine')" in ui_src
+        assert "_saveAndRefresh('reorder',{item_ids:itemIds})" in ui_src
+        assert "_saveAndRefresh('edit',{item_id:_entryId,text:newText})" in ui_src
+        assert "_saveAndRefresh('delete',{item_id:_entryId})" in ui_src
 
 
 class TestQueueRestore:
-    """Queue is restored from the shared storage helper on idle session load."""
+    """Legacy browser entries are restored for review, never auto-submitted."""
 
     def test_restore_reads_shared_helper(self):
         """sessions.js must use the shared helper so localStorage fallback is reachable."""
@@ -73,7 +67,7 @@ class TestQueueRestore:
         assert "sessionStorage.setItem(key,JSON.stringify(localValue))" in body
 
     def test_restore_uses_timestamp_guard(self):
-        """Stale entries (created before last assistant response) must be dropped."""
+        """Stale legacy entries (created before the last response) are dropped."""
         assert '_queued_at' in sess_src
         assert '_lastAsst' in sess_src
 
@@ -85,16 +79,16 @@ class TestQueueRestore:
         """First queued message goes into the composer input, not auto-sent."""
         assert "_msg.value=_first.text" in sess_src
 
-    def test_restore_clears_stale_storage(self):
-        """On timestamp mismatch, stale queue state is removed from both storage layers."""
+    def test_restore_clears_legacy_storage_after_review_restore(self):
+        """Legacy storage is cleared after its first item is copied for review."""
         assert "_clearPersistedSessionQueue(sid)" in sess_src
 
     def test_restore_wrapped_in_try_catch(self):
         """Storage access must be wrapped in try/catch (private browsing may block it)."""
         assert "catch(_){if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);}" in sess_src
 
-    def test_delete_session_clears_persisted_queue_after_success(self):
-        """Deleting a session must clear localStorage-backed queue state after the API succeeds."""
+    def test_delete_session_clears_legacy_queue_after_success(self):
+        """Deleting a session must clear any leftover legacy browser queue."""
         start = sess_src.find("async function deleteSession(sid, beforeDelete=null)")
         end = sess_src.find("// ── Project helpers", start)
         assert start != -1 and end != -1, "deleteSession block not found"
