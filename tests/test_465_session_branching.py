@@ -532,6 +532,58 @@ def test_branch_route_slices_merged_display_view_not_raw_sidecar(monkeypatch):
     routes.SESSIONS.pop(cap["ok"]["session_id"], None)
 
 
+def test_branch_route_uses_get_display_backstop_for_large_state_db(monkeypatch):
+    """Branch coordinates must use GET's bounded state.db display reader."""
+    source = routes.Session(session_id="src-large", workspace=".", messages=[])
+    seen = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": source.session_id})
+    monkeypatch.setattr(routes, "get_session", lambda *_a, **_k: source)
+    monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda _s: False)
+    monkeypatch.setattr(routes, "_is_messaging_session_record", lambda _s: False)
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", lambda _s: [])
+    monkeypatch.setattr(routes, "_state_db_backstop_limit_for_display", lambda _s, before: 50000)
+    def _state_rows(*_a, **kwargs):
+        seen.update(kwargs)
+        return [{"role": "assistant", "content": "displayed conclusion"}]
+    monkeypatch.setattr(routes, "get_state_db_session_messages", _state_rows)
+    monkeypatch.setattr(routes, "merge_session_messages_append_only", lambda _side, state, **_k: state)
+    monkeypatch.setattr(routes, "_merged_webui_lineage_messages_for_display", lambda _s, messages: messages)
+    monkeypatch.setattr(routes, "_evict_sessions_over_cap", lambda: None)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(routes.Session, "save", lambda self: None)
+    cap = _capture_route(monkeypatch)
+    routes.handle_post(_FakeHandler(), urlparse("/api/session/branch"))
+    assert cap["status"] == 200
+    assert seen["limit"] == 50000
+    routes.SESSIONS.pop(cap["ok"]["session_id"], None)
+
+
+def test_branch_route_messaging_empty_cli_does_not_copy_hidden_state_db(monkeypatch):
+    """Messaging-empty forks must not include state.db rows GET never displayed."""
+    conclusion = {"role": "assistant", "content": "displayed conclusion"}
+    source = routes.Session(session_id="src-msg-empty", workspace=".", messages=[conclusion])
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": source.session_id, "keep_count": 1})
+    monkeypatch.setattr(routes, "get_session", lambda *_a, **_k: source)
+    monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda _s: False)
+    monkeypatch.setattr(routes, "_is_messaging_session_record", lambda _s: True)
+    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid: [])
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", lambda _s: [conclusion])
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("hidden state.db read")))
+    monkeypatch.setattr(routes, "merge_session_messages_append_only", lambda side, state, **_k: side + state)
+    monkeypatch.setattr(routes, "_merged_webui_lineage_messages_for_display", lambda _s, messages: messages)
+    monkeypatch.setattr(routes, "_evict_sessions_over_cap", lambda: None)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(routes.Session, "save", lambda self: None)
+    cap = _capture_route(monkeypatch)
+    routes.handle_post(_FakeHandler(), urlparse("/api/session/branch"))
+    assert cap["status"] == 200
+    forked = routes.SESSIONS[cap["ok"]["session_id"]]
+    assert forked.messages == [conclusion]
+    routes.SESSIONS.pop(cap["ok"]["session_id"], None)
+
+
 # ── Session model ──────────────────────────────────────────────────────────────
 
 def test_session_model_parent_session_id():

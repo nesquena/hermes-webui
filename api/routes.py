@@ -15176,8 +15176,19 @@ def handle_post(handler, parsed) -> bool:
         cli_meta = _lookup_cli_session_metadata(source.session_id) if _session_requires_cli_metadata_lookup(source) else {}
         is_messaging_session = _is_messaging_session_record(source) or _is_messaging_session_record(cli_meta)
         cli_messages = get_cli_session_messages(source.session_id) if is_messaging_session else []
-        if is_messaging_session and cli_messages:
-            source_messages = _merged_session_messages_for_display(source, cli_messages)
+        if is_messaging_session:
+            if cli_messages:
+                source_messages = _merged_session_messages_for_display(source, cli_messages)
+            else:
+                # Match GET /api/session: a messaging session with no CLI
+                # transcript does not fall back to state.db rows.
+                source_messages = merge_session_messages_append_only(
+                    _webui_sidecar_lineage_messages_for_display(source),
+                    [],
+                    truncation_watermark=getattr(source, "truncation_watermark", None),
+                    truncation_boundary=getattr(source, "truncation_boundary", None),
+                )
+                source_messages = _merged_webui_lineage_messages_for_display(source, source_messages)
         else:
             # Match GET /api/session's full-transcript display path exactly:
             # sidecar lineage stitched across compression snapshots, merged
@@ -15187,11 +15198,17 @@ def handle_post(handler, parsed) -> bool:
             # the cut too early whenever the merged view deduplicates rows
             # (replayed sidecar/state.db doubles, filtered prefixes), so the
             # fork stopped mid tool-run and dropped the final conclusion.
+            _state_db_reader_kwargs = {
+                "profile": getattr(source, "profile", None) or None,
+            }
+            _backstop = _state_db_backstop_limit_for_display(source, None)
+            if _backstop is not None:
+                _state_db_reader_kwargs["limit"] = _backstop
             source_messages = merge_session_messages_append_only(
                 _webui_sidecar_lineage_messages_for_display(source),
                 get_state_db_session_messages(
                     source.session_id,
-                    profile=getattr(source, "profile", None) or None,
+                    **_state_db_reader_kwargs,
                 ),
                 truncation_watermark=getattr(source, "truncation_watermark", None),
                 truncation_boundary=getattr(source, "truncation_boundary", None),
