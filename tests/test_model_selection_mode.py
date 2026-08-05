@@ -18,6 +18,7 @@ ROUTES_PY = REPO_ROOT / "api" / "routes.py"
 MODELS_PY = REPO_ROOT / "api" / "models.py"
 UI_JS = REPO_ROOT / "static" / "ui.js"
 MESSAGES_JS = REPO_ROOT / "static" / "messages.js"
+COMMANDS_JS = REPO_ROOT / "static" / "commands.js"
 BOOT_JS = REPO_ROOT / "static" / "boot.js"
 
 
@@ -64,6 +65,12 @@ class TestModelSelectionModeSources:
         src = UI_JS.read_text(encoding="utf-8")
         assert "model_selection_mode==='auto'" in src
         assert "session.model==='__default__'" in src
+
+    def test_cmd_model_sends_model_selection_mode_null(self):
+        """cmdModel cross-provider POST must include model_selection_mode:null."""
+        src = COMMANDS_JS.read_text(encoding="utf-8")
+        assert "model_selection_mode:null" in src
+        assert "_clearDefaultModelSession" in src
 
 
 # === Persistent intent tests (no Node needed) ===

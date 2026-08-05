@@ -726,6 +726,7 @@ async function cmdModel(args){
             session_id:S.session.session_id,
             model:q,
             model_provider:provider,
+            model_selection_mode:null,
           }),
         });
         if(resp.ok){
