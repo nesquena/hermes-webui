@@ -1426,18 +1426,36 @@ def test_kanban_model_badge_static_render_e2e():
 
 
 def test_kanban_editor_modal_has_model_and_provider_fields():
-    """Create/edit task modal must expose Model + Provider inputs, and the
-    submit handler must route them to the API so users can configure the
-    card's executing model from the WebUI."""
-    # index.html must define the two fields.
-    for input_id in ("kanbanTaskModalModel", "kanbanTaskModalProvider"):
-        assert f'id="{input_id}"' in INDEX
+    """Create/edit task modal must expose a Model selector backed by the shared
+    /api/models catalog (not free-text), and the submit handler must route the
+    chosen model + provider to the API so users can configure the card's
+    executing model from the WebUI."""
+    # index.html must render the model as a <select> (grouped by provider),
+    # not a free-text input. No separate provider text field.
+    assert 'id="kanbanTaskModalModel"' in INDEX
+    assert '<select id="kanbanTaskModalModel">' in INDEX
+    assert 'id="kanbanTaskModalProvider"' not in INDEX
 
-    # Labels / placeholders wired for i18n.
+    # Labels / placeholder-free hint wired for i18n.
     assert 'data-i18n="kanban_model"' in INDEX
-    assert 'data-i18n="kanban_provider"' in INDEX
+    assert 'data-i18n="kanban_model_hint"' in INDEX
 
-    # submitKanbanTaskModal reads the fields and sends them (create + edit).
+    # The populator reuses the same /api/models catalog + grouping the composer
+    # picker uses, loading into a <select> with a leading "Profile default"
+    # option and data-provider on each option.
+    populate_match = re.search(
+        r"function _kanbanPopulateModelSelect\(currentValue\)\{(.*?)\n\}",
+        PANELS, re.DOTALL,
+    )
+    assert populate_match, "_kanbanPopulateModelSelect() not found"
+    populate_body = populate_match.group(1)
+    assert "api/models" in populate_body
+    assert "optgroup" in populate_body
+    assert "dataset.provider" in populate_body
+    assert "kanban_no_model_override" in populate_body
+
+    # submitKanbanTaskModal reads the model select + its data-provider and sends
+    # both back as model_override/provider_override (create + edit).
     submit_match = re.search(
         r"function submitKanbanTaskModal\(\)\{(.*?)\n\}",
         PANELS, re.DOTALL,
@@ -1445,19 +1463,18 @@ def test_kanban_editor_modal_has_model_and_provider_fields():
     assert submit_match, "submitKanbanTaskModal() not found"
     submit_body = submit_match.group(1)
     assert "kanbanTaskModalModel" in submit_body
-    assert "kanbanTaskModalProvider" in submit_body
+    assert "selectedOptions[0]" in submit_body
     assert "payload.model_override" in submit_body
     assert "payload.provider_override" in submit_body
-    # Provider-requires-model guard surfaced client-side.
-    assert "kanban_provider_requires_model" in submit_body
 
-    # openKanbanEdit pre-fills the fields from the fetched task.
-    edit_source = extract_function(PANELS, "openKanbanEdit", prefix="async function")
-    assert "model_override: task.model_override" in edit_source
-    assert "provider_override: task.provider_override" in edit_source
+    # openKanbanEdit inline-create/expose wiring triggers the populator so the
+    # select is populated before a value is chosen.
+    assert "await _kanbanPopulateModelSelect" in PANELS
 
-    # New i18n keys exist (English block) for placeholders/hints.
-    for key in ("kanban_model_placeholder", "kanban_model_hint",
-                "kanban_provider_placeholder", "kanban_provider_hint",
-                "kanban_provider_requires_model"):
+    # New i18n keys exist (English block) for labels/hints.
+    for key in ("kanban_model", "kanban_model_hint", "kanban_no_model_override"):
         assert f"{key}:" in I18N
+    # The free-text-era keys must be gone.
+    for key in ("kanban_provider_placeholder", "kanban_provider_hint",
+                "kanban_provider_requires_model", "kanban_model_placeholder"):
+        assert f"{key}:" not in I18N

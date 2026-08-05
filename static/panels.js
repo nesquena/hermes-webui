@@ -3212,6 +3212,60 @@ async function _kanbanLoadProfileNames(){
   }
 }
 
+async function _kanbanPopulateModelSelect(currentValue){
+  // Reuses the same /api/models catalog + provider grouping as the composer
+  // picker (populateModelDropdown in ui.js), so the kanban modal offers the
+  // identical set of models a chat session would. Each option carries the
+  // model id as its value and its provider id in data-provider, so clearing
+  // (empty = "Profile default") is the only way to drop an override; a chosen
+  // model always sends its provider alongside.
+  const sel = document.getElementById('kanbanTaskModalModel');
+  if (!sel) return;
+  const emptyOpt = document.createElement('option');
+  emptyOpt.value = '';
+  emptyOpt.textContent = t('kanban_no_model_override') || 'Profile default';
+  sel.innerHTML = '';
+  sel.appendChild(emptyOpt);
+  try {
+    const res = await fetch(new URL('api/models', document.baseURI || location.href), {credentials:'include'});
+    if (!res.ok) return;
+    const data = await res.json();
+    const groups = Array.isArray(data && data.groups) ? data.groups : [];
+    for (const g of groups) {
+      const models = Array.isArray(g.models) ? g.models : [];
+      if (!models.length) continue;
+      const og = document.createElement('optgroup');
+      og.label = g.provider || g.provider_id || 'Configured';
+      for (const m of models) {
+        if (!m || !m.id) continue;
+        const opt = document.createElement('option');
+        opt.value = String(m.id);
+        opt.textContent = (typeof getModelLabel === 'function' ? getModelLabel(m.id) : (m.label || m.id));
+        if (g.provider_id) opt.dataset.provider = g.provider_id;
+        og.appendChild(opt);
+      }
+      sel.appendChild(og);
+    }
+  } catch(_e) {
+    // Catalog unavailable — leave just the "Profile default" option.
+  }
+  if (currentValue) {
+    const match = Array.from(sel.options).find(o => o.value === String(currentValue));
+    sel.value = match ? match.value : currentValue;
+    if (!match) {
+      // Preserve an unknown/imported override so editing doesn't silently drop it.
+      const keep = document.createElement('option');
+      keep.value = String(currentValue);
+      keep.textContent = String(currentValue);
+      keep.dataset.provider = '';
+      sel.appendChild(keep);
+      sel.value = String(currentValue);
+    }
+  } else {
+    sel.value = '';
+  }
+}
+
 async function _kanbanPopulateAssigneeSelect(currentValue){
   const sel = document.getElementById('kanbanTaskModalAssignee');
   if (!sel) return;
@@ -3275,6 +3329,10 @@ function openKanbanCreate(){
   _kanbanResetTaskModalFields({status: 'ready'});
   _kanbanSetTaskModalStatusHint(null);
   _kanbanSetTaskModalLabels('create');
+  _kanbanPopulateModelSelect('').then(() => {
+    const sel = document.getElementById('kanbanTaskModalModel');
+    if (sel) sel.value = '';  // default to "Profile default" (no override)
+  });
   _kanbanPopulateAssigneeSelect('').then(() => {
     // After the dropdown is populated, default-select the first profile (not
     // the "Unassigned" fallthrough).  This is the right hint: most users want
@@ -3336,8 +3394,11 @@ async function openKanbanEdit(taskId){
     tenant: task.tenant || '',
     priority: typeof task.priority === 'number' ? task.priority : 0,
     model_override: task.model_override || '',
-    provider_override: task.provider_override || '',
   });
+  // Populate the model dropdown (from /api/models, same catalog + grouping as
+  // the composer picker) AFTER reset so the option exists when we select the
+  // current value below.
+  await _kanbanPopulateModelSelect(task.model_override || '');
   // Populate the assignee select AFTER reset so the option exists when we
   // call sel.value = currentAssignee.
   await _kanbanPopulateAssigneeSelect(task.assignee || '');
@@ -3383,7 +3444,6 @@ function _kanbanResetTaskModalFields(values){
   set('kanbanTaskModalSkills', Array.isArray(v.skills) ? v.skills.join(', ') : (v.skills || ''));
   set('kanbanTaskModalMaxRuntimeSeconds', v.max_runtime_seconds != null ? v.max_runtime_seconds : '');
   set('kanbanTaskModalModel', v.model_override || '');
-  set('kanbanTaskModalProvider', v.provider_override || '');
   set('kanbanTaskModalParents', '');
   const errEl = document.getElementById('kanbanTaskModalError');
   if (errEl) { errEl.textContent = ''; delete errEl.dataset.warningShown; }
@@ -3548,7 +3608,6 @@ async function submitKanbanTaskModal(){
   const maxRuntimeEl = document.getElementById('kanbanTaskModalMaxRuntimeSeconds');
   const parentsEl = document.getElementById('kanbanTaskModalParents');
   const modelEl = document.getElementById('kanbanTaskModalModel');
-  const providerEl = document.getElementById('kanbanTaskModalProvider');
   const errEl = document.getElementById('kanbanTaskModalError');
   const submitBtn = document.getElementById('kanbanTaskModalSubmit');
   const title = titleEl ? titleEl.value.trim() : '';
@@ -3580,17 +3639,13 @@ async function submitKanbanTaskModal(){
   const skillsRaw = skillsEl ? skillsEl.value.trim() : '';
   const maxRuntimeRaw = maxRuntimeEl ? maxRuntimeEl.value.trim() : '';
   const parentsRaw = parentsEl ? parentsEl.value.trim() : '';
+  // Model chosen from the shared /api/models catalog dropdown; provider is
+  // carried on the option (data-provider) so the model always resolves against
+  // the right backend. Empty value = "Profile default" (no override, clears).
   const modelRaw = modelEl ? modelEl.value.trim() : '';
-  const providerRaw = providerEl ? providerEl.value.trim() : '';
-  // Provider requires a model (mirrors kb.set_model_override / the worker
-  // spawn contract — a bare provider would re-resolve the profile's model
-  // against a different backend).
-  if (providerRaw && !modelRaw) {
-    if (errEl) errEl.textContent = t('kanban_provider_requires_model')
-      || 'Provider requires a model override. Enter a model first, or clear the provider.';
-    if (modelEl) modelEl.focus();
-    return;
-  }
+  const providerRaw = (modelEl && modelEl.selectedOptions && modelEl.selectedOptions[0])
+    ? String(modelEl.selectedOptions[0].dataset && modelEl.selectedOptions[0].dataset.provider || '').trim()
+    : '';
   if (isEdit) {
     payload.body = bodyVal;
     payload.assignee = assigneeVal || null;
