@@ -169,6 +169,15 @@ def _resolve_oidc_config() -> dict[str, Any]:
     allow_values = _normalize_allow_values(
         pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES")
     )
+    raw_allow_private = pick(
+        "allow_private_endpoints", "HERMES_WEBUI_OIDC_ALLOW_PRIVATE_ENDPOINTS"
+    )
+    if isinstance(raw_allow_private, bool):
+        allow_private = raw_allow_private
+    elif isinstance(raw_allow_private, str):
+        allow_private = raw_allow_private.lower() in ("true", "1", "yes")
+    else:
+        allow_private = bool(raw_allow_private)
     return {
         "issuer": str(pick("issuer", "HERMES_WEBUI_OIDC_ISSUER") or "").strip(),
         "client_id": str(pick("client_id", "HERMES_WEBUI_OIDC_CLIENT_ID") or "").strip(),
@@ -177,6 +186,7 @@ def _resolve_oidc_config() -> dict[str, Any]:
         "scopes": scopes,
         "allow_claim": str(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM") or "").strip(),
         "allow_values": allow_values,
+        "allow_private_endpoints": allow_private,
     }
 
 
@@ -415,17 +425,19 @@ def _validate_outbound_oidc_url(url: str) -> None:
     hostname = str(parsed.hostname or "").strip()
     if not hostname:
         raise OIDCAuthError("OIDC endpoint URL was missing a hostname", status_code=502)
-    if _is_disallowed_oidc_host(hostname):
+    cfg = _resolve_oidc_config()
+    allow_private = bool(cfg.get("allow_private_endpoints", False))
+    if _is_disallowed_oidc_host(hostname, allow_private=allow_private):
         raise OIDCAuthError(
             "OIDC endpoint URLs must not target private or local addresses",
             status_code=502,
         )
 
 
-def _is_disallowed_oidc_host(hostname: str) -> bool:
+def _is_disallowed_oidc_host(hostname: str, *, allow_private: bool = False) -> bool:
     literal_ip = _parse_ip_address(hostname)
     if literal_ip is not None:
-        return _is_disallowed_oidc_ip(literal_ip)
+        return _is_disallowed_oidc_ip(literal_ip, allow_private=allow_private)
     try:
         infos = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
     except socket.gaierror:
@@ -433,7 +445,7 @@ def _is_disallowed_oidc_host(hostname: str) -> bool:
     for info in infos:
         sockaddr = info[4]
         address = _parse_ip_address(sockaddr[0] if sockaddr else "")
-        if address is not None and _is_disallowed_oidc_ip(address):
+        if address is not None and _is_disallowed_oidc_ip(address, allow_private=allow_private):
             return True
     return False
 
@@ -445,12 +457,14 @@ def _parse_ip_address(value: str):
         return None
 
 
-def _is_disallowed_oidc_ip(address) -> bool:
+def _is_disallowed_oidc_ip(address, *, allow_private: bool = False) -> bool:
     candidate = getattr(address, "ipv4_mapped", None) or address
+    if candidate.is_loopback:
+        return True
+    if not allow_private and candidate.is_private:
+        return True
     return (
-        candidate.is_loopback
-        or candidate.is_private
-        or candidate.is_link_local
+        candidate.is_link_local
         or candidate.is_multicast
         or candidate.is_unspecified
         or candidate.is_reserved
