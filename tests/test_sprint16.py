@@ -101,18 +101,27 @@ def render_md(raw):
         lines = block.strip().split("\n")
         out = "<ul>"
         prev = 0
+        first = True
         for l in lines:
             m = re.match(r"^( *)([-*+]) (.*)$", l)
             if not m:
                 continue
             depth = 0 if len(m.group(1)) < 2 else len(m.group(1)) // 2
             if depth > prev:
-                out += "<ul>"
+                # Deeper: the previous <li> stays OPEN so the nested <ul>
+                # renders INSIDE it (matches renderMd(): parent<li>child<ul>).
+                out += "<ul>" * (depth - prev)
             elif depth < prev:
-                out += "</ul>" * (prev - depth)
+                # Shallower: close the deepest <li>, each nested <ul> and the
+                # <li> it hung from, then the current item's parent <li>.
+                out += "</li></ul>" * (prev - depth) + "</li>"
+            elif not first:
+                # Same depth: close the previous sibling <li> only.
+                out += "</li>"
             prev = depth
-            out += f"<li>{inline_md(m.group(3))}</li>"
-        out += "</ul>" * (prev + 1)
+            first = False
+            out += f"<li>{inline_md(m.group(3))}"
+        out += "</li></ul>" * (prev + 1)
         return out
 
     s = re.sub(r"((?:^(?:  )?[-*+] .+\n?)+)", lambda m: handle_ul(m.group()), s, flags=re.M)
@@ -121,18 +130,27 @@ def render_md(raw):
         lines = block.strip().split("\n")
         out = "<ol>"
         prev = 0
+        first = True
         for l in lines:
             m = re.match(r"^( *)(\d+)\. (.*)$", l)
             if not m:
                 continue
             depth = 0 if len(m.group(1)) < 2 else len(m.group(1)) // 2
             if depth > prev:
-                out += "<ol>"
+                # Deeper: the previous <li> stays OPEN so the nested <ol>
+                # renders INSIDE it (matches renderMd(): parent<li>child<ol>).
+                out += "<ol>" * (depth - prev)
             elif depth < prev:
-                out += "</ol>" * (prev - depth)
+                # Shallower: close the deepest <li>, each nested <ol> and the
+                # <li> it hung from, then the current item's parent <li>.
+                out += "</li></ol>" * (prev - depth) + "</li>"
+            elif not first:
+                # Same depth: close the previous sibling <li> only.
+                out += "</li>"
             prev = depth
-            out += f"<li>{inline_md(m.group(3))}</li>"
-        out += "</ol>" * (prev + 1)
+            first = False
+            out += f"<li>{inline_md(m.group(3))}"
+        out += "</li></ol>" * (prev + 1)
         return out
 
     s = re.sub(r"((?:^(?:  )?\d+\. .+\n?)+)", lambda m: handle_ol(m.group()), s, flags=re.M)
@@ -583,6 +601,19 @@ def test_indented_list_item_bold(cleanup_test_sessions):
     assert "<strong>nested bold</strong>" in out
     assert "<ul><li><strong>nested bold</strong></li></ul>" in out
     assert "margin-left:16px" not in out
+
+def test_mirror_nests_same_marker_child_list_inside_parent_li(cleanup_test_sessions):
+    """greptile P2 (#6700): the mirror's handle_ul/handle_ol must nest a
+    same-marker child list INSIDE the parent <li>, exactly like renderMd()
+    in ui.js — not close the parent <li> before opening the child <ul>/<ol>.
+    The old shape (<li>parent</li><ul>…) let structural assertions pass
+    without validating the production renderer's parent-child hierarchy."""
+    assert render_md("- parent\n  - child") == (
+        "<ul><li>parent<ul><li>child</li></ul></li></ul>"
+    )
+    assert render_md("1. parent\n  1. child") == (
+        "<ol><li>parent<ol><li>child</li></ol></li></ol>"
+    )
 
 # --- Blockquote variants ---
 
