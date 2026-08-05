@@ -3270,17 +3270,13 @@ function _kanbanOpenModelDropdown(){
     closeDropdown: _kanbanCloseModelDropdown,
     selectModel: _kanbanSelectModelFromDropdown,
     scopeNoteText: t('kanban_model_hint') || 'Used for how this card executes; leave Profile default for the assigned profile.',
-    autoFocusSearch: true,
+    autoFocusSearch: true,  // renderModelDropdown() already focuses the search input
   });
   dd.classList.add('open');
   if (chip) {
     chip.classList.add('active');
     chip.setAttribute('aria-expanded', 'true');
   }
-  setTimeout(() => {
-    const input = dd.querySelector('.model-search-input');
-    if (input) input.focus();
-  }, 0);
 }
 
 async function _kanbanPopulateModelSelect(currentValue){
