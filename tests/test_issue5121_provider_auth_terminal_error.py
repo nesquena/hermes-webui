@@ -617,7 +617,7 @@ def test_stale_partial_with_unfinished_tool_call_still_reports_no_response(tmp_p
     assert saved.messages[-1]["_error"] is True
 
 
-def test_stale_partial_repeated_prompt_replay_still_reports_no_response(tmp_path, monkeypatch):
+def test_stale_partial_repeated_prompt_replay_reports_incomplete_final(tmp_path, monkeypatch):
     session = _prepare_session(
         "repeated_prompt_replay_stale_partial",
         "stream_repeated_prompt_replay_stale_partial",
@@ -653,7 +653,7 @@ def test_stale_partial_repeated_prompt_replay_still_reports_no_response(tmp_path
     events = _queue_events(fake_queue)
     apperrors = [data for event, data in events if event == "apperror"]
     assert apperrors, "expected apperror for repeated-prompt stale replay"
-    assert apperrors[-1]["type"] == "no_response"
+    assert apperrors[-1]["type"] == "incomplete_final"
     assert not any(event == "done" for event, _ in events)
     assert saved.messages[-1]["_error"] is True
 
@@ -715,7 +715,7 @@ def test_non_auth_partial_delivery_persists_error_turn(tmp_path, monkeypatch):
     events = _queue_events(fake_queue)
     apperrors = [data for event, data in events if event == "apperror"]
     assert apperrors, "expected apperror for partial silent failure"
-    assert apperrors[-1]["type"] == "no_response"
+    assert apperrors[-1]["type"] == "incomplete_final"
     assert saved.messages[-1]["_error"] is True
 
 
@@ -747,7 +747,7 @@ def test_non_auth_seeded_multi_turn_partial_persists_error_turn(tmp_path, monkey
     events = _queue_events(fake_queue)
     apperrors = [data for event, data in events if event == "apperror"]
     assert apperrors, "expected apperror for seeded partial silent failure"
-    assert apperrors[-1]["type"] == "no_response"
+    assert apperrors[-1]["type"] == "incomplete_final"
     assert not any(event == "done" for event, _ in events)
 
 

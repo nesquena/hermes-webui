@@ -2588,9 +2588,12 @@ def _recoverable_unsaved_gateway_terminal_error(
     """Return one validated current-turn terminal error from the run journal."""
     if not stream_id:
         return None
+    if _pending_turn_has_durable_final(session):
+        return None
     try:
         from api.run_journal import (
             read_run_events,
+            run_events_have_observable_activity,
             select_authoritative_terminal_event,
         )
         journal = read_run_events(session.session_id, stream_id)
@@ -2621,6 +2624,11 @@ def _recoverable_unsaved_gateway_terminal_error(
 
     payload = event.get('payload')
     if not isinstance(payload, dict) or payload.get('session_id') != session.session_id:
+        return None
+    if (
+        str(event.get('terminal_state') or '') == 'incomplete_final'
+        and not run_events_have_observable_activity(journal.get('events') or [])
+    ):
         return None
     embedded_session = payload.get('session')
     if (
@@ -2693,6 +2701,43 @@ def _pending_recovery_turn_start(session) -> int | None:
         ):
             return idx
     return None
+
+
+def _pending_turn_has_durable_final(session) -> bool:
+    """Return whether the exact pending turn already owns a visible saved final."""
+    turn_start = _pending_recovery_turn_start(session)
+    if turn_start is None:
+        return False
+    for message in (session.messages or [])[turn_start + 1:]:
+        if not isinstance(message, dict):
+            continue
+        if message.get('role') == 'user':
+            return False
+        if (
+            message.get('role') != 'assistant'
+            or message.get('_error') is True
+            or message.get('_partial') is True
+        ):
+            continue
+        content = message.get('content')
+        if isinstance(content, str):
+            if content.strip() and not message.get('tool_calls'):
+                return True
+            continue
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = str(part.get('type') or '').strip().lower()
+                text = str(
+                    part.get('output_text')
+                    or part.get('text')
+                    or part.get('content')
+                    or ''
+                ).strip()
+                if text and part_type in {'output_text', 'text'}:
+                    return True
+    return False
 
 
 def _materialize_unsaved_gateway_terminal_error(

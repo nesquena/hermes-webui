@@ -61,6 +61,11 @@ from api.compression_anchor import is_context_compression_marker, visible_messag
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.metering import meter
 from api.run_journal import RunJournalWriter
+from api.run_journal import (
+    latest_run_summary,
+    read_run_events,
+    run_events_have_observable_activity,
+)
 from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
@@ -1221,6 +1226,41 @@ def _provider_error_probe_text(value) -> tuple[str, int | None]:
 
     _walk(value)
     return ' '.join(t for t in _texts if t).strip(), _status_code
+
+
+def _missing_final_terminal_state(
+    *,
+    has_activity: bool,
+    has_durable_final: bool,
+    hard_failure_state: str | None = None,
+) -> str:
+    """Resolve terminal truth without inferring a provider cause from silence."""
+    if has_durable_final:
+        return "completed"
+    if hard_failure_state:
+        return str(hard_failure_state)
+    return "incomplete_final" if has_activity else "no_response"
+
+
+def _stream_has_observable_activity(session_id: str, stream_id: str) -> bool:
+    if str(STREAM_PARTIAL_TEXT.get(stream_id) or "").strip():
+        return True
+    if str(STREAM_REASONING_TEXT.get(stream_id) or "").strip():
+        return True
+    if STREAM_LIVE_TOOL_CALLS.get(stream_id):
+        return True
+    try:
+        journal = read_run_events(session_id, stream_id)
+    except Exception:
+        return False
+    return run_events_have_observable_activity(journal.get("events") or [])
+
+
+def _run_journal_has_completed_truth(session_id: str, stream_id: str) -> bool:
+    try:
+        return latest_run_summary(session_id, stream_id).get("terminal_state") == "completed"
+    except Exception:
+        return False
 
 
 def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = False) -> dict:
@@ -7923,11 +7963,11 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
 
     if getattr(agent, 'api_mode', None) == 'anthropic_messages':
         if hasattr(agent, '_anthropic_api_key'):
-            rt['anthropic_api_key'] = getattr(agent, '_anthropic_api_key')
+            rt['anthropic_api_key'] = agent._anthropic_api_key
         if hasattr(agent, '_anthropic_base_url'):
-            rt['anthropic_base_url'] = getattr(agent, '_anthropic_base_url')
+            rt['anthropic_base_url'] = agent._anthropic_base_url
         if hasattr(agent, '_is_anthropic_oauth'):
-            rt['is_anthropic_oauth'] = getattr(agent, '_is_anthropic_oauth')
+            rt['is_anthropic_oauth'] = agent._is_anthropic_oauth
 
 
 def _run_admitted_agent_streaming(
@@ -8404,11 +8444,22 @@ def _run_agent_streaming_core(
     _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
 
     _success_writeback_committed = False
+    _semantic_terminal_event = [None]
 
     def put(event, data):
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror'):
             return
+        if event in {'done', 'cancel', 'apperror', 'error'}:
+            if _semantic_terminal_event[0] is not None:
+                logger.warning(
+                    "Dropping conflicting terminal event %s for stream %s after %s",
+                    event,
+                    stream_id,
+                    _semantic_terminal_event[0],
+                )
+                return
+            _semantic_terminal_event[0] = event
         event_id = None
         if run_journal is not None:
             try:
@@ -10357,6 +10408,17 @@ def _run_agent_streaming_core(
                     _previous_context_messages,
                     msg_text,
                 )
+                _durable_current_turn_final = (
+                    _current_turn_already_has_visible_assistant_answer(
+                        _align_current_turn_display(
+                            _previous_messages,
+                            _previous_owner_context_messages,
+                            _active_turn_identity,
+                        )[0],
+                        active_turn_identity=_active_turn_identity,
+                    )
+                    or _run_journal_has_completed_truth(s.session_id, stream_id)
+                )
                 _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
                 # #5940: if the Agent aborted on a non-retryable provider error
                 # (captured from its lifecycle status_callback) but left no error on
@@ -10364,15 +10426,23 @@ def _run_agent_streaming_core(
                 # surface the real cause (model_not_found / auth) instead of the
                 # misleading no_response "silent rate limit, try again" fallback.
                 _captured_terminal_failure = bool(_captured_terminal_error[0])
-                if not _last_err and _captured_terminal_failure:
+                if (
+                    not _last_err
+                    and _captured_terminal_failure
+                    and not _durable_current_turn_final
+                ):
                     _last_err = _captured_terminal_error[0]
+                _result_status = str(result.get('status') or result.get('state') or '').strip().lower()
+                _result_has_hard_failure_state = (
+                    _result_status in {'failed', 'error', 'compression_exhausted'}
+                    or bool(result.get('failed'))
+                    or bool(result.get('compression_exhausted'))
+                )
                 _classification = _classify_provider_error(
                     str(_last_err) if _last_err else '',
                     _last_err,
                     silent_failure=not bool(_last_err),
                 )
-                _is_quota = _classification['type'] == 'quota_exhausted'
-                _is_auth = _classification['type'] == 'auth_mismatch'
                 _drop_replayed_assistant = (
                     _captured_terminal_failure
                     or _agent_result_terminal_failure(result)
@@ -10390,28 +10460,48 @@ def _run_agent_streaming_core(
                 )
                 if (
                     not _all_result_messages
-                    and _current_turn_already_has_visible_assistant_answer(
-                        _align_current_turn_display(
-                            _previous_messages,
-                            _previous_owner_context_messages,
-                            _active_turn_identity,
-                        )[0],
-                        active_turn_identity=_active_turn_identity,
-                    )
+                    and _durable_current_turn_final
                 ):
                     _saved_transcript_lacks_final_answer = False
+                if _durable_current_turn_final:
+                    _saved_transcript_lacks_final_answer = False
+                _turn_has_activity = _stream_has_observable_activity(
+                    s.session_id, stream_id
+                )
+                if (
+                    _saved_transcript_lacks_final_answer
+                    and _classification['type'] == 'no_response'
+                    and not _captured_terminal_failure
+                    and not _result_has_hard_failure_state
+                    and _missing_final_terminal_state(
+                        has_activity=_turn_has_activity,
+                        has_durable_final=False,
+                    ) == 'incomplete_final'
+                ):
+                    _classification = {
+                        'type': 'incomplete_final',
+                        'label': 'Response incomplete',
+                        'hint': (
+                            'The run produced activity but did not commit a final answer. '
+                            'Retry or continue from the visible partial work.'
+                        ),
+                    }
+                _is_quota = _classification['type'] == 'quota_exhausted'
+                _is_auth = _classification['type'] == 'auth_mismatch'
                 if not _assistant_added and not _saved_transcript_lacks_final_answer:
                     _assistant_added = True
                 _is_agent_result_terminal = _agent_result_terminal_failure(result)
                 _terminal_failure = (
-                    _captured_terminal_failure
-                    or _is_agent_result_terminal
+                    (
+                        _captured_terminal_failure
+                        or _is_agent_result_terminal
+                    )
+                    and not _durable_current_turn_final
                     or (
                         _saved_transcript_lacks_final_answer
                         and _classification['type'] not in {'cancelled', 'interrupted'}
                     )
                 )
-                _result_status = str(result.get('status') or result.get('state') or '').strip().lower()
                 _soft_partial_terminal_failure = (
                     _is_agent_result_terminal
                     and (_result_status == 'partial' or bool(result.get('partial')))
@@ -10610,6 +10700,7 @@ def _run_agent_streaming_core(
                             _err_type,
                             _err_hint,
                         )
+                        _error_payload['terminal_state'] = _err_type
                         if _turn_pending_source == 'process_wakeup':
                             _recorded_pause = record_process_wakeup_provider_unavailable_pause(
                                 s,
@@ -10650,6 +10741,7 @@ def _run_agent_streaming_core(
                             'content': _error_content,
                             'timestamp': int(time.time()),
                             '_error': True,
+                            '_terminal_state': _err_type,
                         }
                         if _turn_duration is not None:
                             _error_message['_turnDuration'] = _turn_duration

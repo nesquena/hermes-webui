@@ -3468,12 +3468,12 @@ def test_identityless_gateway_relay_revalidates_head_after_claim_and_releases_ow
 
 
 # ---------------------------------------------------------------------------
-# 6. Empty chat/completions response emits gateway_empty_response (not a
+# 6. Empty chat/completions response emits no_response (not a
 #    misleading approval-unsupported banner)
 # ---------------------------------------------------------------------------
 
 def test_gateway_empty_response_no_approval_banner():
-    """Empty response from chat/completions path emits gateway_empty_response, not gateway_approval_unsupported."""
+    """Empty response emits no_response, not gateway_approval_unsupported."""
     from api.config import STREAMS, STREAMS_LOCK
     from api.gateway_chat import _run_gateway_chat_streaming_core
 
@@ -3516,15 +3516,15 @@ def test_gateway_empty_response_no_approval_banner():
 
     apperrors = [e for e in events if isinstance(e, tuple) and e[0] == "apperror"]
     # The misleading gateway_approval_unsupported banner should no longer fire;
-    # the generic gateway_empty_response handler covers this case correctly.
+    # the generic no_response terminal state covers this case correctly.
     assert not any(
         isinstance(ev[1], dict) and ev[1].get("type") == "gateway_approval_unsupported"
         for ev in apperrors
     ), f"gateway_approval_unsupported should not fire for generic empty responses: {apperrors}"
     assert any(
-        isinstance(ev[1], dict) and ev[1].get("type") == "gateway_empty_response"
+        isinstance(ev[1], dict) and ev[1].get("type") == "no_response"
         for ev in apperrors
-    ), f"Expected gateway_empty_response apperror, got events: {apperrors}"
+    ), f"Expected no_response apperror, got events: {apperrors}"
 
 
 # ---------------------------------------------------------------------------
