@@ -227,6 +227,72 @@ def test_configured_qualified_value_drives_normalization():
     assert provider == "sensenova-primary", provider
 
 
+def test_colon_suffixed_model_id_normalized(monkeypatch):
+    """#6718 (greptile-apps[bot]): a model id that itself contains ':' (e.g.
+    ``@custom:sensenova-primary:model:free`` where the model is ``model:free``)
+    must still normalize. ``_split_provider_qualified_model`` rsplit's on the
+    LAST ':', so the naive qualifier ``custom:sensenova-primary:model`` matches
+    no configured slug; the normalizer must walk back to the configured prefix
+    and re-attach the eaten segments to the model."""
+    import api.routes as routes
+
+    session_cfg = {
+        "custom_providers": [
+            {"name": "Sensenova Primary", "model": "deepseek-v4-flash"},
+        ]
+    }
+
+    effective, provider, changed = routes._resolve_compatible_session_model_state(
+        "@custom:sensenova-primary:model:free",
+        None,
+        profile_config=session_cfg,
+    )
+    assert changed is True
+    assert effective == "sensenova-primary/model:free", effective
+    assert provider == "sensenova-primary", provider
+
+
+def test_colon_suffixed_model_id_multi_segment(monkeypatch):
+    """Multi-colon model id: ``@custom:sensenova-primary:a:b:c`` -> model ``a:b:c``."""
+    import api.routes as routes
+
+    session_cfg = {
+        "custom_providers": [
+            {"name": "Sensenova Primary", "model": "deepseek-v4-flash"},
+        ]
+    }
+
+    effective, provider, changed = routes._resolve_compatible_session_model_state(
+        "@custom:sensenova-primary:a:b:c",
+        None,
+        profile_config=session_cfg,
+    )
+    assert changed is True
+    assert effective == "sensenova-primary/a:b:c", effective
+    assert provider == "sensenova-primary", provider
+
+
+def test_endpoint_derived_host_port_slug_not_walked_back():
+    """Endpoint-derived ``custom:<host>:<port>`` slugs must stay unchanged —
+    the colon walk-back must NOT eat ``8080:Qwen3`` into the model (#1776 form)."""
+    import api.routes as routes
+
+    session_cfg = {
+        "custom_providers": [
+            {"name": "Sensenova Primary", "model": "deepseek-v4-flash"},
+        ]
+    }
+
+    assert (
+        routes._normalize_custom_qualified_session_model(
+            "@custom:10.8.71.41:8080:Qwen3",
+            None,
+            profile_config=session_cfg,
+        )
+        is None
+    )
+
+
 def test_profile_config_none_fails_closed_against_global(monkeypatch):
     """A slug configured only in the module-global config must NOT normalize
     when ``profile_config=None`` — the ``None`` state is reachable from
