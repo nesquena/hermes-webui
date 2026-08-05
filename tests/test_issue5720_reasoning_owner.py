@@ -507,6 +507,7 @@ const INFLIGHT=global.INFLIGHT={};
 const LIVE_STREAMS=global.LIVE_STREAMS={};
 const _STREAM_WAS_HIDDEN=global._STREAM_WAS_HIDDEN={};
 const _STREAM_NOTIFICATION_BACKGROUND=global._STREAM_NOTIFICATION_BACKGROUND={};
+const _STREAM_COMPRESSION_SIDS=global._STREAM_COMPRESSION_SIDS={};
 const _desktopBackgroundedForNotifications=false;
 global._bindStreamHiddenTracker=()=>{};
 global.closeOtherLiveStreams=()=>{};
