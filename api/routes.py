@@ -14404,6 +14404,8 @@ def handle_post(handler, parsed) -> bool:
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,
         )
+        if body.get("model_selection_mode") == "auto":
+            s.model_selection_mode = "auto"
         if worktree_info:
             publish_session_list_changed(
                 "session_new",

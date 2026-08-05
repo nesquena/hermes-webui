@@ -1445,6 +1445,7 @@ async function newSession(flash, options={}){
     }
     if(newModelState&&newModelState.model){
       reqBody.model=newModelState.model;
+      reqBody.model_selection_mode=newModelState.model==='__default__'?'auto':null;
       // Cold-start / picker-without-provider fallback: when the dropdown option's
       // data-provider is empty/'default' or the persisted state predates provider
       // tracking, newModelState.model_provider is null. POST /api/session/new's

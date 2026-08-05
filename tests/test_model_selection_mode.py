@@ -16,6 +16,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 ROUTES_PY = REPO_ROOT / "api" / "routes.py"
 MODELS_PY = REPO_ROOT / "api" / "models.py"
+SESSIONS_JS = REPO_ROOT / "static" / "sessions.js"
 UI_JS = REPO_ROOT / "static" / "ui.js"
 MESSAGES_JS = REPO_ROOT / "static" / "messages.js"
 COMMANDS_JS = REPO_ROOT / "static" / "commands.js"
@@ -77,6 +78,18 @@ class TestModelSelectionModeSources:
         src = MESSAGES_JS.read_text(encoding="utf-8")
         assert "S.session.session_id!==activeSid" in src
         assert "Session changed during default model resolution" in src
+
+    def test_session_new_sends_model_selection_mode(self):
+        """sessions.js newSession sends model_selection_mode in /api/session/new body."""
+        src = SESSIONS_JS.read_text(encoding="utf-8")
+        assert "model_selection_mode=" in src
+        assert "reqBody.model_selection_mode=" in src
+
+    def test_routes_session_new_persists_model_selection_mode(self):
+        """routes.py /api/session/new persists model_selection_mode on new session."""
+        src = ROUTES_PY.read_text(encoding="utf-8")
+        assert 'body.get("model_selection_mode") == "auto"' in src
+        assert 's.model_selection_mode = "auto"' in src
 
 
 # === Persistent intent tests (no Node needed) ===
