@@ -3214,6 +3214,28 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     fresh_segment = True
     last_ts = None
     reasoning_first_tool_count: int | None = None
+    # Monotonic journal-order ordinal, stamped on every renderable unit as it
+    # is observed. The render walk merges prose bursts, tool calls, and
+    # compression events by ordinal so a compression row cannot land on the
+    # wrong side of a tool/prose burst that preceded or followed it in the
+    # journal. Gating by render count (how many tool rows have already been
+    # appended) misclassifies a compression event whose surrounding tools were
+    # a mix of grouped and ungrouped, because ungrouped tools are drained
+    # after the burst walk.
+    render_ordinal_counter = 0
+
+    def next_ordinal() -> int:
+        nonlocal render_ordinal_counter
+        render_ordinal_counter += 1
+        return render_ordinal_counter
+
+    # Parallel maps: unit identity -> render ordinal. Kept off the unit dicts
+    # themselves so the snapshot payload's ``activity_burst_anchors``,
+    # ``tool_calls``, and compression envelopes retain their published shape —
+    # tests and clients depend on it.
+    burst_ordinals: dict[int, int] = {}
+    tool_call_ordinals: dict[int, int] = {}
+    compression_event_ordinals: dict[int, int] = {}
 
     def mark_boundary() -> int:
         nonlocal current_activity_burst_id
@@ -3229,6 +3251,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             activity_burst_anchors.append(
                 {"id": current_activity_burst_id, "textEnd": text_end}
             )
+            burst_ordinals[current_activity_burst_id] = next_ordinal()
         return current_activity_burst_id
 
     def update_completed_tool(payload: dict) -> None:
@@ -3276,6 +3299,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if current_activity_burst_id:
             call["activityBurstId"] = current_activity_burst_id
             call["activitySegmentSeq"] = current_activity_burst_id
+        tool_call_ordinals[id(call)] = next_ordinal()
         tool_calls.append(call)
 
     def reasoning_echo_tail_matches(text: str) -> bool:
@@ -3345,6 +3369,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             if boundary_id:
                 call["activityBurstId"] = boundary_id
                 call["activitySegmentSeq"] = boundary_id
+            tool_call_ordinals[id(call)] = next_ordinal()
             tool_calls.append(call)
             fresh_segment = True
             continue
@@ -3357,25 +3382,30 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             # streaming.put(); preserve them so replay hydration paints the same
             # divider the live SSE path did. Identity comes from the event
             # envelope, never from a phase/status guess.
+            # A malformed seq must cost at most its own ordering hint. int()
+            # raises OverflowError (not ValueError) on a non-finite float, and
+            # the enclosing session route catches Exception and drops the WHOLE
+            # runtime_journal_snapshot — so one bad journal entry would blank the
+            # entire recovered scene. Skip the hint, keep the event.
             try:
                 event_seq = max(0, int(event.get("seq") or 0))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 event_seq = 0
-            compression_events.append(
-                {
-                    "event": event_name,
-                    "burst_id": mark_boundary() or 0,
-                    "leading": not assistant_text and not tool_calls,
-                    "reasoning_text_end": len(reasoning_text),
-                    "tool_count": len(tool_calls),
-                    "seq": event_seq or None,
-                    "event_id": _run_journal_snapshot_event_id_for_run(
-                        event, run_id, event_seq
-                    ),
-                    "created_at": event.get("created_at"),
-                    "payload": payload,
-                }
-            )
+            entry = {
+                "event": event_name,
+                "burst_id": mark_boundary() or 0,
+                "leading": not assistant_text and not tool_calls,
+                "reasoning_text_end": len(reasoning_text),
+                "tool_count": len(tool_calls),
+                "seq": event_seq or None,
+                "event_id": _run_journal_snapshot_event_id_for_run(
+                    event, run_id, event_seq
+                ),
+                "created_at": event.get("created_at"),
+                "payload": payload,
+            }
+            compression_event_ordinals[id(entry)] = next_ordinal()
+            compression_events.append(entry)
             fresh_segment = True
 
     if assistant_text or reasoning_text:
@@ -3647,30 +3677,17 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         reasoning_rendered_end = target_end
         thinking_segment_index = next_segment_index
 
-    def append_compression_rows(
-        burst_id: int | None = None,
-        *,
-        leading_only: bool = False,
-        max_tool_count: int | None = None,
-    ) -> None:
-        """Emit not-yet-emitted compression rows, in journal order.
+    def append_compression_rows() -> None:
+        """Drain any compression event that lacked a journal ordinal.
 
-        ``burst_id=None`` drains whatever is left so a journaled canonical event
-        is never silently dropped when its burst produced no prose/tool row.
+        The main render walk emits every ordinally-stamped compression event
+        at its journal position. This drain only catches legacy shapes that
+        somehow slipped through without an ordinal, so a canonical event is
+        never silently dropped.
         """
         for entry in compression_events:
             if entry.get("_emitted"):
                 continue
-            if burst_id is not None and int(entry.get("burst_id") or 0) != burst_id:
-                continue
-            if leading_only and not entry.get("leading"):
-                continue
-            if max_tool_count is not None and int(entry.get("tool_count") or 0) > max_tool_count:
-                continue
-            # Reasoning is accumulated for display, but canonical compression
-            # events are real ordering boundaries. Flush only the reasoning
-            # observed before this envelope so reasoning after compression stays
-            # in a later Thinking row.
             append_thinking_row(
                 force=True,
                 through=int(entry.get("reasoning_text_end") or 0),
@@ -3680,56 +3697,81 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             row["order_index"] = len(anchor_activity_rows)
             anchor_activity_rows.append(row)
 
-    tool_rows_by_burst: dict[int, list[tuple[int, dict]]] = {}
-    ungrouped_tool_rows: list[tuple[int, dict]] = []
+    # Build a single ordinal-sorted render plan out of every renderable unit
+    # journaled during the event walk. Merging by ordinal — not by render
+    # count — is what keeps a compression row on the correct side of a
+    # mixed grouped/ungrouped tool + prose burst; the previous walk drained
+    # ungrouped tools AFTER the burst loop and gated compression on
+    # ``tool_rows_rendered`` (a render count), so an event journaled before
+    # an ungrouped tool would race past it.
+    render_plan: list[tuple[int, str, object]] = []
     for order, call in enumerate(tool_calls):
-        burst_id = int(call.get("activityBurstId") or 0) if isinstance(call, dict) else 0
+        ordinal = tool_call_ordinals.get(id(call), 0) if isinstance(call, dict) else 0
         row = scene_tool_row(call, fallback_order=order)
-        if not row:
+        if not row or not ordinal:
             continue
-        if burst_id:
-            tool_rows_by_burst.setdefault(burst_id, []).append((order, row))
-        else:
-            ungrouped_tool_rows.append((order, row))
+        render_plan.append((ordinal, "tool", row))
 
-    consumed_tools: set[int] = set()
-    text_start = 0
-    # A compression event that landed before any prose/tool leads the scene.
-    append_compression_rows(0, leading_only=True, max_tool_count=0)
     sorted_anchors = sorted(
         [
             anchor
             for anchor in activity_burst_anchors
             if int(anchor.get("textEnd") or 0) > 0
         ],
-        key=lambda anchor: int(anchor.get("textEnd") or 0),
+        key=lambda anchor: burst_ordinals.get(int(anchor.get("id") or 0), 0),
     )
     for anchor in sorted_anchors:
-        burst_id = int(anchor.get("id") or 0) or None
-        text_end = min(len(assistant_text), int(anchor.get("textEnd") or 0))
-        segment_seq = burst_id or (len(anchor_activity_rows) + 1)
-        prose = scene_prose_row(
-            assistant_text[text_start:text_end],
-            burst_id=burst_id,
-            segment_seq=segment_seq,
-            status="completed",
-        )
-        if prose:
-            anchor_activity_rows.append(prose)
-            append_thinking_row()
-        append_compression_rows(burst_id or 0, max_tool_count=tool_rows_rendered)
-        append_thinking_row()
-        for order, row in tool_rows_by_burst.get(burst_id or 0, []):
+        ordinal = burst_ordinals.get(int(anchor.get("id") or 0), 0)
+        if not ordinal:
+            continue
+        render_plan.append((ordinal, "prose", anchor))
+
+    for entry in compression_events:
+        ordinal = compression_event_ordinals.get(id(entry), 0)
+        if not ordinal:
+            continue
+        render_plan.append((ordinal, "compress", entry))
+
+    render_plan.sort(key=lambda unit: unit[0])
+
+    text_start = 0
+    for _ordinal, kind, unit in render_plan:
+        if kind == "prose":
+            anchor = unit
+            burst_id = int(anchor.get("id") or 0) or None
+            text_end = min(len(assistant_text), int(anchor.get("textEnd") or 0))
+            segment_seq = burst_id or (len(anchor_activity_rows) + 1)
+            prose = scene_prose_row(
+                assistant_text[text_start:text_end],
+                burst_id=burst_id,
+                segment_seq=segment_seq,
+                status="completed",
+            )
+            if prose:
+                anchor_activity_rows.append(prose)
+                append_thinking_row()
+            text_start = max(text_start, text_end)
+        elif kind == "tool":
+            row = unit
             row["order_index"] = len(anchor_activity_rows)
             anchor_activity_rows.append(row)
-            consumed_tools.add(order)
             tool_rows_rendered += 1
             append_thinking_row()
-            append_compression_rows(
-                burst_id or 0,
-                max_tool_count=tool_rows_rendered,
+        elif kind == "compress":
+            entry = unit
+            # Reasoning is accumulated for display, but a canonical
+            # compression event is a real ordering boundary. Flush only the
+            # reasoning observed before this envelope so reasoning after
+            # compression stays in a later Thinking row.
+            append_thinking_row(
+                force=True,
+                through=int(entry.get("reasoning_text_end") or 0),
             )
-        text_start = max(text_start, text_end)
+            entry["_emitted"] = True
+            row = scene_compression_row(entry)
+            row["order_index"] = len(anchor_activity_rows)
+            anchor_activity_rows.append(row)
+            append_thinking_row()
 
     if text_start < len(assistant_text):
         segment_seq = max(len(sorted_anchors) + 1, 1)
@@ -3745,17 +3787,6 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
 
     if not assistant_text:
         append_thinking_row()
-
-    append_compression_rows(0, max_tool_count=tool_rows_rendered)
-    append_thinking_row()
-    for order, row in sorted(ungrouped_tool_rows, key=lambda item: item[0]):
-        if order in consumed_tools:
-            continue
-        row["order_index"] = len(anchor_activity_rows)
-        anchor_activity_rows.append(row)
-        tool_rows_rendered += 1
-        append_thinking_row()
-        append_compression_rows(0, max_tool_count=tool_rows_rendered)
 
     append_compression_rows()
     append_thinking_row(force=True)

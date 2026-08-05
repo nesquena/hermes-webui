@@ -4120,21 +4120,33 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         || text.includes('compression finished')
         || (text.includes('compressed')&&!text.includes('compressing'))
       ) return 'compressed';
-      // Positive cues mirror _is_agent_compression_start_status() in
-      // api/streaming.py, which is the authority for "compression actually
-      // started". Preflight compression (turn_context) is intentionally NOT a
-      // cue there or here: it announces an intent, and the later authoritative
-      // "Compacting context" marker is what proves compaction proceeded.
-      // Accepting it client-side would paint a divider on replay for turns the
-      // live SSE path never flagged.
+      // Positive cues are an EXACT mirror of the accept list in
+      // _is_agent_compression_start_status() (api/streaming.py), which is the
+      // authority for "compression actually started". Any cue accepted here but
+      // not there lets replay invent a "Compressing context" divider the live
+      // SSE path never painted — the defect this function exists to prevent.
+      //
+      // Deliberately NOT cues, because Python rejects them:
+      //   - bare `phase==='compressing'`: a genuine compression row arrives with
+      //     a canonical source_event_type and returns at the top of this
+      //     function, before any text inference. Reaching this branch means the
+      //     row carried no canonical type, so phase alone is not evidence.
+      //   - `compressing context`: Python keys on `compacting context`; there is
+      //     no `compressing context` cue to mirror.
+      //   - `pre-api compression` without the colon: Python requires
+      //     `pre-api compression:`.
+      //   - any generic text containing `compressing`: far broader than the
+      //     dash-paren emitter forms Python accepts.
+      // Preflight compression (turn_context) is excluded on both sides: it
+      // announces intent, and the later `Compacting context` marker is what
+      // proves compaction proceeded.
       if(
-        phase==='compressing'
-        || text.includes('compressing context')
+        text.includes('pre-api compression:')
         || text.includes('compacting context')
-        || text.includes('pre-api compression')
         || text.includes('context too large')
+        || text.includes('\u2014 compressing (')
+        || text.includes('- compressing (')
         || text.includes('compression attempt')
-        || (text.includes('compressing')&&!text.includes('skipping'))
       ) return 'compressing';
       return '';
     }
