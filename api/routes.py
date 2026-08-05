@@ -7215,14 +7215,27 @@ def _read_profile_config_cached(profile_name: str, cfg_path: str) -> dict | None
 
 
 def _load_profile_config_dict(session) -> dict | None:
-    """Load the session profile's config.yaml as a dict, or None."""
-    if not getattr(session, "profile", None):
+    """Load the session profile's config.yaml as a dict, or None.
+
+    #6718 review 3 (SILENT): fail closed on an INVALID persisted profile name.
+    ``get_hermes_home_for_profile`` resolves names that do not match the
+    profile-id shape to the ROOT home, so an invalid stored ``session.profile``
+    used to load the root config — letting a root-only custom-provider slug
+    remap inside that session. The identity is validated BEFORE resolution;
+    anything that is neither a root alias nor a syntactically valid named
+    profile yields None (no config), never the root fallback.
+    """
+    _profile = getattr(session, "profile", None)
+    if not _profile:
         return None
     try:
         from api.profiles import get_hermes_home_for_profile
+        from api.profiles import is_valid_profile_identity
 
+        if not is_valid_profile_identity(str(_profile)):
+            return None
         _profile_cfg_path = os.path.join(
-            str(get_hermes_home_for_profile(session.profile)),
+            str(get_hermes_home_for_profile(_profile)),
             "config.yaml",
         )
         if not os.path.isfile(_profile_cfg_path):
@@ -14623,20 +14636,42 @@ def handle_post(handler, parsed) -> bool:
         # #6718 re-gate: the custom-provider slug normalizer must resolve under
         # the session's OWN profile config (fail-closed when unreadable) —
         # never the process-global config, which may belong to another profile.
+        # #6718 review 3 (CORE): resolve ONE authoritative session profile
+        # identity — the explicit body.profile, else the active profile that
+        # new_session() would otherwise stamp the session with — and use that
+        # SAME identity for both the profile-config load below and
+        # new_session(profile=...) below. Previously an omitted body.profile
+        # loaded the DEFAULT (root) config while the session was stamped with
+        # the active NAMED profile: two different identities in one request,
+        # letting a root-only custom-provider slug remap inside another
+        # profile's session. An explicit body.profile that is not a valid
+        # profile identity also fails closed (no config) instead of resolving
+        # to the root home.
         _profile_name = str(body.get("profile") or "").strip() or None
+        if _profile_name is None:
+            try:
+                from api.profiles import get_active_profile_name
+
+                _profile_name = str(get_active_profile_name() or "").strip() or None
+            except ImportError:
+                _profile_name = None
         _session_profile_config = None
         try:
             from api.profiles import get_hermes_home_for_profile
+            from api.profiles import is_valid_profile_identity
 
-            _p_cfg_path = os.path.join(
-                str(get_hermes_home_for_profile(_profile_name)),
-                "config.yaml",
-            )
-            if os.path.isfile(_p_cfg_path):
-                _session_profile_config = _read_profile_config_cached(
-                    str(_profile_name or ""),
-                    _p_cfg_path,
+            if _profile_name is not None and not is_valid_profile_identity(_profile_name):
+                _session_profile_config = None
+            else:
+                _p_cfg_path = os.path.join(
+                    str(get_hermes_home_for_profile(_profile_name)),
+                    "config.yaml",
                 )
+                if os.path.isfile(_p_cfg_path):
+                    _session_profile_config = _read_profile_config_cached(
+                        str(_profile_name or ""),
+                        _p_cfg_path,
+                    )
         except Exception:
             _session_profile_config = None
         model, model_provider = _session_model_state_from_request(
@@ -14708,7 +14743,9 @@ def handle_post(handler, parsed) -> bool:
             workspace=workspace,
             model=model,
             model_provider=model_provider,
-            profile=body.get("profile") or None,
+            # Same authoritative identity resolved above (body.profile, else the
+            # active profile): the config load and the session stamp must agree.
+            profile=_profile_name,
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,

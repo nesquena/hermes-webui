@@ -12,6 +12,9 @@ the qualifier matches a NAMED ``custom_providers`` entry, and preserves the
 current behavior otherwise.
 """
 
+import io
+import json
+
 
 def test_custom_qualified_model_normalized_to_canonical_slug(monkeypatch):
     """@custom:sensenova-primary:deepseek-v4-flash -> sensenova-primary/deepseek-v4-flash."""
@@ -393,3 +396,193 @@ def test_session_new_request_e2e_profile_config():
 
     assert model == "sensenova-primary/deepseek-v4-flash", model
     assert provider == "sensenova-primary", provider
+
+
+# ── #6718 review 3 regressions ────────────────────────────────────────────
+# (CORE) /api/session/new must resolve ONE authoritative session profile
+# identity and use it for BOTH the profile-config load and new_session().
+# (SILENT) invalid persisted session.profile names must fail closed instead
+# of loading the root config.
+
+
+class _RoutePostHandler:
+    """Minimal fake handler for driving ``routes.handle_post`` in-process."""
+
+    def __init__(self, body: dict):
+        raw = json.dumps(body).encode("utf-8")
+        self.headers = {"Content-Length": str(len(raw))}
+        self.rfile = io.BytesIO(raw)
+        self.wfile = io.BytesIO()
+        self.client_address = ("127.0.0.1", 12345)
+        self.status = None
+        self.response_headers = {}
+
+    def send_response(self, code: int):
+        self.status = code
+
+    def send_header(self, key: str, value: str):
+        self.response_headers[key] = value
+
+    def end_headers(self):
+        pass
+
+    def log_message(self, *_args, **_kwargs):
+        pass
+
+    def payload(self) -> dict:
+        return json.loads(self.wfile.getvalue().decode("utf-8"))
+
+
+def test_session_new_omitted_profile_uses_active_profile_config(monkeypatch, tmp_path):
+    """#6718 review 3 (CORE): POST /api/session/new with ``body.profile``
+    omitted must resolve the session model against the ACTIVE profile's config
+    — not the default/root config.
+
+    Previously the config lookup loaded the root config (profile=None →
+    default home) while ``new_session()`` stamped the session with the active
+    NAMED profile: two different identities in one request, so a root-only
+    ``@custom:other-profile-only:...`` slug remapped inside another profile's
+    session.
+    """
+    from urllib.parse import urlparse
+
+    import api.profiles as profiles_mod
+    import api.routes as routes_mod
+
+    root_home = tmp_path / "root"
+    work_home = tmp_path / "profiles" / "work"
+    root_home.mkdir(parents=True)
+    work_home.mkdir(parents=True)
+    (root_home / "config.yaml").write_text(
+        "custom_providers:\n  - name: Other Profile Only\n    model: gpt-5.5\n"
+    )
+    (work_home / "config.yaml").write_text(
+        "custom_providers:\n  - name: Sensenova Primary\n    model: deepseek-v4-flash\n"
+    )
+
+    # The named profile home resolves for 'work', the root home for anything
+    # else (None/empty/root aliases → root) — exactly the resolver behavior
+    # the review reproduced the leak through.
+    monkeypatch.setattr(
+        profiles_mod,
+        "get_hermes_home_for_profile",
+        lambda name: root_home if not name or str(name).strip().lower() in ("default", "root") else work_home,
+    )
+    # The handler resolves the omitted-profile identity through
+    # api.profiles.get_active_profile_name — the SAME function new_session()
+    # falls back to (one authoritative identity).
+    monkeypatch.setattr(profiles_mod, "get_active_profile_name", lambda: "work")
+    monkeypatch.setattr(routes_mod, "_get_active_profile_name", lambda: "work")
+    # Keep the post-normalization catalog resolution off the network.
+    monkeypatch.setattr(
+        routes_mod,
+        "get_available_models",
+        lambda *a, **k: {"default_model": "gpt-5.4"},
+    )
+
+    handler = _RoutePostHandler({"model": "@custom:other-profile-only:gpt-5.5"})
+    routes_mod.handle_post(handler, urlparse("/api/session/new"))
+
+    assert handler.status == 200, handler.payload()
+    session = handler.payload()["session"]
+    assert session["profile"] == "work", session["profile"]
+    # The root-only slug must NOT be applied inside the 'work' profile's
+    # session: 'work' config has no matching named entry, so the persisted
+    # form is kept (fail closed) instead of being remapped to the root slug.
+    assert session["model"] == "@custom:other-profile-only:gpt-5.5", session["model"]
+    assert session["model"] != "other-profile-only/gpt-5.5", session["model"]
+
+
+def test_session_new_omitted_profile_matches_active_profile_slug(monkeypatch, tmp_path):
+    """#6718 review 3 (CORE) positive control: with body.profile omitted, a
+    model whose qualifier IS configured in the active named profile's config
+    still normalizes — proving the active identity drives the config load."""
+    from urllib.parse import urlparse
+
+    import api.profiles as profiles_mod
+    import api.routes as routes_mod
+
+    root_home = tmp_path / "root"
+    work_home = tmp_path / "profiles" / "work"
+    root_home.mkdir(parents=True)
+    work_home.mkdir(parents=True)
+    # The slug lives ONLY in the active profile's config, not the root config.
+    (root_home / "config.yaml").write_text("custom_providers: []\n")
+    (work_home / "config.yaml").write_text(
+        "custom_providers:\n  - name: Sensenova Primary\n    model: deepseek-v4-flash\n"
+    )
+
+    monkeypatch.setattr(
+        profiles_mod,
+        "get_hermes_home_for_profile",
+        lambda name: root_home if not name or str(name).strip().lower() in ("default", "root") else work_home,
+    )
+    monkeypatch.setattr(profiles_mod, "get_active_profile_name", lambda: "work")
+    monkeypatch.setattr(routes_mod, "_get_active_profile_name", lambda: "work")
+    monkeypatch.setattr(
+        routes_mod,
+        "get_available_models",
+        lambda *a, **k: {"default_model": "gpt-5.4"},
+    )
+
+    handler = _RoutePostHandler({"model": "@custom:sensenova-primary:deepseek-v4-flash"})
+    routes_mod.handle_post(handler, urlparse("/api/session/new"))
+
+    assert handler.status == 200, handler.payload()
+    session = handler.payload()["session"]
+    assert session["profile"] == "work", session["profile"]
+    assert session["model"] == "sensenova-primary/deepseek-v4-flash", session["model"]
+
+
+def test_load_profile_config_dict_fails_closed_on_invalid_persisted_profile(monkeypatch, tmp_path):
+    """#6718 review 3 (SILENT): a session whose PERSISTED profile name is
+    invalid must NOT load the root config.
+
+    ``get_hermes_home_for_profile`` resolves names that do not match the
+    profile-id shape to the ROOT home, so pre-fix an invalid stored
+    ``session.profile`` loaded the root config — letting a root-only
+    custom-provider slug remap inside that session. The identity is validated
+    before resolution; anything that is neither a root alias nor a valid named
+    profile yields None (fail closed), never the root fallback.
+    """
+    import api.profiles as profiles_mod
+    import api.routes as routes_mod
+
+    root_home = tmp_path / "root"
+    root_home.mkdir(parents=True)
+    root_cfg_text = (
+        "custom_providers:\n  - name: Root Only\n    model: gpt-5.5\n"
+    )
+    (root_home / "config.yaml").write_text(root_cfg_text)
+
+    # ANY name resolves to the root home — the resolver fallback the guard
+    # must defeat: pre-fix this made the root config load for the invalid
+    # stored profile name.
+    monkeypatch.setattr(profiles_mod, "get_hermes_home_for_profile", lambda name: root_home)
+
+    class _InvalidProfileSession:
+        profile = "../../evil"
+
+    assert routes_mod._load_profile_config_dict(_InvalidProfileSession()) is None
+
+    class _TraversalProfileSession:
+        profile = "..%2f..%2fetc"
+
+    assert routes_mod._load_profile_config_dict(_TraversalProfileSession()) is None
+
+    # A valid named profile still loads its own config (positive control)...
+    class _NamedProfileSession:
+        profile = "work"
+
+    assert routes_mod._load_profile_config_dict(_NamedProfileSession()) == {
+        "custom_providers": [{"name": "Root Only", "model": "gpt-5.5"}]
+    }
+
+    # ...and a root alias is still the root profile's OWN config (legitimate,
+    # not a cross-profile leak).
+    class _RootAliasSession:
+        profile = "default"
+
+    assert routes_mod._load_profile_config_dict(_RootAliasSession()) == {
+        "custom_providers": [{"name": "Root Only", "model": "gpt-5.5"}]
+    }
