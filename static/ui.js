@@ -2922,12 +2922,19 @@ function _clearDefaultModelSession(sid){
 /** Check if the session is in "Default (auto)" mode. */
 function _isDefaultModelSession(sid){
   if(!sid) return false;
-  // Server-side field is authoritative
+  // Server-side field is authoritative.
   if(S.session && S.session.session_id===sid){
     if(S.session.model_selection_mode==='auto') return true;
     if(S.session.model==='__default__') return true;
+    // Server sent a concrete model with no auto mode; the session is NOT
+    // "Default (auto)".  Never fall through to localStorage, which can
+    // carry a stale entry from cross-browser explicit-model changes or
+    // from a previous session that was later toggled to explicit.  The
+    // server's persisted model is the truth (greptile review).
+    return false;
   }
-  // Fall back to legacy localStorage as migration aid
+  // Legacy localStorage migration aid: only used when S.session hasn't
+  // been loaded for this sid yet (edge case during session creation).
   return !!_readDefaultModelSessions()[String(sid)];
 }
 /** Restore the __default__ sentinel on a session that was set to

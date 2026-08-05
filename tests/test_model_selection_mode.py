@@ -79,6 +79,12 @@ class TestModelSelectionModeSources:
         assert "S.session.session_id!==activeSid" in src
         assert "Session changed during default model resolution" in src
 
+    def test_is_default_model_session_trusts_server_over_localstorage(self):
+        """_isDefaultModelSession must not fall through to localStorage when S.session has concrete model."""
+        src = UI_JS.read_text(encoding="utf-8")
+        assert "return false;" in src.split("model_selection_mode==='auto'")[1].split("_readDefaultModelSessions")[0]
+        assert "Never fall through to localStorage" in src
+
     def test_session_new_sends_model_selection_mode(self):
         """sessions.js newSession sends model_selection_mode in /api/session/new body."""
         src = SESSIONS_JS.read_text(encoding="utf-8")
