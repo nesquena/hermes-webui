@@ -12,6 +12,7 @@ asserting the rendered HTML for the most common LLM-output shapes.
 Add a case here whenever the renderer fix targets a class of input the
 Python mirror cannot exercise faithfully.
 """
+import json
 import os
 import re
 import shutil
@@ -32,6 +33,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 _DRIVER_SRC = r"""
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[2], 'utf8');
+const messagesSrc = process.argv[4] ? fs.readFileSync(process.argv[4], 'utf8') : '';
 global.window = {};
 global.document = { createElement: () => ({ innerHTML: '', textContent: '' }), baseURI: 'http://localhost/app/' };
 function _sessionUrlForSid(sid) { return '/app/session/' + encodeURIComponent(String(sid || '')); }
@@ -56,26 +58,62 @@ function _inlineMediaHtmlForRef(ref){
   return `<img class="msg-media-img" src="api/media?path=${encodeURIComponent(r)}" alt="image" loading="lazy">`;
 }
 
-function extractFunc(name) {
+function extractFunc(name, source = src) {
   const re = new RegExp('function\\s+' + name + '\\s*\\(');
-  const start = src.search(re);
+  const start = source.search(re);
   if (start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{', start);
+  let i = source.indexOf('{', start);
   let depth = 1; i++;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}') depth--;
+  while (depth > 0 && i < source.length) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') depth--;
     i++;
   }
-  return src.slice(start, i);
+  return source.slice(start, i);
+}
+function extractOptionalFunc(name, source = src) {
+  try { return extractFunc(name, source); } catch (_) { return ''; }
 }
 eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
+const bareSessionTransform = extractOptionalFunc('_transformBareSessionReferences');
+if (bareSessionTransform) eval(bareSessionTransform);
 eval(extractFunc('renderMd'));
 
 let buf = '';
 process.stdin.on('data', c => { buf += c; });
-process.stdin.on('end', () => { process.stdout.write(renderMd(buf)); });
+process.stdin.on('end', () => {
+  if (process.argv[3] === 'transform') {
+    process.stdout.write(typeof _transformBareSessionReferences === 'function'
+      ? _transformBareSessionReferences(buf) : buf);
+    return;
+  }
+  if (process.argv[3] === 'stream') {
+    const writes = [];
+    let rebuilds = 0;
+    let _smdParser = {};
+    let _smdWrittenLen = 0;
+    let _smdWrittenText = '';
+    let _streamingKatexTimer = null;
+    const assistantBody = null;
+    window.smd = { parser_write: (_parser, delta) => writes.push(delta) };
+    function _smdNewParser() { rebuilds++; _smdParser = {}; }
+    function _scheduleStreamingKatex() {}
+    function _smdMediaTailFlush() {}
+    function _smdMediaTailClear() {}
+    function _smdClearParserIdentity() {}
+    eval(extractFunc('_smdWrite', messagesSrc));
+    const chunks = JSON.parse(buf);
+    let full = '';
+    for (const chunk of chunks) {
+      full += chunk;
+      _smdWrite(full);
+    }
+    process.stdout.write(JSON.stringify({ writes, rebuilds, final: writes.at(-1) || '', html: renderMd(full) }));
+    return;
+  }
+  process.stdout.write(renderMd(buf));
+});
 """
 
 
@@ -87,10 +125,13 @@ def driver_path(tmp_path_factory):
     return str(p)
 
 
-def _render(driver_path, markdown: str) -> str:
+def _render(driver_path, markdown: str, mode: str | None = None) -> str:
     """Run renderMd against the actual ui.js and return the rendered HTML."""
+    args = [NODE, driver_path, str(UI_JS_PATH)]
+    if mode:
+        args.append(mode)
     result = subprocess.run(
-        [NODE, driver_path, str(UI_JS_PATH)],
+        args,
         input=markdown,
         capture_output=True,
         text=True,
@@ -99,6 +140,19 @@ def _render(driver_path, markdown: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed: {result.stderr}")
     return result.stdout
+
+
+def _stream_write_chunks(driver_path, chunks):
+    result = subprocess.run(
+        [NODE, driver_path, str(UI_JS_PATH), "stream", str(REPO_ROOT / "static" / "messages.js")],
+        input=json.dumps(chunks),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"node driver failed: {result.stderr}")
+    return json.loads(result.stdout)
 
 
 
@@ -123,6 +177,158 @@ class TestSessionInternalLinks:
         out = _render(driver_path, '<a class="session-link" href="/anything/foo/session/abc">bad</a>')
         assert 'href="/anything/foo/session/abc"' not in out
         assert '<a>bad</a>' in out
+
+
+_FENCE_CASES = (
+    pytest.param(
+        "> ```\n> @session:p/quoted123\n> ```\nafter @session:outside123",
+        ("@session:p/quoted123",), "outside123", id="quoted"),
+    pytest.param(
+        "&gt; ```\n&gt; @session:p/entity123\n&gt; ```\nafter @session:outside123",
+        ("@session:p/entity123",), "outside123", id="entity-encoded"),
+    pytest.param(
+        ">  ```\n>  @session:p/twospaces123\n>  ```\nafter @session:outside123",
+        ("@session:p/twospaces123",), "outside123", id="two-spaces"),
+    pytest.param(
+        "> >  ```\n> >  @session:p/mixed123\n> >  ```\nafter @session:outside123",
+        ("@session:p/mixed123",), "outside123", id="mixed-spacing"),
+    pytest.param(
+        "```md\n> ```\n@session:inside123\n> ```\nafter @session:outside123\n```",
+        ("@session:inside123", "@session:outside123"), None,
+        id="quoted-inside-unquoted"),
+    pytest.param(
+        "> ```\n> @session:inside123\nAfter @session:outside123",
+        ("@session:inside123",), "outside123", id="quoted-depth-drop"),
+)
+
+_URL_SESSION_CASES = (
+    pytest.param("See https://example.test/?foo;@session:abc123", "https://example.test/?foo;@session:abc123", None, id="semicolon"),
+    pytest.param("See https://example.test/?foo,@session:abc123", "https://example.test/?foo,@session:abc123", None, id="comma"),
+    pytest.param("See https://example.test/?next=@session:abc123", "https://example.test/?next=@session:abc123", None, id="query"),
+    pytest.param("See https://example.test/?foo=1&next=@session:abc123", "https://example.test/?foo=1&next=@session:abc123", None, id="query-ampersand"),
+    pytest.param("See https://example.test/path/@session:abc123#frag", "https://example.test/path/@session:abc123#frag", None, id="path-fragment"),
+    pytest.param("See https://example.test/#@session:abc123", "https://example.test/#@session:abc123", None, id="fragment"),
+    pytest.param("See https://example.test/?foo;@session:abc123, then (@session:outside123),", "https://example.test/?foo;@session:abc123", "outside123", id="prose-after-url"),
+)
+
+
+class TestBareSessionReferences:
+    """Bare Hermes references share the settled renderer's session-link path."""
+
+    def test_cross_profile_reference_uses_only_id_and_short_label(self, driver_path):
+        out = _render(driver_path, "See @session:team_1-alpha/abc123.")
+        assert 'class="session-link"' in out
+        assert 'href="/app/session/abc123"' in out
+        assert ">abc123</a>." in out
+        assert "@session:team_1-alpha/abc123" not in out
+
+    def test_profileless_reference_is_internal_link(self, driver_path):
+        out = _render(driver_path, "Open @session:abc123")
+        assert 'class="session-link"' in out
+        assert 'href="/app/session/abc123"' in out
+        assert ">abc123</a>" in out
+
+    def test_raw_anchor_stays_literal_settled_and_live(self, driver_path):
+        src = '<a href="/docs">See @session:abc123 </a> Then @session:outside123.'
+        expected = src.replace(
+            "@session:outside123", "[outside123](session://outside123)", 1)
+        transformed = _render(driver_path, src, "transform")
+        out = _render(driver_path, src)
+        live = _stream_write_chunks(driver_path, [src])
+        assert transformed == expected
+        assert '<a href="/docs">See @session:abc123 </a>' in transformed
+        assert '<a>See @session:abc123 </a>' in out
+        assert out.count('class="session-link"') == 1
+        assert live["final"] == expected
+        assert live["html"].count('class="session-link"') == 1
+        assert '@session:abc123' in live["html"]
+
+    def test_code_and_existing_markdown_link_contents_stay_literal(self, driver_path):
+        src = (
+            "`$$ $& $' @session:inline123` [@session:label123](https://example.test/@session/dest123)\n\n"
+            "```text\n$$ $& $' @session:default/fenced123\n```\n\n"
+            "<code>@session:raw123</code> <pre>@session:pre123</pre>\n\n"
+            "See @session:valid123."
+        )
+        out = _render(driver_path, src)
+        assert out.count('class="session-link"') == 1
+        assert 'href="/app/session/valid123"' in out
+        assert "$$" in out and "$&amp;" in out and "$&#39;" in out
+        assert "@session:inline123" in out
+        assert "@session:label123" in out
+        assert "@session:default/fenced123" in out
+        assert "@session:raw123" in out
+        assert "@session:pre123" in out
+        assert "\x00" not in out
+        live = _stream_write_chunks(driver_path, [src])
+        expected = src.replace("@session:valid123", "[valid123](session://valid123)", 1)
+        assert live["final"] == expected
+        assert live["html"].count('class="session-link"') == 1
+        assert "\x00" not in live["final"] + live["html"]
+
+    @pytest.mark.parametrize("source,literal_refs,outside_id", _FENCE_CASES)
+    def test_blockquoted_fence_matrix_stays_literal(self, driver_path, source, literal_refs, outside_id):
+        out = _render(driver_path, source)
+        for ref in literal_refs:
+            assert ref in out
+        if outside_id:
+            assert out.count('class="session-link"') == 1
+            assert f'href="/app/session/{outside_id}"' in out
+            assert f">{outside_id}</a>" in out
+        else:
+            assert 'class="session-link"' not in out
+
+    def test_malformed_hostile_and_token_embedded_references_stay_literal(self, driver_path):
+        src = (
+            "@session: @session:default/ @session:default/abc/extra "
+            "email@session:abc123 foo+@session:abc123 path/@session:abc123 @session:abc123?next=1 "
+            "@session:abc123#frag @session:abc123\"tag "
+            "https://example.test/?next=@session:abc123 "
+            "https://example.test/?foo=1&next=@session:abc123"
+        )
+        out = _render(driver_path, src)
+        assert 'class="session-link"' not in out
+        for ref in (
+            "@session:", "@session:default/", "@session:default/abc/extra",
+            "email@session:abc123", "foo+@session:abc123", "path/@session:abc123",
+            "@session:abc123?next=1", "@session:abc123#frag",
+        ):
+            assert ref in out
+        assert 'javascript:' not in out.lower()
+        live = _stream_write_chunks(driver_path, [src])
+        assert live["final"] == src
+        assert 'class="session-link"' not in live["html"]
+
+    @pytest.mark.parametrize("source,url,linked_id", _URL_SESSION_CASES)
+    def test_bare_url_spans_protect_embedded_references_settled_and_live(self, driver_path, source, url, linked_id):
+        out = _render(driver_path, source)
+        live = _stream_write_chunks(driver_path, [source])
+        assert f'href="{url}"' in out
+        assert f'href="{url}"' in live["html"]
+        if linked_id:
+            assert out.count('class="session-link"') == 1
+            assert f">{linked_id}</a>" in out
+            assert live["final"] == source.replace(
+                f"@session:{linked_id}", f"[{linked_id}](session://{linked_id})", 1)
+        else:
+            assert 'class="session-link"' not in out
+            assert live["final"] == source
+        assert live["html"].count('class="session-link"') == (1 if linked_id else 0)
+
+    def test_reference_split_across_live_chunks_uses_shared_transform(self, driver_path):
+        result = _stream_write_chunks(driver_path, ["Answer: @session:team_1-alpha/", "abc123."])
+        assert result["rebuilds"] == 1
+        assert "Answer: [abc123](session://abc123)." == result["final"]
+        assert 'class="session-link"' in result["html"]
+        assert 'href="/app/session/abc123"' in result["html"]
+        assert ">abc123</a>." in result["html"]
+
+    @pytest.mark.parametrize("source,literal_refs,outside_id", _FENCE_CASES)
+    def test_blockquoted_fence_matrix_stays_literal_live(self, driver_path, source, literal_refs, outside_id):
+        result = _stream_write_chunks(driver_path, [source])
+        expected = source if not outside_id else source.replace(
+            "@session:" + outside_id, "[" + outside_id + "](session://" + outside_id + ")", 1)
+        assert result["final"] == expected
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Blockquote prefix strip — the bug commit 04e7b53 introduced was a one-char

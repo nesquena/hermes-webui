@@ -287,6 +287,56 @@ function _isBacktickFenceClose(line,minLen){
   const m=String(line||'').match(/^[ ]{0,3}(`{3,})[ \t]*$/);
   return !!(m&&m[1].length>=minLen);
 }
+function _transformBareSessionReferences(input){
+  let s=String(input??'');
+  if(!s.includes('@session:')) return s;
+  const stash=[];
+  const protect=re=>{s=s.replace(re,m=>{stash.push(m);return '\x00S'+(stash.length-1)+'\x00';});};
+  const stashFences=source=>{
+    const lines=source.split('\n');
+    const out=[];
+    const block=[];
+    const quotePrefix=/^[ ]{0,3}(?:>|&gt;)[ ]?/;
+    let fence=null;
+    for(let i=0;i<lines.length;i++){
+      const raw=lines[i];
+      let line=raw.replace(/\r$/,'');
+      let depth=0, prefix;
+      while((prefix=line.match(quotePrefix))){depth++;line=line.slice(prefix[0].length);}
+      if(fence){
+        if(fence.depth&&depth<fence.depth){
+          stash.push(block.join('\n'));out.push('\x00S'+(stash.length-1)+'\x00');
+          block.length=0;fence=null;
+        } else {
+          block.push(raw);
+          if(depth===fence.depth&&_isBacktickFenceClose(line,fence.len)){
+            stash.push(block.join('\n'));out.push('\x00S'+(stash.length-1)+'\x00');
+            block.length=0;fence=null;
+          }
+          continue;
+        }
+      }
+      const open=_matchBacktickFenceLine(line);
+      if(open&&i<lines.length-1){fence={depth,len:open.len};block.push(raw);}
+      else out.push(raw);
+    }
+    if(block.length){stash.push(block.join('\n'));out.push('\x00S'+(stash.length-1)+'\x00');}
+    return out.join('\n');
+  };
+  s=stashFences(s);
+  protect(/`[^`\n]*(?:`|$)/g);
+  protect(/<(?:pre|code)\b[^>]*>[\s\S]*?(?:<\/(?:pre|code)\s*>|$)/gi);
+  protect(/<a\b[^>]*>[\s\S]*?(?:<\/a\s*>|$)/gi);
+  // Match the same flat inline-link grammar handled by renderMd.
+  protect(/!?\[[^\]\n]*\]\s*\([^\n]*?\)/g);
+  // Keep the later bare-URL autolink pass authoritative for embedded tokens.
+  protect(/https?:\/\/[^\s<>"'\)\]]+/g);
+  const ref=/(^|[^A-Za-z0-9_@.\/:?#[\]\\+%\-=&])@session:(?:([a-z0-9][a-z0-9_-]{0,63})\/)?([A-Za-z0-9_-]+)(?=$|\s|[.,;:!?()[\]\x7b\x7d](?=$|\s|[.,;:!?()[\]\x7b\x7d]))/g;
+  s=s.replace(ref,(_,lead,_profile,id)=>lead+'['+id+'](session://'+id+')');
+  for(let i=stash.length;i--;) s=s.replace('\x00S'+i+'\x00',()=>stash[i]);
+  return s;
+}
+if(typeof window!=='undefined') window._transformBareSessionReferences=_transformBareSessionReferences;
 /**
  * Render fenced code blocks inside user messages.
  * Extracts ```…``` fences, replaces them with placeholders,
@@ -7117,6 +7167,7 @@ function _stripVisibleAssistantEchoFromThinking(thinkingText, ...visibleTexts){
 
 function renderMd(raw){
   let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  if(typeof _transformBareSessionReferences==='function') s=_transformBareSessionReferences(s);
   // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
   // pre-pass below. LLMs sometimes emit HTML-entity-encoded output; without this
   // a blockquote sent as "&gt; text" would never be recognised as a blockquote.
@@ -13146,7 +13197,10 @@ function _appendTransparentFadeText(body, text){
 
 function _refreshTransparentFadeProseRow(existing, node, preservedState){
   let body = existing.querySelector ? existing.querySelector('.msg-body') : null;
-  const nextText = String((node.dataset && node.dataset.rawText) || (node.textContent || ''));
+  const rawText = String((node.dataset && node.dataset.rawText) || (node.textContent || ''));
+  const nextText = typeof _transformBareSessionReferences === 'function'
+    ? _transformBareSessionReferences(rawText) : rawText;
+  const hasSessionLink = !!(node.querySelector && node.querySelector('a.session-link'));
   const currentText = String(existing.getAttribute('data-stream-fade-text') || (body && body.textContent) || '');
   const pairs = _transparentLiveRowAttributePairs(node);
   const kept = Object.create(null);
@@ -13162,6 +13216,12 @@ function _refreshTransparentFadeProseRow(existing, node, preservedState){
     existing.setAttribute(name, value);
   }
   existing.className = node.className || '';
+  if(nextText!==rawText||hasSessionLink){
+    existing.innerHTML = node.innerHTML || '';
+    existing.setAttribute('data-stream-fade-text', String(node.textContent || ''));
+    _rehydrateTransparentLiveRow(existing, node, preservedState);
+    return existing;
+  }
   if(!body){
     body = document.createElement('div');
     body.className = 'msg-body';

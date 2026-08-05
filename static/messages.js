@@ -3875,15 +3875,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!window.smd || !key || typeof _safeSmdRenderer!=='function') return null;
     const finalize=!!(options&&options.finalize);
     const value=String(text||'');
+    const transformedValue=typeof _transformBareSessionReferences==='function'
+      ? _transformBareSessionReferences(value) : value;
     const fade=typeof _shouldUseLiveProseFade==='function'&&_shouldUseLiveProseFade();
     let st;
     try{
       st=_anchorProseSmdCache.get(key);
       // Self-heal desyncs (edit/sanitize made the text no longer a pure append):
       // rebuild the parser+node from scratch, mirroring the _smdWrite guard.
-      if(st && st.writtenText && !value.startsWith(st.writtenText)) st=null;
+      if(st && st.writtenText && !transformedValue.startsWith(st.writtenText)) st=null;
       if(st && st.fade!==fade) st=null;
-      if(st && st.finalized && st.writtenText!==value){
+      if(st && st.finalized && st.writtenText!==transformedValue){
         const body=st.node&&st.node.querySelector&&st.node.querySelector('.msg-body');
         if(typeof _smdMediaTailClear === 'function') _smdMediaTailClear(st.parser);
         if(typeof _smdClearParserIdentity === 'function') _smdClearParserIdentity(body, st.parser);
@@ -3912,10 +3914,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       const body=st.node&&st.node.querySelector&&st.node.querySelector('.msg-body');
       if(body&&body.classList) body.classList.toggle('stream-fade-active',fade);
-      const delta=value.slice(st.writtenText.length);
+      const delta=transformedValue.slice(st.writtenText.length);
       if(delta){
         window.smd.parser_write(st.parser,delta);
-        st.writtenText=value;
+        st.writtenText=transformedValue;
       }
       if(finalize){
         _finalizeAnchorProseIncrementalNode(st);
@@ -4335,6 +4337,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdWrite(displayText, fade=false){
     if(!_smdParser||!window.smd) return;
     displayText=String(displayText||'');
+    if(typeof _transformBareSessionReferences==='function') displayText=_transformBareSessionReferences(displayText);
     // Self-heal desyncs: if displayText no longer starts with what we've already
     // written (e.g. due to stream sanitization/tag stripping), incremental slicing
     // can skip characters. Rebuild parser from the full current displayText.
