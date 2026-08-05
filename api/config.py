@@ -3345,6 +3345,8 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
         return True
     if "glm" in token_set or normalized.startswith("glm"):
         return True
+    if "grok" in token_set or normalized.startswith("grok"):
+        return True
     if "step" in token_set or normalized.startswith("step"):
         return True
     if "deepseek" in token_set:
