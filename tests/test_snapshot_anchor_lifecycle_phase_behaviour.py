@@ -99,6 +99,13 @@ def test_generic_lifecycle_rows_do_not_invent_compression(row, label):
 # ── Rows that must still paint a compression divider ────────────────────────
 
 
+# A row that already carries a canonical ``source_event_type`` short-circuits
+# at the top of _sourceEventTypeForSnapshotAnchorRow() — this is the shape the
+# live SSE path journals for a real compression envelope. A bare
+# phase-only row with NO canonical type is exactly the untrustworthy shape the
+# phantom-divider bug relied on (see the negative parametrization above), so
+# only rows with an explicit canonical source_event_type OR positive text cues
+# are legitimate compression rows.
 @pytest.mark.parametrize(
     "row,expected,label",
     [
@@ -117,15 +124,47 @@ def test_generic_lifecycle_rows_do_not_invent_compression(row, label):
             "compressing",
             "context too large",
         ),
-        ({"role": "lifecycle", "phase": "compressing", "text": "anything"}, "compressing", "explicit phase"),
+        (
+            {"role": "lifecycle", "source_event_type": "compressing", "text": "anything"},
+            "compressing",
+            "canonical source_event_type",
+        ),
         ({"role": "lifecycle", "status": "done", "text": "Context auto-compressed"}, "compressed", "auto-compressed"),
         ({"role": "lifecycle", "status": "done", "text": "Compression finished"}, "compressed", "finished"),
-        ({"role": "lifecycle", "phase": "compressed", "text": "anything"}, "compressed", "explicit phase"),
+        (
+            {"role": "lifecycle", "source_event_type": "compressed", "text": "anything"},
+            "compressed",
+            "canonical source_event_type",
+        ),
     ],
 )
 def test_genuine_compression_rows_still_classify(row, expected, label):
-    """Real compression lifecycle rows keep painting the divider."""
+    """Real compression lifecycle rows keep painting the divider.
+
+    Compression identity comes from either a canonical ``source_event_type``
+    (the live SSE path stamps it there when the compressing/compressed event
+    is journaled) or from a positive text cue that mirrors the Python
+    authority ``_is_agent_compression_start_status()``. A bare ``phase``
+    with no canonical source is not evidence — a generic in-progress
+    lifecycle row also carries ``phase='running'``, and the phantom-divider
+    bug this test file exists to lock out was exactly that misread.
+    """
     assert _classify(row) == expected, f"{label} must classify as {expected}"
+
+
+def test_phase_only_compressing_row_is_not_a_compression_start():
+    """A bare ``phase='compressing'`` with no canonical source_event_type is
+    not evidence that compression started.
+
+    ``_is_agent_compression_start_status()`` in api/streaming.py rejects any
+    row that lacks a canonical envelope; the JS snapshot classifier makes
+    the same call for the START marker. A genuine start arrives with a
+    canonical ``source_event_type`` and returns at the top of the classifier
+    before any phase inference — so reaching the phase branch means the row
+    carried no canonical type, and phase alone must not paint a
+    "Compressing context" divider.
+    """
+    assert _classify({"role": "lifecycle", "phase": "compressing", "text": "anything"}) == ""
 
 
 def test_skipping_notice_is_not_a_compression_start():
