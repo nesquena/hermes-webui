@@ -3331,6 +3331,16 @@ async function _kanbanPopulateModelSelect(currentValue, currentProvider){
   } catch (_e) {
     // Catalog unavailable — leave just the "Profile default" option.
   }
+  // A user can select a model (e.g. via the Custom model-ID input, which works
+  // without the catalog) while /api/models is still in flight — the create modal
+  // is shown immediately and the populate fires un-awaited. After the load
+  // resolves, don't clobber that live selection back to the captured default;
+  // only apply the restore when the user hasn't picked something mid-flight.
+  if (sel.value) {
+    // Preserve the user's in-flight choice; just resync the chip label.
+    _kanbanSyncModelChip();
+    return;
+  }
   // Restore current override (edit mode). Preserve the MODEL and the PERSISTED
   // PROVIDER: an unrelated edit must not rewrite the provider (catalog-derived)
   // or strip it to null (out-of-catalog fallback). Only a deliberate picker

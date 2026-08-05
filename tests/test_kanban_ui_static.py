@@ -1469,6 +1469,13 @@ def test_kanban_editor_modal_has_model_and_provider_fields():
     assert "++_kanbanModelPopulateSeq" in populate_tok_src
     assert "seq !== _kanbanModelPopulateSeq" in populate_tok_src
 
+    # A selection made while /api/models is still loading (create modal shows
+    # immediately, populate fires un-awaited, custom model-ID works without the
+    # catalog) must survive the load completing — the tail must not restore the
+    # captured default over a live user selection.
+    assert "if (sel.value) {" in populate_tok_src
+    assert "_kanbanSyncModelChip();" in populate_tok_src
+
     # openKanbanEdit passes the persisted provider so the override pair survives
     # an unrelated edit unchanged.
     edit_src = extract_function(PANELS, "openKanbanEdit")
