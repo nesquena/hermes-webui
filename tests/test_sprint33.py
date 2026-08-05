@@ -139,7 +139,44 @@ const _writeSettingsWithAppearanceBarrier = () => { barrierWrites += 1; throw ne
 let _settingsHermesDefaultModelOnOpen = '';
 let _settingsHermesDefaultModelProviderOnOpen = null;
 let _settingsPasswordAuthEnabled = true;
-eval(source.slice(start, end));
+// Late-exit stub bindings: inert stand-ins for helpers only the success path calls,
+// added so the explicit-binding factory can pass every free identifier it names.
+const _applySavedSettingsUi = () => {};
+const _updateCurrentPasswordVisibility = () => {};
+const _renderSettingsAuthStatus = () => {};
+const _updateAuthWarningBadge = () => {};
+const _updateAuthDisabledWarning = () => {};
+let _settingsDirty = false;
+const _resetSettingsPanelState = () => {};
+let _pendingSettingsTargetPanel = null;
+const _hideSettingsPanel = () => {};
+// Extraction technique: the Function constructor loads the repo-static saveSettings
+// body sliced from static/panels.js and binds the harness mocks explicitly. The
+// source is same-PR production code with no user input path, so this is behavioral
+// extraction proof, not dynamic code execution of untrusted text.
+const makeSaveSettings = new Function(
+  '$','_captureModelDropdownSelection','_settingsHermesDefaultModelOnOpen',
+  '_settingsHermesDefaultModelProviderOnOpen','localStorage',
+  '_speechPreferencesPayloadFromUi','_structuredCodeViewFromUi',
+  '_composerControlVisibilityPayload','_getComposerControlOrder','window',
+  '_settingsPasswordAuthEnabled','showToast','t',
+  'api','_writeSettingsWithAppearanceBarrier','_applySavedSettingsUi',
+  '_updateCurrentPasswordVisibility','_renderSettingsAuthStatus',
+  '_updateAuthWarningBadge','_updateAuthDisabledWarning','_settingsDirty',
+  '_resetSettingsPanelState','_pendingSettingsTargetPanel','_hideSettingsPanel',
+  source.slice(start, end) + '; return saveSettings;'
+);
+const saveSettings = makeSaveSettings(
+  $, _captureModelDropdownSelection, _settingsHermesDefaultModelOnOpen,
+  _settingsHermesDefaultModelProviderOnOpen, localStorage,
+  _speechPreferencesPayloadFromUi, _structuredCodeViewFromUi,
+  _composerControlVisibilityPayload, _getComposerControlOrder, window,
+  _settingsPasswordAuthEnabled, showToast, t,
+  api, _writeSettingsWithAppearanceBarrier, _applySavedSettingsUi,
+  _updateCurrentPasswordVisibility, _renderSettingsAuthStatus,
+  _updateAuthWarningBadge, _updateAuthDisabledWarning, _settingsDirty,
+  _resetSettingsPanelState, _pendingSettingsTargetPanel, _hideSettingsPanel
+);
 saveSettings(false).then(() => process.stdout.write(JSON.stringify({
   focused:!!fields.settingsCurrentPassword.focused,
   toasts,
