@@ -1,6 +1,7 @@
 import copy
 import base64
 import hashlib
+import http.client
 import ipaddress
 import json
 import logging
@@ -44,6 +45,162 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class _OIDCNetworkPolicy:
+    """Immutable network policy derived ONCE from the configured issuer.
+
+    The issuer is parsed into a canonical HTTPS origin (normalized hostname
+    + effective port) at construction time and carried through every
+    discovery, token, and JWKS exchange.  Discovery metadata can never
+    expand the grant: loopback / private addressing is permitted only for
+    the exact administrator-configured origin, and only when the explicit
+    ``allow_private_endpoints`` opt-in is enabled.
+    """
+
+    __slots__ = ("issuer", "origin_host", "origin_port", "allow_private_endpoints")
+
+    def __setattr__(self, name, value):
+        raise AttributeError(f"_OIDCNetworkPolicy is immutable: {name}")
+
+    def __init__(self, *, issuer: str, allow_private_endpoints: bool):
+        object.__setattr__(self, "issuer", issuer)
+        object.__setattr__(self, "allow_private_endpoints", bool(allow_private_endpoints))
+        origin = _canonical_https_origin(issuer)
+        if origin is None:
+            raise OIDCConfigError("OIDC issuer must be an https URL with a hostname")
+        object.__setattr__(self, "origin_host", origin[0])
+        object.__setattr__(self, "origin_port", origin[1])
+
+    @classmethod
+    def from_config(cls, cfg: dict[str, Any]) -> "_OIDCNetworkPolicy":
+        return cls(
+            issuer=str(cfg.get("issuer") or "").strip(),
+            allow_private_endpoints=bool(cfg.get("allow_private_endpoints", False)),
+        )
+
+    def is_exact_configured_origin(self, host: str, port: int) -> bool:
+        """True only when *host*:*port* is the configured issuer's own origin."""
+        return (
+            self.allow_private_endpoints
+            and str(host or "").strip().lower() == self.origin_host
+            and int(port) == self.origin_port
+        )
+
+    def address_allowed(self, host: str, port: int, address) -> bool:
+        """Classify one resolved address for outbound OIDC connections.
+
+        Link-local / metadata (169.254.0.0/16), multicast, unspecified, and
+        reserved ranges are ALWAYS blocked — even for the exact configured
+        origin.  Loopback / private ranges are permitted only for the exact
+        configured origin under the explicit opt-in.
+        """
+        candidate = getattr(address, "ipv4_mapped", None) or address
+        if (
+            candidate.is_link_local
+            or candidate.is_multicast
+            or candidate.is_unspecified
+            or candidate.is_reserved
+        ):
+            return False
+        if candidate.is_loopback or candidate.is_private:
+            return self.is_exact_configured_origin(host, port)
+        return True
+
+
+def _canonical_https_origin(url: str) -> tuple[str, int] | None:
+    """Return the normalized (hostname, effective port) of an https URL."""
+    parsed = urllib.parse.urlparse(str(url or "").strip())
+    if parsed.scheme != "https":
+        return None
+    hostname = str(parsed.hostname or "").strip().lower()
+    if not hostname:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    return hostname, port or 443
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection whose ``connect()`` resolves the host ONCE, classifies
+    every returned address against the immutable OIDC policy, and pins the
+    socket to an approved address.
+
+    This closes the DNS-rebinding / peer-mismatch gap: the address actually
+    connected to comes from the same resolution that was validated.  TLS
+    hostname/SNI verification is preserved by wrapping with
+    ``server_hostname=self.host``.
+    """
+
+    def __init__(self, host, port=None, *, policy=None, **kwargs):
+        super().__init__(host, port, **kwargs)
+        self._oidc_policy = policy
+
+    def connect(self):
+        host = self.host
+        port = self.port
+        try:
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            raise OIDCAuthError(
+                f"Failed to resolve OIDC endpoint host: {host}", status_code=502
+            ) from exc
+        if not infos:
+            raise OIDCAuthError(
+                f"OIDC endpoint hostname resolved to no addresses: {host}",
+                status_code=502,
+            )
+        chosen = None
+        for info in infos:
+            family, socktype, proto, _canonname, sockaddr = info
+            address = _parse_ip_address(sockaddr[0] if sockaddr else "")
+            if address is not None and self._oidc_policy.address_allowed(
+                host, port, address
+            ):
+                chosen = (family, socktype, proto, sockaddr)
+                break
+        if chosen is None:
+            raise OIDCAuthError(
+                "OIDC endpoint resolved only to disallowed addresses",
+                status_code=502,
+            )
+        family, socktype, proto, sockaddr = chosen
+        sock = socket.socket(family, socktype, proto)
+        try:
+            timeout = self.timeout
+            if timeout is not None and not isinstance(timeout, (int, float)):
+                timeout = None
+            sock.settimeout(timeout)
+            sock.connect(sockaddr)
+        except Exception:
+            sock.close()
+            raise
+        # server_hostname keeps SNI + TLS hostname verification against the
+        # requested hostname; only the CONNECTED address is pinned.
+        self.sock = self._context.wrap_socket(sock, server_hostname=host)
+
+
+class _OIDCHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, *, policy: _OIDCNetworkPolicy, **kwargs):
+        super().__init__(**kwargs)
+        self._oidc_policy = policy
+
+    def https_open(self, req):
+        return self.do_open(
+            _oidc_https_connection_factory(self._oidc_policy),
+            req,
+            context=self._context,
+            check_hostname=self._check_hostname,
+        )
+
+
+def _oidc_https_connection_factory(policy: _OIDCNetworkPolicy):
+    def factory(host, timeout=10, **kwargs):
+        return _PinnedHTTPSConnection(host, timeout=timeout, policy=policy, **kwargs)
+
+    return factory
+
+
 class OIDCConfigError(Exception):
     pass
 
@@ -69,7 +226,9 @@ def build_authorization_redirect(
     next_path: str | None = None,
 ) -> str:
     cfg = _require_oidc_config()
-    discovery = _get_discovery_document(cfg["issuer"])
+    policy = _OIDCNetworkPolicy.from_config(cfg)
+    discovery = _get_discovery_document(policy, cfg["issuer"])
+    _require_exact_discovery_issuer(discovery, cfg["issuer"])
     authorization_endpoint = str(discovery.get("authorization_endpoint") or "").strip()
     if not authorization_endpoint:
         raise OIDCConfigError("OIDC discovery document is missing authorization_endpoint")
@@ -109,10 +268,9 @@ def complete_authorization_code_flow(
     pending = _consume_pending_flow(state)
     if pending is None:
         raise OIDCAuthError("Invalid OIDC state", status_code=401)
-    discovery = _get_discovery_document(cfg["issuer"])
-    discovery_issuer = str(discovery.get("issuer") or "").strip()
-    if discovery_issuer and discovery_issuer != cfg["issuer"]:
-        raise OIDCAuthError("OIDC discovery issuer did not match the configured issuer", status_code=502)
+    policy = _OIDCNetworkPolicy.from_config(cfg)
+    discovery = _get_discovery_document(policy, cfg["issuer"])
+    _require_exact_discovery_issuer(discovery, cfg["issuer"])
     token_endpoint = str(discovery.get("token_endpoint") or "").strip()
     if not token_endpoint:
         raise OIDCConfigError("OIDC discovery document is missing token_endpoint")
@@ -127,6 +285,7 @@ def complete_authorization_code_flow(
             "redirect_uri": redirect_uri,
             **({"client_secret": cfg["client_secret"]} if cfg.get("client_secret") else {}),
         },
+        policy=policy,
     )
     id_token = str(token_response.get("id_token") or "").strip()
     if not id_token:
@@ -137,6 +296,7 @@ def complete_authorization_code_flow(
         issuer=cfg["issuer"],
         nonce=pending["nonce"],
         jwks_uri=str(discovery.get("jwks_uri") or "").strip(),
+        policy=policy,
     )
     _enforce_allowlist(
         claims,
@@ -169,6 +329,15 @@ def _resolve_oidc_config() -> dict[str, Any]:
     allow_values = _normalize_allow_values(
         pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES")
     )
+    allow_private_raw = pick(
+        "allow_private_endpoints", "HERMES_WEBUI_OIDC_ALLOW_PRIVATE_ENDPOINTS"
+    )
+    allow_private = False
+    if allow_private_raw is not None:
+        if isinstance(allow_private_raw, bool):
+            allow_private = allow_private_raw
+        else:
+            allow_private = str(allow_private_raw).strip().lower() in ("1", "true", "yes")
     return {
         "issuer": str(pick("issuer", "HERMES_WEBUI_OIDC_ISSUER") or "").strip(),
         "client_id": str(pick("client_id", "HERMES_WEBUI_OIDC_CLIENT_ID") or "").strip(),
@@ -177,6 +346,7 @@ def _resolve_oidc_config() -> dict[str, Any]:
         "scopes": scopes,
         "allow_claim": str(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM") or "").strip(),
         "allow_values": allow_values,
+        "allow_private_endpoints": allow_private,
     }
 
 
@@ -296,16 +466,39 @@ def _trim_pending_flows() -> None:
         _pending_flows.pop(state, None)
 
 
-def _get_discovery_document(issuer: str) -> dict[str, Any]:
+def _get_discovery_document(
+    policy: _OIDCNetworkPolicy, issuer: str
+) -> dict[str, Any]:
     discovery_url = _discovery_url_for_issuer(issuer)
     cached = _cache_get(_discovery_lock, _discovery_cache, discovery_url)
     if cached is not None:
         return cached
-    data = _fetch_json(discovery_url)
+    data = _fetch_json(discovery_url, policy=policy)
     if not isinstance(data, dict):
         raise OIDCAuthError("OIDC discovery response was not a JSON object", status_code=502)
     _cache_put(_discovery_lock, _discovery_cache, discovery_url, data)
     return data
+
+
+def _require_exact_discovery_issuer(
+    discovery: dict[str, Any], configured_issuer: str
+) -> None:
+    """Require a present, exact ``issuer`` declaration in the discovery doc.
+
+    Authority for every downstream endpoint (authorization, token, JWKS) is
+    established BEFORE any of them is consumed, in both the start and the
+    callback flow.  A missing issuer is rejected exactly like a mismatch.
+    """
+    discovery_issuer = str(discovery.get("issuer") or "").strip()
+    if not discovery_issuer:
+        raise OIDCAuthError(
+            "OIDC discovery document did not include an issuer", status_code=502
+        )
+    if discovery_issuer != configured_issuer:
+        raise OIDCAuthError(
+            "OIDC discovery issuer did not match the configured issuer",
+            status_code=502,
+        )
 
 
 def _discovery_url_for_issuer(issuer: str) -> str:
@@ -314,7 +507,12 @@ def _discovery_url_for_issuer(issuer: str) -> str:
     return issuer.rstrip("/") + "/.well-known/openid-configuration"
 
 
-def _get_jwks_document(jwks_uri: str, *, force_refresh: bool = False) -> dict[str, Any]:
+def _get_jwks_document(
+    policy: _OIDCNetworkPolicy,
+    jwks_uri: str,
+    *,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
     if not jwks_uri:
         raise OIDCConfigError("OIDC discovery document is missing jwks_uri")
     if force_refresh:
@@ -324,7 +522,7 @@ def _get_jwks_document(jwks_uri: str, *, force_refresh: bool = False) -> dict[st
         cached = _cache_get(_jwks_lock, _jwks_cache, jwks_uri)
         if cached is not None:
             return cached
-    data = _fetch_json(jwks_uri)
+    data = _fetch_json(jwks_uri, policy=policy)
     if not isinstance(data, dict):
         raise OIDCAuthError("OIDC JWKS response was not a JSON object", status_code=502)
     _cache_put(_jwks_lock, _jwks_cache, jwks_uri, data)
@@ -358,14 +556,14 @@ def _cache_put(
         cache[key] = (time.time() + _CACHE_TTL_SECONDS, copy.deepcopy(value))
 
 
-def _fetch_json(url: str) -> dict[str, Any]:
-    _validate_outbound_oidc_url(url)
+def _fetch_json(url: str, *, policy: _OIDCNetworkPolicy) -> dict[str, Any]:
+    _validate_outbound_oidc_url(url, policy=policy)
     req = urllib.request.Request(
         url,
         headers={"Accept": "application/json"},
     )
     try:
-        with _oidc_opener().open(req, timeout=10) as resp:
+        with _oidc_opener(policy).open(req, timeout=10) as resp:
             payload = json.loads(
                 resp.read().decode("utf-8"),
                 parse_constant=_reject_non_finite_json_constant,
@@ -377,8 +575,10 @@ def _fetch_json(url: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _post_form_json(url: str, form_data: dict[str, Any]) -> dict[str, Any]:
-    _validate_outbound_oidc_url(url)
+def _post_form_json(
+    url: str, form_data: dict[str, Any], *, policy: _OIDCNetworkPolicy
+) -> dict[str, Any]:
+    _validate_outbound_oidc_url(url, policy=policy)
     body = urllib.parse.urlencode(form_data).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -390,7 +590,7 @@ def _post_form_json(url: str, form_data: dict[str, Any]) -> dict[str, Any]:
         method="POST",
     )
     try:
-        with _oidc_opener().open(req, timeout=10) as resp:
+        with _oidc_opener(policy).open(req, timeout=10) as resp:
             payload = json.loads(
                 resp.read().decode("utf-8"),
                 parse_constant=_reject_non_finite_json_constant,
@@ -402,11 +602,13 @@ def _post_form_json(url: str, form_data: dict[str, Any]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _oidc_opener() -> urllib.request.OpenerDirector:
-    return urllib.request.build_opener(_NoRedirect)
+def _oidc_opener(policy: _OIDCNetworkPolicy) -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_NoRedirect, _OIDCHTTPSHandler(policy=policy))
 
 
-def _validate_outbound_oidc_url(url: str) -> None:
+def _validate_outbound_oidc_url(
+    url: str, *, policy: _OIDCNetworkPolicy
+) -> None:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme != "https":
         raise OIDCAuthError("OIDC endpoint URLs must use https", status_code=502)
@@ -415,6 +617,18 @@ def _validate_outbound_oidc_url(url: str) -> None:
     hostname = str(parsed.hostname or "").strip()
     if not hostname:
         raise OIDCAuthError("OIDC endpoint URL was missing a hostname", status_code=502)
+    try:
+        effective_port = parsed.port or 443
+    except ValueError as exc:
+        raise OIDCAuthError(
+            "OIDC endpoint URL had an invalid port", status_code=502
+        ) from exc
+    # The allow-private grant is scoped to the EXACT configured origin
+    # (normalized host AND effective port).  Discovery-controlled endpoints
+    # on the same host but a different port never inherit it; they remain
+    # subject to the full address-class check below.
+    if policy.is_exact_configured_origin(hostname, effective_port):
+        return
     if _is_disallowed_oidc_host(hostname):
         raise OIDCAuthError(
             "OIDC endpoint URLs must not target private or local addresses",
@@ -428,8 +642,16 @@ def _is_disallowed_oidc_host(hostname: str) -> bool:
         return _is_disallowed_oidc_ip(literal_ip)
     try:
         infos = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
-    except socket.gaierror:
-        return False
+    except socket.gaierror as exc:
+        # Fail closed: a host that cannot be resolved must never be allowed.
+        raise OIDCAuthError(
+            f"Failed to resolve OIDC endpoint host: {hostname}", status_code=502
+        ) from exc
+    if not infos:
+        raise OIDCAuthError(
+            f"OIDC endpoint hostname resolved to no addresses: {hostname}",
+            status_code=502,
+        )
     for info in infos:
         sockaddr = info[4]
         address = _parse_ip_address(sockaddr[0] if sockaddr else "")
@@ -468,18 +690,19 @@ def _validate_id_token(
     issuer: str,
     nonce: str,
     jwks_uri: str,
+    policy: _OIDCNetworkPolicy,
 ) -> dict[str, Any]:
     header, claims, signed, signature = _parse_jwt(token)
     alg = str(header.get("alg") or "").strip()
     if not alg or alg == "none":
         raise OIDCAuthError("OIDC id_token uses an unsupported signing algorithm")
-    jwks = _get_jwks_document(jwks_uri)
+    jwks = _get_jwks_document(policy, jwks_uri)
     try:
         public_key = _select_public_key(jwks, header)
     except OIDCAuthError as exc:
         if "did not contain the signing key" not in str(exc):
             raise
-        jwks = _get_jwks_document(jwks_uri, force_refresh=True)
+        jwks = _get_jwks_document(policy, jwks_uri, force_refresh=True)
         public_key = _select_public_key(jwks, header)
     _verify_jwt_signature(public_key, alg, signed, signature)
     _validate_registered_claims(claims, client_id=client_id, issuer=issuer, nonce=nonce)
