@@ -296,6 +296,47 @@ def test_endpoint_derived_host_port_slug_not_walked_back():
     )
 
 
+def test_configured_prefix_recovered_before_host_port_classification():
+    """#6718 (greptile P1 re-gate): a configured named provider whose slug is a
+    shorter prefix of the qualifier must be matched BEFORE the endpoint
+    host:port classification.
+
+    ``@custom:localhost:8080:Qwen3`` under a configured provider 'localhost'
+    (slug ``custom:localhost``) rsplit's into qualifier ``custom:localhost:8080``
+    and model ``Qwen3`` — the qualifier looks host:port-shaped, but the
+    CONFIGURED prefix ``custom:localhost`` wins: the colon-bearing model
+    ``8080:Qwen3`` is recovered and the session normalizes instead of staying
+    on the unknown-provider fallback path. Genuine endpoint-derived slugs
+    (``custom:<host>:<port>`` with NO configured prefix) stay unchanged
+    (see test_endpoint_derived_host_port_slug_not_walked_back)."""
+    import api.routes as routes
+
+    session_cfg = {
+        "custom_providers": [
+            {"name": "localhost", "model": "Qwen3"},
+        ]
+    }
+
+    assert (
+        routes._normalize_custom_qualified_session_model(
+            "@custom:localhost:8080:Qwen3",
+            None,
+            profile_config=session_cfg,
+        )
+        == ("localhost/8080:Qwen3", "localhost")
+    )
+
+    # The resolver entry point agrees and returns before any catalog call.
+    effective, provider, changed = routes._resolve_compatible_session_model_state(
+        "@custom:localhost:8080:Qwen3",
+        None,
+        profile_config=session_cfg,
+    )
+    assert changed is True
+    assert effective == "localhost/8080:Qwen3", effective
+    assert provider == "localhost", provider
+
+
 def test_profile_config_none_fails_closed_against_global(monkeypatch):
     """A slug configured only in the module-global config must NOT normalize
     when ``profile_config=None`` — the ``None`` state is reachable from
