@@ -117,11 +117,6 @@ def test_generic_lifecycle_rows_do_not_invent_compression(row, label):
             "compressing",
             "context too large",
         ),
-        (
-            {"role": "lifecycle", "status": "running", "text": "Preflight compression: ~800,000 tokens >= threshold"},
-            "compressing",
-            "preflight compression",
-        ),
         ({"role": "lifecycle", "phase": "compressing", "text": "anything"}, "compressing", "explicit phase"),
         ({"role": "lifecycle", "status": "done", "text": "Context auto-compressed"}, "compressed", "auto-compressed"),
         ({"role": "lifecycle", "status": "done", "text": "Compression finished"}, "compressed", "finished"),
@@ -137,6 +132,43 @@ def test_skipping_notice_is_not_a_compression_start():
     """"Skipping preflight compression..." must never look like a live start."""
     row = {"role": "lifecycle", "status": "running", "text": "Skipping preflight compression: cooldown active"}
     assert _classify(row) == ""
+
+
+def test_preflight_only_row_is_not_a_compression_start():
+    """Preflight announces intent, not that compaction ran.
+
+    ``_is_agent_compression_start_status()`` in api/streaming.py excludes
+    preflight on purpose: the later authoritative "Compacting context" marker is
+    the signal that compression actually proceeded. The client snapshot path must
+    make the same call, or a preflight-only turn paints a divider on replay that
+    the live SSE path never painted.
+    """
+    row = {
+        "role": "lifecycle",
+        "status": "running",
+        "text": "📦 Preflight compression: ~101,000 tokens >= 96,000 threshold. This may take a moment.",
+    }
+    assert _classify(row) == ""
+
+
+def test_js_compression_cues_match_python_contract():
+    """The JS positive cue set must not drift from the Python authority."""
+    streaming_src = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
+    contract = streaming_src.split("def _is_agent_compression_start_status")[1].split("\ndef ")[0]
+    # Every text cue the Python contract accepts, phrased as an agent emitter
+    # would, must classify as a compression start on the snapshot path too.
+    for cue, sample in (
+        ("compacting context", "Compacting context — summarizing earlier conversation"),
+        ("pre-api compression:", "Pre-API compression: ~900,000 tokens near the limit"),
+        ("context too large", "Context too large (~1,000,000 tokens) — compressing (1/3)"),
+        ("compression attempt", "Compression attempt 2 of 3"),
+    ):
+        assert cue in contract, f"{cue!r} vanished from the Python contract"
+        assert _classify({"role": "lifecycle", "status": "running", "text": sample}) == "compressing", (
+            f"JS lost the {cue!r} cue that api/streaming.py still accepts"
+        )
+    # Preflight is excluded on both sides.
+    assert "intentionally excluded" in contract
 
 
 # ── Non-lifecycle roles keep their existing mapping ─────────────────────────
@@ -163,3 +195,155 @@ def test_explicit_source_event_type_wins():
     """An explicit source_event_type is passed through untouched."""
     row = {"role": "lifecycle", "status": "running", "text": "Working", "source_event_type": "token"}
     assert _classify(row) == "token"
+
+
+# ── Live/replay parity: real producer -> real JS classifier ─────────────────
+
+
+def _journal_scene_rows(tmp_path, monkeypatch, events):
+    """Write ``events`` with the real journal writer, return the real scene rows."""
+    from api import models, routes
+    from api.run_journal import RunJournalWriter
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+
+    session_id = "compressparity"
+    stream_id = "stream-compress-parity"
+    writer = RunJournalWriter(session_id, stream_id, session_dir=session_dir)
+    for name, payload in events:
+        writer.append_sse_event(name, payload)
+
+    snapshot = routes._run_journal_live_snapshot(stream_id)
+    assert snapshot is not None
+    scene = snapshot["anchor_activity_scene"]
+    assert scene["version"] == "activity_scene_v1"
+    return scene["activity_rows"], stream_id
+
+
+def test_journaled_compression_events_survive_snapshot_replay(tmp_path, monkeypatch):
+    """Canonical compressing/compressed journal events must reach the scene.
+
+    The live SSE path paints the divider from these very events. If the snapshot
+    producer drops them, a genuinely-compressed turn loses its divider on
+    session-switch replay — the mirror image of the phantom-card bug.
+    """
+    rows, stream_id = _journal_scene_rows(
+        tmp_path,
+        monkeypatch,
+        [
+            ("token", {"text": "before compression"}),
+            ("compressing", {"session_id": "compressparity", "message": "Compressing context"}),
+            ("compressed", {"session_id": "compressparity", "message": "Compression finished"}),
+            ("token", {"text": " after compression"}),
+        ],
+    )
+
+    # Order relative to prose is preserved, and the prose runs stay split.
+    assert [(r["role"], r["source_event_type"]) for r in rows] == [
+        ("prose", "token"),
+        ("lifecycle", "compressing"),
+        ("lifecycle", "compressed"),
+        ("prose", "token"),
+    ]
+
+    running, done = rows[1], rows[2]
+    assert (running["status"], done["status"]) == ("running", "completed")
+    assert running["kind"] == done["kind"] == "lifecycle_status"
+    # Quiet lifecycle display hints.
+    for row in (running, done):
+        assert row["display_hint"] == "quiet_lifecycle_row"
+        assert row["display_hints"]["compact_worklog"] == "quiet_lifecycle_row"
+        assert row["display_hints"]["transparent_stream"] == "chronological_activity"
+        # Event-envelope identity, not a synthesised guess.
+        assert row["event_id"] == f"{stream_id}:{row['seq']}"
+        assert row["identity"]["event_id"] == row["event_id"]
+        assert row["run_id"] == row["identity"]["run_id"] == stream_id
+        assert row["stream_id"] == stream_id
+    assert running["seq"] < done["seq"]
+
+    # Live/replay parity: the real JS classifier round-trips each row back to the
+    # canonical source_event_type the live path used.
+    assert _classify(running) == "compressing"
+    assert _classify(done) == "compressed"
+
+
+def test_journaled_compression_preserves_reasoning_order(tmp_path, monkeypatch):
+    """Reasoning on both sides of compression remains chronologically split."""
+    rows, _ = _journal_scene_rows(
+        tmp_path,
+        monkeypatch,
+        [
+            ("reasoning", {"text": "reasoning before"}),
+            ("compressing", {"message": "Compressing context"}),
+            ("compressed", {"message": "Compression finished"}),
+            ("reasoning", {"text": "reasoning after"}),
+        ],
+    )
+
+    assert [(row["role"], row["source_event_type"], row["text"]) for row in rows] == [
+        ("thinking", "reasoning", "reasoning before"),
+        ("lifecycle", "compressing", "Compressing context"),
+        ("lifecycle", "compressed", "Compression finished"),
+        ("thinking", "reasoning", "reasoning after"),
+    ]
+
+
+def test_reasoning_after_compression_stays_after_compression(tmp_path, monkeypatch):
+    """Future reasoning must not flush ahead of a pending lifecycle boundary."""
+    rows, _ = _journal_scene_rows(
+        tmp_path,
+        monkeypatch,
+        [
+            ("token", {"text": "progress"}),
+            ("compressing", {"message": "Compressing context"}),
+            ("reasoning", {"text": "reasoning after compression"}),
+            ("tool", {"name": "next", "id": "tool-next"}),
+        ],
+    )
+
+    assert [(row["role"], row["source_event_type"]) for row in rows] == [
+        ("prose", "token"),
+        ("lifecycle", "compressing"),
+        ("thinking", "reasoning"),
+        ("tool", "tool"),
+    ]
+
+
+def test_journaled_compression_preserves_tool_order(tmp_path, monkeypatch):
+    """A canonical lifecycle boundary between tools stays between those tools."""
+    rows, _ = _journal_scene_rows(
+        tmp_path,
+        monkeypatch,
+        [
+            ("tool", {"name": "first", "id": "tool-1"}),
+            ("compressing", {"message": "Compressing context"}),
+            ("tool", {"name": "second", "id": "tool-2"}),
+        ],
+    )
+
+    assert [(row["role"], row["source_event_type"]) for row in rows] == [
+        ("tool", "tool"),
+        ("lifecycle", "compressing"),
+        ("tool", "tool"),
+    ]
+    assert [rows[0]["tool"]["name"], rows[2]["tool"]["name"]] == ["first", "second"]
+
+
+def test_generic_working_shell_row_replays_as_non_compression(tmp_path, monkeypatch):
+    """The journal's own 'Working' shell must never replay as compression."""
+    rows, _ = _journal_scene_rows(
+        tmp_path,
+        monkeypatch,
+        [("state_saved", {"ok": True})],
+    )
+
+    assert len(rows) == 1
+    shell = rows[0]
+    assert shell["role"] == "lifecycle"
+    assert shell["text"] == "Working"
+    # Producer keeps the non-canonical marker; classifier ignores it and finds no cue.
+    assert shell["source_event_type"] == "runtime_journal_snapshot"
+    assert _classify(shell) == ""

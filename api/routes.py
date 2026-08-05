@@ -3164,6 +3164,9 @@ def _run_journal_snapshot_event_id_for_run(
     return f"{run_id}:{event_seq}" if event_seq else None
 
 
+_RUN_JOURNAL_SNAPSHOT_COMPRESSION_EVENTS = ("compressing", "compressed")
+
+
 def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
@@ -3206,6 +3209,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     messages: list[dict] = []
     tool_calls: list[dict] = []
     activity_burst_anchors: list[dict] = []
+    compression_events: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
     last_ts = None
@@ -3347,6 +3351,32 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if event_name == "tool_complete":
             update_completed_tool(payload)
             fresh_segment = True
+            continue
+        if event_name in _RUN_JOURNAL_SNAPSHOT_COMPRESSION_EVENTS:
+            # Canonical compression lifecycle events are journaled by
+            # streaming.put(); preserve them so replay hydration paints the same
+            # divider the live SSE path did. Identity comes from the event
+            # envelope, never from a phase/status guess.
+            try:
+                event_seq = max(0, int(event.get("seq") or 0))
+            except (TypeError, ValueError):
+                event_seq = 0
+            compression_events.append(
+                {
+                    "event": event_name,
+                    "burst_id": mark_boundary() or 0,
+                    "leading": not assistant_text and not tool_calls,
+                    "reasoning_text_end": len(reasoning_text),
+                    "tool_count": len(tool_calls),
+                    "seq": event_seq or None,
+                    "event_id": _run_journal_snapshot_event_id_for_run(
+                        event, run_id, event_seq
+                    ),
+                    "created_at": event.get("created_at"),
+                    "payload": payload,
+                }
+            )
+            fresh_segment = True
 
     if assistant_text or reasoning_text:
         message = {
@@ -3418,12 +3448,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             },
         }
 
-    def scene_thinking_row(text: str, *, status: str) -> dict | None:
+    def scene_thinking_row(text: str, *, status: str, segment_index: int) -> dict | None:
         clean = str(text or "").strip()
         if not clean:
             return None
         preview = " ".join(clean.split())
-        local_id = f"live-thinking:{stream_id}:1"
+        local_id = f"live-thinking:{stream_id}:{segment_index}"
         return {
             "row_id": local_id,
             "order_index": len(anchor_activity_rows),
@@ -3534,22 +3564,121 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "payload": payload,
         }
 
+    def scene_compression_row(entry: dict) -> dict:
+        event_name = str(entry.get("event") or "")
+        compressed = event_name == "compressed"
+        payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
+        seq = entry.get("seq")
+        event_id = entry.get("event_id")
+        local_id = event_id or f"lifecycle:{stream_id}:{event_name}:{seq or 0}"
+        burst_id = int(entry.get("burst_id") or 0) or None
+        text = str(payload.get("message") or "").strip() or (
+            "Context auto-compressed" if compressed else "Compressing context"
+        )
+        return {
+            "row_id": local_id,
+            "order_index": len(anchor_activity_rows),
+            "kind": "lifecycle_status",
+            "role": "lifecycle",
+            "display_hint": "quiet_lifecycle_row",
+            "display_hints": {
+                "compact_worklog": "quiet_lifecycle_row",
+                "transparent_stream": "chronological_activity",
+            },
+            "source_event_type": event_name,
+            "event_id": event_id,
+            "local_id": local_id,
+            "run_id": run_id,
+            "stream_id": stream_id,
+            "seq": seq,
+            "status": "completed" if compressed else "running",
+            "created_at": entry.get("created_at", last_ts),
+            "identity": {
+                "event_id": event_id,
+                "local_id": local_id,
+                "run_id": run_id,
+                "stream_id": stream_id,
+                "seq": seq,
+            },
+            "group": scene_group(burst_id, burst_id),
+            "text": text,
+            "thinking": None,
+            "tool_call_id": "",
+            "tool": None,
+            "payload": {**payload, "text": text},
+        }
+
     anchor_activity_rows: list[dict] = []
-    thinking_row_inserted = False
+    reasoning_rendered_end = 0
+    thinking_segment_index = 0
     tool_rows_rendered = 0
 
-    def append_thinking_row(*, force: bool = False) -> None:
-        nonlocal thinking_row_inserted
-        if thinking_row_inserted:
+    def append_thinking_row(
+        *, force: bool = False, through: int | None = None
+    ) -> None:
+        nonlocal reasoning_rendered_end, thinking_segment_index
+        target_end = len(reasoning_text) if through is None else min(
+            len(reasoning_text), max(reasoning_rendered_end, int(through or 0))
+        )
+        if through is None and not force:
+            pending_boundaries = [
+                int(entry.get("reasoning_text_end") or 0)
+                for entry in compression_events
+                if not entry.get("_emitted")
+                and int(entry.get("reasoning_text_end") or 0) >= reasoning_rendered_end
+            ]
+            if pending_boundaries:
+                target_end = min(target_end, min(pending_boundaries))
+        if target_end <= reasoning_rendered_end:
             return
         if not force and reasoning_first_tool_count and tool_rows_rendered < reasoning_first_tool_count:
             return
-        row = scene_thinking_row(reasoning_text, status="running")
+        segment = reasoning_text[reasoning_rendered_end:target_end]
+        next_segment_index = thinking_segment_index + 1
+        row = scene_thinking_row(
+            segment,
+            status="running",
+            segment_index=next_segment_index,
+        )
         if not row:
             return
         row["order_index"] = len(anchor_activity_rows)
         anchor_activity_rows.append(row)
-        thinking_row_inserted = True
+        reasoning_rendered_end = target_end
+        thinking_segment_index = next_segment_index
+
+    def append_compression_rows(
+        burst_id: int | None = None,
+        *,
+        leading_only: bool = False,
+        max_tool_count: int | None = None,
+    ) -> None:
+        """Emit not-yet-emitted compression rows, in journal order.
+
+        ``burst_id=None`` drains whatever is left so a journaled canonical event
+        is never silently dropped when its burst produced no prose/tool row.
+        """
+        for entry in compression_events:
+            if entry.get("_emitted"):
+                continue
+            if burst_id is not None and int(entry.get("burst_id") or 0) != burst_id:
+                continue
+            if leading_only and not entry.get("leading"):
+                continue
+            if max_tool_count is not None and int(entry.get("tool_count") or 0) > max_tool_count:
+                continue
+            # Reasoning is accumulated for display, but canonical compression
+            # events are real ordering boundaries. Flush only the reasoning
+            # observed before this envelope so reasoning after compression stays
+            # in a later Thinking row.
+            append_thinking_row(
+                force=True,
+                through=int(entry.get("reasoning_text_end") or 0),
+            )
+            entry["_emitted"] = True
+            row = scene_compression_row(entry)
+            row["order_index"] = len(anchor_activity_rows)
+            anchor_activity_rows.append(row)
 
     tool_rows_by_burst: dict[int, list[tuple[int, dict]]] = {}
     ungrouped_tool_rows: list[tuple[int, dict]] = []
@@ -3565,6 +3694,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
 
     consumed_tools: set[int] = set()
     text_start = 0
+    # A compression event that landed before any prose/tool leads the scene.
+    append_compression_rows(0, leading_only=True, max_tool_count=0)
     sorted_anchors = sorted(
         [
             anchor
@@ -3586,12 +3717,18 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if prose:
             anchor_activity_rows.append(prose)
             append_thinking_row()
+        append_compression_rows(burst_id or 0, max_tool_count=tool_rows_rendered)
+        append_thinking_row()
         for order, row in tool_rows_by_burst.get(burst_id or 0, []):
             row["order_index"] = len(anchor_activity_rows)
             anchor_activity_rows.append(row)
             consumed_tools.add(order)
             tool_rows_rendered += 1
             append_thinking_row()
+            append_compression_rows(
+                burst_id or 0,
+                max_tool_count=tool_rows_rendered,
+            )
         text_start = max(text_start, text_end)
 
     if text_start < len(assistant_text):
@@ -3609,6 +3746,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     if not assistant_text:
         append_thinking_row()
 
+    append_compression_rows(0, max_tool_count=tool_rows_rendered)
+    append_thinking_row()
     for order, row in sorted(ungrouped_tool_rows, key=lambda item: item[0]):
         if order in consumed_tools:
             continue
@@ -3616,7 +3755,9 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         anchor_activity_rows.append(row)
         tool_rows_rendered += 1
         append_thinking_row()
+        append_compression_rows(0, max_tool_count=tool_rows_rendered)
 
+    append_compression_rows()
     append_thinking_row(force=True)
 
     # Keep a live anchor shell during session-switch replay even before the
