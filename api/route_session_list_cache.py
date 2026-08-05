@@ -504,9 +504,18 @@ def _session_list_row_cron_running(
     if not cron_job_prefixes or not sid:
         return False
     created_at = _session_list_row_numeric_value(row.get("created_at"))
-    for _jid, prefix, started_at in cron_job_prefixes:
-        if sid.startswith(prefix) and created_at >= started_at:
-            return True
+    # Longest prefix first, no fall-through: job ids may nest (backup vs
+    # backup_full), and the shorter prefix is a valid prefix of the longer one.
+    # A session belongs to the longest matching job id — first-match in
+    # insertion order, or falling through to a shorter prefix after a time-miss,
+    # would let a running shorter-prefix job claim a completed longer-prefix
+    # session. Mirrors the max(matches, key=len) convention in
+    # api.routes._latest_cron_session_info_for_jobs.
+    for _jid, prefix, started_at in sorted(
+        cron_job_prefixes, key=lambda item: len(item[1]), reverse=True
+    ):
+        if sid.startswith(prefix):
+            return created_at >= started_at
     return False
 
 

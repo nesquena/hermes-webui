@@ -196,6 +196,48 @@ def test_overlay_fails_closed_when_routes_unavailable(monkeypatch):
     assert rows[0]["cron_running"] is False
 
 
+def test_overlay_nested_job_prefixes_do_not_cross_claim(monkeypatch):
+    """Overlapping cron job ids (backup vs backup_full) must not cross-claim.
+
+    ``cron_backup_`` is a valid prefix of ``cron_backup_full_...``, so a
+    first-match scan in insertion order would attribute a ``backup_full``
+    session to the running ``backup`` job, and a fall-through time-miss would
+    let ``backup`` claim an OLD completed ``backup_full`` run. The
+    longest-prefix-first scan must attribute each session to its own job with
+    no fall-through (mirrors api.routes._latest_cron_session_info_for_jobs).
+    """
+    import api.routes as routes
+    import api.route_session_list_cache as slc
+
+    # Both jobs running; `backup` is inserted FIRST so a first-match scan in
+    # insertion order would claim cron_backup_full_... sessions as `backup`.
+    monkeypatch.setattr(
+        routes, "_RUNNING_CRON_JOBS", {"backup": 1000.0, "backup_full": 2000.0}
+    )
+    monkeypatch.setattr(slc, "_session_list_cache_active_stream_ids", lambda: set())
+
+    rows = slc._session_list_cache_overlay_runtime_rows(
+        [
+            _cron_row("cron_backup_20260803_100000", created_at=1100),
+            _cron_row("cron_backup_full_20260803_210000", created_at=2100),
+            _cron_row("cron_backup_full_20260803_190000", created_at=1900),
+        ]
+    )
+    by_sid = {row["session_id"]: row for row in rows}
+    assert by_sid["cron_backup_20260803_100000"]["cron_running"] is True
+    assert by_sid["cron_backup_full_20260803_210000"]["cron_running"] is True
+    # Old backup_full run created after `backup` started: must NOT fall through
+    # to the shorter cron_backup_ prefix (it belongs to a completed run).
+    assert by_sid["cron_backup_full_20260803_190000"]["cron_running"] is False
+
+    # Single running job, non-overlapping id: unchanged behavior.
+    monkeypatch.setattr(routes, "_RUNNING_CRON_JOBS", {"job6728": 1000.0})
+    rows = slc._session_list_cache_overlay_runtime_rows(
+        [_cron_row("cron_job6728_20260803_100000", created_at=1100)]
+    )
+    assert rows[0]["cron_running"] is True
+
+
 def test_sidebar_response_preserves_cron_running(monkeypatch):
     import api.routes as routes
 
