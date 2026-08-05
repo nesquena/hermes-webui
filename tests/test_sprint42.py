@@ -257,7 +257,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
                  },
              ):
             streaming.STREAMS[fake_stream_id] = fake_queue
-            streaming._run_agent_streaming(
+            streaming._run_agent_streaming_core(
                 session_id=fake_session.session_id,
                 msg_text="hello from webui",
                 model="gpt-5.4",
@@ -403,7 +403,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
                  "hermes_state": fake_hermes_state,
              }):
             streaming.STREAMS[fake_stream_id] = fake_queue
-            streaming._run_agent_streaming(
+            streaming._run_agent_streaming_core(
                 session_id="sess-interim-test",
                 msg_text="hello",
                 model="gpt-4o",
@@ -581,7 +581,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
                 "hermes_state": fake_hermes_state,
              }):
             streaming.STREAMS[fake_stream_id] = fake_queue
-            streaming._run_agent_streaming(
+            streaming._run_agent_streaming_core(
                 session_id="sess-clarify-timeout",
                 msg_text="please run task",
                 model="gpt-5.4",
@@ -928,7 +928,7 @@ class TestCredentialPoolBackwardCompat(unittest.TestCase):
              }):
             streaming.STREAMS[fake_stream_id] = fake_queue
             # Must not raise TypeError
-            streaming._run_agent_streaming(
+            streaming._run_agent_streaming_core(
                 session_id="sess-compat-test",
                 msg_text="hello",
                 model="gpt-4o",

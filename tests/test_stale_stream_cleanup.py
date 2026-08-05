@@ -254,6 +254,7 @@ def test_chat_start_allows_same_session_after_active_run_unregisters(monkeypatch
             self.kwargs = kwargs
 
         def start(self):
+            self.kwargs["kwargs"]["admission"].admitted.set()
             return None
 
     monkeypatch.setattr(routes.uuid, "uuid4", lambda: type("FakeUuid", (), {"hex": "new-stream"})())

@@ -389,7 +389,6 @@ def test_routes_register_goal_endpoint_and_kickoff_stream():
 
 def test_chat_start_forwards_goal_related_to_gateway_worker(monkeypatch, tmp_path):
     from api import routes
-    import api.turn_journal as turn_journal
 
     class FakeSession:
         session_id = "sid-goal-related-gateway"
@@ -409,19 +408,32 @@ def test_chat_start_forwards_goal_related_to_gateway_worker(monkeypatch, tmp_pat
 
         def start(self):
             captured["started"] = True
+            captured["kwargs"]["admission"].admitted.set()
 
     def fake_prepare(session, **kwargs):
         session.pending_started_at = 123.0
         session.title = "Goal Chat"
+        return routes.PreparedChatTurn(
+            session_id=session.session_id,
+            stream_id=kwargs["stream_id"],
+            turn_id="test-turn",
+            pending_started_at=123.0,
+            title=session.title,
+            admission=kwargs["admission"],
+        )
 
     monkeypatch.setattr(routes, "_get_session_agent_lock", lambda *args, **kwargs: threading.Lock())
     monkeypatch.setattr(routes, "_active_stream_blocks_chat_start", lambda *args, **kwargs: False)
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *args, **kwargs: None)
     monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", fake_prepare)
+    monkeypatch.setattr(
+        routes,
+        "_append_prepared_chat_turn_journal",
+        lambda _session, prepared, **_kwargs: prepared,
+    )
     monkeypatch.setattr(routes, "_is_hidden_empty_session", lambda *args, **kwargs: False)
     monkeypatch.setattr(routes, "publish_session_list_changed", lambda *args, **kwargs: None)
     monkeypatch.setattr(routes, "set_last_workspace", lambda *args, **kwargs: None)
-    monkeypatch.setattr(turn_journal, "append_turn_journal_event", lambda *args, **kwargs: {})
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda *args, **kwargs: True)
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
     monkeypatch.setattr(routes.uuid, "uuid4", lambda: SimpleNamespace(hex="goal-stream-id"))
@@ -437,10 +449,14 @@ def test_chat_start_forwards_goal_related_to_gateway_worker(monkeypatch, tmp_pat
     )
 
     assert response["stream_id"] == "goal-stream-id"
-    assert captured["target"] is routes._run_gateway_chat_streaming
+    assert captured["target"] is routes._run_admitted_gateway_chat_streaming
     assert captured["kwargs"]["goal_related"] is True
     assert captured["kwargs"]["model_provider"] == "openai-codex"
     assert captured["started"] is True
+    from api.session_lineage import release_turn_admission
+
+    release_turn_admission(captured["kwargs"]["admission"])
+    routes.STREAMS.pop(response["stream_id"], None)
 
 
 def test_streaming_post_turn_goal_hook_surfaces_and_continues():

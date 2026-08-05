@@ -3,7 +3,7 @@ from pathlib import Path
 
 def test_streaming_appends_worker_started_before_running_phase():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
-    run_idx = src.index("def _run_agent_streaming(")
+    run_idx = src.index("def _run_agent_streaming_core(")
     worker_idx = src.index('"event": "worker_started"', run_idx)
     running_idx = src.index('update_active_run(stream_id, phase="running"', run_idx)
 

@@ -1,6 +1,8 @@
 import json
 import os
 
+import pytest
+
 import api.turn_journal as turn_journal
 from api.session_recovery import audit_session_recovery
 from api.turn_journal import (
@@ -8,6 +10,7 @@ from api.turn_journal import (
     derive_turn_journal_states,
     iter_turn_journal_session_ids,
     read_turn_journal,
+    read_turn_journal_event_bounded,
 )
 
 
@@ -43,6 +46,34 @@ def test_append_turn_journal_event_fsyncs_jsonl_and_preserves_payload(tmp_path):
     lines = shards[0].read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["content"] == "hello"
+
+
+def test_bounded_readback_finds_exact_append_and_rejects_duplicate(tmp_path):
+    payload = {
+        "event": "submitted",
+        "turn_id": "turn-readback",
+        "stream_id": "stream-readback",
+        "content": "hello",
+    }
+    append_turn_journal_event("sid-readback", payload, session_dir=tmp_path)
+
+    durable = read_turn_journal_event_bounded(
+        "sid-readback",
+        turn_id="turn-readback",
+        stream_id="stream-readback",
+        session_dir=tmp_path,
+    )
+    assert durable is not None
+    assert durable["event"] == "submitted"
+
+    append_turn_journal_event("sid-readback", payload, session_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="duplicate durable"):
+        read_turn_journal_event_bounded(
+            "sid-readback",
+            turn_id="turn-readback",
+            stream_id="stream-readback",
+            session_dir=tmp_path,
+        )
 
 
 def test_read_turn_journal_tolerates_malformed_lines(tmp_path):

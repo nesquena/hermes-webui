@@ -989,10 +989,10 @@ class TestLeftoverDelivery:
         """Verify the streaming.py source contains the drain call before put('done', ...)."""
         src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(encoding="utf-8")
         assert "_drain_pending_steer" in src, (
-            "_run_agent_streaming must call agent._drain_pending_steer() to deliver leftovers"
+            "_run_agent_streaming_core must call agent._drain_pending_steer() to deliver leftovers"
         )
         assert "pending_steer_leftover" in src, (
-            "_run_agent_streaming must emit a pending_steer_leftover SSE event"
+            "_run_agent_streaming_core must emit a pending_steer_leftover SSE event"
         )
 
     def test_leftover_drain_runs_before_done_event(self):

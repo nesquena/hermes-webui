@@ -239,9 +239,9 @@ Called after run_conversation() completes to set the session title retroactively
 
 This is the most architecturally interesting part. Two endpoints cooperate:
 
-    POST /api/chat/start     Receives the user message. Creates a queue.Queue, stores it
-                             in STREAMS[stream_id], spawns a daemon thread running
-                             _run_agent_streaming(), returns {stream_id} immediately.
+    POST /api/chat/start     Receives the user message, reserves its stable lineage,
+                             durably prepares one turn, parks an admitted backend
+                             wrapper, then opens its gate and returns {stream_id}.
 
     GET  /api/chat/stream    Long-lived SSE connection. Reads from STREAMS[stream_id]
                              and forwards events to the browser until 'done' or 'error'.
@@ -268,10 +268,11 @@ The SSE handler loop:
     - On 'done' or 'error' event: breaks the loop and returns
     - Catches BrokenPipeError and ConnectionResetError silently (browser disconnected)
 
-Stream cleanup: _run_agent_streaming() pops its stream_id from STREAMS in a finally
-block. If the browser disconnects mid-stream, the daemon thread runs to completion and
-then cleans up. The queue fills and the put_nowait() calls fail silently (queue.Full
-is caught).
+Stream cleanup: the backend core pops its stream_id from STREAMS in a finally block,
+while its admitted wrapper token-removes the active-run reservation and releases the
+lineage permit and stream owner on every exit. If the browser disconnects mid-stream,
+the daemon thread still runs to completion and performs the same cleanup. The queue
+fills and the put_nowait() calls fail silently (queue.Full is caught).
 
 Fallback sync endpoint: POST /api/chat still exists and holds the connection open until
 the agent finishes. The frontend never uses it but it can be useful for debugging.
@@ -299,9 +300,40 @@ diagnostics only; they never establish or release turn ownership. The existing
 weak `_alias_session_agent_lock` remains the in-process mutation lock across a
 compression rotation and is not replaced by the lineage permit.
 
-### 4.4 Agent Invocation (_run_agent_streaming)
+### 4.3.2 Admitted and Prepared Turn Ownership
 
-    def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id):
+Every WebUI-owned local or gateway turn has one immutable, in-process
+`TurnAdmission`. Its reservation ID equals the stream ID, while its opaque owner
+token, stable root, delivery tip, held permit, and `admitted`/`gate`/`abort`
+events never enter HTTP JSON, journal metadata, or a context variable. Browser
+chat-start bodies that try to supply internal ownership field names are rejected.
+
+The lifecycle is deliberately ordered:
+
+1. The route resolves the stable lineage, acquires its nonblocking permit, and
+   publishes one immutable `ACTIVE_RUNS` reservation plus stream owner.
+2. `_prepare_chat_start_session_for_stream` is the sole pending/eager user-turn
+   writer. It saves the sidecar, appends exactly one ordinary `submitted` turn
+   event, reads both durable stores back, and returns a frozen `PreparedChatTurn`.
+3. The route creates the stream channel and starts either
+   `_run_admitted_agent_streaming` or
+   `_run_admitted_gateway_chat_streaming`. The wrapper exact-owner merges worker
+   metadata, sets `admitted`, and parks until the route opens `gate`.
+4. The wrapper calls the corresponding lower-level `*_core` exactly once. Its
+   finalizer runs any completion observer, token-removes the reservation, and
+   releases the permit and stream owner outside `ACTIVE_RUNS_LOCK`.
+
+Thread construction/start, park timeout, preparation/read-back, and hidden-task
+tracker failures set `abort` and retire the row, permit, owner, channel, pending
+state, and hidden sidecar exactly once. A reconnect to an existing live stream
+only reattaches to that stream; it never reserves a second turn. BTW verifies the
+parent lineage before copying context and then admits its independent hidden
+root; background work likewise admits only its hidden root so the parent may run
+in parallel.
+
+### 4.4 Agent Invocation (`_run_agent_streaming_core`)
+
+    def _run_agent_streaming_core(session_id, msg_text, model, workspace, stream_id):
 
 1. Fetches session from SESSIONS (not from disk -- session was just updated by /api/chat/start)
 2. Sets TERMINAL_CWD, HERMES_EXEC_ASK, HERMES_SESSION_KEY env vars
