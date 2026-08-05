@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -1995,6 +1996,28 @@ def apply_force_update(target: str, channel=None) -> dict:
                 'channel': channel,
                 'refused_rewind': True,
             }
+
+        # Preserve local commits before destructive reset. Force-update still
+        # discards the working tree tip, but never silently deletes commits.
+        sync = _describe_checkout_sync(path, compare_ref)
+        backup_branch = None
+        if sync.get('relationship') in {'ahead', 'diverged'} or (
+            isinstance(sync.get('ahead'), int) and sync['ahead'] > 0
+        ) or sync.get('dirty_tracked'):
+            backup = _create_update_backup_branch(path)
+            if backup.get('ok'):
+                backup_branch = backup['branch']
+            else:
+                return {
+                    'ok': False,
+                    'message': (
+                        'Force update aborted: could not create a backup branch '
+                        f'before reset ({backup.get("error") or "unknown error"}). '
+                        'Local commits/modifications were left untouched.'
+                    ),
+                    'target': target,
+                }
+
         # Discard local modifications and untracked colliders before resetting.
         # Do not use -x: ignored build/cache artifacts should survive force update.
         _run_git(['checkout', '.'], path)
@@ -2036,9 +2059,13 @@ def apply_force_update(target: str, channel=None) -> dict:
 
         response = {
             'ok': True,
-            'message': f'{target} force-updated to {compare_ref}',
+            'message': (
+                f'{target} force-updated to {compare_ref}'
+                + (f' (local tip preserved on {backup_branch})' if backup_branch else '')
+            ),
             'target': target,
             'restart_scheduled': True,
+            'backup_branch': backup_branch,
         }
         if target == 'agent':
             response['gateway_restart'] = gateway_result.get('status')
@@ -2062,6 +2089,183 @@ def apply_update(target, channel=None):
         return _apply_update_inner(target, channel)
     finally:
         _apply_lock.release()
+
+
+def _utc_stamp() -> str:
+    return datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+
+
+def _count_commits(path: Path, a: str, b: str) -> int | None:
+    """Return how many commits are reachable from ``b`` but not ``a``."""
+    out, ok = _run_git(['rev-list', '--count', f'{a}..{b}'], path)
+    if not ok or not out.isdigit():
+        return None
+    return int(out)
+
+
+def _list_checkout_processes(path: Path, *, limit: int = 25) -> list[dict]:
+    """Best-effort list of processes whose argv references ``path``."""
+    needle = str(path)
+    try:
+        proc = subprocess.run(
+            ['ps', '-ax', '-o', 'pid=,command='],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            encoding='utf-8',
+            errors='replace',
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    hits: list[dict] = []
+    for line in (proc.stdout or '').splitlines():
+        text = line.strip()
+        if not text or needle not in text:
+            continue
+        parts = text.split(None, 1)
+        if not parts:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        hits.append({'pid': pid, 'command': parts[1] if len(parts) > 1 else ''})
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def _describe_checkout_sync(path: Path, compare_ref: str | None) -> dict:
+    """Return ahead/behind/diverged/dirty state for an update target checkout.
+
+    Relationship meanings (relative to ``compare_ref``):
+      identical — HEAD and compare_ref resolve to the same commit
+      behind    — HEAD is a strict ancestor of compare_ref (ff-only safe)
+      ahead     — compare_ref is a strict ancestor of HEAD (local-only commits)
+      diverged  — histories share no fast-forward path
+      unknown   — git could not classify the relationship
+    """
+    head_sha, head_ok = _run_git(['rev-parse', 'HEAD'], path)
+    branch_out, branch_ok = _run_git(['rev-parse', '--abbrev-ref', 'HEAD'], path)
+    remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
+    status_out, status_ok = _run_git(['status', '--porcelain'], path)
+    dirty_tracked_out, dirty_tracked_ok = _run_git(
+        ['status', '--porcelain', '--untracked-files=no'], path
+    )
+    modified: list[str] = []
+    untracked: list[str] = []
+    if status_ok:
+        for line in status_out.splitlines():
+            if len(line) < 4:
+                continue
+            code, name = line[:2], line[3:]
+            if code == '??':
+                untracked.append(name)
+            else:
+                modified.append(name)
+
+    result = {
+        'path': str(path),
+        'branch': branch_out if branch_ok else None,
+        'head_sha': head_sha if head_ok else None,
+        'remote_url': _normalize_remote_url(remote_url) if remote_url else None,
+        'compare_ref': compare_ref,
+        'ahead': None,
+        'behind': None,
+        'relationship': 'unknown',
+        'dirty': bool(status_ok and status_out),
+        'dirty_tracked': bool(dirty_tracked_ok and dirty_tracked_out),
+        'modified_files': modified[:100],
+        'untracked_files': untracked[:100],
+        'modified_count': len(modified),
+        'untracked_count': len(untracked),
+        'processes': _list_checkout_processes(path),
+    }
+    if not compare_ref or not head_ok:
+        return result
+
+    tip_sha, tip_ok = _run_git(['rev-parse', compare_ref], path)
+    if not tip_ok:
+        result['compare_error'] = tip_sha
+        return result
+    result['compare_sha'] = tip_sha
+    if tip_sha == head_sha:
+        result['relationship'] = 'identical'
+        result['ahead'] = 0
+        result['behind'] = 0
+        return result
+
+    ahead = _count_commits(path, tip_sha, head_sha)
+    behind = _count_commits(path, head_sha, tip_sha)
+    result['ahead'] = ahead
+    result['behind'] = behind
+    can_ff = _can_fast_forward_to(path, compare_ref)
+    head_has = _head_contains_ref(path, compare_ref)
+    if can_ff and not head_has:
+        result['relationship'] = 'behind'
+    elif head_has and not can_ff:
+        result['relationship'] = 'ahead'
+    elif can_ff and head_has:
+        # Same commit already handled; treat as identical if counts are zero.
+        result['relationship'] = 'identical' if ahead == 0 and behind == 0 else 'unknown'
+    else:
+        result['relationship'] = 'diverged'
+    return result
+
+
+def _create_update_backup_branch(path: Path, *, prefix: str = 'hermes-update-backup') -> dict:
+    """Create a timestamped branch at HEAD. Never moves/deletes existing refs."""
+    stamp = _utc_stamp()
+    branch = f'{prefix}/{stamp}'
+    out, ok = _run_git(['branch', branch, 'HEAD'], path)
+    if not ok:
+        # Collision within the same second — add a suffix and retry once.
+        branch = f'{prefix}/{stamp}-{os.getpid()}'
+        out, ok = _run_git(['branch', branch, 'HEAD'], path)
+    if not ok:
+        return {'ok': False, 'branch': None, 'error': out}
+    head_sha, _ = _run_git(['rev-parse', 'HEAD'], path)
+    return {'ok': True, 'branch': branch, 'head_sha': head_sha, 'error': None}
+
+
+def _stash_message() -> str:
+    return f'hermes-update-autostash-{_utc_stamp()}'
+
+
+def diagnose_checkout(target: str = 'agent', channel=None) -> dict:
+    """Return a non-mutating diagnostic snapshot for an update target checkout."""
+    if channel is None:
+        channel = _read_update_channel()
+    channel = _normalize_channel(channel)
+    if target == 'webui':
+        path = REPO_ROOT
+    elif target == 'agent':
+        path = _AGENT_DIR
+        channel = DEFAULT_UPDATE_CHANNEL
+    else:
+        return {'ok': False, 'message': f'Unknown target: {target}'}
+    if path is None or not (Path(path) / '.git').exists():
+        return {
+            'ok': False,
+            'target': target,
+            'message': 'Not a git repository',
+            'path': str(path) if path else None,
+        }
+
+    path = Path(path)
+    # Fetch is intentionally skipped: diagnose must be safe to run while the
+    # gateway/WebUI are live and must not mutate refs or the working tree.
+    compare_ref = _select_apply_compare_ref(path, channel, target)
+    sync = _describe_checkout_sync(path, compare_ref)
+    return {
+        'ok': True,
+        'target': target,
+        'channel': channel,
+        'compare_ref': compare_ref,
+        **sync,
+    }
 
 
 def _restore_stash_after_pull_failure(
@@ -2147,8 +2351,20 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
             'channel': channel,
         }
 
-    # Check for dirty working tree (ignore untracked files — git stash
-    # doesn't include them, so stashing on '??' alone leaves nothing to pop)
+    # Preflight: classify ahead/behind/diverged/dirty before mutating.
+    sync = _describe_checkout_sync(path, compare_ref)
+    if sync.get('relationship') == 'identical':
+        return {
+            'ok': True,
+            'message': f'{target} is already up to date.',
+            'target': target,
+            'up_to_date': True,
+            'channel': channel,
+            'relationship': 'identical',
+            'ahead': 0,
+            'behind': 0,
+        }
+
     status_out, status_ok = _run_git(
         ['status', '--porcelain', '--untracked-files=no'], path
     )
@@ -2167,29 +2383,139 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
             'ok': False,
             'message': (
                 f'The local {target} repo has unresolved merge conflicts. '
-                'To reset to the latest remote version run: '
-                'git -C ' + str(path) + ' checkout . && '
-                'git -C ' + str(path) + ' pull --ff-only'
+                'Resolve them, or create a backup branch and reset with the '
+                'force-update path after confirming local work is preserved.'
             ),
             'conflict': True,
+            'relationship': sync.get('relationship'),
+            'ahead': sync.get('ahead'),
+            'behind': sync.get('behind'),
         }
+
+    backup_branch = None
+    local_commits = sync.get('relationship') in {'ahead', 'diverged'} or (
+        isinstance(sync.get('ahead'), int) and sync['ahead'] > 0
+    )
+    if local_commits:
+        backup = _create_update_backup_branch(path)
+        if not backup.get('ok'):
+            return {
+                'ok': False,
+                'message': (
+                    f'The local {target} checkout has commits not on '
+                    f'{compare_ref}, and creating a backup branch failed '
+                    f'({backup.get("error") or "unknown error"}). '
+                    'Update aborted without discarding local commits. '
+                    f'Inspect with: git -C {path} status && '
+                    f'git -C {path} log --oneline {compare_ref}..HEAD'
+                ),
+                'diverged': True,
+                'relationship': sync.get('relationship'),
+                'ahead': sync.get('ahead'),
+                'behind': sync.get('behind'),
+            }
+        backup_branch = backup['branch']
+        logger.info(
+            'update preflight: preserved %s HEAD %s on backup branch %s '
+            '(relationship=%s ahead=%s behind=%s)',
+            target,
+            backup.get('head_sha'),
+            backup_branch,
+            sync.get('relationship'),
+            sync.get('ahead'),
+            sync.get('behind'),
+        )
+
     stashed = False
+    stash_label = None
     if status_out:
-        _, ok = _run_git(['stash', 'push', '-m', 'hermes-update-autostash'], path)
+        stash_label = _stash_message()
+        _, ok = _run_git(['stash', 'push', '-m', stash_label], path)
         if not ok:
-            return {'ok': False, 'message': 'Failed to stash local changes'}
+            return {
+                'ok': False,
+                'message': (
+                    'Failed to stash local changes before update; '
+                    'working tree left unchanged.'
+                    + (f' Local commits remain on {backup_branch}.' if backup_branch else '')
+                ),
+                'backup_branch': backup_branch,
+                'relationship': sync.get('relationship'),
+            }
         stashed = True
 
-    # Pull with ff-only (no merge commits).
-    # Split tracking refs like 'origin/main' into separate remote + branch
-    # arguments — git treats 'origin/main' as a repository name otherwise.
-    remote, branch = _split_remote_ref(compare_ref)
-    pull_args = ['pull', '--ff-only']
-    if remote:
-        pull_args.extend([remote, branch])
+    # Agent production checkouts should track upstream. When local commits make
+    # ff-only impossible, reset to compare_ref AFTER the backup branch exists.
+    # WebUI keeps fail-closed so intentional local WebUI work is never silently
+    # discarded; the force-update button remains the explicit recovery path.
+    used_safe_reset = False
+    if local_commits and target == 'agent':
+        _, reset_ok = _run_git(['reset', '--hard', compare_ref], path)
+        if not reset_ok:
+            stash_recovery_note = ''
+            if stashed:
+                stash_recovery_note = _restore_stash_after_pull_failure(
+                    target, path, f'reset --hard {compare_ref} failed'
+                )
+            return {
+                'ok': False,
+                'message': (
+                    f'Failed to reset {target} to {compare_ref} after creating '
+                    f'backup branch {backup_branch}. Local commits are still on '
+                    f'that branch.'
+                    + (f' {stash_recovery_note}' if stash_recovery_note else '')
+                ),
+                'diverged': True,
+                'backup_branch': backup_branch,
+                'relationship': sync.get('relationship'),
+                'ahead': sync.get('ahead'),
+                'behind': sync.get('behind'),
+            }
+        used_safe_reset = True
+        pull_out, pull_ok = f'Reset to {compare_ref}', True
+    elif local_commits and target == 'webui':
+        stash_recovery_note = ''
+        if stashed:
+            stash_recovery_note = _restore_stash_after_pull_failure(
+                target, path, 'local commits block fast-forward'
+            )
+        message_parts = [
+            f'The local {target} repo has commits that are not on the remote '
+            f'ref ({compare_ref}), so a fast-forward update is not possible.',
+            f'Local commits were preserved on backup branch {backup_branch}.',
+        ]
+        if stash_recovery_note:
+            message_parts.append(stash_recovery_note)
+        elif stashed:
+            message_parts.append(
+                f'Local modifications remain in git stash ({stash_label}).'
+            )
+        message_parts.append(
+            'Use Force Update to discard the local branch tip after confirming '
+            f'the backup, or recover with: git -C {path} checkout {backup_branch}'
+        )
+        return {
+            'ok': False,
+            'message': ' '.join(message_parts),
+            'diverged': True,
+            'backup_branch': backup_branch,
+            'stash_ref_message': stash_label,
+            'relationship': sync.get('relationship'),
+            'ahead': sync.get('ahead'),
+            'behind': sync.get('behind'),
+        }
     else:
-        pull_args.extend(['origin', compare_ref])
-    pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
+        # Pull with ff-only (no merge commits).
+        # Split tracking refs like 'origin/main' into separate remote + branch
+        # arguments — git treats 'origin/main' as a repository name otherwise.
+        remote, branch = _split_remote_ref(compare_ref)
+        pull_args = ['pull', '--ff-only']
+        if remote:
+            pull_args.extend([remote, branch])
+        else:
+            pull_args.extend(['origin', compare_ref])
+        pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
+
     if not pull_ok:
         if _is_git_lock_error(pull_out):
             # Lock conflict during pull. If a stash was pushed for the local
@@ -2204,10 +2530,13 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
             message = f'Pull failed due to a repository lock: {pull_out.strip()}'
             if stash_recovery_note:
                 message = f'{message} {stash_recovery_note}'
+            if backup_branch:
+                message = f'{message} Local commits remain on {backup_branch}.'
             return {
                 'ok': False,
                 'message': message,
                 'lock_conflict': True,
+                'backup_branch': backup_branch,
             }
         pull_lower = pull_out.lower()
         detail = pull_out.strip()[:300] if pull_out.strip() else '(no output from git)'
@@ -2237,8 +2566,10 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                             'reset --hard HEAD to remove conflict markers. Your '
                             'changes remain in the git stash. Pull error: '
                             + detail
+                            + (f' Backup branch: {backup_branch}.' if backup_branch else '')
                         ),
                         'stash_conflict': True,
+                        'backup_branch': backup_branch,
                     }
                     if diverged_failure:
                         response['diverged'] = True
@@ -2252,8 +2583,10 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                         'remain in the git stash. To inspect: git -C ' + str(path) + ' stash show -p. '
                         'To re-apply: git -C ' + str(path) + ' stash apply, then '
                         'resolve conflicts. Pull error: ' + detail
+                        + (f' Backup branch: {backup_branch}.' if backup_branch else '')
                     ),
                     'stash_conflict': True,
+                    'backup_branch': backup_branch,
                 }
                 if diverged_failure:
                     response['diverged'] = True
@@ -2271,6 +2604,17 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                     'The temporary stash entry may still be present because '
                     'git stash drop failed.'
                 )
+        elif stashed:
+            restored_note_parts.append(
+                f'Local {target} modifications were not restored to the working '
+                'tree; they remain safely in `git stash list`'
+                + (f' ({stash_label})' if stash_label else '')
+                + '.'
+            )
+        if backup_branch:
+            restored_note_parts.append(
+                f'Local commits were preserved on backup branch {backup_branch}.'
+            )
         restored_note = ' '.join(restored_note_parts)
 
         # Diagnose the most common failure modes and surface actionable messages.
@@ -2281,14 +2625,23 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
             ]
             if restored_note:
                 message_parts.append(restored_note)
-            message_parts.append(
-                'Run: git -C ' + str(path) + ' fetch origin && '
-                'git -C ' + str(path) + ' reset --hard ' + compare_ref
-            )
+            if backup_branch:
+                message_parts.append(
+                    f'Recover local commits with: git -C {path} checkout {backup_branch}'
+                )
+            else:
+                message_parts.append(
+                    'Run: git -C ' + str(path) + ' fetch origin && '
+                    'git -C ' + str(path) + ' reset --hard ' + compare_ref
+                )
             return {
                 'ok': False,
                 'message': ' '.join(message_parts),
                 'diverged': True,
+                'backup_branch': backup_branch,
+                'relationship': sync.get('relationship'),
+                'ahead': sync.get('ahead'),
+                'behind': sync.get('behind'),
             }
         if 'does not track' in pull_lower or 'no tracking information' in pull_lower:
             message_parts = [
@@ -2302,12 +2655,17 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
             return {
                 'ok': False,
                 'message': ' '.join(message_parts),
+                'backup_branch': backup_branch,
             }
         # Generic fallback — include the raw git output for debugging.
         message_parts = [f'Pull failed: {detail}']
         if restored_note:
             message_parts.append(restored_note)
-        response = {'ok': False, 'message': ' '.join(message_parts)}
+        response = {
+            'ok': False,
+            'message': ' '.join(message_parts),
+            'backup_branch': backup_branch,
+        }
         if untracked_collision:
             response['conflict'] = True
         return response
@@ -2391,6 +2749,11 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
     # and the restart land at roughly the same time.
     _schedule_restart()
     message = f'{target} updated successfully'
+    if used_safe_reset and backup_branch:
+        message = (
+            f'{target} updated to {compare_ref} after preserving local commits '
+            f'on backup branch {backup_branch}'
+        )
     if stash_drop_failed:
         message += (
             '. Local modifications were restored, but the temporary stash '
@@ -2402,6 +2765,9 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
         'message': message,
         'target': target,
         'restart_scheduled': True,
+        'backup_branch': backup_branch,
+        'relationship': sync.get('relationship'),
+        'safe_reset': used_safe_reset,
     }
     if target == 'agent':
         response['gateway_restart'] = gateway_result.get('status')

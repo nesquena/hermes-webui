@@ -13397,6 +13397,15 @@ def handle_get(handler, parsed) -> bool:
 
         return j(handler, cached_update_status(include_agent=include_agent_updates))
 
+    if parsed.path == "/api/updates/diagnose":
+        qs = parse_qs(parsed.query)
+        target = (qs.get("target", ["agent"])[0] or "agent").strip()
+        if target not in ("webui", "agent"):
+            return bad(handler, 'target must be "webui" or "agent"')
+        from api.updates import diagnose_checkout
+
+        return j(handler, diagnose_checkout(target))
+
     if parsed.path == "/api/chat/stream/status":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
         if not _stream_id_visible_to_request_profile(handler, stream_id):

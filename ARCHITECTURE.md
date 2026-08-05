@@ -66,7 +66,9 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       startup.py           Startup helpers: auto_install_agent_deps()
       state_sync.py        /insights sync — message_count to the agent's state.db
       streaming.py         SSE engine, run_agent, cancel, compression, HERMES_HOME save/restore
-      updates.py           Self-update check and release notes
+      updates.py           Self-update check/apply with dirty+divergence preflight,
+                           timestamped backup branches/stashes, agent safe-reset,
+                           diagnose_checkout(), and release notes
       upload.py            Multipart parser, file upload handler
       workspace.py         File ops: list_dir, read_file_content, git detection, workspace helpers
     static/

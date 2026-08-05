@@ -1038,6 +1038,9 @@ def test_apply_update_status_lock_error_returns_lock_conflict(tmp_path):
     from api import updates as mod
     with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
          patch(f'{_MODULE}._select_apply_compare_ref', return_value='origin/main'), \
+         patch(f'{_MODULE}._describe_checkout_sync', return_value={
+             'relationship': 'behind', 'ahead': 0, 'behind': 1, 'dirty_tracked': False,
+         }), \
          patch(f'{_MODULE}._run_git') as mock_run_git:
         mock_run_git.side_effect = [
             ('', True),   # fetch succeeds
@@ -1053,6 +1056,9 @@ def test_apply_update_pull_lock_error_returns_lock_conflict(tmp_path):
     from api import updates as mod
     with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
          patch(f'{_MODULE}._select_apply_compare_ref', return_value='origin/main'), \
+         patch(f'{_MODULE}._describe_checkout_sync', return_value={
+             'relationship': 'behind', 'ahead': 0, 'behind': 1, 'dirty_tracked': False,
+         }), \
          patch(f'{_MODULE}.STREAMS', {}), \
          patch(f'{_MODULE}._run_git') as mock_run_git:
         mock_run_git.side_effect = [
@@ -1329,6 +1335,12 @@ def test_apply_update_pull_lock_restores_stash(tmp_path, monkeypatch):
         updates, '_select_apply_compare_ref',
         lambda path, channel='stable', target=None: 'origin/main'
     )
+    monkeypatch.setattr(
+        updates, '_describe_checkout_sync',
+        lambda path, compare_ref: {
+            'relationship': 'behind', 'ahead': 0, 'behind': 1, 'dirty_tracked': True,
+        },
+    )
 
     result = updates._apply_update_inner('webui')
     assert result['ok'] is False
@@ -1380,6 +1392,12 @@ def test_apply_update_pull_lock_no_stash_when_clean(tmp_path, monkeypatch):
     monkeypatch.setattr(
         updates, '_select_apply_compare_ref',
         lambda path, channel='stable', target=None: 'origin/main'
+    )
+    monkeypatch.setattr(
+        updates, '_describe_checkout_sync',
+        lambda path, compare_ref: {
+            'relationship': 'behind', 'ahead': 0, 'behind': 1, 'dirty_tracked': False,
+        },
     )
 
     result = updates._apply_update_inner('webui')
