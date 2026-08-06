@@ -744,12 +744,11 @@ class TestCancelInterrupt:
         (gate-certifier blocker #2).
         """
         import threading
-        from unittest.mock import Mock
         from api.streaming import _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED
         from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
 
         stream_id = "claim_retired_no_identity"
-        session_id = None  # agent/session identity NOT available
+        # agent/session identity NOT available — no AGENT_INSTANCES[stream_id]
 
         q = queue.Queue()
         STREAMS[stream_id] = q
