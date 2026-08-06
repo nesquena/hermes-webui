@@ -365,3 +365,56 @@ def test_merge_session_display_metadata_allowlists_fallback_notice_both_orders()
     assert "_cancel_claimed" not in notice_b
     assert set(notice_b.keys()) == {"message", "to_model", "to_provider"}
 
+
+# ── 7: dirty target + clean source canonicalization regression ──────────────
+
+
+def test_merge_session_display_metadata_canonicalizes_dirty_target_before_continue():
+    """An existing DIRTY target _fallbackNotice must be canonicalized BEFORE
+    the presence/continue branch, so internal coordination keys (e.g.
+    ``_cancel_claimed``, ``_internal``) are stripped even when the source
+    carries no notice at all (gate-certifier blocker #1).
+
+    The two-order test above starts order (b) with an already-clean target,
+    so its early return is false-green for the reported blocker.  This test
+    seeds a dirty target (with the three public values PLUS two internal
+    keys) and a clean source with no notice, then asserts the target's own
+    value is re-allowlisted in place — the three public values preserved,
+    every coordination/internal key stripped.
+    """
+    from api.models import _merge_session_display_metadata
+
+    # Dirty target: carries the three public values PLUS internal keys
+    target = {
+        "role": "assistant",
+        "content": "hello",
+        "_fallbackNotice": {
+            "message": "Switched to fallback model: m1 via p1 → m2 via p2",
+            "to_model": "m2",
+            "to_provider": "p2",
+            "_cancel_claimed": True,      # dirty coordination flag
+            "_internal": "coordination",  # another internal key
+            "extra_junk": "must be stripped",
+        },
+    }
+    # Clean source: no _fallbackNotice at all
+    source = {
+        "role": "assistant",
+        "content": "hello",
+    }
+
+    _merge_session_display_metadata(target, source)
+
+    # The target's OWN notice must be canonicalized in place — three public
+    # values preserved, every coordination/internal key stripped.
+    assert "_fallbackNotice" in target, "target notice must not be dropped"
+    notice = target["_fallbackNotice"]
+    assert set(notice.keys()) == {"message", "to_model", "to_provider"}, (
+        f"dirty target keys survived canonicalization: {set(notice.keys())}"
+    )
+    assert notice["message"] == "Switched to fallback model: m1 via p1 → m2 via p2"
+    assert notice["to_model"] == "m2"
+    assert notice["to_provider"] == "p2"
+    assert "_cancel_claimed" not in notice
+    assert "_internal" not in notice
+    assert "extra_junk" not in notice

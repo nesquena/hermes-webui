@@ -732,3 +732,156 @@ class TestCancelInterrupt:
         # Map and claim must be cleaned up (cannot grow unbounded)
         assert stream_id not in _STREAM_FALLBACK_NOTICES
         assert stream_id not in _STREAM_CANCEL_CLAIMED
+
+    def test_cancel_claim_retired_when_agent_and_session_identity_absent(self):
+        """Production cancel_stream() test for the stream-present/agent-not-yet-
+        ready path: stream + cancel flag are present, but the agent (and thus
+        session identity) is NOT yet available.  cancel_stream() must return
+        True, and BOTH registries (_STREAM_FALLBACK_NOTICES and
+        _STREAM_CANCEL_CLAIMED) must be empty at return — the claim retirement
+        must live in an outer try/finally covering every path after the claim,
+        not only the inner ``if _cancel_session_id:`` block
+        (gate-certifier blocker #2).
+        """
+        import threading
+        from unittest.mock import Mock
+        from api.streaming import _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED
+        from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
+
+        stream_id = "claim_retired_no_identity"
+        session_id = None  # agent/session identity NOT available
+
+        q = queue.Queue()
+        STREAMS[stream_id] = q
+        CANCEL_FLAGS[stream_id] = threading.Event()
+        # No AGENT_INSTANCES[stream_id] — agent not yet ready
+        STREAM_PARTIAL_TEXT[stream_id] = ""
+        STREAM_REASONING_TEXT[stream_id] = ""
+        STREAM_LIVE_TOOL_CALLS[stream_id] = []
+        # No notice pre-seeded — the claim adds stream_id to the set anyway
+        # (late publication ownership)
+
+        result = cancel_stream(stream_id)
+
+        # The supported stream-present/agent-not-yet-ready path returns True
+        assert result is True, (
+            "cancel_stream() should return True for stream-present/agent-not-ready path"
+        )
+
+        # Both registries MUST be empty at return — the outer try/finally
+        # retirement must fire even when _cancel_session_id is falsy.
+        assert stream_id not in _STREAM_CANCEL_CLAIMED, (
+            f"_STREAM_CANCEL_CLAIMED still contains {stream_id!r} after "
+            "cancel_stream() returned — claim retirement must cover the "
+            "missing-session-identity path"
+        )
+        assert stream_id not in _STREAM_FALLBACK_NOTICES, (
+            f"_STREAM_FALLBACK_NOTICES still contains {stream_id!r} after "
+            "cancel_stream() returned — map must be cleaned on every path"
+        )
+
+    def test_cancel_replacement_publication_B_overwrites_A_at_commit(self):
+        """Barriered A-at-claim then B-before-save test asserting B is the sole
+        durable notice and both registries are empty at return
+        (gate-certifier blocker #3: stale-first and lossy).
+
+        Schedule:
+        1. Notice A is pre-seeded in _STREAM_FALLBACK_NOTICES.
+        2. cancel_stream() claims the notice (A) under STREAMS_LOCK.
+        3. interrupt() triggers the status callback to publish newer notice B
+           into _STREAM_FALLBACK_NOTICES (replacing A) BEFORE cancel reaches
+           its save/stamp block.
+        4. cancel_stream() re-reads the CURRENT generation at commit time
+           (under lock) and stamps B — not the stale A snapshot.
+
+        Asserts: exactly one durable notice (B, not A), B has clean keys,
+        both registries empty at return.
+        """
+        import threading
+        from unittest.mock import patch, Mock
+        from api.streaming import _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED
+        from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
+
+        stream_id = "replacement_b_wins"
+        session_id = "sess_replacement_b_wins"
+
+        # Notice A: exists at claim time
+        _notice_a = {
+            "message": "Switched to fallback model: gpt-4 via openai → m1 via p1",
+            "to_model": "m1",
+            "to_provider": "p1",
+        }
+        # Notice B: published AFTER claim, BEFORE save — must win
+        _notice_b = {
+            "message": "Switched to fallback model: gpt-4 via openai → m2 via p2",
+            "to_model": "m2",
+            "to_provider": "p2",
+        }
+
+        q = queue.Queue()
+        STREAMS[stream_id] = q
+        CANCEL_FLAGS[stream_id] = threading.Event()
+        STREAM_PARTIAL_TEXT[stream_id] = "partial answer"
+        STREAM_REASONING_TEXT[stream_id] = ""
+        STREAM_LIVE_TOOL_CALLS[stream_id] = []
+        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice_a)
+
+        mock_agent = Mock()
+        mock_agent.session_id = session_id
+        # When interrupt() is called, publish the NEWER notice B (replacing A)
+        def _interrupt_handler(_msg):
+            from api.streaming import STREAMS_LOCK
+            with STREAMS_LOCK:
+                _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice_b)
+        mock_agent.interrupt = Mock(side_effect=_interrupt_handler)
+        AGENT_INSTANCES[stream_id] = mock_agent
+
+        _prior_assistant = {
+            "role": "assistant",
+            "content": "Previous turn.",
+            "timestamp": 1000,
+        }
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id
+        mock_session.pending_user_message = "q"
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = 1.0
+        mock_session.messages = [_prior_assistant]
+        mock_session.save = Mock()
+
+        with patch("api.streaming.get_session", return_value=mock_session):
+            result = cancel_stream(stream_id)
+
+        assert result is True
+
+        # Exactly one durable notice — and it must be B (the latest), NOT A.
+        stamped = [
+            m for m in mock_session.messages
+            if isinstance(m, dict) and m.get("_fallbackNotice")
+        ]
+        assert len(stamped) == 1, (
+            f"expected exactly 1 durable notice, got {len(stamped)}"
+        )
+        notice = stamped[0]["_fallbackNotice"]
+        assert "_cancel_claimed" not in notice, (
+            f"_cancel_claimed leaked into persisted notice: {notice}"
+        )
+        # B is the sole durable notice — A must NOT be persisted
+        assert notice.get("message") == _notice_b["message"], (
+            f"stale notice A persisted instead of latest B: {notice}"
+        )
+        assert notice.get("to_model") == _notice_b["to_model"]
+        assert notice.get("to_provider") == _notice_b["to_provider"]
+        assert set(notice.keys()) == {"message", "to_model", "to_provider"}
+
+        # Prior turn must NOT be mutated
+        assert "_fallbackNotice" not in _prior_assistant
+
+        # Both registries must be empty at return
+        assert stream_id not in _STREAM_FALLBACK_NOTICES, (
+            "_STREAM_FALLBACK_NOTICES not cleaned after replacement publication"
+        )
+        assert stream_id not in _STREAM_CANCEL_CLAIMED, (
+            "_STREAM_CANCEL_CLAIMED not retired after replacement publication"
+        )

@@ -8353,6 +8353,21 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
     if not isinstance(target, dict) or not isinstance(source, dict):
         return
     for key in _SESSION_MESSAGE_DISPLAY_METADATA_KEYS:
+        # Canonicalize an existing TARGET _fallbackNotice BEFORE the
+        # presence/continue branch.  A dirty target (carrying internal
+        # coordination keys like _cancel_claimed or _internal) would sail
+        # through the early `continue` and survive into session JSON
+        # unfiltered.  Re-allowlist the target's own value in place so the
+        # three public values (message, to_model, to_provider) are preserved
+        # and every coordination/internal key is stripped regardless of
+        # whether the source also carries a notice (gate-certifier blocker #1).
+        from api.streaming import _FALLBACK_NOTICE_KEYS as _fb_keys
+        _target_val = target.get(key)
+        if key == "_fallbackNotice" and isinstance(_target_val, dict):
+            target[key] = {
+                _k: _target_val.get(_k, "")
+                for _k in _fb_keys
+            }
         if _message_display_metadata_value_present(target.get(key)):
             continue
         value = source.get(key)
@@ -8362,7 +8377,7 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
                 # any internal coordination flags (e.g. _cancel_claimed)
                 # that may have leaked into the source row.
                 target[key] = {
-                    k: value.get(k, "") for k in ("message", "to_model", "to_provider")
+                    k: value.get(k, "") for k in _fb_keys
                 }
             else:
                 target[key] = copy.deepcopy(value)
