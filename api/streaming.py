@@ -4875,11 +4875,19 @@ def _strip_base64_data_urls(text: str) -> str:
     estimate the full payload bytes inflate every streaming frame.  Strip
     them to a fixed marker so the client still sees *that* an image was
     involved without the wire cost of the base64 blob.
+
+    The recognizer accepts any valid image subtype token (RFC 6838: letters,
+    digits, and ``+``/``-``/``.``), so common variants such as
+    ``svg+xml``, ``x-icon`` or ``vnd.microsoft.icon`` are caught along with
+    ``png``/``jpeg``/``gif``, and it is case-insensitive (``DATA:IMAGE/PNG;
+    BASE64,...``).  Only ``;base64,`` payloads are stripped — HTTP(S), file:,
+    artifact, non-base64 data URIs and ordinary text pass through byte-for-byte.
     """
     return re.sub(
-        r'data:image/[a-zA-Z]+;base64,[A-Za-z0-9+/=]+',
+        r'data:image/[a-zA-Z0-9][a-zA-Z0-9+.\-]*;base64,[A-Za-z0-9+/=]+',
         '[base64 image]',
         text,
+        flags=re.IGNORECASE,
     )
 
 

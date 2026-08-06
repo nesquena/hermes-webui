@@ -17199,18 +17199,23 @@ def _project_replay_tool_payload(event: str, payload):
     """Defensively project a journaled tool/tool_complete payload before replay.
 
     Pre-fix durable journals may contain inline base64 image bytes in
-    ``tool``/``tool_complete`` args or previews. Project them at the replay
-    boundary so historical data cannot reintroduce encoded image bytes into
-    the replayed SSE stream. Non-tool events and non-dict payloads pass through
-    unchanged.
+    ``tool``/``tool_complete`` args or preview/snippet strings. Project them at
+    the replay boundary so historical data cannot reintroduce encoded image
+    bytes into the replayed SSE stream. ``args`` is projected shape-completely
+    (dict/list/tuple/string via the recursive copy-on-write walker) and both
+    ``preview`` and ``snippet`` strings go through the shared string projector.
+    The stored journal entry is never mutated — a shallow copy is projected.
+    Non-tool events and non-dict payloads pass through unchanged.
     """
     if event not in ('tool', 'tool_complete') or not isinstance(payload, dict):
         return payload
     projected = dict(payload)
-    if isinstance(projected.get('args'), dict):
-        projected['args'] = _project_live_tool_args(projected['args'])
-    if isinstance(projected.get('preview'), str):
-        projected['preview'] = _strip_base64_data_urls(projected['preview'])
+    args = projected.get('args')
+    if isinstance(args, (str, dict, list, tuple)):
+        projected['args'] = _project_live_tool_args(args)
+    for key in ('preview', 'snippet'):
+        if isinstance(projected.get(key), str):
+            projected[key] = _strip_base64_data_urls(projected[key])
     return projected
 
 
@@ -17673,7 +17678,15 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
                 continue
             if event_id and event_id in sent_event_ids:
                 continue
-            _sse_with_id(handler, entry.get("event") or entry.get("type") or "message", entry.get("payload"), event_id)
+            # #6316: every journal-to-client boundary — run-level replay AND
+            # session-level emit_replay (pre-attach replay + post-attach
+            # reconciliation) — projects historical tool payloads through the
+            # same projector so pre-fix journals cannot reintroduce encoded
+            # image bytes into the emitted SSE. The stored entry is untouched.
+            _event = entry.get("event") or entry.get("type") or "message"
+            _payload = entry.get("payload")
+            _payload = _project_replay_tool_payload(_event, _payload)
+            _sse_with_id(handler, _event, _payload, event_id)
             if event_id:
                 note_sent_event_id(event_id)
 

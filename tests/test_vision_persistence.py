@@ -505,3 +505,61 @@ def test_replay_run_journal_projects_pre_fix_payloads():
     assert _project_replay_tool_payload("token", token) is token
     # Payload não-dict passa intacto.
     assert _project_replay_tool_payload("tool", None) is None
+
+
+def test_strip_base64_data_urls_valid_subtypes():
+    """Reconhecedor cobre subtypes com +, -, . e case-variants; referências seguras intactas."""
+    # Subtypes com pontuação que o regex antigo [a-zA-Z]+ não casava.
+    assert _strip_base64_data_urls("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=") == "[base64 image]"
+    assert _strip_base64_data_urls("data:image/x-icon;base64,AAABAAEAEBAAAAEAIABoBAAAFgAAACg=") == "[base64 image]"
+    assert _strip_base64_data_urls("data:image/vnd.microsoft.icon;base64,AAABAAEAEBAAAAEAIABoBAAAFgAAACg=") == "[base64 image]"
+    assert _strip_base64_data_urls("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQ=") == "[base64 image]"
+    # Case-variants (scheme/media type/base64 marker).
+    assert _strip_base64_data_urls("DATA:IMAGE/SVG+XML;BASE64,PHN2Zz48L3N2Zz4=") == "[base64 image]"
+    assert _strip_base64_data_urls("Data:Image/PNG;Base64,iVBORw0KGgo=") == "[base64 image]"
+    # Referências seguras e texto comum permanecem byte-for-byte.
+    text = "open https://example.com/img.png and file:///tmp/a.png artifact://x hello world"
+    assert _strip_base64_data_urls(text) == text
+    assert _strip_base64_data_urls("data:text/plain;base64,aGVsbG8=") == "data:text/plain;base64,aGVsbG8="
+    assert _strip_base64_data_urls("data:image/svg+xml,<svg/>") == "data:image/svg+xml,<svg/>"
+    assert _strip_base64_data_urls("data:image/png;charset=utf-8,iVBOR") == "data:image/png;charset=utf-8,iVBOR"
+
+
+def test_replay_projector_shape_complete_and_non_mutating():
+    """Projector lida com args dict/list/tuple/str e preview+snippet; entry armazenado não é mutado."""
+    from api.routes import _project_replay_tool_payload
+
+    b64_png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQ="
+    b64_svg = "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4="
+    b64_icon = "data:image/x-icon;base64,AAABAAEAEBAAAAEAIABoBAAAFgAAACg="
+    payload = {
+        "event_type": "tool.started",
+        "name": "read_file",
+        "preview": b64_svg,
+        "snippet": b64_png,
+        "args": {
+            "path": "/tmp/real.png",
+            "nested": {"image": b64_png},
+            "list": [b64_svg, "https://example.com/ok.png"],
+            "pair": (b64_icon, "plain"),
+        },
+    }
+    frozen = copy.deepcopy(payload)
+    projected = _project_replay_tool_payload("tool", payload)
+    assert projected is not payload
+    assert projected["preview"] == "[base64 image]"
+    assert projected["snippet"] == "[base64 image]"
+    assert projected["args"]["nested"]["image"] == "[base64 image]"
+    assert projected["args"]["list"][0] == "[base64 image]"
+    assert projected["args"]["list"][1] == "https://example.com/ok.png"
+    assert projected["args"]["pair"][0] == "[base64 image]"
+    assert projected["args"]["pair"][1] == "plain"
+    assert projected["args"]["path"] == "/tmp/real.png"
+    # A entrada armazenada não foi mutada (copy-on-write).
+    assert payload == frozen
+    # Args como lista ou string JSON também são projetados shape-complete.
+    list_projected = _project_replay_tool_payload("tool_complete", {"args": [b64_png, {"deep": b64_svg}]})
+    assert list_projected["args"][0] == "[base64 image]"
+    assert list_projected["args"][1]["deep"] == "[base64 image]"
+    str_projected = _project_replay_tool_payload("tool", {"args": '{"image": "%s"}' % b64_png})
+    assert str_projected["args"] == '{"image": "[base64 image]"}'
