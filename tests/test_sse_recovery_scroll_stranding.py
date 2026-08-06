@@ -238,6 +238,46 @@ def test_follow_intent_cache_synchronously_invalidated_before_raf():
     )
 
 
+def test_shift_space_pages_up_invalidates_follow_intent_cache():
+    """#6653 re-gate (maintainer round-2, finding 3): Shift+Space is a page-UP
+    scroll-away and must synchronously invalidate the layout-free follow-intent
+    cache in the keydown path, exactly like PageUp/ArrowUp/Home. Plain Space
+    (page-down) and PageDown scroll TOWARD the bottom and must NOT invalidate -
+    a follower paging down through a stream stays a follower.
+    """
+    keydown = UI_JS[UI_JS.index("const _MESSAGE_SCROLL_KEYS=new Set(["):]
+    keydown = keydown[:keydown.index("let _scrollRaf=0")]
+    kc = _compact(keydown)
+    # The Shift+Space branch must be part of the same synchronous invalidation
+    # statement as the other upward keys (PageUp/ArrowUp/Home). Compacted the
+    # same way as kc (the space inside the ' ' key literal is stripped too).
+    shift_space = _compact("((e.key===' '||e.key==='Spacebar')&&e.shiftKey)")
+    invalidate = kc.index("_messageFollowIntentCache=false")
+    # The invalidation statement: from the enclosing if( up to the cache write.
+    stmt_start = kc.rindex("if(", 0, invalidate)
+    stmt = kc[stmt_start:invalidate + len("_messageFollowIntentCache=false")]
+    assert shift_space in stmt, (
+        "Shift+Space must be wired into the synchronous cache invalidation "
+        "statement (#6653)"
+    )
+    # Downward keys must NOT invalidate follow-intent - they scroll toward the
+    # bottom, so a follower paging down through a stream stays a follower.
+    assert "e.key==='PageDown'" not in stmt, (
+        "PageDown must not invalidate follow-intent - it scrolls toward the "
+        "bottom (#6653)"
+    )
+    # Plain Space (page-down) must only invalidate when gated on shiftKey.
+    plain_space = _compact("(e.key===' '||e.key==='Spacebar')")
+    assert stmt.count(plain_space) == 1, (
+        "plain Space must appear exactly once in the invalidation statement, "
+        "as the Shift+Space branch (#6653)"
+    )
+    assert plain_space + "&&e.shiftKey" in stmt, (
+        "plain Space must not invalidate follow-intent on its own - only "
+        "Shift+Space (page-up) may (#6653)"
+    )
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node required for behavioral test")
 def test_cancel_before_scroll_raf_does_not_follow_stale_pin():
     """#6653 behavioral: a cancel landing BEFORE the scroll listener's rAF has
