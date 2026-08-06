@@ -627,3 +627,56 @@ def test_load_profile_config_dict_fails_closed_on_invalid_persisted_profile(monk
     assert routes_mod._load_profile_config_dict(_RootAliasSession()) == {
         "custom_providers": [{"name": "Root Only", "model": "gpt-5.5"}]
     }
+
+
+def test_read_profile_model_config_fails_closed_on_invalid_persisted_profile(monkeypatch, tmp_path):
+    """#6718 review 3 (SILENT): the display/start config loader must ALSO fail
+    closed on an invalid persisted ``session.profile``.
+
+    ``_read_profile_model_config`` feeds its ``profile_config`` result into the
+    custom-provider slug normalizer on the GET /api/session display path,
+    chat/start wakeup and goal paths. ``get_hermes_home_for_profile`` maps
+    invalid names to the ROOT home, so pre-fix an invalid stored profile name
+    loaded the ROOT config — letting a root-only custom-provider slug remap
+    inside that session. The identity is validated before resolution;
+    anything that is neither a root alias nor a valid named profile yields
+    (None, None, None) (fail closed), never the root fallback.
+    """
+    import api.profiles as profiles_mod
+    import api.routes as routes_mod
+
+    root_home = tmp_path / "root"
+    root_home.mkdir(parents=True)
+    (root_home / "config.yaml").write_text(
+        "custom_providers:\n  - name: Root Only\n    model: gpt-5.5\n"
+    )
+
+    # ANY name resolves to the root home — the resolver fallback the guard
+    # must defeat: pre-fix this made the root config load for the invalid
+    # stored profile name.
+    monkeypatch.setattr(profiles_mod, "get_hermes_home_for_profile", lambda name: root_home)
+
+    class _InvalidProfileSession:
+        profile = "../../evil"
+
+    assert routes_mod._read_profile_model_config(_InvalidProfileSession(), None) == (None, None, None)
+
+    class _TraversalProfileSession:
+        profile = "..%2f..%2fetc"
+
+    assert routes_mod._read_profile_model_config(_TraversalProfileSession(), None) == (None, None, None)
+
+    # A valid named profile still loads its own config (positive control)...
+    class _NamedProfileSession:
+        profile = "work"
+
+    _pp, _pd, _pcfg = routes_mod._read_profile_model_config(_NamedProfileSession(), None)
+    assert _pcfg == {"custom_providers": [{"name": "Root Only", "model": "gpt-5.5"}]}
+
+    # ...and a root alias is still the root profile's OWN config (legitimate,
+    # not a cross-profile leak).
+    class _RootAliasSession:
+        profile = "default"
+
+    _pp, _pd, _pcfg = routes_mod._read_profile_model_config(_RootAliasSession(), None)
+    assert _pcfg == {"custom_providers": [{"name": "Root Only", "model": "gpt-5.5"}]}
