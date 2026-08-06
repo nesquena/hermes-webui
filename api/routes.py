@@ -14961,6 +14961,7 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 return bad(handler, "Invalid session_id", 400)
             sidecar_deleted = False
+            _delete_session_sidecars(sid)
             try:
                 p.unlink(missing_ok=True)
             except Exception:
@@ -21897,6 +21898,22 @@ def _handle_bg_task_complete_ack(handler, body):
         },
         extra_headers={"Deprecation": "true"} if legacy_process_id_used else {},
     )
+
+
+def _delete_session_sidecars(session_id: str) -> None:
+    """Remove transient sidecars before deleting the owning transcript."""
+    try:
+        from api.draft_store import delete_draft
+
+        delete_draft(session_id)
+    except Exception:
+        logger.debug("Failed to delete composer draft sidecar for %s", session_id, exc_info=True)
+    try:
+        from api.session_runtime_state import clear_runtime_state
+
+        clear_runtime_state(session_id)
+    except Exception:
+        logger.debug("Failed to delete runtime state sidecar for %s", session_id, exc_info=True)
 
 
 def _handle_session_compression_recovery_start(handler, body):

@@ -19,7 +19,7 @@ from typing import Any, Iterator
 logger = logging.getLogger(__name__)
 
 _RUNTIME_DIR_NAME = "_runtime"
-_RUNTIME_LOCKS: dict[str, threading.Lock] = {}
+_RUNTIME_LOCKS: dict[str, Any] = {}
 _RUNTIME_LOCKS_GUARD = threading.Lock()
 _RUNTIME_FIELDS = (
     "active_stream_id",
@@ -52,9 +52,9 @@ def runtime_state_path(session_id: str) -> Path:
     return _session_dir() / _RUNTIME_DIR_NAME / f"{session_id}.json"
 
 
-def _lock_for(session_id: str) -> threading.Lock:
+def _lock_for(session_id: str) -> Any:
     with _RUNTIME_LOCKS_GUARD:
-        return _RUNTIME_LOCKS.setdefault(session_id, threading.Lock())
+        return _RUNTIME_LOCKS.setdefault(session_id, threading.RLock())
 
 
 @contextmanager
@@ -87,47 +87,66 @@ def _normalize_state(state: object) -> dict[str, Any]:
 
 
 def load_runtime_state(session_id: str) -> dict[str, Any]:
-    path = runtime_state_path(session_id)
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        return _normalize_state(raw)
-    except FileNotFoundError:
-        return {}
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        logger.warning("Ignoring unreadable runtime state sidecar for %s", session_id)
-        return {}
+    with runtime_state_lock(session_id):
+        path = runtime_state_path(session_id)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            return _normalize_state(raw)
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            logger.warning("Ignoring unreadable runtime state sidecar for %s", session_id)
+            return {}
 
 
 def save_runtime_state(session_id: str, state: object) -> dict[str, Any]:
-    path = runtime_state_path(session_id)
-    payload = _normalize_state(state)
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".tmp.{os.getpid()}.{threading.current_thread().ident}")
-    try:
-        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        with open(tmp, "w", encoding="utf-8") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
+    with runtime_state_lock(session_id):
+        path = runtime_state_path(session_id)
+        payload = _normalize_state(state)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".tmp.{os.getpid()}.{threading.current_thread().ident}")
         try:
-            os.chmod(tmp, 0o600)
-        except OSError:
-            pass
-        os.replace(tmp, path)
-    finally:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-    return copy.deepcopy(payload)
+            encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
+            os.replace(tmp, path)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return copy.deepcopy(payload)
 
 
 def clear_runtime_state(session_id: str) -> None:
-    path = runtime_state_path(session_id)
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        logger.debug("Failed to clear runtime state sidecar for %s", session_id, exc_info=True)
+    with runtime_state_lock(session_id):
+        path = runtime_state_path(session_id)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("Failed to clear runtime state sidecar for %s", session_id, exc_info=True)
+        # A load can have overlaid the sidecar immediately before terminal
+        # cleanup. Clear only transient fields on any cached projection so the
+        # cache cannot retain a deleted pending turn.
+        try:
+            from api import models
+
+            with models.LOCK:
+                cached = models.SESSIONS.get(session_id)
+                if cached is not None:
+                    cached.active_stream_id = None
+                    cached.pending_user_message = None
+                    cached.pending_attachments = []
+                    cached.pending_started_at = None
+                    cached.pending_user_source = None
+        except Exception:
+            logger.debug("Failed to invalidate cached runtime state for %s", session_id, exc_info=True)
 
 
 def runtime_state_from_session(session) -> dict[str, Any]:

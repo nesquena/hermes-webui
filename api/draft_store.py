@@ -106,3 +106,12 @@ def save_draft(session_id: str, draft: object) -> dict[str, Any]:
         except OSError:
             pass
     return copy.deepcopy(payload)
+
+
+def delete_draft(session_id: str) -> None:
+    """Remove a draft sidecar when its owning session is deleted."""
+    with draft_lock(session_id):
+        try:
+            draft_path(session_id).unlink(missing_ok=True)
+        except OSError:
+            logger.debug("Failed to delete composer draft sidecar for %s", session_id, exc_info=True)

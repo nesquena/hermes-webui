@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import api.models as models
 import api.routes as routes
-from api import session_runtime_state
+from api import draft_store, session_runtime_state
 
 
 def test_runtime_state_sidecar_does_not_rewrite_large_transcript(tmp_path, monkeypatch):
@@ -188,3 +188,39 @@ def test_turn_journal_is_submitted_before_pending_state_and_worker(tmp_path, mon
     assert events[:2] == ["journal", "prepare"]
     assert "worker" in events
     routes.STREAMS.pop(response["stream_id"], None)
+
+
+def test_sidecar_cleanup_removes_draft_runtime_and_cached_transient_state(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    models.SESSIONS.clear()
+
+    sid = "sidecar_delete_001"
+    session = models.Session(
+        session_id=sid,
+        title="Delete me",
+        messages=[{"role": "user", "content": "history"}],
+    )
+    session.active_stream_id = "stream-delete"
+    session.pending_user_message = "stale pending"
+    session.pending_attachments = [{"name": "file.txt"}]
+    session.pending_started_at = 123.0
+    session.pending_user_source = "webui"
+    session.save()
+    models.SESSIONS[sid] = session
+    draft_store.save_draft(sid, {"text": "stale draft", "files": []})
+    session_runtime_state.save_runtime_state(
+        sid,
+        session_runtime_state.runtime_state_from_session(session),
+    )
+
+    routes._delete_session_sidecars(sid)
+
+    assert not draft_store.draft_path(sid).exists()
+    assert not session_runtime_state.runtime_state_path(sid).exists()
+    assert session.active_stream_id is None
+    assert session.pending_user_message is None
+    assert session.pending_attachments == []
+    assert session.pending_started_at is None
+    assert session.pending_user_source is None

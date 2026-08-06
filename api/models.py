@@ -12,7 +12,7 @@ import re
 import threading
 import time
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 
 try:  # pragma: no cover - platform-specific imports.
@@ -4767,48 +4767,54 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                     "state.db newer-sidecar sync failed on cache hit for session %s", sid, exc_info=True,
                 )
         return cached
-    if metadata_only:
-        s = Session.load_metadata_only(sid)
+    runtime_lock = nullcontext()
+    try:
+        from api.session_runtime_state import runtime_state_lock
+
+        runtime_lock = runtime_state_lock(sid)
+    except Exception:
+        pass
+    with runtime_lock:
+        if metadata_only:
+            s = Session.load_metadata_only(sid)
+        else:
+            s = Session.load(sid)
         if s:
+            if cache_on_miss:
+                with LOCK:
+                    SESSIONS[sid] = s
+                    if promote_cache:
+                        SESSIONS.move_to_end(sid)
+                    _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+            if not metadata_only:
+                try:
+                    synced_from_state = _sync_sidecar_from_state_db_if_newer(s)
+                    repaired = False if synced_from_state else _repair_stale_pending(s)
+                    # If the stale-pending repair did not fire but the session
+                    # already carries a pending-journal-retry marker (e.g. set on
+                    # a previous repair pass), give the lazy-retry path one
+                    # chance to self-heal on this read.
+                    if not repaired and not synced_from_state and _session_has_pending_journal_retry(s):
+                        try:
+                            _try_retry_journal_recovery_in_place(s)
+                        except Exception:
+                            logger.debug(
+                                "lazy journal-retry failed on cold load for session %s", sid, exc_info=True,
+                            )
+                    # If repair had to bail because the per-session lock was held,
+                    # do not pin the still-stale sidecar in the LRU cache forever.
+                    # Leaving it cached would prevent future get_session() calls from
+                    # re-entering the cache-miss repair path after the lock holder exits.
+                    if cache_on_miss and not repaired and (len(s.messages) == 0
+                            and s.pending_user_message
+                            and s.active_stream_id
+                            and s.active_stream_id not in _active_stream_ids()):
+                        with LOCK:
+                            if SESSIONS.get(sid) is s:
+                                SESSIONS.pop(sid, None)
+                except Exception:
+                    pass  # repair is best-effort
             return s
-    else:
-        s = Session.load(sid)
-    if s:
-        if cache_on_miss:
-            with LOCK:
-                SESSIONS[sid] = s
-                if promote_cache:
-                    SESSIONS.move_to_end(sid)
-                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-        if not metadata_only:
-            try:
-                synced_from_state = _sync_sidecar_from_state_db_if_newer(s)
-                repaired = False if synced_from_state else _repair_stale_pending(s)
-                # If the stale-pending repair did not fire but the session
-                # already carries a pending-journal-retry marker (e.g. set on
-                # a previous repair pass), give the lazy-retry path one
-                # chance to self-heal on this read.
-                if not repaired and not synced_from_state and _session_has_pending_journal_retry(s):
-                    try:
-                        _try_retry_journal_recovery_in_place(s)
-                    except Exception:
-                        logger.debug(
-                            "lazy journal-retry failed on cold load for session %s", sid, exc_info=True,
-                        )
-                # If repair had to bail because the per-session lock was held,
-                # do not pin the still-stale sidecar in the LRU cache forever.
-                # Leaving it cached would prevent future get_session() calls from
-                # re-entering the cache-miss repair path after the lock holder exits.
-                if cache_on_miss and not repaired and (len(s.messages) == 0
-                        and s.pending_user_message
-                        and s.active_stream_id
-                        and s.active_stream_id not in _active_stream_ids()):
-                    with LOCK:
-                        if SESSIONS.get(sid) is s:
-                            SESSIONS.pop(sid, None)
-            except Exception:
-                pass  # repair is best-effort
-        return s
     raise KeyError(sid)
 
 
