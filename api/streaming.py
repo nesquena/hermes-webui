@@ -9138,7 +9138,12 @@ def _run_agent_streaming(
             # the key is absent or invalid, pass None → agent uses its default.
             try:
                 _effort_cfg = _cfg.get('agent', {}) if isinstance(_cfg, dict) else {}
-                _effort_raw = _effort_cfg.get('reasoning_effort') if isinstance(_effort_cfg, dict) else None
+                _session_effort = getattr(_session_meta, 'reasoning_effort', None) if _session_meta else None
+                _effort_raw = (
+                    _session_effort
+                    if _session_effort is not None
+                    else _effort_cfg.get('reasoning_effort') if isinstance(_effort_cfg, dict) else None
+                )
                 _effort = coerce_reasoning_effort_for_model(
                     _effort_raw,
                     resolved_model,
