@@ -1185,6 +1185,44 @@ def model_explicit_pick_signature(model, model_provider) -> str:
     return f"{_m}\x1f{_p}"
 
 
+def _load_composer_draft_sidecar(session_id: str, fallback: object = None) -> dict:
+    """Overlay the lightweight draft sidecar over legacy embedded metadata."""
+    try:
+        from api.draft_store import load_draft
+
+        return load_draft(session_id, fallback=fallback)
+    except Exception:
+        logger.debug("Failed to load composer draft sidecar for %s", session_id, exc_info=True)
+        return fallback if isinstance(fallback, dict) else {"text": "", "files": []}
+
+
+def _load_runtime_state_sidecar(session_id: str) -> dict:
+    """Return lightweight pending/run metadata for a session, if present."""
+    try:
+        from api.session_runtime_state import load_runtime_state
+
+        return load_runtime_state(session_id)
+    except Exception:
+        logger.debug("Failed to load runtime state sidecar for %s", session_id, exc_info=True)
+        return {}
+
+
+def _clear_runtime_state_sidecar_if_terminal(session) -> None:
+    """Remove the runtime overlay once the session has no live pending turn."""
+    if getattr(session, "active_stream_id", None) or getattr(session, "pending_user_message", None):
+        return
+    try:
+        from api.session_runtime_state import clear_runtime_state
+
+        clear_runtime_state(session.session_id)
+    except Exception:
+        logger.debug(
+            "Failed to clear terminal runtime state sidecar for %s",
+            getattr(session, "session_id", None),
+            exc_info=True,
+        )
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL,
@@ -1496,6 +1534,7 @@ class Session:
             except Exception:
                 pass
             raise
+        _clear_runtime_state_sidecar_if_terminal(self)
         if not skip_index:
             _write_session_index(updates=[self])
 
@@ -1539,6 +1578,11 @@ class Session:
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        data['composer_draft'] = _load_composer_draft_sidecar(
+            sid,
+            fallback=data.get('composer_draft'),
+        )
+        data.update(_load_runtime_state_sidecar(sid))
         session = cls(**data)
         if _collapsed_partials:
             try:
@@ -1597,6 +1641,11 @@ class Session:
                 return cls.load(sid)
             parsed['messages'] = []
             parsed['tool_calls'] = []
+            parsed['composer_draft'] = _load_composer_draft_sidecar(
+                sid,
+                fallback=parsed.get('composer_draft'),
+            )
+            parsed.update(_load_runtime_state_sidecar(sid))
             session = cls(**parsed)
             sidecar_message_count = _parse_nonnegative_int(parsed.get('message_count'))
             index_message_count = None

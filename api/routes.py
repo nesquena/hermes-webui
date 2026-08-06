@@ -47,6 +47,7 @@ from api.agent_sessions import (
     read_session_lineage_report,
 )
 from api.compression_anchor import visible_messages_for_anchor
+from api import draft_store
 from api.compression_recovery import (
     COMPRESSION_RECOVERY_ACTION_START_FOCUSED,
     clear_compression_recovery,
@@ -2871,6 +2872,7 @@ from api.config import (
     PENDING_BG_TASK_COMPLETIONS,
 )
 from api import config as api_config
+from api import session_runtime_state
 from api.helpers import (
     require,
     bad,
@@ -14766,10 +14768,13 @@ def handle_post(handler, parsed) -> bool:
             if not sid:
                 return bad(handler, "session_id is required", 400)
             try:
-                s = get_session(sid)
+                s = get_session(sid, metadata_only=True)
             except KeyError:
                 return bad(handler, "Session not found", 404)
-            draft = getattr(s, "composer_draft", {}) or {}
+            draft = draft_store.load_draft(
+                sid,
+                fallback=getattr(s, "composer_draft", {}) or {},
+            )
             return j(handler, {"draft": draft})
         # POST
         try:
@@ -14796,14 +14801,21 @@ def handle_post(handler, parsed) -> bool:
         if isinstance(files, list) and len(files) > _MAX_DRAFT_FILES:
             files = files[:_MAX_DRAFT_FILES]
         try:
-            s = get_session(sid)
+            # Drafts are UI metadata. A metadata-only load avoids parsing the
+            # large transcript when this session is not already cached, and the
+            # dedicated draft sidecar keeps the write path independent from the
+            # full per-session mutation lock.
+            s = get_session(sid, metadata_only=True)
         except KeyError:
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
         unchanged = False
-        with _get_session_agent_lock(sid):
+        with draft_store.draft_lock(sid):
             _draft_mark("acquired_lock")
-            current_draft = dict(getattr(s, "composer_draft", {}) or {})
+            current_draft = draft_store.load_draft(
+                sid,
+                fallback=getattr(s, "composer_draft", {}) or {},
+            )
             next_draft = dict(current_draft)
             if text is not None:
                 next_draft["text"] = text
@@ -14813,15 +14825,10 @@ def handle_post(handler, parsed) -> bool:
                 unchanged = True
                 saved_draft = current_draft
             else:
-                s.composer_draft = next_draft
-                # Draft persistence is not conversation activity. Touching updated_at
-                # here makes the active-session external-refresh poll force-reload the
-                # current chat every few seconds while the user is typing, and that
-                # delayed reload can restore an older draft over newer local input.
-                _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
-                _draft_mark("after_save")
-                saved_draft = s.composer_draft
+                saved_draft = draft_store.save_draft(sid, next_draft)
+                # Keep an already-cached Session projection current for the
+                # current request/session without saving the transcript.
+                s.composer_draft = saved_draft
         _draft_mark("released_lock")
         payload = {"ok": True, "draft": saved_draft}
         if unchanged:
@@ -21055,7 +21062,8 @@ def _prepare_chat_start_session_for_stream(
         provisional_title = _provisional_title_from_prompt(msg, current_title or "Untitled")
         if provisional_title and not _is_default_or_empty_session_title(provisional_title):
             s.title = provisional_title
-    if get_webui_session_save_mode() == "eager":
+    save_mode = get_webui_session_save_mode()
+    if save_mode == "eager":
         _checkpoint_user_message_for_eager_session_save(
             s,
             msg,
@@ -21063,7 +21071,20 @@ def _prepare_chat_start_session_for_stream(
             s.pending_started_at,
             source=source,
         )
-    s.save()
+        s.save()
+    elif s.path.exists():
+        # Deferred turns are durably represented by the small turn journal plus
+        # runtime sidecar. Avoid rewriting the entire transcript just to persist
+        # pending_user_message/active_stream_id on chat start.
+        session_runtime_state.save_runtime_state(
+            s.session_id,
+            session_runtime_state.runtime_state_from_session(s),
+        )
+    else:
+        # A brand-new empty session still needs a compact metadata sidecar so it
+        # appears in the sidebar immediately. This write is tiny because there
+        # is no transcript yet.
+        s.save()
 
 
 def _is_hidden_empty_session(s) -> bool:
@@ -21263,6 +21284,8 @@ def _start_chat_stream_for_session(
 
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
+    journal_event = {}
+    was_hidden_empty_session = False
     while True:
         with session_lock:
             locked_stream_id = getattr(s, "active_stream_id", None)
@@ -21286,6 +21309,27 @@ def _start_chat_stream_for_session(
                     }
                 needs_stale_cleanup = False
                 stream_id = uuid.uuid4().hex
+                pending_started_at = time.time()
+                diag.stage("turn_journal_submitted") if diag else None
+                try:
+                    from api.turn_journal import append_turn_journal_event
+
+                    journal_event = append_turn_journal_event(
+                        s.session_id,
+                        {
+                            "event": "submitted",
+                            "stream_id": stream_id,
+                            "role": "user",
+                            "content": msg,
+                            "attachments": attachments,
+                            "workspace": workspace,
+                            "model": model,
+                            "model_provider": model_provider,
+                            "created_at": pending_started_at,
+                        },
+                    )
+                except Exception:
+                    logger.warning("Failed to append submitted turn journal event", exc_info=True)
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)
                 _prepare_chat_start_session_for_stream(
@@ -21296,6 +21340,7 @@ def _start_chat_stream_for_session(
                     model=model,
                     model_provider=model_provider,
                     stream_id=stream_id,
+                    started_at=pending_started_at,
                     source=source,
                 )
                 break
@@ -21315,26 +21360,6 @@ def _start_chat_stream_for_session(
             profile=getattr(s, "profile", None),
             session_id=getattr(s, "session_id", None),
         )
-    diag.stage("turn_journal_submitted") if diag else None
-    journal_event = {}
-    try:
-        from api.turn_journal import append_turn_journal_event
-        journal_event = append_turn_journal_event(
-            s.session_id,
-            {
-                "event": "submitted",
-                "stream_id": stream_id,
-                "role": "user",
-                "content": msg,
-                "attachments": attachments,
-                "workspace": workspace,
-                "model": model,
-                "model_provider": model_provider,
-                "created_at": s.pending_started_at,
-            },
-        )
-    except Exception:
-        logger.warning("Failed to append submitted turn journal event", exc_info=True)
     diag.stage("set_last_workspace") if diag else None
     set_last_workspace(workspace)
     diag.stage("stream_registration") if diag else None
