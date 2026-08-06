@@ -21917,6 +21917,8 @@ def _session_owner_present(session_id: str) -> bool:
     try:
         from api import models
 
+        if session_id in models._load_webui_deleted_session_tombstone():
+            return False
         session_dir = Path(models.SESSION_DIR)
     except Exception:
         session_dir = SESSION_DIR

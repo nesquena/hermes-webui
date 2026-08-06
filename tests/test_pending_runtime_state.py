@@ -247,3 +247,23 @@ def test_cli_delete_helper_removes_webui_sidecars(tmp_path, monkeypatch):
 
     assert not draft_store.draft_path(sid).exists()
     assert not session_runtime_state.runtime_state_path(sid).exists()
+    assert not routes._session_owner_present(sid)
+
+
+def test_cached_session_refresh_holds_runtime_lock_through_cache_insert(monkeypatch):
+    sid = "cache_refresh_lock_001"
+    cached = SimpleNamespace(session_id=sid)
+    refreshed = SimpleNamespace(session_id=sid)
+    monkeypatch.setitem(models.SESSIONS, sid, cached)
+    monkeypatch.setattr(models, "_cached_session_lags_disk", lambda _session: True)
+    monkeypatch.setattr(models, "_inactive_cache_tail_needs_disk_check", lambda _session: False)
+    observed = []
+
+    def load(_sid):
+        observed.append(session_runtime_state._lock_for(_sid)._is_owned())
+        return refreshed
+
+    monkeypatch.setattr(models.Session, "load", load)
+
+    assert models.get_session(sid) is refreshed
+    assert observed == [True]

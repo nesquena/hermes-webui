@@ -1521,20 +1521,25 @@ class Session:
         except OSError:
             pass
 
-        tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
         try:
-            with open(tmp, 'w', encoding='utf-8') as f:
-                f.write(payload)
-                f.flush()
-                os.fsync(f.fileno())
-            _safe_replace(tmp, self.path)
+            from api.session_runtime_state import runtime_state_lock
         except Exception:
+            runtime_state_lock = lambda _session_id: nullcontext()
+        with runtime_state_lock(self.session_id):
+            tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
             try:
-                tmp.unlink(missing_ok=True)
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    f.write(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                _safe_replace(tmp, self.path)
             except Exception:
-                pass
-            raise
-        _clear_runtime_state_sidecar_if_terminal(self)
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+            _clear_runtime_state_sidecar_if_terminal(self)
         if not skip_index:
             _write_session_index(updates=[self])
 
@@ -4710,6 +4715,13 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
         cached = SESSIONS.get(sid)
         if cached is not None and promote_cache:
             SESSIONS.move_to_end(sid)  # LRU: mark as recently used
+    runtime_lock = nullcontext()
+    try:
+        from api.session_runtime_state import runtime_state_lock
+
+        runtime_lock = runtime_state_lock(sid)
+    except Exception:
+        pass
     if cached is not None:
         # Defensive cache ownership check: compression/continuation and recovery
         # paths can temporarily juggle Session objects across lineage ids.  A
@@ -4729,11 +4741,12 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
     if cached is not None:
         if not metadata_only and _cached_session_lags_disk(cached):
             try:
-                disk_session = Session.load(sid)
-                with LOCK:
-                    SESSIONS[sid] = disk_session
-                    if promote_cache:
-                        SESSIONS.move_to_end(sid)
+                with runtime_lock:
+                    disk_session = Session.load(sid)
+                    with LOCK:
+                        SESSIONS[sid] = disk_session
+                        if promote_cache:
+                            SESSIONS.move_to_end(sid)
                 cached = disk_session
             except Exception:
                 logger.debug(
@@ -4741,12 +4754,15 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                 )
         if not metadata_only and _inactive_cache_tail_needs_disk_check(cached):
             try:
-                disk_session = Session.load(sid)
-                if _cache_has_stale_unsaved_user_tail(cached, disk_session):
-                    with LOCK:
-                        SESSIONS[sid] = disk_session
-                        if promote_cache:
-                            SESSIONS.move_to_end(sid)
+                with runtime_lock:
+                    disk_session = Session.load(sid)
+                    stale_unsaved_tail = _cache_has_stale_unsaved_user_tail(cached, disk_session)
+                    if stale_unsaved_tail:
+                        with LOCK:
+                            SESSIONS[sid] = disk_session
+                            if promote_cache:
+                                SESSIONS.move_to_end(sid)
+                if stale_unsaved_tail:
                     cached = disk_session
             except Exception:
                 logger.debug(
@@ -4767,13 +4783,6 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                     "state.db newer-sidecar sync failed on cache hit for session %s", sid, exc_info=True,
                 )
         return cached
-    runtime_lock = nullcontext()
-    try:
-        from api.session_runtime_state import runtime_state_lock
-
-        runtime_lock = runtime_state_lock(sid)
-    except Exception:
-        pass
     with runtime_lock:
         if metadata_only:
             s = Session.load_metadata_only(sid)
@@ -9500,17 +9509,24 @@ def _cleanup_manifest_thread_lock(hermes_home):
 def _delete_webui_sidecars_for_session(session_id: str) -> None:
     """Remove WebUI-owned transient state for an Agent/CLI-deleted session."""
     try:
-        from api.draft_store import delete_draft
+        from api.session_runtime_state import clear_runtime_state, runtime_state_lock
 
-        delete_draft(session_id)
-    except Exception:
-        logger.debug("Failed to delete WebUI draft sidecar for %s", session_id, exc_info=True)
-    try:
-        from api.session_runtime_state import clear_runtime_state
+        with runtime_state_lock(session_id):
+            with LOCK:
+                SESSIONS.pop(session_id, None)
+            _record_webui_deleted_session_tombstone(session_id)
+            try:
+                from api.draft_store import delete_draft
 
-        clear_runtime_state(session_id)
+                delete_draft(session_id)
+            except Exception:
+                logger.debug("Failed to delete WebUI draft sidecar for %s", session_id, exc_info=True)
+            try:
+                clear_runtime_state(session_id)
+            except Exception:
+                logger.debug("Failed to delete WebUI runtime sidecar for %s", session_id, exc_info=True)
     except Exception:
-        logger.debug("Failed to delete WebUI runtime sidecar for %s", session_id, exc_info=True)
+        logger.debug("Failed to coordinate WebUI sidecar cleanup for %s", session_id, exc_info=True)
 
 
 def delete_cli_session(sid) -> bool:
