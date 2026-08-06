@@ -98,3 +98,36 @@ def test_cron_css_classes_exist():
     assert 'cron-dot-pulse' in src, 'cron-dot-pulse animation not found'
 
 
+def test_cron_unread_markers_share_badge_red():
+    """The new-run dot and the Last Output highlight must match the rail badge red (#e53e3e).
+
+    #1140 regression: the dot used the green --success colour, so an unread job
+    read as "success" instead of "unread". Both markers must be the same red as
+    the sidebar .cron-badge so the per-task indicator visually matches the count.
+    """
+    with open('static/style.css') as f:
+        src = f.read()
+
+    RED = '#e53e3e'
+
+    def rule_body(selector):
+        start = src.find(selector + '{')
+        assert start != -1, f'{selector} CSS rule not found'
+        end = src.find('}', start)
+        return src[start:end]
+
+    dot = rule_body('.cron-new-dot')
+    has_new_run = rule_body('.has-new-run')
+    badge = rule_body('.cron-badge')
+
+    # Both unread markers explicitly use the same red as the rail badge,
+    # not a --success fallback.
+    assert RED in dot, f'.cron-new-dot should use {RED} in rule: {dot}'
+    assert RED in has_new_run, f'.has-new-run should use {RED} in rule: {has_new_run}'
+    # The red is hard-coded (not the --success variable that used to leak in).
+    assert '--success' not in dot, '.cron-new-dot must not fall back to --success green'
+    assert '--success' not in has_new_run, '.has-new-run must not fall back to --success green'
+    # Sanity: the badge this matches against really is the same red.
+    assert RED in badge, f'.cron-badge should use {RED} in rule: {badge}'
+
+
