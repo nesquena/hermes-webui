@@ -797,16 +797,31 @@ _STREAM_WORKER_SAVED: set = set()
 
 
 def _retire_worker_cancelled_state(stream_id: str) -> None:
+    """Lock-obtaining wrapper for :func:`_retire_worker_cancelled_state_locked`.
+
+    Intended for call sites (and tests) that are NOT already holding
+    ``STREAMS_LOCK``.  The streaming thread's finalizer already holds the lock,
+    so it must call the ``_locked`` variant directly — ``STREAMS_LOCK`` is a
+    non-reentrant ``threading.Lock`` and acquiring it twice in the same thread
+    deadlocks (regression found by the Aug 1 CI sweep: every test shard hung on
+    this nested acquisition).
+    """
+    with STREAMS_LOCK:
+        _retire_worker_cancelled_state_locked(stream_id)
+
+
+def _retire_worker_cancelled_state_locked(stream_id: str) -> None:
     """Atomically retire the streaming worker's cancel notice + registries.
 
-    Called by the streaming thread's finally (and by tests) as the worker-side
-    cleanup.  Ownership handoff: if cancel_stream() has claimed the notice (set
-    ``_cancel_claimed`` under STREAMS_LOCK before interrupt) do NOT pop — cancel
-    will persist the notice on the current-turn row and pop after its own
-    ``save()``.  This prevents the race where the worker's finally pops the
-    entry before cancel stamps it (reviewer requirement #2: worker cleanup must
-    not delete a notice until either worker or cancel persistence has committed
-    it).
+    Caller MUST already hold ``STREAMS_LOCK``.  Called by the streaming
+    thread's finally (inside its existing lock block) and by the
+    lock-obtaining wrapper above, as the worker-side cleanup.  Ownership
+    handoff: if cancel_stream() has claimed the notice (set ``_cancel_claimed``
+    under STREAMS_LOCK before interrupt) do NOT pop — cancel will persist the
+    notice on the current-turn row and pop after its own ``save()``.  This
+    prevents the race where the worker's finally pops the entry before cancel
+    stamps it (reviewer requirement #2: worker cleanup must not delete a notice
+    until either worker or cancel persistence has committed it).
 
     Gate (one terminal publication authority): the worker only pops a notice it
     DURABLY persisted itself (``_STREAM_WORKER_SAVED``), and it only lifts the
@@ -815,20 +830,19 @@ def _retire_worker_cancelled_state(stream_id: str) -> None:
     (gate-certifier blocker #2), and lifting the fence early would re-open the
     post-CAS publication window (gate-certifier blocker #1).
     """
-    with STREAMS_LOCK:
-        _cancel_owns_settlement = stream_id in _STREAM_CANCEL_CLAIMED
-        _fb_entry = _STREAM_FALLBACK_NOTICES.get(stream_id)
-        if (
-            _fb_entry is not None
-            and not _fb_entry.get('_cancel_claimed')
-            and not _cancel_owns_settlement
-            and stream_id in _STREAM_WORKER_SAVED
-        ):
-            _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
-        _STREAM_WORKER_SAVED.discard(stream_id)
-        if not _cancel_owns_settlement:
-            _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
-        _STREAM_CANCEL_CLAIMED.discard(stream_id)
+    _cancel_owns_settlement = stream_id in _STREAM_CANCEL_CLAIMED
+    _fb_entry = _STREAM_FALLBACK_NOTICES.get(stream_id)
+    if (
+        _fb_entry is not None
+        and not _fb_entry.get('_cancel_claimed')
+        and not _cancel_owns_settlement
+        and stream_id in _STREAM_WORKER_SAVED
+    ):
+        _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+    _STREAM_WORKER_SAVED.discard(stream_id)
+    if not _cancel_owns_settlement:
+        _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
+    _STREAM_CANCEL_CLAIMED.discard(stream_id)
 
 
 def _stamp_notice_on_current_turn_row(notice_clean, partial_msg, cs_messages,
@@ -11793,13 +11807,15 @@ def _run_agent_streaming(
             STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)  # Clean up event_id pointer (stage-364)
             # Ownership handoff: retire the stream's cancel notice + registries
-            # under one gate (see _retire_worker_cancelled_state): the worker
-            # only pops a notice it DURABLY persisted (_STREAM_WORKER_SAVED) and
-            # only lifts the terminal fence while cancel_stream does not still
+            # under one gate (see _retire_worker_cancelled_state_locked): the
+            # worker only pops a notice it DURABLY persisted (_STREAM_WORKER_SAVED)
+            # and only lifts the terminal fence while cancel_stream does not still
             # own the settlement.  A failed worker save must not delete the live
             # notice (blocker #2); lifting the fence early would re-open the
-            # post-CAS publication window (blocker #1).
-            _retire_worker_cancelled_state(stream_id)
+            # post-CAS publication window (blocker #1).  Call the _locked variant:
+            # this block already holds STREAMS_LOCK (non-reentrant — calling the
+            # lock-obtaining wrapper here would self-deadlock).
+            _retire_worker_cancelled_state_locked(stream_id)
             unregister_active_run(stream_id)
             # Clean up the stream-owner registry so stale stream_id→session_id
             # mappings do not accumulate over thousands of completed streams (#6351).
