@@ -1001,24 +1001,27 @@ async function loadCronGatewayNotice() {
   }
 }
 
-async function loadCrons(animate) {
+async function loadCrons(animate, useCached = false) {
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
-  loadCronGatewayNotice();
+  if (!useCached) loadCronGatewayNotice();
   if (animate && refreshBtn) {
     refreshBtn.style.opacity = '0.5';
     refreshBtn.disabled = true;
   }
   try {
-    await loadCronProfiles();
-    const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
-    const data = await api('/api/crons' + allProfilesQS);
-    _cronList = data.jobs || [];
-    _cronOtherProfileCount = Number(data.other_profile_count || 0);
-    if (_showAllCronProfiles && !_cronList.some(job => job && job.read_only)) {
-      _showAllCronProfiles = false;
-      _cronOtherProfileCount = 0;
+    if (!useCached) {
+      await loadCronProfiles();
+      const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
+      const data = await api('/api/crons' + allProfilesQS);
+      _cronList = data.jobs || [];
+      _cronOtherProfileCount = Number(data.other_profile_count || 0);
+      if (_showAllCronProfiles && !_cronList.some(job => job && job.read_only)) {
+        _showAllCronProfiles = false;
+        _cronOtherProfileCount = 0;
+      }
     }
+    const query = ($('cronSearch')?.value || '').trim().toLocaleLowerCase();
     box.innerHTML = '';
     // Partition active vs paused so paused jobs don't drown the list (#4026).
     // _cronList stays the single source of truth — only the render is split,
@@ -1027,6 +1030,7 @@ async function loadCrons(animate) {
     const _pausedJobs = [];
     for (const job of _cronList) {
       const status = _cronStatusMeta(job);
+      if (query && !String(job.name || '').toLocaleLowerCase().includes(query)) continue;
       (status.state === 'paused' ? _pausedJobs : _activeJobs).push({ job, status });
     }
     const _appendCronItem = (parent, { job, status }) => {
@@ -1066,29 +1070,34 @@ async function loadCrons(animate) {
       if (_cronMode !== 'create' && _cronMode !== 'edit') _clearCronDetail();
       return;
     }
-    for (const entry of _activeJobs) _appendCronItem(box, entry);
-    if (_pausedJobs.length) {
-      let collapsed = true;
-      try { collapsed = localStorage.getItem('cron-paused-collapsed') !== '0'; } catch (_e) {}
-      const details = document.createElement('details');
-      details.className = 'cron-paused-section';
-      if (!collapsed) details.open = true;
-      const pausedLabel = t('cron_status_paused') || 'paused';
-      const headerLabel = pausedLabel.charAt(0).toUpperCase() + pausedLabel.slice(1);
-      const summary = document.createElement('summary');
-      summary.className = 'cron-paused-summary';
-      summary.textContent = `${headerLabel} (${_pausedJobs.length})`;
-      details.appendChild(summary);
-      details.addEventListener('toggle', () => {
-        try { localStorage.setItem('cron-paused-collapsed', details.open ? '0' : '1'); } catch (_e) {}
-      });
-      const inner = document.createElement('div');
-      inner.className = 'cron-paused-inner';
-      details.appendChild(inner);
-      for (const entry of _pausedJobs) _appendCronItem(inner, entry);
-      box.appendChild(details);
+    if (!_activeJobs.length && !_pausedJobs.length) {
+      box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(t('cron_no_matching_jobs') || 'No jobs match your search.')}</div>`;
+      _appendCronProfileToggle(box);
+    } else {
+      for (const entry of _activeJobs) _appendCronItem(box, entry);
+      if (_pausedJobs.length) {
+        let collapsed = true;
+        try { collapsed = localStorage.getItem('cron-paused-collapsed') !== '0'; } catch (_e) {}
+        const details = document.createElement('details');
+        details.className = 'cron-paused-section';
+        if (!collapsed) details.open = true;
+        const pausedLabel = t('cron_status_paused') || 'paused';
+        const headerLabel = pausedLabel.charAt(0).toUpperCase() + pausedLabel.slice(1);
+        const summary = document.createElement('summary');
+        summary.className = 'cron-paused-summary';
+        summary.textContent = `${headerLabel} (${_pausedJobs.length})`;
+        details.appendChild(summary);
+        details.addEventListener('toggle', () => {
+          try { localStorage.setItem('cron-paused-collapsed', details.open ? '0' : '1'); } catch (_e) {}
+        });
+        const inner = document.createElement('div');
+        inner.className = 'cron-paused-inner';
+        details.appendChild(inner);
+        for (const entry of _pausedJobs) _appendCronItem(inner, entry);
+        box.appendChild(details);
+      }
+      _appendCronProfileToggle(box);
     }
-    _appendCronProfileToggle(box);
     // Re-render current detail with fresh data if we have one and we're not in a form
     if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
       const refreshed = _cronList.find(j => _cronJobKey(j) === _currentCronDetailKey);
@@ -1103,6 +1112,8 @@ async function loadCrons(animate) {
     }
   }
 }
+
+function filterCrons() { loadCrons(false, true); }
 
 function _cronPanelExpandKey(jobId, suffix){
   return `hermes-webui-cron-${suffix}-expanded-${encodeURIComponent(String(jobId||''))}`;
