@@ -288,5 +288,80 @@ console.log('OK: all render assertions passed');
         f"node render test failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
     assert "OK: all render assertions passed" in result.stdout, (
-        f"render test did not report success:\n{result.stdout}\n{result.stderr}"
+        f"render test did not report success:\\n{result.stdout}\\n{result.stderr}"
     )
+
+
+# ── 6: two-source-order reconciliation regression ───────────────────────────
+
+
+def test_merge_session_display_metadata_allowlists_fallback_notice_both_orders():
+    """_merge_session_display_metadata must produce exactly one clean,
+    allowlisted _fallbackNotice regardless of which source row carries it.
+
+    The gate-certifier found that adding _fallbackNotice to
+    _SESSION_MESSAGE_DISPLAY_METADATA_KEYS was necessary but insufficient:
+    the original deep-copy preserved dirty coordination keys (e.g.
+    _cancel_claimed).  The fix allowlists to message/to_model/to_provider.
+
+    This test exercises BOTH source orders:
+      (a) target has no notice, source carries a dirty notice → target gets clean copy
+      (b) target already has a clean notice, source carries a dirty notice → target keeps its clean copy (no overwrite, no dirty merge)
+
+    It also asserts the persisted dict has EXACTLY the three allowed keys.
+    """
+    from api.models import _merge_session_display_metadata
+
+    # --- Order (a): source carries dirty notice, target has none ---
+    target_a = {"role": "assistant", "content": "hello"}
+    source_a = {
+        "role": "assistant",
+        "content": "hello",
+        "_fallbackNotice": {
+            "message": "Switched to fallback model: m1 via p1 → m2 via p2",
+            "to_model": "m2",
+            "to_provider": "p2",
+            "_cancel_claimed": True,   # dirty coordination flag
+            "_extra_key": "should be stripped",
+        },
+    }
+    _merge_session_display_metadata(target_a, source_a)
+    assert "_fallbackNotice" in target_a, "target should receive the notice from source"
+    notice_a = target_a["_fallbackNotice"]
+    assert set(notice_a.keys()) == {"message", "to_model", "to_provider"}, (
+        f"dirty keys survived reconciliation: {notice_a.keys()}"
+    )
+    assert notice_a["message"] == "Switched to fallback model: m1 via p1 → m2 via p2"
+    assert notice_a["to_model"] == "m2"
+    assert notice_a["to_provider"] == "p2"
+    assert "_cancel_claimed" not in notice_a
+    assert "_extra_key" not in notice_a
+
+    # --- Order (b): target has clean notice, source carries dirty notice ---
+    # The target's existing value should be PRESERVED (not overwritten by dirty source).
+    target_b = {
+        "role": "assistant",
+        "content": "hello",
+        "_fallbackNotice": {
+            "message": "Switched to fallback model: a via b → c via d",
+            "to_model": "c",
+            "to_provider": "d",
+        },
+    }
+    source_b = {
+        "role": "assistant",
+        "content": "hello",
+        "_fallbackNotice": {
+            "message": "stale dirty",
+            "_cancel_claimed": True,
+        },
+    }
+    _merge_session_display_metadata(target_b, source_b)
+    notice_b = target_b["_fallbackNotice"]
+    # Target's existing clean notice must be preserved
+    assert notice_b["message"] == "Switched to fallback model: a via b → c via d"
+    assert notice_b["to_model"] == "c"
+    assert notice_b["to_provider"] == "d"
+    assert "_cancel_claimed" not in notice_b
+    assert set(notice_b.keys()) == {"message", "to_model", "to_provider"}
+

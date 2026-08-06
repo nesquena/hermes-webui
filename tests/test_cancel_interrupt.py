@@ -544,18 +544,139 @@ class TestCancelInterrupt:
         assert "_fallbackNotice" not in _prior_assistant
         assert stream_id not in _STREAM_FALLBACK_NOTICES
 
-    def test_cancel_fallback_notice_late_publication_no_stamp(self):
-        """When no notice has been published when cancel claims, cancel finds
-        nothing and does not stamp. The worker's own error-path save is
-        responsible for persisting via _pending_fallback_notices.
+    def test_cancel_fallback_notice_dedup_stamps_durable_row_by_signature(self):
+        """When the partial is deduplicated (already present in _cs.messages),
+        the fallback notice must be stamped on the EXACT equivalent durable
+        row found by signature — not the detached _partial_msg candidate,
+        and not the first _partial found.
+
+        Verifies gate-certifier finding #1: save/reload retains the notice
+        when the partial was deduplicated.  Includes a second _partial with
+        different content to prove the signature match (not just "first
+        _partial") is what locates the correct row.
         """
-        import threading
+        import json
+        import tempfile
+        from pathlib import Path
         from unittest.mock import patch, Mock
         from api.streaming import _STREAM_FALLBACK_NOTICES
         from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
 
-        stream_id = "late_publication"
-        session_id = "sess_late_publication"
+        stream_id = "dedup_stamp"
+        session_id = "sess_dedup_stamp"
+
+        _fb_notice = {
+            "message": "Switched to fallback model: gpt-4 via openai → claude-3 via anthropic",
+            "to_model": "claude-3",
+            "to_provider": "anthropic",
+        }
+
+        q = queue.Queue()
+        STREAMS[stream_id] = q
+        CANCEL_FLAGS[stream_id] = threading.Event()
+        STREAM_PARTIAL_TEXT[stream_id] = "dedup partial answer"
+        STREAM_REASONING_TEXT[stream_id] = ""
+        STREAM_LIVE_TOOL_CALLS[stream_id] = []
+        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_fb_notice)
+
+        mock_agent = Mock()
+        mock_agent.session_id = session_id
+        AGENT_INSTANCES[stream_id] = mock_agent
+
+        # Pre-existing partial with DIFFERENT content — proves signature matching
+        # (not just "first _partial") is needed.
+        _other_partial = {
+            "role": "assistant",
+            "content": "different earlier partial",
+            "_partial": True,
+            "timestamp": 999,
+        }
+        # The equivalent durable row (same content as the dedup candidate)
+        _durable_partial = {
+            "role": "assistant",
+            "content": "dedup partial answer",
+            "_partial": True,
+            "timestamp": 1000,
+        }
+        _user_msg = {"role": "user", "content": "q", "timestamp": 998}
+
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id
+        mock_session.pending_user_message = "q"
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = 1.0
+        mock_session.messages = [_user_msg, _other_partial, _durable_partial]
+
+        # Use a real temp file for save/reload verification
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            _session_path = f.name
+            f.write(json.dumps({
+                "session_id": session_id,
+                "messages": [_user_msg, _other_partial, _durable_partial],
+            }))
+
+        def _real_save():
+            # Simulate save: serialize messages to the temp file
+            data = {"session_id": session_id, "messages": mock_session.messages}
+            Path(_session_path).write_text(json.dumps(data))
+
+        mock_session.save = Mock(side_effect=_real_save)
+        mock_session.path = _session_path
+
+        with patch("api.streaming.get_session", return_value=mock_session):
+            result = cancel_stream(stream_id)
+
+        assert result is True
+
+        # Verify the notice was stamped on the DURABLE row (not _other_partial)
+        assert "_fallbackNotice" not in _other_partial, (
+            "notice was stamped on the wrong _partial (first found, not signature-matched)"
+        )
+        assert "_fallbackNotice" in _durable_partial, (
+            "notice was NOT stamped on the signature-matched durable row — "
+            "stamping the detached candidate does not survive s.save()"
+        )
+        notice = _durable_partial["_fallbackNotice"]
+        assert notice.get("message") == _fb_notice["message"]
+        assert "_cancel_claimed" not in notice
+
+        # Verify save/reload retains the notice
+        reloaded = json.loads(Path(_session_path).read_text())
+        reloaded_msgs = reloaded["messages"]
+        stamped_on_reload = [
+            m for m in reloaded_msgs
+            if isinstance(m, dict) and m.get("_fallbackNotice")
+        ]
+        assert len(stamped_on_reload) == 1, (
+            f"expected exactly 1 notice after reload, got {len(stamped_on_reload)}"
+        )
+        Path(_session_path).unlink(missing_ok=True)
+        assert stream_id not in _STREAM_FALLBACK_NOTICES
+
+    def test_cancel_fallback_notice_late_publication_stamps_after_claim(self):
+        """Late publication: no notice exists when cancel claims, but one is
+        published AFTER the claim and BEFORE cancel's save.  Cancel must
+        stamp the late notice on the current-turn row so it survives reload.
+
+        This replaces the prior test that asserted no stamp (the loss).
+        The gate-certifier required: "The submitted late publication test
+        still does not publish after the claim and explicitly expects no
+        stamp."  Now it publishes and asserts survival.
+        """
+        import threading
+        from unittest.mock import patch, Mock
+        from api.streaming import _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED
+        from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
+
+        stream_id = "late_publication_v2"
+        session_id = "sess_late_publication_v2"
+
+        _fb_notice = {
+            "message": "Switched to fallback model: gpt-4 via openai → claude-3 via anthropic",
+            "to_model": "claude-3",
+            "to_provider": "anthropic",
+        }
 
         q = queue.Queue()
         STREAMS[stream_id] = q
@@ -563,10 +684,21 @@ class TestCancelInterrupt:
         STREAM_PARTIAL_TEXT[stream_id] = "partial answer"
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
-        # NO notice pre-seeded
+        # NO notice pre-seeded — it will be published AFTER cancel claims
 
         mock_agent = Mock()
         mock_agent.session_id = session_id
+        # When interrupt() is called, simulate the callback publishing a
+        # late fallback notice (as if the agent emitted a confirmed switch
+        # between cancel's claim and cancel's save).
+        _late_notice = dict(_fb_notice)
+        def _interrupt_handler(_msg):
+            # Late publication: the notice arrives after cancel claimed
+            # but before cancel reaches its save/stamp block.
+            from api.streaming import STREAMS_LOCK
+            with STREAMS_LOCK:
+                _STREAM_FALLBACK_NOTICES[stream_id] = _late_notice
+        mock_agent.interrupt = Mock(side_effect=_interrupt_handler)
         AGENT_INSTANCES[stream_id] = mock_agent
 
         mock_session = Mock()
@@ -583,9 +715,20 @@ class TestCancelInterrupt:
 
         assert result is True
 
+        # The late-published notice MUST be stamped on the current-turn row.
         stamped = [
             m for m in mock_session.messages
             if isinstance(m, dict) and m.get("_fallbackNotice")
         ]
-        assert len(stamped) == 0, "cancel should not stamp when no notice was published"
+        assert len(stamped) == 1, (
+            f"late-published notice should be stamped, got {len(stamped)} stamped rows — "
+            "cancel must check _STREAM_FALLBACK_NOTICES at stamp time, not just the claimed notice"
+        )
+        notice = stamped[0]["_fallbackNotice"]
+        assert "_cancel_claimed" not in notice
+        assert notice.get("message") == _fb_notice["message"]
+        assert notice.get("to_model") == _fb_notice["to_model"]
+        assert notice.get("to_provider") == _fb_notice["to_provider"]
+        # Map and claim must be cleaned up (cannot grow unbounded)
         assert stream_id not in _STREAM_FALLBACK_NOTICES
+        assert stream_id not in _STREAM_CANCEL_CLAIMED

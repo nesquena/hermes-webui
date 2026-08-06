@@ -313,12 +313,16 @@ def test_stream_scoped_fallback_notices_dict_exists():
         "so the worker's finally cannot pop a late-published notice."
     )
     # Verify the stamping targets the current-turn row (partial or cancel marker)
-    stamping_idx = src.find("if _claimed_fb_notice:", cancel_claim)
+    # The stamping block now checks both _claimed_fb_notice and a late-published
+    # notice from _STREAM_FALLBACK_NOTICES (finding #5: late publication is owned).
+    stamping_idx = src.find("if _fb_to_stamp:", cancel_claim)
+    if stamping_idx == -1:
+        stamping_idx = src.find("if _claimed_fb_notice:", cancel_claim)
     assert stamping_idx != -1, (
-        "cancel_stream() must stamp the claimed fallback notice on the "
-        "current-turn row before s.save()."
+        "cancel_stream() must stamp the claimed (or late-published) fallback "
+        "notice on the current-turn row before s.save()."
     )
-    stamping_block = src[stamping_idx:stamping_idx + 1600]
+    stamping_block = src[stamping_idx:stamping_idx + 2000]
     assert "_partial_msg" in stamping_block, (
         "cancel_stream() must stamp on _partial_msg when present (current-turn row)."
     )
