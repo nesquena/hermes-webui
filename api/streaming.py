@@ -1951,12 +1951,19 @@ def _cancelled_turn_content(message: str = 'Task cancelled.', agent_name: str | 
     )
 
 
-def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> None:
+def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.',
+                          stream_id: str | None = None) -> None:
     """Persist a user-cancelled terminal state without provider-error wording.
 
     cancel_stream() usually writes this marker first, but the streaming thread can
     later unwind through the silent-failure or exception path. Those paths must
     not append a misleading provider no-response error after an explicit cancel.
+
+    If ``stream_id`` is provided and a confirmed fallback notice exists in
+    ``_STREAM_FALLBACK_NOTICES``, it is stamped on the cancel marker so the
+    notice survives reload regardless of which side (worker or cancel_stream)
+    wins the session lock.  Internal coordination flags (``_cancel_claimed``)
+    are stripped before persistence.
     """
     _materialize_pending_user_turn_before_error(session)
     session.active_stream_id = None
@@ -1966,14 +1973,24 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     session.pending_user_source = None
     if not _session_has_cancel_marker(session):
         agent_name = _preferred_agent_display_name_for_session(session)
-        session.messages.append({
+        _cancel_msg = {
             'role': 'assistant',
             'content': _cancelled_turn_content(message, agent_name),
             '_error': True,
             'provider_details': str(message or 'Task cancelled.').strip(),
             'provider_details_label': 'Cancellation details',
             'timestamp': int(time.time()),
-        })
+        }
+        # Stamp fallback notice if one was published for this stream.
+        # This makes persistence idempotent: whichever side wins the session
+        # lock (worker or cancel_stream) stamps the notice.
+        if stream_id is not None:
+            _fb = _STREAM_FALLBACK_NOTICES.get(stream_id)
+            if _fb is not None:
+                _cancel_msg['_fallbackNotice'] = {
+                    k: v for k, v in _fb.items() if k != '_cancel_claimed'
+                }
+        session.messages.append(_cancel_msg)
 
 
 def _cleanup_ephemeral_cancelled_turn(session) -> None:
@@ -1990,12 +2007,13 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
         logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
 
 
-def _finalize_cancelled_turn(session, *, ephemeral: bool = False, message: str = 'Task cancelled.') -> None:
+def _finalize_cancelled_turn(session, *, ephemeral: bool = False, message: str = 'Task cancelled.',
+                             stream_id: str | None = None) -> None:
     """Finalize a cancelled turn for persistent or ephemeral sessions."""
     if ephemeral:
         _cleanup_ephemeral_cancelled_turn(session)
         return
-    _persist_cancelled_turn(session, message=message)
+    _persist_cancelled_turn(session, message=message, stream_id=stream_id)
     try:
         session.save()
     except Exception:
@@ -8180,7 +8198,7 @@ def _run_agent_streaming(
         # Check for pre-flight cancel (user cancelled before agent even started)
         if cancel_event.is_set():
             with _agent_lock:
-                _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.')
+                _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
             put('cancel', _cancel_event_payload('Cancelled before start'))
             return
 
@@ -9465,7 +9483,7 @@ def _run_agent_streaming(
                     except Exception:
                         logger.debug("Failed to interrupt agent before start")
                     with _agent_lock:
-                        _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.')
+                        _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                     put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
 
@@ -9668,7 +9686,7 @@ def _run_agent_streaming(
                     _cleanup_ephemeral_cancelled_turn(s)
                 else:
                     with _agent_lock:
-                        _finalize_cancelled_turn(s, ephemeral=False)
+                        _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -9710,7 +9728,7 @@ def _run_agent_streaming(
                 _ckpt_thread.join(timeout=15)
             if cancel_event.is_set():
                 with _agent_lock:
-                    _finalize_cancelled_turn(s, ephemeral=False)
+                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
@@ -9771,7 +9789,7 @@ def _run_agent_streaming(
                         if isinstance(result, dict):
                             result = {**result, 'messages': _result_messages}
                     if cancel_event.is_set():
-                        _finalize_cancelled_turn(s, ephemeral=False)
+                        _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -10023,7 +10041,7 @@ def _run_agent_streaming(
                 # _token_sent tracks whether on_token() was called (any streamed text)
                 if _terminal_failure or (not _assistant_added and not _token_sent):
                     if cancel_event.is_set():
-                        _finalize_cancelled_turn(s, ephemeral=ephemeral)
+                        _finalize_cancelled_turn(s, ephemeral=ephemeral, stream_id=stream_id)
                         if not ephemeral:
                             try:
                                 append_turn_journal_event_for_stream(
@@ -10697,7 +10715,7 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to append assistant_started turn journal event", exc_info=True)
                 if cancel_event.is_set():
-                    _finalize_cancelled_turn(s, ephemeral=False)
+                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
@@ -10715,7 +10733,7 @@ def _run_agent_streaming(
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
                 if cancel_event.is_set():
-                    _finalize_cancelled_turn(s, ephemeral=False)
+                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
@@ -10819,7 +10837,7 @@ def _run_agent_streaming(
             _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
             with _lock_ctx:
                 if cancel_event.is_set():
-                    _finalize_cancelled_turn(s, ephemeral=False)
+                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
@@ -10851,7 +10869,7 @@ def _run_agent_streaming(
                             s.save(touch_updated_at=False)
                         except Exception:
                             logger.debug("Failed to persist restored process wakeup pause", exc_info=True)
-                        _finalize_cancelled_turn(s, ephemeral=False)
+                        _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -10874,7 +10892,7 @@ def _run_agent_streaming(
                             s.save(touch_updated_at=False)
                         except Exception:
                             logger.debug("Failed to persist restored process wakeup pause", exc_info=True)
-                        _finalize_cancelled_turn(s, ephemeral=False)
+                        _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -11243,7 +11261,7 @@ def _run_agent_streaming(
                             model=_turn_route_model,
                             provider=_turn_route_provider,
                         )
-                    _finalize_cancelled_turn(s, ephemeral=ephemeral)
+                    _finalize_cancelled_turn(s, ephemeral=ephemeral, stream_id=stream_id)
                     if not ephemeral:
                         try:
                             append_turn_journal_event_for_stream(
@@ -11869,6 +11887,21 @@ def cancel_stream(stream_id: str) -> bool:
     # health polling sees during that detached window.
     update_active_run(stream_id, phase="cancelling")
 
+    # ── Synchronized fallback-notice ownership handoff ──
+    # Claim the fallback notice UNDER STREAMS_LOCK BEFORE setting the cancel
+    # event flag.  flag.set() is what the worker observes at multiple terminal
+    # boundaries — it can reach _finalize_cancelled_turn() and save a cancel
+    # marker without the notice before cancel progresses past this point.
+    # By claiming first, the worker's finally sees _cancel_claimed=True and
+    # skips popping.  _persist_cancelled_turn() also stamps the notice from
+    # _STREAM_FALLBACK_NOTICES so whichever side wins the session lock persists
+    # it.  Cancel stamps and pops the entry in its own finally block.
+    with streams_lock:
+        _fb_entry = _STREAM_FALLBACK_NOTICES.get(stream_id)
+        if _fb_entry is not None:
+            _fb_entry['_cancel_claimed'] = True
+            _claimed_fb_notice = _fb_entry
+
     # Set WebUI layer cancel flag. Prefer the snapshot captured under the lock;
     # fall back to a fresh lookup for the ACTIVE_RUNS-only path (stream absent).
     flag = _snap_flag if _snap_flag is not None else cancel_flags.get(stream_id)
@@ -11887,24 +11920,7 @@ def cancel_stream(stream_id: str) -> bool:
                 agent = cached[0]
         except Exception:
             pass
-    # ── Synchronized fallback-notice ownership handoff ──
-    # Claim the fallback notice UNDER STREAMS_LOCK BEFORE calling
-    # agent.interrupt().  interrupt() signals and returns immediately — it does
-    # NOT join the conversation worker.  The worker's finally block (which pops
-    # _STREAM_FALLBACK_NOTICES under STREAMS_LOCK) can therefore run AFTER
-    # interrupt() returns but BEFORE we reach the claim.  If the claim were
-    # after interrupt() (as in earlier iterations), the worker could pop the
-    # entry first, and cancel would find nothing to stamp — losing the notice
-    # on reload.  By claiming BEFORE interrupt(), the worker's finally always
-    # sees _cancel_claimed=True and skips popping, regardless of thread
-    # scheduling.  Cancel stamps and pops the entry in its own finally block.
-    # If no notice has been published yet, the claim finds nothing — the worker's
-    # own error-path save will persist it via _pending_fallback_notices.
-    with streams_lock:
-        _fb_entry = _STREAM_FALLBACK_NOTICES.get(stream_id)
-        if _fb_entry is not None:
-            _fb_entry['_cancel_claimed'] = True
-            _claimed_fb_notice = _fb_entry
+
 
     if agent:
         try:

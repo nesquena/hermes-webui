@@ -294,31 +294,205 @@ class TestCancelInterrupt:
             "must cover the ACTIVE_RUNS-only path too, not just STREAMS-present"
         )
 
-    def test_cancel_fallback_notice_worker_first_schedule_with_partial(self):
-        """Production-composed test: cancel_stream() claims the fallback notice
-        BEFORE calling interrupt(), so the worker's finally cannot pop it.
+    def test_cancel_fallback_notice_worker_wins_via_cancel_event_with_partial(self):
+        """Production-composed test: worker observes flag.set() and finalizes
+        the cancel turn before cancel_stream reaches its own stamping block.
 
-        This exercises the worker-first schedule the gate-certifier identified:
-        1. Notice is pre-seeded in _STREAM_FALLBACK_NOTICES (simulating a
-           callback that already published).
-        2. cancel_stream() claims the notice under STREAMS_LOCK (sets
-           _cancel_claimed) BEFORE calling agent.interrupt().
-        3. The mock interrupt() simulates the worker's finally block running
-           BEFORE interrupt() returns — the adversarial schedule.
-        4. The worker's finally sees _cancel_claimed=True and SKIPS popping.
-        5. interrupt() returns, cancel stamps the notice on the current-turn
-           partial row, saves, and cleans up.
+        This exercises the adversarial schedule the gate-certifier identified:
+        1. Notice is pre-seeded in _STREAM_FALLBACK_NOTICES.
+        2. cancel_stream() claims the notice (sets _cancel_claimed) BEFORE
+           flag.set() — so the worker's finally won't pop the entry.
+        3. flag.set() triggers the worker's _finalize_cancelled_turn, which
+           calls _persist_cancelled_turn with stream_id — stamping the notice
+           on the cancel marker and clearing active_stream_id.
+        4. cancel_stream() later finds active_stream_id is None (worker already
+           finalized), so it skips its own stamping — the notice was already
+           persisted by the worker.
 
         Asserts: exactly one durable current-turn notice with clean keys (no
-        _cancel_claimed), no prior-turn mutation, no deadlock, final map cleanup.
+        _cancel_claimed), no prior-turn mutation, final map cleanup.
         """
         import threading
         from unittest.mock import patch, Mock
-        from api.streaming import _STREAM_FALLBACK_NOTICES, STREAMS_LOCK
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _persist_cancelled_turn,
+        )
         from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
 
-        stream_id = "worker_first_partial"
-        session_id = "sess_worker_first_partial"
+        stream_id = "worker_wins_partial"
+        session_id = "sess_worker_wins_partial"
+
+        _fb_notice = {
+            "message": "Switched to fallback model: gpt-4 via openai → claude-3 via anthropic",
+            "to_model": "claude-3",
+            "to_provider": "anthropic",
+        }
+
+        q = queue.Queue()
+        STREAMS[stream_id] = q
+        CANCEL_FLAGS[stream_id] = threading.Event()
+        STREAM_PARTIAL_TEXT[stream_id] = "partial answer so far"
+        STREAM_REASONING_TEXT[stream_id] = ""
+        STREAM_LIVE_TOOL_CALLS[stream_id] = []
+        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_fb_notice)
+
+        # Mock session that the worker will "finalize" when flag.set() fires.
+        # The worker's _persist_cancelled_turn stamps the notice and clears
+        # active_stream_id, simulating the worker winning the race.
+        _prior_assistant = {
+            "role": "assistant",
+            "content": "Previous turn.",
+            "timestamp": 1000,
+        }
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id  # Worker will clear this
+        mock_session.pending_user_message = "q"
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = 1.0
+        mock_session.messages = [_prior_assistant]
+        mock_session.save = Mock()
+
+        # Mock the cancel flag: when set() is called, simulate the worker
+        # observing the event and running _finalize_cancelled_turn
+        worker_session_ref = mock_session
+
+        class WorkerCancelEvent(threading.Event):
+            def set(self):
+                super().set()
+                # Worker observes the cancel event and finalizes the turn.
+                # _persist_cancelled_turn stamps the notice from
+                # _STREAM_FALLBACK_NOTICES and clears active_stream_id.
+                _persist_cancelled_turn(
+                    worker_session_ref,
+                    stream_id=stream_id,
+                )
+                try:
+                    worker_session_ref.save()
+                except Exception:
+                    pass
+
+        CANCEL_FLAGS[stream_id] = WorkerCancelEvent()
+
+        mock_agent = Mock()
+        mock_agent.session_id = session_id
+        AGENT_INSTANCES[stream_id] = mock_agent
+
+        with patch("api.streaming.get_session", return_value=mock_session):
+            result = cancel_stream(stream_id)
+
+        assert result is True
+
+        # The worker's _persist_cancelled_turn should have stamped the notice
+        stamped = [
+            m for m in mock_session.messages
+            if isinstance(m, dict) and m.get("_fallbackNotice")
+        ]
+        assert len(stamped) == 1, (
+            f"expected exactly 1 stamped notice, got {len(stamped)} — "
+            "the worker's _persist_cancelled_turn must stamp the notice "
+            "when it wins the session lock"
+        )
+        notice = stamped[0]["_fallbackNotice"]
+        assert "_cancel_claimed" not in notice, (
+            f"_cancel_claimed leaked into persisted _fallbackNotice: {notice}"
+        )
+        assert notice.get("message") == _fb_notice["message"]
+        assert notice.get("to_model") == _fb_notice["to_model"]
+        assert notice.get("to_provider") == _fb_notice["to_provider"]
+        # Prior turn must NOT be mutated
+        assert "_fallbackNotice" not in _prior_assistant
+        # Map entry should be cleaned up by cancel's finally
+        assert stream_id not in _STREAM_FALLBACK_NOTICES
+
+    def test_cancel_fallback_notice_worker_wins_via_cancel_event_no_partial(self):
+        """Same worker-wins schedule, no partial text → worker stamps on the
+        cancel marker it creates in _persist_cancelled_turn.
+        """
+        import threading
+        from unittest.mock import patch, Mock
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _persist_cancelled_turn,
+        )
+        from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
+
+        stream_id = "worker_wins_no_partial"
+        session_id = "sess_worker_wins_no_partial"
+
+        _fb_notice = {
+            "message": "Switched to fallback model: gpt-4 via openai → claude-3 via anthropic",
+            "to_model": "claude-3",
+            "to_provider": "anthropic",
+        }
+
+        q = queue.Queue()
+        STREAMS[stream_id] = q
+        CANCEL_FLAGS[stream_id] = threading.Event()
+        STREAM_PARTIAL_TEXT[stream_id] = ""
+        STREAM_REASONING_TEXT[stream_id] = ""
+        STREAM_LIVE_TOOL_CALLS[stream_id] = []
+        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_fb_notice)
+
+        _prior_assistant = {
+            "role": "assistant",
+            "content": "Previous turn.",
+            "timestamp": 1000,
+        }
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id
+        mock_session.pending_user_message = "q"
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = 1.0
+        mock_session.messages = [_prior_assistant]
+        mock_session.save = Mock()
+
+        worker_session_ref = mock_session
+
+        class WorkerCancelEvent(threading.Event):
+            def set(self):
+                super().set()
+                _persist_cancelled_turn(worker_session_ref, stream_id=stream_id)
+                try:
+                    worker_session_ref.save()
+                except Exception:
+                    pass
+
+        CANCEL_FLAGS[stream_id] = WorkerCancelEvent()
+
+        mock_agent = Mock()
+        mock_agent.session_id = session_id
+        AGENT_INSTANCES[stream_id] = mock_agent
+
+        with patch("api.streaming.get_session", return_value=mock_session):
+            result = cancel_stream(stream_id)
+
+        assert result is True
+
+        stamped = [
+            m for m in mock_session.messages
+            if isinstance(m, dict) and m.get("_fallbackNotice")
+        ]
+        assert len(stamped) == 1
+        assert stamped[0].get("_error") is True, (
+            "notice should be on the cancel marker (has _error=True)"
+        )
+        notice = stamped[0]["_fallbackNotice"]
+        assert "_cancel_claimed" not in notice
+        assert "_fallbackNotice" not in _prior_assistant
+        assert stream_id not in _STREAM_FALLBACK_NOTICES
+
+    def test_cancel_fallback_notice_cancel_wins_stamp_on_partial(self):
+        """Cancel-wins schedule: cancel_stream reaches its stamping block
+        before the worker finalizes. The notice is stamped on the partial row.
+        """
+        import threading
+        from unittest.mock import patch, Mock
+        from api.streaming import _STREAM_FALLBACK_NOTICES
+        from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
+
+        stream_id = "cancel_wins_partial"
+        session_id = "sess_cancel_wins_partial"
 
         _fb_notice = {
             "message": "Switched to fallback model: gpt-4 via openai → claude-3 via anthropic",
@@ -336,107 +510,11 @@ class TestCancelInterrupt:
 
         mock_agent = Mock()
         mock_agent.session_id = session_id
-
-        # The mock interrupt() simulates the worker-first schedule: the
-        # worker's finally block runs BEFORE interrupt() returns.  This is
-        # the adversarial schedule the gate-certifier identified — the
-        # worker pops _STREAM_FALLBACK_NOTICES if _cancel_claimed is not set.
-        def _interrupt_side_effect(_msg):
-            # Simulate the worker's finally block: pop if not claimed
-            with STREAMS_LOCK:
-                _entry = _STREAM_FALLBACK_NOTICES.get(stream_id)
-                if _entry is not None and not _entry.get('_cancel_claimed'):
-                    _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
-
-        mock_agent.interrupt = Mock(side_effect=_interrupt_side_effect)
         AGENT_INSTANCES[stream_id] = mock_agent
 
         _prior_assistant = {
             "role": "assistant",
-            "content": "This is from a previous turn.",
-            "timestamp": 1000,
-        }
-
-        mock_session = Mock()
-        mock_session.session_id = session_id
-        mock_session.active_stream_id = stream_id
-        mock_session.pending_user_message = "q"
-        mock_session.pending_attachments = []
-        mock_session.pending_started_at = 1.0
-        mock_session.messages = [_prior_assistant]
-        mock_session.save = Mock()
-
-        with patch("api.streaming.get_session", return_value=mock_session):
-            result = cancel_stream(stream_id)
-
-        assert result is True, "cancel_stream must return True"
-        mock_agent.interrupt.assert_called_once_with("Cancelled by user")
-
-        # The notice must survive the worker-first schedule: cancel claimed
-        # it before interrupt(), so the worker's finally skipped popping.
-        stamped = [
-            m for m in mock_session.messages
-            if isinstance(m, dict) and m.get("_fallbackNotice")
-        ]
-        assert len(stamped) == 1, (
-            f"expected exactly 1 stamped notice, got {len(stamped)} — "
-            "the worker-first schedule must NOT lose the notice when "
-            "cancel claims before interrupt()"
-        )
-        # No _cancel_claimed in the persisted notice
-        notice = stamped[0]["_fallbackNotice"]
-        assert "_cancel_claimed" not in notice, (
-            f"_cancel_claimed leaked into persisted _fallbackNotice: {notice}"
-        )
-        assert notice.get("message") == _fb_notice["message"]
-        assert notice.get("to_model") == _fb_notice["to_model"]
-        assert notice.get("to_provider") == _fb_notice["to_provider"]
-        # Prior turn must NOT be mutated
-        assert "_fallbackNotice" not in _prior_assistant, (
-            "prior-turn assistant message was mutated"
-        )
-        # Final map cleanup
-        assert stream_id not in _STREAM_FALLBACK_NOTICES, (
-            "fallback notice map entry was not cleaned up"
-        )
-
-    def test_cancel_fallback_notice_worker_first_schedule_no_partial(self):
-        """No-partial case: when no partial text exists, the notice is stamped
-        on the newly created cancellation marker (current-turn row).
-
-        Uses the same worker-first schedule as the with_partial test but with
-        empty partial text, forcing the stamp onto the cancel marker.
-        """
-        import threading
-        from unittest.mock import patch, Mock
-        from api.streaming import _STREAM_FALLBACK_NOTICES
-        from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
-
-        stream_id = "worker_first_no_partial"
-        session_id = "sess_worker_first_no_partial"
-
-        _fb_notice = {
-            "message": "Switched to fallback model: gpt-4 via openai → claude-3 via anthropic",
-            "to_model": "claude-3",
-            "to_provider": "anthropic",
-        }
-
-        q = queue.Queue()
-        STREAMS[stream_id] = q
-        CANCEL_FLAGS[stream_id] = threading.Event()
-        # NO partial text
-        STREAM_PARTIAL_TEXT[stream_id] = ""
-        STREAM_REASONING_TEXT[stream_id] = ""
-        STREAM_LIVE_TOOL_CALLS[stream_id] = []
-        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_fb_notice)
-
-        mock_agent = Mock()
-        mock_agent.session_id = session_id
-        AGENT_INSTANCES[stream_id] = mock_agent
-
-        _prior_assistant = {
-            "role": "assistant",
-            "content": "This is from a previous turn.",
+            "content": "Previous turn.",
             "timestamp": 1000,
         }
         mock_session = Mock()
@@ -457,31 +535,17 @@ class TestCancelInterrupt:
             m for m in mock_session.messages
             if isinstance(m, dict) and m.get("_fallbackNotice")
         ]
-        assert len(stamped) == 1, (
-            f"expected exactly 1 stamped notice on the cancel marker, got {len(stamped)}"
-        )
-        assert stamped[0].get("_error") is True, (
-            "notice was stamped on a non-cancel-marker message"
-        )
+        assert len(stamped) == 1
         notice = stamped[0]["_fallbackNotice"]
-        assert "_cancel_claimed" not in notice, (
-            f"_cancel_claimed leaked into persisted _fallbackNotice: {notice}"
-        )
-        assert "_fallbackNotice" not in _prior_assistant, (
-            "prior-turn assistant message was mutated in the no-partial case"
-        )
-        assert stream_id not in _STREAM_FALLBACK_NOTICES, (
-            "fallback notice map entry was not cleaned up"
-        )
+        assert "_cancel_claimed" not in notice
+        assert notice.get("message") == _fb_notice["message"]
+        assert "_fallbackNotice" not in _prior_assistant
+        assert stream_id not in _STREAM_FALLBACK_NOTICES
 
     def test_cancel_fallback_notice_late_publication_no_stamp(self):
         """When no notice has been published when cancel claims, cancel finds
         nothing and does not stamp. The worker's own error-path save is
         responsible for persisting via _pending_fallback_notices.
-
-        This exercises the late-publication schedule: the notice arrives after
-        cancel has already claimed (found nothing). Cancel must not stamp
-        anything; the worker's error save handles persistence.
         """
         import threading
         from unittest.mock import patch, Mock
@@ -497,7 +561,7 @@ class TestCancelInterrupt:
         STREAM_PARTIAL_TEXT[stream_id] = "partial answer"
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
-        # NO notice pre-seeded — simulates late publication
+        # NO notice pre-seeded
 
         mock_agent = Mock()
         mock_agent.session_id = session_id
@@ -517,13 +581,9 @@ class TestCancelInterrupt:
 
         assert result is True
 
-        # No notice was published, so no stamp
         stamped = [
             m for m in mock_session.messages
             if isinstance(m, dict) and m.get("_fallbackNotice")
         ]
-        assert len(stamped) == 0, (
-            "cancel should not stamp when no notice was published"
-        )
-        # Map should be clean (nothing to clean up)
+        assert len(stamped) == 0, "cancel should not stamp when no notice was published"
         assert stream_id not in _STREAM_FALLBACK_NOTICES
