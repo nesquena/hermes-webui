@@ -19,8 +19,9 @@ class TestCancelInterrupt:
         STREAMS.clear()
         CANCEL_FLAGS.clear()
         ACTIVE_RUNS.clear()
-        from api.streaming import _STREAM_FALLBACK_NOTICES
+        from api.streaming import _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED
         _STREAM_FALLBACK_NOTICES.clear()
+        _STREAM_CANCEL_CLAIMED.clear()
         with SESSION_AGENT_CACHE_LOCK:
             SESSION_AGENT_CACHE.clear()
 
@@ -30,8 +31,9 @@ class TestCancelInterrupt:
         STREAMS.clear()
         CANCEL_FLAGS.clear()
         ACTIVE_RUNS.clear()
-        from api.streaming import _STREAM_FALLBACK_NOTICES
+        from api.streaming import _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED
         _STREAM_FALLBACK_NOTICES.clear()
+        _STREAM_CANCEL_CLAIMED.clear()
         with SESSION_AGENT_CACHE_LOCK:
             SESSION_AGENT_CACHE.clear()
 

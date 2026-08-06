@@ -568,6 +568,27 @@ def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
     )
 
 
+
+def _is_transient_fallback_warning(kind: str, message: str) -> bool:
+    """Broad classifier for transient fallback/rate-limit lifecycle warnings.
+
+    These should still produce a live SSE warning (composer status flash) but
+    must NOT produce a persistent ``_fallbackNotice`` — they fire before the
+    model has changed and may never complete the switch.
+    """
+    k = str(kind or '').strip().lower()
+    m = str(message or '').strip().lower()
+    return (
+        k == 'lifecycle'
+        and (
+            'rate limited' in m
+            or 'switching to fallback' in m
+            or 'falling back' in m
+            or 'fallback activated' in m
+            or 'trying fallback' in m
+        )
+    )
+
 def _is_agent_compression_start_status(kind: str, message: str) -> bool:
     """Return True only for real Hermes context-compression start notices.
 
@@ -706,6 +727,30 @@ _CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrup
 # _fallbackNotice after reload (gate-certifier blocking finding #2).
 # Cleared in the _run_agent_streaming finally block alongside STREAMS/CANCEL_FLAGS.
 _STREAM_FALLBACK_NOTICES: dict = {}
+
+# Streams where cancel_stream() has claimed the fallback-notice lifecycle,
+# even if no notice was published yet.  This prevents a late-published
+# notice from being popped by the worker's finally before cancel can
+# stamp it (gate-certifier finding #5).
+_STREAM_CANCEL_CLAIMED: set = set()
+
+# Fields allowed in a persisted _fallbackNotice.  Internal coordination
+# flags (e.g. _cancel_claimed) are stripped at every writer to prevent
+# dirty data leaking into session JSON.
+_FALLBACK_NOTICE_KEYS = ('message', 'to_model', 'to_provider')
+
+
+def _clean_fallback_notice(notice):
+    """Return an allowlisted copy of a fallback notice dict.
+
+    Only ``message``, ``to_model``, and ``to_provider`` are persisted —
+    internal coordination flags like ``_cancel_claimed`` are stripped.
+    Used at every stamp site (worker success/error/heal, cancel, and
+    _persist_cancelled_turn) to guarantee clean session data.
+    """
+    if not isinstance(notice, dict):
+        return None
+    return {k: notice.get(k, '') for k in _FALLBACK_NOTICE_KEYS}
 
 
 _WEBUI_PROGRESS_PROMPT = """
@@ -11897,6 +11942,7 @@ def cancel_stream(stream_id: str) -> bool:
     # _STREAM_FALLBACK_NOTICES so whichever side wins the session lock persists
     # it.  Cancel stamps and pops the entry in its own finally block.
     with streams_lock:
+        _STREAM_CANCEL_CLAIMED.add(stream_id)
         _fb_entry = _STREAM_FALLBACK_NOTICES.get(stream_id)
         if _fb_entry is not None:
             _fb_entry['_cancel_claimed'] = True

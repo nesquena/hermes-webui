@@ -580,6 +580,50 @@ def test_fallback_lifecycle_message_predicate_matches_agent_emitters():
     )
 
 
+
+def test_transient_fallback_warning_classifies_broad_lifecycle_messages():
+    """The broad classifier must match transient pre-switch fallback/rate-limit
+    messages for live SSE warnings, while the confirmed classifier rejects them.
+
+    The PR narrows _is_fallback_lifecycle_message to confirmed post-switch
+    notices only, but existing transient warnings must still produce a live
+    SSE warning.  A separate _is_transient_fallback_warning classifier covers
+    the broad set without persisting a _fallbackNotice.
+    """
+    from api.streaming import _is_transient_fallback_warning, _is_fallback_lifecycle_message
+
+    # Transient messages must match the broad classifier
+    assert _is_transient_fallback_warning(
+        "lifecycle",
+        "Rate limited — switching to fallback provider...",
+    )
+    assert _is_transient_fallback_warning(
+        "lifecycle",
+        "Non-retryable error (HTTP 500) — trying fallback...",
+    )
+    assert _is_transient_fallback_warning(
+        "lifecycle",
+        "Fallback activated",
+    )
+
+    # Confirmed post-switch must NOT match the transient classifier
+    assert not _is_transient_fallback_warning(
+        "lifecycle",
+        "Switched to fallback model: m1 via p1 → m2 via p2",
+    )
+
+    # Confirmed post-switch must still match the confirmed classifier
+    assert _is_fallback_lifecycle_message(
+        "lifecycle",
+        "Switched to fallback model: m1 via p1 → m2 via p2",
+    )
+
+    # Non-lifecycle kinds must not match either classifier
+    assert not _is_transient_fallback_warning(
+        "tool",
+        "Rate limited — switching to fallback provider...",
+    )
+
 def test_auto_compression_completion_transition_is_preserved_after_running_listener():
     src = _read("static/messages.js")
     compressing_idx = src.find("source.addEventListener('compressing'")

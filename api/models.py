@@ -8336,6 +8336,7 @@ _SESSION_MESSAGE_DISPLAY_METADATA_KEYS = (
     "_statusCard",
     "_anchor_stream_id",
     "_anchor_activity_scene",
+    "_fallbackNotice",
 )
 
 
