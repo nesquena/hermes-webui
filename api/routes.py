@@ -19905,7 +19905,13 @@ def _handle_live_models(handler, parsed):
                     if _mid and _mid not in _ids:
                         _ids.append(_mid)
 
-                _append(_cp.get("model", ""))
+                # Only the plural ``models`` allowlist participates in the
+                # live-catalog filter (#6646 finding 3).  The singular
+                # ``model`` field is sticky/default metadata, NOT an allowlist
+                # signal — treating it as one hides the rest of the live
+                # catalog (e.g. a provider with ``model: assistant`` and a live
+                # list of [assistant, assistant-pro, remote-extra] would show
+                # only ``assistant``).
                 _models = _cp.get("models")
                 if isinstance(_models, dict):
                     for _mid in _models:
@@ -19938,11 +19944,18 @@ def _handle_live_models(handler, parsed):
             # Collect config-specified model IDs separately so they don't
             # prevent the live fetch below from running (#3718).
             _config_ids = []
+            _sticky_model_ids = []
             if provider == "custom" or provider.startswith("custom:"):
                 for _cp in _custom_provider_entries_for_request():
                     if custom_provider_entry is None:
                         custom_provider_entry = _cp
                     _config_ids.extend(_custom_provider_model_ids(_cp))
+                    # The singular ``model`` field is sticky/default metadata:
+                    # it does not filter the live catalog, but it IS the
+                    # fallback when the live fetch fails (#6646 finding 3).
+                    _m = str(_cp.get("model") or "").strip()
+                    if _m and _m not in _sticky_model_ids:
+                        _sticky_model_ids.append(_m)
             
             # Always try live fetch for custom providers — config entries are a
             # fallback, not a replacement.  The live endpoint should return ALL
@@ -20024,7 +20037,14 @@ def _handle_live_models(handler, parsed):
                         _configured_set = set(_config_ids)
                         ids = [mid for mid in ids if mid in _configured_set]
                 else:
+                    # Live fetch failed (or returned nothing): fall back to
+                    # the configured allowlist, plus the singular sticky
+                    # ``model`` ids so a model-only provider still resolves
+                    # (#6646 finding 3).
                     ids = list(_config_ids)
+                    for _mid in _sticky_model_ids:
+                        if _mid not in ids:
+                            ids.append(_mid)
 
         # ── OpenAI-compat live fetch fallback ──────────────────────────────────
         # When provider_model_ids() is unavailable or returns [] for a provider

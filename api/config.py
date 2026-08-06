@@ -1382,6 +1382,28 @@ def _custom_provider_slug_from_name(name: object) -> str:
     return "custom:" + slug
 
 
+def _legacy_slug_from_name(name: object) -> str | None:
+    """Return the pre-unicode slug normalization for ``name``, or None.
+
+    Before #6646, ``_custom_provider_slug_from_name`` applied
+    ``re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")`` then collapsed repeated
+    ``-``.  That produced ``my-proxy`` from ``My  Proxy`` (double space), while
+    today's ``_slug_from_name`` (which mirrors the agent's
+    ``_normalize_custom_pool_name``) yields ``my--proxy``.  Sessions persisted
+    before the upgrade carry the legacy slug, so credential lookup must accept
+    it — but only when it uniquely identifies one configured provider, and
+    never pick credentials from an arbitrary entry on ambiguity.
+    """
+    raw = str(name or "").strip().lower()
+    if not raw:
+        return None
+    import re as _re
+
+    slug = _re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
+    slug = _re.sub(r"-{2,}", "-", slug)
+    return slug or None
+
+
 def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
     source = config_obj if isinstance(config_obj, dict) else cfg
     entries = source.get("custom_providers", [])
@@ -2580,6 +2602,18 @@ def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
     inner = candidate[1:]
     provider_hint, bare_model = inner.rsplit(":", 1)
     if provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
+        # Canonical round-trip guard (#6646 finding 1): a name-derived slug
+        # may legitimately contain colons (e.g. "Local (127.0.0.1:15721)"
+        # → custom:local-(127.0.0.1:15721), matching the agent's
+        # _normalize_custom_pool_name which only replaces spaces). Parsing
+        # that slug with the colon-suffix heuristics below would eat the
+        # slug's own colons as model segments (provider becomes
+        # custom:local-(127.0.0.1, model 15721):deepseek-v4-flash).
+        # Resolve the full provider_hint against the configured canonical
+        # providers FIRST — if it is an exact known slug, round-trip
+        # succeeds without any heuristic splitting.
+        if _named_custom_provider_slug_for_provider(provider_hint) == provider_hint:
+            return bare_model, provider_hint
         _slug_rest = provider_hint[len("custom:"):]
         if not _custom_slug_rest_looks_like_host_port(_slug_rest):
             provider_hint, extra = provider_hint.rsplit(":", 1)
@@ -3066,6 +3100,29 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
             base_url = str(entry.get("base_url") or "").strip() or None
             api_key = _resolve_key(entry.get("api_key"), entry.get("key_env"), pid)
             return api_key, base_url
+
+    # Legacy slug migration (#6646 finding 2): sessions persisted before the
+    # Unicode slug change carry the OLD normalization (``My  Proxy`` → slug
+    # ``my-proxy``, collapsing repeated separators), while current canonical
+    # slugs keep the double dash (``my--proxy``).  Accept the legacy slug only
+    # when it uniquely identifies exactly one configured provider — never pick
+    # credentials from an arbitrary entry when the alias is ambiguous.
+    _legacy_matches = []
+    for entry in custom_providers:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        legacy = _legacy_slug_from_name(name)
+        if legacy and legacy == raw_slug:
+            _legacy_matches.append(entry)
+    if len(_legacy_matches) == 1:
+        entry = _legacy_matches[0]
+        return (
+            _resolve_key(entry.get("api_key"), entry.get("key_env"), pid),
+            str(entry.get("base_url") or "").strip() or None,
+        )
 
     # If exactly one custom provider is configured, use it as a pragmatic
     # fallback for mismatched slugs (e.g. punctuation differences).

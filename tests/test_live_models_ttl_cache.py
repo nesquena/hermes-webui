@@ -1,5 +1,6 @@
 """Regression tests for /api/models/live backend TTL caching."""
 
+import json
 import sys
 import types
 from urllib.parse import urlparse
@@ -131,3 +132,134 @@ def test_live_models_endpoint_respects_picker_visibility_budget(monkeypatch):
     assert [m["id"] for m in payload["models"]] == [
         f"openai/model-{idx}" for idx in range(config._MODEL_PICKER_VISIBLE_TARGET)
     ]
+
+
+# ── PR #6646 finding 3: singular ``model`` must not filter the live catalog ──
+
+def _patch_custom_live_models(monkeypatch, routes, custom_providers, live_ids):
+    """Patch a custom provider live-fetch path so _handle_live_models returns
+    ``live_ids`` as the /v1/models payload without network I/O."""
+    import api.config as config
+    import api.profiles as profiles
+
+    # provider_model_ids() must return [] for custom providers so the
+    # custom_providers live-fetch branch is exercised.
+    _install_provider_model_ids(monkeypatch, lambda provider: [])
+    routes._clear_live_models_cache()
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(config, "get_config", lambda: {"custom_providers": custom_providers})
+    monkeypatch.setattr(config, "_resolve_provider_alias", lambda provider: provider)
+    # Force the custom-provider branch: provider_model_ids returns [] for
+    # custom providers, then the live fetch hits _models_url — patch urlopen.
+    import urllib.request
+
+    class _FakeResp:
+        def __init__(self, body):
+            self._body = body
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _fake_urlopen(req, timeout=8):
+        return _FakeResp(json.dumps({"data": [{"id": mid} for mid in live_ids]}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+
+def test_singular_model_does_not_filter_live_catalog(monkeypatch):
+    """A provider configured with ONLY the singular ``model`` field (no
+    ``models`` allowlist) must return the FULL live catalog — the sticky
+    default must not hide the rest of the live list (#6646 finding 3)."""
+    import json
+    import api.routes as routes
+
+    custom_providers = [
+        {
+            "name": "proxy",
+            "api_key": "k",
+            "base_url": "http://127.0.0.1:9999/v1",
+            "model": "assistant",  # singular sticky default only
+        },
+    ]
+    live_ids = ["assistant", "assistant-pro", "remote-extra"]
+    _patch_custom_live_models(monkeypatch, routes, custom_providers, live_ids)
+
+    parsed = urlparse("/api/models/live?provider=custom:proxy")
+    payload = routes._handle_live_models(object(), parsed)
+
+    ids = [m["id"] for m in payload["models"]]
+    assert ids == live_ids, (
+        f"singular model must NOT filter the live catalog; "
+        f"expected {live_ids}, got {ids}"
+    )
+
+
+def test_live_catalog_filtered_only_by_plural_models(monkeypatch):
+    """A provider with a plural ``models`` allowlist filters the live catalog
+    to that list — the plural list IS the allowlist signal."""
+    import json
+    import api.routes as routes
+
+    custom_providers = [
+        {
+            "name": "proxy",
+            "api_key": "k",
+            "base_url": "http://127.0.0.1:9999/v1",
+            "model": "assistant",  # sticky default — not an allowlist
+            "models": ["assistant", "remote-extra"],  # plural allowlist
+        },
+    ]
+    live_ids = ["assistant", "assistant-pro", "remote-extra"]
+    _patch_custom_live_models(monkeypatch, routes, custom_providers, live_ids)
+
+    parsed = urlparse("/api/models/live?provider=custom:proxy")
+    payload = routes._handle_live_models(object(), parsed)
+
+    ids = [m["id"] for m in payload["models"]]
+    assert ids == ["assistant", "remote-extra"], (
+        f"plural models allowlist must filter the live catalog, got {ids}"
+    )
+
+
+def test_singular_model_sticky_fallback_when_live_fetch_fails(monkeypatch):
+    """When the live fetch fails, the singular ``model`` must still be
+    returned as the sticky fallback (#6646 finding 3)."""
+    import urllib.error
+    import api.routes as routes
+
+    custom_providers = [
+        {
+            "name": "proxy",
+            "api_key": "k",
+            "base_url": "http://127.0.0.1:9999/v1",
+            "model": "assistant",  # singular sticky default only
+        },
+    ]
+
+    def _fail_urlopen(req, timeout=8):
+        raise urllib.error.URLError("connection refused")
+
+    import urllib.request
+    routes._clear_live_models_cache()
+    import api.config as config
+    import api.profiles as profiles
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(config, "get_config", lambda: {"custom_providers": custom_providers})
+    monkeypatch.setattr(config, "_resolve_provider_alias", lambda provider: provider)
+    monkeypatch.setattr(urllib.request, "urlopen", _fail_urlopen)
+
+    parsed = urlparse("/api/models/live?provider=custom:proxy")
+    payload = routes._handle_live_models(object(), parsed)
+
+    ids = [m["id"] for m in payload["models"]]
+    assert "assistant" in ids, (
+        f"singular model must be the sticky fallback when live fetch fails, got {ids}"
+    )

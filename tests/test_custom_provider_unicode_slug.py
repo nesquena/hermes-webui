@@ -354,3 +354,136 @@ class TestResolveCustomProviderConnection:
         api_key, base_url = config.resolve_custom_provider_connection(pid)
         assert api_key == "sk-tr-key"
         assert base_url == "https://tokenrhythm.studio/v1"
+
+# ── Finding 1: colon-bearing slugs must round-trip the provider parser ──────
+
+class TestColonSlugRoundTrip:
+    """PR #6646 finding 1: a name-derived slug containing colons (e.g.
+    'Local (127.0.0.1:15721)' → custom:local-(127.0.0.1:15721)) must parse
+    back to the same provider + model without the colon-suffix heuristics
+    eating the slug's own colons as model segments."""
+
+    def test_colon_slug_parses_correctly_when_configured(self, monkeypatch):
+        """When the full provider_hint is an exact configured canonical slug,
+        the parser must round-trip it without heuristic splitting."""
+        name = "Local (127.0.0.1:15721)"
+        slug = config._custom_provider_slug_from_name(name)
+        assert slug == "custom:local-(127.0.0.1:15721)"
+
+        # The parser's canonical guard reads the config via
+        # _custom_provider_entries() (module-level cfg), so patch that.
+        monkeypatch.setattr(
+            config,
+            "_custom_provider_entries",
+            lambda config_obj=None: [
+                {"name": name, "api_key": "k", "base_url": "http://127.0.0.1:15721"},
+            ],
+        )
+        hint = f"@{slug}:deepseek-v4-flash"
+        parsed = config._parse_provider_qualified_model_id(hint)
+        assert parsed is not None, "parser returned None"
+        model, provider = parsed
+        assert provider == slug, (
+            f"provider must round-trip to {slug!r}, got {provider!r}"
+        )
+        assert model == "deepseek-v4-flash", (
+            f"model must not be corrupted by colon heuristics, got {model!r}"
+        )
+
+    def test_colon_slug_unconfigured_falls_back_to_heuristics(self, monkeypatch):
+        """When the slug is NOT a configured provider, the old heuristic
+        behavior must be preserved (backward compat for host:port slugs)."""
+        monkeypatch.setattr(config, "get_config", lambda: {"custom_providers": []})
+        hint = "@custom:10.8.71.41:8080:Qwen3"
+        parsed = config._parse_provider_qualified_model_id(hint)
+        assert parsed is not None
+        model, provider = parsed
+        # host:port slug keeps its colon structure; the model is the tail
+        assert provider == "custom:10.8.71.41:8080"
+        assert model == "Qwen3"
+
+    def test_plain_custom_slug_unchanged(self):
+        """Non-colon custom slugs must parse exactly as before."""
+        hint = "@custom:my-proxy:deepseek-v4-flash"
+        parsed = config._parse_provider_qualified_model_id(hint)
+        assert parsed is not None
+        model, provider = parsed
+        assert provider == "custom:my-proxy"
+        assert model == "deepseek-v4-flash"
+
+
+# ── Finding 2: legacy slug migration must not lose credentials ──────────────
+
+class TestLegacySlugMigration:
+    """PR #6646 finding 2: sessions persisted before the Unicode slug change
+    carry the OLD normalization (e.g. 'My  Proxy' → slug 'my-proxy', repeated
+    separators collapsed). Credential lookup must accept the legacy slug when
+    it uniquely identifies one provider, and fail closed on ambiguity."""
+
+    def test_legacy_double_space_slug_resolves(self, monkeypatch):
+        """'My  Proxy' (double space): current canonical is 'my--proxy', but a
+        session persisting the legacy 'my-proxy' must still find credentials."""
+        monkeypatch.setattr(
+            config,
+            "get_config",
+            lambda: {
+                "custom_providers": [
+                    {"name": "My  Proxy", "api_key": "key-legacy", "base_url": "https://legacy.example.com"},
+                ],
+            },
+        )
+        # Canonical slug of this provider is my--proxy
+        canonical = config._slug_from_name("My  Proxy")
+        assert canonical == "my--proxy"
+        # Legacy slug (pre-#6646 normalization) is my-proxy
+        legacy = config._legacy_slug_from_name("My  Proxy")
+        assert legacy == "my-proxy"
+
+        api_key, base_url = config.resolve_custom_provider_connection("custom:my-proxy")
+        assert api_key == "key-legacy", (
+            f"legacy slug must resolve credentials, got {api_key!r}"
+        )
+        assert base_url == "https://legacy.example.com"
+
+    def test_legacy_slug_ambiguous_fails_closed(self, monkeypatch):
+        """If a requested legacy slug matches two providers, credentials must
+        NOT be picked from an arbitrary entry — fail closed (None, None)."""
+        # Two providers with DIFFERENT canonical slugs but the SAME legacy
+        # slug: "My  Proxy" → legacy "my-proxy" (double space collapses),
+        # "My Proxy@@@" → legacy "my-proxy" (@@ collapses). Canonical forms
+        # differ (my--proxy vs my-proxy@@@), so the requested legacy id
+        # "custom:my-proxy" matches neither canonical and is ambiguous.
+        monkeypatch.setattr(
+            config,
+            "get_config",
+            lambda: {
+                "custom_providers": [
+                    {"name": "My  Proxy", "api_key": "key-a", "base_url": "https://a.example.com"},
+                    {"name": "My Proxy@@@", "api_key": "key-b", "base_url": "https://b.example.com"},
+                ],
+            },
+        )
+        # Canonical slugs differ…
+        assert config._slug_from_name("My  Proxy") == "my--proxy"
+        assert config._slug_from_name("My Proxy@@@") == "my-proxy@@@"
+        # …but both legacy slugs collapse to the same key.
+        assert config._legacy_slug_from_name("My  Proxy") == "my-proxy"
+        assert config._legacy_slug_from_name("My Proxy@@@") == "my-proxy"
+
+        api_key, base_url = config.resolve_custom_provider_connection("custom:my-proxy")
+        assert api_key is None and base_url is None, (
+            f"ambiguous legacy slug must fail closed, got ({api_key!r}, {base_url!r})"
+        )
+
+    def test_legacy_helper_contract(self):
+        """_legacy_slug_from_name mirrors the pre-#6646 normalization."""
+        assert config._legacy_slug_from_name("My  Proxy") == "my-proxy"
+        assert config._legacy_slug_from_name("My Proxy") == "my-proxy"
+        assert config._legacy_slug_from_name("a b") == "a-b"
+        assert config._legacy_slug_from_name("a  b") == "a-b"
+        assert config._legacy_slug_from_name("") is None
+        assert config._legacy_slug_from_name("   ") is None
+        # Pure-CJK names had NO legacy slug (all CJK chars replaced by '-'
+        # then stripped) — pre-#6646 they were unslugifiable, which is
+        # exactly the gap this PR fixes. Legacy lookup must simply not match.
+        assert config._legacy_slug_from_name("测试提供商") is None
