@@ -8194,17 +8194,22 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         _cache_build_in_progress = False
                         _cache_build_cv.notify_all()
                 raise
-            with _cache_build_cv:
-                if _build_generation == _models_cache_generation:
-                    published_at = time.monotonic()
-                    _available_models_cache = result
-                    _available_models_cache_ts = published_at
-                    _available_models_live_rebuild_ts = published_at
-                    _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-                    _sync_models_cache_provenance()
             try:
-                if _build_generation == _models_cache_generation:
-                    _save_models_cache_to_disk(result)
+                with _cache_build_cv:
+                    if _build_generation == _models_cache_generation:
+                        published_at = time.monotonic()
+                        _available_models_cache = result
+                        _available_models_cache_ts = published_at
+                        _available_models_live_rebuild_ts = published_at
+                        _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                        _sync_models_cache_provenance()
+                        # Hold the cv through the atomic disk rename: an
+                        # invalidation can no longer interleave between the
+                        # generation check and the file write (TOCTOU #6581).
+                        # It either blocks until the rename lands and then
+                        # deletes the file, or runs first and bumps the
+                        # generation so this publish block is skipped.
+                        _save_models_cache_to_disk(result)
             finally:
                 with _cache_build_cv:
                     if _build_generation == _models_cache_generation:
@@ -8263,15 +8268,17 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 )
                 _sync_models_cache_provenance()
             try:
-                # Re-check the generation right before the disk write: an
-                # invalidation between the in-memory publish and here must
-                # also cancel the on-disk write — otherwise the stale catalog
-                # survives a restart and the picker still shows the provider
-                # that was just removed.
+                # Hold the cv from the re-check through the atomic disk
+                # rename: an invalidation can no longer interleave between
+                # the generation check and the file write (TOCTOU #6581). It
+                # either blocks until the rename lands and then deletes the
+                # file, or runs first and bumps the generation so this
+                # publish block is skipped — the stale catalog cannot survive
+                # a restart and resurrect a just-removed provider.
                 with _cache_build_cv:
                     if _build_generation != _models_cache_generation:
                         return
-                _save_models_cache_to_disk(result)
+                    _save_models_cache_to_disk(result)
             except Exception:
                 logger.debug("models cache disk save failed", exc_info=True)
             finally:

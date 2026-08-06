@@ -13,6 +13,15 @@ import api.config as cfg
 import api.profiles as profiles
 
 
+# The autouse isolate_models_catalog_state fixture replaces these with hermetic
+# no-ops for every test. The real-disk TOCTOU regression test below needs the
+# genuine implementations, so capture them at import time (before any fixture
+# has run).
+_REAL_SAVE_MODELS_CACHE_TO_DISK = cfg._save_models_cache_to_disk
+_REAL_DELETE_MODELS_CACHE_ON_DISK = cfg._delete_models_cache_on_disk
+_REAL_LOAD_MODELS_CACHE_FROM_DISK = cfg._load_models_cache_from_disk
+
+
 @pytest.fixture(autouse=True)
 def isolate_models_catalog_state(monkeypatch, tmp_path):
     config_path = tmp_path / "config.yaml"
@@ -635,3 +644,147 @@ def test_stale_over_budget_rebuild_discarded_after_invalidation(
     assert disk_writes == [fresh_result], (
         "the stale rebuild must not write its catalog to disk"
     )
+
+
+def test_disk_save_atomic_with_invalidation_real_disk(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    """Regression for #6581 (TOCTOU): generation check + disk save must be
+    atomic under _cache_build_cv, on the real disk.
+
+    The stale-worker race is: (1) the worker passes the generation check,
+    (2) an invalidation advances the generation AND deletes the on-disk cache,
+    (3) the worker proceeds to _save_models_cache_to_disk and re-creates the
+    file with the removed provider + post-removal fingerprint — which the
+    strict boot loader accepts, resurrecting the provider from disk.
+
+    The fix holds _cache_build_cv from the generation check through the atomic
+    disk rename: the invalidation either blocks until the rename lands and
+    then deletes the file, or runs first and bumps the generation so the
+    publish block is skipped entirely. This test drives the REAL disk path
+    (the autouse fixture's no-op saves are replaced by the genuine
+    implementations) and asserts BOTH the on-disk cache file AND a strict
+    restart load stay free of the removed provider.
+    """
+    _configure_local_sources(
+        monkeypatch,
+        isolate_models_catalog_state["auth_store_path"],
+    )
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+    # The autouse fixture neutralizes the disk functions for hermetic tests;
+    # this test needs the real I/O so the file state after the race is
+    # genuinely asserted (the fixture still points _get_models_cache_path at
+    # the isolated tmp_path, so no production cache file is touched).
+    monkeypatch.setattr(
+        cfg, "_save_models_cache_to_disk", _REAL_SAVE_MODELS_CACHE_TO_DISK
+    )
+    monkeypatch.setattr(
+        cfg, "_delete_models_cache_on_disk", _REAL_DELETE_MODELS_CACHE_ON_DISK
+    )
+    monkeypatch.setattr(
+        cfg, "_load_models_cache_from_disk", _REAL_LOAD_MODELS_CACHE_FROM_DISK
+    )
+
+    # The catalog the STALE worker builds (still contains the provider the
+    # cleanup removes mid-flight).
+    stale_result = {
+        "active_provider": "openai-api",
+        "default_model": "gpt-5.5",
+        "configured_model_badges": {},
+        "groups": [
+            {
+                "provider": "OpenAI",
+                "provider_id": "openai-api",
+                "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+            }
+        ],
+        "aliases": {},
+    }
+
+    stale_started = threading.Event()
+    release_stale = threading.Event()
+    disk_save_entered = threading.Event()
+    release_disk_save = threading.Event()
+    invalidation_done = threading.Event()
+
+    def _stale_rebuild(_builder):
+        stale_started.set()
+        assert release_stale.wait(5)
+        return copy.deepcopy(stale_result)
+
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _stale_rebuild)
+
+    def _paused_save(cache):
+        # Only reached after the generation check passed — and, with the fix,
+        # while the worker still holds _cache_build_cv. Pause here so the
+        # test can try to invalidate in the TOCTOU window.
+        disk_save_entered.set()
+        assert release_disk_save.wait(5)
+        _REAL_SAVE_MODELS_CACHE_TO_DISK(cache)
+
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", _paused_save)
+
+    def _rebuild_worker_threads():
+        return [
+            t for t in threading.enumerate() if t.name == "models-catalog-rebuild"
+        ]
+
+    baseline_workers = len(_rebuild_worker_threads())
+
+    # 1. Over-budget rebuild: the worker builds a catalog that still contains
+    #    the provider the cleanup removes (openai-api).
+    cfg.get_available_models()
+    assert stale_started.wait(5)
+    assert len(_rebuild_worker_threads()) == baseline_workers + 1
+
+    # 2. Let the worker finish building and publish. The generation check
+    #    passes (no invalidation yet) and it enters the disk save, where it
+    #    pauses — with the fix, still holding _cache_build_cv.
+    release_stale.set()
+    assert disk_save_entered.wait(5)
+
+    # 3. Invalidate on a separate thread: it must BLOCK behind the worker's
+    #    cv-held disk save (the fix) instead of interleaving between the
+    #    generation check and the rename (the TOCTOU bug).
+    def _invalidate():
+        cfg.invalidate_models_cache()
+        invalidation_done.set()
+
+    invalidation_thread = threading.Thread(
+        target=_invalidate, name="test-invalidation", daemon=True
+    )
+    invalidation_thread.start()
+    time.sleep(0.2)
+    assert not invalidation_done.is_set(), (
+        "invalidation must not interleave between the generation check and "
+        "the atomic disk rename (#6581 TOCTOU)"
+    )
+
+    # 4. Resume the worker: it completes the real disk write (the file
+    #    briefly holds the stale catalog), then releases the cv — and only
+    #    then does the invalidation run, strictly after, deleting the file.
+    release_disk_save.set()
+    assert invalidation_done.wait(5)
+    invalidation_thread.join(5)
+
+    # 5. The removed provider must not survive anywhere. Not in memory...
+    assert cfg._available_models_cache is None
+    # ...not in the on-disk cache: the invalidation deleted the file the
+    #    stale worker just wrote (on the buggy code the file survives with
+    #    the removed provider + post-removal fingerprint)...
+    cache_path = cfg._get_models_cache_path()
+    assert not cache_path.exists(), (
+        "the stale on-disk write must be deleted by the post-write "
+        "invalidation, not resurrect the removed provider on next boot"
+    )
+    # ...and not through a strict restart load (a fresh process's boot path).
+    assert cfg._load_models_cache_from_disk() is None
+
+    deadline = time.monotonic() + 5
+    while (
+        time.monotonic() < deadline
+        and len(_rebuild_worker_threads()) > baseline_workers
+    ):
+        time.sleep(0.01)
+    assert len(_rebuild_worker_threads()) == baseline_workers
