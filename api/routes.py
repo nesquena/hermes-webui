@@ -20038,11 +20038,12 @@ def _handle_live_models(handler, parsed):
                         ids = [mid for mid in ids if mid in _configured_set]
                 else:
                     # Live fetch failed (or returned nothing): fall back to
-                    # the configured allowlist, plus the singular sticky
-                    # ``model`` ids so a model-only provider still resolves
-                    # (#6646 finding 3).
-                    ids = list(_config_ids)
-                    for _mid in _sticky_model_ids:
+                    # the singular sticky ``model`` first, then the plural
+                    # ``models`` allowlist — preserving the pre-#6646 order
+                    # (sticky default before configured siblings) so a
+                    # model-only provider still resolves (#6646 finding 3).
+                    ids = list(_sticky_model_ids)
+                    for _mid in _config_ids:
                         if _mid not in ids:
                             ids.append(_mid)
 
