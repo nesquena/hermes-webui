@@ -61,7 +61,12 @@ _loaded_profile_env_owner: dict[str, str] = {}
 # RLock: the detached wrapper holds it full-body and the named branch
 # re-enters it via profile_env_for_background_worker without self-deadlock.
 # Lock order (outermost -> innermost): _PROCESS_ENV_OWNERSHIP_LOCK ->
-# _SKILL_HOME_MODULE_PATCH_LOCK -> _ENV_LOCK.
+# _SKILL_HOME_MODULE_PATCH_LOCK -> _ENV_LOCK.  EVERY process-env-mirroring
+# entrypoint follows it — including api.streaming's legacy/static full-turn
+# block, which must take _PROCESS_ENV_OWNERSHIP_LOCK BEFORE the skill-module
+# patch lock (it holds the patch lock for the whole turn and re-enters the
+# detached/profile scope mid-turn; taking SKILL first would form the
+# cross-thread AB/BA cycle this order exists to rule out).
 _PROCESS_ENV_OWNERSHIP_LOCK = threading.RLock()
 
 # Thread-local profile context: set per-request by server.py, cleared after.
@@ -1212,8 +1217,21 @@ def profile_env_for_background_worker(
     log = logger_override or logger
     raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
     profile = str(raw_profile or "").strip()
-    if not profile or profile == "default":
-        yield
+    # #6327: root/default bodies run under the SAME shared full-body ownership
+    # protocol as named scopes. The root profile's env IS the process env, so
+    # there is nothing to mirror; instead we hold _PROCESS_ENV_OWNERSHIP_LOCK
+    # for the complete body (setup, caller yield, restoration) while
+    # _root_profile_worker_env_scope installs root-owned thread/context
+    # credentials and scrubs values proven foreign to root from the raw
+    # os.getenv() channel — so a root body can never observe a named scope's
+    # raw env mid-overlap, and a named scope can never restore a stale
+    # snapshot over a concurrent root-body change.
+    if not profile or _is_root_profile(profile):
+        with _PROCESS_ENV_OWNERSHIP_LOCK:
+            with _root_profile_worker_env_scope(
+                profile or "default", purpose, logger_override=logger_override
+            ):
+                yield
         return
 
     # #6327: acquire the SHARED full-body process-env ownership lock BEFORE
@@ -1495,9 +1513,16 @@ def profile_env_for_active_request(
     stay on the mirrored scope until they are fully audited.
     """
     profile = (get_active_profile_name() or "").strip()
-    if not profile or _is_root_profile(profile):
+    if not profile:
         yield
         return
+    # #6327: root/default active-request bodies route through the SAME shared
+    # full-body ownership protocol as named ones — the background-worker
+    # wrapper treats root profiles as first-class owners (root-owned
+    # thread/context setup, foreign-value scrub, exact restoration) instead of
+    # a lock-free yield, so a root body can never overlap a named scope
+    # mid-mutation and a named scope can never restore a stale snapshot over a
+    # concurrent root-body change.
     with profile_env_for_background_worker(
         profile, purpose, logger_override=logger_override
     ):

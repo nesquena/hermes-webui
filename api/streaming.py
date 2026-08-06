@@ -7558,6 +7558,12 @@ def _run_agent_streaming(
     _streaming_skill_home_snapshot = None
     _restore_streaming_skill_home_modules = False
     _acquired_streaming_skill_home_patch_lock = False
+    # #6327: the legacy/static full-turn block also holds the shared
+    # process-env ownership lock (acquired BEFORE the skill-module patch lock
+    # per the single global lock order) so the mid-turn detached/profile scope
+    # re-enters it on the same thread and background scopes can never form an
+    # AB/BA cycle with this turn.
+    _acquired_streaming_process_env_lock = False
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
@@ -7631,6 +7637,7 @@ def _run_agent_streaming(
                 get_profile_runtime_env,
                 _skill_modules_support_profile_home,
                 _SKILL_HOME_MODULE_PATCH_LOCK,
+                _PROCESS_ENV_OWNERSHIP_LOCK,
             )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
@@ -7646,6 +7653,7 @@ def _run_agent_streaming(
             restore_skill_home_modules = None
             _skill_modules_support_profile_home = None
             _SKILL_HOME_MODULE_PATCH_LOCK = None
+            _PROCESS_ENV_OWNERSHIP_LOCK = None
 
         # Profile-aware provider/model enrichment: when the session belongs
         # to a profile that specifies model.provider and model.default, use
@@ -7733,6 +7741,19 @@ def _run_agent_streaming(
 
             if not (_streaming_override_installed and _streaming_modules_are_dynamic):
                 _restore_streaming_skill_home_modules = True
+                # #6327: enforce ONE global lock order
+                # (_PROCESS_ENV_OWNERSHIP_LOCK -> _SKILL_HOME_MODULE_PATCH_LOCK
+                # -> _ENV_LOCK) across every process-env-mirroring entrypoint.
+                # This full-turn legacy/static block must take the shared
+                # process-env ownership lock BEFORE the skill-module patch
+                # lock: the turn later re-enters profile_scope_for_detached_worker()
+                # (a full-body PROCESS holder) for model resolution, and direct
+                # background scopes hold PROCESS while waiting for SKILL —
+                # acquiring SKILL first would create the cross-thread AB/BA
+                # cycle the ownership protocol exists to rule out.
+                if _PROCESS_ENV_OWNERSHIP_LOCK is not None:
+                    _PROCESS_ENV_OWNERSHIP_LOCK.acquire()
+                    _acquired_streaming_process_env_lock = True
                 _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
                 _acquired_streaming_skill_home_patch_lock = True
 
@@ -10984,6 +11005,9 @@ def _run_agent_streaming(
         if _acquired_streaming_skill_home_patch_lock:
             _SKILL_HOME_MODULE_PATCH_LOCK.release()
             _acquired_streaming_skill_home_patch_lock = False
+        if _acquired_streaming_process_env_lock:
+            _PROCESS_ENV_OWNERSHIP_LOCK.release()
+            _acquired_streaming_process_env_lock = False
         _reset_streaming_hermes_home_override(*_streaming_hermes_home_override_ctx)
         # xsession wakeup misroute root fix (Option 1): restore the per-turn
         # session-identity context-locals (reset-token semantics). MUST run on
