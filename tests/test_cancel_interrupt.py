@@ -451,6 +451,14 @@ class TestCancelInterrupt:
             "must pop the entry after stamping"
         )
 
+        # The stamped notice must NOT contain the internal _cancel_claimed
+        # flag — it is a runtime coordination marker, not session data.
+        stamped_notice = stamped[0].get("_fallbackNotice", {})
+        assert "_cancel_claimed" not in stamped_notice, (
+            "_cancel_claimed leaked into persisted _fallbackNotice — "
+            "cancel_stream() must strip the internal flag before stamping."
+        )
+
     def test_cancel_fallback_notice_ownership_handoff_no_partial(self):
         """No-partial marker case: when no partial text exists, the notice
         must be stamped on the newly created cancellation marker (the
@@ -526,3 +534,72 @@ class TestCancelInterrupt:
             "fallback notice map entry was not cleaned up in the no-partial case"
         )
 
+
+    def test_cancel_fallback_notice_strips_cancel_claimed_flag(self):
+        """The internal _cancel_claimed ownership-handoff flag must NOT
+        leak into the persisted _fallbackNotice metadata.
+
+        cancel_stream() sets _cancel_claimed=True on the dict to coordinate
+        with the worker's finally block.  Without stripping it before
+        stamping, the flag is saved to the session JSON as dirty metadata.
+
+        This test exercises the same cancel path as the ownership-handoff
+        tests but explicitly asserts that the stamped _fallbackNotice dict
+        does not contain _cancel_claimed.
+        """
+        import threading
+        from unittest.mock import patch
+        from api.streaming import _STREAM_FALLBACK_NOTICES
+        from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
+
+        stream_id = "strip_claimed_flag"
+        session_id = "sess_strip_claimed"
+
+        _fb_notice = {
+            "message": "Switched to fallback model: gpt-4 via openai → claude-3 via anthropic",
+            "to_model": "claude-3",
+            "to_provider": "anthropic",
+        }
+
+        q = queue.Queue()
+        STREAMS[stream_id] = q
+        CANCEL_FLAGS[stream_id] = threading.Event()
+        STREAM_PARTIAL_TEXT[stream_id] = "partial answer"
+        STREAM_REASONING_TEXT[stream_id] = ""
+        STREAM_LIVE_TOOL_CALLS[stream_id] = []
+        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_fb_notice)
+
+        mock_agent = Mock()
+        mock_agent.session_id = session_id
+        AGENT_INSTANCES[stream_id] = mock_agent
+
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id
+        mock_session.pending_user_message = "q"
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = 1.0
+        mock_session.messages = []
+        mock_session.save = Mock()
+
+        with patch("api.streaming.get_session", return_value=mock_session):
+            result = cancel_stream(stream_id)
+
+        assert result is True
+
+        # The stamped notice must NOT contain the _cancel_claimed flag
+        stamped = [
+            m for m in mock_session.messages
+            if isinstance(m, dict) and m.get("_fallbackNotice")
+        ]
+        assert len(stamped) == 1, f"expected 1 stamped notice, got {len(stamped)}"
+        notice = stamped[0]["_fallbackNotice"]
+        assert "_cancel_claimed" not in notice, (
+            f"_cancel_claimed leaked into persisted _fallbackNotice: {notice}. "
+            "The flag is a runtime coordination marker, not session data — "
+            "cancel_stream() must strip it before stamping."
+        )
+        # The notice must contain the expected fields
+        assert notice.get("message") == _fb_notice["message"]
+        assert notice.get("to_model") == _fb_notice["to_model"]
+        assert notice.get("to_provider") == _fb_notice["to_provider"]

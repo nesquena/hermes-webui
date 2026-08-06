@@ -113,7 +113,7 @@ def test_fallback_notice_persisted_on_assistant_message_before_save():
     """Fallback notices must be session-persisted as structured metadata on
     the turn's final assistant message, not inserted as an orphan DOM node.
 
-    The gate certification on PR #5755 found that `appendFallbackNotice()`
+    The gate certification on PR #6405 found that `appendFallbackNotice()`
     inserted a DOM node that was wiped by the next `renderMessages()` /
     session-switch / stream-completion — so the "persistent" notice was not
     actually persistent. The fix stores `_fallbackNotice` on the message
@@ -318,7 +318,7 @@ def test_stream_scoped_fallback_notices_dict_exists():
         "cancel_stream() must stamp the claimed fallback notice on the "
         "current-turn row before s.save()."
     )
-    stamping_block = src[stamping_idx:stamping_idx + 500]
+    stamping_block = src[stamping_idx:stamping_idx + 800]
     assert "_partial_msg" in stamping_block, (
         "cancel_stream() must stamp on _partial_msg when present (current-turn row)."
     )

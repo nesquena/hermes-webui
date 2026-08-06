@@ -1,4 +1,4 @@
-"""Behavioral tests for show_fallback_notices persistence (PR #5755).
+"""Behavioral tests for show_fallback_notices persistence (PR #6405).
 
 The gate-certifier found that show_fallback_notices was added to
 _SETTINGS_DEFAULTS but then excluded from _SETTINGS_ALLOWED_KEYS and

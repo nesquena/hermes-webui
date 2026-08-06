@@ -12143,12 +12143,17 @@ def cancel_stream(stream_id: str) -> bool:
                 # cancellation marker.  Do not reverse-search arbitrary prior
                 # partial rows (reviewer requirement #3).
                 if _claimed_fb_notice:
+                    # Strip the internal ownership-handoff flag before
+                    # persisting — _cancel_claimed is a runtime coordination
+                    # marker, not session data.  Without this, the flag
+                    # leaks into the saved session JSON as dirty metadata.
+                    _fb_notice_clean = {k: v for k, v in _claimed_fb_notice.items() if k != '_cancel_claimed'}
                     if _partial_msg is not None:
-                        _partial_msg['_fallbackNotice'] = _claimed_fb_notice
+                        _partial_msg['_fallbackNotice'] = _fb_notice_clean
                     else:
                         # No partial content streamed — stamp on the cancel
                         # marker we just appended (the current-turn row).
-                        _cs.messages[-1]['_fallbackNotice'] = _claimed_fb_notice
+                        _cs.messages[-1]['_fallbackNotice'] = _fb_notice_clean
                 _cs.save()
                 _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
             except Exception:
