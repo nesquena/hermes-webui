@@ -344,12 +344,21 @@ def _profile_env_scope_b(purpose: str = "", logger_override=None):
 
 def _install_env_config(monkeypatch, tmp_path):
     """Write a config.yaml whose provider URL/auth reference ${VAR}s, pin the
-    config path, clear in-memory overrides, and stub hermes/live probes."""
+    config path, clear in-memory overrides, and stub hermes/live probes.
+    Returns a state dict capturing cfg/_cfg_path/_cfg_mtime/_cfg_fingerprint
+    so the caller can restore them exactly — leaving _cfg_path at None would
+    make the NEXT test's reload_config_if_stale() see a path change, refresh
+    the shared cache and clobber that test's in-memory override cfg."""
     _install_fake_hermes_cli(monkeypatch)
     _pin_test_paths(monkeypatch, tmp_path)
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text(_MULTI_PROFILE_YAML, encoding="utf-8")
-    old_cfg = config.cfg
+    old_state = {
+        "cfg": config.cfg,
+        "path": config._cfg_path,
+        "mtime": config._cfg_mtime,
+        "fp": config._cfg_fingerprint,
+    }
     # No in-memory overrides: the snapshot must be re-expanded from the raw
     # YAML against the calling thread's profile env, never a deep copy of a
     # process-env-pinned shared dict.
@@ -357,12 +366,14 @@ def _install_env_config(monkeypatch, tmp_path):
     config._cfg_mtime = 0.0
     config._cfg_path = None
     config.invalidate_models_cache()
-    return old_cfg
+    return old_state
 
 
-def _restore_test_env(old_cfg, old_env):
-    config.cfg = old_cfg
-    config._cfg_path = None
+def _restore_test_env(old_state, old_env):
+    config.cfg = old_state["cfg"]
+    config._cfg_path = old_state["path"]
+    config._cfg_mtime = old_state["mtime"]
+    config._cfg_fingerprint = old_state["fp"]
     config.invalidate_models_cache()
     for k in _MULTI_PROFILE_TEST_VARS:
         v = old_env.get(k)
@@ -492,7 +503,7 @@ def test_sync_rebuild_captures_profile_a_env_through_ab_a_alternation(monkeypatc
     mutates the shared cache between capture and build, then back to A. The
     published catalog AND the provider URL/auth the builder resolves must be
     profile A's — never B's and never the shared dict."""
-    old_cfg = _install_env_config(monkeypatch, tmp_path)
+    old_state = _install_env_config(monkeypatch, tmp_path)
     old_env = {k: os.environ.get(k) for k in _MULTI_PROFILE_TEST_VARS}
     try:
         monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "profile-a")
@@ -507,7 +518,7 @@ def test_sync_rebuild_captures_profile_a_env_through_ab_a_alternation(monkeypatc
 
         payload = config.get_available_models(force_refresh=True)
     finally:
-        _restore_test_env(old_cfg, old_env)
+        _restore_test_env(old_state, old_env)
 
     assert phases["entered"] == 1, "barrier never fired — test is vacuous"
     _assert_catalog_is_profile_a(payload)
@@ -528,7 +539,7 @@ def test_detached_worker_rebuild_captures_profile_a_env_through_ab_a_alternation
     thread. The barrier flips the worker's ambient env to B and mutates the
     shared cache between capture and build, then back to A. The worker-built
     catalog and the provider URL/auth it resolves must be profile A's."""
-    old_cfg = _install_env_config(monkeypatch, tmp_path)
+    old_state = _install_env_config(monkeypatch, tmp_path)
     old_env = {k: os.environ.get(k) for k in _MULTI_PROFILE_TEST_VARS}
     try:
         monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "profile-a")
@@ -547,7 +558,7 @@ def test_detached_worker_rebuild_captures_profile_a_env_through_ab_a_alternation
 
         payload = config.get_available_models(force_refresh=True)
     finally:
-        _restore_test_env(old_cfg, old_env)
+        _restore_test_env(old_state, old_env)
 
     assert phases["entered"] == 1, "worker rebuild never ran — test is vacuous"
     _assert_catalog_is_profile_a(payload)
@@ -557,3 +568,54 @@ def test_detached_worker_rebuild_captures_profile_a_env_through_ab_a_alternation
         "worker builder resolved the provider URL from a foreign config object, "
         f"not the captured snapshot: {[type(c).__name__ for c in lm_config_objs]}"
     )
+
+
+def test_snapshot_fallback_is_empty_defaults_never_foreign_shared_cache(monkeypatch, tmp_path):
+    """greptile P1 (#5619 review, optional): when the active profile's config
+    file is missing/empty/invalid while the shared cache was populated by
+    another profile, the snapshot fallback must produce THIS profile's
+    empty/default configuration — never a copy of the shared cache, which
+    would expose the previous profile's providers/models/aliases/endpoints."""
+    _install_fake_hermes_cli(monkeypatch)
+    _pin_test_paths(monkeypatch, tmp_path)
+    cfg_file = tmp_path / "config.yaml"
+    assert not cfg_file.exists(), "test needs a missing config file"
+
+    old_cfg = config.cfg
+    old_cache = config._cfg_cache
+    old_mtime = config._cfg_mtime
+    old_path = config._cfg_path
+    old_fp = config._cfg_fingerprint
+    try:
+        # Another profile populated the shared cache with rich config...
+        config._cfg_cache = copy.deepcopy(_PROFILE_A)
+        config.cfg = config._cfg_cache
+        # ...while the active profile's own config file is missing. Same
+        # resolved path, fresh mtime and a matching fingerprint keep
+        # reload_config_if_stale() (stubbed no-op here) from clearing it —
+        # the exact state the fallback branch must not copy.
+        config._cfg_path = cfg_file
+        config._cfg_mtime = 0.0
+        config._cfg_fingerprint = config._fingerprint_config(config._cfg_cache)
+
+        snapshot = config._capture_profile_config_snapshot()
+
+        assert snapshot is not config._cfg_cache, "snapshot aliased the shared cache"
+        # Nothing from the foreign profile A leaked in.
+        assert snapshot.get("custom_providers") in (None, []), (
+            f"foreign profile's custom_providers leaked: {snapshot.get('custom_providers')!r}"
+        )
+        assert snapshot.get("moa") is None, "foreign profile's moa presets leaked"
+        assert snapshot.get("model") is None, "foreign profile's model section leaked"
+        assert snapshot.get("providers") is None, "foreign profile's providers leaked"
+        assert snapshot.get("fallback_providers") is None
+        # Default-only keys are still applied — the same shape get_config()
+        # returns for a missing file.
+        assert isinstance(snapshot.get("agent", {}).get("personalities"), dict)
+        assert snapshot.get("experimental", {}).get("unified_session_db") is False
+    finally:
+        config.cfg = old_cfg
+        config._cfg_cache = old_cache
+        config._cfg_mtime = old_mtime
+        config._cfg_path = old_path
+        config._cfg_fingerprint = old_fp
