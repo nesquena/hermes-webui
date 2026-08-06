@@ -3,8 +3,9 @@
 - **Status:** Proposed
 - **Author:** @franksong2702
 - **Created:** 2026-05-16
+- **Updated:** 2026-07-16
 - **Tracking issue:** [#2361](https://github.com/nesquena/hermes-webui/issues/2361)
-- **Related architecture:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925), [`hermes-run-adapter-contract.md`](hermes-run-adapter-contract.md)
+- **Related architecture:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925), [`hermes-run-adapter-contract.md`](hermes-run-adapter-contract.md), [`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md)
 
 ## Problem
 
@@ -45,6 +46,21 @@ while WebUI still has multiple overlapping state stores.
 - Do not rewrite the streaming protocol in this RFC.
 - Do not reopen already-fixed narrow bugs.
 - Do not make this a catch-all for unrelated UI polish.
+
+## Current implementation relationship
+
+Stable Assistant Turn Anchors now implement the presentation/reconciliation
+portion of this contract for one assistant turn. The run journal and settled
+transcript provide durable observations; the Anchor registry and
+`activity_scene_v1` reconcile those observations into Compact Worklog,
+Transparent Stream, or Final answer only; `S.messages`, `INFLIGHT`, renderer
+caches, and DOM remain projections or recovery caches rather than independent
+semantic owners.
+
+This RFC remains `Proposed` because its broader cross-layer contract also covers
+model-context reconstruction, compression handoff, session metadata, and future
+runtime-adapter migration. Shipped Anchor coverage strengthens invariants 2, 3,
+and 5; it does not mark every run-state boundary implemented.
 
 ## State Layers
 

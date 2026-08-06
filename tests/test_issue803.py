@@ -34,6 +34,30 @@ class TestProfileCookieHelpers:
         assert 'SameSite=Lax' in s
         assert 'Path=/' in s
 
+    def test_build_profile_cookie_survives_stale_password_hash_cache(self, monkeypatch):
+        """#5588 regression: a prior test that set HERMES_WEBUI_PASSWORD populates
+        api.auth's process-wide password-hash cache; if that cache leaks past the
+        env-var teardown, is_auth_enabled() reads stale True and build_profile_cookie
+        raises "requires a request handler when auth is enabled". Simulate the leak
+        in-test: cache a password, pop the env, and confirm the memoized state does
+        not make a no-handler build_profile_cookie raise. (The autouse
+        _reset_password_hash_cache fixture is what keeps this from leaking across
+        real test files.)"""
+        import api.auth as auth
+        from api.helpers import build_profile_cookie
+        # Populate the cache as if an auth-enabled test just ran.
+        monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "leak-check")
+        auth._invalidate_password_hash_cache()
+        assert auth.is_auth_enabled() is True  # cache now holds a hash
+        # Env goes away (as monkeypatch would on teardown) but reset the cache the
+        # way the autouse fixture does — auth must read as disabled again.
+        monkeypatch.delenv("HERMES_WEBUI_PASSWORD", raising=False)
+        auth._invalidate_password_hash_cache()
+        assert auth.is_auth_enabled() is False
+        # And the no-handler cookie build must not raise.
+        s = build_profile_cookie('alice')
+        assert 'hermes_profile=alice' in s
+
     def test_build_profile_cookie_default_persists(self):
         from api.helpers import build_profile_cookie
         s = build_profile_cookie('default')

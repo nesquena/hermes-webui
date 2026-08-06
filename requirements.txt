@@ -12,3 +12,7 @@
 # CPU/RAM metrics on platforms without /proc:  pip install psutil>=5.9
 pyyaml>=6.0
 cryptography>=42.0
+# OPTIONAL: Office workspace preview/edit support needs these parsers.
+# The workspace file routes return 503 with an install hint when they are absent.
+# Install them only if you want .docx/.xlsx/.pptx preview support:
+#   pip install python-docx>=1.1.2 openpyxl>=3.1.5 python-pptx>=1.0.2

@@ -50,12 +50,13 @@ def test_terminal_survives_short_lived_request_thread(tmp_path):
         assert term.is_alive()
 
         marker = f"lifecycle-ok-{os.getpid()}"
+        out = term.subscribe()
         write_terminal(sid, f"printf '{marker}\\n'\n")
         deadline = time.monotonic() + 1.0
         seen = ""
         while time.monotonic() < deadline:
             try:
-                event, payload = term.output.get(timeout=0.1)
+                _seq, event, payload = out.get(timeout=0.1)
             except queue.Empty:
                 continue
             if event == "output":
@@ -63,6 +64,7 @@ def test_terminal_survives_short_lived_request_thread(tmp_path):
                 if f"{marker}\r\n" in seen or f"{marker}\n" in seen:
                     break
         assert f"{marker}\r\n" in seen or f"{marker}\n" in seen
+        term.unsubscribe(out)
     finally:
         close_terminal(sid)
 
@@ -366,9 +368,16 @@ def test_terminal_supervisor_continues_after_mixed_popen_failures(monkeypatch, t
     term_2 = start_terminal(sid_ok_2, tmp_path, restart=True)
 
     try:
+        # Both successful spawns produced distinct, registered terminals. We
+        # assert on the returned objects rather than re-reading _TERMINALS[sid]:
+        # these FakeProcs never hold the pty slave open, so the master EOFs
+        # immediately and the reader loop now correctly retires the entry (the
+        # fd-leak fix) — a real, alive shell keeps its pty open and stays
+        # registered (covered by the real-shell lifecycle tests above).
         assert term_1 is not term_2
-        assert terminal._TERMINALS[sid_ok_1].proc is term_1.proc
-        assert terminal._TERMINALS[sid_ok_2].proc is term_2.proc
+        assert term_1.proc is not term_2.proc
+        assert isinstance(term_1, terminal.TerminalSession)
+        assert isinstance(term_2, terminal.TerminalSession)
         assert terminal._spawn_supervisor_thread is not None
         assert terminal._spawn_supervisor_thread.is_alive()
     finally:

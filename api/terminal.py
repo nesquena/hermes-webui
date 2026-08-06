@@ -11,6 +11,7 @@ from __future__ import annotations
 import errno
 import atexit
 import codecs
+import collections
 import os
 import queue
 import shutil
@@ -53,6 +54,12 @@ def _safe_close_fd(fd: int) -> None:
         pass
 
 
+# Bounds both the replay backlog and each subscriber's live queue: how many
+# output chunks are buffered before the oldest is dropped. One value so the
+# catch-up backlog and the per-viewer queue stay in lockstep.
+_OUTPUT_BUFFER_MAXLEN = 2000
+
+
 @dataclass
 class TerminalSession:
     session_id: str
@@ -61,36 +68,124 @@ class TerminalSession:
     master_fd: int
     rows: int = 24
     cols: int = 80
-    output: queue.Queue = field(default_factory=lambda: queue.Queue(maxsize=2000))
+    # Output is fanned out to every attached viewer. Each SSE consumer
+    # subscribe()s its own queue; put_output broadcasts to all of them plus a
+    # bounded backlog that a newly attaching consumer replays. Two tabs/windows
+    # on the same session therefore each get the FULL byte stream — previously a
+    # single shared queue was read destructively, so two consumers split the
+    # output between them and only one saw terminal_closed.
+    _subscribers: list = field(default_factory=list)
+    _backlog: collections.deque = field(
+        default_factory=lambda: collections.deque(maxlen=_OUTPUT_BUFFER_MAXLEN)
+    )
+    _sub_lock: threading.Lock = field(default_factory=threading.Lock)
+    _next_output_seq: int = 1
     closed: threading.Event = field(default_factory=threading.Event)
     reader: threading.Thread | None = None
+    # Serializes fd-touching ops (os.write, resize ioctl) against os.close, so a
+    # write can never land on a master_fd that was closed and whose number was
+    # already recycled by a concurrent openpty — that would inject the user's
+    # keystrokes into a foreign fd. Holders re-check ``closed`` under this lock
+    # and bail if the terminal has been torn down.
+    io_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Wall-clock of the last input written or output produced. Drives which
+    # terminal the cap evicts first (least-recently-active): a shell abandoned
+    # at its prompt has neither, so it sorts oldest and is evicted before an
+    # actively used one.
+    last_activity: float = field(default_factory=time.time)
+    # Wall-clock of when the terminal last had zero attached viewers, or None
+    # while at least one is attached. The reaper closes a terminal that has been
+    # unwatched for longer than the idle grace: a client that drops its output
+    # stream without POSTing /api/terminal/close (tab close, crash, network drop)
+    # otherwise leaves the shell running forever (no PDEATHSIG). A terminal is
+    # born unwatched, so a spawn nobody ever attaches to is reaped too. The grace
+    # spans transient reconnects (a tab refresh re-attaches and clears it).
+    unwatched_since: float | None = field(default_factory=time.time)
 
     def is_alive(self) -> bool:
         return not self.closed.is_set() and self.proc.poll() is None
 
+    def subscribe(self, after_seq: int | None = None) -> queue.Queue:
+        """Attach a viewer: return a queue seeded with the current backlog and
+        registered to receive all subsequent output.
+
+        A reconnecting EventSource supplies its last received sequence so only
+        newer backlog entries are replayed. A new viewer leaves ``after_seq``
+        unset and receives the full bounded backlog.
+        """
+        q: queue.Queue = queue.Queue(maxsize=_OUTPUT_BUFFER_MAXLEN)
+        with self._sub_lock:
+            for item in self._backlog:
+                if after_seq is None or item[0] > after_seq:
+                    q.put_nowait(item)
+            self._subscribers.append(q)
+            self.unwatched_since = None  # a viewer is attached
+        return q
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        with self._sub_lock:
+            try:
+                self._subscribers.remove(q)
+            except ValueError:
+                pass
+            if not self._subscribers:
+                self.unwatched_since = time.time()
+
     def put_output(self, event: str, payload: dict) -> None:
-        try:
-            self.output.put_nowait((event, payload))
-        except queue.Full:
-            # Keep the terminal responsive by dropping the oldest queued chunk.
-            try:
-                self.output.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self.output.put_nowait((event, payload))
-            except queue.Full:
-                pass
+        self.last_activity = time.time()
+        with self._sub_lock:
+            item = (self._next_output_seq, event, payload)
+            self._next_output_seq += 1
+            self._backlog.append(item)
+            # Keep sequence assignment, backlog append, and non-blocking fanout in
+            # one publication order. Releasing this lock before fanout lets two
+            # producers enqueue seq N+1 before seq N to a live subscriber.
+            for q in self._subscribers:
+                try:
+                    q.put_nowait(item)
+                except queue.Full:
+                    # Slow viewer: drop its oldest chunk to stay responsive.
+                    # Isolated per subscriber, so one lagging tab can't starve
+                    # another; all queue operations remain non-blocking.
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        q.put_nowait(item)
+                    except queue.Full:
+                        pass
 
 
 _TERMINALS: dict[str, TerminalSession] = {}
 _LOCK = threading.RLock()
+# Hard cap on concurrently live embedded terminals. Each holds a shell process,
+# a pty master fd, and a reader thread; a client that drops its output stream
+# without POSTing /api/terminal/close (tab close, crash, network drop) leaves
+# the shell running (no PDEATHSIG — see the note below), so without a ceiling
+# these accumulate over a long uptime toward fd/thread exhaustion (#4633). The
+# cap evicts the least-recently-active terminal to make room. Generous enough
+# that real interactive use never trips it.
+_MAX_TERMINALS = 32
 _spawn_queue: queue.Queue = queue.Queue()
 _spawn_supervisor_started = False
 _spawn_supervisor_lock = threading.Lock()
 _spawn_supervisor_thread: threading.Thread | None = None
 _terminal_descendant_reaper_lock = threading.Lock()
 _TERMINAL_DESCENDANT_REAPER_LIMIT = 64
+
+# Idle-terminal reaper: proactively close terminals whose viewers have all gone
+# away, instead of leaving an abandoned shell running until the cap evicts it.
+# A terminal unwatched (zero attached output streams) for longer than the grace
+# is closed; the grace spans a tab refresh / brief network drop so a real
+# reconnect keeps the session. Dead-process terminals are swept too as a
+# belt-and-suspenders for the reader-loop retire.
+_TERMINAL_IDLE_GRACE_SECONDS = 900  # 15 min unwatched -> reap
+_TERMINAL_REAPER_INTERVAL_SECONDS = 60
+_terminal_reaper_started = False
+_terminal_reaper_lock = threading.Lock()
+_terminal_reaper_thread: threading.Thread | None = None
+_terminal_reaper_stop = threading.Event()
 
 
 @dataclass
@@ -278,20 +373,164 @@ def _reader_loop(term: TerminalSession) -> None:
         code = term.proc.poll()
         _reap_terminal_descendants(term.proc.pid)
         term.put_output("terminal_closed", {"exit_code": code})
+        # The shell has exited (or its pty broke): retire the session so its
+        # master fd and _TERMINALS entry are released. Previously only an
+        # explicit close_terminal() / restart / atexit did this, so a shell that
+        # exited on its own (user typed `exit`, process died) leaked its master
+        # fd and dict entry for the rest of the WebUI's uptime. ``expected=term``
+        # makes this a no-op if a restart already replaced the entry with a new
+        # terminal for the same session id.
+        close_terminal(term.session_id, expected=term)
 
 
 def _set_size(term: TerminalSession, rows: int, cols: int) -> None:
     term.rows = max(8, min(int(rows or term.rows or 24), 80))
     term.cols = max(20, min(int(cols or term.cols or 80), 240))
-    try:
-        fcntl.ioctl(term.master_fd, termios.TIOCSWINSZ, _winsize(term.rows, term.cols))
-    except OSError:
-        pass
+    # The ioctl touches master_fd, so guard it against a concurrent close (and
+    # the fd-number recycling that can follow) with the same io_lock as writes.
+    with term.io_lock:
+        if not term.closed.is_set():
+            try:
+                fcntl.ioctl(term.master_fd, termios.TIOCSWINSZ, _winsize(term.rows, term.cols))
+            except OSError:
+                pass
     try:
         if term.proc.poll() is None:
             os.killpg(term.proc.pid, signal.SIGWINCH)
     except (OSError, ProcessLookupError):
         pass
+
+
+def _enforce_terminal_cap(*, exclude_sid: str | None = None) -> None:
+    """Evict terminals until there is room under ``_MAX_TERMINALS``.
+
+    Picks a victim under the lock but closes it *outside* the lock (close_terminal
+    may spend up to a couple of seconds killing/​waiting on the shell). Prefers a
+    dead-process terminal, else the least-recently-active one — an abandoned
+    shell idle at its prompt sorts oldest and goes first. ``exclude_sid`` is the
+    session about to reuse/replace its own entry, so it never evicts itself.
+    """
+    if not _TERMINAL_SUPPORTED:
+        return
+    # Bounded loop: at most the current population; guards against a pathological
+    # spin if close_terminal somehow can't remove an entry.
+    for _ in range(_MAX_TERMINALS + 1):
+        victim_sid = None
+        victim_term = None
+        with _LOCK:
+            # Reuse/restart of an existing sid replaces in place — no growth.
+            if exclude_sid in _TERMINALS:
+                return
+            if len(_TERMINALS) < _MAX_TERMINALS:
+                return
+            candidates = [
+                (sid, term) for sid, term in _TERMINALS.items() if sid != exclude_sid
+            ]
+            if not candidates:
+                return
+            dead = [(sid, term) for sid, term in candidates if not term.is_alive()]
+            victim_sid, victim_term = (
+                dead[0] if dead else min(candidates, key=lambda kv: kv[1].last_activity)
+            )
+        # ``expected=victim_term`` so that if this sid was restarted/replaced in
+        # the gap between picking it and closing it, we don't tear down the new
+        # (possibly active) terminal — symmetric with the reader-loop retire.
+        close_terminal(victim_sid, expected=victim_term)
+
+
+def _terminals_to_reap(now: float) -> list[tuple[str, TerminalSession]]:
+    """Return (sid, term) pairs the reaper should close: a dead process, or a
+    terminal unwatched for longer than the idle grace. Pure/snapshotted under
+    the lock so it can be unit-tested without threads."""
+    victims = []
+    with _LOCK:
+        for sid, term in _TERMINALS.items():
+            if not term.is_alive():
+                victims.append((sid, term))
+                continue
+            unwatched = term.unwatched_since
+            if unwatched is not None and (now - unwatched) >= _TERMINAL_IDLE_GRACE_SECONDS:
+                victims.append((sid, term))
+    return victims
+
+
+def _claim_reap_victim(sid: str, term: TerminalSession, now: float) -> TerminalSession | None:
+    """Atomically remove *term* from the registry, or refuse.
+
+    ``_terminals_to_reap`` snapshots victims and then releases ``_LOCK``, so by
+    the time we get here a viewer may have reconnected: ``subscribe()`` appends
+    to ``_subscribers`` and clears ``unwatched_since`` under the terminal's
+    ``_sub_lock``, which the selection pass never held. Object identity alone —
+    what ``close_terminal(expected=…)`` checks — is still true in that case, so
+    the reaper would kill a terminal that now has a live viewer.
+
+    The claim therefore re-establishes the *whole* selection predicate while
+    holding both locks, and takes the entry out of ``_TERMINALS`` in the same
+    critical section. A concurrent ``attach_terminal()`` acquires the same two
+    locks in the same order, so exactly one of the two wins: either the viewer
+    is attached (and we refuse) or the entry is already gone (and the attach
+    reports "not running").
+
+    Returns the claimed terminal — the caller owns its teardown — or ``None``.
+    """
+    with _LOCK:
+        if _TERMINALS.get(sid) is not term:
+            return None
+        # A dead process is reaped unconditionally: it cannot come back to life,
+        # and an attached viewer only means someone is watching a corpse.
+        if term.is_alive():
+            with term._sub_lock:
+                if term._subscribers:
+                    return None
+                unwatched = term.unwatched_since
+                if unwatched is None:
+                    return None
+                if (now - unwatched) < _TERMINAL_IDLE_GRACE_SECONDS:
+                    return None
+        del _TERMINALS[sid]
+    return term
+
+
+def _reap_idle_terminals(now: float) -> int:
+    """Close every terminal selected by ``_terminals_to_reap`` that is *still*
+    idle when claimed. Returns the count closed."""
+    reaped = 0
+    for sid, term in _terminals_to_reap(now):
+        claimed = _claim_reap_victim(sid, term, now)
+        if claimed is None:
+            continue
+        # Process/fd teardown runs after both locks are released: killpg + wait
+        # can take seconds and must not block attaches or spawns.
+        _teardown_terminal(claimed)
+        reaped += 1
+    return reaped
+
+
+def _terminal_reaper_loop() -> None:
+    while not _terminal_reaper_stop.wait(_TERMINAL_REAPER_INTERVAL_SECONDS):
+        try:
+            # Wall-clock, consistent with unwatched_since / last_activity.
+            _reap_idle_terminals(time.time())
+        except Exception:
+            # Never let a transient error kill the reaper thread.
+            pass
+
+
+def _ensure_terminal_reaper() -> None:
+    global _terminal_reaper_started, _terminal_reaper_thread
+    if not _TERMINAL_SUPPORTED:
+        return
+    with _terminal_reaper_lock:
+        if (
+            _terminal_reaper_started
+            and _terminal_reaper_thread is not None
+            and getattr(_terminal_reaper_thread, "is_alive", lambda: False)()
+        ):
+            return
+        thread = threading.Thread(target=_terminal_reaper_loop, daemon=True)
+        thread.start()
+        _terminal_reaper_thread = thread
+        _terminal_reaper_started = True
 
 
 def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int = 80, restart: bool = False) -> TerminalSession:
@@ -304,6 +543,12 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
     cwd = str(Path(workspace).expanduser().resolve())
     if not Path(cwd).is_dir():
         raise ValueError("workspace is not a directory")
+
+    # Enforce the cap before spawning. Done outside the main lock below (the
+    # eviction's process teardown must not run while _LOCK is held for the whole
+    # spawn), and skipped for a same-sid reuse/restart, which replaces rather
+    # than adds an entry.
+    _enforce_terminal_cap(exclude_sid=sid)
 
     with _LOCK:
         current = _TERMINALS.get(sid)
@@ -349,6 +594,7 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             }
         )
         _ensure_spawn_supervisor()
+        _ensure_terminal_reaper()
         _spawn_queue.put(request)
         try:
             if not request.done.wait(timeout=5.0):
@@ -396,13 +642,56 @@ def get_terminal(session_id: str) -> TerminalSession | None:
         return term
 
 
+def attach_terminal(
+    session_id: str, after_seq: int | None = None
+) -> tuple[TerminalSession, queue.Queue] | None:
+    """Attach a viewer atomically against the idle reaper.
+
+    ``get_terminal()`` followed by ``term.subscribe()`` leaves a window: the
+    reaper can claim and tear the terminal down in between, so the viewer ends
+    up subscribed to a corpse and the caller reports a live stream that will
+    never produce output. Doing the lookup and the subscribe inside the same
+    ``_LOCK`` section — the same lock, in the same order, that
+    ``_claim_reap_victim`` takes — makes the two mutually exclusive:
+
+    * attach wins → ``_subscribers`` is non-empty and ``unwatched_since`` is
+      ``None`` before the reaper can revalidate, so the reap is refused;
+    * reap wins → the entry is already out of ``_TERMINALS``, so this returns
+      ``None`` and the route answers "terminal not running" instead of hanging.
+
+    Registration is the authority, deliberately: both the reaper and
+    ``close_terminal()`` remove the entry *before* tearing the terminal down, so
+    "still in ``_TERMINALS``" is exactly the condition that cannot race. A
+    terminal that is registered but already flagged ``closed`` (its shell exited
+    and the reader loop has not retired it yet) still attaches, so the viewer
+    receives the ``terminal_closed`` event instead of a bare 404.
+
+    Returns ``(term, queue)`` or ``None``.
+    """
+    if not _TERMINAL_SUPPORTED:
+        return None
+    sid = str(session_id or "")
+    with _LOCK:
+        term = _TERMINALS.get(sid)
+        if term is None:
+            return None
+        return term, term.subscribe(after_seq=after_seq)
+
+
 def write_terminal(session_id: str, data: str) -> None:
     if not _TERMINAL_SUPPORTED:
         raise NotImplementedError("Embedded terminal is not supported on Windows")
     term = get_terminal(session_id)
     if not term or not term.is_alive():
         raise KeyError("terminal not running")
-    os.write(term.master_fd, str(data or "").encode("utf-8", errors="replace"))
+    # Re-check ``closed`` under io_lock and write while holding it, so the fd
+    # can't be closed (and its number recycled by another openpty) between the
+    # check and the write — which would inject this input into a foreign fd.
+    with term.io_lock:
+        if term.closed.is_set():
+            raise KeyError("terminal not running")
+        os.write(term.master_fd, str(data or "").encode("utf-8", errors="replace"))
+    term.last_activity = time.time()
 
 
 def resize_terminal(session_id: str, rows: int, cols: int) -> None:
@@ -414,14 +703,36 @@ def resize_terminal(session_id: str, rows: int, cols: int) -> None:
     _set_size(term, rows, cols)
 
 
-def close_terminal(session_id: str) -> bool:
+def close_terminal(session_id: str, *, expected: TerminalSession | None = None) -> bool:
+    """Tear down the terminal for *session_id*: kill the shell, close the pty
+    master fd, reap descendants, and drop the ``_TERMINALS`` entry.
+
+    ``expected`` guards the retire-from-reader-loop path: only act if the live
+    entry is still that exact terminal, so an old reader thread finishing after
+    a restart cannot tear down the *new* terminal that replaced it (the old
+    one's fd was already closed by the restart's own close_terminal call).
+    """
     if not _TERMINAL_SUPPORTED:
         return False
     sid = str(session_id or "")
     with _LOCK:
+        if expected is not None and _TERMINALS.get(sid) is not expected:
+            return False
         term = _TERMINALS.pop(sid, None)
     if not term:
         return False
+    _teardown_terminal(term)
+    return True
+
+
+def _teardown_terminal(term: TerminalSession) -> None:
+    """Kill the shell, close the pty master fd and reap descendants.
+
+    Split out of ``close_terminal`` so a caller that has already claimed the
+    registry entry (the idle reaper) can run the teardown without re-entering
+    the registry lookup — and, importantly, without holding any lock while
+    ``killpg``/``wait`` block for up to ~2.5s.
+    """
     term.closed.set()
     try:
         if term.proc.poll() is None:
@@ -441,12 +752,14 @@ def close_terminal(session_id: str) -> bool:
                 except (subprocess.TimeoutExpired, ProcessLookupError):
                     pass
     finally:
-        try:
-            os.close(term.master_fd)
-        except OSError:
-            pass
+        # ``closed`` is already set above, so a writer/​resizer blocked on io_lock
+        # will see it and bail rather than touch the fd we are about to close.
+        with term.io_lock:
+            try:
+                os.close(term.master_fd)
+            except OSError:
+                pass
         _reap_terminal_descendants(term.proc.pid)
-    return True
 
 
 def close_all_terminals() -> None:

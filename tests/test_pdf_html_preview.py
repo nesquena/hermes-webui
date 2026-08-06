@@ -10,12 +10,12 @@ import pytest
 
 
 def _read_js(name):
-    with open(os.path.join('static', name)) as f:
+    with open(os.path.join('static', name), encoding="utf-8") as f:
         return f.read()
 
 
 def _read_css():
-    with open(os.path.join('static', 'style.css')) as f:
+    with open(os.path.join('static', 'style.css'), encoding="utf-8") as f:
         return f.read()
 
 
@@ -180,16 +180,36 @@ class TestLoadHtmlInlineFunction:
         """Must use srcdoc (not src) for HTML content to keep it same-origin sandboxed."""
         ui = _read_js('ui.js')
         idx = ui.find('function loadHtmlInline')
-        body = ui[idx:idx + 1500]
+        body = ui[idx:idx + 2200]
         assert 'srcdoc=' in body, 'Must use srcdoc attribute for inline HTML rendering'
 
     def test_escapes_html_for_srcdoc(self):
         """HTML content must be escaped before embedding in srcdoc to prevent attribute injection."""
         ui = _read_js('ui.js')
         idx = ui.find('function loadHtmlInline')
-        body = ui[idx:idx + 1500]
+        body = ui[idx:idx + 2200]
         # Must escape &, <, >, " to prevent breaking out of srcdoc attribute
         assert '&amp;' in body or 'replace' in body, 'Must escape HTML entities for srcdoc'
+
+    def test_html_fetch_url_includes_session_id_for_session_media_artifacts(self):
+        ui = _read_js('ui.js')
+        idx = ui.find('function loadHtmlInline')
+        body = ui[idx:idx + 1200]
+        assert 'const mediaSessionId=' in body
+        assert "'&session_id='+encodeURIComponent(mediaSessionId)" in body
+        assert 'fetch(mediaUrl)' in body
+        assert "const publicMediaUrl='api/media?path='+encodeURIComponent(path);" in body
+        assert "const openUrl=publicMediaUrl+'&inline=1';" in body
+
+    def test_pdf_fetch_url_includes_session_id_for_session_media_artifacts(self):
+        ui = _read_js('ui.js')
+        idx = ui.find('function loadPdfInline')
+        body = ui[idx:idx + 1200]
+        assert 'const mediaSessionId=' in body
+        assert "'&session_id='+encodeURIComponent(mediaSessionId)" in body
+        assert 'fetch(mediaUrl)' in body
+        assert "const publicMediaUrl='api/media?path='+encodeURIComponent(path);" in body
+        assert "const dlUrl=publicMediaUrl+'&download=1';" in body
 
 
 # ── requestAnimationFrame integration ──────────────────────────────────────
@@ -222,7 +242,15 @@ class TestRAFIntegration:
 
     def test_message_render_uses_single_post_process_raf(self):
         ui = _read_js('ui.js')
-        assert ui.count('requestAnimationFrame(()=>postProcessRenderedMessages(inner))') == 2
+        # Behavior assertion (#5338): the two `(inner)` post-render dispatches are
+        # now routed through _postProcessWithAnchorSuppression (which still calls
+        # postProcessRenderedMessages). Assert on the wrapper's `(inner)` dispatch
+        # count rather than the old literal so a future rename doesn't re-orphan this.
+        assert ui.count('requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner))') == 2
+        _wrap = ui.find('function _postProcessWithAnchorSuppression')
+        assert _wrap != -1, "post-render should be wrapped by _postProcessWithAnchorSuppression"
+        assert 'postProcessRenderedMessages(container)' in ui[_wrap:_wrap + 500], \
+            "the wrapper must still invoke postProcessRenderedMessages"
 
 
 # ── CSS classes ────────────────────────────────────────────────────────────
@@ -288,7 +316,7 @@ class TestI18nKeys:
     HTML_KEYS = ['html_loading', 'html_too_large', 'html_error', 'html_open_full', 'html_sandbox_label']
 
     def _find_locale_block(self, locale):
-        with open('static/i18n.js') as f:
+        with open('static/i18n.js', encoding="utf-8") as f:
             content = f.read()
         start = content.find(f"'{locale}':")
         if start < 0:

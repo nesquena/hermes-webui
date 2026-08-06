@@ -33,6 +33,43 @@ def test_session_menu_respects_motion_preferences():
     assert ".session-action-menu{animation:none;will-change:auto;}" in STYLE_CSS
 
 
+def test_session_action_menu_exposes_popup_state_and_focus_contract():
+    """A portaled menu must stay discoverable from its sidebar trigger.
+
+    The fixed-position menu intentionally lives under document.body to avoid
+    clipping, so a screen reader cannot rely on DOM proximity. Opening it must
+    expose the popup relationship and move focus to an actionable item; Escape
+    must return focus to the trigger.
+    """
+    assert SESSIONS_JS.count("menuBtn.setAttribute('aria-expanded','false');") == 2
+    assert "menu.setAttribute('role','menu');" in SESSIONS_JS
+    assert "menu.setAttribute('aria-label', 'Conversation actions');" in SESSIONS_JS
+    assert "opt.setAttribute('role','menuitem');" in SESSIONS_JS
+
+    mount = _sessions_block("function _mountSessionActionMenu(menu, session, anchorEl){", "function _findSessionRenameRow")
+    assert "anchorEl.setAttribute('aria-expanded','true');" in mount
+    assert "anchorEl.setAttribute('aria-controls',menu.id);" in mount
+    assert "firstAction.focus({preventScroll:true});" in mount
+
+    close = _sessions_block("function closeSessionActionMenu", "function _sessionActionMenuShouldIgnoreScrollTarget")
+    assert "_sessionActionAnchor.setAttribute('aria-expanded','false');" in close
+    assert "_sessionActionAnchor.removeAttribute('aria-controls');" in close
+    assert "restoreFocus" in close
+    assert "fallbackFocusTarget=restoreFocus?_sessionActionPreviousFocus:null;" in close
+    assert "_focusSessionActionMenuRestoreTarget(focusTarget)" in close
+    assert "_focusSessionActionMenuRestoreTarget(fallbackFocusTarget)" in close
+
+    escape_handler = _sessions_block("document.addEventListener('keydown',e=>{", "window.addEventListener('resize'")
+    assert "closeSessionActionMenu({restoreFocus:true});" in escape_handler
+
+
+def test_session_action_menu_supports_arrow_key_navigation():
+    mount = _sessions_block("function _mountSessionActionMenu(menu, session, anchorEl){", "function _findSessionRenameRow")
+    for key in ("'ArrowDown'", "'ArrowUp'", "'Home'", "'End'"):
+        assert key in mount
+    assert "menu.addEventListener('keydown'" in mount
+
+
 def test_mobile_session_menu_opens_from_long_press_and_hides_dots():
     assert "const SESSION_LONG_PRESS_DELAY_MS = 400;" in SESSIONS_JS
     assert "el.classList.add('long-pressing')" in SESSIONS_JS
@@ -79,10 +116,10 @@ def test_open_session_menu_consumes_next_row_activation():
     assert "if(_longPressMenuOpened){_gestureState='idle';return true;}" in SESSIONS_JS
     finish_idx = SESSIONS_JS.find("const _finishSessionGesture=(clientX,clientY,target,pointerType)=>{")
     dismiss_idx = SESSIONS_JS.find("if(_sessionActionMenu&&!_sessionActionMenu.contains(target)){", finish_idx)
-    load_idx = SESSIONS_JS.find("await loadSession(s.session_id)", finish_idx)
+    open_idx = SESSIONS_JS.find("await _openSidebarSession(s)", finish_idx)
     pointerup_idx = SESSIONS_JS.find("el.onpointerup=(e)=>{")
-    assert finish_idx > 0 and load_idx > finish_idx
-    assert dismiss_idx > finish_idx and dismiss_idx < load_idx
+    assert finish_idx > 0 and open_idx > finish_idx
+    assert dismiss_idx > finish_idx and dismiss_idx < open_idx
     assert "if(_finishSessionGesture(e.clientX,e.clientY,e.target,e.pointerType)) e.stopPropagation();" in SESSIONS_JS[pointerup_idx:]
 
 
@@ -283,3 +320,33 @@ def test_touch_session_rows_preserve_vertical_scroll():
     assert "user-select:none" in item_rule
     assert "-webkit-user-select:none" in item_rule
     assert "-webkit-touch-callout:none" in item_rule
+
+
+def test_session_gesture_finish_ignores_idle_state():
+    """Test that _finishSessionGesture bails early when _gestureState is 'idle'.
+    
+    This prevents unintended session switches when a drag starts outside the
+    session row and ends on top of it. The gesture must have begun with a
+    pointerdown on the row itself (_gestureState='pressing'), otherwise the
+    pointerup should be ignored.
+    
+    See: https://github.com/nesquena/hermes-webui/issues/5462
+    """
+    # Find the _finishSessionGesture function
+    fn_start = SESSIONS_JS.find("const _finishSessionGesture=(clientX,clientY,target,pointerType)=>{")
+    assert fn_start != -1, "_finishSessionGesture function not found"
+    
+    # Extract the first ~200 characters of the function body
+    fn_body_start = SESSIONS_JS[fn_start:fn_start+200]
+    
+    # Verify the idle-state guard is present at the beginning
+    assert "if(_gestureState==='idle') return false;" in fn_body_start, \
+        "Missing idle-state guard at the beginning of _finishSessionGesture"
+    
+    # Also verify that the fork row handler has the same guard (consistency check)
+    # Fork handler pattern: rowEl.onpointerup followed by pointerType/button check, then idle guard
+    fork_handler_start = SESSIONS_JS.find("rowEl.onpointerup=(e)=>{")
+    assert fork_handler_start != -1, "Fork row pointerup handler not found"
+    fork_handler_snippet = SESSIONS_JS[fork_handler_start:fork_handler_start+200]
+    assert "if(_gestureState==='idle') return;" in fork_handler_snippet, \
+        "Fork row pointerup handler should have idle guard"

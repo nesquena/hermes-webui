@@ -46,8 +46,11 @@ class TestCancelStreamCleanup:
     def _get_cancel_block(self):
         """Extract the cancelStream function body from boot.js."""
         src = read("static/boot.js")
-        idx = src.find("async function cancelStream()")
-        assert idx != -1, "cancelStream not found in boot.js"
+        # Signature-tolerant: cancelStream now takes a `reason` param (#5345), so
+        # match the declaration regardless of its parameter list.
+        m = re.search(r"async function cancelStream\s*\(", src)
+        assert m is not None, "cancelStream not found in boot.js"
+        idx = m.start()
         # Find the closing brace — scan for the matching }
         depth = 0
         end = idx
@@ -122,8 +125,13 @@ class TestCancelStreamErrorPath:
         The status is cleared by setStatus('') unconditionally.
         """
         src = read("static/boot.js")
-        idx = src.find("async function cancelStream()")
-        block = src[idx:idx + 400]
+        # Signature-tolerant match (cancelStream now takes a `reason` param, #5345).
+        m = re.search(r"async function cancelStream\s*\(", src)
+        assert m is not None, "cancelStream not found in boot.js"
+        idx = m.start()
+        # Widen the window: the provenance log + comments added for #5345 sit
+        # before the try/catch, so 400 chars no longer reaches the catch block.
+        block = src[idx:idx + 1200]
         # The old pattern was setStatus inside catch; new pattern has it outside
         # Look for the catch block specifically
         catch_idx = block.find("}catch(")

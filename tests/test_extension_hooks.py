@@ -126,23 +126,97 @@ def test_index_html_injection_escapes_urls_and_preserves_disabled_default(tmp_pa
     assert injected.index("/extensions/app.js") < injected.index("</body>")
 
 
+def test_extension_settings_runtime_config_injects_before_extension_scripts(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "manifest.json").write_text(
+        """
+        {
+          "extensions": [
+            {
+              "id": "settings-ok",
+              "scripts": ["settings-ok.js"],
+              "permissions": {"storage": {"owned": true}},
+              "settings_schema": [
+                {"key": "flag", "type": "boolean", "default": true}
+              ]
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "manifest.json")
+
+    from api.extensions import inject_extension_tags
+
+    injected = inject_extension_tags("<html><head></head><body></body></html>")
+
+    assert "window.__HERMES_EXTENSION_CONFIG__" in injected
+    assert "window.HermesExtensionSettings.primeFromStatus(window.__HERMES_EXTENSION_CONFIG__)" in injected
+    assert '"storage_owned":true' in injected
+    assert '"settings_schema":[{"key":"flag","type":"boolean"' in injected
+    assert injected.index("window.__HERMES_EXTENSION_CONFIG__") < injected.index("/extensions/settings-ok.js")
+
+
+def test_extension_settings_only_manifest_still_injects_runtime_config(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "manifest.json").write_text(
+        """
+        {
+          "extensions": [
+            {
+              "id": "settings-only",
+              "permissions": {"storage": {"owned": true}},
+              "settings_schema": [
+                {"key": "flag", "type": "boolean", "default": true}
+              ]
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "manifest.json")
+
+    from api.extensions import inject_extension_tags
+
+    injected = inject_extension_tags("<html><head></head><body></body></html>")
+
+    assert "window.__HERMES_EXTENSION_CONFIG__" in injected
+    assert '"id":"settings-only"' in injected
+    assert injected.index("window.__HERMES_EXTENSION_CONFIG__") < injected.index("</body>")
+
+
 def test_extension_route_remains_behind_webui_auth(monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "test-password")
 
-    from api.auth import check_auth
+    from api.auth import check_auth, _invalidate_password_hash_cache
 
-    extension = FakeHandler()
-    # SimpleNamespace must include `query` because api.auth.check_auth (since
-    # v0.50.258, the multi-param ?next= encoding fix) accesses `parsed.query`
-    # when constructing the redirect Location header.
-    assert check_auth(extension, SimpleNamespace(path="/extensions/app.js", query="")) is False
-    assert extension.status == 302
-    assert extension.header("Location") == "login?next=/extensions/app.js"
+    # The password hash is cached process-wide (PBKDF2 is ~1s/call). Invalidate
+    # before so this test reads the just-set env var rather than a stale None
+    # cached by an earlier auth-disabled test, and again in finally so the hash
+    # computed here can't leak into a later test that expects auth disabled.
+    # Without this the test's result depends on suite execution order.
+    _invalidate_password_hash_cache()
+    try:
+        extension = FakeHandler()
+        # SimpleNamespace must include `query` because api.auth.check_auth (since
+        # v0.50.258, the multi-param ?next= encoding fix) accesses `parsed.query`
+        # when constructing the redirect Location header.
+        assert check_auth(extension, SimpleNamespace(path="/extensions/app.js", query="")) is False
+        assert extension.status == 302
+        assert extension.header("Location") == "login?next=/extensions/app.js"
 
-    # Existing core static assets remain public; extension assets intentionally
-    # do not share that exemption because they are administrator-supplied code.
-    static = FakeHandler()
-    assert check_auth(static, SimpleNamespace(path="/static/ui.js", query="")) is True
+        # Existing core static assets remain public; extension assets intentionally
+        # do not share that exemption because they are administrator-supplied code.
+        static = FakeHandler()
+        assert check_auth(static, SimpleNamespace(path="/static/ui.js", query="")) is True
+    finally:
+        _invalidate_password_hash_cache()
 
 
 
@@ -198,6 +272,14 @@ def test_extension_manifest_adds_bundled_assets_before_env_urls(tmp_path, monkey
             "/extensions/templates/app.css",
             "/extensions/env-only.css",
         ],
+        "extensions": [
+            {
+                "id": "templates",
+                "name": "templates",
+                "storage_owned": False,
+                "settings_schema": [],
+            },
+        ],
     }
 
 
@@ -231,6 +313,14 @@ def test_extension_manifest_relative_assets_resolve_from_manifest_directory(tmp_
         "enabled": True,
         "script_urls": ["/extensions/desktop-companion/assets/companion-adapter.js"],
         "stylesheet_urls": ["/extensions/desktop-companion/assets/companion-adapter.css"],
+        "extensions": [
+            {
+                "id": "desktop-companion",
+                "name": "desktop-companion",
+                "storage_owned": False,
+                "settings_schema": [],
+            }
+        ],
     }
 
 
@@ -537,6 +627,10 @@ def test_extension_manifest_accepts_top_level_extension_array(tmp_path, monkeypa
         "enabled": True,
         "script_urls": ["/extensions/a/a.js", "/extensions/b/b.js"],
         "stylesheet_urls": ["/extensions/a/a.css"],
+        "extensions": [
+            {"id": "a", "name": "a", "storage_owned": False, "settings_schema": []},
+            {"id": "b", "name": "b", "storage_owned": False, "settings_schema": []},
+        ],
     }
 
 def test_extension_static_serving_is_sandboxed(tmp_path, monkeypatch):

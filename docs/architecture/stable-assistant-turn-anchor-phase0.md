@@ -1,12 +1,16 @@
 # Stable Assistant Turn Anchors Phase 0 Inventory
 
-This inventory implements the first non-visual slice of
-[`stable-assistant-turn-anchors.md`](../rfcs/stable-assistant-turn-anchors.md).
-It documents the current per-turn state layers and the event-shape contract that
-future anchor phases must consume. It does not claim that anchors are wired into
-streaming or rendering yet.
+This inventory began as the first non-visual slice of
+[`stable-assistant-turn-anchors.md`](../rfcs/stable-assistant-turn-anchors.md) and
+now records the shipped phase progression. Current `master` wires Anchor-owned
+`activity_scene_v1` data into live and settled Compact Worklog, Transparent
+Stream, journal hydration, session re-entry, and transcript-backed persistence.
 
-## RFC Phase Progress
+The slice-by-slice sections below are retained as implementation history.
+Present-tense statements such as “unwired” or “future phase” describe the point
+when that slice landed; they do not override the current coverage summary above.
+
+## Shipped RFC Phase Progress
 
 - The #3962 Phase 0 scaffold shipped through #3977 / v0.51.359: inventory the
   current state layers, encode the owner seed, and pin the source classification
@@ -50,6 +54,13 @@ streaming or rendering yet.
   `_anchor_activity_scene` snapshot so the folded activity summary can appear
   above the final answer. This handoff does not claim Transparent Stream wiring
   or durable hard-reload scene persistence.
+- The first RFC Phase 6 ownership slice routes the production `state_saved` SSE
+  into the active Assistant Turn Anchor and carries `artifacts` and
+  `side_effects` through `activity_scene_v1` settlement persistence and reload
+  hydration. These owned outcomes remain off the readable Worklog by default;
+  memory/skill saves still surface through their existing toast and natural UI.
+  Production artifact-reference derivation and run-journal reconstruction of
+  side effects remain follow-up work.
 
 ## State Layers
 
@@ -294,6 +305,28 @@ post-tool process text, thinking rows, and tool rows stay in chronological
 activity order for Compact Worklog and Transparent Stream renderers. The
 Transparent Stream raw `content[]` helper remains a fallback for settled
 messages that do not yet carry `_anchor_activity_scene`.
+
+### Settled Fallback Ownership Matrix
+
+After the mixed `content[]` bridge, `_anchor_activity_scene` is the semantic
+owner for settled assistant activity whenever it is present. Legacy raw-message
+paths stay as compatibility fallbacks for older or non-anchor transcripts; they
+must not compete with an anchor-owned turn.
+
+| Surface | Anchor-present owner | Compatibility fallback | Fallback exit |
+| --- | --- | --- | --- |
+| Settled Compact Worklog activity | `_renderSettledAnchorSceneForMessage()` renders `activity_scene_v1` rows before the final answer. | Legacy `S.toolCalls`, `tool_calls`, `_partial_tool_calls`, and raw `content[].tool_use` rebuilds. | `anchorOwnedAssistantRawIdxs` excludes the anchor-owned turn from message metadata scans, fallback source collection, tool buckets, thinking buckets, and worklog-source mirroring. |
+| Settled Transparent Stream activity | `_renderSettledAnchorSceneTransparentForMessage()` renders the same scene rows as transparent event rows or inline prose before the final answer segment. | `_transparentStreamOrderedParts()` rebuilds raw `content[]` order for historical messages without an anchor scene. | `_transparentStreamOrderedParts()` returns `null` when `message._anchor_activity_scene` exists, leaving the dedicated anchor renderer in charge. |
+| Historical / non-anchor transcripts | Complete, user-bounded transcripts with unique top-level `assistant.tool_calls[].id` declarations, exactly one matching role=`tool` `tool_call_id` result per declaration, and a later final assistant answer hydrate an in-memory `activity_scene_v1` through the Anchor module adapter before settled rendering. | Raw `content[]`, persisted `session.tool_calls`, role=`tool` rows, and partial tool-call snapshots continue to recover ambiguous, incomplete, or richer historical shapes. | The ID-linked shape exits fallback ownership only after strict turn-local validation; missing or duplicate IDs/results, cross-turn matches, process prose/reasoning, and other tool schemas fail closed to the legacy renderer. |
+| Live reattach / session switch | `renderLiveAnchorActivityScene()` consumes the projected live scene, and session switch first attempts runtime-journal anchor scene restore. | Saved live DOM snapshots and `INFLIGHT` tool replay. | Snapshot fallback only runs when no usable live anchor scene can be rendered. |
+
+This matrix is the current settled-render contract, backed by runtime-journal
+hydration parity and behavior-level renderer ownership coverage. Fallback paths
+are compatibility-only rebuilds for historical or genuinely non-anchor
+transcripts, and the renderer must gate them by explicit raw transcript indexes
+so object identity or duplicate message references cannot let fallback rows
+compete with an anchor-owned turn. Removing a compatibility path still requires
+new evidence that the supported transcript shape hydrates through anchors.
 
 ## Source Event Classification
 

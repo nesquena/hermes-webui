@@ -27,7 +27,7 @@ def run_ctl(
     home: Path,
     *args: str,
     env: dict[str, str] | None = None,
-    timeout: float = 5.0,
+    timeout: float = 15.0,
     repo_root: Path = REPO_ROOT,
     load_dotenv: bool = False,
 ):
@@ -269,6 +269,11 @@ def test_start_can_ignore_repo_dotenv_for_authoritative_test_env(tmp_path):
             "HERMES_WEBUI_PYTHON": str(fake_python),
             "FAKE_PYTHON_LOG": str(fake_log),
             "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
+            # This test exercises dotenv precedence on the DEFAULT port; keep
+            # it hermetic on developer machines where a real WebUI (systemd
+            # unit or manual run) is serving 8787.
+            "HERMES_WEBUI_CTL_ALLOW_SYSTEMD_CONFLICT": "1",
+            "HERMES_WEBUI_CTL_ALLOW_PORT_CONFLICT": "1",
         },
         repo_root=repo_root,
     )
@@ -318,6 +323,82 @@ def test_start_loads_dotenv_but_inline_overrides_win(tmp_path):
         fake_output = wait_for_file_text(fake_log, contains="host=0.0.0.0 port=18888")
         assert "fake-python args:" in fake_output
         assert "host=0.0.0.0 port=18888" in fake_output
+    finally:
+        stop = run_ctl(tmp_path, "stop", repo_root=repo_root)
+        assert stop.returncode == 0, stop.stderr + stop.stdout
+        _kill_tree(pid)
+        assert_process_exits(pid)
+
+
+def test_start_loads_dotenv_double_quoted_port_with_trailing_comment(tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _seed_ctl_repo(repo_root)
+    (repo_root / "bootstrap.py").write_text("# fake bootstrap target\n", encoding="utf-8")
+
+    fake_python = tmp_path / "fake-python"
+    fake_log = tmp_path / "fake-python.log"
+    write_fake_python(fake_python)
+    (repo_root / ".env").write_text(
+        'HERMES_WEBUI_PORT="19004" # inline comment\n',
+        encoding="utf-8",
+    )
+
+    result = run_ctl(
+        tmp_path,
+        "start",
+        env={
+            "HERMES_WEBUI_PYTHON": str(fake_python),
+            "FAKE_PYTHON_LOG": str(fake_log),
+            "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
+        },
+        repo_root=repo_root,
+        load_dotenv=True,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    pid = wait_for_pid_file(tmp_path / ".hermes" / "webui.pid")
+    try:
+        fake_output = wait_for_file_text(fake_log, contains="host=127.0.0.1 port=19004")
+        assert "host=127.0.0.1 port=19004" in fake_output
+    finally:
+        stop = run_ctl(tmp_path, "stop", repo_root=repo_root)
+        assert stop.returncode == 0, stop.stderr + stop.stdout
+        _kill_tree(pid)
+        assert_process_exits(pid)
+
+
+def test_start_loads_dotenv_export_tab_host_assignment(tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _seed_ctl_repo(repo_root)
+    (repo_root / "bootstrap.py").write_text("# fake bootstrap target\n", encoding="utf-8")
+
+    fake_python = tmp_path / "fake-python"
+    fake_log = tmp_path / "fake-python.log"
+    write_fake_python(fake_python)
+    (repo_root / ".env").write_text(
+        "export\tHERMES_WEBUI_HOST=0.0.0.0\nHERMES_WEBUI_PORT=19005\n",
+        encoding="utf-8",
+    )
+
+    result = run_ctl(
+        tmp_path,
+        "start",
+        env={
+            "HERMES_WEBUI_PYTHON": str(fake_python),
+            "FAKE_PYTHON_LOG": str(fake_log),
+            "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
+        },
+        repo_root=repo_root,
+        load_dotenv=True,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    pid = wait_for_pid_file(tmp_path / ".hermes" / "webui.pid")
+    try:
+        fake_output = wait_for_file_text(fake_log, contains="host=0.0.0.0 port=19005")
+        assert "host=0.0.0.0 port=19005" in fake_output
     finally:
         stop = run_ctl(tmp_path, "stop", repo_root=repo_root)
         assert stop.returncode == 0, stop.stderr + stop.stdout

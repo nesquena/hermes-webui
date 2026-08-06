@@ -182,6 +182,31 @@ def _agent_dir_from_hermes_cli() -> Path | None:
     return None
 
 
+def _agent_dir_from_python(python_exe: str) -> Path | None:
+    script = (
+        'import importlib.util\n'
+        'spec = importlib.util.find_spec("run_agent")\n'
+        'print(spec.origin if spec else "")\n'
+    )
+    try:
+        check = subprocess.run(
+            [python_exe, "-c", script],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if check.returncode != 0:
+        return None
+    lines = check.stdout.splitlines()
+    if not lines:
+        return None
+    origin = Path(lines[0].strip())
+    if not origin.is_absolute() or origin.name != "run_agent.py" or not origin.is_file():
+        return None
+    return origin.parent.resolve()
+
+
 def discover_agent_dir() -> Path | None:
     home = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
     candidates = [
@@ -202,7 +227,10 @@ def discover_agent_dir() -> Path | None:
         candidate = Path(raw).expanduser().resolve()
         if candidate.exists() and (candidate / "run_agent.py").exists():
             return candidate
-    return _agent_dir_from_hermes_cli()
+    agent_dir = _agent_dir_from_hermes_cli()
+    if agent_dir:
+        return agent_dir
+    return _agent_dir_from_python(discover_launcher_python(None))
 
 
 def discover_launcher_python(agent_dir: Path | None) -> str:
@@ -269,6 +297,13 @@ def ensure_python_has_webui_deps(python_exe: str, agent_dir: Path | None = None)
             if str(candidate) != python_exe and candidate.exists():
                 if _python_can_run_webui_and_agent(str(candidate), agent_dir):
                     return str(candidate)
+
+    if (os.getenv("HERMES_WEBUI_DISABLE_LOCAL_VENV") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        raise RuntimeError(
+            "Python environment cannot import both WebUI dependencies and Hermes Agent, "
+            "and local .venv creation is disabled for this packaged launch. Set "
+            "HERMES_WEBUI_PYTHON to an interpreter with Hermes Agent dependencies."
+        )
 
     venv_dir = REPO_ROOT / ".venv"
     venv_python = venv_dir / (

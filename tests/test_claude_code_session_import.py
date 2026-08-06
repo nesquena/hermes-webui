@@ -164,15 +164,15 @@ def test_get_cli_sessions_cache_invalidates_when_sqlite_wal_changes(monkeypatch,
     Path(f"{db_path}-wal").write_text("new wal contents", encoding="utf-8")
     second = models.get_cli_sessions()
 
-    # Two calls to get_cli_sessions() × 2 invocations each (first pass +
-    # second cron-only pass) = 4 total calls to the mock.
-    assert calls == 4
+    # Two calls to get_cli_sessions() × 3 invocations each (first pass +
+    # cron-only pass + webhook-only pass) = 6 total calls to the mock.
+    assert calls == 6
     # First pass of first call returned message_count=1 (calls was 1).
     assert first[0]["message_count"] == 1
-    # First pass of second call returned message_count=3 (calls was 3;
-    # the second pass incremented calls to 2 and 4 but cron-only filter
-    # excluded the cli-source session from both second passes).
-    assert second[0]["message_count"] == 3
+    # First pass of second call returned message_count=4 (calls was 4;
+    # source-specific passes incremented calls to 2, 3, 5, and 6 but excluded
+    # the cli-source session from those pass results).
+    assert second[0]["message_count"] == 4
 
 
 def test_session_import_cli_returns_read_only_claude_code_payload(monkeypatch, tmp_path):

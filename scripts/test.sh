@@ -3,8 +3,20 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="$ROOT/.venv"
-VENV_PY="$VENV_DIR/bin/python"
 REQ_FILE="$ROOT/requirements-dev.txt"
+
+resolve_venv_python() {
+  local candidate
+  for candidate in "$VENV_DIR/bin/python" "$VENV_DIR/Scripts/python.exe"; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+VENV_PY="$(resolve_venv_python || true)"
 
 is_supported_python() {
   "$1" - <<'PY' >/dev/null 2>&1
@@ -115,9 +127,10 @@ create_or_rebuild_venv() {
     venv_guidance "$base_py"
     return 2
   fi
+  VENV_PY="$(resolve_venv_python || true)"
   if [[ ! -x "$VENV_PY" ]]; then
     rm -rf "$VENV_DIR"
-    echo "$VENV_DIR was created but does not contain bin/python." >&2
+    echo "$VENV_DIR was created but does not contain bin/python or Scripts/python.exe." >&2
     venv_guidance "$base_py"
     return 2
   fi
@@ -157,6 +170,7 @@ select_python() {
     desired_major_minor=""
   fi
 
+  VENV_PY="$(resolve_venv_python || true)"
   if [[ -x "$VENV_PY" ]]; then
     if is_supported_python "$VENV_PY"; then
       current_major_minor="$(python_major_minor "$VENV_PY")"
@@ -182,7 +196,7 @@ select_python() {
   fi
 
   if [[ -e "$VENV_DIR" && ! -x "$VENV_PY" ]]; then
-    echo "$VENV_DIR exists but does not contain bin/python; rebuilding." >&2
+    echo "$VENV_DIR exists but does not contain bin/python or Scripts/python.exe; rebuilding." >&2
     create_or_rebuild_venv "$base_py" rebuild || return $?
     printf '%s\n' "$VENV_PY"
     return 0

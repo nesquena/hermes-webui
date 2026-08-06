@@ -3,9 +3,10 @@
 import hashlib
 import io
 import json
+import socket
 import zipfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -133,11 +134,75 @@ def test_gallery_installed_extension_becomes_runtime_manifest(monkeypatch, tmp_p
         "enabled": True,
         "script_urls": ["/extensions/my-ext/assets/app.js"],
         "stylesheet_urls": ["/extensions/my-ext/assets/app.css"],
+        "extensions": [
+            {
+                "id": "my-ext",
+                "name": "My Extension",
+                "storage_owned": False,
+                "settings_schema": [],
+            }
+        ],
     }
     status = ext_mod.get_extension_status()
     assert status["manifest"]["status"] == "gallery_installed"
     assert status["counts"]["manifest_extensions"] == 1
     assert status["extensions"][0]["id"] == "my-ext"
+
+
+def test_gallery_installed_settings_only_manifest_becomes_runtime_entry(monkeypatch, tmp_path):
+    """Settings-only gallery installs still surface in status and runtime config."""
+    ext_dir, state_dir = _setup_ext_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_MANIFEST", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_SCRIPT_URLS", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_STYLESHEET_URLS", raising=False)
+    import api.extensions as ext_mod
+
+    files = {
+        "my-ext/manifest.json": json.dumps(
+            {
+                "name": "Settings Only",
+                "version": "1.0.0",
+                "permissions": {"storage": {"owned": True}},
+                "settings_schema": [
+                    {"key": "flag", "type": "boolean", "default": True},
+                ],
+            }
+        ),
+    }
+    zip_bytes = _make_zip(files)
+    sha = hashlib.sha256(zip_bytes).hexdigest()
+
+    monkeypatch.setattr(ext_mod, "_safe_download", lambda *a, **kw: zip_bytes)
+
+    ext_mod.install_extension(
+        "my-ext",
+        "https://hermes-webui.github.io/exts/my-ext.zip",
+        sha,
+    )
+
+    assert ext_mod.get_extension_config() == {
+        "enabled": True,
+        "script_urls": [],
+        "stylesheet_urls": [],
+        "extensions": [
+            {
+                "id": "my-ext",
+                "name": "Settings Only",
+                "storage_owned": True,
+                "settings_schema": [
+                    {"key": "flag", "type": "boolean", "label": "flag", "description": "", "default": True},
+                ],
+            }
+        ],
+    }
+    status = ext_mod.get_extension_status()
+    assert status["manifest"]["status"] == "gallery_installed"
+    assert status["counts"]["manifest_extensions"] == 1
+    assert status["extensions"][0]["id"] == "my-ext"
+    assert status["extensions"][0]["storage_owned"] is True
+    assert status["extensions"][0]["settings_schema"] == [
+        {"key": "flag", "type": "boolean", "label": "flag", "description": "", "default": True},
+    ]
 
 
 def test_install_bootstraps_managed_default_root_without_env(monkeypatch, tmp_path):
@@ -203,6 +268,14 @@ def test_install_bootstraps_managed_default_root_without_env(monkeypatch, tmp_pa
         "enabled": True,
         "script_urls": ["/extensions/plug-ext/app.js"],
         "stylesheet_urls": [],
+        "extensions": [
+            {
+                "id": "plug-ext",
+                "name": "Plug And Play",
+                "storage_owned": False,
+                "settings_schema": [],
+            }
+        ],
     }
     status = ext_mod.get_extension_status()
     assert status["enabled"] is True
@@ -347,7 +420,7 @@ def test_gallery_registry_list_format(monkeypatch, tmp_path):
     mock_resp.read.return_value = json.dumps(registry_data).encode("utf-8")
 
     ext_mod._REGISTRY_CACHE.clear()
-    monkeypatch.setattr(ext_mod, "urlopen", lambda *a, **kw: mock_resp)
+    monkeypatch.setattr(ext_mod, "_build_gallery_opener", lambda: MagicMock(open=lambda *a, **kw: mock_resp))
 
     result = ext_mod.get_extension_registry()
     assert "entries" in result
@@ -372,7 +445,7 @@ def test_gallery_registry_extensions_format(monkeypatch, tmp_path):
     mock_resp.read.return_value = json.dumps(registry_data).encode("utf-8")
 
     ext_mod._REGISTRY_CACHE.clear()
-    monkeypatch.setattr(ext_mod, "urlopen", lambda *a, **kw: mock_resp)
+    monkeypatch.setattr(ext_mod, "_build_gallery_opener", lambda: MagicMock(open=lambda *a, **kw: mock_resp))
 
     result = ext_mod.get_extension_registry()
     assert len(result["entries"]) == 1
@@ -450,3 +523,94 @@ def test_install_rejects_redirect_to_disallowed_host(monkeypatch, tmp_path):
             "https://hermes-webui.github.io/exts/redir-ext.zip",
             "a" * 64,
         )
+
+
+def test_connect_ipv4_first_tries_inet_before_inet6(monkeypatch):
+    """_connect_ipv4_first calls getaddrinfo with AF_INET before AF_INET6."""
+    import api.extensions as ext_mod
+
+    call_order = []
+
+    real_getaddrinfo = socket.getaddrinfo
+
+    def tracking_getaddrinfo(host, port, family, *args, **kwargs):
+        call_order.append(family)
+        return real_getaddrinfo(host, port, family, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", tracking_getaddrinfo)
+    monkeypatch.setattr(socket, "getdefaulttimeout", lambda: None)
+
+    # We don't actually need to connect; just verify family ordering.
+    try:
+        ext_mod._connect_ipv4_first(("localhost", 80), timeout=None)
+    except OSError:
+        pass  # connection failure is fine — we only care about call order
+
+    assert socket.AF_INET in call_order
+    if socket.AF_INET6 in call_order:
+        assert call_order.index(socket.AF_INET) < call_order.index(socket.AF_INET6)
+
+
+def test_connect_ipv4_first_handles_global_default_timeout():
+    """The _GLOBAL_DEFAULT_TIMEOUT sentinel is resolved correctly."""
+    import api.extensions as ext_mod
+
+    # Should not raise TypeError when passed the stdlib sentinel.
+    sentinel = socket._GLOBAL_DEFAULT_TIMEOUT
+    # Force default timeout to None so no actual timeout is set on the socket.
+    with patch.object(socket, "getdefaulttimeout", return_value=None):
+        try:
+            ext_mod._connect_ipv4_first(("127.0.0.1", 1), timeout=sentinel)
+        except OSError:
+            pass  # connection refused is fine
+        except TypeError:
+            pytest.fail("TypeError — sentinel not resolved")
+
+
+def test_gallery_opener_includes_ipv4_first_handler():
+    """_build_gallery_opener produces an opener wired to the IPv4-first HTTPS handler."""
+    import api.extensions as ext_mod
+
+    opener = ext_mod._build_gallery_opener()
+    # build_opener instantiates handler classes internally; find the one whose
+    # https_open uses our IPv4-first connection class.
+    handler_classes = [type(h) for h in opener.handlers]
+    assert ext_mod._IPv4FirstHTTPSHandler in handler_classes
+
+
+def test_safe_download_uses_gallery_opener(monkeypatch):
+    """_safe_download routes through _build_gallery_opener (which is IPv4-first)."""
+    import api.extensions as ext_mod
+
+    fake_response = MagicMock()
+    fake_response.read.return_value = b"file-content"
+    fake_response.close = MagicMock()
+    fake_opener = MagicMock(open=lambda url, timeout=None: fake_response)
+
+    called = []
+    monkeypatch.setattr(ext_mod, "_build_gallery_opener", lambda: (called.append(True), fake_opener)[1])
+
+    result = ext_mod._safe_download("https://example.com/x.zip", 1024)
+    assert result == b"file-content"
+    assert called == [True]
+
+
+def test_registry_fetch_uses_gallery_opener(monkeypatch):
+    """get_extension_registry routes through _build_gallery_opener (IPv4-first)."""
+    import api.extensions as ext_mod
+
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = json.dumps(
+        {"extensions": [{"id": "test-ext", "name": "Test"}]}
+    ).encode("utf-8")
+
+    ext_mod._REGISTRY_CACHE.clear()
+
+    called = []
+    fake_opener = MagicMock(open=lambda *a, **kw: mock_resp)
+    monkeypatch.setattr(ext_mod, "_build_gallery_opener", lambda: (called.append(True), fake_opener)[1])
+
+    result = ext_mod.get_extension_registry()
+    assert len(result["entries"]) == 1
+    assert result["entries"][0]["id"] == "test-ext"
+    assert called == [True]

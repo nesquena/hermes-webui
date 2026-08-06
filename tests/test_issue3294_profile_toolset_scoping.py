@@ -108,6 +108,31 @@ def test_matching_home_defers_to_get_config(_two_profiles):
     ]
 
 
+def test_active_home_with_external_config_override_defers_to_get_config(_two_profiles, monkeypatch, tmp_path):
+    """The active home still honors HERMES_CONFIG_PATH when the override lives
+    outside that home."""
+    cfg, default_home, profile_b_home = _two_profiles
+    from api import profiles
+
+    active_home = tmp_path / "active-home"
+    override_path = tmp_path / "override-dir" / "config.yaml"
+    active_home.mkdir()
+    _write_cfg(active_home, ["wrong-active-home-file"])
+    override_path.parent.mkdir()
+    import yaml
+
+    override_path.write_text(
+        yaml.safe_dump({"platform_toolsets": {"cli": ["override-config"]}}, sort_keys=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(override_path))
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: active_home)
+    cfg.reload_config()
+
+    same = cfg.get_config_for_profile_home(active_home)
+    assert same.get("platform_toolsets", {}).get("cli") == ["override-config"]
+
+
 def test_matching_ambient_home_that_does_not_exist_still_defers_to_get_config(_two_profiles, monkeypatch, tmp_path):
     """Regression (#4516 gate): the nonexistent-home guard must run AFTER the
     ambient-resolver short-circuit. A home that matches the ambient config path

@@ -73,6 +73,121 @@ def _install_fake_hermes_cli(monkeypatch):
 class TestGetProviders:
     """Unit tests for get_providers() function."""
 
+    def test_reuses_short_ttl_cache_for_same_profile_home(self, monkeypatch, tmp_path):
+        """Back-to-back provider reads should not re-run expensive probes (#6010)."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        from api import providers as prov
+
+        calls = []
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {"openai": "OpenAI"})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {"openai": []})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+        monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
+
+        def _counting_has_key(pid):
+            calls.append(pid)
+            return False
+
+        monkeypatch.setattr(prov, "_provider_has_key", _counting_has_key)
+
+        try:
+            first = prov.get_providers()
+            second = prov.get_providers()
+            assert first == second
+            assert calls == ["openai"]
+        finally:
+            if hasattr(prov, "invalidate_providers_cache"):
+                prov.invalidate_providers_cache()
+
+    def test_provider_cache_is_scoped_by_profile_home(self, monkeypatch, tmp_path):
+        """Provider cache entries must not leak across profile homes (#3957/#6010)."""
+        _install_fake_hermes_cli(monkeypatch)
+        home_a = tmp_path / "a"
+        home_b = tmp_path / "b"
+        home_a.mkdir()
+        home_b.mkdir()
+        active_home = {"path": home_a}
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: active_home["path"])
+
+        from api import providers as prov
+
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {"openai": "OpenAI"})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {"openai": []})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+        monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
+        monkeypatch.setattr(prov, "_provider_has_key", lambda _pid: active_home["path"] == home_b)
+
+        try:
+            first = prov.get_providers()
+            active_home["path"] = home_b
+            second = prov.get_providers()
+            first_openai = next(p for p in first["providers"] if p["id"] == "openai")
+            second_openai = next(p for p in second["providers"] if p["id"] == "openai")
+            assert first_openai["has_key"] is False
+            assert second_openai["has_key"] is True
+        finally:
+            if hasattr(prov, "invalidate_providers_cache"):
+                prov.invalidate_providers_cache()
+
+    def test_set_provider_key_invalidates_providers_cache(self, monkeypatch, tmp_path):
+        """Saving a key should invalidate the cached Providers response (#6010)."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        from api import providers as prov
+
+        key_present = {"value": False}
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {"anthropic": "Anthropic"})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {"anthropic": []})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+        monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
+        monkeypatch.setattr(prov, "_provider_has_key", lambda _pid: key_present["value"])
+
+        def _fake_write_env_file(_path, values):
+            key_present["value"] = bool(values.get("ANTHROPIC_API_KEY"))
+
+        monkeypatch.setattr(prov, "_write_env_file", _fake_write_env_file)
+        monkeypatch.setattr(prov, "invalidate_models_cache", lambda: None)
+        monkeypatch.setattr(prov, "invalidate_account_usage_status_cache", lambda _provider_id=None: None)
+
+        try:
+            before = prov.get_providers()
+            result = prov.set_provider_key("anthropic", "sk-test-12345678")
+            after = prov.get_providers()
+
+            before_anthropic = next(p for p in before["providers"] if p["id"] == "anthropic")
+            after_anthropic = next(p for p in after["providers"] if p["id"] == "anthropic")
+            assert result["ok"] is True
+            assert before_anthropic["has_key"] is False
+            assert after_anthropic["has_key"] is True
+        finally:
+            if hasattr(prov, "invalidate_providers_cache"):
+                prov.invalidate_providers_cache()
+
+    def test_oauth_credential_updates_invalidate_providers_cache(self, monkeypatch, tmp_path):
+        """OAuth credential updates should invalidate cached Providers responses (#6010)."""
+        from api import oauth
+        from api import providers as prov
+
+        invalidated_credentials = []
+        providers_invalidated = []
+        monkeypatch.setattr(config, "invalidate_credential_pool_cache", invalidated_credentials.append)
+        monkeypatch.setattr(prov, "invalidate_providers_cache", lambda: providers_invalidated.append(True))
+
+        oauth._persist_codex_credentials(
+            tmp_path,
+            {"access_token": "access-token", "refresh_token": "refresh-token"},
+        )
+
+        assert invalidated_credentials == ["openai-codex"]
+        assert providers_invalidated == [True]
+
     def test_returns_list_of_known_providers(self, monkeypatch, tmp_path):
         """GET /api/providers should return a list of all known providers."""
         _install_fake_hermes_cli(monkeypatch)

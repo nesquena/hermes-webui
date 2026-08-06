@@ -20,7 +20,7 @@ import re
 
 
 def _src(name: str) -> str:
-    with open(f"static/{name}") as f:
+    with open(f"static/{name}", encoding="utf-8") as f:
         return f.read()
 
 
@@ -123,7 +123,7 @@ class TestComposerVoiceButtonI18n:
         "voice_mode_toggle_active",
     )
 
-    LOCALES = ("en", "fr", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "tr", "pl", "vi")
+    LOCALES = ("en", "fr", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "tr", "pl", "vi", "cs")
 
     def test_legacy_voice_toggle_key_removed(self):
         """The old key whose string was 'Voice input' caused the duplicate-
@@ -171,7 +171,7 @@ class TestComposerVoiceButtonI18n:
 class TestVoiceModePreferenceGate:
     """boot.js must hide btnVoiceMode by default, surface it via Preferences."""
 
-    LOCALES = ("en", "fr", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "tr", "pl", "vi")
+    LOCALES = ("en", "fr", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "tr", "pl", "vi", "cs")
 
     def test_voice_mode_pref_is_localstorage_backed(self):
         """The pref reads from localStorage key 'hermes-voice-mode-button'."""
@@ -230,6 +230,31 @@ class TestVoiceModePreferenceGate:
         assert "_applyVoiceModePref" in src, \
             "panels.js onchange handler must call window._applyVoiceModePref() " \
             "so the button appears/disappears immediately."
+
+
+class TestVoiceModeRuntimePreferences:
+    """Voice mode runtime prefs must stay wired to localStorage-backed settings."""
+
+    def test_voice_mode_silence_pref_reads_localstorage_with_floor(self):
+        """boot.js must keep the silence timeout configurable without allowing
+        tiny or invalid values to auto-send instantly."""
+        src = _src("boot.js")
+        assert "localStorage.getItem('hermes-voice-silence-ms')" in src, (
+            "voice mode must read hermes-voice-silence-ms from localStorage "
+            "so pause timing survives reloads."
+        )
+        assert "Math.max(200,_silenceMsRaw)" in src, (
+            "voice mode must floor the configured silence timeout at 200ms "
+            "instead of trusting tiny values."
+        )
+
+    def test_voice_mode_continuous_pref_reads_localstorage(self):
+        """boot.js must preserve the continuous-recognition preference across reloads."""
+        src = _src("boot.js")
+        assert "localStorage.getItem('hermes-voice-continuous')==='true'" in src, (
+            "voice mode must read hermes-voice-continuous from localStorage "
+            "instead of hardcoding continuous recognition off."
+        )
 
 
 class TestActiveStateTooltips:

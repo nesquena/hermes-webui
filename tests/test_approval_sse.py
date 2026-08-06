@@ -113,8 +113,10 @@ class TestSSEStaticAnalysis:
         cb_start = streaming_src.find("def _approval_notify_cb(approval_data):")
         cb_end = streaming_src.find("_reg_notify(session_id, _approval_notify_cb)", cb_start)
         cb_body = streaming_src[cb_start:cb_end]
-        assert "_submit_pending_for_polling(session_id, approval_data)" in cb_body, \
+        assert "head, total = _submit_pending_for_polling(session_id, approval_data)" in cb_body, \
             "_approval_notify_cb must mirror approval data into polling state before SSE"
+        assert '"pending_count": total' in cb_body, \
+            "_approval_notify_cb must emit the reconciled pending count"
         assert "put('approval', approval_data)" in cb_body, \
             "_approval_notify_cb must still emit the approval SSE event"
 

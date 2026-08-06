@@ -7,8 +7,8 @@ and the streaming render path (messages.js _streamDisplay logic).
 import pathlib
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
-UI_JS     = (REPO_ROOT / "static" / "ui.js").read_text()
-MSG_JS    = (REPO_ROOT / "static" / "messages.js").read_text()
+UI_JS     = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+MSG_JS    = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 
 
 # ── ui.js: static render path ────────────────────────────────────────────────

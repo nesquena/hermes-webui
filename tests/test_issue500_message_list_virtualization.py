@@ -506,6 +506,7 @@ eval(extractFunc('_messageSessionIndexForRawIdx'));
 eval(extractFunc('_messageRawIdxForSessionIndex'));
 eval(extractFunc('_messageVirtualScrollTopForVisibleIdx'));
 eval(extractFunc('_remountMessageViewportAnchor'));
+eval(extractFunc('_restorePinnedMessageScrollSnapshot'));
 eval(extractFunc('_restoreMessageScrollSnapshotSameFrame'));
 
 const snapshot = {

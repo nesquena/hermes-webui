@@ -2,11 +2,79 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlparse
 import io
+import json
 import queue
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ROUTES_SRC = (ROOT / "api" / "routes.py").read_text()
+ROUTES_SRC = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+
+
+def test_gateway_terminal_error_save_failure_is_marked_unsaved(monkeypatch, tmp_path):
+    import api.gateway_chat as gateway_chat
+    import api.models as models
+    import api.streaming as streaming
+
+    session = models.Session(
+        session_id="gateway_terminal_error_save_failed",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        model_provider="openai",
+        messages=[{"role": "user", "content": "prompt"}],
+        context_messages=[],
+    )
+    session.active_stream_id = "gateway_terminal_error_stream"
+
+    def fail_save(*_args, **_kwargs):
+        raise OSError("forced gateway terminal error save failure")
+
+    session.save = fail_save
+    monkeypatch.setattr(gateway_chat, "get_session", lambda _sid: session)
+    monkeypatch.setattr(gateway_chat, "_stream_writeback_is_current", lambda *_args: True)
+    monkeypatch.setattr(streaming, "_snapshot_and_append_partial_on_error", lambda *_args: None)
+
+    payload = gateway_chat._settle_gateway_terminal_error(
+        session.session_id,
+        session.active_stream_id,
+        str(tmp_path),
+        "gpt-4o",
+        "openai",
+        "gateway exploded",
+    )
+
+    assert payload["terminal_session_persisted"] is False
+    assert "terminal_session_persisted_session_id" not in payload
+
+
+def test_gateway_terminal_error_successful_save_is_marked_persisted(monkeypatch, tmp_path):
+    import api.gateway_chat as gateway_chat
+    import api.models as models
+    import api.streaming as streaming
+
+    session = models.Session(
+        session_id="gateway_terminal_error_save_succeeds",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        model_provider="openai",
+        messages=[{"role": "user", "content": "prompt"}],
+        context_messages=[],
+    )
+    session.active_stream_id = "gateway_terminal_error_stream"
+    monkeypatch.setattr(gateway_chat, "get_session", lambda _sid: session)
+    monkeypatch.setattr(gateway_chat, "_stream_writeback_is_current", lambda *_args: True)
+    monkeypatch.setattr(streaming, "_snapshot_and_append_partial_on_error", lambda *_args: None)
+
+    payload = gateway_chat._settle_gateway_terminal_error(
+        session.session_id,
+        session.active_stream_id,
+        str(tmp_path),
+        "gpt-4o",
+        "openai",
+        "gateway exploded",
+    )
+
+    assert payload["terminal_session_persisted"] is True
+    assert payload["terminal_session_persisted_session_id"] == session.session_id
 
 
 def test_stream_status_exposes_replay_summary():
@@ -265,7 +333,7 @@ def test_session_payload_exposes_runtime_journal_for_stale_streams():
     assert "original_stream_id = getattr(s, \"active_stream_id\", None)" in ROUTES_SRC
     assert '"runtime_journal"' in ROUTES_SRC
     assert '"runtime_journal_snapshot"' in ROUTES_SRC
-    assert "_run_journal_live_snapshot(original_stream_id)" in ROUTES_SRC
+    assert "_run_journal_live_snapshot(original_stream_id, handler=handler)" in ROUTES_SRC
     assert 'terminal_state = "lost-worker-bookkeeping"' in ROUTES_SRC
     assert "active=journal_active" in ROUTES_SRC
     assert "journal_active = bool(original_stream_id in active_stream_ids)" in ROUTES_SRC
@@ -363,7 +431,51 @@ def test_live_journal_snapshot_reconstructs_visible_progress_and_tool_aliases(mo
     assert tool["activitySegmentSeq"] == 1
     assert tool["snippet"] == "passed"
     assert tool["duration"] == 1.25
-    assert len(tool["args"]["extra"]) <= 123
+    assert tool["args"]["extra"] == "x" * 200
+
+
+def test_live_journal_snapshot_bounds_pathological_tool_args(monkeypatch):
+    import api.routes as routes
+
+    long_command = "python -c " + repr("print('x')\n" * 24)
+    huge_args = {
+        "command": long_command,
+        "items": [{"index": i, "payload": "x" * 100} for i in range(50_000)],
+    }
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: {
+            "session_id": "session_1",
+            "run_id": stream_id,
+            "last_seq": 1,
+            "last_event_id": f"{stream_id}:1",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id: {
+            "events": [
+                {
+                    "seq": 1,
+                    "event": "tool",
+                    "payload": {
+                        "name": "terminal",
+                        "tool_use_id": "toolu_huge",
+                        "args": huge_args,
+                    },
+                    "event_id": f"{run_id}:1",
+                },
+            ]
+        },
+    )
+
+    snapshot = routes._run_journal_live_snapshot("run_1")
+    tool = snapshot["tool_calls"][0]
+    assert tool["args"]["command"] == long_command
+    assert len(tool["args"]["items"]) <= 64
+    assert len(json.dumps(snapshot, sort_keys=True)) < 200_000
 
 
 def test_status_payload_marks_non_terminal_dead_journal_as_stale():

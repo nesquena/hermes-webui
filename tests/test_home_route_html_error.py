@@ -6,6 +6,7 @@ their normal JSON error behavior; this only pins the shell route contract.
 """
 
 from urllib.parse import urlparse
+from types import SimpleNamespace
 
 
 class _FakeHandler:
@@ -36,14 +37,19 @@ class _FakeHandler:
 
 
 class _BrokenIndexPath:
+    def stat(self):
+        return SimpleNamespace(st_size=1, st_mtime_ns=1)
+
     def read_text(self, *args, **kwargs):
         raise RuntimeError("simulated index.html read failure")
 
 
 def test_home_route_internal_error_returns_html_503_not_json(monkeypatch):
+    from api import config as api_config
     from api import routes
 
-    monkeypatch.setattr(routes, "_INDEX_HTML_PATH", _BrokenIndexPath())
+    monkeypatch.setattr(api_config, "get_index_html_path", lambda: _BrokenIndexPath())
+    monkeypatch.setattr(routes, "_INDEX_SHELL_CACHE", {})
 
     handler = _FakeHandler()
     assert routes.handle_get(handler, urlparse("http://example.com/")) is True

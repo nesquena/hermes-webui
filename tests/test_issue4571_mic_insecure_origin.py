@@ -70,8 +70,8 @@ def test_permission_style_speech_errors_use_insecure_origin_key_only_on_that_bra
 def test_dictation_preflights_insecure_origin_before_speech_or_media_capture():
     body = _slice_between(
         BOOT_JS,
-        "btn.onclick=async()=>{",
-        "\n  // Wire up the settings checkbox",
+        "async function _startMicCapture(holdRequired=false){",
+        "\n\n  async function _toggleMicCapture(){",
     )
     insecure_idx = body.index("_micOriginNeedsSecureContext()")
     speech_idx = body.index("recognition.start()")

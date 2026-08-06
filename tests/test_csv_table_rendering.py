@@ -7,7 +7,7 @@ WORKSPACE_JS = Path("static/workspace.js").read_text(encoding="utf-8")
 
 def test_csv_extension_regex():
     """Verify _CSV_EXTS regex is defined."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert '_CSV_EXTS' in src, "Missing _CSV_EXTS regex"
     assert '.csv' in src, "CSV regex should match .csv extension"
@@ -15,7 +15,7 @@ def test_csv_extension_regex():
 
 def test_csv_fence_block_handler():
     """Verify fenced ```csv blocks are handled."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert "lang==='csv'" in src, "Missing csv language detection in fence handler"
     assert 'csv-table' in src, "Missing csv-table class for fenced CSV rendering"
@@ -24,7 +24,7 @@ def test_csv_fence_block_handler():
 
 def test_csv_fence_renders_table_structure():
     """Verify fenced CSV blocks produce proper table HTML."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     # Should have thead, tbody, th, td
     assert '<thead>' in src, "CSV table should have <thead>"
@@ -37,7 +37,7 @@ def test_csv_fence_renders_table_structure():
 
 def test_csv_fence_fallback_for_insufficient_rows():
     """Verify CSV with < 2 rows falls back to code block."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     fence_section = src[src.find("lang==='csv'"):src.find("lang==='csv'") + 800]
     assert 'rows.length>=2' in fence_section, "Should check for at least 2 rows"
@@ -48,7 +48,7 @@ def test_csv_fence_fallback_for_insufficient_rows():
 
 def test_csv_media_file_handler():
     """Verify MEDIA: CSV files trigger inline loading."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert 'csv-inline-load' in src, "Missing csv-inline-load class for MEDIA: CSV"
     assert 'csv_loading' in src, "Missing csv_loading i18n key usage"
@@ -62,15 +62,27 @@ def test_csv_media_file_handler():
 
 def test_loadCsvInline_function():
     """Verify loadCsvInline lazy-load function exists."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert 'function loadCsvInline' in src, "Missing loadCsvInline function"
-    assert 'function buildCsvTablePreview(path, text)' in src, "Missing shared CSV preview helper"
+    assert 'function buildCsvTablePreview(path, text, downloadUrl' in src, "Missing shared CSV preview helper"
+    assert 'function _csvMediaUrl(path, opts={})' in src, "Missing CSV media URL helper"
+
+
+def test_csv_media_file_keeps_download_affordance():
+    """MEDIA: CSV preview must keep a visible downloadable attachment link."""
+    with open('static/ui.js', encoding="utf-8") as f:
+        src = f.read()
+    csv_section = src[src.find('function buildCsvTablePreview'):src.find('function loadCsvInline') + 1600]
+    assert 'csv-download-link msg-media-link' in csv_section
+    assert '_csvMediaUrl(path,{download:true})' in src
+    assert 'download="${esc(fname)}"' in csv_section
+    assert 'buildCsvTablePreview(path, text, downloadUrl)' in src
 
 
 def test_csv_inline_max_size():
     """Verify CSV inline rendering has a size cap."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert 'const CSV_MAX_SIZE=256*1024' in src, "Should have CSV_MAX_SIZE constant"
     helper_section = src[src.find('function buildCsvTablePreview'):src.find('function buildCsvTablePreview') + 2000]
@@ -79,7 +91,7 @@ def test_csv_inline_max_size():
 
 def test_csv_auto_detect_separator():
     """Verify CSV handler auto-detects separator."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     csv_section = src[src.find('function buildCsvTablePreview'):src.find('function buildCsvTablePreview') + 2000]
     assert 'separators' in csv_section, "Should have separator detection"
@@ -89,14 +101,14 @@ def test_csv_auto_detect_separator():
 
 def test_csv_quote_stripping():
     """Verify CSV handler strips surrounding quotes from fields."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert "replace(/^[\"']|[\"']$/g,'')" in src, "Should strip quotes from CSV fields"
 
 
 def test_csv_error_handling():
     """Verify CSV error and empty data handling."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     csv_section = src[src.find('function buildCsvTablePreview'):src.find('function loadCsvInline') + 1000]
     assert 'csv_error' in csv_section, "Should use csv_error i18n on fetch failure"
@@ -110,14 +122,23 @@ def test_csv_error_handling():
 
 def test_csv_loadCsvInline_called_after_render():
     """Verify loadCsvInline is called by the consolidated post-render pass."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
-    assert 'requestAnimationFrame(()=>postProcessRenderedMessages(inner))' in src
+    # Behavior assertion (not a brittle rAF-literal match): the post-render pass
+    # is scheduled a frame later, now routed through _postProcessWithAnchorSuppression
+    # (which holds overflow-anchor suppression across the media/layout reflow, then
+    # calls postProcessRenderedMessages). Assert the behavior chain, so a future
+    # wrapper rename doesn't re-orphan this test. (#5338)
+    assert 'requestAnimationFrame(()=>_postProcessWithAnchorSuppression(' in src
+    wrap_idx = src.find('function _postProcessWithAnchorSuppression')
+    assert wrap_idx != -1, "post-render should be wrapped by _postProcessWithAnchorSuppression"
+    assert 'postProcessRenderedMessages(container)' in src[wrap_idx:wrap_idx + 500], \
+        "the wrapper must still invoke postProcessRenderedMessages"
     idx = src.find('function postProcessRenderedMessages')
     body = src[idx:idx + 500]
     assert 'loadCsvInline(container)' in body, "post-process should call loadCsvInline once per render"
     load_section = src[src.find('function loadCsvInline'):src.find('function loadCsvInline') + 1200]
-    assert 'buildCsvTablePreview(path, text)' in load_section, "Inline loader should reuse the shared helper"
+    assert 'buildCsvTablePreview(path, text, downloadUrl)' in load_section, "Inline loader should reuse the shared helper"
     open_file = WORKSPACE_JS[WORKSPACE_JS.index("async function openFile(path, opts={}){"):WORKSPACE_JS.index("\nfunction downloadFile")]
     csv_pos = open_file.find("} else if(ext==='.csv'){")
     generic_pos = open_file.find("} else {\n    // Plain code / text -- but fall back to download if server signals binary")
@@ -135,7 +156,7 @@ def test_csv_loadCsvInline_called_after_render():
 
 def test_csv_line_ending_normalization():
     """Verify CSV handler normalizes line endings."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     csv_section = src[src.find('function buildCsvTablePreview'):src.find('function buildCsvTablePreview') + 2000]
     assert '\\r\\n' in csv_section, "Should handle \\r\\n line endings"
@@ -144,7 +165,7 @@ def test_csv_line_ending_normalization():
 
 def test_csv_i18n_keys():
     """Verify CSV i18n keys exist in all 7 locales."""
-    with open('static/i18n.js') as f:
+    with open('static/i18n.js', encoding="utf-8") as f:
         src = f.read()
     required_keys = ['csv_loading', 'csv_too_large', 'csv_no_data', 'csv_error']
     for key in required_keys:
@@ -154,7 +175,7 @@ def test_csv_i18n_keys():
 
 def test_csv_css_classes():
     """Verify CSV table CSS classes are defined."""
-    with open('static/style.css') as f:
+    with open('static/style.css', encoding="utf-8") as f:
         src = f.read()
     required_classes = ['csv-table-wrap', 'csv-table', 'csv-table th', 'csv-table td']
     for cls in required_classes:
@@ -165,7 +186,7 @@ def test_csv_css_classes():
 
 def test_csv_not_matched_by_image_exts():
     """Verify .csv is NOT in _IMAGE_EXTS."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     match = re.search(r"const _IMAGE_EXTS=/([^/]+)/i", src)
     assert match
@@ -178,7 +199,7 @@ def test_csv_preview_preserves_edit_flow():
     workspace Edit affordance that .csv had when it fell through to the code
     preview. csv mode must be editable, the preview must cache raw content for
     the textarea, and a save must re-render the table (not markdown)."""
-    with open('static/workspace.js') as f:
+    with open('static/workspace.js', encoding="utf-8") as f:
         src = f.read()
     # csv mode is editable
     assert "_previewCurrentMode==='csv'" in src, "csv mode should be editable / handled in workspace edit flow"
@@ -189,6 +210,6 @@ def test_csv_preview_preserves_edit_flow():
     assert '_previewRawContent = content' in csv_render or '_previewRawContent=content' in csv_render, \
         "renderCsvPreviewContent must cache raw CSV content for the edit flow"
     # save path re-renders the CSV table for csv mode
-    save_section = src[src.find('async function toggleEditMode'):src.find('async function toggleEditMode') + 1200]
-    assert "renderCsvPreviewContent(_previewCurrentPath, content)" in save_section, \
+    save_section = src[src.find('async function toggleEditMode'):src.find('async function toggleEditMode') + 2200]
+    assert "renderCsvPreviewContent(_previewCurrentPath, savedContent)" in save_section, \
         "saving an edited CSV must re-render the table, not markdown"

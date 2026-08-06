@@ -28,6 +28,7 @@ def _isolate_models_cache(tmp_path, monkeypatch):
 def _with_ollama_local_config():
     old_cfg = dict(config.cfg)
     old_mtime = config._cfg_mtime
+    old_path = getattr(config, "_cfg_path", None)
     config.cfg.clear()
     config.cfg.update(
         {
@@ -51,11 +52,13 @@ def _with_ollama_local_config():
         config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
     except Exception:
         config._cfg_mtime = 0.0
+    config._cfg_path = config._get_config_path()
 
     def restore():
         config.cfg.clear()
         config.cfg.update(old_cfg)
         config._cfg_mtime = old_mtime
+        config._cfg_path = old_path
         config.invalidate_models_cache()
 
     return restore

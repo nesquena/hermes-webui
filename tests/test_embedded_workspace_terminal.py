@@ -170,7 +170,9 @@ def test_terminal_slash_command_preflights_remote_backend_before_session_create(
     assert "syncTerminalBackendState(data)" in cmd_block
     assert "data&&data.terminal_remote_backend" in cmd_block
     assert "_terminalRemoteBackendUnsupportedMessage" in cmd_block
-    assert cmd_block.index("data&&data.terminal_remote_backend") < cmd_block.index("await newSession()")
+    # #6022: the auto-mint passes explicit worktree:false so the config
+    # default can't leak a worktree from opening the terminal.
+    assert cmd_block.index("data&&data.terminal_remote_backend") < cmd_block.index("await newSession(false, {worktree: false})")
 
 
 def test_terminal_v1_does_not_expose_send_to_chat_action():
@@ -268,6 +270,11 @@ def test_terminal_button_and_start_path_respect_remote_backend_guard():
 class _RouteHandler:
     def __init__(self):
         self.headers = {}
+        # Real terminal requests come from a same-host browser; present as a
+        # genuine loopback client so the embedded-terminal local-origin gate
+        # (CVD #3 / test_cvd3_terminal_local_origin_gate.py) admits the request
+        # and these tests exercise the terminal logic they target.
+        self.client_address = ("127.0.0.1", 12345)
         self.wfile = io.BytesIO()
         self.responses = []
 

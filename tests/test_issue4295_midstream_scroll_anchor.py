@@ -86,6 +86,7 @@ function renderMessages(options) {{
 }}
 {_function_body(UI_JS, "_restoreMessageViewportAnchor")}
 {_function_body(UI_JS, "_remountMessageViewportAnchor")}
+{_function_body(UI_JS, "_restorePinnedMessageScrollSnapshot")}
 {_function_body(UI_JS, "_restoreMessageScrollSnapshot")}
 _restoreMessageScrollSnapshot({{
   anchor: {{ rawIdx: 20, topOffset: 15 }},
@@ -235,6 +236,7 @@ function _messageVirtualScrollTopForVisibleIdx() {{ throw new Error('not expecte
 function renderMessages() {{ throw new Error('not expected'); }}
 {_function_body(UI_JS, "_restoreMessageViewportAnchor")}
 {_function_body(UI_JS, "_remountMessageViewportAnchor")}
+{_function_body(UI_JS, "_restorePinnedMessageScrollSnapshot")}
 {_function_body(UI_JS, "_restoreMessageScrollSnapshot")}
 _restoreMessageScrollSnapshot({{
   anchor: null,
@@ -249,6 +251,185 @@ assert.strictEqual(_messageUserUnpinned, true);
 assert.strictEqual(_scrollPinned, false);
 assert.strictEqual(_nearBottomCount, 0);
 assert.strictEqual(_programmaticScroll, false);
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_capture_snapshot_treats_recent_scroll_away_as_manual_reader():
+    """Manual live-Worklog browsing must not reuse a stale pinned snapshot.
+
+    A reader can be far from the live tail while scrolling down through a long
+    Compact Worklog. If a live activity rebuild captures that state while the
+    sticky globals still say pinned, restoring as a pinned follower preserves a
+    huge bottom gap and can keep yanking the viewport back toward the turn start.
+    Recent message-pane scroll intent makes the snapshot explicitly unpinned.
+    """
+
+    script = f"""
+const assert = require('assert');
+let _messageUserUnpinned = false;
+let _scrollPinned = true;
+let _lastMessageScrollIntentMs = 1000;
+const MESSAGE_WHEEL_INTENT_SUPPRESS_MS = 1200;
+const container = {{
+  scrollTop: 900,
+  scrollHeight: 5000,
+  clientHeight: 600,
+  getBoundingClientRect() {{ return {{ top: 0, bottom: 600 }}; }},
+  querySelectorAll() {{ return []; }},
+}};
+function $(id) {{ return id === 'messages' ? container : null; }}
+const performance = {{ now() {{ return 1500; }} }};
+function _captureMessageViewportAnchor() {{ return null; }}
+function _recentMessageTouchScrollIntent() {{ return false; }}
+function _recentMessageKeyScrollIntent() {{ return false; }}
+function _shouldFollowMessagesOnDomReplace() {{ return true; }}
+{_function_body(UI_JS, "_recentMessageScrollIntent")}
+{_function_body(UI_JS, "_captureMessageScrollSnapshot")}
+const snapshot = _captureMessageScrollSnapshot();
+assert.strictEqual(snapshot.bottom, 3500);
+assert.strictEqual(snapshot.pinned, false);
+assert.strictEqual(snapshot.userUnpinned, true);
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_capture_snapshot_keeps_true_pinned_follower_pinned_despite_large_gap():
+    """Large bottom distance alone is not enough to unpin a follower.
+
+    During fast streaming, content can grow under a followed viewport before the
+    follow write lands. Without a recent user scroll intent or explicit unpin
+    state, the snapshot must stay pinned so the existing tail-relative restore
+    continues to protect pinned live followers. Raw touch/key recency is not
+    enough here because those helpers also track near-tail artifact-suppression
+    windows; only the guarded away-from-bottom intent stamp can classify a
+    snapshot as manual-reader state.
+    """
+
+    script = f"""
+const assert = require('assert');
+let _messageUserUnpinned = false;
+let _scrollPinned = true;
+let _lastMessageScrollIntentMs = -Infinity;
+const MESSAGE_WHEEL_INTENT_SUPPRESS_MS = 1200;
+const container = {{
+  scrollTop: 900,
+  scrollHeight: 5000,
+  clientHeight: 600,
+  getBoundingClientRect() {{ return {{ top: 0, bottom: 600 }}; }},
+  querySelectorAll() {{ return []; }},
+}};
+function $(id) {{ return id === 'messages' ? container : null; }}
+const performance = {{ now() {{ return 1500; }} }};
+function _captureMessageViewportAnchor() {{ return null; }}
+function _recentMessageTouchScrollIntent() {{ return true; }}
+function _recentMessageKeyScrollIntent() {{ return true; }}
+function _shouldFollowMessagesOnDomReplace() {{ return true; }}
+{_function_body(UI_JS, "_recentMessageScrollIntent")}
+{_function_body(UI_JS, "_captureMessageScrollSnapshot")}
+const snapshot = _captureMessageScrollSnapshot();
+assert.strictEqual(snapshot.bottom, 3500);
+assert.strictEqual(snapshot.pinned, true);
+assert.strictEqual(snapshot.userUnpinned, false);
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_wheel_scroll_intent_only_records_when_reader_is_away_from_bottom():
+    """Downward wheel intent should protect manual reading, not bottom following."""
+
+    script = f"""
+const assert = require('assert');
+let _lastNonMessageScrollIntentMs = -Infinity;
+let _lastMessageWheelIntentMs = -Infinity;
+let _lastMessageScrollIntentMs = -Infinity;
+let _messageUserUnpinned = false;
+let _nearBottomCount = 2;
+let _scrollPinned = true;
+let _messageTouchScrollActive = false;
+let _lastMessageTouchScrollIntentMs = -Infinity;
+let _touchStartY = null;
+const child = {{}};
+const el = {{
+  scrollTop: 900,
+  scrollHeight: 5000,
+  clientHeight: 600,
+  contains(target) {{ return target === child; }},
+}};
+function _cancelBottomSettle() {{}}
+function _markMessageTouchScrollIntent(active) {{
+  _messageTouchScrollActive = !!active;
+  _lastMessageTouchScrollIntentMs = performance.now();
+}}
+const document = {{ getElementById(id) {{ return id === 'messages' ? el : null; }} }};
+const performance = {{ now() {{ return 1234; }} }};
+{_function_body(UI_JS, "_recordNonMessageScrollIntent")}
+_recordNonMessageScrollIntent({{ target: child, type: 'wheel', deltaY: 24 }});
+assert.strictEqual(_lastMessageScrollIntentMs, 1234);
+assert.strictEqual(_messageUserUnpinned, false);
+
+_lastMessageScrollIntentMs = -Infinity;
+el.scrollTop = 4400; // bottomDistance = 0
+_recordNonMessageScrollIntent({{ target: child, type: 'wheel', deltaY: 24 }});
+assert.strictEqual(_lastMessageScrollIntentMs, -Infinity);
+assert.strictEqual(_scrollPinned, true);
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_manual_scroll_snapshot_intent_excludes_raw_touch_and_key_recency():
+    """Only bottom-guarded message scroll intent can drive snapshot unpinning."""
+
+    compact = _compact(_function_body(UI_JS, "_recentMessageScrollIntent"))
+
+    assert "_lastMessageScrollIntentMs" in compact
+    assert "_scrollbarDragActive" in compact
+    assert "_recentMessageTouchScrollIntent" not in compact
+    assert "_recentMessageKeyScrollIntent" not in compact
+    assert "_lastMessageKeyScrollIntentMs=now;" in _compact(UI_JS)
+    assert "if(bottomDistance>120)_lastMessageScrollIntentMs=now;" in _compact(UI_JS)
+
+
+def test_touch_scroll_intent_only_records_when_reader_is_away_from_bottom():
+    """Touch recency is broad, but snapshot intent is bottom-distance guarded."""
+
+    script = f"""
+const assert = require('assert');
+let _lastNonMessageScrollIntentMs = -Infinity;
+let _lastMessageWheelIntentMs = -Infinity;
+let _lastMessageScrollIntentMs = -Infinity;
+let _messageUserUnpinned = false;
+let _nearBottomCount = 2;
+let _scrollPinned = true;
+let _messageTouchScrollActive = false;
+let _lastMessageTouchScrollIntentMs = -Infinity;
+let _touchStartY = null;
+const child = {{}};
+const el = {{
+  scrollTop: 900,
+  scrollHeight: 5000,
+  clientHeight: 600,
+  contains(target) {{ return target === child; }},
+}};
+function _cancelBottomSettle() {{}}
+function _markMessageTouchScrollIntent(active) {{
+  _messageTouchScrollActive = !!active;
+  _lastMessageTouchScrollIntentMs = performance.now();
+}}
+const document = {{ getElementById(id) {{ return id === 'messages' ? el : null; }} }};
+const performance = {{ now() {{ return 1234; }} }};
+{_function_body(UI_JS, "_recordNonMessageScrollIntent")}
+_recordNonMessageScrollIntent({{ target: child, type: 'touchmove' }});
+assert.strictEqual(_lastMessageScrollIntentMs, 1234);
+assert.strictEqual(_lastMessageTouchScrollIntentMs, 1234);
+assert.strictEqual(_messageUserUnpinned, false);
+
+_lastMessageScrollIntentMs = -Infinity;
+el.scrollTop = 4400; // bottomDistance = 0
+_recordNonMessageScrollIntent({{ target: child, type: 'touchmove' }});
+assert.strictEqual(_lastMessageScrollIntentMs, -Infinity);
+assert.strictEqual(_lastMessageTouchScrollIntentMs, 1234);
+assert.strictEqual(_scrollPinned, true);
 """
     subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
@@ -286,3 +467,99 @@ def test_same_frame_restore_uses_the_shared_anchor_remount_fallback():
 
     assert "if(!restoredViaAnchor&&typeof_remountMessageViewportAnchor==='function'&&_remountMessageViewportAnchor(snapshot.anchor))" in compact
     assert "_messageVirtualScrollTopForVisibleIdx" not in body
+
+
+def test_stale_content_key_recovers_via_session_index_and_compensates_height():
+    """Desktop scroll jump-back root fix (residual, distinct from #5392 mobile path).
+
+    The viewport anchor key is content-derived (role|ts|attachments|first-160-chars),
+    so while a live assistant message is streaming, each chunk that changes the first
+    160 chars recomputes that row's data-message-anchor-key. A scroll snapshot captured
+    a chunk earlier now has a STALE key that no longer matches by key lookup.
+
+    The OLD code conceded immediately on a stale key (`if(!row&&anchorKey) return false`),
+    and the caller then fell back to an ABSOLUTE scrollTop that does not compensate the
+    above-viewport height change from that same chunk -> desktop jump-back. The row is
+    still in the DOM under its stable data-session-msg-idx, so the fix recovers it via
+    sessionIdx and applies the relative-offset realign (which compensates the height).
+
+    Behavior test (not a source-string check): the anchor row's on-screen top must be
+    held at its captured topOffset. With buggy code the keyed lookup misses, sessionIdx
+    is never consulted, _restoreMessageViewportAnchor returns false, and this asserts FAIL.
+    """
+
+    script = f"""
+const assert = require('assert');
+let _programmaticScroll = false;
+let _programmaticScrollSetAt = 0;
+// Scenario: reader is unpinned mid-transcript. A streaming chunk (a) changed the
+// anchor row's content-derived key (stale key -> keyed lookup misses) and (b) grew
+// content above the viewport. We assert the realign still runs (via sessionIdx) and
+// writes the exact relative-offset compensation instead of conceding to an absolute
+// jump. Geometry is chosen so the write is unambiguous:
+//   containerRect.top = 100, captured topOffset = 300 (row was 300px below container top)
+//   after the chunk, the row's live rect.top = 250 => (250-100) = 150 from container top
+//   realign write: scrollTop += (150) - 300 = -150  => 1200 - 150 = 1050
+// A buggy body dead-ends on the stale key (returns false, no scrollTop write at all),
+// so both asserts below FAIL on the old code.
+const anchorRow = {{
+  getBoundingClientRect() {{ return {{ top: 250, bottom: 400 }}; }}
+}};
+const container = {{
+  scrollTop: 1200,
+  scrollHeight: 4600,
+  clientHeight: 600,
+  getBoundingClientRect() {{ return {{ top: 100, bottom: 700 }}; }},
+  querySelectorAll(selector) {{
+    // Stale key: NO node matches the captured (old) content key.
+    if (selector === '[data-message-anchor-key]') return [];
+    return [];
+  }},
+  querySelector(selector) {{
+    // The row is still present under its stable session index (and raw index).
+    if (selector === '[data-session-msg-idx="3"]') return anchorRow;
+    if (selector === '[data-msg-idx="3"]') return anchorRow;
+    return null;
+  }}
+}};
+function $(id) {{ return id === 'messages' ? container : null; }}
+function requestAnimationFrame(fn) {{ fn(); }}
+function setTimeout(fn) {{ fn(); }}
+const performance = {{ now() {{ return 0; }} }};
+function _suppressBrowserOverflowAnchor() {{ return null; }}  // desktop no-op
+function _deferClearProgrammaticScroll() {{ _programmaticScroll = false; }}
+{_function_body(UI_JS, "_restoreMessageViewportAnchor")}
+// Captured snapshot: anchor row was at topOffset=300, content key now STALE, but the
+// row still exists at sessionIdx=3 / rawIdx=3.
+const ok = _restoreMessageViewportAnchor({{
+  key: 'assistant|200|0|STALE_first_160_chars_from_an_earlier_chunk',
+  sessionIdx: 3,
+  rawIdx: 3,
+  topOffset: 300,
+}}, 0);
+// Must NOT concede on the stale key: sessionIdx recovers the row and the realign runs.
+assert.strictEqual(ok, true, 'stale content key must recover via sessionIdx, not return false');
+// Relative realign: scrollTop += (rect.top - containerRect.top) - targetTop
+//                              = 1200 + ((250 - 100) - 300) = 1200 + (150 - 300) = 1050.
+// This compensates the above-viewport height change; the buggy path would have left
+// an absolute jump (or no write at all), so this exact value pins the correct behavior.
+assert.strictEqual(container.scrollTop, 1050, 'realign must compensate the above-height change, not leave an absolute jump');
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_stale_key_does_not_dead_end_before_session_index_fallback():
+    """Guard the exact dead-code regression: a present content key must not short-circuit
+    the sessionIdx fallback. The old body had `if(!row&&anchorKey) return false;` BEFORE
+    sessionIdx was consulted, so a stale key could never reach the session-index recovery.
+    This asserts that early dead-end is gone and sessionIdx is resolved before conceding.
+    """
+
+    compact = _compact(_function_body(UI_JS, "_restoreMessageViewportAnchor"))
+
+    # The old dead-end (concede on stale key before trying sessionIdx) must be gone.
+    assert "if(!row&&anchorKey)returnfalse;" not in compact
+    # sessionIdx must be computed and the row recovered by it before any concede.
+    assert 'container.querySelector(`[data-session-msg-idx="${{sessionIdx}}"]`)'.replace("{{", "{").replace("}}", "}") in compact
+    # The concede now requires BOTH key AND sessionIdx to have failed.
+    assert "if(!row&&(anchorKey||hasSessionIdx))returnfalse;" in compact

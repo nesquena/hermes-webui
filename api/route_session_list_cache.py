@@ -14,15 +14,16 @@ from api.profiles import _profiles_match
 
 _SESSIONS_CACHE_TTL_SECONDS = 2.5
 # #4808: while a turn is actively streaming the frontend polls /api/sessions on a
-# fixed cadence (static/sessions.js `_streamingPollMs` = 5000ms). With the idle TTL
-# of 2.5s, every streaming poll lands in a fresh window and forces a full
-# all_sessions() rebuild on the hot path under the global store LOCK — pinning CPU
-# and starving token rendering on large stores (recurrence of #4672). Hold the
-# sidebar cache steady for longer than one poll interval while streaming; live
-# runtime state (active stream, sort order, pending flags) is overlaid on every
-# response regardless of cache, and structural/settings changes still evict
-# immediately via the source stamp.
-_SESSIONS_CACHE_STREAMING_TTL_SECONDS = 10.0
+# fixed cadence (static/sessions.js `_streamingPollMs`). With the idle TTL of
+# 2.5s, the entry expires between streaming polls, so each poll can find it stale
+# and force a full all_sessions() rebuild on the hot path under the global store
+# LOCK — pinning CPU and starving token rendering on large stores (recurrence of
+# #4672). Hold the sidebar cache steady for longer than one poll interval while
+# streaming; live runtime state (active stream, sort order, pending flags) is
+# overlaid on every response regardless of cache, and structural/settings changes
+# still invalidate immediately. Keep this strictly greater than
+# `_streamingPollMs`/1000 (see tests/test_streaming_cache_ttl_vs_poll.py).
+_SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
 _SESSIONS_CACHE_MAX_ENTRIES = 64
 _SESSIONS_CACHE_WAIT_SECONDS = 0.25
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
@@ -125,9 +126,22 @@ def _session_list_cache_key(
     include_archived: bool = False,
     exclude_hidden: bool = False,
     visible_only: bool = False,
+    show_webhook_sessions: bool = False,
     source_filter: str | None = None,
     sidebar_source: str | None = None,
+    archived_limit: int | None = None,
+    archived_offset: int = 0,
 ) -> tuple:
+    normalized_archived_limit = None
+    if archived_limit is not None:
+        try:
+            normalized_archived_limit = max(0, int(archived_limit))
+        except (TypeError, ValueError):
+            normalized_archived_limit = None
+    try:
+        normalized_archived_offset = max(0, int(archived_offset or 0))
+    except (TypeError, ValueError):
+        normalized_archived_offset = 0
     return (
         _session_list_cache_profile_scope(active_profile),
         bool(all_profiles),
@@ -137,8 +151,11 @@ def _session_list_cache_key(
         bool(include_archived),
         bool(exclude_hidden),
         bool(visible_only),
+        bool(show_webhook_sessions),
         source_filter,
         sidebar_source,
+        normalized_archived_limit,
+        normalized_archived_offset,
     )
 
 
@@ -160,7 +177,7 @@ def _session_list_cache_get(
             _SESSIONS_CACHE.pop(key, None)
             return None, False
         # #4808: widen the freshness window while a turn is streaming so the fixed
-        # 5s streaming poll cadence doesn't force a full rebuild on every poll.
+        # streaming poll cadence doesn't force a full rebuild on every poll.
         ttl = _SESSIONS_CACHE_TTL_SECONDS
         if _session_list_cache_streaming_freeze_marker() is not None:
             ttl = _SESSIONS_CACHE_STREAMING_TTL_SECONDS
@@ -173,6 +190,25 @@ def _session_list_cache_get(
             return copy.deepcopy(payload), False
         _SESSIONS_CACHE.pop(key, None)
         return None, False
+
+
+def _session_list_cache_stale_reason(key: tuple) -> str | None:
+    """Return why an existing cache entry is stale, if it is stale."""
+    now = time.monotonic()
+    current_stamp = _session_list_cache_resolved_source_stamp(key)
+    with _SESSIONS_CACHE_LOCK:
+        entry = _SESSIONS_CACHE.get(key)
+        if not entry:
+            return None
+        ts, stamp, _payload = entry
+        if stamp != current_stamp:
+            return "source"
+        ttl = _SESSIONS_CACHE_TTL_SECONDS
+        if _session_list_cache_streaming_freeze_marker() is not None:
+            ttl = _SESSIONS_CACHE_STREAMING_TTL_SECONDS
+        if (now - ts) >= ttl:
+            return "age"
+        return None
 
 
 def _session_list_cache_set(key: tuple, payload: dict) -> None:

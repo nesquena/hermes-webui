@@ -20,6 +20,37 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _js_function_decl(src: str, name: str) -> str:
+    marker = f"function {name}("
+    start = src.find(marker)
+    assert start != -1, f"{name}() not found"
+    brace = src.find("){", start)
+    assert brace != -1, f"{name}() body not found"
+    brace += 1
+    depth = 1
+    i = brace + 1
+    in_str = None
+    escaped = False
+    while i < len(src) and depth:
+        ch = src[i]
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == in_str:
+                in_str = None
+        elif ch in ('"', "'", "`"):
+            in_str = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    assert depth == 0, f"{name}() body did not close"
+    return src[start:i]
+
+
 # ---------------------------------------------------------------------------
 # Module surface
 # ---------------------------------------------------------------------------
@@ -390,6 +421,64 @@ def test_frontend_opens_session_stream():
     assert "api/session/stream?session_id=" in js
     assert "startSessionStream" in js
     assert "stopSessionStream" in js
+
+
+def test_session_stream_pauses_while_chat_stream_is_active():
+    """The active turn's chat SSE already carries live events for that session.
+
+    Keeping /api/session/stream open for the same sid at the same time burns a
+    Chrome same-origin connection slot and can starve ordinary /api/session
+    fetches on HTTP/1.1.
+    """
+    js = (REPO_ROOT / "static" / "messages.js").read_text()
+    assert "function _chatStreamActiveForSession(sid)" in js
+    assert "function _suspendSessionStreamForLiveChat(sid)" in js
+    assert "function _resumeSessionStreamAfterLiveChat(sid)" in js
+
+    start_src = _js_function_decl(js, "startSessionStream")
+    assert "if (_chatStreamActiveForSession(sid))" in start_src
+    assert "_sessionStreamHiddenSid = sid;" in start_src
+    assert "return;" in start_src
+    assert start_src.index("if (_chatStreamActiveForSession(sid))") < start_src.index("new EventSource(")
+
+    attach_ix = js.index("function attachLiveStream")
+    attach_src = js[attach_ix:js.index("function transcript()", attach_ix)]
+    assert "_suspendSessionStreamForLiveChat(activeSid);" in attach_src
+    assert attach_src.index("_suspendSessionStreamForLiveChat(activeSid);") < attach_src.index("new EventSource(")
+
+    resume_src = _js_function_decl(js, "_resumeSessionStreamAfterLiveChat")
+    assert "S.session.session_id !== sid" in resume_src
+    assert "if (_chatStreamActiveForSession(sid)) return;" in resume_src
+    assert "_sessionStreamHiddenSid = null;" in resume_src
+    assert "startSessionStream(sid);" in resume_src
+
+    suspend_src = _js_function_decl(js, "_suspendSessionStreamForLiveChat")
+    assert "if (_sessionStreamSessionId !== sid) return;" in suspend_src
+    assert "stopSessionStream();" in suspend_src
+
+
+def test_session_stream_resume_rearms_when_live_stream_registry_clears():
+    """The done event can arrive before stream_end closes /api/chat/stream.
+
+    If the first resume attempt sees LIVE_STREAMS[sid] still present, the
+    stream_end teardown must re-attempt resume after deleting that owner entry.
+    """
+    js = (REPO_ROOT / "static" / "messages.js").read_text()
+    close_src = _js_function_decl(js, "closeLiveStream")
+
+    delete_idx = close_src.index("delete LIVE_STREAMS[sessionId];")
+    resume_idx = close_src.index("_resumeSessionStreamAfterLiveChat(sessionId);")
+    assert delete_idx < resume_idx, (
+        "closeLiveStream must retry session-stream resume after LIVE_STREAMS is "
+        "cleared, otherwise done-before-stream_end can leave /api/session/stream closed"
+    )
+
+    resume_src = _js_function_decl(js, "_resumeSessionStreamAfterLiveChat")
+    assert "S.session.session_id !== sid" in resume_src, (
+        "the closeLiveStream retry relies on the visible-session guard to avoid "
+        "reopening a session stream for a background session-switch teardown"
+    )
+    assert "if (_chatStreamActiveForSession(sid)) return;" in resume_src
 
 
 def test_frontend_busy_race_gate_obsoleted_by_option_z_pivot():
@@ -846,9 +935,11 @@ def test_load_session_rearms_stream_on_every_early_return():
         "helper must (re)arm startSessionStream for the currently-shown S.session"
     )
 
-    # Isolate the loadSession body.
+    # Isolate the loadSession body. Widened window: the #4946 visit-ack helpers
+    # added inside loadSession pushed the fetch-error catch's stream restart past
+    # the old 14000-char cutoff.
     fn_ix = js.index("async function loadSession(")
-    body = js[fn_ix:fn_ix + 12000]
+    body = js[fn_ix:fn_ix + 16000]
 
     # The unconditional teardown must still be there (this is what creates the
     # dead-stream window the re-arm closes).
@@ -867,10 +958,11 @@ def test_load_session_rearms_stream_on_every_early_return():
 
     # Specifically: the same-session no-op guard must be PRECEDED by a re-arm
     # so re-selecting a session whose stream a prior failed load killed revives
-    # it. The re-arm sits before the guard (not inside a wrapping block) so the
-    # guard stays the exact one-liner other tests assert; it's idempotent so
+    # it. The re-arm sits before the guard (not inside a wrapping block), with
+    # the updated authoritative-load check that still permits the same-session
+    # guard when no different in-flight load is running; it's idempotent so
     # the real-switch path is unaffected.
-    guard_ix = body.index("currentSid===sid && !forceReload && !_loadingSessionId")
+    guard_ix = body.index("currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)")
     pre_guard = body[max(0, guard_ix - 600):guard_ix]
     assert "_rearmActiveSessionStream()" in pre_guard, (
         "a re-arm must run before the same-session no-op guard so a "
@@ -881,7 +973,7 @@ def test_load_session_rearms_stream_on_every_early_return():
     # but guarded against the self-healed-current (404'd) case so it never
     # spins the reconnect loop against a dead session_id.
     catch_ix = body.index("const _selfHealedCurrent")
-    catch_src = body[catch_ix:catch_ix + 1400]
+    catch_src = body[catch_ix:catch_ix + 2200]
     assert "!_selfHealedCurrent" in catch_src and "startSessionStream(currentSid)" in catch_src, (
         "fetch-error path must restart the on-screen stream, guarded against "
         "the self-healed-current (deleted/404) session"

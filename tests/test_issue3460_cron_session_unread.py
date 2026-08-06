@@ -486,6 +486,7 @@ function extractFunc(name) {{
 let _cronPollSince = 10;
 let _cronPollTimer = null;
 let _cronUnreadCount = 0;
+let _cronPollGeneration = 0;
 const _cronNewJobIds = new Set();
 const markCalls = [];
 const toastCalls = [];

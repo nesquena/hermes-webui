@@ -28,6 +28,22 @@ class TestSessionPersistence(unittest.TestCase):
     """Sessions survive a simulated process restart (module reload)."""
 
     def setUp(self) -> None:
+        # Bind api.auth's STATE_DIR-derived globals to THIS file's _TEST_STATE,
+        # regardless of import/reload order. pytest-shard distributes individual
+        # test items, so a shard may run a key/session test WITHOUT any of the
+        # _simulate_restart() tests that (as a reload side effect) rebind
+        # auth.STATE_DIR to _TEST_STATE. Without this, auth.STATE_DIR keeps
+        # conftest's TEST_STATE_DIR: _load_key() then reads the wrong dir (so the
+        # sentinel key is "missing", no OSError fires, and assertLogs sees no
+        # WARNING), and the warning's "STATE_DIR=..." never contains _TEST_STATE.
+        # Patching the actual bindings the code reads makes every test in this
+        # class self-contained. Saved values are restored in tearDown.
+        self._saved_state_dir = auth.STATE_DIR
+        self._saved_sessions_file = auth._SESSIONS_FILE
+        self._saved_login_attempts_file = auth._LOGIN_ATTEMPTS_FILE
+        auth.STATE_DIR = _TEST_STATE
+        auth._SESSIONS_FILE = _TEST_STATE / '.sessions.json'
+        auth._LOGIN_ATTEMPTS_FILE = _TEST_STATE / '.login_attempts.json'
         auth._sessions.clear()
         auth._PBKDF2_KEY_CACHE = None
         auth._SIGNING_KEY_CACHE = None
@@ -35,6 +51,14 @@ class TestSessionPersistence(unittest.TestCase):
             path = _TEST_STATE / name
             if path.exists():
                 path.unlink()
+
+    def tearDown(self) -> None:
+        auth.STATE_DIR = self._saved_state_dir
+        auth._SESSIONS_FILE = self._saved_sessions_file
+        auth._LOGIN_ATTEMPTS_FILE = self._saved_login_attempts_file
+        auth._sessions.clear()
+        auth._PBKDF2_KEY_CACHE = None
+        auth._SIGNING_KEY_CACHE = None
 
     def _simulate_restart(self) -> None:
         """Reload auth module to simulate a fresh process start.

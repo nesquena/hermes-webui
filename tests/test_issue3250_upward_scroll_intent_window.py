@@ -32,8 +32,19 @@ def _scroll_listener_block() -> str:
 def test_scroll_if_pinned_respects_sticky_user_unpin():
     fn = UI_JS[UI_JS.index("function scrollIfPinned"): UI_JS.index("function scrollToBottom")]
     compact = fn.replace(" ", "")
-    assert "if(_messageUserUnpinned)return" in compact, (
-        "scrollIfPinned() must not fight a sticky manual unpin during streaming"
+    # scrollIfPinned() re-pins auto-follow when the reader returns to the tail
+    # (#5544), but it must still RESPECT a sticky manual unpin: the re-pin is
+    # gated behind the true-bottom threshold (<=80px, not mere proximity) and
+    # bails on any recent scroll intent, so it never fights a reader who has
+    # scrolled up. Assert the guards rather than the old unconditional bail.
+    assert "if(_messageUserUnpinned){" in compact, (
+        "scrollIfPinned() must handle the sticky-unpin case explicitly"
+    )
+    assert "_messageBottomDistance()>80" in compact, (
+        "re-pin must require the true bottom tail (<=80px), not proximity — the #4295 invariant"
+    )
+    assert "_recentMessageWheelIntent()" in compact and "_recentMessageKeyScrollIntent()" in compact, (
+        "re-pin must bail on recent wheel/key scroll intent so it can't fight a manual scroll-up"
     )
 
 

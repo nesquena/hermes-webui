@@ -6,10 +6,13 @@ It is disabled by default and never executes or fetches third-party URLs.
 """
 
 import html
+import http.client
 import json
+import math
 import logging
 import os
 import re
+import socket
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -18,7 +21,11 @@ import hashlib
 import io
 import time
 import zipfile
-from urllib.request import HTTPRedirectHandler, build_opener, urlopen
+from urllib.request import (
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    build_opener,
+)
 
 from api.helpers import _security_headers, j
 
@@ -59,6 +66,14 @@ class ExtensionInstallError(Exception):
         self.status = status
 
 
+class ExtensionSidecarProxyError(Exception):
+    """Sanitized sidecar proxy error safe to return to the browser."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
 EXTENSION_ROUTE_PREFIX = "/extensions/"
 _EXTENSION_DIR_ENV = "HERMES_WEBUI_EXTENSION_DIR"
 _EXTENSION_SCRIPT_URLS_ENV = "HERMES_WEBUI_EXTENSION_SCRIPT_URLS"
@@ -71,9 +86,12 @@ _LOOPBACK_SIDECAR_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _EXTENSION_STATE_FILENAME = "extension-overrides.json"
 _MAX_EXTENSION_STATE_BYTES = 32 * 1024
 _MAX_DISABLED_EXTENSION_IDS = 512
+_MAX_SIDECAR_PROXY_CONSENTS = 512
 _EXTENSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_EXTENSION_SETTINGS_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{0,63}$")
 _EXTENSION_STATE_WARNING_SOURCE = "extension_state"
 _EXTENSION_STATE_LOCK = threading.Lock()
+_EXTENSION_SETTING_TYPES = {"boolean", "string", "number", "integer", "enum"}
 
 _GALLERY_INSTALL_STATE_FILENAME = "extension-install-manifest.json"
 _MAX_INSTALL_MANIFEST_BYTES = 128 * 1024
@@ -96,9 +114,80 @@ class _AllowlistRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def _connect_ipv4_first(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+    """Connect to *address*, preferring IPv4 to avoid dead-route stalls.
+
+    Some networks advertise IPv6 routes (router advertisements, tunnel brokers)
+    that do not actually reach the public internet.  ``socket.create_connection``
+    follows the OS address ordering, which typically tries IPv6 first; each dead
+    address stalls for the full TCP timeout (~75–130 s) before falling back to
+    IPv4.  This makes gallery installs and registry fetches appear to hang until
+    the browser or curl timeout kills them.
+
+    We iterate families in IPv4→IPv6 order so the common case (IPv4 works, IPv6
+    is a broken route) completes instantly.  IPv6 is still tried as a fallback so
+    IPv6-only networks are unaffected.
+
+    Signature matches ``socket.create_connection`` including the
+    ``_GLOBAL_DEFAULT_TIMEOUT`` sentinel so callers that rely on the stdlib
+    default-timeout behaviour are not broken.
+    """
+    host, port = address
+    if timeout is socket._GLOBAL_DEFAULT_TIMEOUT:
+        timeout = socket.getdefaulttimeout()
+    last_error: OSError | None = None
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            infos = socket.getaddrinfo(host, port, family, socket.SOCK_STREAM)
+        except socket.gaierror:
+            continue
+        for _fam, socktype, proto, _canon, sockaddr in infos:
+            sock = None
+            try:
+                sock = socket.socket(_fam, socktype, proto)
+                if timeout is not None:
+                    sock.settimeout(timeout)
+                if source_address is not None:
+                    sock.bind(source_address)
+                sock.connect(sockaddr)
+                return sock
+            except OSError as exc:
+                last_error = exc
+                if sock is not None:
+                    sock.close()
+    if last_error is not None:
+        raise last_error
+    raise OSError(f"Could not connect to {host}:{port}")
+
+
+class _IPv4FirstHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection that resolves IPv4 addresses before IPv6.
+
+    Overrides the class-level ``_create_connection`` that
+    ``HTTPConnection.connect()`` calls — the stdlib extension point designed for
+    exactly this kind of per-class customisation (added in Python 3.9,
+    bpo-37830).  No global state is mutated, so the change is thread-safe under
+    ``ThreadingHTTPServer``.
+    """
+
+    _create_connection = staticmethod(_connect_ipv4_first)
+
+
+class _IPv4FirstHTTPSHandler(HTTPSHandler):
+    """HTTPS handler that builds IPv4-first connections for gallery downloads."""
+
+    def https_open(self, req):
+        return self.do_open(_IPv4FirstHTTPSConnection, req)
+
+
+def _build_gallery_opener():
+    """Opener with IPv4-first downloads and redirect-host allowlist."""
+    return build_opener(_IPv4FirstHTTPSHandler, _AllowlistRedirectHandler)
+
+
 def _safe_download(url: str, max_bytes: int, timeout: int = 30) -> bytes:
     """Download from an allowlisted host, rejecting cross-host redirects."""
-    opener = build_opener(_AllowlistRedirectHandler)
+    opener = _build_gallery_opener()
     resp = opener.open(url, timeout=timeout)
     try:
         return resp.read(max_bytes + 1)
@@ -248,7 +337,7 @@ def _extension_state_file() -> Path:
 
 
 def _empty_extension_state() -> Dict[str, Any]:
-    return {"version": 1, "disabled_extensions": []}
+    return {"version": 1, "disabled_extensions": [], "sidecar_proxy_consents": {}}
 
 
 def _load_extension_state(diagnostics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -298,11 +387,44 @@ def _load_extension_state(diagnostics: Optional[Dict[str, Any]] = None) -> Dict[
                 diagnostics, "extension_state_truncated", _EXTENSION_STATE_WARNING_SOURCE
             )
             break
+    consents_raw = parsed.get("sidecar_proxy_consents", {})
+    consents: Dict[str, str] = {}
+    consents_invalid = False
+    if consents_raw is not None:
+        if not isinstance(consents_raw, dict):
+            invalid = True
+            consents_invalid = True
+        else:
+            for raw_ext_id, raw_origin in consents_raw.items():
+                if not _valid_extension_id(raw_ext_id):
+                    invalid = True
+                    consents_invalid = True
+                    continue
+                origin = _normalize_loopback_sidecar_origin(raw_origin)
+                if origin is None:
+                    invalid = True
+                    consents_invalid = True
+                    continue
+                ext_id = str(raw_ext_id).strip()
+                if ext_id in consents:
+                    continue
+                consents[ext_id] = origin
+                if len(consents) >= _MAX_SIDECAR_PROXY_CONSENTS:
+                    _add_diagnostic_warning(
+                        diagnostics, "extension_state_truncated", _EXTENSION_STATE_WARNING_SOURCE
+                    )
+                    break
+    if consents_invalid:
+        consents = {}
     if invalid:
         _add_diagnostic_warning(
             diagnostics, "extension_state_invalid_entries", _EXTENSION_STATE_WARNING_SOURCE
         )
-    return {"version": 1, "disabled_extensions": disabled}
+    return {
+        "version": 1,
+        "disabled_extensions": disabled,
+        "sidecar_proxy_consents": consents,
+    }
 
 
 def _write_extension_state(state: Dict[str, Any]) -> None:
@@ -321,7 +443,26 @@ def _write_extension_state(state: Dict[str, Any]) -> None:
             disabled.append(ext_id)
             if len(disabled) >= _MAX_DISABLED_EXTENSION_IDS:
                 break
-    payload = {"version": 1, "disabled_extensions": disabled}
+    consents_raw = state.get("sidecar_proxy_consents", {})
+    consents: Dict[str, str] = {}
+    if isinstance(consents_raw, dict):
+        for raw_ext_id, raw_origin in consents_raw.items():
+            if not _valid_extension_id(raw_ext_id):
+                continue
+            origin = _normalize_loopback_sidecar_origin(raw_origin)
+            if origin is None:
+                continue
+            ext_id = str(raw_ext_id).strip()
+            if ext_id in consents:
+                continue
+            consents[ext_id] = origin
+            if len(consents) >= _MAX_SIDECAR_PROXY_CONSENTS:
+                break
+    payload = {
+        "version": 1,
+        "disabled_extensions": disabled,
+        "sidecar_proxy_consents": consents,
+    }
     target = _extension_state_file()
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
@@ -521,6 +662,122 @@ def _manifest_entry_text(entry: Dict[str, object], key: str) -> str:
         return ""
     return value.strip()
 
+def _manifest_entry_storage_owned(entry: Dict[str, object]) -> bool:
+    permissions = entry.get("permissions")
+    if not isinstance(permissions, dict):
+        return False
+    storage = permissions.get("storage")
+    return isinstance(storage, dict) and storage.get("owned") is True
+
+def _settings_text(value: object, *, max_len: int = 160) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    return text[:max_len]
+
+def _normalize_enum_options(options: object) -> Optional[List[Dict[str, str]]]:
+    if not isinstance(options, list) or not options:
+        return None
+    normalized: List[Dict[str, str]] = []
+    seen: Set[str] = set()
+    for option in options:
+        if isinstance(option, str):
+            value = option.strip()
+            label = value
+        elif isinstance(option, dict):
+            raw_value = option.get("value")
+            if not isinstance(raw_value, str):
+                return None
+            value = raw_value.strip()
+            label = _settings_text(option.get("label")) or value
+        else:
+            return None
+        if not value or value in seen:
+            return None
+        seen.add(value)
+        normalized.append({"value": value, "label": label})
+    return normalized
+
+_SETTINGS_DEFAULT_MISSING = object()
+
+def _normalize_settings_default(field_type: str, raw_default: object, options: Optional[List[Dict[str, str]]] = None) -> Tuple[bool, object]:
+    if field_type == "boolean":
+        if raw_default is _SETTINGS_DEFAULT_MISSING:
+            return True, False
+        return (True, raw_default) if isinstance(raw_default, bool) else (False, None)
+    if field_type == "string":
+        if raw_default is _SETTINGS_DEFAULT_MISSING:
+            return True, ""
+        return (True, raw_default) if isinstance(raw_default, str) else (False, None)
+    if field_type == "number":
+        if raw_default is _SETTINGS_DEFAULT_MISSING:
+            return True, 0
+        return (
+            (True, raw_default)
+            if isinstance(raw_default, (int, float)) and not isinstance(raw_default, bool) and math.isfinite(raw_default)
+            else (False, None)
+        )
+    if field_type == "integer":
+        if raw_default is _SETTINGS_DEFAULT_MISSING:
+            return True, 0
+        return (True, raw_default) if isinstance(raw_default, int) and not isinstance(raw_default, bool) else (False, None)
+    if field_type == "enum" and options:
+        values = [option["value"] for option in options]
+        if raw_default is _SETTINGS_DEFAULT_MISSING:
+            return True, values[0]
+        return (True, raw_default) if isinstance(raw_default, str) and raw_default in values else (False, None)
+    return False, None
+
+def _settings_schema_values(raw_schema: object) -> List[object]:
+    if isinstance(raw_schema, list):
+        return raw_schema
+    if isinstance(raw_schema, dict) and isinstance(raw_schema.get("fields"), list):
+        return raw_schema["fields"]
+    return []
+
+def _sanitize_settings_schema(entry: Dict[str, object]) -> List[Dict[str, object]]:
+    if not _manifest_entry_storage_owned(entry):
+        return []
+    fields: List[Dict[str, object]] = []
+    seen_keys: Set[str] = set()
+    for raw_field in _settings_schema_values(entry.get("settings_schema")):
+        if not isinstance(raw_field, dict):
+            continue
+        if raw_field.get("sensitive") is True:
+            continue
+        key = raw_field.get("key")
+        if not isinstance(key, str):
+            continue
+        key = key.strip()
+        if not _EXTENSION_SETTINGS_KEY_RE.fullmatch(key):
+            continue
+        field_type = raw_field.get("type")
+        if not isinstance(field_type, str):
+            continue
+        field_type = field_type.strip().lower()
+        if field_type not in _EXTENSION_SETTING_TYPES:
+            continue
+        options = _normalize_enum_options(raw_field.get("options")) if field_type == "enum" else None
+        if field_type == "enum" and options is None:
+            continue
+        ok, default = _normalize_settings_default(field_type, raw_field.get("default", _SETTINGS_DEFAULT_MISSING), options)
+        if not ok:
+            continue
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        field: Dict[str, object] = {
+            "key": key,
+            "type": field_type,
+            "label": _settings_text(raw_field.get("label")) or key,
+            "description": _settings_text(raw_field.get("description"), max_len=300),
+            "default": default,
+        }
+        if options is not None:
+            field["options"] = options
+        fields.append(field)
+    return fields
+
 
 def _normalize_loopback_sidecar_origin(value: object) -> Optional[str]:
     """Return a canonical loopback origin or None when unsafe.
@@ -593,6 +850,22 @@ def _normalize_sidecar_health_path(value: object) -> Optional[str]:
     return decoded_path
 
 
+def _is_valid_sidecar_proxy_path(decoded_path: str) -> bool:
+    if any(ch in decoded_path for ch in ("?", "#")):
+        return False
+    if any(ch.isspace() for ch in decoded_path):
+        return False
+    if not decoded_path.startswith("/") or decoded_path.startswith("//"):
+        return False
+    segments = decoded_path.split("/")[1:]
+    if not segments:
+        return False
+    for segment in segments:
+        if not segment or segment in (".", ".."):
+            return False
+    return True
+
+
 def _sidecar_from_manifest_entry(
     entry: Dict[str, object], diagnostics: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, str]]:
@@ -625,6 +898,21 @@ def _sidecar_from_manifest_entry(
             return None
     else:
         health_path = _DEFAULT_SIDECAR_HEALTH_PATH
+    # proxy_auth negotiation (token-v1). Absent = explicit legacy (unauthenticated
+    # proxy→sidecar, unchanged behavior for any pre-existing declaration). token-v1
+    # = core mints+injects a per-extension token and the sidecar validates it.
+    # Any unknown value fails closed (reject the sidecar) so a typo can never
+    # silently downgrade to unauthenticated.
+    raw_proxy_auth = raw.get("proxy_auth")
+    if raw_proxy_auth is None:
+        proxy_auth = "legacy"
+    elif raw_proxy_auth in ("legacy", "token-v1"):
+        proxy_auth = str(raw_proxy_auth)
+    else:
+        _add_diagnostic_warning(
+            diagnostics, "sidecar_proxy_auth_unsupported", _SIDECAR_WARNING_SOURCE
+        )
+        return None
     sidecar_id = _manifest_entry_text(entry, "id")
     name = _manifest_entry_text(entry, "name")
     return {
@@ -634,6 +922,7 @@ def _sidecar_from_manifest_entry(
         "origin": origin,
         "health_path": health_path,
         "health_url": f"{origin}{health_path}",
+        "proxy_auth": proxy_auth,
     }
 
 
@@ -735,10 +1024,13 @@ def _gallery_installed_runtime_manifest(
         asset_base = ext_id
         if isinstance(manifest, dict):
             top_entry: Dict[str, object] = {"id": ext_id}
-            for key in ("name", "enabled", "scripts", "stylesheets", "sidecar"):
+            for key in ("name", "enabled", "scripts", "stylesheets", "sidecar", "permissions", "settings_schema"):
                 if key in manifest:
                     top_entry[key] = manifest[key]
-            if any(key in top_entry for key in ("scripts", "stylesheets", "sidecar")):
+            if any(
+                key in top_entry
+                for key in ("scripts", "stylesheets", "sidecar", "permissions", "settings_schema")
+            ):
                 entries.append(_copy_manifest_entry_with_asset_base(top_entry, asset_base))
         for _source, _index, entry in _manifest_extension_entries(manifest):
             copied = _copy_manifest_entry_with_asset_base(entry, asset_base)
@@ -809,7 +1101,10 @@ def _load_manifest_with_status(
 
 
 def _manifest_extension_state(
-    manifest: object, disabled_ids: Set[str], diagnostics: Optional[Dict[str, Any]] = None
+    manifest: object,
+    disabled_ids: Set[str],
+    diagnostics: Optional[Dict[str, Any]] = None,
+    consent_ids: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     """Return sanitized per-extension state for manifest extension entries."""
     extension_entries: List[Dict[str, Any]] = []
@@ -836,6 +1131,7 @@ def _manifest_extension_state(
         effective_enabled = manifest_enabled and not user_disabled
         if not manifest_enabled:
             manifest_disabled_ids.add(ext_id)
+        settings_schema = _sanitize_settings_schema(entry)
         extension_entries.append(
             {
                 "id": ext_id,
@@ -846,6 +1142,8 @@ def _manifest_extension_state(
                 "effective_enabled": effective_enabled,
                 "can_toggle": can_toggle,
                 "reload_required": True,
+                "storage_owned": _manifest_entry_storage_owned(entry),
+                "settings_schema": settings_schema,
                 "status": (
                     "manifest_disabled"
                     if not manifest_enabled
@@ -857,7 +1155,7 @@ def _manifest_extension_state(
         _add_diagnostic_warning(diagnostics, "manifest_extension_id_invalid", "manifest:extensions")
     if duplicate_seen:
         _add_diagnostic_warning(diagnostics, "manifest_extension_id_duplicate", "manifest:extensions")
-    stale_ids = sorted(disabled_ids - known_ids)
+    stale_ids = sorted((disabled_ids | (consent_ids or set())) - known_ids)
     if stale_ids:
         _add_diagnostic_warning(diagnostics, "extension_state_unknown_ids", _EXTENSION_STATE_WARNING_SOURCE)
     return {
@@ -867,13 +1165,164 @@ def _manifest_extension_state(
     }
 
 
+def _extension_sidecar_proxy_path(extension_id: str) -> str:
+    return f"/api/extensions/{extension_id}/sidecar/"
+
+
+def _sidecar_proxy_public_status(
+    extension_id: str,
+    origin: str,
+    approved_origin: Optional[str],
+    *,
+    available: bool,
+    proxy_auth: str = "legacy",
+) -> Dict[str, Any]:
+    consented = bool(available and approved_origin == origin)
+    origin_changed = bool(available and approved_origin and approved_origin != origin)
+    payload: Dict[str, Any] = {
+        "available": available,
+        "consented": consented,
+        "consent_required": bool(available and not consented),
+        "path": _extension_sidecar_proxy_path(extension_id),
+        "origin_changed": origin_changed,
+    }
+    # proxy_auth / posture are token-v1-only fields. Legacy sidecars keep the
+    # original payload shape byte-for-byte (the public status contract tests pin
+    # it), so a token-v1 negotiation field never leaks onto a legacy record.
+    # (Frank #6331 blocker 2 — fields were previously emitted on every record and
+    # broke the legacy exact-shape contract on shard 4.)
+    if proxy_auth == "token-v1":
+        # token-v1 posture (§9.1). "protected" = WebUI auth ON (the only posture
+        # in which token-v1 proxying is permitted; auth-off is now fail-closed at
+        # both consent and resolution, so "local_unprotected" signals the panel
+        # to tell the operator to enable authentication before the proxy will work).
+        posture = None
+        if available:
+            try:
+                from api.auth import is_auth_enabled
+                posture = "protected" if is_auth_enabled() else "local_unprotected"
+            except Exception:
+                posture = None
+        payload["proxy_auth"] = proxy_auth
+        payload["posture"] = posture
+    return payload
+
+
+def _extension_sidecar_records(
+    manifest: object,
+    disabled_ids: Optional[Set[str]] = None,
+    state: Optional[Dict[str, Any]] = None,
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    disabled_ids = disabled_ids or set()
+    consent_map = {}
+    if isinstance(state, dict) and isinstance(state.get("sidecar_proxy_consents"), dict):
+        consent_map = state["sidecar_proxy_consents"]
+    id_counts: Dict[str, int] = {}
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for _source, _index, entry in _manifest_extension_entries(manifest):
+        raw_id = _manifest_entry_text(entry, "id")
+        if not _valid_extension_id(raw_id):
+            continue
+        ext_id = raw_id.strip()
+        id_counts[ext_id] = id_counts.get(ext_id, 0) + 1
+        if ext_id in by_id:
+            continue
+        manifest_enabled = entry.get("enabled", True) is not False
+        user_disabled = ext_id in disabled_ids
+        effective_enabled = manifest_enabled and not user_disabled
+        sidecar = _sidecar_from_manifest_entry(entry, diagnostics) if effective_enabled else None
+        approved_origin = consent_map.get(ext_id) if isinstance(consent_map.get(ext_id), str) else None
+        by_id[ext_id] = {
+            "id": ext_id,
+            "name": _manifest_entry_text(entry, "name"),
+            "manifest_enabled": manifest_enabled,
+            "user_disabled": user_disabled,
+            "effective_enabled": effective_enabled,
+            "sidecar": sidecar,
+            "approved_origin": approved_origin,
+        }
+    records: List[Dict[str, Any]] = []
+    for ext_id, item in by_id.items():
+        sidecar = item.get("sidecar")
+        if sidecar is None:
+            continue
+        available = bool(item["effective_enabled"] and id_counts.get(ext_id, 0) == 1)
+        proxy = _sidecar_proxy_public_status(
+            ext_id,
+            sidecar["origin"],
+            item.get("approved_origin"),
+            available=available,
+            proxy_auth=sidecar.get("proxy_auth", "legacy"),
+        )
+        item["duplicate_id"] = id_counts.get(ext_id, 0) > 1
+        item["proxy"] = proxy
+        if len(records) < _MAX_URL_LIST:
+            # Build the PUBLIC sidecar record explicitly. The internal `sidecar`
+            # dict carries a top-level `proxy_auth` for the consent/resolution
+            # logic, but the public status contract only exposes proxy_auth (and
+            # posture) INSIDE `proxy`, and only for token-v1 records — legacy
+            # sidecars keep their original public shape byte-for-byte. Spreading
+            # `**sidecar` leaked a top-level `proxy_auth: legacy` and broke the
+            # exact-shape contract tests (Frank #6331 blocker 2).
+            public_record = {k: v for k, v in sidecar.items() if k != "proxy_auth"}
+            public_record["proxy"] = proxy
+            records.append(public_record)
+        else:
+            _add_diagnostic_warning(diagnostics, "sidecar_list_truncated", _SIDECAR_WARNING_SOURCE)
+            break
+    return records, by_id
+
+
+def _normalize_sidecar_proxy_path(value: object) -> Optional[str]:
+    if value is None:
+        return "/"
+    raw = str(value)
+    if raw == "":
+        return "/"
+    if raw.startswith("/"):
+        return None
+    candidate = f"/{raw}"
+    if not _is_valid_sidecar_proxy_path(_fully_unquote_path(candidate)):
+        return None
+    return candidate
+
+def _extension_runtime_entries(
+    manifest: object, disabled_ids: Optional[Set[str]] = None
+) -> List[Dict[str, object]]:
+    """Return enabled extension metadata injected before extension scripts run."""
+    disabled_ids = disabled_ids or set()
+    extensions: List[Dict[str, object]] = []
+    seen_ids: Set[str] = set()
+    for _source, _index, entry in _manifest_extension_entries(manifest):
+        raw_id = _manifest_entry_text(entry, "id")
+        if not _valid_extension_id(raw_id):
+            continue
+        ext_id = raw_id.strip()
+        if ext_id in seen_ids:
+            continue
+        seen_ids.add(ext_id)
+        if entry.get("enabled", True) is False or ext_id in disabled_ids:
+            continue
+        extensions.append(
+            {
+                "id": ext_id,
+                "name": _manifest_entry_text(entry, "name") or ext_id,
+                "storage_owned": _manifest_entry_storage_owned(entry),
+                "settings_schema": _sanitize_settings_schema(entry),
+            }
+        )
+    return extensions
+
+
 def _read_manifest_urls_with_diagnostics(
     root: Path,
     diagnostics: Optional[Dict[str, Any]] = None,
     disabled_ids: Optional[Set[str]] = None,
     manifest: Optional[object] = None,
     manifest_status: Optional[Dict[str, Any]] = None,
-) -> Tuple[List[str], List[str], List[Dict[str, str]], Dict[str, Any]]:
+    state: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[str], List[str], List[Dict[str, Any]], Dict[str, Any]]:
     disabled_ids = disabled_ids or set()
     if manifest is None or manifest_status is None:
         manifest, manifest_status = _load_manifest_with_status(root, diagnostics)
@@ -882,7 +1331,7 @@ def _read_manifest_urls_with_diagnostics(
 
     scripts: List[str] = []
     stylesheets: List[str] = []
-    sidecars: List[Dict[str, str]] = []
+    sidecars: List[Dict[str, Any]] = []
     asset_base = str(manifest_status.get("_asset_base", "") or "")
     entries = _iter_manifest_entries(manifest, disabled_ids=disabled_ids)
     manifest_status["entry_count"] = len(entries)
@@ -891,15 +1340,6 @@ def _read_manifest_urls_with_diagnostics(
     for _source, entry in entries:
         if not isinstance(entry, dict):
             continue
-        if _source.startswith("manifest.extensions["):
-            sidecar = _sidecar_from_manifest_entry(entry, diagnostics)
-            if sidecar is not None:
-                if len(sidecars) < _MAX_URL_LIST:
-                    sidecars.append(sidecar)
-                else:
-                    _add_diagnostic_warning(
-                        diagnostics, "sidecar_list_truncated", _SIDECAR_WARNING_SOURCE
-                    )
         script_source = "manifest:scripts"
         stylesheet_source = "manifest:stylesheets"
         if not scripts_full:
@@ -922,6 +1362,12 @@ def _read_manifest_urls_with_diagnostics(
                 ):
                     stylesheets_full = True
                     break
+    sidecars, _ = _extension_sidecar_records(
+        manifest,
+        disabled_ids=disabled_ids,
+        state=state,
+        diagnostics=diagnostics,
+    )
     manifest_status.update(
         {
             "loaded": True,
@@ -950,8 +1396,14 @@ def get_extension_config() -> Dict[str, Any]:
         return {"enabled": False, "script_urls": [], "stylesheet_urls": []}
     state = _load_extension_state()
     disabled_ids = set(state.get("disabled_extensions") or [])
-    manifest_scripts, manifest_stylesheets = _read_manifest_urls(root, disabled_ids=disabled_ids)
-    return {
+    manifest, manifest_status = _load_manifest_with_status(root)
+    manifest_scripts, manifest_stylesheets, _, _ = _read_manifest_urls_with_diagnostics(
+        root,
+        disabled_ids=disabled_ids,
+        manifest=manifest,
+        manifest_status=manifest_status,
+    )
+    config = {
         "enabled": True,
         "script_urls": _read_url_list(
             _EXTENSION_SCRIPT_URLS_ENV, manifest_scripts or None
@@ -960,6 +1412,10 @@ def get_extension_config() -> Dict[str, Any]:
             _EXTENSION_STYLESHEET_URLS_ENV, manifest_stylesheets or None
         ),
     }
+    runtime_entries = _extension_runtime_entries(manifest, disabled_ids) if manifest is not None else []
+    if runtime_entries:
+        config["extensions"] = runtime_entries
+    return config
 
 
 
@@ -1008,7 +1464,13 @@ def get_extension_status() -> Dict[str, Any]:
         }
 
     manifest, manifest_status = _load_manifest_with_status(root, diagnostics)
-    extension_state = _manifest_extension_state(manifest, disabled_ids, diagnostics) if manifest is not None else {
+    consent_ids = set((state.get("sidecar_proxy_consents") or {}).keys())
+    extension_state = _manifest_extension_state(
+        manifest,
+        disabled_ids,
+        diagnostics,
+        consent_ids=consent_ids,
+    ) if manifest is not None else {
         "extensions": [],
         "known_ids": set(),
         "manifest_disabled_ids": set(),
@@ -1019,6 +1481,7 @@ def get_extension_status() -> Dict[str, Any]:
         disabled_ids=disabled_ids,
         manifest=manifest,
         manifest_status=manifest_status,
+        state=state,
     )
     extensions = extension_state["extensions"]
     known_ids = extension_state["known_ids"]
@@ -1074,7 +1537,13 @@ def set_extension_user_enabled(extension_id: object, enabled: object) -> Dict[st
         manifest, manifest_status = _load_manifest_with_status(root, diagnostics)
         if manifest is None or not manifest_status.get("loaded", False):
             raise ExtensionToggleError("Extension manifest is not loaded", status=409)
-        extension_state = _manifest_extension_state(manifest, disabled_ids, diagnostics)
+        consent_map = state.get("sidecar_proxy_consents") or {}
+        extension_state = _manifest_extension_state(
+            manifest,
+            disabled_ids,
+            diagnostics,
+            consent_ids=set(consent_map.keys()),
+        )
         known_ids: Set[str] = extension_state["known_ids"]
         manifest_disabled_ids: Set[str] = extension_state["manifest_disabled_ids"]
         if ext_id not in known_ids:
@@ -1085,12 +1554,191 @@ def set_extension_user_enabled(extension_id: object, enabled: object) -> Dict[st
             disabled_ids.discard(ext_id)
         else:
             disabled_ids.add(ext_id)
-        _write_extension_state({"disabled_extensions": sorted(disabled_ids)})
+        _write_extension_state(
+            {
+                "disabled_extensions": sorted(disabled_ids),
+                "sidecar_proxy_consents": {
+                    consent_ext_id: origin
+                    for consent_ext_id, origin in consent_map.items()
+                    if consent_ext_id in known_ids
+                },
+            }
+        )
     # Return a fresh status snapshot after the atomic write is visible. Keeping
     # the readback outside the lock avoids doing the full manifest/status parse
     # while blocking other toggles; a concurrent toggle may be reflected too,
     # which is fine because the UI re-renders from the current effective state.
     return get_extension_status()
+
+
+def set_extension_sidecar_proxy_consent(extension_id: object, approved: object) -> Dict[str, Any]:
+    """Persist or revoke proxy consent for the current sidecar origin."""
+    if not _valid_extension_id(extension_id):
+        raise ExtensionSidecarProxyError("Invalid extension id", status=400)
+    ext_id = str(extension_id).strip()
+    if not isinstance(approved, bool):
+        raise ExtensionSidecarProxyError("approved must be a boolean", status=400)
+    root = _extension_root()
+    if root is None:
+        raise ExtensionSidecarProxyError("Extensions are not configured", status=404)
+    with _EXTENSION_STATE_LOCK:
+        diagnostics = _new_diagnostics()
+        state = _load_extension_state(diagnostics)
+        disabled_ids = set(state.get("disabled_extensions") or [])
+        consent_map = dict(state.get("sidecar_proxy_consents") or {})
+        manifest, manifest_status = _load_manifest_with_status(root, diagnostics)
+        if manifest is None or not manifest_status.get("loaded", False):
+            raise ExtensionSidecarProxyError("Extension manifest is not loaded", status=409)
+        extension_state = _manifest_extension_state(
+            manifest,
+            disabled_ids,
+            diagnostics,
+            consent_ids=set(consent_map.keys()),
+        )
+        known_ids: Set[str] = extension_state["known_ids"]
+        if ext_id not in known_ids:
+            raise ExtensionSidecarProxyError("Extension not found", status=404)
+        _sidecars, by_id = _extension_sidecar_records(
+            manifest,
+            disabled_ids=disabled_ids,
+            state=state,
+            diagnostics=diagnostics,
+        )
+        item = by_id.get(ext_id) or {}
+        sidecar = item.get("sidecar")
+        proxy = item.get("proxy") or {}
+        if approved:
+            if sidecar is None or proxy.get("available") is not True:
+                raise ExtensionSidecarProxyError("Extension sidecar proxy is unavailable", status=409)
+            consent_map[ext_id] = sidecar["origin"]
+            # For token-v1, mint the per-extension token NOW and fail the consent
+            # if it can't be persisted+read — otherwise we'd persist consent and
+            # then 503 on every request (a mint failure must surface at grant
+            # time, not as a mysterious later error).
+            if sidecar.get("proxy_auth") == "token-v1":
+                # token-v1 REQUIRES configured WebUI authentication. Without it,
+                # this consent endpoint is itself unauthenticated, so any caller
+                # that can reach the WebUI listener could self-grant consent and
+                # then drive the token-bearing proxy (a forwarding oracle) — the
+                # sidecar token file blocks direct port access but does NOT stop a
+                # caller who simply asks core to inject it. Loopback origin is not
+                # sufficient: another local UID can still reach the listener
+                # without reading the 0600 token file. Fail closed regardless of
+                # origin. (Frank #6331 blocker 1.)
+                from api.auth import is_auth_enabled
+                if not is_auth_enabled():
+                    raise ExtensionSidecarProxyError(
+                        "Sidecar token-v1 proxy requires WebUI authentication; "
+                        "set a password in Settings before granting consent.",
+                        status=403,
+                    )
+                from api import extension_sidecar_auth as _sc_auth
+                if not _sc_auth.ensure_token(ext_id):
+                    raise ExtensionSidecarProxyError(
+                        "Could not provision the sidecar auth token", status=503
+                    )
+        else:
+            consent_map.pop(ext_id, None)
+        _write_extension_state(
+            {
+                "disabled_extensions": sorted(disabled_ids),
+                "sidecar_proxy_consents": {
+                    consent_ext_id: origin
+                    for consent_ext_id, origin in consent_map.items()
+                    if consent_ext_id in known_ids
+                },
+            }
+        )
+    return get_extension_status()
+
+
+def resolve_extension_sidecar_proxy_target(
+    extension_id: object,
+    proxy_path: object,
+    query: str = "",
+) -> Dict[str, Any]:
+    """Resolve the current approved sidecar proxy target for an extension."""
+    if not _valid_extension_id(extension_id):
+        raise ExtensionSidecarProxyError("Invalid extension id", status=400)
+    normalized_path = _normalize_sidecar_proxy_path(proxy_path)
+    if normalized_path is None:
+        raise ExtensionSidecarProxyError("Invalid sidecar proxy path", status=400)
+    ext_id = str(extension_id).strip()
+    root = _extension_root()
+    if root is None:
+        raise ExtensionSidecarProxyError("Extensions are not configured", status=404)
+    diagnostics = _new_diagnostics()
+    state = _load_extension_state(diagnostics)
+    disabled_ids = set(state.get("disabled_extensions") or [])
+    manifest, manifest_status = _load_manifest_with_status(root, diagnostics)
+    if manifest is None or not manifest_status.get("loaded", False):
+        raise ExtensionSidecarProxyError("Extension manifest is not loaded", status=409)
+    consent_ids = set((state.get("sidecar_proxy_consents") or {}).keys())
+    extension_state = _manifest_extension_state(
+        manifest,
+        disabled_ids,
+        diagnostics,
+        consent_ids=consent_ids,
+    )
+    if ext_id not in extension_state["known_ids"]:
+        raise ExtensionSidecarProxyError("Extension not found", status=404)
+    _sidecars, by_id = _extension_sidecar_records(
+        manifest,
+        disabled_ids=disabled_ids,
+        state=state,
+        diagnostics=diagnostics,
+    )
+    item = by_id.get(ext_id) or {}
+    sidecar = item.get("sidecar")
+    proxy = item.get("proxy") or {}
+    if sidecar is None or proxy.get("available") is not True:
+        raise ExtensionSidecarProxyError("Extension sidecar proxy is unavailable", status=409)
+    if proxy.get("consented") is not True:
+        raise ExtensionSidecarProxyError("Extension sidecar proxy consent required", status=403)
+    upstream_url = f"{sidecar['origin']}{normalized_path}"
+    if query:
+        upstream_url = f"{upstream_url}?{query}"
+
+    # token-v1 auth (§9.1/§9.2). Legacy sidecars proxy unchanged; token-v1
+    # sidecars get a per-extension secret injected, and only proxy when the
+    # trust posture is sound.
+    proxy_auth = sidecar.get("proxy_auth", "legacy")
+    inject_token: Optional[str] = None
+    if proxy_auth == "token-v1":
+        from api.auth import is_auth_enabled
+        from api import extension_sidecar_auth as _sc_auth
+
+        # token-v1 REQUIRES configured WebUI authentication — fail closed
+        # regardless of the upstream origin (loopback included). The consent
+        # endpoint and this resolution path are both unauthenticated when auth is
+        # off, so a caller that can reach the WebUI listener could otherwise drive
+        # a token-bearing proxy to the sidecar (a forwarding oracle). Loopback is
+        # NOT a sufficient guard: another local UID can reach the listener without
+        # ever reading the 0600 token file. (Frank #6331 blocker 1 — this
+        # mirrors the consent-time check so a pre-existing consent granted while
+        # auth was enabled cannot be exercised after auth is turned off.)
+        if not is_auth_enabled():
+            raise ExtensionSidecarProxyError(
+                "Sidecar token-v1 proxy requires WebUI authentication; "
+                "set a password in Settings.",
+                status=403,
+            )
+        token = _sc_auth.current_token(ext_id) or _sc_auth.ensure_token(ext_id)
+        if not token:
+            # Token could not be persisted+read → fail closed rather than proxy
+            # unauthenticated (never inject an ephemeral secret).
+            raise ExtensionSidecarProxyError(
+                "Sidecar proxy auth token is unavailable", status=503
+            )
+        inject_token = token
+    return {
+        "extension_id": ext_id,
+        "origin": sidecar["origin"],
+        "proxy_path": proxy["path"],
+        "upstream_url": upstream_url,
+        "proxy_auth": proxy_auth,
+        "auth_token": inject_token,
+    }
 
 
 def _install_manifest_file() -> Path:
@@ -1350,7 +1998,8 @@ def get_extension_registry() -> Dict[str, Any]:
         if cached is not None and (now - cached_at) < _REGISTRY_TTL_SECONDS:
             return {"entries": cached}
         try:
-            raw = urlopen(_REGISTRY_URL, timeout=10).read(2 * 1024 * 1024)
+            opener = _build_gallery_opener()
+            raw = opener.open(_REGISTRY_URL, timeout=10).read(2 * 1024 * 1024)
             data = json.loads(raw.decode("utf-8"))
             if isinstance(data, list):
                 entries = data
@@ -1387,6 +2036,15 @@ def inject_extension_tags(index_html: str) -> str:
         '<script src="{}" defer></script>'.format(html.escape(url, quote=True))
         for url in config["script_urls"]
     ]
+    runtime_config = {
+        "extensions": config.get("extensions", []),
+    }
+    runtime_json = json.dumps(runtime_config, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
+    runtime_tag = (
+        "<script>window.__HERMES_EXTENSION_CONFIG__={};"
+        "if(window.HermesExtensionSettings)window.HermesExtensionSettings.primeFromStatus(window.__HERMES_EXTENSION_CONFIG__);"
+        "</script>"
+    ).format(runtime_json)
 
     if stylesheet_tags:
         head_marker = "</head>"
@@ -1396,9 +2054,11 @@ def inject_extension_tags(index_html: str) -> str:
         else:
             result = block + result
 
-    if script_tags:
+    if runtime_config["extensions"] or script_tags:
         body_marker = "</body>"
-        block = "\n".join(script_tags) + "\n"
+        block = runtime_tag + "\n"
+        if script_tags:
+            block += "\n".join(script_tags) + "\n"
         if body_marker in result:
             result = result.replace(body_marker, block + body_marker, 1)
         else:

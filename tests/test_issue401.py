@@ -86,8 +86,9 @@ def test_rendermessages_treats_partial_toolcall_assistants_as_visible():
 
 def test_rendermessages_rebuilds_tool_cards_from_partial_tool_calls():
     """Fallback reconstruction should include private `_partial_tool_calls` rows."""
-    assert "const hasPartialToolCalls=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;" in UI_JS
-    assert "if(hasTopLevelToolCalls||hasContentToolUse||hasPartialToolCalls) fallbackToolSources.push({m,rawIdx});" in UI_JS
+    assert "function _legacySettledFallbackHasToolMetadata(message)" in UI_JS
+    assert "Array.isArray(message._partial_tool_calls)&&message._partial_tool_calls.length>0" in UI_JS
+    assert "if(_legacySettledFallbackHasToolMetadata(m)) fallbackToolSources.push({m,rawIdx});" in UI_JS
     assert "if(Array.isArray(m._partial_tool_calls)){" in UI_JS
     assert "tc.snippet||tc.result||tc.output||tc.preview" in UI_JS
     assert "done:true" in UI_JS

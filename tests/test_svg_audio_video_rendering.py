@@ -4,7 +4,7 @@ import re
 
 def test_media_extension_regexes_exist():
     """Verify SVG/audio/video extension regexes are defined."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert '_SVG_EXTS' in src, "Missing _SVG_EXTS regex"
     assert '_AUDIO_EXTS' in src, "Missing _AUDIO_EXTS regex"
@@ -19,7 +19,7 @@ def test_media_extension_regexes_exist():
 
 def test_svg_rendered_before_image_catch_all():
     """Verify SVG handler for URLs runs before the catch-all image handler."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     # Find positions of SVG vs image catch-all in the URL section
     svg_url_match = src.find("SVG URLs")
@@ -33,37 +33,44 @@ def test_svg_rendered_before_image_catch_all():
 
 def test_local_svg_inline_rendering():
     """Verify local SVG files render as inline image."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert "msg-media-svg" in src, "Missing msg-media-svg CSS class for SVG rendering"
-    # Should have at least 2 SVG handlers (URL + local)
+    # Both URL-based and local-path SVG handlers are centralised in
+    # _inlineMediaHtmlForRef (the single MEDIA renderer exported by ui.js for
+    # use by both renderMd() and the streaming smd path). The shared function
+    # contains all SVG markup, so we only need the helper to exist once.
     count = src.count("msg-media-svg")
-    assert count >= 2, f"Expected >=2 msg-media-svg references, got {count}"
+    assert count >= 1, f"Expected >=1 msg-media-svg references in _inlineMediaHtmlForRef, got {count}"
 
 
 def test_local_audio_inline_rendering():
     """Verify local audio files render as inline player."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert "msg-media-audio" in src, "Missing msg-media-audio CSS class"
     assert "<audio controls" in src, "Should render <audio> element with controls"
+    # See comment in test_svg_rendered_before_image_catch_all — audio markup
+    # lives in a single shared helper now.
     count = src.count("msg-media-audio")
-    assert count >= 2, f"Expected >=2 msg-media-audio references, got {count}"
+    assert count >= 1, f"Expected >=1 msg-media-audio references in _inlineMediaHtmlForRef, got {count}"
 
 
 def test_local_video_inline_rendering():
     """Verify local video files render as inline player."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert "msg-media-video" in src, "Missing msg-media-video CSS class"
     assert "<video controls" in src, "Should render <video> element with controls"
+    # See comment in test_svg_rendered_before_image_catch_all — video markup
+    # lives in a single shared helper now.
     count = src.count("msg-media-video")
-    assert count >= 2, f"Expected >=2 msg-media-video references, got {count}"
+    assert count >= 1, f"Expected >=1 msg-media-video references in _inlineMediaHtmlForRef, got {count}"
 
 
 def test_url_svg_audio_video_handlers():
     """Verify HTTPS URLs for SVG/audio/video get inline rendering."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     # SVG URLs should be handled via _SVG_EXTS test on urlPath
     url_svg = "_SVG_EXTS.test(urlPath)" in src or ("_SVG_EXTS.test" in src and "urlPath" in src)
@@ -75,9 +82,26 @@ def test_url_svg_audio_video_handlers():
     assert url_video >= 1, "URL video handler should test extension on src"
 
 
+def test_webm_prefers_video_when_audio_and_video_regexes_overlap():
+    """Verify .webm is not shadowed by the audio regex."""
+    with open('static/ui.js', encoding="utf-8") as f:
+        src = f.read()
+    kind_start = src.find("function _mediaKindForName")
+    kind_body = src[kind_start:kind_start + 400]
+    assert "_VIDEO_EXTS.test(clean)" in kind_body
+    assert "_AUDIO_EXTS.test(clean)" in kind_body
+    assert kind_body.index("_VIDEO_EXTS.test(clean)") < kind_body.index("_AUDIO_EXTS.test(clean)"), \
+        "_mediaKindForName must check video before audio so .webm renders as video"
+    inline_start = src.find("function _inlineMediaHtmlForRef")
+    inline_body = src[inline_start:inline_start + 4500]
+    assert "const kind=_AUDIO_EXTS.test(ref)?'audio':'video';" not in inline_body, \
+        "Local MEDIA rendering must reuse _mediaKindForName instead of reintroducing audio-first .webm ordering"
+    assert "if(localKind==='audio'||localKind==='video')" in inline_body
+
+
 def test_attachment_svg_audio_video():
     """Verify file attachments for SVG/audio/video get inline previews."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert "attach-thumb--svg" in src, "Missing attach-thumb--svg for SVG thumbnails"
     assert "attach-chip--audio" in src, "Missing attach-chip--audio"
@@ -87,7 +111,7 @@ def test_attachment_svg_audio_video():
 
 def test_attachment_blob_url_cleanup():
     """Verify audio/video attachment chips create blob URLs."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     # SVG and media attachments should use createObjectURL
     assert "URL.createObjectURL(f)" in src, "Should create blob URLs for attachments"
@@ -95,21 +119,21 @@ def test_attachment_blob_url_cleanup():
 
 def test_preload_metadata():
     """Verify audio/video elements use preload='metadata' for performance."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert 'preload="metadata"' in src, "Audio/video should use preload='metadata'"
 
 
 def test_media_label_class():
     """Verify media label class exists for type identification."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert "msg-media-label" in src, "Missing msg-media-label class"
 
 
 def test_i18n_keys():
     """Verify media rendering i18n keys exist in all locales."""
-    with open('static/i18n.js') as f:
+    with open('static/i18n.js', encoding="utf-8") as f:
         src = f.read()
     required_keys = [
         'media_audio_label',
@@ -123,7 +147,7 @@ def test_i18n_keys():
 
 def test_css_classes_exist():
     """Verify all media CSS classes are defined."""
-    with open('static/style.css') as f:
+    with open('static/style.css', encoding="utf-8") as f:
         src = f.read()
     required_classes = [
         'msg-media-svg',
@@ -141,7 +165,7 @@ def test_css_classes_exist():
 
 def test_svg_not_matched_by_image_exts():
     """Verify .svg is NOT in _IMAGE_EXTS (SVG has its own handler)."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     # Extract the _IMAGE_EXTS regex
     match = re.search(r"const _IMAGE_EXTS=/([^/]+)/i", src)
@@ -152,7 +176,7 @@ def test_svg_not_matched_by_image_exts():
 
 def test_audio_video_not_matched_by_image_exts():
     """Verify audio/video extensions are NOT in _IMAGE_EXTS."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     match = re.search(r"const _IMAGE_EXTS=/([^/]+)/i", src)
     assert match

@@ -1,6 +1,8 @@
 from pathlib import Path
 import re
 
+from tests.js_source_extract import extract_function
+
 ROOT = Path(__file__).resolve().parents[1]
 INDEX = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
@@ -526,6 +528,15 @@ def test_kanban_dispatcher_inflight_guard_prevents_double_click_toast_confusion(
     assert 'btnKanbanPreviewDispatcher' in INDEX
 
 
+def test_kanban_dispatcher_no_longer_blocks_default_board():
+    """Pin removal of the previous null-board guard in runKanbanDispatcher()."""
+    run_source = extract_function(PANELS, "runKanbanDispatcher", prefix="async function")
+    assert "if (!_kanbanCurrentBoard)" not in run_source, (
+        "runKanbanDispatcher() must not block when _kanbanCurrentBoard is null; "
+        "default board should dispatch through a board-less path."
+    )
+
+
 def test_kanban_board_has_native_css_classes():
     for selector in (
         ".kanban-board",
@@ -802,6 +813,27 @@ def test_kanban_review_feedback_static_ui_fixes_exist():
     assert "@media (max-width: 640px)" in STYLE
     assert "scroll-snap-type" in STYLE
     assert "kanban-stats-grid" in PANELS
+
+
+def test_kanban_modal_mobile_responsive_css():
+    """On narrow phones (<=640px) a tall kanban modal must stay reachable: the
+    overlay scrolls (overflow-y:auto) and safe-centers its content
+    (align-items:safe center) so an overflowing modal is never clipped above
+    the fold where its top can't be scrolled back into view."""
+    # There are several `.kanban-modal-overlay{...}` rules (skin override, base
+    # desktop, and the mobile <=640px override, which is last in the file).
+    # Match against COMPACT_STYLE — whitespace-stripped, like the sibling CSS
+    # tests — and take the last rule to isolate the mobile override, instead of
+    # depending on brittle @media-block bracket matching.
+    overlay_rules = re.findall(r"\.kanban-modal-overlay\{([^}]*)\}", COMPACT_STYLE)
+    assert overlay_rules, "no .kanban-modal-overlay rule found in style.css"
+    mobile = overlay_rules[-1]
+    assert "overflow-y:auto" in mobile, f"mobile overlay must be scrollable. Got: {mobile}"
+    # `align-items:safe center` compacts to `align-items:safecenter`.
+    assert "align-items:safecenter" in mobile, (
+        f"mobile overlay must safe-center its content so an overflowing modal "
+        f"is never clipped above the fold. Got: {mobile}"
+    )
 
 
 def test_kanban_task_detail_renderer_executes_with_log_and_formats_feedback():
@@ -1107,17 +1139,11 @@ def test_kanban_board_color_is_validated_against_css_injection():
     """
     import json
     import subprocess
+    fn_source = extract_function(PANELS, "_kanbanSafeColor")
     script = """
-const fs = require('fs');
-const src = fs.readFileSync('static/panels.js', 'utf8');
-const start = src.indexOf('function _kanbanSafeColor');
-if (start < 0) { console.error('_kanbanSafeColor missing'); process.exit(2); }
-// Grab the function body up to and including the closing `}` line.
-const tail = src.slice(start);
-const end = tail.indexOf('\\n}\\n') + 2;
-const fn = tail.slice(0, end);
+const fnSource = __FN__;
 const ctx = {};
-new Function('out', fn + '; out.fn = _kanbanSafeColor;')(ctx);
+new Function('out', fnSource + '; out.fn = _kanbanSafeColor;')(ctx);
 const cases = [
   ['#fff', '#fff'],
   ['#3b82f6', '#3b82f6'],
@@ -1137,7 +1163,7 @@ const results = cases.map(([input, expected]) => ({
   input, expected, actual: ctx.fn(input)
 }));
 console.log(JSON.stringify(results));
-"""
+""".replace("__FN__", json.dumps(fn_source))
     result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
     results = json.loads(result.stdout)
     failures = [r for r in results if r["actual"] != r["expected"]]

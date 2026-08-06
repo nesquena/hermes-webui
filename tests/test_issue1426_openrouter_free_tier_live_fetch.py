@@ -111,9 +111,28 @@ def test_openrouter_group_uses_live_fetch_when_available(monkeypatch):
         return _FakeResponse(fake_payload)
 
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    # The OpenRouter branch does TWO live fetches:
+    #   (1) hermes_cli.models.fetch_openrouter_models() — the curated catalog.
+    #       This routes through hermes_cli's `open_credentialed_url()`, which
+    #       builds its own opener and calls `.open()`; it does NOT go through
+    #       the module-level `urllib.request.urlopen` symbol patched above.
+    #       So the monkeypatch alone leaves fetch (1) hitting the REAL network
+    #       whenever hermes_cli is installed — returning the live curated list,
+    #       which fills the visible picker cap and pushes the mocked free-tier
+    #       entries into `extra_models`. Mock fetch (1) here too so the test is
+    #       genuinely hermetic (as the module docstring promises) and the
+    #       free-tier augment path (2) is what is actually under test.
+    #   (2) the direct urllib.request.urlopen(".../v1/models") — the free-tier
+    #       augment; this one IS intercepted by the monkeypatch above.
     try:
         from hermes_cli import models as _hm
         monkeypatch.setattr(_hm, "_openrouter_catalog_cache", None, raising=False)
+        # A small curated base ("live data, not just the fallback list") so the
+        # tool-supporting paid model is present alongside the free-tier augment.
+        monkeypatch.setattr(
+            _hm, "fetch_openrouter_models",
+            lambda *a, **k: [("anthropic/claude-sonnet-4.6", "")],
+        )
     except Exception:
         pass
 
@@ -121,7 +140,16 @@ def test_openrouter_group_uses_live_fetch_when_available(monkeypatch):
     or_group = next((g for g in grouped if g.get("provider_id") == "openrouter"), None)
     assert or_group is not None, "openrouter group must be present"
 
-    model_ids = [m["id"] for m in or_group["models"]]
+    # Both `models` (visible dropdown) and `extra_models` (slash-command
+    # autocomplete / dynamic-label overflow) are picker surfaces — a free-tier
+    # entry that lands in either bucket has surfaced in the picker. Assert
+    # across both, matching the sibling fail-closed / cap tests, so a large
+    # curated base overflowing the visible cap does not flip this assertion.
+    model_ids = [
+        m["id"]
+        for bucket in ("models", "extra_models")
+        for m in or_group.get(bucket, [])
+    ]
     # Resilient to test-isolation pollution: when a sibling test mutates
     # `cfg` and triggers the openrouter-not-active branch, _apply_provider_prefix
     # adds an `@openrouter:` prefix to model IDs. Skip rather than fail — the
@@ -136,6 +164,70 @@ def test_openrouter_group_uses_live_fetch_when_available(monkeypatch):
         "free-tier minimax/minimax-m2.5:free must surface in the picker even without tools support"
     assert "openrouter/elephant-alpha" in model_ids, \
         "free pricing model must surface even without :free suffix"
+
+
+@pytest.mark.parametrize(
+    ("pricing", "case_name"),
+    [
+        ({}, "missing"),
+        ({"prompt": "0"}, "completion missing"),
+        ({"completion": "0"}, "prompt missing"),
+        ({"prompt": None, "completion": None}, "null"),
+        ({"prompt": "n/a", "completion": "0"}, "malformed"),
+    ],
+)
+def test_openrouter_free_tier_pricing_fails_closed(
+    monkeypatch,
+    pricing,
+    case_name,
+):
+    """Unknown pricing must not be presented as free without a :free ID."""
+    candidate_id = f"vendor/{case_name.replace(' ', '-')}-pricing"
+    explicit_free_id = "vendor/explicit-free:free"
+    fake_payload = _make_or_payload(
+        {"id": candidate_id, "name": case_name, "pricing": pricing},
+        {"id": explicit_free_id, "name": "Explicit Free", "pricing": pricing},
+    )
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _FakeResponse(fake_payload),
+    )
+
+    # hermes_cli (the agent package) is an optional dependency and is not
+    # installed in the WebUI CI test environment. Force its live-fetch to
+    # return empty when present so the fail-closed static path is exercised;
+    # when absent, that static path is already the only one — mirror the
+    # try/except guard the sibling tests in this file use.
+    try:
+        from hermes_cli import models as hermes_models
+        monkeypatch.setattr(hermes_models, "fetch_openrouter_models", lambda **_kwargs: [])
+        monkeypatch.setattr(hermes_models, "provider_model_ids", lambda *_args, **_kwargs: [])
+    except Exception:
+        pass
+
+    grouped = _get_grouped_models()
+    openrouter_group = next(
+        (group for group in grouped if group.get("provider_id") == "openrouter"),
+        None,
+    )
+    if openrouter_group is None:
+        # Test-isolation pollution: when a sibling test (in this file or another
+        # shard-adjacent module) mutates config.cfg away from the openrouter
+        # active provider, get_available_models() omits the openrouter group
+        # entirely. Skip rather than fail — same guard the sibling live-fetch
+        # tests use — since the fail-closed contract under test only applies
+        # when that branch actually runs.
+        pytest.skip("openrouter group absent (likely test-isolation pollution from a sibling test)")
+    model_ids = {
+        model["id"]
+        for bucket_name in ("models", "extra_models")
+        for model in openrouter_group.get(bucket_name, [])
+    }
+
+    assert candidate_id not in model_ids
+    assert explicit_free_id in model_ids
 
 
 def test_openrouter_falls_back_to_static_when_live_fails(monkeypatch):

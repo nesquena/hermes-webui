@@ -9,9 +9,9 @@ next ``loadSession()`` before ``syncTopbar()`` projects server metadata.
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BOOT_JS = (ROOT / "static" / "boot.js").read_text()
-SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text()
-UI_JS = (ROOT / "static" / "ui.js").read_text()
+BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 def _body_between(src: str, start: str, end: str) -> str:
@@ -42,7 +42,7 @@ def test_model_selection_records_pending_state_before_async_session_update():
 
 def test_load_session_applies_pending_model_before_first_topbar_sync():
     """Reload should project the pending selection before server old metadata wins."""
-    body = _body_between(SESSIONS_JS, "async function loadSession", "const activeStreamId=")
+    body = _body_between(SESSIONS_JS, "async function loadSession", "activeStreamId=S.session.active_stream_id")
 
     apply_idx = body.index("_applyPendingSessionModelForSession")
     sync_idx = body.index("syncTopbar()")

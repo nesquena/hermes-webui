@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-UI_JS = (ROOT / "static" / "ui.js").read_text()
+UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 def test_temporary_configured_model_option_carries_provider_badge():

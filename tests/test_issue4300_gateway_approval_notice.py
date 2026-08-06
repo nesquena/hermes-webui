@@ -17,17 +17,18 @@ def test_gateway_chat_has_approval_notice_emitted_attribute_check():
 def test_gateway_chat_emits_approval_gateway_unsupported_event():
     """Verify put_gateway_event is called with approval_gateway_unsupported type on non-terminal channel."""
     assert "put_gateway_event(\"warning\"" in GATEWAY_CHAT
-    assert "\"type\": \"approval_gateway_unsupported\"" in GATEWAY_CHAT
+    assert "approval_type = \"approval_gateway_unsupported\"" in GATEWAY_CHAT
 
 
 def test_gateway_chat_once_per_session_guard_pattern():
     """Verify the once-per-session guard: capability check + hasattr + flag check + flag set."""
-    assert "if not gateway_supports_approval(base_url, api_key):" in GATEWAY_CHAT
+    assert "approval_reason = gateway_approval_unavailable_reason(base_url, api_key)" in GATEWAY_CHAT
+    assert "if approval_reason is not None:" in GATEWAY_CHAT
     assert "if not hasattr(s, \"_approval_notice_emitted\"):" in GATEWAY_CHAT
     assert "if not s._approval_notice_emitted:" in GATEWAY_CHAT
     assert "s._approval_notice_emitted = True" in GATEWAY_CHAT
     # Verify order: capability gate before session guard before flag set
-    cap_pos = GATEWAY_CHAT.find("if not gateway_supports_approval(base_url, api_key):")
+    cap_pos = GATEWAY_CHAT.find("if approval_reason is not None:")
     hasattr_pos = GATEWAY_CHAT.find("if not hasattr(s, \"_approval_notice_emitted\"):")
     flag_check_pos = GATEWAY_CHAT.find("if not s._approval_notice_emitted:")
     flag_set_pos = GATEWAY_CHAT.find("s._approval_notice_emitted = True")
@@ -36,8 +37,8 @@ def test_gateway_chat_once_per_session_guard_pattern():
 
 def test_gateway_chat_event_payload_contains_type_and_message():
     """Verify the event payload has type and message fields."""
-    assert "\"type\": \"approval_gateway_unsupported\"" in GATEWAY_CHAT
-    assert "\"message\": \"Approvals require a newer gateway. Upgrade the connected Hermes gateway to enable this.\"" in GATEWAY_CHAT
+    assert "approval_type = \"approval_gateway_unsupported\"" in GATEWAY_CHAT
+    assert "approval_message = \"Approvals require a newer gateway. Upgrade the connected Hermes gateway to enable this.\"" in GATEWAY_CHAT
 
 
 def test_messages_js_handles_approval_gateway_unsupported_event():

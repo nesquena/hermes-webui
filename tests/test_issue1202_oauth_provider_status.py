@@ -297,7 +297,7 @@ class TestProviderListFilter:
         # Current filter also includes is_custom and is_plugin_provider; require
         # the full expression so partial regressions are caught.
         assert (
-            "filter(p=>p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider)"
+            "filter(p=>p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider||p.is_self_hosted)"
             in self.JS
         ), (
             "Settings → Providers filter must keep OAuth, custom, and plugin "

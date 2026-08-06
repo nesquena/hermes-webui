@@ -30,12 +30,14 @@ class _RestoreCfg:
         import copy
         self._snapshot = copy.deepcopy(config.cfg)
         self._cfg_mtime = config._cfg_mtime
+        self._cfg_path = getattr(config, "_cfg_path", None)
         return self
 
     def __exit__(self, *exc):
         config.cfg.clear()
         config.cfg.update(self._snapshot)
         config._cfg_mtime = self._cfg_mtime
+        config._cfg_path = self._cfg_path
 
 
 def _set_cfg(cfg_dict: dict):
@@ -45,6 +47,7 @@ def _set_cfg(cfg_dict: dict):
         config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
     except Exception:
         config._cfg_mtime = 0.0
+    config._cfg_path = config._get_config_path()
 
 
 def _groups_by_provider_id(result: dict) -> dict:
@@ -415,6 +418,39 @@ def test_provider_catalog_preserves_dict_shaped_raw_key_lookup(monkeypatch):
         model_ids.append(mid.split(":", 1)[-1] if mid.startswith("@") and ":" in mid else mid)
     assert "my-model" in model_ids
     assert "another-model" in model_ids
+
+
+def test_provider_catalog_rejects_non_active_models_only_custom_provider(monkeypatch):
+    """A models-only custom provider config must NOT render when it is not the
+    active/configured provider (#5301 review finding: admitting any
+    models-only config re-opens the copilot-2 duplicate-alias regression)."""
+    _stub_hermes_cli(monkeypatch)
+    monkeypatch.setattr("socket.getaddrinfo", lambda *a, **k: [])
+
+    with _RestoreCfg():
+        _set_cfg({
+            "model": {
+                "default": "my-model",
+                "provider": "CLIPpoxy",
+            },
+            "providers": {
+                "CLIPpoxy": {
+                    "models": ["my-model"],
+                },
+                "OtherCustom": {
+                    "models": ["unrelated-model"],
+                },
+            },
+        })
+        config.invalidate_models_cache()
+
+        result = config.get_available_models()
+
+    groups = _groups_by_provider_id(result)
+    assert "clippoxy" in groups, f"Active models-only provider should render, got: {list(groups)}"
+    assert "othercustom" not in groups, (
+        f"Non-active models-only provider must not render as a phantom group, got: {list(groups)}"
+    )
 
 
 def test_provider_catalog_treats_malformed_provider_entry_as_unconfigured(monkeypatch):

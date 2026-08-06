@@ -20,6 +20,9 @@ node_test = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def _extract_async_function(source: str, name: str) -> str:
     marker = f"async function {name}("
     start = source.find(marker)
+    if start < 0:
+        marker = f"function {name}("
+        start = source.find(marker)
     assert start >= 0, f"{name}() function must exist"
     brace = source.find("{", source.find(")", start))
     assert brace > start, f"{name}() function body must start"
@@ -79,6 +82,7 @@ def _run_node(script: str) -> dict:
 
 
 def _helper_driver(panel_mode: str, default_workspace: str | None, *, reject: bool = False) -> dict:
+    helper_dep = _extract_async_function(BOOT_JS.read_text(encoding="utf-8"), "_prefillHasDraftText")
     helper = _extract_async_function(BOOT_JS.read_text(encoding="utf-8"), "_maybeBindFreshDefaultWorkspaceSession")
     default_workspace_repr = json.dumps(default_workspace)
     script = textwrap.dedent(
@@ -94,6 +98,7 @@ def _helper_driver(panel_mode: str, default_workspace: str | None, *, reject: bo
           calls.push({{arg0:a,arg1:b}});
           return shouldReject ? Promise.reject(new Error('bind-failed')) : Promise.resolve({{}});
         }}
+        {helper_dep}
         {helper}
         _maybeBindFreshDefaultWorkspaceSession().then((bound)=>{{
           process.stdout.write(JSON.stringify({{bound,calls}}));
@@ -111,7 +116,10 @@ def test_blank_boot_open_panel_auto_binds_default_workspace_session():
     result = _helper_driver("browse", "/default-workspace")
 
     assert result["bound"] is True
-    assert result["calls"] == [{"arg0": False, "arg1": {"awaitWorkspaceLoad": True}}]
+    # worktree:false is explicit and load-bearing (#6022): the boot auto-bind
+    # must opt out so a config-level worktree default can't mint a worktree
+    # from merely opening the page.
+    assert result["calls"] == [{"arg0": False, "arg1": {"awaitWorkspaceLoad": True, "worktree": False}}]
 
 
 @node_test
@@ -150,7 +158,7 @@ def test_no_saved_session_branch_restores_panel_pref_before_bind_attempt():
     fresh_pref = "if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';"
     pref_idx = segment.find(fresh_pref)
     assert pref_idx >= 0, "no-saved-session path must restore panel preference"
-    bind_call = "await _maybeBindFreshDefaultWorkspaceSession();"
+    bind_call = "await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);"
     bind_idx = segment.find(bind_call)
     assert bind_idx >= 0, "no-saved-session path must attempt to bind after pref restore"
     assert pref_idx < bind_idx, "panel preference restoration must happen before bind attempt"
@@ -167,7 +175,7 @@ def test_ephemeral_blank_session_branch_restores_panel_pref_before_bind_attempt(
     eph_pref = "if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';"
     pref_idx = segment.find(eph_pref)
     assert pref_idx >= 0, "ephemeral blank-session path must restore panel preference"
-    bind_call = "await _maybeBindFreshDefaultWorkspaceSession();"
+    bind_call = "await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);"
     bind_idx = segment.find(bind_call)
     assert bind_idx >= 0, "ephemeral blank-session path must attempt to bind before returning"
     assert pref_idx < bind_idx, "ephemeral panel preference restoration must happen before bind attempt"

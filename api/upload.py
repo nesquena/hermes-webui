@@ -4,13 +4,13 @@ Hermes Web UI -- File upload: multipart parser and upload handler.
 import mimetypes
 import os
 import re as _re
-import email.parser
 import tempfile
 from pathlib import Path
 
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
-from api.helpers import j, bad
+from api.helpers import j
 from api.models import get_session
+from api.profiles import _profiles_match, get_active_profile_name as _get_active_profile_name
 from api.workspace import (
     safe_resolve_ws,
     resolve_trusted_workspace,
@@ -74,7 +74,6 @@ def parse_multipart(rfile, content_type, content_length) -> tuple:
     fields = {}
     files = {}
     delimiter = b'--' + boundary
-    end_marker = b'--' + boundary + b'--'
     parts = raw.split(delimiter)
     for part in parts[1:]:
         stripped = part.lstrip(b'\r\n')
@@ -150,6 +149,60 @@ def _session_attachment_dir(session_id: str, *, root: Path | None = None) -> Pat
     return dest_dir
 
 
+def _session_visible_to_active_profile(session) -> bool:
+    """Return whether an upload target session belongs to the active profile."""
+    session_profile = getattr(session, 'profile', None)
+    if not isinstance(session_profile, str):
+        session_profile = None
+    return _profiles_match(session_profile, _get_active_profile_name())
+
+
+def _reject_invisible_session(handler, session) -> bool:
+    if _session_visible_to_active_profile(session):
+        return False
+    j(handler, {'error': 'Session not found'}, status=404)
+    return True
+
+
+def _write_office_upload_sidecar(workspace: Path, dest: Path, file_bytes: bytes) -> dict | None:
+    """Write a Markdown preview sidecar for supported Office uploads."""
+    if dest.suffix.lower() not in {'.docx', '.xlsx', '.pptx'}:
+        return None
+
+    error_message = 'Office sidecar extraction failed'
+    sidecar = dest.with_name(f'{dest.name}.md')
+    sidecar_path = sidecar.resolve()
+    created_sidecar = False
+    try:
+        from api.office_documents import preview_office_document
+
+        preview = preview_office_document(dest.name, file_bytes)
+        if not sidecar_path.is_relative_to(workspace.resolve()):
+            raise ValueError('Invalid sidecar destination')
+        sidecar_fd = open_anchored_create_fd(workspace, sidecar_path)
+        created_sidecar = True
+        with os.fdopen(sidecar_fd, 'w', encoding='utf-8', closefd=True) as sidecar_file:
+            sidecar_file.write(str(preview.get('content') or ''))
+        return {
+            'filename': sidecar_path.name,
+            'path': str(sidecar_path),
+            'size': sidecar_path.stat().st_size,
+            'preview_kind': preview.get('preview_kind'),
+            'office_format': preview.get('office_format'),
+        }
+    except FileExistsError:
+        return {'error': error_message}
+    except Exception:
+        if created_sidecar:
+            try:
+                unlink_anchored(workspace, sidecar_path)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+        return {'error': error_message}
+
+
 def handle_upload(handler):
     import traceback as _tb
     try:
@@ -168,6 +221,8 @@ def handle_upload(handler):
             s = get_session(session_id)
         except KeyError:
             return j(handler, {'error': 'Session not found'}, status=404)
+        if _reject_invisible_session(handler, s):
+            return True
         safe_name = _sanitize_upload_name(filename)
         dest = _upload_destination(session_id, safe_name)
         dest.write_bytes(file_bytes)
@@ -192,7 +247,7 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
     Returns a dict with ``extracted`` (int), ``files`` (list[str]).
     Raises ValueError on zip-slip or unsupported format.
     """
-    import zipfile, tarfile, io, os, shutil
+    import zipfile, tarfile, io, os
 
     cap = _max_extracted_bytes()
     name = Path(filename).name
@@ -344,6 +399,8 @@ def handle_upload_extract(handler):
             s = get_session(session_id)
         except KeyError:
             return j(handler, {'error': 'Session not found'}, status=404)
+        if _reject_invisible_session(handler, s):
+            return True
         session_dir = _session_attachment_dir(session_id)
         session_dir.mkdir(parents=True, exist_ok=True)
         result = extract_archive(file_bytes, filename, session_dir)
@@ -563,6 +620,8 @@ def handle_workspace_upload(handler):
             session = get_session(session_id)
         except KeyError:
             return j(handler, {'error': 'Session not found'}, status=404)
+        if _reject_invisible_session(handler, session):
+            return True
 
         # Resolve workspace root from session
         workspace = resolve_trusted_workspace(session.workspace)
@@ -686,6 +745,7 @@ def handle_workspace_upload(handler):
                     })
                     continue
 
+            sidecar = _write_office_upload_sidecar(workspace, dest, file_bytes)
             results.append({
                 'filename': dest.name,
                 'path': str(dest),
@@ -693,6 +753,8 @@ def handle_workspace_upload(handler):
                 'mime': mime,
                 'is_image': mime.startswith('image/'),
                 'extracted': False,
+                **({'sidecar': sidecar} if sidecar and 'error' not in sidecar else {}),
+                **({'sidecar_error': sidecar['error']} if sidecar and 'error' in sidecar else {}),
             })
 
         if len(results) == 1:

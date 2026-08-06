@@ -34,4 +34,5 @@ def test_poll_path_skips_non_external_sessions():
 def test_session_events_refresh_active_session():
     src = SESSIONS_JS.read_text(encoding="utf-8")
     body = _function_body(src, "_scheduleSessionEventsRefresh")
-    assert "refreshSessionList(reason||'event', {refreshActive:true})" in body
+    assert "void refreshSessionList(request.reason||'event', request.opts)" in body
+    assert "_scheduleSessionEventsRefresh(eventTargetsActiveSession?'event-active-session':'event', {force:true, refreshActive:true})" in src

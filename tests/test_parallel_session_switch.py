@@ -80,30 +80,30 @@ class TestLoadSessionIdleOverlap:
 
         found = False
         for pos in positions:
-            # Window widened 600→850 (#3326 added a reload-width-hint comment +
-            # conditional preserveScroll arg in the idle branch, pushing the
-            # _dirP.catch line further from the S.busy=false anchor).
-            block = SESSIONS_JS[pos : pos + 850]
-            has_loaddir = "loadDir('.')" in block
+            # Window widened 600→950 (#3326 added a reload-width-hint comment +
+            # conditional preserveScroll arg in the idle branch; the workspace
+            # refresh now routes through a first-paint deferral helper instead of
+            # a direct loadDir('.') call).
+            block = SESSIONS_JS[pos : pos + 950]
+            has_deferred_workspace = "_deferWorkspaceRefreshForSession(sid);" in block
             # #3326 added an optional {preserveScroll} arg to the idle-path render
             # call; match the call form rather than the bare `renderMessages()`.
             has_render = "renderMessages(" in block
-            if has_loaddir and has_render:
+            if has_deferred_workspace and has_render:
                 found = True
                 assert "highlightCode()" not in block, (
                     "The idle path should rely on renderMessages()'s consolidated "
                     "post-render pass instead of running a second highlight pass."
                 )
-                assert "_dirP" in block and "await _dirP" not in block, (
-                    "loadDir() should refresh the workspace without blocking "
-                    "session-load completion."
+                assert block.index("renderMessages(") < block.index("_deferWorkspaceRefreshForSession(sid);"), (
+                    "workspace refresh should be deferred until after the session "
+                    "transcript render starts."
                 )
-                assert "_dirP.catch" in block
                 break
 
         assert found, (
             "Could not find the idle path in loadSession that calls both "
-            "renderMessages and loadDir."
+            "renderMessages and _deferWorkspaceRefreshForSession."
         )
 
 

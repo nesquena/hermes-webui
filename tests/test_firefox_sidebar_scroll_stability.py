@@ -33,9 +33,9 @@ def test_polling_payloads_are_deferred_while_user_scrolls_sidebar():
     assert "async function _runRenderSessionListRefresh(opts, _gen)" in refresh_block
     assert "const deferWhileInteracting=Boolean(opts&&opts.deferWhileInteracting);" in refresh_block
     assert "if(deferWhileInteracting&&_isSessionListUserInteracting())" in refresh_block
-    assert "_pendingSessionListPayload={gen:_gen,sessData,projData};" in refresh_block
+    assert "_pendingSessionListPayload={gen:_gen,sessData,projData,unreadGen};" in refresh_block
     assert "_schedulePendingSessionListApply();" in refresh_block
-    assert "_applySessionListPayload(sessData,projData);" in refresh_block
+    assert "_applySessionListPayload(sessData,projData,{unreadGen});" in refresh_block
     assert "_markPollingCompletionUnreadTransitions(_allSessions);" in apply_block, (
         "deferring sidebar refreshes must preserve background-completion unread semantics"
     )
@@ -61,8 +61,8 @@ def test_only_background_refreshes_defer_while_sidebar_is_interacting():
     assert "renderSessionList({deferWhileInteracting:true})" in streaming_poll_block
     assert "renderSessionList({deferWhileInteracting:true})" in gateway_poll_block
     assert "renderSessionList({deferWhileInteracting:true}); // re-fetch and re-render" in gateway_sse_block
-    assert "pfToggle.onclick=()=>{_showAllProfiles=true;renderSessionList();};" in SESSIONS_JS
-    assert "pfToggle.onclick=()=>{_showAllProfiles=false;renderSessionList();};" in SESSIONS_JS
+    assert "pfToggle.onclick=()=>{_setShowAllProfiles(true);renderSessionList({deferWhileInteracting:false});};" in SESSIONS_JS
+    assert "pfToggle.onclick=()=>{_setShowAllProfiles(false);renderSessionList({deferWhileInteracting:false});};" in SESSIONS_JS
 
 def test_session_list_pointer_hover_and_scroll_activity_are_tracked():
     interaction_block = _block("function _isSessionListUserInteracting()", "function _schedulePendingSessionListApply")

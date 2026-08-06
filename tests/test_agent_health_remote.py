@@ -141,6 +141,58 @@ def test_probe_order_prefers_health_detailed(monkeypatch):
     assert probed_urls[0] == "http://fake-gateway:8642/health/detailed"
 
 
+def test_health_detailed_probe_sends_bearer_when_api_key_configured(monkeypatch):
+    """/health/detailed must include Bearer auth when a gateway API key is set (#5418)."""
+    monkeypatch.setenv("HERMES_API_URL", "http://fake-gateway:8642")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "probe-secret")
+    captured_headers: list[dict[str, str]] = []
+
+    def fake_urlopen(req, timeout=None):
+        captured_headers.append(dict(req.header_items()))
+        return _FakeResp(200, body=json.dumps({"gateway_state": "running"}).encode())
+
+    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+        payload = agent_health.build_agent_health_payload()
+
+    assert payload["alive"] is True
+    assert payload["details"]["gateway_state"] == "running"
+    assert captured_headers
+    auth = captured_headers[0].get("Authorization")
+    assert auth == "Bearer probe-secret"
+
+
+def test_health_detailed_falls_back_to_api_server_key(monkeypatch):
+    monkeypatch.setenv("HERMES_API_URL", "http://fake-gateway:8642")
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.setenv("API_SERVER_KEY", "shared-secret")
+    captured_headers: list[dict[str, str]] = []
+
+    def fake_urlopen(req, timeout=None):
+        captured_headers.append(dict(req.header_items()))
+        return _FakeResp(200, body=b'{"gateway_state": "running"}')
+
+    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+        agent_health.build_agent_health_payload()
+
+    assert captured_headers[0].get("Authorization") == "Bearer shared-secret"
+
+
+def test_health_probe_does_not_send_bearer_without_api_key(monkeypatch):
+    monkeypatch.setenv("HERMES_API_URL", "http://fake-gateway:8642")
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.delenv("API_SERVER_KEY", raising=False)
+    captured_headers: list[dict[str, str]] = []
+
+    def fake_urlopen(req, timeout=None):
+        captured_headers.append(dict(req.header_items()))
+        return _FakeResp(200, body=b'{"gateway_state": "running"}')
+
+    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+        agent_health.build_agent_health_payload()
+
+    assert "Authorization" not in captured_headers[0]
+
+
 def test_gateway_health_url_env_used(monkeypatch):
     """GATEWAY_HEALTH_URL should be respected by the remote probe."""
     monkeypatch.delenv("HERMES_API_URL", raising=False)

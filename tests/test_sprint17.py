@@ -47,6 +47,12 @@ def test_settings_save_send_key():
         # Verify it persisted
         data, _ = get("/api/settings")
         assert data["send_key"] == "ctrl+enter"
+        # Save shift+enter
+        _, status = post("/api/settings", {"send_key": "shift+enter"})
+        assert status == 200
+        # Verify it persisted
+        data, _ = get("/api/settings")
+        assert data["send_key"] == "shift+enter"
     finally:
         # Always restore default
         post("/api/settings", {"send_key": "enter"})

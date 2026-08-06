@@ -295,14 +295,29 @@ class TestTLSEndToEnd(unittest.TestCase):
         self._proc = _start_and_wait(
             use_ssl=False, cert="/nonexistent/cert.pem", key="/nonexistent/key.pem",
         )
-        # Confirm TLS warning was printed
-        import fcntl
+        # Confirm the TLS warning was printed. Drain ALL currently-available
+        # stdout, not just the first N bytes: startup can emit an unbounded
+        # amount of unrelated preamble first (optional-dep plugin/tool import
+        # warnings when the test venv lacks `requests`/`websockets`, the startup
+        # config banner, the state-dir hint, etc.), which can push the
+        # "TLS setup failed" line well past any fixed-size single read and make
+        # this test flaky depending on how noisy the environment is.
         os.set_blocking(self._proc.stdout.fileno(), False)
         output = ""
-        try:
-            output = self._proc.stdout.read(2000) or ""
-        except BlockingIOError:
-            output = ""
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                chunk = self._proc.stdout.read(65536)
+            except BlockingIOError:
+                chunk = None
+            if chunk:
+                output += chunk
+                if "TLS setup failed" in output:
+                    break
+            else:
+                if "TLS setup failed" in output:
+                    break
+                time.sleep(0.05)
         self.assertIn("TLS setup failed", output)
 
 

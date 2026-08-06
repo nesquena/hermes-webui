@@ -43,7 +43,7 @@ def test_live_models_cache_hits_within_ttl(monkeypatch):
 
     assert calls == ["openai"]
     assert first == second
-    assert first["models"] == [{"id": "openai/gpt-test", "label": "GPT Test"}]
+    assert first["models"] == [{"id": "openai/gpt-test", "label": "GPT Test", "supports_fast_tier": True}]
 
 
 def test_live_models_cache_expires(monkeypatch):
@@ -111,7 +111,7 @@ def test_live_models_cache_returns_deep_copies(monkeypatch):
     second = routes._handle_live_models(object(), parsed)
 
     assert second["provider"] == "openai"
-    assert second["models"] == [{"id": "openai/gpt-test", "label": "GPT Test"}]
+    assert second["models"] == [{"id": "openai/gpt-test", "label": "GPT Test", "supports_fast_tier": True}]
 
 
 def test_live_models_endpoint_respects_picker_visibility_budget(monkeypatch):

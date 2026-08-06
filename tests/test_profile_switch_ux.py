@@ -133,8 +133,80 @@ class TestParallelizedFetches:
         fn = self._get_switch_fn()
         assert "awaitWorkspaceLoad: workspaceVisible" in fn
         sessions_js = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
-        assert "if(options&&options.awaitWorkspaceLoad) await dirLoad" in sessions_js
-        assert "loadDir('.') is fire-and-forget while the workspace panel is closed" in sessions_js
+        assert "if(options&&options.awaitWorkspaceLoad){" in sessions_js
+        assert "await loadDir('.')" in sessions_js
+        assert "typeof _deferWorkspaceRefreshForSession==='function'" in sessions_js
+        assert "_deferWorkspaceRefreshForSession(S.session.session_id)" in sessions_js
+        assert "const _dirP=loadDir('.')" in sessions_js
+        assert "Keep new-chat first paint instant" in sessions_js
+
+    def test_cross_profile_empty_session_is_replaced_before_mutation_or_upload(self):
+        """Switching profile must not keep an old-profile empty session active.
+
+        Uploads post ``S.session.session_id`` and the backend correctly rejects a
+        session that is invisible to the active profile.  Therefore a profile
+        switch must promote a profile-mismatched, even empty, current session to
+        the ``sessionInProgress`` replacement path before any in-place
+        ``/api/session/update`` or local profile retagging can make the browser
+        believe the old session is safe to use.
+        """
+        fn = self._get_switch_fn()
+        mismatch_idx = fn.find("sessionProfileMatchesTarget")
+        assert mismatch_idx != -1, (
+            "switchToProfile() must explicitly compare the current session profile "
+            "with the target active profile"
+        )
+        assert "const targetActiveProfile = S.activeProfile || 'default';" in fn
+        assert "currentSessionProfile === targetActiveProfile || (currentSessionProfile === 'default' && !!S.activeProfileIsDefault)" in fn, (
+            "fallback matching must preserve the renamed-default/root-profile alias semantics"
+        )
+        promote_idx = fn.find("sessionInProgress = true", mismatch_idx)
+        assert promote_idx != -1, (
+            "a profile-mismatched current session must force the new-session branch, "
+            "even when it has no messages"
+        )
+        first_in_place_patch = fn.find("if (S.session && !sessionInProgress)")
+        first_update = fn.find("await api('/api/session/update'")
+        branch_idx = fn.find("if (sessionInProgress)")
+        assert -1 not in (first_in_place_patch, first_update, branch_idx)
+        assert promote_idx < first_in_place_patch < first_update < branch_idx, (
+            "the stale-session promotion must happen before any in-place session "
+            "retag/update and before choosing the profile-switch branch"
+        )
+
+    def test_profile_switch_opens_session_browser_after_successful_list_refresh(self):
+        """After changing profile, expose the new profile's conversation list.
+
+        If the user started from an old-profile chat, leaving the old transcript as
+        the dominant UI invites sending into a stale session_id.  The switch must
+        render the new profile's session list, then open the sidebar/mobile drawer
+        so the user can choose an existing conversation or click New Chat.
+        """
+        fn = self._get_switch_fn()
+        assert "function _openProfileSwitchSessionBrowser(" in self.JS
+        open_calls = [m.start() for m in re.finditer(r"_openProfileSwitchSessionBrowser\(\)", fn)]
+        assert len(open_calls) >= 2, (
+            "both profile-switch success branches must expose the new profile's session browser"
+        )
+        for open_idx in open_calls:
+            render_idx = fn.rfind("await renderSessionList();", 0, open_idx)
+            assert render_idx != -1 and render_idx < open_idx, (
+                "open the sidebar only after the new profile's session list has rendered"
+            )
+            toast_idx = fn.find("showToast(", open_idx)
+            assert toast_idx != -1, "the open call should remain in the success branch before user feedback"
+
+    def test_profile_switch_session_browser_helper_supports_desktop_and_mobile(self):
+        js = self.JS
+        start = js.find("function _openProfileSwitchSessionBrowser(")
+        assert start != -1
+        end = js.find("async function switchToProfile(", start)
+        assert end != -1
+        helper = js[start:end]
+        assert "expandSidebar()" in helper, "desktop profile switches must uncollapse the sidebar"
+        assert "mobile-panel-drawer" in helper
+        assert "mobile-open" in helper
+        assert "mobile-session-page" in helper
 
 
 class TestSpinnerCss:

@@ -19,6 +19,7 @@ import subprocess
 import concurrent.futures
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
 logger = logging.getLogger(__name__)
@@ -371,6 +372,45 @@ def save_workspaces(workspaces: list) -> None:
     ws_file = _workspaces_file()
     ws_file.parent.mkdir(parents=True, exist_ok=True)
     ws_file.write_text(json.dumps(workspaces, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def get_profile_default_workspace() -> str:
+    """Resolve the ACTIVE PROFILE's default workspace, never the global file.
+
+    Like get_last_workspace() but WITHOUT the global ``_GLOBAL_LW_FILE``
+    fallback: for a named profile that has not yet written its own
+    profile-scoped ``last_workspace.txt``, that global fallback would leak the
+    *global* last-workspace instead of the profile's configured workspace —
+    which is exactly the #5169 bug (the composer chip on a blank new-chat page
+    showing the wrong/global workspace for a named profile). Used by
+    ``GET /api/profile/active`` so a cold boot under a profile cookie reflects
+    the profile's own configured working directory.
+
+    Priority: profile-scoped ``last_workspace.txt`` -> profile ``config.yaml``
+    ``workspace``/``default_workspace`` -> ``terminal.cwd`` -> process default.
+    """
+    remote_cwd = _remote_terminal_cwd()
+
+    def _valid(raw: str) -> str | None:
+        if not raw:
+            return None
+        if remote_cwd:
+            if _remote_terminal_workspace_candidate(raw) is not None:
+                return raw
+            return None
+        if Path(raw).is_dir():
+            return raw
+        return None
+
+    lw_file = _last_workspace_file()
+    if lw_file.exists():
+        try:
+            p = _valid(lw_file.read_text(encoding='utf-8').strip())
+            if p:
+                return p
+        except Exception:
+            logger.debug("Failed to read profile last workspace from %s", lw_file)
+    return _profile_default_workspace()
 
 
 def get_last_workspace() -> str:
@@ -838,6 +878,47 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
         f"list, and not under the default workspace: {candidate}. "
         f"Add it via Settings → Workspaces first."
     )
+
+
+def resolve_implicit_workspace_with_recovery(
+    candidate: str | Path | None,
+    fallback: str | Path | None | Callable[[], str | Path | None],
+) -> tuple[Path, bool]:
+    """Resolve an implicit workspace, recovering only a genuinely missing path.
+
+    The fallback still passes through :func:`resolve_trusted_workspace`. Existing
+    but untrusted, inaccessible, or non-directory candidates are not recovery
+    cases: their original validation error is preserved so fallback cannot widen
+    the workspace trust boundary.
+    """
+    try:
+        return resolve_trusted_workspace(candidate), False
+    except ValueError as original_error:
+        if candidate in (None, ""):
+            raise original_error from None
+        # Remote terminal workspaces live on the target host. Classify the
+        # backend independently of terminal.cwd: remote backends may omit cwd,
+        # set it to an empty string, or use ".". A failed host-local stat can
+        # never prove target-side deletion. Config-read uncertainty also fails
+        # closed by preserving the original validation error.
+        try:
+            from api.config import get_config
+
+            terminal_cfg = get_config().get("terminal", {})
+        except Exception:
+            logger.debug("Failed to classify terminal backend for workspace recovery", exc_info=True)
+            raise original_error from None
+        if _is_remote_terminal_backend(terminal_cfg):
+            raise original_error from None
+        try:
+            local_candidate = _resolve_path(candidate)
+            local_candidate.stat()
+        except FileNotFoundError:
+            fallback_value = fallback() if callable(fallback) else fallback
+            return resolve_trusted_workspace(fallback_value), True
+        except (OSError, RuntimeError, ValueError):
+            raise original_error from None
+        raise original_error from None
 
 
 
@@ -1432,6 +1513,10 @@ def read_file_content(workspace: Path, rel: str) -> dict:
         if st.st_size > MAX_FILE_BYTES:
             raise ValueError(f"File too large ({st.st_size} bytes, max {MAX_FILE_BYTES})")
         raw = fh.read(MAX_FILE_BYTES + 1)
+    if Path(str(rel)).suffix.lower() in {".docx", ".xlsx", ".pptx"}:
+        from api.office_documents import preview_office_document
+
+        return preview_office_document(rel, raw)
     content = raw.decode('utf-8', errors='replace')
     return {'path': rel, 'content': content, 'size': len(raw), 'lines': content.count('\n') + 1}
 

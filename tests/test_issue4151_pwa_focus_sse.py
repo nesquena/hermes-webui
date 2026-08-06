@@ -61,6 +61,7 @@ def test_focus_hook_closes_both_global_sidebar_streams():
     assert "window.addEventListener('focus'" in block
     assert "ensureSessionEventsSSE()" in block
     assert "startGatewaySSE()" in block
+    assert "_refreshSessionListAfterSidebarResume('focus')" in block
 
 
 def test_blur_close_is_debounced_and_rechecks_focus_at_fire_time():

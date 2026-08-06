@@ -120,10 +120,11 @@ def test_save_updates_cached_raw_content_for_force_render():
     """#3378 review (Codex): saving a markdown file from the plain-text fallback
     must refresh _previewRawContent (and its path) so a later force-render shows the
     saved text, not the stale pre-edit fetch."""
-    save_idx = WORKSPACE_JS.find("await api('/api/file/save'")
+    save_idx = WORKSPACE_JS.find("const saved=await api(_previewSaveRoute||'/api/file/save'")
     assert save_idx != -1, "file save call not found"
-    save_block = WORKSPACE_JS[save_idx:save_idx + 600]
-    assert "_previewRawContent = content" in save_block
+    save_block = WORKSPACE_JS[save_idx:save_idx + 1500]
+    assert "const savedContent=saved&&typeof saved.content==='string'?saved.content:content;" in save_block
+    assert "_previewRawContent = savedContent" in save_block
     assert "_previewRawContentPath = _previewCurrentPath" in save_block
 
 

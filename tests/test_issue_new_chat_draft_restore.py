@@ -53,6 +53,30 @@ def test_new_chat_button_restores_remembered_draft_before_creating_session():
     )
 
 
+def test_new_chat_empty_reuse_guard_checks_loaded_visible_messages():
+    helper_start = BOOT_JS.find("function _currentSessionIsReusableEmptyChat()")
+    helper_end = BOOT_JS.find("$('fileInput').onchange", helper_start)
+    assert helper_start != -1 and helper_end != -1, "empty-chat reuse helper not found"
+    helper = BOOT_JS[helper_start:helper_end]
+    assert "S.session.message_count||0" in helper, (
+        "empty-chat reuse should still honor the server-side session message count"
+    )
+    assert "S.messages.some(m=>m&&m.role&&m.role!=='tool')" in helper, (
+        "empty-chat reuse must not focus-only when loaded transcript messages are visible"
+    )
+    assert "S.session.active_stream_id" in helper and "S.session.pending_user_message" in helper, (
+        "empty-chat reuse must continue to treat in-flight zero-count sessions as real sessions"
+    )
+
+    button_body = _btn_new_chat_handler()
+    assert "if(_currentSessionIsReusableEmptyChat())" in button_body
+    shortcut_start = BOOT_JS.find("if((e.metaKey||e.ctrlKey)&&e.key==='k')")
+    shortcut_end = BOOT_JS.find("// Cmd/Ctrl+, opens/closes Settings", shortcut_start)
+    assert shortcut_start != -1 and shortcut_end != -1, "Cmd/Ctrl+K handler block not found"
+    shortcut_body = BOOT_JS[shortcut_start:shortcut_end]
+    assert "if(_currentSessionIsReusableEmptyChat())" in shortcut_body
+
+
 def test_restore_helper_validates_candidate_with_session_metadata():
     assert "const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';" in SESSIONS_JS
     assert "async function _restoreRememberedNewChatDraftSession()" in SESSIONS_JS
@@ -76,16 +100,36 @@ def test_session_switch_awaits_immediate_draft_flush_before_loading_target():
     )
 
 
+def test_immediate_empty_draft_flush_clears_locally_known_server_draft():
+    assert "const _composerDraftKnownPayloadSessions = new Set();" in SESSIONS_JS
+    save_start = SESSIONS_JS.find("function _saveComposerDraft(")
+    save_end = SESSIONS_JS.find("function _composerDraftHasPayload", save_start)
+    now_start = SESSIONS_JS.find("function _saveComposerDraftNow(")
+    now_end = SESSIONS_JS.find("// Restore composer draft", now_start)
+    assert save_start != -1 and save_end != -1
+    assert now_start != -1 and now_end != -1
+    save_body = SESSIONS_JS[save_start:save_end]
+    now_body = SESSIONS_JS[now_start:now_end]
+    assert "_composerDraftKnownPayloadSessions.add(sid);" in save_body, (
+        "debounced non-empty draft saves must mark the session as having server-side draft payload"
+    )
+    assert "_rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);" in save_body
+    assert "!_composerDraftKnownPayloadSessions.has(sid)" in now_body, (
+        "empty immediate switch-away saves may only be skipped when no local/server draft payload is known"
+    )
+    assert "_rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);" in now_body
+
+
 def test_pre_switch_draft_flush_rechecks_stale_loading_guard():
     """The awaited draft-save in loadSession yields the event loop. On a rapid
     session switch (B then quickly C) the stale B continuation must bail out
     before the destructive state-clearing block, or it would wipe the
-    freshly-loaded C state. The guard is `if (_loadingSessionId !== sid) return;`
+    freshly-loaded C state. The guard is `if (!_isCurrentLoad()) return;`
     placed AFTER the awaited save and BEFORE the `S.messages = []` clear
     (Codex pre-release CORE catch, #3471)."""
     body = _load_session_clear_block()
     await_idx = body.find("await _saveComposerDraftNow(currentSid")
-    guard_idx = body.find("if (_loadingSessionId !== sid) return;", await_idx)
+    guard_idx = body.find("if (!_isCurrentLoad()) return;", await_idx)
     clear_idx = body.find("S.messages = [];", await_idx)
     assert await_idx != -1, "pre-switch awaited draft save not found"
     assert guard_idx != -1, "stale-loading guard missing after the awaited draft save"
@@ -116,6 +160,12 @@ def test_clear_composer_draft_forgets_same_new_chat_candidate():
     body = SESSIONS_JS[start:end]
     assert "_clearRememberedNewChatDraftSession(sid);" in body, (
         "sending a draft must stop New Chat from restoring that now-cleared candidate"
+    )
+    assert "return api('/api/session/draft'" in body, (
+        "clear path should return its POST promise for callers/tests that need to await it"
+    )
+    assert "_rememberComposerDraftPayloadState(sid, '', []);" in body, (
+        "clear path must also clear local draft-payload tracking so send-then-switch can skip redundant empty flushes"
     )
 
 

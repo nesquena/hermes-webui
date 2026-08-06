@@ -22,6 +22,8 @@ import gzip
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
+import api.config as api_config
+
 
 class _FakeHandler:
     """Minimal request handler stand-in matching tests/test_session_static_assets.py."""
@@ -66,24 +68,6 @@ def _serve(routes, path, query="", request_headers=None):
     return h
 
 
-def _patch_static_root(monkeypatch, static_root):
-    """Force _serve_static to read from a temp directory and clear its cache."""
-    from api import routes
-    monkeypatch.setattr(
-        routes, "_serve_static",
-        lambda handler, parsed, _root=static_root, _orig=routes._serve_static: _orig(handler, parsed),
-    )
-    # Tests redirect by writing files to the real static dir's parent layout
-    # via a fixture; instead we monkeypatch the module-level Path computation.
-    # _serve_static derives static_root from `Path(__file__).parent.parent / "static"`,
-    # so we monkeypatch __file__ via a closure that re-resolves with our temp tree.
-    # Simpler: patch the cache and call the real function with a parsed path that
-    # resolves under the real static dir. We use the fixture below instead.
-
-
-# ── Fixture: build a tiny isolated static tree and rebind paths ───────────
-
-
 import pytest
 
 
@@ -100,30 +84,7 @@ def isolated_static(tmp_path, monkeypatch):
 
     # Patch the cache so cross-test state cannot leak.
     monkeypatch.setattr(routes, "_STATIC_CACHE", {}, raising=True)
-
-    # _serve_static derives static_root from Path(__file__).parent.parent.
-    # Rebind by monkeypatching Path resolution: we wrap the function so the
-    # caller-visible signature is unchanged.
-    original = routes._serve_static
-
-    def wrapped(handler, parsed):
-        # Trick: temporarily monkeypatch Path so the function sees our temp tree.
-        import api.routes as ar
-        orig_file = ar.__file__
-        # Place a sentinel api/routes.py "next to" tmp_path so the relative
-        # walk lands in our static_root.
-        fake_api_dir = tmp_path / "api"
-        fake_api_dir.mkdir(exist_ok=True)
-        fake_routes = fake_api_dir / "routes.py"
-        if not fake_routes.exists():
-            fake_routes.write_text("# stub for path resolution\n")
-        monkeypatch.setattr(ar, "__file__", str(fake_routes))
-        try:
-            return original(handler, parsed)
-        finally:
-            monkeypatch.setattr(ar, "__file__", orig_file)
-
-    monkeypatch.setattr(routes, "_serve_static", wrapped)
+    monkeypatch.setattr(api_config, "get_static_root", lambda: static_root)
     yield static_root
 
 

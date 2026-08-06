@@ -55,6 +55,14 @@ def assert_contains_all(src: str, snippets: list[str]) -> None:
         assert snippet in src
 
 
+def slice_between(src: str, start_anchor: str, end_anchor: str) -> str:
+    start = src.find(start_anchor)
+    assert start != -1, f"start anchor not found: {start_anchor!r}"
+    end = src.find(end_anchor, start + len(start_anchor))
+    assert end != -1, f"end anchor not found after {start_anchor!r}: {end_anchor!r}"
+    return src[start:end]
+
+
 def fade_helper_script(performance_stub: str = "{_t:0,now(){return this._t;}}") -> str:
     helpers = "\n".join(
         function_block(MESSAGES_JS, name)
@@ -74,15 +82,14 @@ let _streamFadeLastTargetWords=0;
 let _streamFadeLastArrivalMs=0;
 let _streamFadeArrivalWps=0;
 let _streamFadeLatestAnimationEndAt=0;
-let _streamFadeAppendOffset=0;
 let _streamFadeVisibleWords=0;
 let _streamFadeHoldUntilMs=0;
-let _streamFadeCurrentMs=200;
-const _STREAM_FADE_MS=200;
-const _STREAM_FADE_MAX_MS=350;
-const _STREAM_FADE_STAGGER_MS=16;
-const _STREAM_FADE_DONE_MAX_MS=320;
-const _STREAM_FADE_DONE_DRAIN_MAX_MS=900;
+let _streamFadeCurrentMs=620;
+let _streamFadeDomText='';
+const _STREAM_FADE_MS=620;
+const _STREAM_FADE_MAX_MS=900;
+const _STREAM_FADE_DONE_MAX_MS=1000;
+const _STREAM_FADE_DONE_DRAIN_MAX_MS=1400;
 const performance={performance_stub};
 {helpers}
 """
@@ -158,12 +165,30 @@ def test_stream_fade_uses_incremental_renderer_without_changing_default_path():
         [
             "_streamFadeNextText(displayText)",
             "if(!next.changed) return next.caughtUp",
+            "if(!_shouldUseTransparentStreamFade())",
             "_smdNewParser(assistantBody,true)",
             "_smdWrite(next.text,true)",
+            "_sanitizeSmdLinks(assistantBody)",
+            "assistantBody.appendChild(document.createTextNode(delta))",
+            "_streamFadeDomText=String(next.text||'')",
             "stream-fade-active",
         ],
     )
-    assert "renderMd ? renderMd(next.text||'')" in render_block
+    assert render_block.index("_smdWrite(next.text,true)") < render_block.index(
+        "assistantBody.appendChild(document.createTextNode(delta))"
+    )
+    assert "_streamFadeAppendText(assistantBody,delta)" not in render_block
+    assert "_streamFadeBindCleanup(assistantBody)" not in render_block
+    append_block = function_block(MESSAGES_JS, "_streamFadeAppendText")
+    assert_contains_all(
+        append_block,
+        [
+            "document.createDocumentFragment()",
+            "span.className='stream-fade-word is-new'",
+            "el.appendChild(frag)",
+            "_streamFadeLatestAnimationEndAt",
+        ],
+    )
     assert_contains_all(
         renderer_block,
         [
@@ -181,18 +206,238 @@ def test_stream_fade_uses_incremental_renderer_without_changing_default_path():
         ["animationend", "span.replaceWith(document.createTextNode"],
     )
     assert "_wrapStreamingFadeWords" not in MESSAGES_JS
+    assert "animationDelay" not in renderer_block
+    assert "_STREAM_FADE_STAGGER_MS" not in MESSAGES_JS
+    assert "_streamFadeAppendOffset" not in MESSAGES_JS
+
+
+def test_stream_fade_appends_new_spans_without_replacing_existing_nodes():
+    script = (
+        function_block(MESSAGES_JS, "_streamFadeAppendText")
+        + r"""
+const _STREAM_FADE_MS=620;
+let _streamFadeLatestAnimationEndAt=0;
+let _streamFadeCurrentMs=620;
+const performance={_t:0,now(){return this._t;}};
+function _streamFadeReduceMotionEnabled(){ return false; }
+class FakeNode{
+  constructor(type,text=''){
+    this.type=type;
+    this.children=[];
+    this.className='';
+    this.textContent=text;
+    this.style={values:{},setProperty:(name,value)=>{this.style.values[name]=value;}};
+  }
+  appendChild(child){
+    if(child&&child.type==='fragment'){
+      child.children.forEach(n=>this.children.push(n));
+    }else{
+      this.children.push(child);
+    }
+    return child;
+  }
+}
+global.document={
+  createDocumentFragment(){ return new FakeNode('fragment'); },
+  createTextNode(text){ return new FakeNode('text',String(text)); },
+  createElement(tag){ const node=new FakeNode(tag); node.tagName=String(tag).toUpperCase(); return node; },
+};
+const body=new FakeNode('div');
+_streamFadeAppendText(body,'alpha beta ');
+const firstSpan=body.children.find(node=>node.className==='stream-fade-word is-new');
+if(!firstSpan) throw new Error('missing first fade span');
+_streamFadeAppendText(body,'gamma');
+if(body.children.find(node=>node.className==='stream-fade-word is-new')!==firstSpan){
+  throw new Error('first span was replaced');
+}
+const spans=body.children.filter(node=>node.className==='stream-fade-word is-new');
+if(spans.length!==3) throw new Error(`expected three animated spans, got ${spans.length}`);
+if(spans.map(node=>node.textContent).join('|')!=='alpha|beta|gamma'){
+  throw new Error(`wrong span text: ${spans.map(node=>node.textContent).join('|')}`);
+}
+"""
+    )
+    run_node(script)
+
+
+def test_transparent_anchor_prose_uses_fade_renderer_when_enabled():
+    anchor_block = function_block(MESSAGES_JS, "_anchorProseIncrementalNode")
+    predicate_block = function_block(MESSAGES_JS, "_shouldUseLiveProseFade")
+    assert_contains_all(
+        anchor_block,
+        [
+            "const fade=typeof _shouldUseLiveProseFade==='function'&&_shouldUseLiveProseFade()",
+            "if(st && st.fade!==fade) st=null",
+            "if(body.classList) body.classList.toggle('stream-fade-active',fade)",
+            "const baseRenderer=fade?_streamFadeRenderer(body):_safeSmdRenderer(body)",
+            "st={node,parser:window.smd.parser(renderer),writtenText:'',fade}",
+            "const body=st.node&&st.node.querySelector&&st.node.querySelector('.msg-body')",
+        ],
+    )
+    assert_contains_all(
+        predicate_block,
+        [
+            "!_streamFadeReduceMotionEnabled()",
+            "_shouldUseStreamFade()",
+            "_shouldUseTransparentStreamFade()",
+        ],
+    )
+    assert "function _shouldUseTransparentStreamFade()" in MESSAGES_JS
+    assert "typeof isTransparentStream==='function'&&isTransparentStream()" in MESSAGES_JS
+
+
+def test_reduced_motion_disables_live_prose_fade_predicate():
+    script = (
+        "\n".join(
+            function_block(MESSAGES_JS, name)
+            for name in [
+                "_shouldUseStreamFade",
+                "_shouldUseTransparentStreamFade",
+                "_streamFadeReduceMotionEnabled",
+                "_shouldUseLiveProseFade",
+            ]
+        )
+        + r"""
+let _streamFadeReduceMotionMql=null;
+let _streamFadeReduceMotion=false;
+let _streamFadeReduceMotionOnChange=null;
+let transparent=true;
+let reduceMotion=true;
+global.window={
+  _fadeTextEffect:true,
+  matchMedia(){
+    return {
+      get matches(){ return reduceMotion; },
+      addEventListener(){},
+      removeEventListener(){},
+    };
+  },
+};
+function isTransparentStream(){ return transparent; }
+if(_shouldUseLiveProseFade()) throw new Error('reduced motion allowed live prose fade');
+_streamFadeReduceMotionMql=null;
+reduceMotion=false;
+window._fadeTextEffect=false;
+if(!_shouldUseLiveProseFade()) throw new Error('transparent stream fade should work when motion is allowed');
+_streamFadeReduceMotionMql=null;
+transparent=false;
+window._fadeTextEffect=true;
+if(!_shouldUseLiveProseFade()) throw new Error('regular fade preference should work when motion is allowed');
+"""
+    )
+    run_node(script)
+
+
+def test_transparent_stream_hidden_body_appends_plain_text_only():
+    script = (
+        function_block(MESSAGES_JS, "_renderStreamingFadeMarkdown")
+        + r"""
+let _streamFadeDomText='';
+let _smdParser=null;
+let _smdReconnect=false;
+let parserEnded=false;
+function _streamFadeNextText(){ return {changed:true,caughtUp:false,text:'alpha beta'}; }
+function _shouldUseTransparentStreamFade(){ return true; }
+function _smdEndParser(){ parserEnded=true; }
+const assistantBody={
+  textContent:'',
+  innerHTML:'',
+  children:[],
+  classList:{added:[],add(name){ this.added.push(name); }},
+  appendChild(node){
+    this.children.push(node);
+    this.textContent += String(node.textContent || '');
+    return node;
+  },
+};
+global.document={
+  createTextNode(text){ return {type:'text',textContent:String(text)}; },
+};
+const caughtUp=_renderStreamingFadeMarkdown('alpha beta');
+if(caughtUp) throw new Error('expected fade playout to remain catching up');
+if(assistantBody.textContent!=='alpha beta') throw new Error(`wrong hidden text: ${assistantBody.textContent}`);
+if(_streamFadeDomText!=='alpha beta') throw new Error(`wrong dom text: ${_streamFadeDomText}`);
+if(assistantBody.children.some(node=>node.className==='stream-fade-word is-new')){
+  throw new Error('hidden body received fade span');
+}
+if(!assistantBody.classList.added.includes('stream-fade-active')) throw new Error('missing stream fade active marker');
+"""
+    )
+    run_node(script)
+
+
+def test_transparent_anchor_prose_receives_revealed_fade_text():
+    render_section = slice_between(
+        MESSAGES_JS,
+        "const displayText = segmentStart===0",
+        "scrollIfPinned();",
+    )
+    assert_contains_all(
+        render_section,
+        [
+            "let anchorProcessText=displayText",
+            "if(assistantBody){",
+            "const caughtUp=_renderStreamingFadeMarkdown(displayText)",
+            "if(_shouldUseLiveProseFade())",
+            "anchorProcessText=_streamFadeDomText||''",
+            "if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText)",
+        ],
+    )
+    assert render_section.index("let anchorProcessText=displayText") < render_section.index("if(assistantBody){")
+    assert render_section.index("anchorProcessText=_streamFadeDomText||''") < render_section.index(
+        "_upsertAnchorProcessProse(anchorProcessText)"
+    )
+    assert render_section.index("if(assistantBody){") < render_section.rindex(
+        "if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText)"
+    )
 
 
 def test_stream_fade_done_drain_has_hard_cap_for_large_buffered_responses():
     drain_block = function_block(MESSAGES_JS, "_drainStreamFadeBeforeDone")
-    assert "const _STREAM_FADE_DONE_DRAIN_MAX_MS=900" in MESSAGES_JS
+    assert "const _STREAM_FADE_DONE_DRAIN_MAX_MS=1400" in MESSAGES_JS
     assert_contains_all(
         drain_block,
         [
             "const drainStartedAt=performance.now();",
+            "const target=_streamFadeCurrentDisplayText();",
+            "const caughtUp=_renderStreamingFadeMarkdown(target);",
+            "const anchorProcessText=_streamFadeDomText||target;",
+            "if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText);",
             "performance.now()-drainStartedAt>=_STREAM_FADE_DONE_DRAIN_MAX_MS",
             "if(_smdParser) _smdEndParser();",
             "onDone();",
+        ],
+    )
+    assert drain_block.index("_renderStreamingFadeMarkdown(target)") < drain_block.index(
+        "_upsertAnchorProcessProse(anchorProcessText)"
+    )
+
+
+def test_live_streaming_assistant_content_opts_out_of_global_theme_transitions():
+    """Per-token markdown rewrites must not inherit global div color/background fades.
+
+    The global theme transition is useful for dark/light switches, but live
+    assistant DOM updates happen for every streamed token. If those live nodes
+    inherit color/background transitions, light themes visibly flash/fade on
+    each word.
+    """
+    live_transition_guard = slice_between(
+        STYLE_CSS,
+        "Live assistant content is updated token-by-token",
+        ":root{--app-titlebar-safe-top",
+    )
+    assert_contains_all(
+        live_transition_guard,
+        [
+            "#liveAssistantTurn *",
+            "#thinkingRow *",
+            '.assistant-segment[data-live-assistant="1"] *',
+            '.agent-activity-thinking[data-thinking-active="1"] *',
+            '.agent-activity-thinking[data-live-thinking="1"] *',
+            '.live-worklog[data-live-worklog-shell="1"] *',
+            "transition-property:none!important",
+            "transition-duration:0s!important",
+            "transition-delay:0s!important",
         ],
     )
 
@@ -210,7 +455,9 @@ def test_stream_fade_css_is_opacity_only_and_hides_live_cursor():
         [
             "@keyframes stream-fade-word-in",
             ".stream-fade-word.is-new",
-            "var(--stream-fade-ms,240ms) cubic-bezier(.2,.7,.2,1)",
+            "var(--stream-fade-ms,620ms) cubic-bezier(.16,.84,.32,1)",
+            "35%{opacity:.18;}",
+            "70%{opacity:.72;}",
             "prefers-reduced-motion: reduce",
             ".msg-body.stream-fade-active > :last-child::after",
             "display:none",
@@ -236,12 +483,12 @@ const words=Array.from({length:260},(_,i)=>'w'+i).join(' ');
 performance._t += 33;
 let out=_streamFadeNextText('slow start');
 if(!out.changed) throw new Error('expected initial reveal');
-if(_streamFadeCurrentMs !== 200) throw new Error(`expected base fade 200ms, got ${_streamFadeCurrentMs}`);
-for(let frame=0;frame<20&&_streamFadeCurrentMs<350;frame++){
+if(_streamFadeCurrentMs !== 620) throw new Error(`expected base fade 620ms, got ${_streamFadeCurrentMs}`);
+for(let frame=0;frame<20&&_streamFadeCurrentMs<900;frame++){
   performance._t += 120;
   out=_streamFadeNextText(words);
 }
-if(_streamFadeCurrentMs !== 350) throw new Error(`expected max fade 350ms, got ${_streamFadeCurrentMs}`);
+if(_streamFadeCurrentMs !== 900) throw new Error(`expected max fade 900ms, got ${_streamFadeCurrentMs}`);
 """
     )
     run_node(script)

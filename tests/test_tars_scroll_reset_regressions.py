@@ -100,7 +100,18 @@ def test_user_scroll_cancels_delayed_bottom_settling():
     assert "_cancelBottomSettle();" in record
     assert "_lastNonMessageScrollIntentMs=performance.now();" in record
     assert "_scrollPinned=false" in record
-    assert "if(_messageUserUnpinned) return;" in pinned
+    # scrollIfPinned() may now re-pin auto-follow (#5544), but ONLY when the
+    # reader has genuinely returned to the true bottom tail (<=80px) AND no
+    # recent scroll intent is active — it must never fight a manual scroll-up.
+    # Assert those guards are present instead of the old "bail unconditionally
+    # when unpinned" lock.
+    _pinned_compact = pinned.replace(" ", "")
+    assert "_messageBottomDistance()>80" in _pinned_compact, (
+        "scrollIfPinned() re-pin must require the true bottom tail (<=80px), not mere proximity"
+    )
+    assert "_recentMessageWheelIntent()" in _pinned_compact and "_recentMessageKeyScrollIntent()" in _pinned_compact, (
+        "scrollIfPinned() re-pin must bail on recent wheel/key scroll intent so it can't fight a reader"
+    )
     assert "_messageUserUnpinned" in final and "return" in final
     assert "_recentMessageUpwardIntent()" not in pinned
 
@@ -112,7 +123,7 @@ def test_external_active_refresh_defers_while_reader_is_manually_unpinned():
     assert "_deferActiveSessionExternalRefresh" in SESSIONS_JS
     assert "typeof _isMessageReaderUnpinned==='function'&&_isMessageReaderUnpinned()" in refresh
     assert "_deferActiveSessionExternalRefresh(reason||'poll');" in refresh
-    assert "await loadSession(sid, {force:true, externalRefreshReason:reason||'poll'});" in refresh
+    assert "await loadSession(sid, {force:true, externalRefreshReason:reason||'poll', keepStaleUntilLoaded:_keepStaleUntilLoaded});" in refresh
 
 
 def test_session_switch_clears_deferred_active_refresh_reason():
@@ -163,12 +174,44 @@ def test_preserve_scroll_restores_unpinned_viewport_after_dom_rebuild():
     assert "row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);" in UI_JS
     assert "seg.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);" in UI_JS
     assert "container.querySelector(`[data-session-msg-idx=\"${sessionIdx}\"]`)" in UI_JS
-    assert "if(!row&&anchorKey) return false;" in UI_JS
-    assert "if(!row&&hasSessionIdx) return false;" in UI_JS
+    # Desktop scroll jump-back root fix: a stale content-derived anchor key must NOT
+    # dead-end before the sessionIdx fallback (the old `if(!row&&anchorKey) return false;`
+    # sat before sessionIdx was consulted, so a live-stream stale key could never reach
+    # the session-index recovery and the caller fell back to an absolute jump). The
+    # concede now requires BOTH key and sessionIdx lookups to have failed.
+    assert "if(!row&&anchorKey) return false;" not in UI_JS
+    assert "if(!row&&(anchorKey||hasSessionIdx)) return false;" in UI_JS
     assert "_restoreMessageViewportAnchor(snapshot.anchor,0)" in restore
     assert "if(!restoredViaAnchor){" in restore
     assert "el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop))" in restore
     assert "_programmaticScroll=true" in restore
+
+
+def test_pinned_preserve_scroll_uses_bottom_distance_before_viewport_anchor():
+    """Pinned/following streams must not remount an older viewport anchor.
+
+    Live Worklog/activity rebuilds call the same snapshot helpers as reader
+    preservation. For pinned followers, the stable invariant is tail-relative
+    bottom distance, not the first visible row. Restoring the semantic anchor in
+    that state can yank a long streaming transcript upward/topward.
+    """
+    helper = _function_body(UI_JS, "function _restorePinnedMessageScrollSnapshot")
+    restore = _function_body(UI_JS, "function _restoreMessageScrollSnapshot")
+    same_frame = _function_body(UI_JS, "function _restoreMessageScrollSnapshotSameFrame")
+
+    assert "snapshot.pinned!==true||snapshot.userUnpinned===true" in helper
+    assert "maxTop-Math.max(0,bottom)" in helper
+    assert "_messageUserUnpinned=false;" in helper
+    assert "_scrollPinned=true;" in helper
+    assert "_nearBottomCount=2;" in helper
+
+    regular_guard_idx = restore.index("_restorePinnedMessageScrollSnapshot(snapshot)")
+    regular_anchor_idx = restore.index("_restoreMessageViewportAnchor(snapshot.anchor,0)")
+    same_guard_idx = same_frame.index("_restorePinnedMessageScrollSnapshot(snapshot)")
+    same_anchor_idx = same_frame.index("_restoreMessageViewportAnchor(snapshot.anchor,0)")
+
+    assert regular_guard_idx < regular_anchor_idx
+    assert same_guard_idx < same_anchor_idx
 
 
 def test_same_session_reload_anchor_uses_absolute_session_message_index():

@@ -56,6 +56,10 @@ def test_apply_force_update_removes_untracked_files_before_reset(tmp_path):
             return '', True
         if args == ['clean', '-fd']:
             return '', True
+        if args[:2] == ['merge-base', '--is-ancestor']:
+            # rewind guard probe: origin/master is NOT an ancestor of HEAD
+            # (it's the update target ahead of HEAD) -> allow the reset.
+            return '', False
         if args == ['reset', '--hard', 'origin/master']:
             return '', True
         raise AssertionError(f'unexpected git args: {args!r}')
@@ -95,6 +99,10 @@ def test_apply_force_update_proceeds_when_clean_fails(tmp_path):
             return '', True
         if args == ['clean', '-fd']:
             return 'warning: failed to remove nul: Invalid argument', False
+        if args[:2] == ['merge-base', '--is-ancestor']:
+            # rewind guard probe: origin/master is NOT an ancestor of HEAD
+            # (it's the update target ahead of HEAD) -> allow the reset.
+            return '', False
         if args == ['reset', '--hard', 'origin/master']:
             return '', True
         raise AssertionError(f'unexpected git args: {args!r}')

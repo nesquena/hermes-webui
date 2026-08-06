@@ -63,8 +63,8 @@ def test_context_indicator_surfaces_cache_hit_rate():
 def test_cache_usage_labels_are_localized():
     src = (ROOT / "static" / "i18n.js").read_text()
 
-    assert src.count("usage_cache_hit_detail:") == 14
-    assert src.count("usage_cached_percent:") == 14
+    assert src.count("usage_cache_hit_detail:") == 15
+    assert src.count("usage_cached_percent:") == 15
     assert "usage_cache_hit_detail: 'Cache: {0}% hit ({1} read / {2} write)'" in src
     assert "usage_cached_percent: '{0}% cached'" in src
 

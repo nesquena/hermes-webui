@@ -66,16 +66,17 @@ def test_background_done_sets_marker_when_session_not_actively_viewed():
     assert "const isSessionViewed=_isSessionActivelyViewed(activeSid);" in done_block
     assert "const completedSession=d.session||{session_id:activeSid};" in done_block
     assert "const completedSid=completedSession.session_id||activeSid;" in done_block
+    assert "const completedMessageCount=completedSession.message_count != null" in done_block
     assert "if(!isSessionViewed && typeof _markSessionCompletionUnread==='function')" in done_block
-    assert "_markSessionCompletionUnread(completedSid, completedSession.message_count);" in done_block
+    assert "_markSessionCompletionUnread(completedSid, completedMessageCount);" in done_block
 
 
 def test_background_done_uses_rotated_session_id_for_completion_unread():
     done_block = _done_block()
 
     completed_sid_idx = done_block.find("const completedSid=completedSession.session_id||activeSid;")
-    marker_idx = done_block.find("_markSessionCompletionUnread(completedSid, completedSession.message_count);")
-    viewed_idx = done_block.find("_markSessionViewed(completedSid, completedSession.message_count")
+    marker_idx = done_block.find("_markSessionCompletionUnread(completedSid, completedMessageCount);")
+    viewed_idx = done_block.find("_markSessionViewed(completedSid, completedMessageCount);")
 
     assert completed_sid_idx != -1, "done handler must derive the final post-compression session id"
     assert marker_idx != -1, "background completion marker must be stored on the final session id"
@@ -158,9 +159,13 @@ def test_polling_transition_marks_completion_unread_without_sse_done():
     assert "wasStreaming === true && !isStreaming" in transition_block, (
         "polling fallback must only fire on an observed streaming -> stopped transition"
     )
-    assert "_markSessionCompletionUnread(sid, s.message_count);" in transition_block
+    # #5960/#5975: third arg may carry cron source+profile meta; still mark unread.
+    assert "_markSessionCompletionUnread(sid, s.message_count" in transition_block
     assert "_sessionStreamingById.set(sid, isStreaming);" in transition_block
-    assert "_applySessionListPayload(sessData,projData);" in refresh_block
+    assert "const _streamingPollMs = 30000;" in SESSIONS_JS
+    # Greptile #5975: apply carries unreadGen so stale pre-switch lists skip mark.
+    assert "_applySessionListPayload(sessData,projData,{unreadGen});" in refresh_block
+    assert "unreadGen" in refresh_block
     assert "_markPollingCompletionUnreadTransitions(_allSessions);" in apply_block
     assert "_allSessions.some(s => _isSessionEffectivelyStreaming(s))" in apply_block, (
         "the streaming poll fallback must stay active for the same server-confirmed "
@@ -517,17 +522,32 @@ def test_completion_unread_clears_only_when_session_is_opened():
     assert load_idx != -1, "loadSession not found"
     load_block = SESSIONS_JS[load_idx:SESSIONS_JS.find("function _resolveSessionModelForDisplaySoon", load_idx)]
 
-    stale_guard_idx = load_block.find("if (_loadingSessionId !== sid) return;")
-    clear_idx = load_block.find("_clearSessionCompletionUnread(S.session.session_id);")
-    set_viewed_idx = load_block.find("_setSessionViewedCount(S.session.session_id")
+    # The metadata-arrival "mark viewed + clear stale completion unread" pair now
+    # flows through _acknowledgeSessionVisit(S.session.session_id, ...), which
+    # calls _setSessionViewedCount() internally (and _setSessionViewedCount clears
+    # any stale completion-unread marker, #3020) (#4946).
+    assign_idx = load_block.find("S.session=data.session;")
+    acknowledge_idx = load_block.find("_acknowledgeSessionVisit(\n    S.session.session_id,", assign_idx)
+    # The last stale-response ownership guard before the visit is acknowledged:
+    # stale loadSession responses must not clear unread markers for sessions the
+    # user did not actually open.
+    stale_guard_idx = load_block.rfind("if (!_isCurrentLoad())", 0, acknowledge_idx)
 
-    assert clear_idx != -1, "loadSession must clear explicit completion unread when the user opens the session"
-    assert stale_guard_idx != -1 and stale_guard_idx < clear_idx, (
-        "stale loadSession responses must not clear unread markers for sessions the user did not actually open"
+    assert assign_idx != -1, "loadSession must assign S.session before acknowledging the visit"
+    assert acknowledge_idx != -1 and assign_idx < acknowledge_idx, (
+        "loadSession must acknowledge the visit only after the session metadata "
+        "response is accepted for the in-flight load"
     )
-    assert set_viewed_idx != -1 and set_viewed_idx < clear_idx, (
-        "completion unread should clear at the same point the session is marked viewed"
+    assert stale_guard_idx != -1 and stale_guard_idx < acknowledge_idx, (
+        "stale loadSession responses must be guarded out before the visit-ack "
+        "clears unread markers for sessions the user did not actually open"
     )
+    # The acknowledge helper is what clears completion unread on visit, via
+    # _setSessionViewedCount (#3020 stale-marker clear).
+    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0)" in SESSIONS_JS
+    ack_body_start = SESSIONS_JS.find("function _acknowledgeSessionVisit(")
+    ack_body = SESSIONS_JS[ack_body_start:SESSIONS_JS.find("function _sessionVisitHasUnreadState", ack_body_start)]
+    assert "_setSessionViewedCount(sid, messageCount);" in ack_body
 
 
 def test_historical_sessions_are_not_marked_unread_on_list_render():

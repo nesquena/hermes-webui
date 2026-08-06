@@ -89,6 +89,8 @@ const S = { session: { session_id: 'sess-1' } };
 const _assistantRoleHtml = (title, tps) => `role:${title}:${tps}`;
 const isTpsDisplayEnabled = () => true;
 const _formatTurnTps = value => `tps:${value}`;
+const latestRenderedAssistantRawIdx = rawIdx;
+function _setLatestAssistantTurnLandmark() {}
 eval(recycleChunk);
 console.log(JSON.stringify({
   removedAttrs,
@@ -110,6 +112,9 @@ console.log(JSON.stringify({
         "data-transparent-turn-toggle-bound",
         "data-anchor-scene-live-owner",
         "data-anchor-stream-id",
+        "data-latest-assistant-response",
+        "role",
+        "aria-label",
         "data-live-assistant-turn",
     }
     assert set(result["resetAttrs"]) == expected_attrs
@@ -155,6 +160,8 @@ const S = { session: { session_id: 'sess-1' } };
 const _assistantRoleHtml = (title, tps) => `role:${title}:${tps}`;
 const isTpsDisplayEnabled = () => true;
 const _formatTurnTps = value => `tps:${value}`;
+const latestRenderedAssistantRawIdx = rawIdx;
+function _setLatestAssistantTurnLandmark() {}
 eval(recycleChunk);
 console.log(JSON.stringify({
   blocksInnerHTML: blocks.innerHTML,

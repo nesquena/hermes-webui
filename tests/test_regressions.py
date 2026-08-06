@@ -166,13 +166,13 @@ def test_streaming_py_imports_has_pending(cleanup_test_sessions):
 
 
 def test_aiagent_imported_in_streaming(cleanup_test_sessions):
-    """R2b: api/streaming.py must import AIAgent.
+    """R2b: api/streaming.py must resolve AIAgent through the runtime guard.
     When missing, the streaming thread crashed immediately after being spawned.
     """
     src = (REPO_ROOT / "api/streaming.py").read_text()
-    assert "AIAgent" in src, "AIAgent not referenced in api/streaming.py"
-    assert "from run_agent import AIAgent" in src or "import AIAgent" in src, \
-        "AIAgent must be imported in api/streaming.py"
+    assert "get_ai_agent_class" in src, "guarded AIAgent resolver not referenced in api/streaming.py"
+    assert "from api.agent_runtime import" in src and "get_ai_agent_class" in src, \
+        "AIAgent must be resolved through api.agent_runtime in api/streaming.py"
 
 
 # ── R5: SSE loop did not break on cancel event (Sprint 10 bug) ───────────────
@@ -195,10 +195,20 @@ def test_server_py_sse_loop_breaks_on_cancel(cleanup_test_sessions):
     src = (REPO_ROOT / "server.py").read_text()
     routes_src = (REPO_ROOT / "api" / "routes.py").read_text() if (REPO_ROOT / "api" / "routes.py").exists() else ""
     combined = src + routes_src
-    m = re.search(r"if event in \([^)]+\):\s*break", combined)
-    assert m, "SSE break condition not found in server.py or api/routes.py"
-    assert "cancel" in m.group(), \
-        f"'cancel' missing from SSE break condition: {m.group()}"
+    # #6527: the break condition may be an inline tuple ("stream_end", ...) OR
+    # the named SSE_RELAY_CLOSE_EVENTS frozenset. Accept either shape and pin
+    # the BEHAVIOR (cancel closes the relay) against the resolved close set,
+    # not the source syntax.
+    m = re.search(
+        r"if event in (?:SSE_RELAY_CLOSE_EVENTS|\([^)]*cancel[^)]*\)):\s*break",
+        combined,
+    )
+    assert m, "SSE break/close condition not found in server.py or api/routes.py"
+    from api.run_journal import SSE_RELAY_CLOSE_EVENTS
+    assert "cancel" in SSE_RELAY_CLOSE_EVENTS, \
+        f"'cancel' missing from SSE relay close set: {SSE_RELAY_CLOSE_EVENTS}"
+    assert "apperror" in SSE_RELAY_CLOSE_EVENTS, \
+        f"'apperror' missing from SSE relay close set: {SSE_RELAY_CLOSE_EVENTS}"
 
 
 # ── R6: Test cron isolation (Sprint 10) ──────────────────────────────────────
@@ -344,7 +354,7 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
             text.find('if parsed.path == "/api/session/delete":'),
         )
         if delete_idx >= 0:
-            delete_block = text[delete_idx:delete_idx+1800]
+            delete_block = text[delete_idx:delete_idx+2400]
             assert "prune_session_from_index(sid)" in delete_block, \
                 f"{label} session/delete must prune SESSION_INDEX_FILE"
             return
@@ -359,7 +369,7 @@ def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
         routes_src.find('if parsed.path == "/api/session/delete":'),
     )
     assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    delete_block = routes_src[delete_idx:delete_idx+1800]
+    delete_block = routes_src[delete_idx:delete_idx+2400]
     assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
         "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
 
@@ -588,8 +598,13 @@ def test_queue_card_cross_session_helper_used_only_for_session_change(cleanup_te
     assert "_clearQueueCardDisplay(currentSid);" in load_body[cross_start:cross_end], (
         "queue-card clear helper must be inside the cross-session branch"
     )
-    same_session_idx = load_body.find("if(currentSid===sid && !forceReload && !_loadingSessionId) return;")
-    assert same_session_idx >= 0
+    same_session_idx = load_body.find(
+        "if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)){"
+    )
+    assert same_session_idx >= 0, (
+        "same-session no-op guard must still exist (now a block that first clears "
+        "a stale unread dot before returning) and must precede the cross-session branch"
+    )
     assert same_session_idx < cross_start
 
 
@@ -642,8 +657,11 @@ def test_reload_path_restores_pending_message_and_reattaches_live_stream(cleanup
     assert 'pending_user_message' in ui_src
     assert 'function attachLiveStream' in messages_src
     assert 'const pendingMsg=typeof getPendingSessionMessage' in sessions_src
-    assert ('const activeStreamId=data.session.active_stream_id||null;' in sessions_src or
-            'const activeStreamId=S.session.active_stream_id||null;' in sessions_src)
+    # `activeStreamId` declaration was widened const → let (#5248 race-guard
+    # re-reads it after the awaited message load). Accept either keyword via a
+    # prefix anchor that omits const/let.
+    assert ('activeStreamId=data.session.active_stream_id||null;' in sessions_src or
+            'activeStreamId=S.session.active_stream_id||null;' in sessions_src)
     assert 'attachLiveStream(sid, activeStreamId' in sessions_src
     assert 'if (S.activeStreamId && S.activeStreamId === streamId) return;' in ui_src
     active_branch_start = sessions_src.index("if(activeStreamId){\n      S.busy=true;")
@@ -748,7 +766,7 @@ def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
     inflight_block = src[inflight_idx:inflight_idx+1200]
 
-    assert "await _ensureMessagesLoaded(sid);" in inflight_block, (
+    assert "await _ensureMessagesLoaded(sid" in inflight_block, (
         "returning to an active stream should load the persisted transcript before adding the live tail"
     )
     assert "_mergeInflightTailMessages(S.messages,inflightMessages)" in inflight_block, (
@@ -928,8 +946,16 @@ def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_se
         "messages.js must listen for live reasoning SSE events"
     assert "liveReasoningText += text" in src, \
         "live reasoning SSE events must update the active Worklog Thinking Card text"
-    assert "_updateLiveThinkingCard(_liveThinkingText())" in src, \
-        "live reasoning SSE events must refresh the current segment's Worklog Thinking Card"
+    assert "const liveThinkingText=_liveThinkingText();" in src, \
+        "live reasoning SSE events must compute the current segment's Worklog Thinking Card text once"
+    assert "const anchorReasoningFallback={};" in src, \
+        "live reasoning SSE events must capture the active anchor id for fallback"
+    assert "if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback))" in src, \
+        "live reasoning SSE events must prefer the anchor renderer before falling back"
+    assert "_updateLiveThinkingCard(liveThinkingText,{" in src and "...anchorReasoningFallback" in src, \
+        "live reasoning SSE events must carry anchor identity into the fallback renderer"
+    assert "anchorRenderFallback:true" in src and "sessionId:activeSid" in src and "streamId" in src, \
+        "live reasoning SSE events must keep the current segment's Worklog Thinking Card as fallback"
     assert "source.addEventListener('tool_complete'" in src or 'source.addEventListener("tool_complete"' in src, \
         "messages.js must listen for live tool completion SSE events"
     assert "function _parseStreamState()" in src, \
@@ -1027,8 +1053,61 @@ def test_messages_js_live_assistant_segment_reuses_live_turn_wrapper(cleanup_tes
         "live answer content should be appended as a segment inside the live turn wrapper"
     assert "if(!force&&!assistantRow){" in src.replace(' ', ''), \
         "ensureAssistantRow must still avoid creating the live answer segment when no display text exists yet"
-    assert "if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();" in src, \
+    token_start = src.find("source.addEventListener('token'")
+    interim_start = src.find("source.addEventListener('interim_assistant'", token_start)
+    assert token_start >= 0 and interim_start > token_start
+    token_body = src[token_start:interim_start]
+    compact_token_body = token_body.replace(" ", "").replace("\n", "")
+    assert "if(assistantRow){ensureAssistantRow();_scheduleRender();}" in compact_token_body, \
+        "token handler should skip the per-token full-text parse after the live answer segment exists"
+    assert "constparsed=_parseStreamState();if(String((parsed&&parsed.displayText)||'').trim())ensureAssistantRow();_scheduleRender(parsed);" in compact_token_body, \
         "token handler must only create the live answer segment once visible answer text starts"
+
+
+def test_messages_js_stream_perf_cleanup_lifecycle(cleanup_test_sessions):
+    """#5455 review: throttled snapshot timers and incremental anchor caches tear down at terminal events."""
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    assert "function _cancelThrottledSnapshotTimer()" in src
+    assert "clearTimeout(_snapshotLiveTurnTimer)" in src
+    assert "function _clearAnchorProseIncrementalNode()" in src
+    assert "window.__anchorProseIncrementalNode===_anchorProseIncrementalNode" in src
+    assert "_anchorProseSmdCache.clear();" in src
+    fallback_start = src.find("function _finalizeStreamEndFallback")
+    recovery_start = src.find("async function _runStreamEndRecovery", fallback_start)
+    assert fallback_start >= 0 and recovery_start > fallback_start
+    fallback_body = src[fallback_start:recovery_start]
+    assert "_cancelThrottledSnapshotTimer();" in fallback_body
+    assert "_clearAnchorProseIncrementalNode();" in fallback_body
+    done_start = src.find("source.addEventListener('done'")
+    stream_end_start = src.find("source.addEventListener('stream_end'", done_start)
+    assert done_start >= 0 and stream_end_start > done_start
+    done_body = src[done_start:stream_end_start]
+    assert "_cancelThrottledSnapshotTimer();" in done_body
+    assert "_clearAnchorProseIncrementalNode();" in done_body
+
+    # #5466 Codex gate: the snapshot/anchor cleanup must run on EVERY terminal
+    # path, not just fallback/done/stream_end — otherwise a timer/cache/global
+    # survives the turn on apperror, cancel, stream-error, and the settled-session
+    # recovery path (the PR's own stated teardown invariant).
+    def _terminal_body(anchor, end_marker):
+        a = src.find(anchor)
+        assert a >= 0, f"missing terminal handler: {anchor}"
+        b = src.find(end_marker, a)
+        assert b > a, f"could not bound terminal handler: {anchor}"
+        return src[a:b]
+
+    apperror_body = _terminal_body("source.addEventListener('apperror'", "_streamFadeCleanupReduceMotionListener();")
+    assert "_cancelThrottledSnapshotTimer();" in apperror_body and "_clearAnchorProseIncrementalNode();" in apperror_body, \
+        "apperror terminal handler must tear down the snapshot timer + anchor prose cache"
+    cancel_body = _terminal_body("source.addEventListener('cancel'", "_streamFadeCleanupReduceMotionListener();")
+    assert "_cancelThrottledSnapshotTimer();" in cancel_body and "_clearAnchorProseIncrementalNode();" in cancel_body, \
+        "cancel terminal handler must tear down the snapshot timer + anchor prose cache"
+    stream_error_body = _terminal_body("function _handleStreamError(source)", "_streamFadeCleanupReduceMotionListener();")
+    assert "_cancelThrottledSnapshotTimer();" in stream_error_body and "_clearAnchorProseIncrementalNode();" in stream_error_body, \
+        "_handleStreamError must tear down the snapshot timer + anchor prose cache"
+    restore_body = _terminal_body("async function _restoreSettledSession(source", "_cancelAnimationFramePendingStreamRender();")
+    assert "_cancelThrottledSnapshotTimer();" in restore_body and "_clearAnchorProseIncrementalNode();" in restore_body, \
+        "_restoreSettledSession terminal recovery must tear down the snapshot timer + anchor prose cache"
 
 
 def test_messages_js_finalizes_thinking_card_before_tool_card(cleanup_test_sessions):

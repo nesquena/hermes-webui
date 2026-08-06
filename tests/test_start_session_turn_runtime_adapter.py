@@ -50,7 +50,7 @@ def _stub_routes(monkeypatch):
     monkeypatch.setattr(
         routes_mod,
         "_resolve_compatible_session_model_state",
-        lambda model, provider, profile_provider=None, profile_default_model=None, prefer_cached_catalog=False: (model, provider, model),
+        lambda model, provider, **kwargs: (model, provider, model),
     )
 
     # 4. Block the per-session live-view fan-out (it pokes a real registry).

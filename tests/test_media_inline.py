@@ -292,11 +292,15 @@ class TestMediaEndpointUnit(unittest.TestCase):
         self.assertIn("image/svg+xml", routes_src,
                       "SVG MIME type must be handled (forced download) in _handle_media")
 
-    def test_non_image_forces_download(self):
-        """Non-image files should be forced to download, not served inline."""
+    def test_inline_preview_mime_whitelist_exists(self):
+        """Only the explicit safe preview whitelist should be eligible for inline display."""
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
         self.assertIn("_INLINE_IMAGE_TYPES", routes_src,
                       "_INLINE_IMAGE_TYPES whitelist must exist in _handle_media")
+        self.assertIn("_AUDIO_VIDEO_PDF_TYPES", routes_src,
+                      "shared audio/video/PDF preview MIME whitelist must exist in _handle_media")
+        self.assertIn('{"text/html"}', routes_src,
+                      "HTML must be added only to the session-token whitelist")
 
     def test_media_allowed_roots_env_var_referenced(self):
         """Handler must reference MEDIA_ALLOWED_ROOTS for configurable roots."""
@@ -638,6 +642,102 @@ class TestMediaEndpointUnit(unittest.TestCase):
                     )
                 )
 
+    def test_session_media_token_allows_exact_html_path_when_mime_is_safe(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            html = pathlib.Path(tmpd) / "report.html"
+            html.write_text("<h1>Report</h1>", encoding="utf-8")
+            session = SimpleNamespace(messages=[{"role": "assistant", "content": f"MEDIA:{html}"}])
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertTrue(
+                    routes._session_media_token_allows_path(
+                        "s-media", html, {"text/html"}
+                    )
+                )
+
+    def test_session_media_token_rejects_mentioned_html_when_mime_not_allowed(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            html = pathlib.Path(tmpd) / "report.html"
+            html.write_text("<h1>Report</h1>", encoding="utf-8")
+            session = SimpleNamespace(messages=[{"role": "assistant", "content": f"MEDIA:{html}"}])
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertFalse(
+                    routes._session_media_token_allows_path(
+                        "s-media", html, {"image/png"}
+                    )
+                )
+
+    def test_session_media_token_rejects_user_authored_html_path(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            html = pathlib.Path(tmpd) / "report.html"
+            html.write_text("<h1>Report</h1>", encoding="utf-8")
+            session = SimpleNamespace(messages=[{"role": "user", "content": f"MEDIA:{html}"}])
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertFalse(
+                    routes._session_media_token_allows_path(
+                        "s-media", html, {"text/html"}
+                    )
+                )
+
+    def test_handle_media_session_authorizes_html_artifact_outside_roots(self):
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+                self.body = b""
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, k, v):
+                self.headers[k.lower()] = v
+            def end_headers(self):
+                pass
+            class _W:
+                def __init__(self, owner):
+                    self.owner = owner
+                def write(self, b):
+                    self.owner.body += b
+                def flush(self):
+                    pass
+            @property
+            def wfile(self):
+                return self._W(self)
+
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as outside:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            html = pathlib.Path(outside) / "report.html"
+            html.write_text("<h1>Report</h1>", encoding="utf-8")
+            session = SimpleNamespace(messages=[{"role": "assistant", "content": f"MEDIA:{html}"}])
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home), "MEDIA_ALLOWED_ROOTS": ""}), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                 mock.patch.object(routes, "get_session", return_value=session), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False):
+                handler = _Handler()
+                routes._handle_media(
+                    handler,
+                    SimpleNamespace(
+                        query=(
+                            f"path={urllib.parse.quote(str(html.resolve()))}"
+                            "&session_id=s-media&inline=1"
+                        ),
+                        path="/api/media",
+                    ),
+                )
+
+            self.assertEqual(handler.status, 200)
+            self.assertIn("text/html", handler.headers.get("content-type", ""))
+            self.assertIn("sandbox", handler.headers.get("content-security-policy", ""))
+            self.assertIn(b"Report", handler.body)
+
 
 # ── Integration tests: live server on TEST_PORT ───────────────────────────────
 # No collection-time skip guard — conftest.py starts the server via its
@@ -840,6 +940,127 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             self.assertIn("image/png", headers.get("Content-Type", ""))
         finally:
             pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    def test_ts_artifact_served_as_text_plain_with_attachment(self):
+        """.ts file via /api/media must have text/plain Content-Type,
+        Content-Disposition: attachment, and X-Content-Type-Options: nosniff.
+        Regression for PR #6372 — ensures narrow MIME_MAP fix is live."""
+        ts_bytes = b"const x: number = 42;\nconsole.log(x);\n"
+        with tempfile.NamedTemporaryFile(
+            suffix=".ts", prefix="hermes_test_", dir=_media_fixture_dir(), delete=False
+        ) as f:
+            f.write(ts_bytes)
+            tmp_path = f.name
+        try:
+            body, status, headers = self._get(
+                f"/api/media?path={urllib.parse.quote(tmp_path)}"
+            )
+            self.assertEqual(status, 200)
+            ct = headers.get("Content-Type", "")
+            self.assertIn(
+                "text/plain", ct,
+                f"Expected text/plain Content-Type for .ts, got {ct}",
+            )
+            self.assertNotIn(
+                "text/javascript", ct,
+                f".ts must NOT be served as text/javascript, got {ct}",
+            )
+            disp = headers.get("Content-Disposition", "")
+            self.assertIn(
+                "attachment", disp,
+                f"Expected attachment Content-Disposition for .ts, got {disp}",
+            )
+            self.assertEqual(
+                headers.get("X-Content-Type-Options"),
+                "nosniff",
+                "X-Content-Type-Options: nosniff must be set on media responses",
+            )
+            self.assertEqual(body, ts_bytes)
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    def test_tsx_artifact_served_as_text_plain_with_attachment(self):
+        """.tsx file via /api/media must also have text/plain Content-Type
+        and attachment disposition. Regression for PR #6372."""
+        tsx_bytes = b"const App: React.FC = () => <div>Hello</div>;\n"
+        with tempfile.NamedTemporaryFile(
+            suffix=".tsx", prefix="hermes_test_", dir=_media_fixture_dir(), delete=False
+        ) as f:
+            f.write(tsx_bytes)
+            tmp_path = f.name
+        try:
+            body, status, headers = self._get(
+                f"/api/media?path={urllib.parse.quote(tmp_path)}"
+            )
+            self.assertEqual(status, 200)
+            ct = headers.get("Content-Type", "")
+            self.assertIn(
+                "text/plain", ct,
+                f"Expected text/plain Content-Type for .tsx, got {ct}",
+            )
+            self.assertNotIn(
+                "text/javascript", ct,
+                f".tsx must NOT be served as text/javascript, got {ct}",
+            )
+            disp = headers.get("Content-Disposition", "")
+            self.assertIn(
+                "attachment", disp,
+                f"Expected attachment Content-Disposition for .tsx, got {disp}",
+            )
+            self.assertEqual(
+                headers.get("X-Content-Type-Options"),
+                "nosniff",
+            )
+            self.assertEqual(body, tsx_bytes)
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    def test_file_raw_js_not_served_as_inline_executable(self):
+        """.js files served via /api/file/raw must NOT get text/javascript
+        Content-Type — they should fall through to application/octet-stream
+        since MIME_MAP intentionally omits .js. Regression for PR #6372."""
+        # Create a session so we can use /api/file/raw
+        try:
+            req = urllib.request.Request(
+                BASE + "/api/session/new",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as r:
+                sess_data = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            sess_data = json.loads(e.read())
+            self.fail(f"Cannot create test session: {sess_data}")
+        sid = sess_data.get("session_id") or sess_data.get("session", {}).get("session_id", "")
+        self.assertTrue(sid, f"No session_id in response: {sess_data}")
+        ws = pathlib.Path(
+            sess_data.get("workspace") or sess_data.get("session", {}).get("workspace", "")
+        )
+        self.assertTrue(str(ws), f"No workspace in response: {sess_data}")
+
+        js_bytes = b"const x = 1;\n"
+        js_file = ws / "exploit_test.js"
+        try:
+            js_file.write_bytes(js_bytes)
+
+            encoded = urllib.parse.quote("exploit_test.js")
+            body, status, headers = self._get(
+                f"/api/file/raw?session_id={sid}&path={encoded}"
+            )
+            self.assertEqual(status, 200)
+            ct = headers.get("Content-Type", "")
+            self.assertNotIn(
+                "text/javascript", ct,
+                f".js via /api/file/raw must NOT be text/javascript, got {ct}",
+            )
+            # Without a .js MIME_MAP entry, it falls back to application/octet-stream
+            self.assertEqual(
+                ct, "application/octet-stream",
+                f"Expected application/octet-stream for unmapped .js, got {ct}",
+            )
+            self.assertEqual(body, js_bytes)
+        finally:
+            js_file.unlink(missing_ok=True)
 
     def test_health_check_still_works(self):
         """Sanity: server is up and /health works."""

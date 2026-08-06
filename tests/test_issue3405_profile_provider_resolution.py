@@ -283,14 +283,14 @@ class TestReadProfileModelConfig:
     """Tests for the _read_profile_model_config helper."""
 
     def test_returns_none_when_no_profile(self):
-        """No session profile returns (None, None)."""
+        """No session profile returns (None, None, None)."""
         from api.routes import _read_profile_model_config
 
         class FakeSession:
             profile = None
 
         result = _read_profile_model_config(FakeSession(), None)
-        assert result == (None, None)
+        assert result == (None, None, None)
 
     def test_returns_none_when_explicit_provider(self):
         """Explicit requested_provider skips profile config read."""
@@ -300,7 +300,7 @@ class TestReadProfileModelConfig:
             profile = "work"
 
         result = _read_profile_model_config(FakeSession(), "openai-codex")
-        assert result == (None, None)
+        assert result == (None, None, None)
 
     def test_reads_profile_config(self, tmp_path):
         """Reads model.provider and model.default from profile config.yaml."""
@@ -319,10 +319,11 @@ class TestReadProfileModelConfig:
         with patch("api.profiles.get_hermes_home_for_profile", return_value=tmp_path):
             result = _read_profile_model_config(FakeSession(), None)
 
-        assert result == ("anthropic", "claude-sonnet-4.6")
+        assert result[:2] == ("anthropic", "claude-sonnet-4.6")
+        assert result[2] == {"model": {"provider": "anthropic", "default": "claude-sonnet-4.6"}}
 
     def test_missing_config_returns_none(self):
-        """Missing config.yaml returns (None, None)."""
+        """Missing config.yaml returns (None, None, None)."""
         from api.routes import _read_profile_model_config
         import tempfile
 
@@ -333,10 +334,10 @@ class TestReadProfileModelConfig:
             with patch("api.profiles.get_hermes_home_for_profile", return_value=Path(td)):
                 result = _read_profile_model_config(FakeSession(), None)
 
-        assert result == (None, None)
+        assert result == (None, None, None)
 
     def test_empty_provider_returns_none(self, tmp_path):
-        """Empty model.provider in config returns (None, None)."""
+        """Empty model.provider in config returns (None, default, config)."""
         from api.routes import _read_profile_model_config
         import yaml
 
@@ -352,7 +353,7 @@ class TestReadProfileModelConfig:
         with patch("api.profiles.get_hermes_home_for_profile", return_value=tmp_path):
             result = _read_profile_model_config(FakeSession(), None)
 
-        assert result == (None, "claude-sonnet-4.6")
+        assert result == (None, "claude-sonnet-4.6", {"model": {"provider": "", "default": "claude-sonnet-4.6"}})
 
 
 class TestStreamingWorkerEnrichment:

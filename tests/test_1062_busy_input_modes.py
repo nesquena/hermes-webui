@@ -1,15 +1,17 @@
-"""Regression tests for busy_input_mode (PR #1062, closes #720).
+"""Regression tests for default_message_mode (PR #1062, closes #720).
 
 Pins the wiring for the three modes (queue / interrupt / steer):
 - The setting key + default + enum validation in api/config.py
 - Three slash commands registered in static/commands.js
-- send()'s busy branch reads window._busyInputMode and dispatches
-- Boot initializes window._busyInputMode from settings
+- send()'s busy branch reads window._defaultMessageMode and dispatches
+- Boot initializes window._defaultMessageMode from settings
 - 17 new i18n keys present in all 6 locale blocks
 
 Issue: #720 (configurable busy-input behaviour)
 """
 from pathlib import Path
+
+from tests.helpers import source_between as _source_between
 
 ROOT = Path(__file__).parent.parent
 CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
@@ -27,20 +29,20 @@ I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 class TestBusyInputModeSetting:
     """The new setting key must be registered with a default and enum validator."""
 
-    def test_default_is_queue(self):
-        """Default value preserves existing queue behaviour for users who don't touch the setting."""
-        assert '"busy_input_mode": "queue"' in CONFIG_PY, (
-            "_DEFAULT_SETTINGS must include busy_input_mode='queue' so existing users see no change"
+    def test_default_is_steer(self):
+        """Default value resolves to steer for users who don't touch the setting."""
+        assert '"default_message_mode": "steer"' in CONFIG_PY, (
+            "_DEFAULT_SETTINGS must include default_message_mode='steer' so new users see the steer default"
         )
 
     def test_enum_validator_present(self):
-        """_SETTINGS_ENUM_KEYS must validate busy_input_mode against {queue, interrupt, steer}."""
+        """_SETTINGS_ENUM_KEYS must validate default_message_mode against {queue, interrupt, steer}."""
         # Find the entry inside the enum dict (a set literal as the value)
-        idx = CONFIG_PY.find('"busy_input_mode": {')
-        assert idx >= 0, "busy_input_mode entry missing from _SETTINGS_ENUM_KEYS"
+        idx = CONFIG_PY.find('"default_message_mode": {')
+        assert idx >= 0, "default_message_mode entry missing from _SETTINGS_ENUM_KEYS"
         block = CONFIG_PY[idx:idx + 200]
         assert '"queue"' in block and '"interrupt"' in block and '"steer"' in block, (
-            "busy_input_mode enum must contain {queue, interrupt, steer}"
+            "default_message_mode enum must contain {queue, interrupt, steer}"
         )
 
 
@@ -94,21 +96,26 @@ class TestSlashCommandHandlers:
         assert "cancelStream" in body, "/interrupt must call cancelStream() so the drain re-sends"
 
     def test_cmd_steer_delegates_to_try_steer(self):
-        """/steer delegates to _trySteer which calls /api/chat/steer with
-        a non-destructive fallback. The fallback path is exercised by tests
-        in test_real_steer.py — this test just pins the delegation."""
+        """/steer delegates to _trySteer which calls /api/chat/steer.
+        Fallback behavior is covered in test_real_steer.py; this test pins
+        delegation and blocks the old cancel-on-failure path."""
         idx = COMMANDS_JS.find("async function cmdSteer(")
         assert idx >= 0
         body = COMMANDS_JS[idx:idx + 800]
-        # cmdSteer delegates to _trySteer; fallback must not queue+cancel.
+        # cmdSteer delegates to _trySteer; fallback must not cancel.
         assert "_trySteer" in body, "cmdSteer must call _trySteer to use the real /api/chat/steer endpoint"
-        # The shared helper must contain the non-destructive fallback path.
+        # The shared helper must contain the non-cancelling fallback path.
         helper_idx = COMMANDS_JS.find("async function _trySteer(")
         assert helper_idx >= 0, "_trySteer helper must exist"
-        helper_body = COMMANDS_JS[helper_idx:helper_idx + 2000]
-        assert "queueSessionMessage" not in helper_body
+        helper_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
         assert "cancelStream" not in helper_body
+        gateway_fallback_idx = helper_body.find("result&&result.fallback==='gateway_steer_queued'")
+        gateway_queue_idx = helper_body.find("queueSessionMessage", gateway_fallback_idx)
+        assert gateway_fallback_idx >= 0
+        assert gateway_queue_idx > gateway_fallback_idx
         assert "inp.value" in helper_body
+        assert "if(result&&result.accepted)" in helper_body
+        assert "S.pendingFiles=_remaining" in helper_body
         # Toast should differ from interrupt to signal it's the steer path
         assert "_steerFailureMessageKey" in helper_body or "steer_fail_" in helper_body
 
@@ -135,13 +142,22 @@ class TestSlashCommandHandlers:
             assert "renderTray()" in body, (
                 f"{fn_name} must call renderTray() after clearing pendingFiles"
             )
-        # cmdSteer delegates to _trySteer; the helper must not clear files in
-        # the fallback path because the draft is restored instead of queued.
-        idx_try = COMMANDS_JS.find("function _trySteer(")
-        assert idx_try >= 0, "_trySteer not found"
-        try_body = COMMANDS_JS[idx_try:idx_try + 1600]
-        assert "S.pendingFiles=[]" not in try_body
-        assert "renderTray()" in try_body
+        # cmdSteer delegates to _trySteer; the helper clears files only on
+        # accepted steer, and (post-#5459-gate) removes ONLY the delivered files
+        # by identity so files staged during the upload await are preserved. The
+        # fallback path restores the draft and keeps staged files available.
+        try_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
+        accepted_idx = try_body.find("if(result&&result.accepted)")
+        failure_idx = try_body.find("// Do not fall back to interrupt")
+        # Identity-based removal of the delivered snapshot on accepted steer.
+        clear_idx = try_body.find("S.pendingFiles=_remaining", accepted_idx)
+        assert accepted_idx >= 0, "_trySteer must branch on accepted steer responses"
+        assert clear_idx > accepted_idx, "accepted steer should clear the delivered staged files"
+        assert "_delivered=new Set(pendingFilesSnapshot)" in try_body, (
+            "accepted steer must remove only the delivered files by identity, preserving newly staged ones"
+        )
+        assert failure_idx > clear_idx, "staged files must not be cleared in the failure path"
+        assert "renderTray()" in try_body[failure_idx:]
 
 
 class TestBusySendButton:
@@ -164,7 +180,7 @@ class TestBusySendButton:
             "the single primary button should remain visible while busy; it becomes Stop when there is no draft"
         )
 
-    def test_composer_primary_action_accounts_for_all_busy_input_modes(self):
+    def test_composer_primary_action_accounts_for_all_default_message_modes(self):
         idx = UI_JS.find("function getComposerPrimaryAction()")
         assert idx >= 0, "getComposerPrimaryAction() not found"
         body = UI_JS[idx:UI_JS.find("function _setComposerPrimaryButtonIcon", idx)]
@@ -172,9 +188,9 @@ class TestBusySendButton:
         assert "return 'queue'" in body, "queue mode and unavailable steer/interrupt fallbacks must map to queue"
         assert "return 'interrupt'" in body, "interrupt mode with an active stream must map to interrupt"
         assert "return 'steer'" in body, "steer mode with active stream support must map to steer"
-        assert "window._busyInputMode||'queue'" in body, "helper must respect the Busy input mode setting"
+        assert "window._defaultMessageMode||'steer'" in body, "helper must respect the Default message mode setting"
         assert "_getExplicitBusyCommandAction(msg&&msg.value)" in body, (
-            "explicit /queue, /interrupt, and /steer drafts must override the Busy input mode for button visuals"
+            "explicit /queue, /interrupt, and /steer drafts must override the Default message mode for button visuals"
         )
 
     def test_explicit_busy_commands_override_button_visual_action(self):
@@ -263,21 +279,29 @@ class TestBusySendButton:
 
 
 class TestSendBusyBranchDispatch:
-    """send()'s busy block must read window._busyInputMode and branch accordingly."""
+    """send()'s busy block must read window._defaultMessageMode and branch accordingly."""
 
-    def test_send_reads_busy_input_mode(self):
-        # The send() function should read window._busyInputMode in the busy block
+    def test_send_reads_default_message_mode(self):
+        # The send() function should read window._defaultMessageMode in the busy block
         send_idx = MESSAGES_JS.find("async function send(")
         assert send_idx >= 0
-        # Look in the first ~3000 chars of send() for the busy mode read
-        send_body = MESSAGES_JS[send_idx:send_idx + 3000]
-        assert "_busyInputMode" in send_body, (
-            "send() must read window._busyInputMode in the S.busy branch"
+        # Bound the window to the actual send() body (up to the LIVE_STREAMS decl
+        # that immediately follows it) rather than an arbitrary char count, so
+        # unrelated additions near the top of send() don't push the assertion
+        # target out of a fixed window (#5472 caught this).
+        send_end = MESSAGES_JS.find("const LIVE_STREAMS=", send_idx)
+        assert send_end > send_idx, "could not bound send() body"
+        send_body = MESSAGES_JS[send_idx:send_end]
+        assert "_defaultMessageMode" in send_body, (
+            "send() must read window._defaultMessageMode in the S.busy branch"
         )
 
     def test_send_calls_cancel_stream_on_interrupt(self):
         send_idx = MESSAGES_JS.find("async function send(")
-        send_body = MESSAGES_JS[send_idx:send_idx + 5000]
+        assert send_idx >= 0
+        send_end = MESSAGES_JS.find("const LIVE_STREAMS=", send_idx)
+        assert send_end > send_idx, "could not bound send() body"
+        send_body = MESSAGES_JS[send_idx:send_end]
         # The interrupt branch must call cancelStream
         assert "cancelStream" in send_body
         # And queue before cancel (otherwise the drain has nothing to pick up)
@@ -300,12 +324,56 @@ class TestSendBusyBranchDispatch:
         """
         send_idx = MESSAGES_JS.find("async function send(")
         assert send_idx >= 0, "send() not found"
-        steer_idx = MESSAGES_JS.find("busyMode==='steer'", send_idx)
+        steer_idx = MESSAGES_JS.find("defaultMessageMode==='steer'", send_idx)
         assert steer_idx >= 0, "busy steer branch not found"
-        branch = MESSAGES_JS[steer_idx:steer_idx + 900]
-        assert "const _steerDelivered=await _trySteer" in branch
-        assert "if(_steerDelivered){S.pendingFiles=[];renderTray();}" in branch
-        assert branch.index("const _steerDelivered=await _trySteer") < branch.index("if(_steerDelivered){S.pendingFiles=[];renderTray();}")
+        branch_end = MESSAGES_JS.find("} else if(defaultMessageMode==='interrupt')", steer_idx)
+        assert branch_end > steer_idx, "busy steer branch end not found"
+        branch = MESSAGES_JS[steer_idx:branch_end]
+        assert "await _trySteer(text, /*explicitSteer=*/false)" in branch
+        assert "_trySteer captures the owner session/files before awaiting uploads" in branch
+        assert "_trySteer clears staged files only after /api/chat/steer accepts" in branch
+        assert "_clearComposerDraft(S.session.session_id,text" not in branch
+        try_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
+        accepted_idx = try_body.find("if(result&&result.accepted)")
+        failure_idx = try_body.find("// Do not fall back to interrupt")
+        clear_idx = try_body.find("S.pendingFiles=_remaining", accepted_idx)
+        assert accepted_idx >= 0 and clear_idx > accepted_idx
+        assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in try_body
+        assert failure_idx > clear_idx, "failed steer must leave staged files intact"
+
+    def test_reentrant_send_does_not_queue_staged_files_while_steer_uploads(self):
+        """Repeated Enter during steer upload must not double-send staged files.
+
+        _trySteer uploads with clearPending=false, so S.pendingFiles intentionally
+        stays populated until the steer endpoint accepts. The early reentrant
+        guard must therefore be text-only; file-only busy submissions are handled
+        by the normal busy branch after the first send call owns the turn.
+        """
+        send_idx = MESSAGES_JS.find("async function send(")
+        assert send_idx >= 0, "send() not found"
+        guard_start = MESSAGES_JS.find("if (_sendInProgress)", send_idx)
+        guard_end = MESSAGES_JS.find("_sendInProgress = true", guard_start)
+        assert guard_start >= 0 and guard_end > guard_start, "send() reentrant guard not found"
+        guard = MESSAGES_JS[guard_start:guard_end]
+        assert "if(_text && _targetSid)" in guard
+        assert "S.pendingFiles.length" not in guard
+        assert "files:[...S.pendingFiles]" in guard
+
+    def test_steer_upload_is_cached_and_delivered_files_removed_by_identity(self):
+        """#5459 gate fixes: (1) a failed-steer RETRY reuses the cached upload
+        instead of re-uploading the same File objects; (2) accepted steer removes
+        ONLY the delivered files by identity, preserving files staged during the
+        upload/API await."""
+        try_body = _source_between(COMMANDS_JS, "async function _steerTextWithPendingFiles(", "\nasync function cmdTitle")
+        # (1) upload cache keyed by session + file signature, reused on retry,
+        # invalidated on delivery.
+        assert "_steerUploadCache" in try_body
+        assert "_steerFilesSignature(" in try_body
+        assert "_steerUploadCache={sid:ownerSid,sig,paths}" in try_body
+        assert "_steerUploadCache=null" in try_body
+        # (2) identity-based removal of only the delivered snapshot.
+        assert "_delivered=new Set(pendingFilesSnapshot)" in try_body
+        assert "S.pendingFiles=_remaining" in try_body
 
 
     def test_slash_commands_intercepted_before_busymode_routing(self):
@@ -324,7 +392,7 @@ class TestSendBusyBranchDispatch:
         assert busy_start >= 0, "busy block not found"
         # The intercept must appear BEFORE the busyMode assignment
         intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
-        busymode_idx = MESSAGES_JS.find("_busyInputMode||'queue'", busy_start)
+        busymode_idx = MESSAGES_JS.find("_defaultMessageMode||'steer'", busy_start)
         assert intercept_idx >= 0, (
             "send() must intercept /steer /interrupt /queue /terminal /goal /yolo before the busyMode "
             "routing block — otherwise they queue instead of executing immediately"
@@ -345,7 +413,7 @@ class TestSendBusyBranchDispatch:
         intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
         assert intercept_idx >= 0
         # Get the intercept block (up to the next busyMode assignment)
-        busymode_idx = MESSAGES_JS.find("_busyInputMode||'queue'", busy_start)
+        busymode_idx = MESSAGES_JS.find("_defaultMessageMode||'steer'", busy_start)
         intercept_block = MESSAGES_JS[intercept_idx:busymode_idx]
         assert "_bc.fn(_pc.args)" in intercept_block, (
             "The intercept must call the command handler directly via _bc.fn(_pc.args)"
@@ -365,7 +433,7 @@ class TestSendBusyBranchDispatch:
         send_idx = MESSAGES_JS.find("async function send(")
         busy_start = MESSAGES_JS.find("S.busy||compressionRunning", send_idx)
         intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
-        busymode_idx = MESSAGES_JS.find("_busyInputMode||'queue'", busy_start)
+        busymode_idx = MESSAGES_JS.find("_defaultMessageMode||'steer'", busy_start)
         intercept_block = MESSAGES_JS[intercept_idx:busymode_idx]
         clear_idx = intercept_block.find("$('msg').value=''")
         await_idx = intercept_block.find("await _bc.fn")
@@ -384,23 +452,36 @@ class TestSendBusyBranchDispatch:
 
 class TestBootAndPanelsWiring:
     def test_boot_init_default_path(self):
-        """Boot success path initialises window._busyInputMode from settings."""
-        assert "window._busyInputMode=(s.busy_input_mode||'queue')" in BOOT_JS
+        """Boot success path initialises window._defaultMessageMode from settings.
+
+        #5167/#5170: the assignment routes through _persistDefaultMessageMode()
+        so the resolved value is mirrored into localStorage (the synchronous
+        source the eager default reads) while still being the single source of
+        truth once /api/settings resolves. #5145 renamed the setting and reads
+        the legacy busy_input_mode key as a back-compat fallback.
+        """
+        assert "window._defaultMessageMode=_persistDefaultMessageMode(s.default_message_mode||s.busy_input_mode)" in BOOT_JS
 
     def test_boot_init_fallback_path(self):
-        """Boot fallback path (settings load failed) initialises to safe default."""
-        # The fallback should set window._busyInputMode='queue'
-        assert "window._busyInputMode='queue'" in BOOT_JS
+        """Boot fallback path (settings load failed) keeps the persisted preference.
+
+        #5167/#5170: instead of hard-clobbering to a default, the catch path
+        re-reads the persisted mirror so a saved 'steer'/'interrupt'/'queue'
+        still applies when the server is unreachable. This must NOT regress to
+        a hardcoded default that ignores the saved choice.
+        """
+        assert "window._defaultMessageMode=_readPersistedDefaultMessageMode()" in BOOT_JS
 
     def test_panels_load_save_apply(self):
-        assert "settingsBusyInputMode" in PANELS_JS, "panels.js must load the setting"
-        assert "body.busy_input_mode" in PANELS_JS, "saveSettings must include busy_input_mode in body"
-        assert "window._busyInputMode=body.busy_input_mode" in PANELS_JS, (
-            "_applySavedSettingsUi must propagate busy_input_mode to the global"
+        assert "settingsDefaultMessageMode" in PANELS_JS, "panels.js must load the setting"
+        assert "body.default_message_mode" in PANELS_JS, "saveSettings must include default_message_mode in body"
+        assert "_persistDefaultMessageMode(body.default_message_mode||body.busy_input_mode)" in PANELS_JS, (
+            "_applySavedSettingsUi must propagate default_message_mode to the global "
+            "and persist it (so the next reload's eager default honors the save) (#5167/#5170)"
         )
 
     def test_index_html_dropdown_has_three_options(self):
-        idx = INDEX_HTML.find('id="settingsBusyInputMode"')
+        idx = INDEX_HTML.find('id="settingsDefaultMessageMode"')
         assert idx >= 0
         block = INDEX_HTML[idx:idx + 800]
         assert 'value="queue"' in block
@@ -426,11 +507,11 @@ class TestI18nKeys:
         "cmd_steer_fallback",
         "busy_steer_fallback",
         "busy_interrupt_confirm",
-        "settings_label_busy_input_mode",
-        "settings_desc_busy_input_mode",
-        "settings_busy_input_mode_queue",
-        "settings_busy_input_mode_interrupt",
-        "settings_busy_input_mode_steer",
+        "settings_label_default_message_mode",
+        "settings_desc_default_message_mode",
+        "settings_default_message_mode_queue",
+        "settings_default_message_mode_interrupt",
+        "settings_default_message_mode_steer",
     ]
 
     def test_each_key_appears_at_least_six_times(self):

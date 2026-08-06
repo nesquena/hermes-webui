@@ -98,7 +98,7 @@ def test_duplicate_creates_independent_session():
 
     # Extract the duplicate endpoint code (next few lines)
     lines = content[duplicate_start:].split('\n')
-    endpoint_code = '\n'.join(lines[:80])
+    endpoint_code = '\n'.join(lines[:100])
 
     # Verify that parent_session_id is NOT passed to Session constructor
     assert 'parent_session_id' not in endpoint_code, \
@@ -127,7 +127,7 @@ def test_duplicate_session_copies_title_logic():
     assert duplicate_start != -1, "Duplicate endpoint not found"
 
     lines = content[duplicate_start:].split('\n')
-    endpoint_code = '\n'.join(lines[:80])
+    endpoint_code = '\n'.join(lines[:100])
 
     # Verify title includes (copy). Accept the original `session.title + " (copy)"`
     # form OR the May 2 2026 SF-3 hardened form `(session.title or "Untitled") + " (copy)"`
@@ -150,7 +150,7 @@ def test_duplicate_session_copies_messages_logic():
     assert duplicate_start != -1, "Duplicate endpoint not found"
 
     lines = content[duplicate_start:].split('\n')
-    endpoint_code = '\n'.join(lines[:80])
+    endpoint_code = '\n'.join(lines[:100])
 
     # Verify messages are copied from original session.  Accept either the
     # plain assignment (insufficient — see test_duplicate_runtime_messages_independence)
@@ -171,7 +171,7 @@ def test_duplicate_session_copies_model_logic():
     assert duplicate_start != -1, "Duplicate endpoint not found"
 
     lines = content[duplicate_start:].split('\n')
-    endpoint_code = '\n'.join(lines[:80])
+    endpoint_code = '\n'.join(lines[:100])
 
     # Verify model is copied
     assert 'model=session.model' in endpoint_code, \
@@ -189,7 +189,7 @@ def test_duplicate_session_copies_workspace_logic():
     assert duplicate_start != -1, "Duplicate endpoint not found"
 
     lines = content[duplicate_start:].split('\n')
-    endpoint_code = '\n'.join(lines[:80])
+    endpoint_code = '\n'.join(lines[:100])
 
     # Verify workspace is copied
     assert 'workspace=session.workspace' in endpoint_code, \
@@ -207,7 +207,7 @@ def test_duplicate_session_copies_all_session_properties():
     assert duplicate_start != -1, "Duplicate endpoint not found"
 
     lines = content[duplicate_start:].split('\n')
-    endpoint_code = '\n'.join(lines[:80])
+    endpoint_code = '\n'.join(lines[:100])
 
     # Extract the copied_session = Session( lines
     session_construction_start = endpoint_code.find('copied_session = Session(')
@@ -257,7 +257,7 @@ def test_duplicate_uses_deepcopy_for_messages():
     duplicate_start = content.find('if parsed.path == "/api/session/duplicate":')
     assert duplicate_start != -1, "Duplicate endpoint not found"
     lines = content[duplicate_start:].split('\n')
-    endpoint_code = '\n'.join(lines[:80])
+    endpoint_code = '\n'.join(lines[:100])
     assert 'copy.deepcopy(session.messages)' in endpoint_code, \
         "duplicate must use copy.deepcopy(session.messages) — plain assignment shares list refs"
     assert 'copy.deepcopy(session.tool_calls)' in endpoint_code, \
@@ -277,7 +277,7 @@ def test_duplicate_explicitly_persists_to_disk():
     duplicate_start = content.find('if parsed.path == "/api/session/duplicate":')
     assert duplicate_start != -1, "Duplicate endpoint not found"
     lines = content[duplicate_start:].split('\n')
-    endpoint_code = '\n'.join(lines[:80])
+    endpoint_code = '\n'.join(lines[:100])
     assert 'copied_session.save()' in endpoint_code, \
         "duplicate must call .save() explicitly — without it the copy vanishes on refresh"
 
@@ -294,7 +294,7 @@ def test_duplicate_resets_pinned_and_archived():
     duplicate_start = content.find('if parsed.path == "/api/session/duplicate":')
     assert duplicate_start != -1, "Duplicate endpoint not found"
     lines = content[duplicate_start:].split('\n')
-    endpoint_code = '\n'.join(lines[:80])
+    endpoint_code = '\n'.join(lines[:100])
     # Both must be hard-coded to False, NOT inherited from `session.pinned`/`session.archived`
     assert 'pinned=False' in endpoint_code, \
         "duplicate must reset pinned=False — duplicating shouldn't propagate pin state"
@@ -318,7 +318,7 @@ def test_duplicate_returns_404_when_session_not_found():
     duplicate_start = content.find('if parsed.path == "/api/session/duplicate":')
     assert duplicate_start != -1, "Duplicate endpoint not found"
     lines = content[duplicate_start:].split('\n')
-    endpoint_code = '\n'.join(lines[:80])
+    endpoint_code = '\n'.join(lines[:100])
     assert 'bad(handler, "Session not found", status=404)' in endpoint_code, \
         "missing session must return status=404, not the default 400"
 

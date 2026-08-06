@@ -2,7 +2,7 @@
 
 > Forward-looking sprint plan and active queue.
 >
-> Current state: v0.50.281 | 3995 tests | port 8787
+> Current state: v0.51.792 | ~11,500 tests | port 8787
 > Target A (CLI parity): ✅ Complete
 > Target B (Claude parity): ~95% — full subagent transparency UI and code-execution cells remain
 >

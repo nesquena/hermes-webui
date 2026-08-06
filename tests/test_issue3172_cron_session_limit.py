@@ -56,15 +56,26 @@ def fake_hermes_home(tmp_path, monkeypatch):
     home = tmp_path / "hermes"
     home.mkdir()
 
+    import api.config as cfg
     import api.profiles as profiles
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: home)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: None)
 
-    # Pre-create a cron project so _cron_pid() returns a stable ID.
-    projects_dir = home / "projects"
-    projects_dir.mkdir()
-    (projects_dir / "projects.json").write_text(
-        json.dumps({"projects": [{"id": "cron-project", "name": "Cron Jobs"}]}),
+    projects_file = tmp_path / "projects.json"
+    monkeypatch.setattr(cfg, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "_projects_migrated", True)
+    # Seed a legacy untagged Cron Jobs project in the actual file the
+    # production ensure_cron_project() path reads.
+    projects_file.write_text(
+        json.dumps([
+            {
+                "project_id": "cron-project",
+                "name": "Cron Jobs",
+                "color": "#6366f1",
+                "created_at": 1.0,
+            }
+        ]),
         encoding="utf-8",
     )
 

@@ -9,6 +9,7 @@ PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 DOCS_EXTENSIONS = (ROOT / "docs" / "EXTENSIONS.md").read_text(encoding="utf-8")
+ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 
 
 def _function_block(name: str, *, extra: int = 2200) -> str:
@@ -64,6 +65,7 @@ def test_extensions_panel_warns_about_trust_model_and_stays_install_free():
     pane = INDEX_HTML[pane_start:pane_end]
 
     assert "Extensions run in the WebUI browser origin" in pane
+    assert "Settings and extension-owned storage are browser-local and not for secrets" in pane
     assert "Only load trusted local extension directories" in pane
     assert "takes effect after reload" in pane
     assert "copyExtensionsDiagnostics()" in pane
@@ -71,6 +73,8 @@ def test_extensions_panel_warns_about_trust_model_and_stays_install_free():
     assert "api('/api/settings'" not in pane
     assert "type=\"checkbox\"" not in pane
     assert "marketplace" not in pane.lower()
+    assert "static/extension_settings.js" in INDEX_HTML
+    assert INDEX_HTML.index("static/extension_settings.js") < INDEX_HTML.index("static/panels.js")
 
 
 def test_switch_settings_section_supports_extensions_lazy_load():
@@ -100,6 +104,13 @@ def test_extensions_panel_fetches_status_endpoint_without_mutating_settings():
     assert "api('/api/settings'" not in load_block
     assert not _contains_post_method(load_block)
     assert "extensions-error" in load_block
+
+
+def test_extensions_do_not_add_generic_backend_settings_write_route():
+    assert "/api/extensions/settings" not in ROUTES_PY
+    assert "/api/extensions/storage" not in ROUTES_PY
+    assert "set_extension_settings" not in ROUTES_PY
+    assert "write_extension_settings" not in ROUTES_PY
 
 
 def test_extensions_diagnostics_tab_refreshes_runtime_status():
@@ -156,12 +167,21 @@ def test_extensions_panel_renders_loopback_sidecar_monitor_safely():
     assert "esc(origin)" in sidecar_block
     assert "esc(healthPath)" in sidecar_block
     assert "esc(healthUrl)" in sidecar_block
+    assert "sidecar&&sidecar.proxy" in sidecar_block
+    assert "proxy.available===true" in sidecar_block
+    assert "proxy.consented===true" in sidecar_block
+    assert "proxy.consent_required===true" in sidecar_block
+    assert "proxy.origin_changed===true" in sidecar_block
+    assert "Proxy path" in sidecar_block
+    assert "data-extension-sidecar-proxy-id" in sidecar_block
+    assert "data-extension-sidecar-proxy-approved" in sidecar_block
     assert 'data-sidecar-runtime-index="${index}"' in sidecar_block
     assert "fetch(healthUrl,{credentials:'omit',cache:'no-store'" in monitor_block
     assert "function _monitorExtensionSidecars(sidecars,seq)" in monitor_block
     assert "const seq=_extensionsSidecarMonitorSeq" not in monitor_block
     assert "_monitorExtensionSidecars(sidecars,seq)" in render_block
     assert "function _renderExtensionsPanel(data,seq)" in render_block
+    assert "_bindExtensionSidecarProxyButtons(target)" in render_block
     assert "const seq=++_extensionsSidecarMonitorSeq" in load_block
     assert "opts&&opts.preserveExisting&&target.innerHTML.trim()" in load_block
     # A failed refresh must NOT be preserved as "existing content": the Loading/
@@ -193,6 +213,19 @@ def test_extensions_panel_renders_loopback_sidecar_monitor_safely():
     assert not _contains_post_method(monitor_block)
 
 
+def test_extensions_panel_sidecar_proxy_consent_uses_dedicated_endpoint():
+    bind_block = _between("function _bindExtensionSidecarProxyButtons", "async function handleExtensionToggle")
+    consent_block = _between("async function handleExtensionSidecarProxyConsent", "function _readExtensionSettingsForm")
+
+    assert "handleExtensionSidecarProxyConsent" in bind_block
+    assert "data-extension-sidecar-proxy-id" in bind_block
+    assert "api('/api/extensions/sidecar-proxy-consent',{method:'POST',body:JSON.stringify({id,approved})})" in consent_block
+    assert "Extension sidecar proxy approved." in consent_block
+    assert "Extension sidecar proxy consent revoked." in consent_block
+    assert "Failed to update extension sidecar proxy consent" in consent_block
+    assert "api('/api/extensions/toggle'" not in consent_block
+
+
 def test_extensions_panel_toggle_uses_dedicated_endpoint_without_settings_or_install():
     installed_block = _between("function _extensionInstalledList", "function _extensionSidecarHealthBadge")
     toggle_block = _between("async function handleExtensionToggle", "async function loadExtensionsPanel")
@@ -211,6 +244,32 @@ def test_extensions_panel_toggle_uses_dedicated_endpoint_without_settings_or_ins
     assert "Install extension" not in combined
     assert "Uninstall" not in combined
     assert "marketplace" not in combined.lower()
+
+
+def test_extensions_installed_settings_route_through_shared_accessor():
+    installed_block = _between("function _extensionInstalledList", "function _extensionSidecarHealthBadge")
+    settings_block = _between("function _configureExtensionSettingsFromStatus", "function _extensionInstalledList")
+    bind_block = _between("function _bindExtensionSettingsButtons", "async function loadExtensionsPanel")
+    gallery_block = _between("function _renderExtensionsGallery", "function _bindExtensionGalleryButtons")
+
+    assert "entry&&entry.storage_owned" in settings_block
+    assert "window.HermesExtensionSettings.settingsForExtension(id)" in settings_block
+    assert "settingsApi&&settingsApi.schema" in settings_block
+    assert "settingsApi||!settingsApi.trusted" in settings_block
+    assert "data-extension-settings-save" in settings_block
+    assert "data-extension-settings-reset" in settings_block
+    assert "data-extension-storage-clear" in settings_block
+    assert "Browser-local extension settings" in settings_block
+    assert "Do not store secrets here" in settings_block
+    assert "Reload WebUI after enabling or installing this extension to edit browser-local settings." in settings_block
+    assert "_extensionSettingsControls(entry)" in installed_block
+    assert "window.HermesExtensionSettings.settingsForExtension(id).reset()" in bind_block
+    assert "window.HermesExtensionSettings.storageForExtension(id).clear()" in bind_block
+    assert "api('/api/extensions/status')" not in bind_block
+    assert "api('/api/settings'" not in bind_block
+    assert "localStorage" not in bind_block
+    assert "_extensionInstalledList(statusData&&statusData.extensions" in gallery_block
+    assert "_bindExtensionSettingsButtons(installedEl)" in gallery_block
 
 
 def test_extensions_gallery_renders_post_install_guidance():
@@ -292,6 +351,8 @@ def test_extensions_styles_are_scoped_to_extensions_panel():
     assert ".extension-url-list" in STYLE_CSS
     assert ".extension-installed-list" in STYLE_CSS
     assert ".extension-toggle-btn" in STYLE_CSS
+    assert ".extension-settings-box" in STYLE_CSS
+    assert ".extension-settings-actions" in STYLE_CSS
     assert ".extension-sidecar-list" in STYLE_CSS
     assert ".extension-sidecar-runtime" in STYLE_CSS
     assert ".extension-sidecar-status-badge" in STYLE_CSS
@@ -376,13 +437,19 @@ def test_extensions_docs_mentions_settings_panel_without_install_or_proxy_claims
     assert "manifests" in diagnostics_section
     assert "fetch new extension assets" in diagnostics_section
     assert "uninstall files" in diagnostics_section
-    assert "proxy sidecars" in diagnostics_section
     assert "GET /api/extensions/status" in diagnostics_section
+    assert "`POST /api/extensions/sidecar-proxy-consent`" in diagnostics_section
     assert "sanitized loopback sidecars" in diagnostics_section
     assert "credentials: 'omit'" in diagnostics_section
-    assert "does **not** proxy sidecar requests" in diagnostics_section
+    assert "fixed per-extension sidecar path" in diagnostics_section
+    assert "WebUI strips `Cookie`, `Authorization`, and CSRF headers" in diagnostics_section
+    assert "does not create arbitrary extension-owned backend routes" in diagnostics_section
     assert "optional top-level `runtime` object" in diagnostics_section
     assert "allowlisted scalar fields" in diagnostics_section
+    assert "browser-local controls" in diagnostics_section
+    assert "`window.HermesExtensionSettings`" in DOCS_EXTENSIONS
+    assert "does not store extension settings or expose a generic settings write route" in DOCS_EXTENSIONS
+    assert "Settings persist only non-default overrides" in DOCS_EXTENSIONS
     assert "do **not**" in diagnostics_section
     assert "return `HERMES_WEBUI_EXTENSION_DIR`" in diagnostics_section
     assert "override state-file path" in diagnostics_section

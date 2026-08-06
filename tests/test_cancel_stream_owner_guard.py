@@ -135,6 +135,10 @@ class TestCancelStreamOwnerGuardStructural:
         """When the backend reports ``cancelled:false``, the fix should
         show a lightweight toast (the backend may have already finalized
         the turn, or a newer turn may hold the session lock)."""
+        assert "r.ok" in CANCEL_STREAM_SRC, (
+            "cancelStream() must gate cancelled:false cleanup on an HTTP-success "
+            "response so failed gateway stops do not settle the UI locally"
+        )
         assert "cancelled" in CANCEL_STREAM_SRC and "false" in CANCEL_STREAM_SRC, (
             "cancelStream() must check respBody.cancelled === false and surface "
             "a toast (e.g. 'Stream is no longer active')"
@@ -254,6 +258,25 @@ async function runAll() {
     toastCalls: [...M.toastCalls],
   };
 
+  // T3b — failed HTTP response with cancelled:false body: keep the active
+  // owner path intact because the cancel did not succeed.
+  reset();
+  globalThis.S = { activeStreamId: 'stream-1', session: { session_id: 'sid-1' } };
+  _fetchResponse = {
+    ok: false,
+    json: () => Promise.resolve({ ok: false, cancelled: false, stream_id: 'stream-1' }),
+  };
+  _fetchThrows = false;
+  await cancelStream();
+  out.t3b_failed_http = {
+    finalActiveStreamId: globalThis.S.activeStreamId,
+    fetchCalls: M.fetchCalls.length,
+    closeCalls: [...M.closeCalls],
+    busyCalls: [...M.busyCalls],
+    composerCalls: [...M.composerCalls],
+    toastCalls: [...M.toastCalls],
+  };
+
   // T4 — network error: no throw, active owner kept because we do not know
   // whether the cancel landed.
   reset();
@@ -329,7 +352,16 @@ def _run_cancel_stream_scenarios() -> dict:
             f"--- stderr ---\n{completed.stderr}"
         )
     try:
-        return json.loads(completed.stdout)
+        # The function under test legitimately emits diagnostic lines on stdout
+        # (e.g. cancelStream's '[stream] cancel requested' provenance log, added
+        # for #5345). Those fire DURING runAll(); the result JSON is written by
+        # `console.log(JSON.stringify(r))` only after runAll() resolves, so it is
+        # always the LAST non-empty stdout line. Parse that rather than assuming
+        # stdout is pure JSON.
+        lines = [ln for ln in completed.stdout.splitlines() if ln.strip()]
+        if not lines:
+            raise json.JSONDecodeError("empty stdout", completed.stdout or "", 0)
+        return json.loads(lines[-1])
     except json.JSONDecodeError as e:
         raise AssertionError(
             f"node subprocess returned non-JSON output:\n"
@@ -457,6 +489,26 @@ class TestCancelStreamOwnerGuardRuntime:
             f"got {r['toastCalls']}"
         )
 
+    def test_t3b_failed_http_keeps_owner_state(self, runtime_results):
+        r = runtime_results["t3b_failed_http"]
+        assert r["fetchCalls"] == 1, (
+            f"cancelStream() must still issue the cancel request on failed HTTP, "
+            f"got {r['fetchCalls']}"
+        )
+        assert r["finalActiveStreamId"] == "stream-1", (
+            f"cancelStream() must keep S.activeStreamId when /api/chat/cancel "
+            f"fails, got {r['finalActiveStreamId']!r}"
+        )
+        assert r["closeCalls"] == [], (
+            f"cancelStream() must keep owned SSE open on failed HTTP, got {r['closeCalls']}"
+        )
+        assert r["busyCalls"] == [], (
+            f"cancelStream() must not call setBusy(false) on failed HTTP, got {r['busyCalls']}"
+        )
+        assert r["toastCalls"] == [], (
+            f"cancelStream() should not show a toast on failed HTTP, got {r['toastCalls']}"
+        )
+
     def test_t5_owner_guard_preserves_new_turn(self, runtime_results):
         r = runtime_results["t5_owner_guard"]
         # The fetch still happened for the OLD stream.
@@ -503,12 +555,14 @@ class TestCancelStreamOwnerGuardRuntime:
             )
         assert runtime_results["t3_cancelled_false"]["finalActiveStreamId"] is None
         assert runtime_results["t3_cancelled_false"]["busyCalls"] == [False]
+        assert runtime_results["t3b_failed_http"]["finalActiveStreamId"] == "stream-1"
+        assert runtime_results["t3b_failed_http"]["busyCalls"] == []
         # T5 is the owner-rotation case and must preserve the new turn.
         assert runtime_results["t5_owner_guard"]["finalActiveStreamId"] == "stream-2"
         assert runtime_results["t5_owner_guard"]["busyCalls"] == []
         # Only the stale-owner path closes the old SSE; active owned paths
         # keep it open so the backend terminal event can settle/render.
-        for key in ("t2_happy_path", "t3_cancelled_false", "t4_network_error", "t5_owner_guard"):
+        for key in ("t2_happy_path", "t3_cancelled_false", "t3b_failed_http", "t4_network_error", "t5_owner_guard"):
             if key == "t5_owner_guard":
                 assert runtime_results[key]["closeCalls"] == [["sid-1", "stream-1"]], (
                     f"{key} must close stale old SSE for ('sid-1', 'stream-1'), "

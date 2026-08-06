@@ -17,6 +17,15 @@ This is intentionally not a plugin marketplace or dependency system. It is a
 safe escape hatch for local dashboards, internal tooling, and workflow-specific
 panels that should not live in core Hermes WebUI.
 
+> **The vetted extension library.** The curated, one-click-installable extensions
+> that appear in the gallery live in a separate public repo:
+> **[hermes-webui/hermes-webui-extensions](https://github.com/hermes-webui/hermes-webui-extensions)**.
+> "In the registry == vetted." That repo holds the entries, the authoring
+> conventions ([`docs/extension-entry.md`](https://github.com/hermes-webui/hermes-webui-extensions/blob/main/docs/extension-entry.md)),
+> the JSON schema, and the CI safety gates. This document covers the WebUI-side
+> *infrastructure* (loader, manifest contract, capabilities, install client);
+> see the library repo to browse existing extensions or contribute a new one.
+
 ## What extensions can do
 
 Extensions can:
@@ -35,6 +44,7 @@ Extensions cannot, by themselves:
 - serve files outside the configured extension directory
 - load third-party scripts/styles through the built-in injection config
 - register new WebUI backend routes or proxy arbitrary sidecar/backend traffic
+  outside the fixed consented extension sidecar path described below
 - change Hermes Agent permissions, models, memory, or tools unless they call
   existing authenticated APIs that already allow those changes
 
@@ -141,7 +151,8 @@ manifest such as `extensions.json` keeps the existing
 `desktop-companion/manifest.json` resolves relative assets under
 `/extensions/desktop-companion/`.
 
-Extension entries may also declare a read-only loopback sidecar for diagnostics:
+Extension entries may also declare a loopback sidecar for diagnostics and the
+opt-in proxy:
 
 ```json
 {
@@ -154,16 +165,111 @@ Extension entries may also declare a read-only loopback sidecar for diagnostics:
       "sidecar": {
         "type": "loopback",
         "origin": "http://127.0.0.1:17787",
-        "health_path": "/health"
+        "health_path": "/health",
+        "proxy_auth": "token-v1"
       }
     }
   ]
 }
 ```
 
-Loopback sidecars do **not** change asset injection behavior. They are only
-reported by diagnostics so an operator can see that a local companion service was
-declared and optionally check its health from the browser.
+Loopback sidecars do **not** change asset injection behavior. They are reported
+by diagnostics so an operator can see that a local companion service was
+declared and optionally check its health from the browser. If the operator later
+approves the proxy in **Settings → Extensions**, WebUI may proxy requests only
+through the fixed per-extension sidecar path for that extension.
+
+### Sidecar proxy authentication (`proxy_auth`)
+
+The loopback port a sidecar binds is reachable by **any local process**, and the
+proxy strips every inbound credential (cookies, `Authorization`, CSRF, `x-hermes-*`)
+before forwarding — so a sidecar cannot, on its own, tell a proxied request from a
+direct one. The `proxy_auth` field closes that gap:
+
+- **`token-v1`** (recommended for any sidecar that mutates state) — WebUI mints a
+  per-extension secret at `STATE_DIR/sidecar-auth/<id>.token` (mode `0600`) and
+  injects it as the `X-Hermes-Sidecar-Token` header on every proxied request. The
+  sidecar resolves the token file in this order — `HERMES_EXT_SIDECAR_TOKEN_FILE`
+  → `$HERMES_WEBUI_STATE_DIR/sidecar-auth/<id>.token` →
+  `$HERMES_HOME/webui/sidecar-auth/<id>.token` → platform default
+  (`~/.hermes/webui/…`, `%LOCALAPPDATA%\hermes\webui\…` on Windows) — and must
+  validate the header on every route except `/health`, returning **`401` on a
+  missing/mismatched token** and **`503` when the token file is absent/unreadable**.
+  The canonical scaffold in the extensions repository (`examples/`, see
+  `docs/SIDECAR_CONTRACT.md`) does all of this for you — do not hand-roll it.
+- **absent (or the explicit literal `"legacy"`)** — **legacy** mode (no token;
+  unchanged behavior). Only appropriate for read-only, non-sensitive sidecars.
+- Any **other** value fails closed (the sidecar declaration is rejected).
+
+**Auth-off posture:** WebUI authentication is optional and off by default. Because
+the consent endpoint and proxy route are unauthenticated in that mode, `token-v1`
+fails closed regardless of whether the sidecar origin is loopback: consent and proxy
+resolution return `403` until WebUI authentication is configured. Otherwise, any
+caller that can reach WebUI could ask core to inject the token and use it as a
+forwarding oracle. The extensions panel exposes the `local_unprotected` posture so
+the operator is told to enable authentication before granting consent. The token
+protects against other-UID and sandboxed local callers; it does **not** defend against
+arbitrary same-UID code (which can read the token file, WebUI's own signing key, or
+run the sidecar's tool directly).
+
+Extension entries may declare browser-local settings when they also request
+extension-owned storage:
+
+```json
+{
+  "id": "desktop-companion",
+  "permissions": {
+    "storage": {
+      "owned": true
+    }
+  },
+  "settings_schema": [
+    {
+      "key": "show_badge",
+      "type": "boolean",
+      "label": "Show badge",
+      "default": true
+    },
+    {
+      "key": "mode",
+      "type": "enum",
+      "label": "Mode",
+      "options": [
+        {"value": "compact", "label": "Compact"},
+        {"value": "full", "label": "Full"}
+      ],
+      "default": "compact"
+    }
+  ]
+}
+```
+
+Settings are a first-pass browser feature. WebUI sanitizes the manifest schema, injects the accepted schema before extension scripts, and leaves persistence to the browser. The backend does not store extension settings or expose a generic settings write route, and it does not treat these values as secrets.
+
+The sanitizer accepts only `boolean`, `string`, `number`, `integer`, and `enum`
+fields. It drops `sensitive: true` fields, unsupported types, malformed enum
+options, duplicate keys after the first valid field, and defaults that do not
+match the declared type. `settings_schema` is honored only when
+`permissions.storage.owned` is exactly `true`.
+
+Extension scripts can use the sanctioned browser accessors:
+
+```js
+const settings = window.HermesExtensionSettings.settingsForExtension("desktop-companion");
+const value = settings.get("show_badge");
+settings.set("show_badge", false);
+
+const storage = window.HermesExtensionSettings.storageForExtension("desktop-companion");
+storage.set("lastPanel", "settings");
+
+const sameSettings = window.hermesExt.settings.forExtension("desktop-companion");
+const sameStorage = window.hermesExt.storage.forExtension("desktop-companion");
+```
+
+Settings persist only non-default overrides. Resetting settings removes those
+overrides and returns schema defaults. Extension-owned storage uses a separate
+browser-local namespace, and clearing storage removes that namespace without
+changing settings.
 
 ## URL rules
 
@@ -202,9 +308,10 @@ URLs are ignored rather than injected.
 
 Manifest-bundled extensions may integrate with a trusted local sidecar process,
 such as a desktop companion listening on `http://127.0.0.1:17787`. The injected
-extension JavaScript talks to that sidecar directly from the browser; Hermes
-WebUI does not proxy those requests and does not create extension-owned backend
-routes.
+extension JavaScript can talk to that sidecar directly from the browser, and
+WebUI diagnostics still use that direct browser path. WebUI may also proxy the
+same sidecar through a fixed per-extension sidecar path after explicit persisted
+user consent. WebUI does not create arbitrary extension-owned backend routes.
 
 Loopback sidecar origins are already included in WebUI's enforced CSP
 `connect-src` directive:
@@ -328,6 +435,7 @@ window.registerHermesSkin({
   name: 'E-Ink',            // display name (also the picker label)
   value: 'e-ink',           // optional stable key; slugified from name if omitted
   label: 'E-Ink',           // optional explicit picker label
+  scheme: 'light',          // optional: force a light or dark base while selected
   colors: ['#000000', '#ffffff', '#555555'],  // up to 3 preview swatches
   tokens: {                 // CSS design-token overrides for this skin
     '--bg': '#ffffff',
@@ -345,6 +453,13 @@ The call returns `true` on success and `false` if the descriptor was rejected
 shows up in the picker, can be selected, and persists across reloads exactly
 like a built-in skin. Registering the same key again updates it in place
 (idempotent), which is what a live theme editor relies on while the user edits.
+
+Use `scheme` when a skin is light-only or dark-only. Accepted values are
+`"light"` and `"dark"`; any other value is ignored. This does not rewrite the
+user's saved Theme setting (`Light`, `Dark`, or `System Default`). It only
+controls the effective base theme class while that extension skin is selected,
+so a dark editor skin is not mixed with light-mode code/table tokens, and a
+light E-Ink skin is not mixed with dark-mode tokens.
 
 **Core does the security-sensitive work for you.** Because token values are
 written into CSS, every value is sanitized in core, once, so every theme
@@ -366,6 +481,8 @@ extension inherits the guard:
 - **Reserved keys are protected** — an extension cannot overwrite a built-in
   skin key (e.g. `default`, `ares`, `graphite`).
 - A descriptor with no valid tokens after sanitization is rejected entirely.
+- **Skin scheme is constrained** — only `light` and `dark` are accepted. Invalid
+  scheme values are ignored rather than rendered into CSS.
 
 This is the supported, forward-looking way for theme-pack and theme-creator
 extensions to integrate with the built-in appearance system.
@@ -464,6 +581,16 @@ If host CSS overrides `[hidden]`, add an extension-scoped rule such as:
 }
 ```
 
+### Contributing to the extension library
+
+To publish an extension in the vetted gallery, open a PR against
+**[hermes-webui/hermes-webui-extensions](https://github.com/hermes-webui/hermes-webui-extensions)**
+following [`docs/extension-entry.md`](https://github.com/hermes-webui/hermes-webui-extensions/blob/main/docs/extension-entry.md)
+(entry layout, `extension.json`/`manifest.json` shape, and the capability +
+best-practice conventions). Every entry PR runs the repo's CI validators and
+safety scan before it can merge, and merged entries are published to the registry
+that powers Settings → Extensions.
+
 ## Minimal example
 
 Create a local extension directory:
@@ -518,8 +645,8 @@ for operators who prefer to inspect extension state from the browser. Installed
 manifest entries can be enabled or disabled from that panel through the
 authenticated `POST /api/extensions/toggle` endpoint. The toggle writes only a
 WebUI-managed override in the WebUI state directory; it does not edit extension
-manifests, fetch new extension assets, uninstall files, proxy sidecars, or add
-extension-owned backend routes. Manifest entries with `"enabled": false` remain
+manifests, fetch new extension assets, uninstall files, or add extension-owned
+backend routes. Manifest entries with `"enabled": false` remain
 manifest-disabled and cannot be re-enabled from WebUI.
 
 The diagnostics return the same public asset URLs that can already be injected
@@ -540,15 +667,11 @@ return `HERMES_WEBUI_EXTENSION_DIR`, resolved manifest paths, raw environment
 values, rejected URL strings, rejected sidecar origins, rejected health paths, or
 the override state-file path.
 
-When sanitized loopback sidecars are present, **Settings → Extensions** renders a
-read-only sidecar monitor card. The browser checks each declared `health_url`
-directly with `fetch(..., { credentials: 'omit', cache: 'no-store' })` and a
-short timeout. WebUI does **not** proxy sidecar requests and does not send WebUI
-cookies to sidecars. A successful HTTP response is shown as healthy, a non-OK
-HTTP response as unhealthy, and CORS/network/timeouts as unreachable or blocked;
-raw health response bodies are never rendered. If a healthy response includes an
-optional top-level `runtime` object, the panel may parse it and render only
-allowlisted scalar fields such as `sidecar`, `native_host`, `bridge`,
-`last_seen_at`, and `webui_origin`. This keeps sidecar-specific diagnostics
-machine-readable without making WebUI depend on any one extension's private
-payload shape.
+When sanitized loopback sidecars are present, **Settings → Extensions** renders a sidecar monitor card. The browser checks each declared `health_url` directly with `fetch(..., { credentials: 'omit', cache: 'no-store' })` and a short timeout. A successful HTTP response is shown as healthy, a non-OK HTTP response as unhealthy, and CORS/network/timeouts as unreachable or blocked; raw health response bodies are never rendered. If a healthy response includes an optional top-level `runtime` object, the panel may parse it and render only allowlisted scalar fields such as `sidecar`, `native_host`, `bridge`, `last_seen_at`, and `webui_origin`. This keeps sidecar-specific diagnostics machine-readable without making WebUI depend on any one extension's private payload shape.
+
+The same card also exposes proxy consent through `POST /api/extensions/sidecar-proxy-consent` and reports the fixed per-extension sidecar path `/api/extensions/<extension-id>/sidecar/<relative-path>`. WebUI strips `Cookie`, `Authorization`, and CSRF headers before contacting the sidecar, and sidecar `Set-Cookie` headers are stripped before the browser sees the response. WebUI does not create arbitrary extension-owned backend routes; the proxy surface stays on that fixed per-extension sidecar path.
+
+When sanitized settings are present, Settings -> Extensions renders
+browser-local controls for installed manifest entries. Save, reset, and clear
+storage actions call `window.HermesExtensionSettings`; they do not call backend
+storage routes and do not write WebUI settings.

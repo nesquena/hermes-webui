@@ -786,10 +786,13 @@ class TestBackgroundTitleProfileRouting(unittest.TestCase):
 
         self.assertEqual(captured.get('hermes_home'), 'profile-home')
         self.assertEqual(str(captured.get('skill_module_home')), 'profile-home')
-        self.assertEqual(Path(str(captured.get('skill_module_dir'))), Path('profile-home') / 'skills')
+        self.assertEqual(
+            Path(str(captured.get('skill_module_dir'))),
+            Path('profile-home') / 'skills',
+        )
         self.assertEqual(captured.get('restored_hermes_home'), 'default-home')
-        self.assertEqual(getattr(fake_skill_module, 'HERMES_HOME'), 'default-home')
-        self.assertEqual(getattr(fake_skill_module, 'SKILLS_DIR'), 'default-home/skills')
+        self.assertEqual(fake_skill_module.HERMES_HOME, 'default-home')
+        self.assertEqual(fake_skill_module.SKILLS_DIR, 'default-home/skills')
         self.assertEqual(mock_session.title, 'Profile Routed Title')
 
     def test_background_profile_env_routes_load_config_and_provider_credentials(self):

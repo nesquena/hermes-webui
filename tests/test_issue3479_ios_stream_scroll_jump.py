@@ -74,7 +74,7 @@ def test_live_anchor_worklog_rebuild_restores_snapshot_before_follow_settle():
     dedupe_idx = body.index("_dedupeLiveProcessedWorklogAnchors(turn);")
     move_status_idx = body.index("_moveLiveRunStatusToTurnEnd();")
     restore_idx = body.index("_restoreMessageScrollSnapshotSameFrame(scrollSnapshot);")
-    release_idx = body.index("if(scrollRebuildGuard&&scrollRebuildGuard.release)")
+    release_idx = body.index("_restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);")
     settle_idx = body.index("if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();")
 
     assert capture_idx < guard_idx < remove_idx < restore_detail_idx < dedupe_idx < move_status_idx < restore_idx < release_idx < settle_idx
@@ -101,8 +101,8 @@ def test_same_frame_snapshot_preserves_bottom_distance_and_unpinned_state():
     wrapper = _function_body(UI_JS, "_renderMessagesWithScrollSnapshot")
 
     assert "bottom" in capture
-    assert "pinned:_shouldFollowMessagesOnDomReplace()" in _compact(capture)
-    assert "userUnpinned:_messageUserUnpinned" in _compact(capture)
+    assert "readerAwayFromBottom?false:_shouldFollowMessagesOnDomReplace()" in _compact(capture)
+    assert "readerAwayFromBottom?true:_messageUserUnpinned" in _compact(capture)
     assert "maxTop-Math.max(0,bottom)" in restore
     assert "_messageUserUnpinned=true" in restore
     assert "_scrollPinned=false" in restore

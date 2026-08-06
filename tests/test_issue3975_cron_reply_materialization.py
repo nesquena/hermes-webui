@@ -47,7 +47,7 @@ def test_chat_start_materializes_cron_session_before_reply(monkeypatch, tmp_path
     def fail_get_session(_sid):
         raise KeyError(_sid)
 
-    def materialize(_sid):
+    def materialize(_sid, **_kwargs):
         captured["materialize_sid"] = _sid
         return materialized
 
@@ -59,7 +59,7 @@ def test_chat_start_materializes_cron_session_before_reply(monkeypatch, tmp_path
     monkeypatch.setattr(routes, "get_session", fail_get_session)
     monkeypatch.setattr(routes, "_get_or_materialize_session", materialize)
     monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda _s, _w: str(tmp_path))
-    monkeypatch.setattr(routes, "_read_profile_model_config", lambda _s, _provider: (None, None))
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda _s, _provider: (None, None, None))
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",

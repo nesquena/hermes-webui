@@ -17,6 +17,7 @@ from api.config import (
     DEFAULT_WORKSPACE,
     _FALLBACK_MODELS,
     _HERMES_FOUND,
+    invalidate_models_cache,
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     _get_config_path,
@@ -27,6 +28,7 @@ from api.config import (
     save_settings,
     verify_hermes_imports,
 )
+from api.paths import _atomic_write_text
 from api.providers import _write_env_file  # shared impl with _ENV_LOCK (#1164)
 from api.workspace import get_last_workspace, load_workspaces
 
@@ -250,7 +252,8 @@ def _save_yaml_config(config_path: Path, config: dict) -> None:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
+    _atomic_write_text(
+        config_path,
         _yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
@@ -731,15 +734,18 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
             )
 
     chat_ready = bool(_HERMES_FOUND and imports_ok and provider_ready)
+    note_args: list[str] = []
 
     if not _HERMES_FOUND or not imports_ok:
         state = "agent_unavailable"
+        note_key = "onboarding_notice_system_unavailable"
         note = (
             "Hermes is not fully importable from the Web UI yet. Finish bootstrap or fix the "
             "agent install before provider setup will work."
         )
     elif chat_ready:
         state = "ready"
+        note_key = "onboarding_notice_system_ready"
         provider_name = _PROVIDER_DISPLAY.get(
             provider, provider.title() if provider else "Hermes"
         )
@@ -747,11 +753,15 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
     elif provider_configured:
         state = "provider_incomplete"
         if provider == "custom" and not base_url:
+            note_key = "onboarding_notice_custom_base_url_required"
             note = (
-                "Hermes has a saved provider/model selection but still needs the "
-                "base URL and API key required to chat."
+                "Hermes has a saved provider/model selection, but the custom "
+                "provider still needs a base URL. Add the API key too if that "
+                "server requires one."
             )
         elif provider not in _SUPPORTED_PROVIDER_SETUPS:
+            note_key = "onboarding_notice_provider_auth_required"
+            note_args = [provider]
             # OAuth / unsupported provider: avoid misleading "API key" wording.
             note = (
                 f"Provider '{provider}' is configured but not yet authenticated. "
@@ -759,12 +769,14 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
                 "setup, then reload the Web UI."
             )
         else:
+            note_key = "onboarding_notice_provider_api_key_required"
             note = (
                 "Hermes has a saved provider/model selection but still needs the "
                 "API key required to chat."
             )
     else:
         state = "needs_provider"
+        note_key = "onboarding_notice_provider_choice_required"
         note = "Hermes is installed, but you still need to choose a provider and save working credentials."
 
     return {
@@ -773,6 +785,8 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
         "chat_ready": chat_ready,
         "setup_state": state,
         "provider_note": note,
+        "provider_note_key": note_key,
+        "provider_note_args": note_args,
         "current_provider": provider or None,
         "current_model": model or None,
         "current_base_url": base_url or None,
@@ -1042,6 +1056,80 @@ def apply_onboarding_setup(body: dict) -> dict:
 
     reload_config()
     return get_onboarding_status()
+
+
+def apply_self_hosted_provider_setup(body: dict) -> dict:
+    provider = str(body.get("provider") or "").strip().lower()
+    model = str(body.get("model") or "").strip()
+    api_key = str(body.get("api_key") or "").strip()
+    base_url = _normalize_base_url(str(body.get("base_url") or ""))
+    activate = body.get("activate")
+    do_activate = activate is None or bool(activate)
+
+    if provider not in {"ollama", "lmstudio"}:
+        raise ValueError(f"unsupported self-hosted provider: {provider}")
+    if not model:
+        raise ValueError("model is required")
+
+    provider_meta = _SUPPORTED_PROVIDER_SETUPS.get(provider, {})
+    if provider_meta.get("requires_base_url"):
+        if not base_url:
+            raise ValueError("base_url is required for this provider")
+        parsed = urlparse(base_url)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("base_url must start with http:// or https://")
+
+    config_path = _get_config_path()
+    cfg = _load_yaml_config(config_path)
+    providers_cfg = cfg.setdefault("providers", {})
+    if not isinstance(providers_cfg, dict):
+        providers_cfg = {}
+        cfg["providers"] = providers_cfg
+
+    provider_cfg = providers_cfg.setdefault(provider, {})
+    if not isinstance(provider_cfg, dict):
+        provider_cfg = {}
+        providers_cfg[provider] = provider_cfg
+
+    provider_cfg["base_url"] = base_url
+
+    model_cfg = cfg.get("model", {})
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    original_model_cfg = dict(model_cfg)
+    env_var = provider_meta.get("env_var")
+
+    if do_activate:
+        model_cfg["provider"] = provider
+        model_cfg["default"] = _normalize_model_for_provider(provider, model)
+        model_cfg["base_url"] = base_url
+        cfg["model"] = model_cfg
+    elif "model" in cfg:
+        cfg["model"] = original_model_cfg
+    _save_yaml_config(config_path, cfg)
+
+    if api_key and env_var:
+        _write_env_file(_get_active_hermes_home() / ".env", {env_var: api_key})
+        os.environ[env_var] = api_key
+
+    try:
+        from api.profiles import _reload_dotenv
+        _reload_dotenv(_get_active_hermes_home())
+    except Exception:
+        logger.debug("Failed to reload dotenv")
+
+    try:
+        # hermes_cli may cache config at import time; ask it to reload if possible.
+        from hermes_cli.config import reload as _cli_reload
+        _cli_reload()
+    except Exception:
+        logger.debug("Failed to reload hermes_cli config")
+
+    invalidate_models_cache()
+    result = {"ok": True, "provider": provider, "base_url": base_url}
+    if do_activate:
+        result["model"] = model_cfg.get("default")
+    return result
 
 
 def complete_onboarding() -> dict:

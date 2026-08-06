@@ -211,6 +211,78 @@ def _backup_predates_intentional_shrink(session_path: Path, bak_path: Path) -> b
     return bak_ctx_len > live_ctx_len
 
 
+def _session_records_clear_sentinel(session_path: Path, bak_path: Path) -> bool:
+    """Return True when the live sidecar records a provenanced clear sentinel.
+
+    The live sidecar must carry the explicit /api/session/clear marker, and
+    the backup must not carry the same marker. Same-generation backups stay
+    recoverable; unreadable or partial matches fail open.
+    """
+    try:
+        data = json.loads(session_path.read_text(encoding='utf-8'))
+        bak = json.loads(bak_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict) or not isinstance(bak, dict):
+        return False
+    clear_generation = data.get('clear_generation')
+    if not isinstance(clear_generation, str) or not clear_generation:
+        return False
+    if bak.get('clear_generation') == clear_generation:
+        return False
+    expected = {
+        'messages': [],
+        'context_messages': [],
+        'truncation_watermark': 0.0,
+        'truncation_boundary': 0.0,
+        'active_stream_id': None,
+        'pending_user_message': None,
+        'pending_attachments': [],
+        'pending_started_at': None,
+        'pending_user_source': None,
+    }
+    for key, value in expected.items():
+        if key not in data or data.get(key) != value:
+            return False
+    return True
+
+
+def _live_supersedes_backup_by_clear_generation(session_path: Path, bak_path: Path) -> bool:
+    """Return True when the live sidecar provably post-dates the backup via a
+    clear sentinel even though the user has since sent NEW messages.
+
+    Scope: this handles ONLY the post-clear-message case that the exact-empty
+    sentinel (_session_records_clear_sentinel) can't. After /api/session/clear
+    stamps a unique ``clear_generation`` and resets the truncation boundary to
+    0.0, a pre-clear ``.json.bak`` is stale — restoring it would resurrect
+    cleared history on top of the post-clear message. We require: live carries a
+    ``clear_generation`` the backup lacks, live has a NON-EMPTY transcript, and
+    the live boundary still shows the clear reset (watermark == boundary == 0.0).
+    Empty clear-shaped sidecars stay governed by the exact-empty sentinel and its
+    existing recovery semantics. Same-generation backups stay recoverable;
+    unreadable/partial reads fail open (return False -> normal recovery), so a
+    genuine crash-loss is never suppressed.
+    """
+    try:
+        data = json.loads(session_path.read_text(encoding='utf-8'))
+        bak = json.loads(bak_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict) or not isinstance(bak, dict):
+        return False
+    clear_generation = data.get('clear_generation')
+    if not isinstance(clear_generation, str) or not clear_generation:
+        return False
+    if bak.get('clear_generation') == clear_generation:
+        return False
+    live_messages = data.get('messages')
+    if not isinstance(live_messages, list) or len(live_messages) == 0:
+        return False
+    if data.get('truncation_watermark') != 0.0 or data.get('truncation_boundary') != 0.0:
+        return False
+    return True
+
+
 def inspect_session_recovery_status(session_path: Path) -> dict:
     """Return a status dict describing whether recovery is recommended.
 
@@ -232,6 +304,17 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
         }
     bak_count = _msg_count(bak_path)
     if bak_count > live_count:
+        if (
+            _session_records_clear_sentinel(session_path, bak_path)
+            or _live_supersedes_backup_by_clear_generation(session_path, bak_path)
+        ):
+            return {
+                "session_id": session_path.stem,
+                "live_messages": live_count,
+                "bak_messages": bak_count,
+                "recommend": "no_action",
+                "intentional_clear_truncate": True,
+            }
         if (
             _session_records_intentional_compress_shrink(session_path)
             and _backup_predates_intentional_shrink(session_path, bak_path)
@@ -330,6 +413,18 @@ def _orphaned_backup_live_paths(
         if _msg_count(bak_path) < 0:
             continue
         session_id = live_path.stem
+        # A WebUI session the user deleted must not be resurrected from its
+        # surviving .bak on the next boot (#5498). Use the DURABLE tombstone
+        # only — not the _index.json heuristic — so a genuine crash that loses
+        # the sidecar while its index entry survives is still restored (the
+        # crash-recovery case this helper exists for).
+        if _durable_tombstone_marks_deleted_webui_session(session_dir, session_id):
+            logger.info(
+                "recover_all_sessions_on_startup: skipped orphan backup %s; "
+                "session is tombstoned as a deleted WebUI session",
+                bak_path.name,
+            )
+            continue
         if not _state_db_has_session(session_id, state_db_path):
             logger.info(
                 "recover_all_sessions_on_startup: skipped orphan backup %s; "
@@ -383,6 +478,17 @@ def _read_state_db_missing_sidecar_rows(
                 sid = str(data.get('id') or '').strip()
                 if not sid or (session_dir / f"{sid}.json").exists():
                     continue
+                # Only the DURABLE delete tombstone suppresses state.db sidecar
+                # repair. The _index.json heuristic must NOT gate this path: a
+                # genuine crash that loses the sidecar while its index entry
+                # survives (no durable tombstone) is exactly the case this repair
+                # exists for, and on master it materialized the sidecar. Using
+                # _marks_deleted_webui_session() here (which ORs in the index
+                # heuristic) wrongly classified that crash as a delete and
+                # stopped recovery (#5504 Codex/Opus finding).
+                tombstoned = _durable_tombstone_marks_deleted_webui_session(session_dir, sid)
+                if tombstoned and not include_empty:
+                    continue
                 message_rows: list[dict] = []
                 if {'session_id', 'role', 'content'}.issubset(message_cols):
                     order = "timestamp, id" if 'timestamp' in message_cols and 'id' in message_cols else "rowid"
@@ -402,6 +508,8 @@ def _read_state_db_missing_sidecar_rows(
                     continue
                 data['messages'] = message_rows
                 data['_state_db_empty_messages'] = not message_rows
+                if tombstoned:
+                    data['_state_db_deleted_webui_tombstone'] = True
                 rows.append(data)
             return rows
     except Exception as exc:
@@ -428,6 +536,9 @@ def _state_db_row_to_sidecar(row: dict) -> dict:
     messages = row.get('messages') if isinstance(row.get('messages'), list) else []
     last_ts = messages[-1].get('timestamp') if messages and isinstance(messages[-1], dict) else started_at
     workspace_value = row.get('workspace') or ''
+    compression_recovery = row.get('compression_recovery')
+    if not isinstance(compression_recovery, dict):
+        compression_recovery = {}
     return {
         'session_id': row.get('id'),
         'title': row.get('title') or 'Recovered WebUI Session',
@@ -459,6 +570,10 @@ def _state_db_row_to_sidecar(row: dict) -> dict:
         'context_length': None,
         'threshold_tokens': None,
         'last_prompt_tokens': None,
+        'compression_recovery': compression_recovery,
+        'recommended_recovery_action': row.get('recommended_recovery_action') or None,
+        'compression_recovery_source_session_id': row.get('compression_recovery_source_session_id') or None,
+        'compression_recovery_action': row.get('compression_recovery_action') or None,
         'gateway_routing': None,
         'gateway_routing_history': [],
         'llm_title_generated': False,
@@ -565,6 +680,79 @@ def _read_index_session_ids(index_path: Path) -> set[str]:
     return ids
 
 
+def _index_marks_deleted_webui_session(session_dir: Path, sid: str) -> bool:
+    """Return True when _index.json has a WebUI-like entry whose sidecar is missing.
+
+    This is a delete-route heuristic for cases where index pruning and durable
+    tombstone recording both failed; it can also match other sidecar-loss modes.
+    """
+    if not sid or (session_dir / f"{sid}.json").exists():
+        return False
+    index_path = session_dir / '_index.json'
+    if not index_path.exists():
+        return False
+    try:
+        data = json.loads(index_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(data, list):
+        return False
+    for entry in data:
+        if not isinstance(entry, dict) or entry.get('session_id') != sid:
+            continue
+        srcs = [
+            str(entry.get('source_tag') or '').strip().lower(),
+            str(entry.get('raw_source') or '').strip().lower(),
+            str(entry.get('session_source') or '').strip().lower(),
+        ]
+        explicit = [src for src in srcs if src]
+        if any(src in ('webui', 'fork') for src in explicit):
+            return True
+        if explicit:
+            return False
+        is_cli = entry.get('is_cli_session') is True
+        is_read_only = bool(entry.get('read_only') or entry.get('is_read_only'))
+        return not (is_cli or is_read_only)
+    return False
+
+
+def _durable_tombstone_marks_deleted_webui_session(session_dir: Path, sid: str) -> bool:
+    """Return True when the durable WebUI delete tombstone contains sid."""
+    if not sid or (session_dir / f"{sid}.json").exists():
+        return False
+    try:
+        from api import models as _models
+
+        if Path(_models.SESSION_DIR).resolve() == session_dir.resolve():
+            return sid in _models._load_webui_deleted_session_tombstone()
+    except Exception:
+        pass
+    tombstone_path = session_dir / '_deleted_webui_sessions.json'
+    try:
+        raw = json.loads(tombstone_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(raw, dict):
+        return False
+    try:
+        version = int(raw.get('version', 0))
+    except (TypeError, ValueError):
+        return False
+    if version != 1:
+        return False
+    ids = raw.get('ids')
+    if not isinstance(ids, list):
+        return False
+    return sid in {str(value).strip() for value in ids if str(value or '').strip()}
+
+
+def _marks_deleted_webui_session(session_dir: Path, sid: str) -> bool:
+    return (
+        _index_marks_deleted_webui_session(session_dir, sid)
+        or _durable_tombstone_marks_deleted_webui_session(session_dir, sid)
+    )
+
+
 def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None) -> dict:
     """Read-only audit of session recovery state.
 
@@ -583,6 +771,16 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
     items: list[dict] = []
     live_paths = sorted(p for p in session_dir.glob('*.json') if not p.name.startswith('_'))
     live_ids = {p.stem for p in live_paths}
+    state_db_missing_rows = _read_state_db_missing_sidecar_rows(
+        session_dir,
+        state_db_path,
+        include_empty=True,
+    )
+    state_db_deleted_webui_ids = {
+        str(row.get('id') or '')
+        for row in state_db_missing_rows
+        if row.get('_state_db_deleted_webui_tombstone')
+    }
 
     for live_path in live_paths:
         status = inspect_session_recovery_status(live_path)
@@ -596,6 +794,12 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
                 status.get('bak_messages', -1),
             ))
 
+    # Track sids already classified as deleted-webui-tombstone from the orphan
+    # .bak branch below, so the later state_db_missing_rows loop doesn't emit a
+    # duplicate audit item for the same sid (both a surviving .bak and a state.db
+    # row can exist for one deleted session). (#5504)
+    _bak_tombstoned_ids: set[str] = set()
+
     for bak_path in sorted(session_dir.glob('*.json.bak')):
         live_path = bak_path.with_suffix('')
         if live_path.exists() or live_path.name.startswith('_'):
@@ -605,6 +809,21 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
         if bak_messages < 0:
             items.append(_new_audit_item(
                 session_id, "malformed_orphan_backup", "unsafe_to_repair", "manual_review", -1, bak_messages
+            ))
+        elif _durable_tombstone_marks_deleted_webui_session(session_dir, session_id):
+            # The user deleted this WebUI session; its surviving .bak must NOT be
+            # reported as repairable. DURABLE tombstone only — the _index.json
+            # heuristic must not suppress a genuine crash whose index survived
+            # (that case is legitimately repairable). Matches the startup-recovery
+            # skip + the state.db recovery path (#5504 Codex/Opus finding).
+            _bak_tombstoned_ids.add(session_id)
+            items.append(_new_audit_item(
+                session_id,
+                "state_db_deleted_webui_tombstone",
+                "unsafe_to_repair",
+                "deleted_session_skipped",
+                -1,
+                bak_messages,
             ))
         elif _state_db_has_session(session_id, state_db_path):
             items.append(_new_audit_item(
@@ -624,6 +843,11 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
     if index_path.exists():
         index_ids = _read_index_session_ids(index_path)
         for session_id in sorted(index_ids - live_ids):
+            if (
+                session_id in state_db_deleted_webui_ids
+                or _durable_tombstone_marks_deleted_webui_session(session_dir, session_id)
+            ):
+                continue
             items.append(_new_audit_item(
                 session_id, "index_missing_file", "repairable", "rebuild_index"
             ))
@@ -633,8 +857,23 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
                 _msg_count(session_dir / f"{session_id}.json"), -1,
             ))
 
-    for row in _read_state_db_missing_sidecar_rows(session_dir, state_db_path, include_empty=True):
+    for row in state_db_missing_rows:
         sid = str(row.get('id') or '')
+        if sid in _bak_tombstoned_ids:
+            # Already emitted a deleted-webui-tombstone audit item from the
+            # orphan .bak branch above (surviving .bak + state.db row both exist
+            # for this one deleted session) — don't double-count. (#5504)
+            continue
+        if row.get('_state_db_deleted_webui_tombstone'):
+            items.append(_new_audit_item(
+                sid,
+                "state_db_deleted_webui_tombstone",
+                "unsafe_to_repair",
+                "deleted_session_skipped",
+                -1,
+                -1,
+            ))
+            continue
         if row.get('_state_db_empty_messages'):
             items.append(_new_audit_item(
                 sid,

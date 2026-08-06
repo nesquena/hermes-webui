@@ -57,6 +57,18 @@ class TestTtsUtilityFunctions:
         assert 'speechSynthesis.speak' in src, \
             "speakMessage must call speechSynthesis.speak"
 
+    def test_speak_message_routes_openai(self):
+        src = _read('ui.js')
+        assert "if(engine==='openai')" in src, \
+            "speakMessage must branch for the OpenAI TTS engine"
+        assert '_playOpenaiTts(clean, btn);' in src, \
+            "speakMessage must route OpenAI TTS through _playOpenaiTts"
+
+    def test_auto_read_routes_openai(self):
+        src = _read('ui.js')
+        assert '_playOpenaiTts(clean, null);' in src, \
+            "autoReadLastAssistant must route OpenAI TTS through _playOpenaiTts"
+
 
 class TestTtsSpeakerButton:
     """Speaker button is rendered on assistant messages."""
@@ -109,6 +121,11 @@ class TestTtsSettings:
         assert 'settingsTtsVoice' in src, \
             "TTS voice selector not found in index.html"
 
+    def test_tts_engine_includes_openai_option(self):
+        src = _read('index.html')
+        assert '<option value="openai">OpenAI TTS (server)</option>' in src, \
+            "settingsTtsEngine must expose the OpenAI server TTS option"
+
     def test_tts_rate_slider(self):
         src = _read('index.html')
         assert 'settingsTtsRate' in src, \
@@ -132,6 +149,13 @@ class TestTtsSettings:
         src = _read('panels.js')
         assert 'function _applyTtsEnabled(' in src, \
             "_applyTtsEnabled function not found in panels.js"
+
+    def test_openai_voice_placeholder_in_panels(self):
+        src = _read('panels.js')
+        assert "engine==='openai'" in src, \
+            "panels.js must branch for the OpenAI TTS engine"
+        assert 'OpenAI voice (server-configured)' in src, \
+            "OpenAI TTS must present a server-configured voice placeholder"
 
 
 class TestTtsI18n:

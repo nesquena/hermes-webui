@@ -129,7 +129,7 @@ def test_streaming_sessiondb_uses_session_profile_state_db(tmp_path, monkeypatch
     monkeypatch.setattr(
         streaming,
         "resolve_model_provider",
-        lambda _model: ("test-model", "test-provider", None),
+        lambda _model, **_kw: ("test-model", "test-provider", None),
     )
     monkeypatch.setattr(streaming, "_maybe_schedule_title_refresh", lambda *args, **kwargs: None)
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: profile_home)
