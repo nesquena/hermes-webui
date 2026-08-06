@@ -9497,6 +9497,22 @@ def _cleanup_manifest_thread_lock(hermes_home):
         return lock
 
 
+def _delete_webui_sidecars_for_session(session_id: str) -> None:
+    """Remove WebUI-owned transient state for an Agent/CLI-deleted session."""
+    try:
+        from api.draft_store import delete_draft
+
+        delete_draft(session_id)
+    except Exception:
+        logger.debug("Failed to delete WebUI draft sidecar for %s", session_id, exc_info=True)
+    try:
+        from api.session_runtime_state import clear_runtime_state
+
+        clear_runtime_state(session_id)
+    except Exception:
+        logger.debug("Failed to delete WebUI runtime sidecar for %s", session_id, exc_info=True)
+
+
 def delete_cli_session(sid) -> bool:
     """Delete a CLI session while serializing manifest and DB cleanup."""
     try:
@@ -9803,6 +9819,8 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
                 return False
 
             conn.commit()
+            for removed_id in all_removed_ids:
+                _delete_webui_sidecars_for_session(str(removed_id))
 
             # Post-commit artifact cleanup.  Scan ALL outstanding manifests
             # (including the one just written) and retry every pending ID.

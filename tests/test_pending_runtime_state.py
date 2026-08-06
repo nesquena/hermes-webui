@@ -224,3 +224,26 @@ def test_sidecar_cleanup_removes_draft_runtime_and_cached_transient_state(tmp_pa
     assert session.pending_attachments == []
     assert session.pending_started_at is None
     assert session.pending_user_source is None
+
+
+def test_cli_delete_helper_removes_webui_sidecars(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    sid = "cli_sidecar_delete_001"
+    session = models.Session(
+        session_id=sid,
+        title="CLI delete",
+        messages=[{"role": "user", "content": "history"}],
+    )
+    session.save()
+    draft_store.save_draft(sid, {"text": "draft", "files": []})
+    session_runtime_state.save_runtime_state(
+        sid,
+        {"active_stream_id": "stream", "pending_user_message": "pending"},
+    )
+
+    models._delete_webui_sidecars_for_session(sid)
+
+    assert not draft_store.draft_path(sid).exists()
+    assert not session_runtime_state.runtime_state_path(sid).exists()

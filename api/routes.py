@@ -21293,6 +21293,12 @@ def _start_chat_stream_for_session(
     was_hidden_empty_session = False
     while True:
         with session_lock:
+            if hasattr(s, "path") and not _session_owner_present(s.session_id):
+                diag.stage("response_write") if diag else None
+                return {
+                    "error": "Session not found",
+                    "_status": 404,
+                }
             locked_stream_id = getattr(s, "active_stream_id", None)
             if locked_stream_id:
                 if _active_stream_blocks_chat_start(s, locked_stream_id):
