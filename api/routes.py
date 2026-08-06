@@ -534,6 +534,42 @@ def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
     return _profiles_match(session_profile, active_profile)
 
 
+def _is_profile_agnostic_foreign_session(cli_meta) -> bool:
+    """Return whether a foreign-session row lives outside the Hermes profile tree.
+
+    Claude Code transcripts are scanned straight out of ``~/.claude/projects``
+    by ``get_claude_code_sessions()``, which stamps ``profile: None`` on every
+    row because the JSONL files belong to no Hermes profile at all. The sidebar
+    lists them under whichever profile is active, but ``_profiles_match``
+    coerces ``None`` to ``'default'``, so the detail-load profile gate 404s
+    every one of them as soon as the active profile is a named (non-root) one —
+    the session shows in the list and then renders "Session not available in
+    web UI." when clicked.
+
+    Exempt these profile-less external-agent rows from the gate so opening one
+    behaves identically on the root profile and on named profiles. Rows that
+    DO carry a profile (every state.db-backed CLI/messaging/cron session) stay
+    fully scoped.
+    """
+    if not isinstance(cli_meta, dict):
+        return False
+    if cli_meta.get("profile"):
+        return False
+    sources = {
+        str(cli_meta.get("source_tag") or "").strip().lower(),
+        str(cli_meta.get("raw_source") or "").strip().lower(),
+    }
+    # Profile-less external-agent rows that live outside the Hermes profile tree.
+    # Claude Code: scanned from ~/.claude/projects; Codex: scanned from ~/.codex/
+    profile_agnostic_sources = {CLAUDE_CODE_SOURCE}
+    try:
+        from api.codex_sessions import CODEX_SOURCE
+        profile_agnostic_sources.add(CODEX_SOURCE)
+    except ImportError:
+        pass
+    return bool(sources & profile_agnostic_sources)
+
+
 def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
     if not path:
         return False
@@ -9401,6 +9437,7 @@ from api.models import (
     load_projects,
     save_projects,
     import_cli_session,
+    CLAUDE_CODE_SOURCE,
     get_cli_sessions,
     get_cli_session_messages,
     get_state_db_session_messages,
@@ -13044,7 +13081,12 @@ def handle_get(handler, parsed) -> bool:
             # drift on foreign-session semantics.
             cli_meta = _lookup_cli_session_metadata(sid)
             _session_profile = (cli_meta or {}).get("profile") or None
-            if not _session_visible_to_active_profile(_session_profile, handler):
+            # Claude Code rows are profile-less by construction (they come from
+            # ~/.claude/projects, not from any profile's state.db), so the gate
+            # below would 404 every one of them under a named active profile
+            # even though /api/sessions happily lists them. Exempt them.
+            _profile_agnostic = _is_profile_agnostic_foreign_session(cli_meta)
+            if not _profile_agnostic and not _session_visible_to_active_profile(_session_profile, handler):
                 if _session_profile:
                     # Valid CLI/foreign session owned by a KNOWN other profile:
                     # 409 so the client can offer to switch to it (#5419).
@@ -19223,7 +19265,11 @@ def _handle_media(handler, parsed):
     ) else "attachment"
     # _serve_file_bytes sends Content-Security-Policy when csp is set.
     csp = "sandbox allow-scripts" if html_inline_ok else None
-    return _serve_file_bytes(handler, target, mime, disposition, "private, max-age=3600", csp=csp)
+    # HTML inline previews change frequently (agent edits + re-renders).
+    # Use no-store so the browser always fetches fresh content, avoiding stale
+    # previews that require a manual full-page refresh to update.
+    cache_control = "no-store" if mime == "text/html" else "private, max-age=3600"
+    return _serve_file_bytes(handler, target, mime, disposition, cache_control, csp=csp)
 
 
 def _file_raw_target(session, sid: str, rel: str) -> tuple[Path, Path] | None:
@@ -20666,17 +20712,28 @@ def _handle_memory_read(handler, parsed=None):
     except ImportError:
         home = Path.home() / ".hermes"
         mem_dir = home / "memories"
-    mem_file = mem_dir / "MEMORY.md"
-    user_file = mem_dir / "USER.md"
+
+    # Respect memory_enabled and user_profile_enabled config flags (#6406)
+    # Use get_config_snapshot() for per-profile isolation — get_config() returns
+    # the process-global mutable _cfg_cache which races across profiles.
+    # The flags are nested under cfg["memory"] in Hermes Agent's schema.
+    cfg = get_config_snapshot()
+    mem = cfg.get("memory") if isinstance(cfg, dict) else None
+    mem_cfg = mem if isinstance(mem, dict) else {}
+    memory_enabled = _webui_truthy(mem_cfg.get("memory_enabled", True))
+    user_profile_enabled = _webui_truthy(mem_cfg.get("user_profile_enabled", True))
+
+    mem_file = mem_dir / "MEMORY.md" if memory_enabled else None
+    user_file = mem_dir / "USER.md" if user_profile_enabled else None
     soul_file = home / "SOUL.md"
     memory = (
         mem_file.read_text(encoding="utf-8", errors="replace")
-        if mem_file.exists()
+        if mem_file and mem_file.exists()
         else ""
     )
     user = (
         user_file.read_text(encoding="utf-8", errors="replace")
-        if user_file.exists()
+        if user_file and user_file.exists()
         else ""
     )
     soul = (
@@ -20692,18 +20749,18 @@ def _handle_memory_read(handler, parsed=None):
             "user": _redact_text(user),
             "soul": _redact_text(soul),
             "project_context": _redact_text(project_context["content"]),
-            "memory_path": str(mem_file),
-            "user_path": str(user_file),
+            "memory_path": str(mem_file) if mem_file else "",
+            "user_path": str(user_file) if user_file else "",
             "soul_path": str(soul_file),
             "project_context_path": project_context["path"],
             "project_context_name": project_context.get("name", ""),
             "project_context_workspace": project_context["workspace"],
-            "memory_mtime": mem_file.stat().st_mtime if mem_file.exists() else None,
-            "user_mtime": user_file.stat().st_mtime if user_file.exists() else None,
+            "memory_mtime": mem_file.stat().st_mtime if mem_file and mem_file.exists() else None,
+            "user_mtime": user_file.stat().st_mtime if user_file and user_file.exists() else None,
             "soul_mtime": soul_file.stat().st_mtime if soul_file.exists() else None,
             "project_context_mtime": project_context["mtime"],
             "project_context_shadowed": project_context["shadowed"],
-            "external_notes_enabled": _external_notes_sources_enabled(),
+            "external_notes_enabled": _external_notes_sources_enabled(cfg),
         },
     )
 
@@ -25770,6 +25827,22 @@ def _handle_memory_write(handler, body):
         require(body, "section", "content")
     except ValueError as e:
         return bad(handler, str(e))
+    section = body["section"]
+
+    # Respect memory_enabled and user_profile_enabled config flags (#6406)
+    # Use get_config_snapshot() for per-profile isolation — get_config() returns
+    # the process-global mutable _cfg_cache which races across profiles.
+    # The flags are nested under cfg["memory"] in Hermes Agent's schema.
+    cfg = get_config_snapshot()
+    mem = cfg.get("memory") if isinstance(cfg, dict) else None
+    mem_cfg = mem if isinstance(mem, dict) else {}
+    if section == "memory":
+        if not _webui_truthy(mem_cfg.get("memory_enabled", True)):
+            return bad(handler, "Memory is disabled by configuration (memory_enabled: false)", 403)
+    elif section == "user":
+        if not _webui_truthy(mem_cfg.get("user_profile_enabled", True)):
+            return bad(handler, "User profile is disabled by configuration (user_profile_enabled: false)", 403)
+
     try:
         from api.profiles import get_active_hermes_home
 
@@ -25779,7 +25852,6 @@ def _handle_memory_write(handler, body):
         home = Path.home() / ".hermes"
         mem_dir = home / "memories"
     mem_dir.mkdir(parents=True, exist_ok=True)
-    section = body["section"]
     if section == "memory":
         target = mem_dir / "MEMORY.md"
     elif section == "user":
