@@ -539,7 +539,12 @@ def get_codex_sessions(
 
 
 def get_codex_session_messages(sid: Any, home_dir: Path | str | None = None) -> list[dict]:
-    """Return the rendered messages for one read-only Codex session."""
+    """Return the rendered messages for one read-only Codex session.
+
+    Note: ``get_codex_session_detail`` is the primary entry point and also
+    reports ``truncated``.  This helper returns only the message list for
+    callers that do not need the truncation flag.
+    """
     thread_id = thread_id_from_session_id(sid)
     if thread_id is None:
         return []
