@@ -132,7 +132,7 @@ def test_load_session_persists_only_after_metadata_loads():
     # _mergePendingSessionMessage was lifted to a top-level helper for #6419,
     # so use a stable boundary inside loadSession instead.
     load = _block(src, "async function loadSession(sid)", "// Phase 2a:")
-    api_pos = load.index("data = await _apiSessionNav(")
+    api_pos = load.index("data = await api(")
     persist_pos = load.index("localStorage.setItem('hermes-webui-session',S.session.session_id)")
 
     assert "_persistActiveSession" not in src
