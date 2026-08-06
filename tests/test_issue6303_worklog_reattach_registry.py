@@ -125,6 +125,16 @@ var S = { session: null, activeStreamId: null, messages: [], toolCalls: [], busy
 var _STREAM_WAS_HIDDEN = {};
 var _STREAM_NOTIFICATION_BACKGROUND = {};
 var _desktopBackgroundedForNotifications = false;
+// Module-level approval/clarify session trackers the attachLiveStream closure
+// reads via _approvalBelongsToOwner()/_clarifyBelongsToOwner().
+var _approvalSessionId = null;
+var _clarifySessionId = null;
+// Module-level thinking-delimiter pairs used by the real
+// _extractInlineThinkingFromContent().
+const _thinkPairs=[
+  {open:'<think>',close:'</think>'},
+  {open:'<|channel>thought\\n',close:'<channel|>'},
+];
 
 // Module-scope state loadSession() touches.
 var _loadingSessionId = null;
@@ -195,11 +205,94 @@ async function api(url) { return __apiResponse; }
 function _bindStreamHiddenTracker() {}
 function ensureLiveWorklogShell() {}
 function showLiveRunStatus() {}
-function closeOtherLiveStreams() {}
-function closeLiveStream() {}
+// REAL transport teardown — the fresh-reconnect regression test must exercise
+// the production attach/wire/teardown path, so closeLiveStream and
+// closeOtherLiveStreams mirror static/messages.js exactly (identity-guarded
+// close + LIVE_STREAMS entry deletion + INFLIGHT reattach marking).
+function closeLiveStream(sessionId, streamId, source){
+  const live=LIVE_STREAMS[sessionId];
+  if(!live) return;
+  if(streamId&&live.streamId!==streamId) return;
+  if(source&&live.source!==source) return;
+  if(typeof snapshotLiveTurnHtmlForSession==='function') snapshotLiveTurnHtmlForSession(sessionId);
+  if(typeof _clearLiveRunStatusTimer==='function') _clearLiveRunStatusTimer(sessionId);
+  if(typeof hideLiveRunStatus==='function') hideLiveRunStatus(sessionId);
+  try{if(live.source&&live.source.readyState!==2)live.source.close();}catch(_){ }
+  delete LIVE_STREAMS[sessionId];
+  _resumeSessionStreamAfterLiveChat(sessionId);
+  if(INFLIGHT[sessionId]){
+    INFLIGHT[sessionId].reattach=true;
+    INFLIGHT[sessionId].journalReplayFromStart=true;
+    if(typeof saveInflightState==='function'){
+      saveInflightState(sessionId,{
+        streamId:live.streamId||streamId||null,
+        messages:INFLIGHT[sessionId].messages||[],
+        uploaded:INFLIGHT[sessionId].uploaded||[],
+        toolCalls:INFLIGHT[sessionId].toolCalls||[],
+        lastAssistantText:INFLIGHT[sessionId].lastAssistantText||'',
+        lastReasoningText:INFLIGHT[sessionId].lastReasoningText||'',
+        lastRunJournalSeq:INFLIGHT[sessionId].lastRunJournalSeq||0,
+        lastRunJournalEventId:INFLIGHT[sessionId].lastRunJournalEventId||'',
+        journalReplayFromStart:true,
+        currentActivityBurstId:INFLIGHT[sessionId].currentActivityBurstId||0,
+        currentLiveSegmentSeq:INFLIGHT[sessionId].currentLiveSegmentSeq||0,
+        activityBurstAnchors:Array.isArray(INFLIGHT[sessionId].activityBurstAnchors)?INFLIGHT[sessionId].activityBurstAnchors:[],
+      });
+    }
+  }
+}
+function closeOtherLiveStreams(activeSid){
+  for(const sid of Object.keys(LIVE_STREAMS)){
+    if(sid!==activeSid) closeLiveStream(sid);
+  }
+}
+// Real module-scope helpers used by the terminal (done) path.
+function _clearStreamHidden(sid, streamId){
+  if(!sid) return;
+  const e=_STREAM_WAS_HIDDEN[sid];
+  if(!e) return;
+  if(streamId&&e.streamId&&e.streamId!==streamId) return;
+  delete _STREAM_WAS_HIDDEN[sid];
+}
+function _clearStreamNotificationBackground(sid, streamId){
+  if(!sid) return;
+  const e=_STREAM_NOTIFICATION_BACKGROUND[sid];
+  if(!e) return;
+  if(streamId&&e.streamId&&e.streamId!==streamId) return;
+  delete _STREAM_NOTIFICATION_BACKGROUND[sid];
+}
+function _shouldForceCompletionNotification(sid, streamId){
+  const hiddenEntry=_STREAM_WAS_HIDDEN[sid];
+  const backgroundEntry=_STREAM_NOTIFICATION_BACKGROUND[sid];
+  const wasHidden=!!(hiddenEntry&&hiddenEntry.wasHidden);
+  const wasBackgrounded=!!(backgroundEntry&&backgroundEntry.wasBackgrounded);
+  _clearStreamHidden(sid, streamId);
+  _clearStreamNotificationBackground(sid, streamId);
+  return wasHidden||wasBackgrounded;
+}
+function _isSessionCurrentPane(sid) {
+  if(!sid || !S.session || S.session.session_id!==sid) return false;
+  if(typeof _loadingSessionId!=='undefined' && _loadingSessionId && _loadingSessionId!==sid) return false;
+  return true;
+}
+function _isSessionActivelyViewed(sid) {
+  if(!_isSessionCurrentPane(sid)) return false;
+  if(!_isDocumentVisibleAndFocused()) return false;
+  return true;
+}
+function _isDocumentVisibleAndFocused() { return true; }
+function _markSessionViewed() {}
 function resetTurnWorkspaceMutations() {}
 function _resetStreamScrollFollow() {}
 function _suspendSessionStreamForLiveChat() {}
+function _resumeSessionStreamAfterLiveChat() {}
+function clearLiveToolCards() {}
+function loadDir() {}
+function renderSessionList() {}
+function playNotificationSound() {}
+function sendBrowserNotification() {}
+function _completionNotificationPreviewText() { return ''; }
+function removeThinking() {}
 function clearInflight() {}
 function clearInflightState() {}
 function _closeSource() {}
@@ -653,4 +746,175 @@ def test_fresh_connection_replaces_stale_registry_when_no_open_transport():
     )
     assert result["freshRegistryIdentity"] is True, (
         "the fresh registry must be seeded for the active stream"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Required path 4 (maintainer fix-spec): fresh reconnect replaces the source
+# for the SAME session+stream pair, and queued callbacks from the REPLACED
+# EventSource must be rejected by EXACT transport ownership.
+# ---------------------------------------------------------------------------
+
+_FRESH_RECONNECT_STALE_SOURCE_DRIVER = textwrap.dedent("""\
+const __results = {};
+const SID = 'test-sid';
+const STREAM_ID = 'test-stream';
+
+window._liveAnchorRegistries = new Map();
+window._renderLiveAnchorActivitySceneForStream = _renderLiveAnchorActivitySceneForStream;
+window._projectLiveAnchorActivitySceneForStream = _projectLiveAnchorActivitySceneForStream;
+
+INFLIGHT[SID] = {
+  messages: [], uploaded: [], toolCalls: [],
+  streamId: STREAM_ID,
+  activityBurstAnchors: [], currentActivityBurstId: 0, currentLiveSegmentSeq: 0,
+};
+S.session = { session_id: SID };
+S.activeStreamId = STREAM_ID;
+S.messages = [];
+S.toolCalls = [];
+
+(async () => {
+  // Phase 1 — install the OLD same-stream transport through the production
+  // listener path (real attachLiveStream -> _wireSSE -> LIVE_STREAMS entry).
+  attachLiveStream(SID, STREAM_ID, [], {});
+  const oldSource = __esCreated[0];
+  const oldRegistry = window._liveAnchorRegistries.get(STREAM_ID);
+  __results.oldTransportInstalled = !!oldRegistry && LIVE_STREAMS[SID].source === oldSource;
+
+  // Phase 2 — force the FRESH-source reconnect path: the old source is
+  // closed (absent/closed/CONNECTING), so attachLiveStream({reconnecting:true})
+  // must NOT reuse it. The production path deletes the stale registry, runs the
+  // REAL closeOtherLiveStreams()/closeLiveStream() teardown, and wires a NEW
+  // EventSource whose fresh closure creates a NEW registry. The server preflight
+  // reports the stream still active so the reconnect actually opens.
+  oldSource.close();
+  __apiResponse = { active: true };
+  attachLiveStream(SID, STREAM_ID, [], { reconnecting: true });
+  await new Promise((resolve) => setTimeout(resolve, 0)); // let the preflight + _wireSSE complete
+  const newSource = __esCreated[1];
+  const newRegistry = window._liveAnchorRegistries.get(STREAM_ID);
+  __results.freshSourceCreated = __esCreated.length === 2;
+  __results.freshRegistryReplaced = !!newRegistry && newRegistry !== oldRegistry;
+  __results.currentTransportIsNew = !!LIVE_STREAMS[SID] && LIVE_STREAMS[SID].source === newSource;
+  __results.realTeardownDeletedOldEntry = !(LIVE_STREAMS[SID] && LIVE_STREAMS[SID].source === oldSource);
+
+  // Phase 3 — DELAYED events from the REPLACED old source (same session/stream
+  // pair, different object). Every one must be inert: no registry writes, no
+  // INFLIGHT/transcript mutation, no terminal settle.
+  const inflightBefore = JSON.stringify(INFLIGHT[SID]);
+  const oldRegEventsBefore = oldRegistry.anchor.activity_events.length;
+  oldSource.dispatch('token', { text: 'OLD-STALE-TOKEN' });
+  oldSource.dispatch('interim_assistant', { text: 'OLD-STALE-INTERIM' });
+  oldSource.dispatch('reasoning', { text: 'OLD-STALE-REASONING' });
+  oldSource.dispatch('tool', { name: 'stale_tool', tool_call_id: 'stale-1', args: '{}', session_id: SID });
+  oldSource.dispatch('done', { status: 'completed', session: { session_id: SID, messages: [] } });
+  __results.registryStillPointsToNew = window._liveAnchorRegistries.get(STREAM_ID) === newRegistry;
+  __results.newRegistryUntouchedByOldEvents = newRegistry.anchor.activity_events.length === 0;
+  __results.oldRegistryUntouchedByOldEvents = oldRegistry.anchor.activity_events.length === oldRegEventsBefore;
+  __results.inflightUntouchedByOldEvents = JSON.stringify(INFLIGHT[SID]) === inflightBefore;
+  __results.transcriptUntouchedByOldEvents = Array.isArray(S.messages) && S.messages.length === 0;
+  __results.oldDoneDidNotSettle = S.activeStreamId === STREAM_ID && !!INFLIGHT[SID];
+
+  // Phase 4 — an event from the CURRENT new source applies exactly once, and
+  // its terminal event settles the turn exactly once.
+  newSource.dispatch('reasoning', { text: 'fresh reasoning' });
+  __results.newReasoningAppliedOnce = newRegistry.anchor.activity_events.length === 1;
+  const scene = window._projectLiveAnchorActivitySceneForStream(STREAM_ID, 'compact_worklog');
+  __results.sceneRows = scene && Array.isArray(scene.activity_rows) ? scene.activity_rows.length : -1;
+  newSource.dispatch('done', {
+    status: 'completed',
+    session: { session_id: SID, messages: [{ role: 'assistant', content: 'fresh answer' }] },
+  });
+  __results.newDoneSettledOnce = (
+    S.activeStreamId === null &&
+    !INFLIGHT[SID] &&
+    Array.isArray(S.messages) &&
+    S.messages.length === 1 &&
+    S.messages[0].content === 'fresh answer'
+  );
+  __results.newDoneAppliedToRegistry = newRegistry.anchor.activity_events.some(
+    (ev) => ev && ev.source_event_type === 'done'
+  );
+
+  process.stdout.write(JSON.stringify(__results) + '\\n', () => { process.exit(0); });
+})().catch(err => {
+  console.error(err && err.stack ? err.stack : String(err));
+  process.exit(2);
+});
+""")
+
+
+def test_fresh_reconnect_rejects_delayed_events_from_replaced_source():
+    """Maintainer fix-spec: the fresh reconnect path replaces the EventSource
+    for the SAME session+stream pair, and queued callbacks from the REPLACED
+    source must be rejected by EXACT transport ownership.
+
+    Composes the production attach/wire/teardown path end-to-end (REAL
+    closeOtherLiveStreams()/closeLiveStream() — not stubs):
+
+      - Phase 1: install an old same-stream source through the production path.
+      - Phase 2: force the fresh-source reconnect path (old source closed) and
+        let the real teardown + fresh _wireSSE install the replacement.
+      - Phase 3: retain the old source's callback handles and deliver delayed
+        old-source token/interim/reasoning/tool/done events. Assert the registry
+        map still points to the NEW registry, neither registry gained events,
+        INFLIGHT and the transcript are untouched, and the stale done did NOT
+        settle the turn.
+      - Phase 4: a reasoning event from the new source applies exactly once and
+        a done event from the new source settles the turn exactly once.
+    """
+    result = _run_harness(_FRESH_RECONNECT_STALE_SOURCE_DRIVER)
+
+    assert result["oldTransportInstalled"] is True, (
+        "phase 1 must install the old transport through the production path"
+    )
+    assert result["freshSourceCreated"] is True, (
+        "the fresh reconnect must create exactly one replacement EventSource "
+        "(old closed -> not reusable -> fresh _wireSSE)"
+    )
+    assert result["freshRegistryReplaced"] is True, (
+        "the fresh closure must create a NEW registry object (the stale one was "
+        "deleted by the production delete-before-wire path)"
+    )
+    assert result["currentTransportIsNew"] is True, (
+        "LIVE_STREAMS[activeSid] must now own the NEW source object"
+    )
+    assert result["realTeardownDeletedOldEntry"] is True, (
+        "the real closeLiveStream() teardown must remove the old transport entry"
+    )
+    assert result["registryStillPointsToNew"] is True, (
+        "after the delayed old-source events, window._liveAnchorRegistries must "
+        "still point to the NEW registry"
+    )
+    assert result["newRegistryUntouchedByOldEvents"] is True, (
+        "delayed old-source events must not write the new registry"
+    )
+    assert result["oldRegistryUntouchedByOldEvents"] is True, (
+        "delayed old-source events must not write even the old (orphaned) registry"
+    )
+    assert result["inflightUntouchedByOldEvents"] is True, (
+        "delayed old-source token/reasoning/tool events must not mutate INFLIGHT"
+    )
+    assert result["transcriptUntouchedByOldEvents"] is True, (
+        "delayed old-source events must not mutate S.messages"
+    )
+    assert result["oldDoneDidNotSettle"] is True, (
+        "the delayed done from the REPLACED source must NOT settle the turn "
+        "(S.activeStreamId must stay set, INFLIGHT must survive) — this is the "
+        "fresh-reconnect gap the maintainer flagged"
+    )
+    assert result["newReasoningAppliedOnce"] is True, (
+        "a reasoning event from the CURRENT new source must apply exactly once"
+    )
+    assert result["sceneRows"] == 1, (
+        "the renderer projection must contain exactly one Worklog row from the "
+        "new source's event"
+    )
+    assert result["newDoneSettledOnce"] is True, (
+        "the done from the CURRENT new source must settle the turn exactly once "
+        "(S.activeStreamId null, INFLIGHT cleared, transcript replaced)"
+    )
+    assert result["newDoneAppliedToRegistry"] is True, (
+        "the new source's done must be recorded in the new registry"
     )
