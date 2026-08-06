@@ -8357,7 +8357,15 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
             continue
         value = source.get(key)
         if _message_display_metadata_value_present(value):
-            target[key] = copy.deepcopy(value)
+            if key == "_fallbackNotice" and isinstance(value, dict):
+                # Allowlist only message, to_model, to_provider — strip
+                # any internal coordination flags (e.g. _cancel_claimed)
+                # that may have leaked into the source row.
+                target[key] = {
+                    k: value.get(k, "") for k in ("message", "to_model", "to_provider")
+                }
+            else:
+                target[key] = copy.deepcopy(value)
 
 
 def _session_message_dedup_key(msg: dict):

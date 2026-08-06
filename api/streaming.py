@@ -2032,9 +2032,7 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.',
         if stream_id is not None:
             _fb = _STREAM_FALLBACK_NOTICES.get(stream_id)
             if _fb is not None:
-                _cancel_msg['_fallbackNotice'] = {
-                    k: v for k, v in _fb.items() if k != '_cancel_claimed'
-                }
+                _cancel_msg['_fallbackNotice'] = _clean_fallback_notice(_fb)
         session.messages.append(_cancel_msg)
 
 
@@ -8147,7 +8145,12 @@ def _run_agent_streaming(
         # Pass through rate-limit and fallback messages so the frontend can
         # show them as warnings via the existing messages.js 'warning' listener.
         _is_fallback_notice = _is_fallback_lifecycle_message(_kind, _message)
-        if _is_fallback_notice:
+        _is_transient_warning = _is_transient_fallback_warning(_kind, _message)
+        if _is_transient_warning and not _is_fallback_notice:
+            # Transient pre-switch warning: show as live SSE warning but do NOT
+            # persist as _fallbackNotice (model hasn't changed yet, may never).
+            put('warning', {'type': 'fallback', 'message': _message})
+        elif _is_fallback_notice:
             _fallback_data = {'type': 'fallback', 'message': _message}
             # Enrich with from/to model+provider when the agent is available,
             # so the frontend can show a persistent, informative notice
@@ -10320,7 +10323,7 @@ def _run_agent_streaming(
                         # path that finalizes an assistant turn must flush
                         # _pending_fallback_notices.
                         if _pending_fallback_notices:
-                            _error_message['_fallbackNotice'] = _pending_fallback_notices[-1]
+                            _error_message['_fallbackNotice'] = _clean_fallback_notice(_pending_fallback_notices[-1])
                         s.messages.append(_error_message)
                         try:
                             s.save()
@@ -10582,7 +10585,7 @@ def _run_agent_streaming(
                             # assistant message so they survive renderMessages()
                             # rebuilds, session switches, and page reloads.
                             if _pending_fallback_notices:
-                                _dm['_fallbackNotice'] = _pending_fallback_notices[-1]
+                                _dm['_fallbackNotice'] = _clean_fallback_notice(_pending_fallback_notices[-1])
                             break
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
@@ -11452,7 +11455,7 @@ def _run_agent_streaming(
                                 if _pending_fallback_notices:
                                     for _dm in reversed(s.messages):
                                         if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
-                                            _dm['_fallbackNotice'] = _pending_fallback_notices[-1]
+                                            _dm['_fallbackNotice'] = _clean_fallback_notice(_pending_fallback_notices[-1])
                                             break
                                 s.save()
                         logger.info('[webui] self-heal (except path): retry succeeded')
@@ -11573,7 +11576,7 @@ def _run_agent_streaming(
                 # error saves drop notices). Every s.save() path that finalizes
                 # an assistant turn must flush _pending_fallback_notices.
                 if _pending_fallback_notices:
-                    _error_message['_fallbackNotice'] = _pending_fallback_notices[-1]
+                    _error_message['_fallbackNotice'] = _clean_fallback_notice(_pending_fallback_notices[-1])
                 s.messages.append(_error_message)
                 try:
                     s.save()
@@ -11665,7 +11668,9 @@ def _run_agent_streaming(
             # until either worker or cancel persistence has committed it).
             _fb_entry = _STREAM_FALLBACK_NOTICES.get(stream_id)
             if _fb_entry is not None and not _fb_entry.get('_cancel_claimed'):
-                _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+                if stream_id not in _STREAM_CANCEL_CLAIMED:
+                    _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+            _STREAM_CANCEL_CLAIMED.discard(stream_id)
             unregister_active_run(stream_id)
             # Clean up the stream-owner registry so stale stream_id→session_id
             # mappings do not accumulate over thousands of completed streams (#6351).
@@ -12208,13 +12213,26 @@ def cancel_stream(stream_id: str) -> bool:
                 # cancellation marker.  Do not reverse-search arbitrary prior
                 # partial rows (reviewer requirement #3).
                 if _claimed_fb_notice:
-                    # Strip the internal ownership-handoff flag before
-                    # persisting — _cancel_claimed is a runtime coordination
-                    # marker, not session data.  Without this, the flag
-                    # leaks into the saved session JSON as dirty metadata.
-                    _fb_notice_clean = {k: v for k, v in _claimed_fb_notice.items() if k != '_cancel_claimed'}
+                    _fb_notice_clean = _clean_fallback_notice(_claimed_fb_notice)
                     if _partial_msg is not None:
-                        _partial_msg['_fallbackNotice'] = _fb_notice_clean
+                        # If the partial was inserted, _partial_msg IS the
+                        # durable row.  If it was deduplicated (already
+                        # present), find the actual row in _cs.messages
+                        # and stamp that — stamping the detached _partial_msg
+                        # would not survive s.save().
+                        _stamp_target = _partial_msg
+                        if _partial_marker_already_present(
+                            _cs.messages,
+                            _partial_msg,
+                            before_idx=_cancel_marker_idx,
+                        ):
+                            for _m in _cs.messages[:_cancel_marker_idx]:
+                                if (isinstance(_m, dict)
+                                        and _m.get('role') == 'assistant'
+                                        and _m.get('_partial')):
+                                    _stamp_target = _m
+                                    break
+                        _stamp_target['_fallbackNotice'] = _fb_notice_clean
                     else:
                         # No partial content streamed — stamp on the cancel
                         # marker we just appended (the current-turn row).
@@ -12235,6 +12253,8 @@ def cancel_stream(stream_id: str) -> bool:
                         if _entry is not None and _entry is _claimed_fb_notice:
                             _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
                     _claimed_fb_notice = None
+                with streams_lock:
+                    _STREAM_CANCEL_CLAIMED.discard(stream_id)
 
     if _emit_cancel_event and q:
         _cancel_event_id = STREAM_LAST_EVENT_ID.get(stream_id)

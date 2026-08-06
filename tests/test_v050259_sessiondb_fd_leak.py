@@ -318,7 +318,7 @@ def test_stream_scoped_fallback_notices_dict_exists():
         "cancel_stream() must stamp the claimed fallback notice on the "
         "current-turn row before s.save()."
     )
-    stamping_block = src[stamping_idx:stamping_idx + 800]
+    stamping_block = src[stamping_idx:stamping_idx + 1600]
     assert "_partial_msg" in stamping_block, (
         "cancel_stream() must stamp on _partial_msg when present (current-turn row)."
     )
