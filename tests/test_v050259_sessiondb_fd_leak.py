@@ -327,12 +327,12 @@ def test_stream_scoped_fallback_notices_dict_exists():
         "cancel_stream() must use a bounded compare-and-set settlement loop "
         "(_SETTLEMENT_MAX_ITERS) for the fallback notice."
     )
-    settlement_block = src[settlement_idx:settlement_idx + 2000]
+    settlement_block = src[settlement_idx:settlement_idx + 5000]
     assert "_cs.save()" in settlement_block, (
         "The settlement loop must persist via _cs.save()."
     )
     assert "_STREAM_FALLBACK_NOTICES.pop" in settlement_block or \
-           "_STREAM_FALLBACK_NOTICES.pop" in src[stamping_idx:stamping_idx + 3000], (
+           "_STREAM_FALLBACK_NOTICES.pop" in src[stamping_idx:stamping_idx + 5000], (
         "The settlement must retire the map entry."
     )
 

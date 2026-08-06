@@ -734,18 +734,18 @@ _STREAM_FALLBACK_NOTICES: dict = {}
 # stamp it (gate-certifier finding #5).
 _STREAM_CANCEL_CLAIMED: set = set()
 
-# Dead-letter owner for fallback notices that could not be persisted (save
-# failure or settlement loop exhaustion).  A future reaper may retry
-# durability.  Keyed by stream_id — one entry per stream — so it cannot
-# grow unbounded for a single stream.  Cleaned up when the stream is
-# torn down in the worker's finally (gate-certifier blocker #2).
-_STREAM_FALLBACK_DEAD_LETTER: dict = {}
+# Terminal settlement fence: once a stream's compare-and-set settlement loop
+# has retired a generation (CAS pop), this set blocks the production status
+# callback from publishing a newer notice into _STREAM_FALLBACK_NOTICES for
+# that stream.  Without this fence, a notice B published after the CAS pop
+# is unconditionally deleted by the finalizers without being saved
+# (gate-certifier blocker #1: post-CAS loss).
+# Cleaned up when the stream is torn down in the worker's finally.
+_STREAM_SETTLEMENT_TERMINAL: set = set()
 
 # Maximum iterations for the compare-and-set settlement loop in
 # cancel_stream().  Bounds the loop so a pathological callback that
 # publishes a newer generation on every save cannot loop forever.
-# After exhaustion, the unsaved generation is transferred to
-# _STREAM_FALLBACK_DEAD_LETTER (gate-certifier blocker #2).
 _SETTLEMENT_MAX_ITERS_GLOBAL = 16
 
 # Fields allowed in a persisted _fallbackNotice.  Internal coordination
@@ -8238,8 +8238,16 @@ def _run_agent_streaming(
             # published after cancel_stream() snapshots can be lost when the
             # worker's finally pops the entry before the later live read
             # (greptile P1: fallback snapshot is not atomic).
+            #
+            # Terminal fence (gate-certifier blocker #1): if cancel_stream()'s
+            # settlement loop has already retired a generation (CAS pop), the
+            # stream is terminal.  A newer notice published now would be
+            # unconditionally deleted by the finalizers without being saved.
+            # Block publication; the already-saved generation is the durable
+            # outcome.
             with STREAMS_LOCK:
-                _STREAM_FALLBACK_NOTICES[stream_id] = _pending_fallback_notices[-1]
+                if stream_id not in _STREAM_SETTLEMENT_TERMINAL:
+                    _STREAM_FALLBACK_NOTICES[stream_id] = _pending_fallback_notices[-1]
             put('warning', _fallback_data)
 
     # xsession wakeup misroute root fix (Option 1): pre-init so the outer
@@ -11734,7 +11742,7 @@ def _run_agent_streaming(
                 if stream_id not in _STREAM_CANCEL_CLAIMED:
                     _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
             _STREAM_CANCEL_CLAIMED.discard(stream_id)
-            _STREAM_FALLBACK_DEAD_LETTER.pop(stream_id, None)
+            _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
             unregister_active_run(stream_id)
             # Clean up the stream-owner registry so stale stream_id→session_id
             # mappings do not accumulate over thousands of completed streams (#6351).
@@ -12023,6 +12031,11 @@ def cancel_stream(stream_id: str) -> bool:
     # `if _cancel_session_id:`) no longer holds the sole retirement; this
     # outer finally is the authoritative cleanup so neither registry can grow
     # unbounded (gate-certifier blocker #2).
+    _leave_notice_for_worker = False  # set by the settlement loop on save
+                                       # failure/loop exhaustion; the outer
+                                       # finally respects it too so the
+                                       # worker's _persist_cancelled_turn
+                                       # can still stamp the notice
     try:
         # Set WebUI layer cancel flag. Prefer the snapshot captured under the lock;
         # fall back to a fresh lookup for the ACTIVE_RUNS-only path (stream absent).
@@ -12129,6 +12142,9 @@ def cancel_stream(stream_id: str) -> bool:
         if _cancel_session_id:
             _partial_msg = None
             _cancel_marker_idx = 0
+            _settled = False  # initialized before the try block so the
+                              # finally can safely check it even if an
+                              # exception fires before the settlement loop
             with _get_session_agent_lock(_cancel_session_id):
                 try:
                     _cs = get_session(_cancel_session_id)
@@ -12276,11 +12292,11 @@ def cancel_stream(stream_id: str) -> bool:
                             'timestamp': int(time.time()),
                         })
                     # ── Generation-owned compare-and-set settlement loop ──
-                    # (gate-certifier blockers #1-#3, re-gate at bff6ae5d)
+                    # (gate-certifier blockers #1-#3, re-gate at 3eb6fc0392)
                     #
                     # The production status callback can publish a newer
                     # fallback notice into _STREAM_FALLBACK_NOTICES at any
-                    # time under STREAMS_LOCK (:7695-7696).  A naive
+                    # time under STREAMS_LOCK (:8239-8240).  A naive
                     # snapshot-then-save loses the newer notice.  Instead we
                     # use a compare-and-set loop:
                     #
@@ -12291,13 +12307,17 @@ def cancel_stream(stream_id: str) -> bool:
                     #      _cs.save() (outside STREAMS_LOCK — blocker #3).
                     #   3. Re-acquire STREAMS_LOCK.  If the map entry is
                     #      still the same generation, ATOMICALLY pop it
-                    #      while still holding the lock.  If a newer
-                    #      generation replaced it, keep ownership and loop
-                    #      back to step 1 to persist the newer notice.
-                    #   4. Bounded by _SETTLEMENT_MAX_ITERS.  On save
-                    #      failure or loop exhaustion, transfer the unsaved
-                    #      generation to _STREAM_FALLBACK_DEAD_LETTER so
-                    #      it is not silently lost (blocker #2).
+                    #      AND add the stream to _STREAM_SETTLEMENT_TERMINAL
+                    #      while still holding the lock.  The terminal fence
+                    #      blocks the callback from publishing a newer notice
+                    #      B after the CAS pop — B would be deleted by the
+                    #      finalizers without being saved (blocker #1).
+                    #   4. Bounded by _SETTLEMENT_MAX_ITERS.  On save failure
+                    #      or loop exhaustion, the notice is LEFT in the map
+                    #      (not popped) so the worker's _persist_cancelled_turn
+                    #      can pick it up.  An ERROR is logged.  No ephemeral
+                    #      dead-letter copy is created — the gate-certifier
+                    #      rejected that pattern (blocker #2).
                     #
                     # This sits AFTER the stale-stream guard
                     # (_stream_writeback_is_current), so a stale stream
@@ -12329,19 +12349,18 @@ def cancel_stream(stream_id: str) -> bool:
                         try:
                             _cs.save()
                         except Exception:
-                            # Save failure: transfer the unsaved generation
-                            # to the dead-letter owner rather than silently
-                            # dropping it (blocker #2).  Final cleanup may
-                            # retire only a generation proven durable or
-                            # explicitly transferred — never treat deletion
-                            # as successful settlement.
-                            with streams_lock:
-                                _unsaved = _STREAM_FALLBACK_NOTICES.get(stream_id)
-                                if _unsaved is not None:
-                                    _STREAM_FALLBACK_DEAD_LETTER[stream_id] = (
-                                        _clean_fallback_notice(_unsaved)
-                                    )
+                            # Save failure: leave the notice in the map so
+                            # the worker's _persist_cancelled_turn can pick
+                            # it up when it wins the session lock.  Log at
+                            # ERROR level — this is a real persistence
+                            # failure, not silent loss (blocker #2).
+                            logger.error(
+                                "Fallback notice save failed for stream %s; "
+                                "leaving notice in map for worker persistence",
+                                stream_id, exc_info=True,
+                            )
                             _settled = True
+                            _leave_notice_for_worker = True
                             break
                         _first_save = False
                         if _fb_to_stamp is None:
@@ -12356,45 +12375,47 @@ def cancel_stream(stream_id: str) -> bool:
                                 break
                             if id(_final_fb) == _fb_generation_id:
                                 # ATOMICALLY retire the exact generation we
-                                # just saved, WHILE holding the lock — no
-                                # gap between equality check and cleanup
-                                # where a newer notice can be lost
-                                # (blocker #1).
+                                # just saved AND fence the stream terminal,
+                                # WHILE holding the lock — no gap between
+                                # equality check and cleanup where a newer
+                                # notice can be lost.  The terminal fence
+                                # blocks the callback from publishing B
+                                # after this pop (blocker #1).
                                 _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+                                _STREAM_SETTLEMENT_TERMINAL.add(stream_id)
                                 _settled = True
                                 break
                             # A newer generation replaced the one we saved.
                             # Loop back: persist the newer notice on the
                             # same row, then re-check.
                     if not _settled:
-                        # Loop exhaustion: transfer the current generation
-                        # to dead-letter so it is not silently lost
+                        # Loop exhaustion: leave the current generation in
+                        # the map for the worker's _persist_cancelled_turn.
+                        # Log at ERROR — non-convergence is unexpected
                         # (blocker #2).
-                        with streams_lock:
-                            _unsaved = _STREAM_FALLBACK_NOTICES.get(stream_id)
-                            if _unsaved is not None:
-                                _STREAM_FALLBACK_DEAD_LETTER[stream_id] = (
-                                    _clean_fallback_notice(_unsaved)
-                                )
-                        logger.warning(
+                        logger.error(
                             "Fallback notice settlement did not converge "
-                            "after %d iterations for stream %s",
+                            "after %d iterations for stream %s; leaving "
+                            "notice in map for worker persistence",
                             _SETTLEMENT_MAX_ITERS, stream_id,
                         )
+                        _leave_notice_for_worker = True
                     _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
                 except Exception:
                     logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
                 finally:
                     # Retire the claim on every path.  The map entry was
                     # already atomically popped by the settlement loop's
-                    # compare-and-set on the happy path.  On exception or
-                    # save failure, the entry may still be present — pop it
-                    # here so the registry cannot grow unbounded.  Any
-                    # unsaved generation was transferred to dead-letter
-                    # by the loop (blocker #2).
+                    # compare-and-set on the happy path.  On save failure
+                    # or loop exhaustion, _leave_notice_for_worker is set —
+                    # skip popping so the worker's _persist_cancelled_turn
+                    # can still stamp the notice (blocker #2).  On other
+                    # exceptions where the loop didn't run, pop as safety.
                     with streams_lock:
-                        _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+                        if not _leave_notice_for_worker:
+                            _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
                         _STREAM_CANCEL_CLAIMED.discard(stream_id)
+                        _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
                     _claimed_fb_notice = None
 
         if _emit_cancel_event and q:
@@ -12416,13 +12437,13 @@ def cancel_stream(stream_id: str) -> bool:
         # Authoritative claim retirement: covers every path after the
         # claim (missing session identity, stale-writeback early return,
         # save failure, normal completion) so neither registry grows
-        # unbounded (gate-certifier blocker #2).  The dead-letter entry
-        # is NOT retired here — it was transferred by the settlement
-        # loop on save failure or loop exhaustion, and may need to
-        # survive for a future reaper.  The worker's finally (in the
-        # streaming thread) cleans dead-letter when the stream is
-        # torn down.
+        # unbounded (gate-certifier blocker #2).  On save failure or loop
+        # exhaustion, _leave_notice_for_worker is set — skip popping the
+        # map so the worker's _persist_cancelled_turn can still stamp the
+        # notice (blocker #2).  The terminal fence is always retired.
         with streams_lock:
-            _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+            if not _leave_notice_for_worker:
+                _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
             _STREAM_CANCEL_CLAIMED.discard(stream_id)
+            _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
         _claimed_fb_notice = None

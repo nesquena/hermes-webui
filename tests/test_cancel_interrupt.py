@@ -19,10 +19,10 @@ class TestCancelInterrupt:
         STREAMS.clear()
         CANCEL_FLAGS.clear()
         ACTIVE_RUNS.clear()
-        from api.streaming import _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED, _STREAM_FALLBACK_DEAD_LETTER
+        from api.streaming import _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED, _STREAM_SETTLEMENT_TERMINAL
         _STREAM_FALLBACK_NOTICES.clear()
         _STREAM_CANCEL_CLAIMED.clear()
-        _STREAM_FALLBACK_DEAD_LETTER.clear()
+        _STREAM_SETTLEMENT_TERMINAL.clear()
         with SESSION_AGENT_CACHE_LOCK:
             SESSION_AGENT_CACHE.clear()
 
@@ -32,10 +32,10 @@ class TestCancelInterrupt:
         STREAMS.clear()
         CANCEL_FLAGS.clear()
         ACTIVE_RUNS.clear()
-        from api.streaming import _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED, _STREAM_FALLBACK_DEAD_LETTER
+        from api.streaming import _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED, _STREAM_SETTLEMENT_TERMINAL
         _STREAM_FALLBACK_NOTICES.clear()
         _STREAM_CANCEL_CLAIMED.clear()
-        _STREAM_FALLBACK_DEAD_LETTER.clear()
+        _STREAM_SETTLEMENT_TERMINAL.clear()
         with SESSION_AGENT_CACHE_LOCK:
             SESSION_AGENT_CACHE.clear()
 
@@ -887,6 +887,111 @@ class TestCancelInterrupt:
             "_STREAM_CANCEL_CLAIMED not retired after replacement publication"
         )
 
+    def test_post_cas_publication_blocked_by_terminal_fence(self):
+        """After the settlement loop's CAS pop retires generation A and sets
+        the terminal fence, a notice B published through the production
+        callback path must be BLOCKED from entering the map.  Without the
+        fence, B would be unconditionally deleted by the finalizers without
+        being saved (gate-certifier blocker #1: post-CAS loss).
+
+        This test verifies the fence mechanism in two parts:
+        1. Production callback path: when _STREAM_SETTLEMENT_TERMINAL
+           contains the stream, the callback does NOT write to
+           _STREAM_FALLBACK_NOTICES.
+        2. Integration: after a normal cancel_stream() with notice A,
+           A is the sole durable notice and the fence is retired by
+           the finalizers.
+
+        The fence is set inside the CAS pop (under STREAMS_LOCK) and
+        retired by both finalizers.  The callback checks the fence
+        under STREAMS_LOCK before publishing.
+        """
+        import threading
+        from unittest.mock import patch, Mock
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED,
+            _STREAM_SETTLEMENT_TERMINAL, STREAMS_LOCK,
+        )
+        from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
+
+        stream_id = "post_cas_fence"
+        session_id = "sess_post_cas_fence"
+
+        _notice_a = {
+            "message": "Switched to fallback: m1 via p1",
+            "to_model": "m1",
+            "to_provider": "p1",
+        }
+        _notice_b = {
+            "message": "Switched to fallback: m2 via p2",
+            "to_model": "m2",
+            "to_provider": "p2",
+        }
+
+        # ── Part 1: verify the callback path respects the fence ──
+        # Simulate the fence being set (as the CAS pop would do)
+        _STREAM_SETTLEMENT_TERMINAL.add(stream_id)
+        _STREAM_FALLBACK_NOTICES.pop(stream_id, None)  # CAS popped A
+
+        # Simulate the production callback publication path:
+        # "with STREAMS_LOCK: if stream_id not in _STREAM_SETTLEMENT_TERMINAL:
+        #     _STREAM_FALLBACK_NOTICES[stream_id] = ..."
+        with STREAMS_LOCK:
+            if stream_id not in _STREAM_SETTLEMENT_TERMINAL:
+                _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice_b)
+
+        # B must NOT have been published — the fence blocked it
+        assert stream_id not in _STREAM_FALLBACK_NOTICES, (
+            "terminal fence failed to block B publication — B entered the map "
+            "after CAS pop, would be deleted by finalizers without saving"
+        )
+        _STREAM_SETTLEMENT_TERMINAL.clear()
+
+        # ── Part 2: integration — cancel_stream with A, verify durable ──
+        q = queue.Queue()
+        STREAMS[stream_id] = q
+        CANCEL_FLAGS[stream_id] = threading.Event()
+        STREAM_PARTIAL_TEXT[stream_id] = "partial"
+        STREAM_REASONING_TEXT[stream_id] = ""
+        STREAM_LIVE_TOOL_CALLS[stream_id] = []
+        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice_a)
+
+        _prior = {"role": "assistant", "content": "Prior.", "timestamp": 1000}
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id
+        mock_session.pending_user_message = "q"
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = 1.0
+        mock_session.messages = [_prior]
+        mock_session.save = Mock()
+
+        mock_agent = Mock()
+        mock_agent.session_id = session_id
+        AGENT_INSTANCES[stream_id] = mock_agent
+
+        with patch("api.streaming.get_session", return_value=mock_session):
+            result = cancel_stream(stream_id)
+
+        assert result is True
+
+        # A must be the sole durable notice
+        stamped = [
+            m for m in mock_session.messages
+            if isinstance(m, dict) and m.get("_fallbackNotice")
+        ]
+        assert len(stamped) == 1, (
+            f"expected exactly 1 durable notice, got {len(stamped)}"
+        )
+        notice = stamped[0]["_fallbackNotice"]
+        assert notice.get("message") == _notice_a["message"]
+        assert set(notice.keys()) == {"message", "to_model", "to_provider"}
+
+        # All registries and fence must be retired
+        assert stream_id not in _STREAM_FALLBACK_NOTICES
+        assert stream_id not in _STREAM_CANCEL_CLAIMED
+        assert stream_id not in _STREAM_SETTLEMENT_TERMINAL
+
     def test_settlement_3_generations_latest_wins_with_serialized_snapshots(self):
         """Production-composed compare-and-set settlement: three notice
         generations (A at claim, B after first save, C after second save).
@@ -976,25 +1081,24 @@ class TestCancelInterrupt:
         assert stream_id not in _STREAM_FALLBACK_NOTICES
         assert stream_id not in _STREAM_CANCEL_CLAIMED
 
-    def test_settlement_save_failure_transfers_to_dead_letter(self):
+    def test_settlement_save_failure_leaves_notice_for_worker(self):
         """If Session.save() raises during the settlement loop, the unsaved
-        notice must be transferred to _STREAM_FALLBACK_DEAD_LETTER — not
-        silently dropped.  Both registries are still retired so they cannot
+        notice must be LEFT in _STREAM_FALLBACK_NOTICES — not silently
+        dropped, not transferred to an ephemeral dead-letter.  The worker's
+        _persist_cancelled_turn can still stamp it when it wins the session
+        lock.  The claim and terminal fence are retired so they cannot
         grow unbounded (gate-certifier blocker #2).
 
-        The prior version of this test (test_settlement_save_failure_retires
-        _registries) explicitly accepted loss — the bot said that was wrong.
-        Now it asserts the dead-letter transfer (blocker #2: "transfer the
-        unsaved generation to a named bounded retry/reaper/dead-letter
-        owner.  Final cleanup may retire only a generation proven durable
-        or explicitly transferred — never treat deletion as successful
-        settlement").
+        The gate-certifier rejected the dead-letter pattern: "propagate
+        the save failure instead of treating an ephemeral process-local
+        copy as a dead letter."  This test asserts the notice survives
+        in the map for the worker.
         """
         import threading
         from unittest.mock import patch, Mock
         from api.streaming import (
             _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED,
-            _STREAM_FALLBACK_DEAD_LETTER,
+            _STREAM_SETTLEMENT_TERMINAL,
         )
         from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
 
@@ -1010,7 +1114,7 @@ class TestCancelInterrupt:
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
         _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice)
-        _STREAM_FALLBACK_DEAD_LETTER.clear()
+        _STREAM_SETTLEMENT_TERMINAL.clear()
 
         _prior = {"role": "assistant", "content": "Prior.", "timestamp": 1000}
         mock_session = Mock()
@@ -1031,26 +1135,23 @@ class TestCancelInterrupt:
 
         assert result is True
 
-        # Registries MUST be retired even though save failed
-        assert stream_id not in _STREAM_FALLBACK_NOTICES, (
-            "registry leaked after save failure"
-        )
+        # Claim and terminal fence MUST be retired even though save failed
         assert stream_id not in _STREAM_CANCEL_CLAIMED, (
             "claim leaked after save failure"
         )
-        # The unsaved notice MUST have been transferred to dead-letter
-        # — NOT silently lost (blocker #2)
-        assert stream_id in _STREAM_FALLBACK_DEAD_LETTER, (
-            "unsaved notice was silently lost instead of transferred to dead-letter"
+        assert stream_id not in _STREAM_SETTLEMENT_TERMINAL, (
+            "terminal fence leaked after save failure"
         )
-        _dl = _STREAM_FALLBACK_DEAD_LETTER[stream_id]
-        assert _dl.get("message") == _notice["message"]
-        assert _dl.get("to_model") == _notice["to_model"]
-        assert _dl.get("to_provider") == _notice["to_provider"]
-        assert set(_dl.keys()) == {"message", "to_model", "to_provider"}, (
-            f"dead-letter entry has dirty keys: {set(_dl.keys())}"
+        # The unsaved notice MUST remain in the map for the worker's
+        # _persist_cancelled_turn — NOT silently dropped (blocker #2)
+        assert stream_id in _STREAM_FALLBACK_NOTICES, (
+            "unsaved notice was silently dropped instead of left in map for worker"
         )
-        _STREAM_FALLBACK_DEAD_LETTER.clear()
+        _fb = _STREAM_FALLBACK_NOTICES[stream_id]
+        assert _fb.get("message") == _notice["message"]
+        assert _fb.get("to_model") == _notice["to_model"]
+        assert _fb.get("to_provider") == _notice["to_provider"]
+        _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
 
     def test_settlement_stale_stream_does_not_mutate_messages(self):
         """An old stream whose active_stream_id no longer matches must return
@@ -1283,21 +1384,21 @@ class TestCancelInterrupt:
         assert stream_id not in _STREAM_FALLBACK_NOTICES
         assert stream_id not in _STREAM_CANCEL_CLAIMED
 
-    def test_settlement_loop_exhaustion_transfers_to_dead_letter(self):
+    def test_settlement_loop_exhaustion_leaves_notice_for_worker(self):
         """If the settlement loop hits _SETTLEMENT_MAX_ITERS (16+ continuous
-        replacements), the current unsaved generation must be transferred
-        to dead-letter — not silently dropped (blocker #2: "exhaust the
-        loop without data loss").
+        replacements), the current unsaved generation must be LEFT in
+        _STREAM_FALLBACK_NOTICES — not silently dropped, not transferred
+        to an ephemeral dead-letter.  The worker's _persist_cancelled_turn
+        can still stamp it (blocker #2: "exhaust the loop without data
+        loss").
 
-        The test sets up a save() side-effect that publishes a newer
-        generation on EVERY save call, so the loop never converges.  After
-        _SETTLEMENT_MAX_ITERS iterations, the loop must transfer the final
-        generation to _STREAM_FALLBACK_DEAD_LETTER.
+        The gate-certifier rejected the dead-letter pattern.  This test
+        asserts the notice survives in the map.
         """
         from unittest.mock import patch, Mock
         from api.streaming import (
             _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED,
-            _STREAM_FALLBACK_DEAD_LETTER, STREAMS_LOCK,
+            _STREAM_SETTLEMENT_TERMINAL, STREAMS_LOCK,
         )
         from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
 
@@ -1310,7 +1411,7 @@ class TestCancelInterrupt:
         STREAM_PARTIAL_TEXT[stream_id] = "partial"
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
-        _STREAM_FALLBACK_DEAD_LETTER.clear()
+        _STREAM_SETTLEMENT_TERMINAL.clear()
 
         # Start with generation 0
         _STREAM_FALLBACK_NOTICES[stream_id] = {
@@ -1323,6 +1424,9 @@ class TestCancelInterrupt:
             _save_count[0] += 1
             # Publish a newer generation on every save — the loop never
             # converges because the generation always changes.
+            # NOTE: the terminal fence is NOT set during the loop (only
+            # on CAS pop), so the callback path is not blocked here.
+            # We publish directly into the map under the lock.
             with STREAMS_LOCK:
                 _STREAM_FALLBACK_NOTICES[stream_id] = {
                     "message": f"gen{_save_count[0]}",
@@ -1355,20 +1459,20 @@ class TestCancelInterrupt:
             f"loop ran only {_save_count[0]} times, expected >= {_SETTLEMENT_MAX_ITERS_GLOBAL}"
         )
 
-        # The final unsaved generation must be in dead-letter — not lost
-        assert stream_id in _STREAM_FALLBACK_DEAD_LETTER, (
+        # The final unsaved generation must remain in the map — not lost
+        assert stream_id in _STREAM_FALLBACK_NOTICES, (
             "loop exhaustion silently dropped the unsaved generation "
-            "instead of transferring to dead-letter"
+            "instead of leaving it in map for worker"
         )
-        _dl = _STREAM_FALLBACK_DEAD_LETTER[stream_id]
-        assert set(_dl.keys()) == {"message", "to_model", "to_provider"}, (
-            f"dead-letter entry has dirty keys: {set(_dl.keys())}"
+        _fb = _STREAM_FALLBACK_NOTICES[stream_id]
+        assert set(_fb.keys()) == {"message", "to_model", "to_provider"}, (
+            f"map entry has dirty keys: {set(_fb.keys())}"
         )
 
-        # Registries retired
-        assert stream_id not in _STREAM_FALLBACK_NOTICES
+        # Claim and terminal fence retired
         assert stream_id not in _STREAM_CANCEL_CLAIMED
-        _STREAM_FALLBACK_DEAD_LETTER.clear()
+        assert stream_id not in _STREAM_SETTLEMENT_TERMINAL
+        _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
 
     def test_settlement_identical_partial_signatures_across_turns(self):
         """When two turns have identical _partial signatures, the stamp
@@ -1445,7 +1549,7 @@ class TestCancelInterrupt:
         assert result is True
 
         # The notice must be on partial2 (current turn), NOT partial1
-        assert "._fallbackNotice" not in _partial1, (
+        assert "_fallbackNotice" not in _partial1, (
             "notice was stamped on the WRONG turn's partial — "
             "identical signatures caused the stamp to hit the earlier turn"
         )
