@@ -89,3 +89,11 @@ def test_frontend_uses_normal_chat_start_without_timed_clarify() -> None:
     assert "/api/chat/start" in source
     assert "/api/clarify/respond" not in durable
     assert "lockComposerForClarify" not in durable
+
+
+def test_idle_session_load_starts_durable_decision_polling() -> None:
+    source = Path("static/sessions.js").read_text(encoding="utf-8")
+    load_start = source.index("async function loadSession")
+    idle_start = source.index("    }else{\n      S.busy=false;", load_start)
+    idle_end = source.index("_deferWorkspaceRefreshForSession(sid);", idle_start)
+    assert "startClarifyPolling(sid)" in source[idle_start:idle_end]

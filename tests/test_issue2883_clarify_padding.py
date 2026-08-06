@@ -44,3 +44,19 @@ def test_clarify_padding_remeasures_on_resize():
     assert "function_ensureClarifyResizeListener()" in compact_js
     assert 'window.addEventListener("resize"' in MESSAGES_JS
     assert "_ensureClarifyResizeListener();" in MESSAGES_JS
+
+
+def test_clarify_card_stays_above_composer_and_fits_mobile_controls():
+    compact_css = _compact(STYLE_CSS)
+
+    assert ".clarify-card{position:absolute;left:0;right:0;bottom:0;" in compact_css
+    assert (
+        ".clarify-card{padding-left:10px;padding-right:10px;"
+        "max-height:clamp(180px,min(68vh,calc(100vh-180px)),420px);"
+        in compact_css
+    )
+    assert (
+        ".clarify-card.clarify-inner{"
+        "max-height:clamp(180px,min(68vh,calc(100vh-180px)),420px);"
+        in compact_css
+    )

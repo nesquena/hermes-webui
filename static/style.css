@@ -2047,7 +2047,7 @@
   .approval-btn.deny:hover{background:rgba(239,83,80,.12);border-color:var(--error);}
   .approval-btn.loading{opacity:.7;cursor:wait;}
   /* ── Clarify card ── */
-  .clarify-card{position:absolute;left:0;right:0;bottom:-24px;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;max-height:clamp(180px,min(68vh,calc(100vh - 220px)),420px);}
+  .clarify-card{position:absolute;left:0;right:0;bottom:0;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;max-height:clamp(180px,min(68vh,calc(100vh - 220px)),420px);}
   .clarify-card.visible{pointer-events:auto;}
   .clarify-card .clarify-inner{max-height:clamp(180px,min(68vh,calc(100vh - 220px)),420px);overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;box-sizing:border-box;transform:translateY(100%);opacity:0;transition:transform .4s cubic-bezier(.32,.72,.16,1),opacity .25s ease,max-height .2s ease;}
   @supports (height:100dvh){.clarify-card,.clarify-card .clarify-inner{max-height:clamp(180px,min(68dvh,calc(100dvh - 220px)),420px);}}
@@ -3215,9 +3215,9 @@
     .approval-btn.yolo{grid-column:1 / -1;}
     .approval-kbd{display:none;}
     /* Clarify card */
-    .clarify-card{padding-left:10px;padding-right:10px;max-height:clamp(180px,min(62vh,calc(100vh - 180px)),360px);}
-    .clarify-card .clarify-inner{max-height:clamp(180px,min(62vh,calc(100vh - 180px)),360px);}
-    @supports (height:100dvh){.clarify-card,.clarify-card .clarify-inner{max-height:clamp(180px,min(62dvh,calc(100dvh - 180px)),360px);}}
+    .clarify-card{padding-left:10px;padding-right:10px;max-height:clamp(180px,min(68vh,calc(100vh - 180px)),420px);}
+    .clarify-card .clarify-inner{max-height:clamp(180px,min(68vh,calc(100vh - 180px)),420px);}
+    @supports (height:100dvh){.clarify-card,.clarify-card .clarify-inner{max-height:clamp(180px,min(68dvh,calc(100dvh - 180px)),420px);}}
     .clarify-inner{padding:12px 12px 13px;}
     .clarify-response{flex-direction:column;align-items:stretch;}
     .clarify-input,.clarify-submit{width:100%;min-height:44px;}

@@ -2257,6 +2257,7 @@ async function loadSession(sid){
       updateQueueBadge(sid);
       syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
       if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
+      if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
       // Workspace refresh is guarded by session id inside loadDir(); keep it
       // after the transcript's first paint so chat switching is not competing
       // with file-tree / git badge IO.
