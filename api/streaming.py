@@ -540,18 +540,31 @@ def _runtime_preferred_base_url(
 
 
 def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
-    """Return True if an agent lifecycle status should surface as a fallback warning."""
+    """Return True if an agent lifecycle status is a CONFIRMED fallback switch.
+
+    The Agent has two distinct fallback emission paths:
+
+    1. **Transient (pre-switch):** ``_buffer_status("... switching to fallback: ...")``
+       — buffered during retries, only flushed via ``_flush_status_buffer()`` on
+       terminal FAILURE.  These messages carry the OLD model and may fire even
+       when the fallback never succeeds.
+
+    2. **Confirmed (post-switch):** ``_emit_pending_fallback_notice()`` →
+       ``_emit_status("Switched to fallback model: m1 via p1 → m2 via p2")``
+       — emitted ONLY on the SUCCESS path, AFTER ``agent.model`` / ``agent.provider``
+       have already been updated to the new fallback model (see
+       ``_try_activate_fallback`` in chat_completion_helpers.py).
+
+    Only the confirmed post-switch notice should produce a persistent fallback
+    notice.  Matching the transient pre-switch strings would persist false
+    notices for turns that never completed the switch, and would capture the
+    OLD model/provider before the change — inverting the PR's contract.
+    """
     k = str(kind or '').strip().lower()
     m = str(message or '').strip().lower()
     return (
         k == 'lifecycle'
-        and (
-            'rate limited' in m
-            or 'switching to fallback' in m
-            or 'falling back' in m
-            or 'fallback activated' in m
-            or 'trying fallback' in m
-        )
+        and 'switched to fallback' in m
     )
 
 
@@ -684,6 +697,15 @@ def _clarify_timeout_seconds(default: int = 120) -> int:
 
 
 _CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrupted')
+
+# Stream-scoped fallback notices: the latest CONFIRMED fallback notice for each
+# active stream_id.  The _agent_status_callback in _run_agent_streaming writes
+# here so cancel_stream() — which runs outside that function's closure — can
+# stamp the notice before its own s.save().  Without this, a user who clicks
+# Stop after a real fallback sees the live SSE warning but loses the persistent
+# _fallbackNotice after reload (gate-certifier blocking finding #2).
+# Cleared in the _run_agent_streaming finally block alongside STREAMS/CANCEL_FLAGS.
+_STREAM_FALLBACK_NOTICES: dict = {}
 
 
 _WEBUI_PROGRESS_PROMPT = """
@@ -8022,6 +8044,13 @@ def _run_agent_streaming(
     # write without nonlocal) so it can seed `_last_err` and let the classifier
     # surface the real, actionable cause (model_not_found / auth_mismatch).
     _captured_terminal_error = [None]
+    # Mutable holder so _agent_status_callback can read the live agent's
+    # model/provider to enrich fallback SSE events with structured data.
+    _current_agent = [None]
+    # Accumulates fallback notices so they can be persisted on the turn's
+    # final assistant message before s.save() — making them survive
+    # renderMessages() rebuilds, session switches, and page reloads.
+    _pending_fallback_notices = []
 
     def _agent_status_callback(kind, message):
         """Bridge Agent lifecycle status into WebUI SSE.
@@ -8056,7 +8085,33 @@ def _run_agent_streaming(
         # show them as warnings via the existing messages.js 'warning' listener.
         _is_fallback_notice = _is_fallback_lifecycle_message(_kind, _message)
         if _is_fallback_notice:
-            put('warning', {'type': 'fallback', 'message': _message})
+            _fallback_data = {'type': 'fallback', 'message': _message}
+            # Enrich with from/to model+provider when the agent is available,
+            # so the frontend can show a persistent, informative notice
+            # instead of just a 4-second status bar flash.
+            _agent_ref = _current_agent[0]
+            if _agent_ref is not None:
+                _fallback_data['to_model'] = getattr(_agent_ref, 'model', '') or ''
+                _fallback_data['to_provider'] = getattr(_agent_ref, 'provider', '') or ''
+            # Capture for session-persisted metadata. Stamped onto the turn's
+            # final assistant message before s.save() so it survives
+            # renderMessages() rebuilds and session switches.
+            _pending_fallback_notices.append({
+                'message': _fallback_data['message'],
+                'to_model': _fallback_data.get('to_model', ''),
+                'to_provider': _fallback_data.get('to_provider', ''),
+            })
+            # Also mirror to the stream-scoped dict so cancel_stream() — which
+            # runs outside this closure — can stamp the notice before its own
+            # s.save() (gate-certifier blocking finding #2).
+            # Write under STREAMS_LOCK so cancel_stream()'s under-lock snapshot
+            # sees a consistent value — without the lock, a confirmed notice
+            # published after cancel_stream() snapshots can be lost when the
+            # worker's finally pops the entry before the later live read
+            # (greptile P1: fallback snapshot is not atomic).
+            with STREAMS_LOCK:
+                _STREAM_FALLBACK_NOTICES[stream_id] = _pending_fallback_notices[-1]
+            put('warning', _fallback_data)
 
     # xsession wakeup misroute root fix (Option 1): pre-init so the outer
     # finally can always reset even if an exception fires before the bind.
@@ -9213,6 +9268,7 @@ def _run_agent_streaming(
             # injectionFrequency: "first-turn" actually suppresses after turn 1.
             if ephemeral:
                 agent = _AIAgent(**_agent_kwargs)
+                _current_agent[0] = agent
                 logger.debug('[webui] Created ephemeral agent for session %s', session_id)
             else:
                 import hashlib as _hashlib
@@ -9298,6 +9354,7 @@ def _run_agent_streaming(
                 if agent is not None:
                     # Refresh per-turn callbacks — these close over request-scoped
                     # objects (put queue, cancel_event) that are new each request.
+                    _current_agent[0] = agent
                     agent.stream_delta_callback = _agent_kwargs.get('stream_delta_callback')
                     agent.tool_progress_callback = _agent_kwargs.get('tool_progress_callback')
                     if hasattr(agent, 'tool_start_callback'):
@@ -9339,6 +9396,7 @@ def _run_agent_streaming(
                         agent._interrupt_message = None
                 else:
                     agent = _AIAgent(**_agent_kwargs)
+                    _current_agent[0] = agent
                     # Register the new agent with the memory lifecycle so
                     # its commit_memory_session() can be found later.
                     try:
@@ -10017,6 +10075,7 @@ def _run_agent_streaming(
                             if 'credential_pool' in _agent_params:
                                 _agent_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
                             agent = _AIAgent(**_agent_kwargs)
+                            _current_agent[0] = agent
                             with STREAMS_LOCK:
                                 AGENT_INSTANCES[stream_id] = agent
                             from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SAC_L
@@ -10192,6 +10251,13 @@ def _run_agent_streaming(
                             _error_message['provider_details_label'] = 'Interruption details'
                         elif _err_type == 'tool_limit_reached':
                             _error_message['provider_details_label'] = 'Terminal state details'
+                        # Persist fallback notices on the error assistant message
+                        # so they survive session switches / page reloads
+                        # (greptile P1: error saves drop notices). Every s.save()
+                        # path that finalizes an assistant turn must flush
+                        # _pending_fallback_notices.
+                        if _pending_fallback_notices:
+                            _error_message['_fallbackNotice'] = _pending_fallback_notices[-1]
                         s.messages.append(_error_message)
                         try:
                             s.save()
@@ -10449,6 +10515,11 @@ def _run_agent_streaming(
                                 _dm['_firstTokenMs'] = _ttft_ms
                             if _used_model:
                                 _dm['_usedModel'] = _used_model
+                            # Persist fallback notices on the turn's final
+                            # assistant message so they survive renderMessages()
+                            # rebuilds, session switches, and page reloads.
+                            if _pending_fallback_notices:
+                                _dm['_fallbackNotice'] = _pending_fallback_notices[-1]
                             break
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
@@ -11242,6 +11313,10 @@ def _run_agent_streaming(
                     if 'credential_pool' in _agent_params:
                         _heal_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
                     _heal_agent = _AIAgent(**_heal_kwargs)
+                    # Update the holder so the fallback-notice callback reads
+                    # the replacement agent's model/provider, not the stale
+                    # failed agent (greptile P1: stale-heal-metadata).
+                    _current_agent[0] = _heal_agent
                     with STREAMS_LOCK:
                         AGENT_INSTANCES[stream_id] = _heal_agent
                     from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L
@@ -11301,6 +11376,21 @@ def _run_agent_streaming(
                                     _turn_pending_source,
                                     _active_turn_identity,
                                 )
+                                _compact_session_image_parts_for_persistence(s)
+                                _advance_truncation_watermark_after_commit(s)  # #3831
+                                # Persist fallback notices on the final
+                                # assistant message so they survive
+                                # renderMessages() rebuilds, session switches,
+                                # and page reloads (greptile P1: heal notices
+                                # not saved). The heal-success path has its
+                                # own save block that returns before the normal
+                                # pre-save metadata block runs, so flush
+                                # _pending_fallback_notices here too.
+                                if _pending_fallback_notices:
+                                    for _dm in reversed(s.messages):
+                                        if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
+                                            _dm['_fallbackNotice'] = _pending_fallback_notices[-1]
+                                            break
                                 s.save()
                         logger.info('[webui] self-heal (except path): retry succeeded')
                         return  # skip error emission
@@ -11415,6 +11505,12 @@ def _run_agent_streaming(
                     _error_message['provider_details_label'] = 'Cancellation details'
                 elif _exc_type == 'interrupted':
                     _error_message['provider_details_label'] = 'Interruption details'
+                # Persist fallback notices on the error assistant message so
+                # they survive session switches / page reloads (greptile P1:
+                # error saves drop notices). Every s.save() path that finalizes
+                # an assistant turn must flush _pending_fallback_notices.
+                if _pending_fallback_notices:
+                    _error_message['_fallbackNotice'] = _pending_fallback_notices[-1]
                 s.messages.append(_error_message)
                 try:
                     s.save()
@@ -11497,6 +11593,16 @@ def _run_agent_streaming(
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)  # Clean up tool calls (#1361 §B)
             STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)  # Clean up event_id pointer (stage-364)
+            # Ownership handoff: if cancel_stream() has claimed the notice
+            # (set _cancel_claimed under STREAMS_LOCK before interrupt), do NOT
+            # pop — cancel will persist the notice on the current-turn row and
+            # pop after its own s.save().  This prevents the race where the
+            # worker's finally pops the entry before cancel stamps it
+            # (reviewer requirement #2: worker cleanup must not delete a notice
+            # until either worker or cancel persistence has committed it).
+            _fb_entry = _STREAM_FALLBACK_NOTICES.get(stream_id)
+            if _fb_entry is not None and not _fb_entry.get('_cancel_claimed'):
+                _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
             unregister_active_run(stream_id)
             # Clean up the stream-owner registry so stale stream_id→session_id
             # mappings do not accumulate over thousands of completed streams (#6351).
@@ -11710,6 +11816,7 @@ def cancel_stream(stream_id: str) -> bool:
     _snap_tool_calls = None
     _snap_flag = None
     _snap_agent = None
+    _claimed_fb_notice = None
     _cancel_session_payload = None
 
     with streams_lock:
@@ -11796,6 +11903,22 @@ def cancel_stream(stream_id: str) -> bool:
             f"Cancel requested for stream {stream_id} before agent ready - "
             f"cancel_event flag set, will be checked on agent startup"
         )
+
+    # ── Synchronized fallback-notice ownership handoff ──
+    # After interrupt() returns, no more _agent_status_callback calls fire, so
+    # any notice that was going to be published is already in the map.  Claim
+    # it under STREAMS_LOCK: set _cancel_claimed so the worker's finally skips
+    # popping (it would otherwise pop the entry before we can stamp it, losing
+    # the notice on reload).  If the worker's finally already ran and popped
+    # the entry, the worker's own error-path save persisted the notice — we
+    # have nothing to stamp.
+    # This replaces the old pre/post-interrupt snapshot approach with a single
+    # ownership handoff (reviewer requirement #1/#2).
+    with streams_lock:
+        _fb_entry = _STREAM_FALLBACK_NOTICES.get(stream_id)
+        if _fb_entry is not None:
+            _fb_entry['_cancel_claimed'] = True
+            _claimed_fb_notice = _fb_entry
 
     # Clear any pending clarify prompt so the blocked tool call can unwind.
     try:
@@ -12009,10 +12132,39 @@ def cancel_stream(stream_id: str) -> bool:
                         'provider_details_label': 'Cancellation details',
                         'timestamp': int(time.time()),
                     })
+                # Stamp any confirmed fallback notice onto the current-turn row
+                # before save, so it survives reload even when the user cancels
+                # mid-stream (gate-certifier finding #2).
+                # The notice was claimed under STREAMS_LOCK before interrupt(),
+                # so the worker's finally cannot have popped it — the ownership
+                # handoff guarantees it survives until we stamp it here.
+                # Bind to the exact current-turn row: the inserted/deduplicated
+                # partial row when present, otherwise the newly created
+                # cancellation marker.  Do not reverse-search arbitrary prior
+                # partial rows (reviewer requirement #3).
+                if _claimed_fb_notice:
+                    if _partial_msg is not None:
+                        _partial_msg['_fallbackNotice'] = _claimed_fb_notice
+                    else:
+                        # No partial content streamed — stamp on the cancel
+                        # marker we just appended (the current-turn row).
+                        _cs.messages[-1]['_fallbackNotice'] = _claimed_fb_notice
                 _cs.save()
                 _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
             except Exception:
                 logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
+            finally:
+                # Release ownership of the fallback notice and clean up the map
+                # entry.  Runs regardless of whether the save succeeded.
+                # The worker's finally skips popping when _cancel_claimed is
+                # set, so cancel must pop the entry itself.  If the save failed,
+                # the notice is still in the map — popping prevents leakage.
+                if _claimed_fb_notice is not None:
+                    with streams_lock:
+                        _entry = _STREAM_FALLBACK_NOTICES.get(stream_id)
+                        if _entry is not None and _entry is _claimed_fb_notice:
+                            _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+                    _claimed_fb_notice = None
 
     if _emit_cancel_event and q:
         _cancel_event_id = STREAM_LAST_EVENT_ID.get(stream_id)
