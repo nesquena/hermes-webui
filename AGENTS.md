@@ -61,6 +61,23 @@ resolved, and repeated evidence unless the user explicitly asks for them or a
 failure/risk requires diagnosis. Validation remains thorough; only its final
 presentation is compressed.
 
+### Background process completion notifications
+
+Raw background-process completion wakeups (for example, messages beginning
+`[IMPORTANT: Background process ... completed ...]`) are internal coordination
+signals. The agent currently conducting the conversation owns and consumes
+these signals.
+
+- Respond exactly `[[SILENT]]` when the wakeup is routine, successful,
+  intermediate, already known, or otherwise requires no user action.
+- Do not expose the raw command, process identifier, exit notification, or
+  empty output to the user.
+- Send a normal user-facing summary only when the wakeup completes the full
+  requested task with a useful result, reports a failure or material risk, or
+  requires a decision or action from the user.
+- Other profiles and worker agents must not independently surface the same
+  completion notification.
+
 - Keep one logical change per PR; split unrelated refactors or cleanup.
 - Read `docs/CONTRACTS.md` and the linked contract/RFC for the touched
   subsystem before editing.
