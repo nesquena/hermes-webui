@@ -36,6 +36,7 @@ from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     _coerce_provider_cost_budget,
+    _configured_model_ids,
     _custom_provider_slug_from_name,
     _get_label_for_model,
     _models_from_live_provider_ids,
@@ -2809,22 +2810,18 @@ def get_providers() -> dict[str, Any]:
                     cp_name,
                 )
                 continue
-            # Collect models from `models` (list or dict) or `model` single.
-            # An empty dict/list falls through to the singular `model` field so
-            # the Providers card stays consistent with the model picker, which
-            # always surfaces the configured default model (#6774).
-            cp_raw_models = cp.get("models")
-            cp_models = []
-            if isinstance(cp_raw_models, list) and cp_raw_models:
-                cp_models = [{"id": str(m), "label": str(m)} for m in cp_raw_models]
-            elif isinstance(cp_raw_models, dict) and cp_raw_models:
-                cp_models = [
-                    {"id": str(k), "label": str(k)}
-                    for k in cp_raw_models
-                    if isinstance(k, str)
-                ]
-            elif cp.get("model"):
-                cp_models = [{"id": cp["model"], "label": cp["model"]}]
+            # Collect models via the shared normalizer so the Providers card
+            # stays consistent with the model picker (_configured_model_ids
+            # handles dict, list, and list-of-dicts shapes — stripping
+            # whitespace, dropping empty IDs, and de-duplicating).
+            # Fall back to the singular ``model`` field when the normalized
+            # catalog is empty (#6774).
+            cp_model_ids = _configured_model_ids(cp.get("models"))
+            if not cp_model_ids and cp.get("model"):
+                fallback_id = str(cp["model"]).strip()
+                if fallback_id:
+                    cp_model_ids = [fallback_id]
+            cp_models = [{"id": mid, "label": mid} for mid in cp_model_ids]
             # Check for env var reference (${VAR_NAME} pattern)
             cp_api_key = str(cp.get("api_key") or "")
             cp_has_key = bool(cp_api_key.strip())

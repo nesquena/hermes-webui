@@ -224,3 +224,63 @@ class TestCustomProviderModelsDict:
             assert model_ids == ["Coding"]
         finally:
             _invalidate()
+
+    def test_whitespace_and_duplicate_keys_normalized(self, monkeypatch):
+        """Whitespace-padded and duplicate keys collapse to one clean entry.
+
+        Matches _configured_model_ids behaviour: strip, drop empties, dedup.
+        """
+        prov, _invalidate = _setup_providers_module(monkeypatch)
+        monkeypatch.setattr(
+            prov,
+            "get_config",
+            lambda: {
+                "model": {"provider": "custom:litellm"},
+                "custom_providers": [
+                    {
+                        "name": "litellm",
+                        "model": "Coding",
+                        "api_key": "sk-test",
+                        "models": {
+                            "Best": {},
+                            " Best ": {},      # whitespace variant
+                            "   ": {},          # whitespace-only → dropped
+                        },
+                    },
+                ],
+            },
+        )
+        try:
+            result = prov.get_providers()
+            cp = next(p for p in result["providers"] if p.get("is_custom"))
+            model_ids = [m["id"] for m in cp["models"]]
+            assert model_ids == ["Best"]
+            assert cp["models_total"] == 1
+        finally:
+            _invalidate()
+
+    def test_whitespace_only_model_field_produces_no_entries(self, monkeypatch):
+        """A whitespace-only singular model field emits no empty pills."""
+        prov, _invalidate = _setup_providers_module(monkeypatch)
+        monkeypatch.setattr(
+            prov,
+            "get_config",
+            lambda: {
+                "model": {"provider": "custom:litellm"},
+                "custom_providers": [
+                    {
+                        "name": "litellm",
+                        "model": "   ",  # whitespace-only → no fallback
+                        "api_key": "sk-test",
+                        "models": {},
+                    },
+                ],
+            },
+        )
+        try:
+            result = prov.get_providers()
+            cp = next(p for p in result["providers"] if p.get("is_custom"))
+            model_ids = [m["id"] for m in cp["models"]]
+            assert model_ids == []
+        finally:
+            _invalidate()
