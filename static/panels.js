@@ -1001,10 +1001,20 @@ async function loadCronGatewayNotice() {
   }
 }
 
+let _cronLoadGeneration = 0;  // monotonically bumped per loadCrons() entry; stale loads bail
+
 async function loadCrons(animate) {
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
   loadCronGatewayNotice();
+  // #6767 stale-refresh guard: loadCrons() is async, and both the poller and
+  // switchPanel('tasks') can fire it. If a request started earlier resolves
+  // after a newer one (e.g. the poller fired, then the user reopened the panel
+  // and switchPanel started a fresh load), applying the older response would
+  // overwrite the newer list/detail with stale data. Bump a generation token
+  // at entry and bail once a superseded request realises it is no longer the
+  // latest, so only the newest render wins.
+  const _cronLoadSeq = ++_cronLoadGeneration;
   if (animate && refreshBtn) {
     refreshBtn.style.opacity = '0.5';
     refreshBtn.disabled = true;
@@ -1013,6 +1023,7 @@ async function loadCrons(animate) {
     await loadCronProfiles();
     const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
     const data = await api('/api/crons' + allProfilesQS);
+    if (_cronLoadSeq !== _cronLoadGeneration) return;  // superseded by a newer load
     _cronList = data.jobs || [];
     _cronOtherProfileCount = Number(data.other_profile_count || 0);
     if (_showAllCronProfiles && !_cronList.some(job => job && job.read_only)) {
