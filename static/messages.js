@@ -1297,6 +1297,7 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
 }
 
 async function send(){
+  const pendingDecisionResolution = _pendingDecisionSend;
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
   // _defaultMessageMode
@@ -1746,8 +1747,15 @@ async function send(){
       profile:S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
-      moa_config:_pendingMoaConfig?true:undefined
+      moa_config:_pendingMoaConfig?true:undefined,
+      resolves_decision_id:pendingDecisionResolution&&pendingDecisionResolution.decision_id||undefined,
+      decision_option:pendingDecisionResolution&&pendingDecisionResolution.option||undefined
     })});
+    if(pendingDecisionResolution && _pendingDecisionSend===pendingDecisionResolution){
+      _pendingDecisionSend=null;
+      _clearClarifyPendingForSession(activeSid);
+      hideClarifyCard(true,'sent');
+    }
     _pendingMoaConfig=null;
     postStartData = startData;
   }catch(e){
@@ -7696,6 +7704,8 @@ let _clarifyMissingEndpointWarned = false;
 let _clarifyCountdownTimer = null;
 let _clarifyExpiresAt = 0;
 let _clarifyPendingBySession = new Map();
+let _clarifyDurableDecision = false;
+let _pendingDecisionSend = null;
 const CLARIFY_MIN_VISIBLE_MS = 30000;
 
 function _clarifyPromptBelongsToActiveSession(sid) {
@@ -7945,6 +7955,7 @@ function _resetClarifyCardState() {
   _clarifyVisibleSince = 0;
   _clarifySignature = '';
   _clarifyId = null;
+  _clarifyDurableDecision = false;
 }
 
 function hideClarifyCard(force=false, reason="dismissed") {
@@ -8024,6 +8035,7 @@ function showClarifyCard(pending) {
   const sameClarify = card.classList.contains("visible") && _clarifySignature === sig;
   _clarifySessionId = sid;
   _clarifyId = pending.clarify_id || null;
+  _clarifyDurableDecision = !!pending.durable_decision;
   _clarifySignature = sig;
   if (Number(pending.timeout_seconds) > 0) {
     _startClarifyCountdown(pending);
@@ -8090,7 +8102,7 @@ function showClarifyCard(pending) {
       }
     };
   }
-  if (typeof lockComposerForClarify === "function") {
+  if (!_clarifyDurableDecision && typeof lockComposerForClarify === "function") {
     lockComposerForClarify(question ? `Clarification needed: ${question}` : "Clarification needed");
   }
   _clarifySetControlsDisabled(false, false);
@@ -8119,6 +8131,18 @@ async function respondClarify(response) {
     return;
   }
   const clarifyId = _clarifyId;
+  if (_clarifyDurableDecision) {
+    _pendingDecisionSend = {decision_id: clarifyId, option: value};
+    const composer = $('msg');
+    if (composer) {
+      composer.value = value;
+      if (typeof autoResize === 'function') autoResize();
+      if (typeof updateSendBtn === 'function') updateSendBtn();
+    }
+    _clarifySetControlsDisabled(true, true);
+    await send();
+    return;
+  }
   // Keep a draft copy so we can restore the input on failure (issue #2639).
   const draft = value;
   _clarifySetControlsDisabled(true, true);
@@ -8253,7 +8277,12 @@ function _startClarifyFallbackPoll(sid) {
     try {
       const data = await api("/api/clarify/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showClarifyForSession(sid, data.pending); }
-      else { _clearClarifyPendingForSession(sid); _hideClarifyCardIfOwner(sid, false, 'expired'); }
+      else {
+        const decisions = await api("/api/pending-decisions?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
+        const pendingDecision = Array.isArray(decisions.pending_decisions) ? decisions.pending_decisions[0] : null;
+        if (pendingDecision) showPendingDecisionCard(sid, pendingDecision);
+        else { _clearClarifyPendingForSession(sid); _hideClarifyCardIfOwner(sid, false, 'expired'); }
+      }
     } catch(e) {
       const msg = String((e && e.message) || "");
       // `api()` attaches the raw HTTP status on the thrown Error (err.status).
@@ -8322,6 +8351,17 @@ function _startClarifyFallbackPoll(sid) {
   };
   _clarifyFallbackTimer = setInterval(_tick, 3000);
   _tick();
+}
+
+function showPendingDecisionCard(sid, pending) {
+  if (!pending || !pending.decision_id) return;
+  showClarifyForSession(sid, {
+    durable_decision: true,
+    clarify_id: pending.decision_id,
+    question: pending.question || '',
+    choices_offered: Array.isArray(pending.options) ? pending.options : [],
+    _session_id: sid,
+  });
 }
 
 function stopClarifyPollingForSession(sid) {

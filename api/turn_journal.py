@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover
 TURN_JOURNAL_DIR_NAME = "_turn_journal"
 _TERMINAL_EVENTS = {"completed", "interrupted"}
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_EVENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 
 
 def _default_session_dir() -> Path:
@@ -84,11 +85,18 @@ def append_turn_journal_event(
     payload["session_id"] = str(session_id)
     payload.setdefault("turn_id", _make_turn_id())
     payload.setdefault("created_at", time.time())
+    event_id = str(payload.get("event_id") or uuid.uuid4().hex)
+    if not _EVENT_ID_RE.fullmatch(event_id):
+        raise ValueError("invalid event_id")
+    payload["event_id"] = event_id
     if event_name in _TERMINAL_EVENTS:
         payload.setdefault("terminal", True)
 
     path = _journal_path(session_id, session_dir=session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
+    existing = read_turn_journal(session_id, session_dir=session_dir)
+    if any(item.get("event_id") == event_id for item in existing.get("events") or []):
+        raise ValueError("duplicate event_id")
     line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
     fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as fh:

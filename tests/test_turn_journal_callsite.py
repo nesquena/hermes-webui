@@ -23,3 +23,12 @@ def test_chat_start_writes_turn_journal_after_session_lock_and_handles_failure()
     assert "append_turn_journal_event(" not in lock_block
     assert "except Exception:" in append_block
     assert "Failed to append submitted turn journal event" in append_block
+
+
+def test_pending_decision_resolution_is_durable_before_worker_start():
+    src = Path("api/routes.py").read_text(encoding="utf-8")
+    append_idx = src.index("append_turn_journal_event(", src.index("def _start_chat_stream_for_session"))
+    resolve_idx = src.index("mark_pending_decision_resolved(", append_idx)
+    thread_idx = src.index("threading.Thread(", resolve_idx)
+    assert append_idx < resolve_idx < thread_idx
+    assert '"relation": "resolve_decision"' in src[append_idx:resolve_idx]

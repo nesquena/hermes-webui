@@ -1,0 +1,17 @@
+{
+  "schema_version": "superset-pending-decision/v2",
+  "storage": "SESSION_DIR/_pending_decisions/<session_id>/<decision_id>.json",
+  "resolution_storage": "SESSION_DIR/_pending_decisions/<session_id>/<decision_id>.resolution.json",
+  "required": [
+    "schema_version",
+    "decision_id",
+    "session_id",
+    "task_id",
+    "question",
+    "options",
+    "impact_summary",
+    "state"
+  ],
+  "state": "waiting_for_user",
+  "wall_clock_expiry": false
+}

@@ -1,6 +1,8 @@
 import json
 import os
 
+import pytest
+
 import api.turn_journal as turn_journal
 from api.session_recovery import audit_session_recovery
 from api.turn_journal import (
@@ -37,12 +39,28 @@ def test_append_turn_journal_event_fsyncs_jsonl_and_preserves_payload(tmp_path):
     assert event["version"] == 1
     assert event["session_id"] == "sid-1"
     assert event["created_at"] > 0
+    assert event["event_id"]
     journal_dir = tmp_path / "_turn_journal"
     shards = list(journal_dir.glob(f"sid-1~{os.getpid()}.jsonl"))
     assert len(shards) == 1, f"expected one pid-scoped shard, found: {list(journal_dir.iterdir())}"
     lines = shards[0].read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["content"] == "hello"
+
+
+def test_valid_caller_event_id_is_preserved_and_duplicate_is_rejected(tmp_path):
+    event = append_turn_journal_event(
+        "sid-1",
+        {"event": "submitted", "event_id": "evt-stable-1", "turn_id": "turn-1", "content": "hello"},
+        session_dir=tmp_path,
+    )
+    assert event["event_id"] == "evt-stable-1"
+    with pytest.raises(ValueError, match="duplicate event_id"):
+        append_turn_journal_event(
+            "sid-1",
+            {"event": "submitted", "event_id": "evt-stable-1", "turn_id": "turn-2", "content": "again"},
+            session_dir=tmp_path,
+        )
 
 
 def test_read_turn_journal_tolerates_malformed_lines(tmp_path):

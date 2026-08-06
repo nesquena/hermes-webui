@@ -13176,6 +13176,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/clarify/pending":
         return _handle_clarify_pending(handler, parsed)
 
+    if parsed.path == "/api/pending-decisions":
+        return _handle_pending_decisions(handler, parsed)
+
     if parsed.path == "/api/clarify/stream":
         return _handle_clarify_sse_stream(handler, parsed)
 
@@ -19172,6 +19175,18 @@ def _handle_clarify_pending(handler, parsed):
     return j(handler, {"pending": None})
 
 
+def _handle_pending_decisions(handler, parsed):
+    sid = parse_qs(parsed.query).get("session_id", [""])[0]
+    if not sid:
+        return bad(handler, "session_id is required")
+    from api.pending_decisions import list_pending_decisions
+
+    try:
+        return j(handler, {"pending_decisions": list_pending_decisions(sid)})
+    except ValueError as exc:
+        return bad(handler, str(exc))
+
+
 def _handle_clarify_sse_stream(handler, parsed):
     """SSE endpoint for real-time clarify notifications.
 
@@ -20751,6 +20766,7 @@ def _start_chat_stream_for_session(
     goal_related: bool = False,
     source: str = "webui",
     moa_config=None,
+    decision_resolution=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     attachments = attachments or []
@@ -20856,10 +20872,44 @@ def _start_chat_stream_for_session(
                 "model": model,
                 "model_provider": model_provider,
                 "created_at": s.pending_started_at,
+                "source": "pending_decision_resolution" if decision_resolution else "user_submission",
+                **(
+                    {
+                        "relation": "resolve_decision",
+                        "decision_id": decision_resolution["decision_id"],
+                        "decision_option": decision_resolution["option"],
+                    }
+                    if decision_resolution
+                    else {}
+                ),
             },
         )
     except Exception:
         logger.warning("Failed to append submitted turn journal event", exc_info=True)
+        if decision_resolution:
+            _clear_stale_stream_state(s)
+            return {
+                "error": "Failed to persist the decision response; no worker was started.",
+                "_status": 500,
+            }
+    if decision_resolution:
+        try:
+            from api.pending_decisions import mark_pending_decision_resolved
+
+            mark_pending_decision_resolved(
+                s.session_id,
+                decision_resolution["decision_id"],
+                option=decision_resolution["option"],
+                event_id=journal_event["event_id"],
+                turn_id=journal_event["turn_id"],
+            )
+        except Exception:
+            logger.warning("Failed to persist pending decision resolution", exc_info=True)
+            _clear_stale_stream_state(s)
+            return {
+                "error": "Failed to persist the decision response; no worker was started.",
+                "_status": 500,
+            }
     diag.stage("set_last_workspace") if diag else None
     set_last_workspace(workspace)
     diag.stage("stream_registration") if diag else None
@@ -20962,6 +21012,7 @@ def _start_run(
     route: str,
     diag=None,
     moa_config=None,
+    decision_resolution=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -21002,6 +21053,7 @@ def _start_run(
                 diag=diag,
                 source=request.source or source,
                 moa_config=moa_config,
+                decision_resolution=decision_resolution,
             )
 
         def _legacy_adapter_factory():
@@ -21042,6 +21094,7 @@ def _start_run(
         diag=diag,
         source=source,
         moa_config=moa_config,
+        decision_resolution=decision_resolution,
     )
 
 
@@ -21827,6 +21880,20 @@ def _handle_chat_start(handler, body, diag=None):
             "route": "/api/chat/start",
             "diag": diag,
         }
+        resolves_decision_id = str(body.get("resolves_decision_id") or "").strip()
+        if resolves_decision_id:
+            from api.pending_decisions import get_pending_decision
+
+            pending_decision = get_pending_decision(s.session_id, resolves_decision_id)
+            if not pending_decision or pending_decision.get("state") != "waiting_for_user":
+                return bad(handler, "pending decision is not active", 409)
+            decision_option = str(body.get("decision_option") or "").strip()
+            if decision_option not in (pending_decision.get("options") or []):
+                return bad(handler, "decision_option must select an offered option", 400)
+            start_run_kwargs["decision_resolution"] = {
+                "decision_id": resolves_decision_id,
+                "option": decision_option,
+            }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
         recovery_cleared_for_start = None
