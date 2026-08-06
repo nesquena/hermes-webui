@@ -21,15 +21,16 @@ import tempfile
 import threading
 from unittest.mock import patch, Mock
 
-from api.streaming import (
-    cancel_stream,
-    _STREAM_FALLBACK_NOTICES,
-    _STREAM_CANCEL_CLAIMED,
-    _STREAM_SETTLEMENT_TERMINAL,
-    _STREAM_WORKER_SAVED,
-    _publish_fallback_notice,
-    STREAMS_LOCK,
-)
+# IMPORTANT: reference mutable module-level registries through the module
+# object (api.streaming) rather than importing them by value.  Another test in
+# the shard (test_optionz_liveview_perf.py) calls importlib.reload(api.streaming),
+# which rebinds every module-level global to a fresh object.  A `from
+# api.streaming import _STREAM_FALLBACK_NOTICES` captures the pre-reload
+# reference; writes go to the orphaned old dict while cancel_stream reads the
+# new one — the test silently writes into a void and fails.  Module-qualified
+# access always resolves to the current binding.  (Full-suite CI failure,
+# Aug 1 2026.)
+import api.streaming as _streaming_mod
 from api.config import (
     AGENT_INSTANCES, STREAMS, CANCEL_FLAGS,
     STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
@@ -43,19 +44,19 @@ class TestPostCASBarrier:
         AGENT_INSTANCES.clear()
         STREAMS.clear()
         CANCEL_FLAGS.clear()
-        _STREAM_FALLBACK_NOTICES.clear()
-        _STREAM_CANCEL_CLAIMED.clear()
-        _STREAM_SETTLEMENT_TERMINAL.clear()
-        _STREAM_WORKER_SAVED.clear()
+        _streaming_mod._STREAM_FALLBACK_NOTICES.clear()
+        _streaming_mod._STREAM_CANCEL_CLAIMED.clear()
+        _streaming_mod._STREAM_SETTLEMENT_TERMINAL.clear()
+        _streaming_mod._STREAM_WORKER_SAVED.clear()
 
     def teardown_method(self):
         AGENT_INSTANCES.clear()
         STREAMS.clear()
         CANCEL_FLAGS.clear()
-        _STREAM_FALLBACK_NOTICES.clear()
-        _STREAM_CANCEL_CLAIMED.clear()
-        _STREAM_SETTLEMENT_TERMINAL.clear()
-        _STREAM_WORKER_SAVED.clear()
+        _streaming_mod._STREAM_FALLBACK_NOTICES.clear()
+        _streaming_mod._STREAM_CANCEL_CLAIMED.clear()
+        _streaming_mod._STREAM_SETTLEMENT_TERMINAL.clear()
+        _streaming_mod._STREAM_WORKER_SAVED.clear()
 
     def test_post_cas_barrier_rejects_B_through_real_callback(self):
         """Production-composed: after cancel_stream's CAS pops A and sets the
@@ -91,7 +92,7 @@ class TestPostCASBarrier:
         STREAM_PARTIAL_TEXT[stream_id] = "partial text"
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
-        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice_a)
+        _streaming_mod._STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice_a)
 
         _save_snapshots = []
         _b_published = [False]
@@ -127,13 +128,13 @@ class TestPostCASBarrier:
             # Publish B through the real gate — it must be REJECTED.
             if not _b_published[0]:
                 _b_published[0] = True
-                published = _publish_fallback_notice(stream_id, dict(_notice_b))
+                published = _streaming_mod._publish_fallback_notice(stream_id, dict(_notice_b))
                 assert published is False, (
                     "terminal fence failed to block post-CAS B — "
                     "_publish_fallback_notice accepted B after CAS pop, "
                     "B would be deleted by finalizers without saving"
                 )
-                assert stream_id not in _STREAM_FALLBACK_NOTICES, (
+                assert stream_id not in _streaming_mod._STREAM_FALLBACK_NOTICES, (
                     "post-CAS B entered the map despite the terminal fence"
                 )
             return None
@@ -141,7 +142,7 @@ class TestPostCASBarrier:
         with patch("api.streaming.get_session", return_value=mock_session), \
              patch("api.streaming._redacted_session_payload_with_full_messages",
                    side_effect=_payload_hook):
-            result = cancel_stream(stream_id)
+            result = _streaming_mod.cancel_stream(stream_id)
 
         assert result is True
 
@@ -164,10 +165,10 @@ class TestPostCASBarrier:
         assert set(notice.keys()) == {"message", "to_model", "to_provider"}
 
         # All registries retired
-        assert stream_id not in _STREAM_FALLBACK_NOTICES
-        assert stream_id not in _STREAM_CANCEL_CLAIMED
-        assert stream_id not in _STREAM_SETTLEMENT_TERMINAL
-        assert stream_id not in _STREAM_WORKER_SAVED
+        assert stream_id not in _streaming_mod._STREAM_FALLBACK_NOTICES
+        assert stream_id not in _streaming_mod._STREAM_CANCEL_CLAIMED
+        assert stream_id not in _streaming_mod._STREAM_SETTLEMENT_TERMINAL
+        assert stream_id not in _streaming_mod._STREAM_WORKER_SAVED
 
     def test_post_cas_barrier_disk_reload_asserts_one_durable_notice(self):
         """Production-composed with disk reload: after cancel_stream completes
@@ -198,7 +199,7 @@ class TestPostCASBarrier:
         STREAM_PARTIAL_TEXT[stream_id] = "partial text"
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
-        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice_a)
+        _streaming_mod._STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice_a)
 
         # Use a real temp-file-backed session to prove disk durability
         tmpdir = tempfile.mkdtemp()
@@ -233,7 +234,7 @@ class TestPostCASBarrier:
             if not _b_published[0]:
                 _b_published[0] = True
                 # Publish B through the REAL production gate after CAS
-                published = _publish_fallback_notice(stream_id, dict(_notice_b))
+                published = _streaming_mod._publish_fallback_notice(stream_id, dict(_notice_b))
                 assert published is False, (
                     "post-CAS B was not blocked by the terminal fence"
                 )
@@ -242,7 +243,7 @@ class TestPostCASBarrier:
         with patch("api.streaming.get_session", return_value=file_session), \
              patch("api.streaming._redacted_session_payload_with_full_messages",
                    side_effect=_payload_hook):
-            result = cancel_stream(stream_id)
+            result = _streaming_mod.cancel_stream(stream_id)
 
         assert result is True
 
@@ -267,9 +268,9 @@ class TestPostCASBarrier:
         )
 
         # Registries retired
-        assert stream_id not in _STREAM_FALLBACK_NOTICES
-        assert stream_id not in _STREAM_CANCEL_CLAIMED
-        assert stream_id not in _STREAM_SETTLEMENT_TERMINAL
+        assert stream_id not in _streaming_mod._STREAM_FALLBACK_NOTICES
+        assert stream_id not in _streaming_mod._STREAM_CANCEL_CLAIMED
+        assert stream_id not in _streaming_mod._STREAM_SETTLEMENT_TERMINAL
 
         # Cleanup
         os.unlink(session_path)
@@ -298,7 +299,7 @@ class TestPostCASBarrier:
         STREAM_PARTIAL_TEXT[stream_id] = "partial"
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
-        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice)
+        _streaming_mod._STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice)
 
         _prior = {"role": "assistant", "content": "Prior.", "timestamp": 1}
         cancel_session = Mock()
@@ -315,15 +316,15 @@ class TestPostCASBarrier:
         AGENT_INSTANCES[stream_id] = mock_agent
 
         with patch("api.streaming.get_session", return_value=cancel_session):
-            result = cancel_stream(stream_id)
+            result = _streaming_mod.cancel_stream(stream_id)
 
         # Cancel save failed -> non-silent disposition
         assert result is False
         # Notice left in map for worker
-        assert stream_id in _STREAM_FALLBACK_NOTICES
+        assert stream_id in _streaming_mod._STREAM_FALLBACK_NOTICES
         # Cancel registries retired
-        assert stream_id not in _STREAM_CANCEL_CLAIMED
-        assert stream_id not in _STREAM_SETTLEMENT_TERMINAL
+        assert stream_id not in _streaming_mod._STREAM_CANCEL_CLAIMED
+        assert stream_id not in _streaming_mod._STREAM_SETTLEMENT_TERMINAL
 
         # Worker retries: _finalize_cancelled_turn with a session whose save succeeds
         worker_session = Mock()
@@ -336,7 +337,7 @@ class TestPostCASBarrier:
         worker_session.save = Mock()
 
         _finalize_cancelled_turn(worker_session, stream_id=stream_id)
-        assert stream_id in _STREAM_WORKER_SAVED, (
+        assert stream_id in _streaming_mod._STREAM_WORKER_SAVED, (
             "worker retry did not mark stream as durably saved"
         )
 
@@ -348,10 +349,10 @@ class TestPostCASBarrier:
 
         # Worker retirement pops the exact notice and empties all registries
         _retire_worker_cancelled_state(stream_id)
-        assert stream_id not in _STREAM_FALLBACK_NOTICES
-        assert stream_id not in _STREAM_WORKER_SAVED
-        assert stream_id not in _STREAM_CANCEL_CLAIMED
-        assert stream_id not in _STREAM_SETTLEMENT_TERMINAL
+        assert stream_id not in _streaming_mod._STREAM_FALLBACK_NOTICES
+        assert stream_id not in _streaming_mod._STREAM_WORKER_SAVED
+        assert stream_id not in _streaming_mod._STREAM_CANCEL_CLAIMED
+        assert stream_id not in _streaming_mod._STREAM_SETTLEMENT_TERMINAL
 
     def test_cancel_first_save_failure_then_worker_retry_also_fails(self):
         """Cancel-first save failure + worker retry ALSO fails matrix:
@@ -373,7 +374,7 @@ class TestPostCASBarrier:
         STREAM_PARTIAL_TEXT[stream_id] = "partial"
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
-        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice)
+        _streaming_mod._STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice)
 
         _prior = {"role": "assistant", "content": "Prior.", "timestamp": 1}
         cancel_session = Mock()
@@ -390,10 +391,10 @@ class TestPostCASBarrier:
         AGENT_INSTANCES[stream_id] = mock_agent
 
         with patch("api.streaming.get_session", return_value=cancel_session):
-            result = cancel_stream(stream_id)
+            result = _streaming_mod.cancel_stream(stream_id)
 
         assert result is False
-        assert stream_id in _STREAM_FALLBACK_NOTICES, "notice dropped after cancel save failure"
+        assert stream_id in _streaming_mod._STREAM_FALLBACK_NOTICES, "notice dropped after cancel save failure"
 
         # Worker retry also fails
         worker_session = Mock()
@@ -406,23 +407,23 @@ class TestPostCASBarrier:
         worker_session.save = Mock(side_effect=RuntimeError("disk full again"))
 
         _finalize_cancelled_turn(worker_session, stream_id=stream_id)
-        assert stream_id not in _STREAM_WORKER_SAVED, (
+        assert stream_id not in _streaming_mod._STREAM_WORKER_SAVED, (
             "worker marked saved despite save failure"
         )
 
         # Worker retirement must NOT pop (not durably saved)
         _retire_worker_cancelled_state(stream_id)
         # Notice still in map — not silently dropped
-        assert stream_id in _STREAM_FALLBACK_NOTICES, (
+        assert stream_id in _streaming_mod._STREAM_FALLBACK_NOTICES, (
             "notice silently dropped after both cancel and worker saves failed"
         )
         # But ownership registries are retired — no unbounded growth
-        assert stream_id not in _STREAM_WORKER_SAVED
-        assert stream_id not in _STREAM_CANCEL_CLAIMED
-        assert stream_id not in _STREAM_SETTLEMENT_TERMINAL
+        assert stream_id not in _streaming_mod._STREAM_WORKER_SAVED
+        assert stream_id not in _streaming_mod._STREAM_CANCEL_CLAIMED
+        assert stream_id not in _streaming_mod._STREAM_SETTLEMENT_TERMINAL
 
         # Cleanup
-        _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+        _streaming_mod._STREAM_FALLBACK_NOTICES.pop(stream_id, None)
 
     def test_cancel_first_save_failure_settlement_exhaustion_disposition(self):
         """Settlement exhaustion disposition: cancel_stream returns False
@@ -440,15 +441,15 @@ class TestPostCASBarrier:
         STREAM_PARTIAL_TEXT[stream_id] = "partial"
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
-        _STREAM_SETTLEMENT_TERMINAL.clear()
-        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice)
+        _streaming_mod._STREAM_SETTLEMENT_TERMINAL.clear()
+        _streaming_mod._STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice)
 
         _save_count = [0]
 
         def _save_then_publish_next():
             _save_count[0] += 1
-            with STREAMS_LOCK:
-                _STREAM_FALLBACK_NOTICES[stream_id] = {
+            with _streaming_mod.STREAMS_LOCK:
+                _streaming_mod._STREAM_FALLBACK_NOTICES[stream_id] = {
                     "message": f"gen{_save_count[0]}",
                     "to_model": f"m{_save_count[0]}",
                     "to_provider": f"p{_save_count[0]}",
@@ -469,7 +470,7 @@ class TestPostCASBarrier:
         AGENT_INSTANCES[stream_id] = mock_agent
 
         with patch("api.streaming.get_session", return_value=mock_session):
-            result = cancel_stream(stream_id)
+            result = _streaming_mod.cancel_stream(stream_id)
 
         # Exact disposition: False (not True, not raise)
         assert result is False, (
@@ -477,9 +478,9 @@ class TestPostCASBarrier:
         )
 
         # Bounded-empty registries
-        assert stream_id not in _STREAM_CANCEL_CLAIMED
-        assert stream_id not in _STREAM_SETTLEMENT_TERMINAL
-        assert stream_id not in _STREAM_WORKER_SAVED
+        assert stream_id not in _streaming_mod._STREAM_CANCEL_CLAIMED
+        assert stream_id not in _streaming_mod._STREAM_SETTLEMENT_TERMINAL
+        assert stream_id not in _streaming_mod._STREAM_WORKER_SAVED
         # Notice left in map (not silently dropped)
-        assert stream_id in _STREAM_FALLBACK_NOTICES
-        _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+        assert stream_id in _streaming_mod._STREAM_FALLBACK_NOTICES
+        _streaming_mod._STREAM_FALLBACK_NOTICES.pop(stream_id, None)

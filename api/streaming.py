@@ -12415,6 +12415,10 @@ def cancel_stream(stream_id: str) -> bool:
                                 else:
                                     # A notice was retired by this loop's
                                     # compare-and-set pop — settlement done.
+                                    # Set the fence: the post-settlement
+                                    # window must stay sealed (see the
+                                    # _final_fb is None branch below).
+                                    _STREAM_SETTLEMENT_TERMINAL.add(stream_id)
                                     _settled = True
                                     break
                             else:
@@ -12446,13 +12450,28 @@ def cancel_stream(stream_id: str) -> bool:
                             break
                         _first_save = False
                         if _fb_to_stamp is None:
+                            # First-save with no notice — settlement done.
+                            # Set the fence for consistency: the post-settlement
+                            # window must stay sealed even when there was no
+                            # notice to retire.
+                            _STREAM_SETTLEMENT_TERMINAL.add(stream_id)
                             _settled = True
                             break
                         with streams_lock:
                             _final_fb = _STREAM_FALLBACK_NOTICES.get(stream_id)
                             if _final_fb is None:
                                 # Worker or another path popped it after
-                                # our save — settlement complete.
+                                # our save — settlement complete.  Still
+                                # set the terminal fence: the post-CAS
+                                # publication window (between this loop exit
+                                # and the inner finally) must stay sealed so
+                                # a callback cannot publish B into an
+                                # already-settled stream (gate-certifier
+                                # blocker #1 — found by full-suite CI: a
+                                # concurrent worker pop left the fence unset,
+                                # the hook at _redacted_session_payload ran
+                                # with no fence, and B was accepted).
+                                _STREAM_SETTLEMENT_TERMINAL.add(stream_id)
                                 _settled = True
                                 break
                             if id(_final_fb) == _fb_generation_id:
