@@ -2272,17 +2272,37 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
-  function _ownsActiveStreamOrBackground(){
+  function _ownsActiveStreamOrBackground(source){
+    // #6381 fresh-reconnect gap: require EXACT transport ownership. The
+    // session/streamId pair alone is not enough — the fresh reconnect path
+    // replaces the EventSource OBJECT for the same pair, and queued callbacks
+    // from the REPLACED source keep firing until the browser drains them. A
+    // callback is only authorized when LIVE_STREAMS[activeSid] exists, its
+    // streamId matches, and the captured `source` IS the current live source.
+    // Callers that have no transport handle (e.g. pure session-level checks)
+    // omit the argument and get the legacy session ownership check.
+    if(source){
+      const live=LIVE_STREAMS[activeSid];
+      if(!(live&&live.streamId===streamId&&live.source===source)) return false;
+    }
     return !_isActiveSession() || S.activeStreamId===streamId;
   }
   function _bailOutOfTerminalEventsFromStaleStream(source){
-    if(_ownsActiveStreamOrBackground()) return false;
-    // This stale stream no longer owns the session — schedule cleanup of ITS own
-    // anchor registry (identity-guarded, so it can't clobber the newer stream's
-    // registry for the same session) before closing. (Codex leak catch.)
-    _scheduleAnchorRegistryCleanup(120000);
-    _closeSource(source);
-    return true;
+    // Reject terminal events from a replaced/closed transport FIRST: a stale
+    // `done`/`stream_end`/`apperror`/`error`/`cancel` must not settle the
+    // current turn, clear INFLIGHT, or write the anchor registry — even when
+    // the session/stream pair matches. Valid background completion for the
+    // CURRENT exact source is preserved (the session-ownership check below).
+    if(!_ownsActiveStreamOrBackground(source)) {
+      // This stale stream no longer owns the session — schedule cleanup of ITS
+      // own anchor registry (identity-guarded, so it can't clobber the newer
+      // stream's registry for the same session) before closing. (Codex leak
+      // catch.)
+      _scheduleAnchorRegistryCleanup(120000);
+      _closeSource(source);
+      return true;
+    }
+    return false;
   }
   function _clearActivePaneInflightIfOwner(){
     if(_isActiveSession()) clearInflight();
@@ -5722,6 +5742,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
     }
     LIVE_STREAMS[activeSid]={streamId,source};
+    // Ownership of the live transport is now THIS source object. Every
+    // listener below gates on _ownsActiveStreamOrBackground(source) so a
+    // queued callback from a replaced/closed EventSource for the same
+    // session+stream pair is rejected (#6381 fresh-reconnect gap).
 
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
@@ -5740,6 +5764,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('token',e=>{
       if(_terminalStateReached||_streamFinalized) return;
+      if(!_ownsActiveStreamOrBackground(source)) return;
       const d=JSON.parse(e.data);
       assistantText+=d.text;
       syncInflightAssistantMessage();
@@ -5764,6 +5789,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('interim_assistant',e=>{
       if(_terminalStateReached||_streamFinalized) return;
+      if(!_ownsActiveStreamOrBackground(source)) return;
       const d=JSON.parse(e.data);
       const visible=String(d&&d.text?d.text:'').trim();
       const alreadyStreamed=!!(d&&d.already_streamed);
@@ -5847,7 +5873,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('reasoning',e=>{
       if(_terminalStateReached||_streamFinalized) return;
-      if(!_ownsActiveStreamOrBackground()) return;
+      if(!_ownsActiveStreamOrBackground(source)) return;
       const d=JSON.parse(e.data);
       const text=d.text||'';
       reasoningText += text;
@@ -5870,6 +5896,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('tool',e=>{
       if(_terminalStateReached||_streamFinalized) return;
+      if(!_ownsActiveStreamOrBackground(source)) return;
       if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
@@ -5906,6 +5933,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('tool_complete',e=>{
       if(_terminalStateReached||_streamFinalized) return;
+      if(!_ownsActiveStreamOrBackground(source)) return;
       if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
@@ -5951,6 +5979,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Cross-session protection mirrors every other live listener:
     // payload.session_id must match activeSid or the event is dropped.
     source.addEventListener('todo_state',e=>{
+      if(!_ownsActiveStreamOrBackground(source)) return;
       let d;
       try{ d=JSON.parse(e.data||'{}'); }catch(_){ return; }
       if(!d||typeof d!=='object') return;
@@ -5984,6 +6013,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('approval',e=>{
+      if(!_ownsActiveStreamOrBackground(source)) return;
       const d=JSON.parse(e.data);
       _applyToAnchor('approval',d,e);
       showApprovalForSession(activeSid, d, d.pending_count || 1);
@@ -5992,6 +6022,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('clarify',e=>{
+      if(!_ownsActiveStreamOrBackground(source)) return;
       const d=JSON.parse(e.data);
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
@@ -6000,6 +6031,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('state_saved',e=>{
+      if(!_ownsActiveStreamOrBackground(source)) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -6009,6 +6041,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('title',e=>{
+      if(!_ownsActiveStreamOrBackground(source)) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -6059,6 +6092,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
 
     source.addEventListener('goal',e=>{
+      if(!_ownsActiveStreamOrBackground(source)) return;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
@@ -6077,6 +6111,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('goal_continue',e=>{
+      if(!_ownsActiveStreamOrBackground(source)) return;
       try{
         const d=JSON.parse(e.data||'{}');
         const sid=d.session_id||activeSid;
@@ -6468,6 +6503,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('pending_steer_leftover',e=>{
+      if(!_ownsActiveStreamOrBackground(source)) return;
       // The agent finished its turn with steer text still stashed (no
       // tool-result boundary fired). Match the CLI's leftover-delivery
       // behaviour: queue the leftover text as a next-turn user message
@@ -6493,6 +6529,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('compressing',e=>{
+      if(!_ownsActiveStreamOrBackground(source)) return;
       // Context auto-compression is starting. Surface the same calm running
       // compression card as manual /compress while the summarizer LLM call runs.
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -6523,6 +6560,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('compressed',e=>{
+      if(!_ownsActiveStreamOrBackground(source)) return;
       // Context was auto-compressed during this turn. Keep the live timeline
       // honest by transitioning the running divider into a completed divider;
       // final settlement removes live-only compression rows from the Worklog.
@@ -6558,6 +6596,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('metering',e=>{
+      if(!_ownsActiveStreamOrBackground(source)) return;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
