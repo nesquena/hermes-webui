@@ -1607,7 +1607,6 @@ class TestCancelInterrupt:
         registries (gate-certifier #2: a failed worker save must not silently
         drop the only live notice).
         """
-        import threading
         from unittest.mock import Mock
         from api.streaming import (
             _STREAM_FALLBACK_NOTICES, _STREAM_WORKER_SAVED,
