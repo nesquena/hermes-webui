@@ -910,7 +910,7 @@ class TestCancelInterrupt:
         from unittest.mock import patch, Mock
         from api.streaming import (
             _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED,
-            _STREAM_SETTLEMENT_TERMINAL, STREAMS_LOCK,
+            _STREAM_SETTLEMENT_TERMINAL, _publish_fallback_notice,
         )
         from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
 
@@ -928,22 +928,27 @@ class TestCancelInterrupt:
             "to_provider": "p2",
         }
 
-        # ── Part 1: verify the callback path respects the fence ──
+        # ── Part 1: verify the REAL production callback path respects the fence ──
         # Simulate the fence being set (as the CAS pop would do)
         _STREAM_SETTLEMENT_TERMINAL.add(stream_id)
         _STREAM_FALLBACK_NOTICES.pop(stream_id, None)  # CAS popped A
 
-        # Simulate the production callback publication path:
-        # "with STREAMS_LOCK: if stream_id not in _STREAM_SETTLEMENT_TERMINAL:
-        #     _STREAM_FALLBACK_NOTICES[stream_id] = ..."
-        with STREAMS_LOCK:
-            if stream_id not in _STREAM_SETTLEMENT_TERMINAL:
-                _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice_b)
-
+        # Run the actual production publication gate: _publish_fallback_notice.
+        # It must REJECT B (return False) because the stream is terminal — the
+        # fence is held.  This is the real callback code path, not a memo.
+        published = _publish_fallback_notice(stream_id, dict(_notice_b))
+        assert published is False, (
+            "terminal fence failed to block B — _publish_fallback_notice "
+            "accepted a post-CAS publication"
+        )
         # B must NOT have been published — the fence blocked it
         assert stream_id not in _STREAM_FALLBACK_NOTICES, (
             "terminal fence failed to block B publication — B entered the map "
             "after CAS pop, would be deleted by finalizers without saving"
+        )
+        # The fence must still be held (sealed through the finalizer window)
+        assert stream_id in _STREAM_SETTLEMENT_TERMINAL, (
+            "terminal fence was dropped before finalizer retirement"
         )
         _STREAM_SETTLEMENT_TERMINAL.clear()
 
@@ -1098,7 +1103,7 @@ class TestCancelInterrupt:
         from unittest.mock import patch, Mock
         from api.streaming import (
             _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED,
-            _STREAM_SETTLEMENT_TERMINAL,
+            _STREAM_SETTLEMENT_TERMINAL, _STREAM_WORKER_SAVED,
         )
         from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
 
@@ -1133,7 +1138,13 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result is True
+        # Non-silent disposition (gate-certifier blocker #2 / rework point 3):
+        # a save failure means the terminal notice could NOT be confirmed
+        # durable within cancel's bounded window, so cancel_stream must NOT
+        # report success.  It returns False (routes.py surfaces cancelled:
+        # false) and logs an ERROR, while still leaving the notice in the map
+        # for the worker's _persist_cancelled_turn as a backstop.
+        assert result is False
 
         # Claim and terminal fence MUST be retired even though save failed
         assert stream_id not in _STREAM_CANCEL_CLAIMED, (
@@ -1151,6 +1162,13 @@ class TestCancelInterrupt:
         assert _fb.get("message") == _notice["message"]
         assert _fb.get("to_model") == _notice["to_model"]
         assert _fb.get("to_provider") == _notice["to_provider"]
+
+        # Bounded registries: cancel-side owner + fence retired and the worker
+        # never claimed durability, so _STREAM_WORKER_SAVED is empty too — no
+        # registry grows unbounded across failure paths (gate-certifier #2).
+        assert stream_id not in _STREAM_WORKER_SAVED, (
+            "worker-saved registry leaked after cancel-side save failure"
+        )
         _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
 
     def test_settlement_stale_stream_does_not_mutate_messages(self):
@@ -1398,7 +1416,7 @@ class TestCancelInterrupt:
         from unittest.mock import patch, Mock
         from api.streaming import (
             _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED,
-            _STREAM_SETTLEMENT_TERMINAL, STREAMS_LOCK,
+            _STREAM_SETTLEMENT_TERMINAL, _STREAM_WORKER_SAVED, STREAMS_LOCK,
         )
         from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
 
@@ -1451,7 +1469,12 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result is True
+        # Non-silent disposition (gate-certifier blocker #2 / rework point 3):
+        # loop exhaustion means the terminal notice could NOT be confirmed
+        # durable within cancel's bounded window, so cancel_stream does NOT
+        # report success — it returns False and logs an ERROR, leaving the
+        # current unsaved generation in the map for the worker.
+        assert result is False
 
         # The loop must have run _SETTLEMENT_MAX_ITERS times
         from api.streaming import _SETTLEMENT_MAX_ITERS_GLOBAL
@@ -1472,6 +1495,9 @@ class TestCancelInterrupt:
         # Claim and terminal fence retired
         assert stream_id not in _STREAM_CANCEL_CLAIMED
         assert stream_id not in _STREAM_SETTLEMENT_TERMINAL
+        # Worker never claimed durability on the cancel-side loop-exhaustion
+        # path — bounded registry, no growth (gate-certifier #2).
+        assert stream_id not in _STREAM_WORKER_SAVED
         _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
 
     def test_settlement_identical_partial_signatures_across_turns(self):
@@ -1571,3 +1597,155 @@ class TestCancelInterrupt:
         )
 
         assert stream_id not in _STREAM_FALLBACK_NOTICES
+    def test_worker_save_failure_then_retry_success_retires_exact_notice(self):
+        """Worker _finalize_cancelled_turn saves, fails once, then succeeds on
+        retry.  On the FAILED save, _STREAM_WORKER_SAVED must NOT contain the
+        stream — so the worker's retirement (_retire_worker_cancelled_state)
+        must NOT pop the live notice (the notice stays for cancel).  On the
+        SUCCESSFUL retry, _STREAM_WORKER_SAVED is set and the worker's
+        retirement compare-then-pops the exact notice and empties all
+        registries (gate-certifier #2: a failed worker save must not silently
+        drop the only live notice).
+        """
+        import threading
+        from unittest.mock import Mock
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_WORKER_SAVED,
+            _STREAM_CANCEL_CLAIMED, _STREAM_SETTLEMENT_TERMINAL,
+            _finalize_cancelled_turn, _retire_worker_cancelled_state,
+        )
+
+        stream_id = "worker_retry_ok"
+        session_id = "sess_worker_retry_ok"
+        _notice = {"message": "fb", "to_model": "m1", "to_provider": "p1"}
+        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice)
+
+        _saved = [0]
+
+        def _save():
+            _saved[0] += 1
+            if _saved[0] == 1:
+                raise RuntimeError("transient disk error")
+
+        ws = Mock()
+        ws.session_id = session_id
+        ws.active_stream_id = stream_id
+        ws.pending_user_message = "q"
+        ws.pending_attachments = []
+        ws.pending_started_at = 1.0
+        ws.messages = [{"role": "assistant", "content": "Prior.", "timestamp": 1}]
+        ws.save = Mock(side_effect=_save)
+
+        # First finalize: save FAILS -> _STREAM_WORKER_SAVED must not contain it
+        _finalize_cancelled_turn(ws, stream_id=stream_id)
+        assert stream_id not in _STREAM_WORKER_SAVED, (
+            "worker marked stream saved after a FAILED save"
+        )
+        # Worker retirement with a failed save must NOT pop the live notice
+        _retire_worker_cancelled_state(stream_id)
+        assert stream_id in _STREAM_FALLBACK_NOTICES, (
+            "worker retirement deleted the live notice after a failed save — "
+            "blocker #2: silent drop of the only copy"
+        )
+
+        # Retry: finalize again, save now succeeds -> _STREAM_WORKER_SAVED set
+        _finalize_cancelled_turn(ws, stream_id=stream_id)
+        assert stream_id in _STREAM_WORKER_SAVED, (
+            "worker failed to mark stream saved after a successful retry"
+        )
+        stamped = [
+            m for m in ws.messages
+            if isinstance(m, dict) and m.get("_fallbackNotice")
+        ]
+        assert len(stamped) >= 1, "worker retry did not persist a durable notice row"
+
+        # Worker retirement now pops the exact notice and empties all registries
+        _retire_worker_cancelled_state(stream_id)
+        assert stream_id not in _STREAM_FALLBACK_NOTICES
+        assert stream_id not in _STREAM_WORKER_SAVED
+        assert stream_id not in _STREAM_CANCEL_CLAIMED
+        assert stream_id not in _STREAM_SETTLEMENT_TERMINAL
+
+    def test_worker_first_save_failure_notice_survives_for_cancel_persist(self):
+        """Worker-first save failure composed end-to-end: the worker's
+        _finalize_cancelled_turn save() RAISES, so _STREAM_WORKER_SAVED stays
+        empty and the worker's retirement does NOT pop the notice.  The notice
+        remains in _STREAM_FALLBACK_NOTICES for cancel_stream to pick up, and a
+        subsequent cancel_stream persists it durably on the session row
+        (gate-certifier #2: at least one durable owner exists at all times).
+        """
+        import threading
+        from unittest.mock import patch, Mock
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_WORKER_SAVED,
+            _STREAM_CANCEL_CLAIMED, _STREAM_SETTLEMENT_TERMINAL,
+            _finalize_cancelled_turn, _retire_worker_cancelled_state,
+            cancel_stream,
+        )
+        from api.config import (
+            STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT,
+            STREAM_LIVE_TOOL_CALLS, AGENT_INSTANCES,
+        )
+
+        stream_id = "worker_first_fail"
+        session_id = "sess_worker_first_fail"
+        _notice = {"message": "fb", "to_model": "m1", "to_provider": "p1"}
+        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice)
+
+        # Worker session: save always fails
+        ws = Mock()
+        ws.session_id = session_id
+        ws.active_stream_id = stream_id
+        ws.pending_user_message = "q"
+        ws.pending_attachments = []
+        ws.pending_started_at = 1.0
+        ws.messages = [{"role": "assistant", "content": "Prior.", "timestamp": 1}]
+        ws.save = Mock(side_effect=RuntimeError("disk full"))
+
+        # Worker finalizes and its save FAILS
+        _finalize_cancelled_turn(ws, stream_id=stream_id)
+        assert stream_id not in _STREAM_WORKER_SAVED
+        # Worker retirement must NOT pop (not durably saved)
+        _retire_worker_cancelled_state(stream_id)
+        assert stream_id in _STREAM_FALLBACK_NOTICES, (
+            "worker dropped the only live notice after its save failure"
+        )
+
+        # Now cancel runs: its session save SUCCEEDS -> notice persisted durably
+        q = queue.Queue()
+        STREAMS[stream_id] = q
+        CANCEL_FLAGS[stream_id] = threading.Event()
+        STREAM_PARTIAL_TEXT[stream_id] = "partial"
+        STREAM_REASONING_TEXT[stream_id] = ""
+        STREAM_LIVE_TOOL_CALLS[stream_id] = []
+        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice)  # still parked
+
+        cs = Mock()
+        cs.session_id = session_id
+        cs.active_stream_id = stream_id
+        cs.pending_user_message = "q"
+        cs.pending_attachments = []
+        cs.pending_started_at = 1.0
+        cs.messages = [{"role": "assistant", "content": "Prior.", "timestamp": 1}]
+        cs.save = Mock()
+
+        mock_agent = Mock()
+        mock_agent.session_id = session_id
+        AGENT_INSTANCES[stream_id] = mock_agent
+
+        with patch("api.streaming.get_session", return_value=cs):
+            result = cancel_stream(stream_id)
+        assert result is True
+
+        stamped = [
+            m for m in cs.messages
+            if isinstance(m, dict) and m.get("_fallbackNotice")
+        ]
+        assert len(stamped) >= 1, (
+            "cancel failed to persist the notice left by the failed worker"
+        )
+        # Bounded registries after the full composed flow
+        assert stream_id not in _STREAM_FALLBACK_NOTICES
+        assert stream_id not in _STREAM_WORKER_SAVED
+        assert stream_id not in _STREAM_CANCEL_CLAIMED
+        assert stream_id not in _STREAM_SETTLEMENT_TERMINAL
