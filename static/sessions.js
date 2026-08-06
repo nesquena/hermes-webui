@@ -4127,6 +4127,35 @@ function _profileQueryIntentFromLocation(){
     };
   }catch(_e){return empty;}
 }
+function _workspaceQueryIntentFromLocation(){
+  // ?workspace=/abs/path — one-shot workspace routing at boot, symmetric to
+  // ?profile=. Validity: absolute path, no traversal. The server re-validates
+  // via resolve_trusted_workspace(), this is only a cheap client-side gate.
+  const empty={hasParam:false,valid:false,path:''};
+  if(typeof window==='undefined'||!window.location) return empty;
+  try{
+    const qs=new URLSearchParams(window.location.search||'');
+    if(!qs.has('workspace')) return empty;
+    const path=String(qs.get('workspace')||'');
+    return {
+      hasParam:true,
+      valid:path.startsWith('/')&&!path.includes('..')&&path.length<1024,
+      path
+    };
+  }catch(_e){return empty;}
+}
+function _consumeWorkspaceQueryParamFromLocation(){
+  if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
+  try{
+    const current=new URL(window.location.href);
+    const before=current.searchParams.toString();
+    current.searchParams.delete('workspace');
+    const after=current.searchParams.toString();
+    if(after===before) return;
+    const next=current.pathname+(after?`?${after}`:'')+(current.hash||'');
+    window.history.replaceState(window.history.state||null,'',next);
+  }catch(_e){}
+}
 function _consumeProfileQueryParamFromLocation(){
   if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
   try{

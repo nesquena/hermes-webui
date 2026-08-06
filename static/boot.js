@@ -3694,6 +3694,32 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
     }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
   }
+  // ?workspace=/abs/path (one-shot, symmetric to ?profile=) — route the boot
+  // into a fresh session bound to that workspace instead of restoring the
+  // saved one. Reuses the S._profileSwitchWorkspace one-shot contract that
+  // newSession() already consumes (same path as a profile-switch workspace).
+  // Combined with ?q=, this lets an external launcher open the agent on the
+  // right project with a prefilled composer.
+  const workspaceIntent=(typeof _workspaceQueryIntentFromLocation==='function')?_workspaceQueryIntentFromLocation():null;
+  if(workspaceIntent&&workspaceIntent.hasParam){
+    if(typeof _consumeWorkspaceQueryParamFromLocation==='function') _consumeWorkspaceQueryParamFromLocation();
+    if(workspaceIntent.valid){
+      try{
+        S._profileSwitchWorkspace=workspaceIntent.path;
+        await newSession(true,{worktree:false});
+        if(S.session){
+          try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
+        }
+        S._bootReady=true;
+        syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
+      }catch(e){
+        S._profileSwitchWorkspace=null;
+        console.warn('[boot] workspace query routing failed', e);
+      }
+    }else{
+      console.warn('[boot] ignored invalid workspace query', workspaceIntent.path);
+    }
+  }
   const _profileQueryBlocksSavedLocal=_profileQueryBlocksSavedLocalRestore(profileIntent, urlSession);
   if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){
     try{
