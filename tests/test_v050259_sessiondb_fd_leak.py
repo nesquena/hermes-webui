@@ -312,23 +312,28 @@ def test_stream_scoped_fallback_notices_dict_exists():
         "stream_id to _STREAM_CANCEL_CLAIMED under streams_lock BEFORE flag.set(), "
         "so the worker's finally cannot pop a late-published notice."
     )
-    # Verify the stamping targets the current-turn row (partial or cancel marker)
-    # The stamping block now checks both _claimed_fb_notice and a late-published
-    # notice from _STREAM_FALLBACK_NOTICES (finding #5: late publication is owned).
-    stamping_idx = src.find("if _fb_to_stamp:", cancel_claim)
-    if stamping_idx == -1:
-        stamping_idx = src.find("if _claimed_fb_notice:", cancel_claim)
+    # Verify the settlement loop stamps the notice on the current-turn row.
+    # The compare-and-set loop replaces the old three-step stamping with a
+    # single loop that calls _stamp_notice_on_current_turn_row().
+    stamping_idx = src.find("_stamp_notice_on_current_turn_row(", cancel_claim)
     assert stamping_idx != -1, (
-        "cancel_stream() must stamp the claimed (or late-published) fallback "
-        "notice on the current-turn row before s.save()."
+        "cancel_stream() must call _stamp_notice_on_current_turn_row() inside "
+        "the compare-and-set settlement loop to stamp the notice on the "
+        "current-turn row."
     )
-    stamping_block = src[stamping_idx:stamping_idx + 2000]
-    assert "_partial_msg" in stamping_block, (
-        "cancel_stream() must stamp on _partial_msg when present (current-turn row)."
+    # The settlement loop must save OUTSIDE streams_lock (blocker #3)
+    settlement_idx = src.find("_SETTLEMENT_MAX_ITERS", cancel_claim)
+    assert settlement_idx != -1, (
+        "cancel_stream() must use a bounded compare-and-set settlement loop "
+        "(_SETTLEMENT_MAX_ITERS) for the fallback notice."
     )
-    assert "_cs.messages[-1]" in stamping_block, (
-        "cancel_stream() must stamp on the cancel marker (messages[-1]) when "
-        "no partial message exists (no-partial case)."
+    settlement_block = src[settlement_idx:settlement_idx + 2000]
+    assert "_cs.save()" in settlement_block, (
+        "The settlement loop must persist via _cs.save()."
+    )
+    assert "_STREAM_FALLBACK_NOTICES.pop" in settlement_block or \
+           "_STREAM_FALLBACK_NOTICES.pop" in src[stamping_idx:stamping_idx + 3000], (
+        "The settlement must retire the map entry."
     )
 
     # 4. The worker's finally cleanup respects the ownership handoff:
