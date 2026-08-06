@@ -245,22 +245,20 @@ def _user_text_without_injected_context(content: Any) -> str:
     return '\n'.join(kept)
 
 
-def parse_codex_rollout(
+def _parse_codex_rollout_impl(
     path: Path, *, max_messages: int = CODEX_MAX_MESSAGES_PER_FILE
-) -> list[dict]:
-    """Parse one rollout JSONL into ``{role, content, timestamp}`` messages.
+) -> tuple[list[dict], bool]:
+    """Parse one rollout JSONL; returns ``(messages, truncated)``.
 
-    Only ``response_item`` records whose ``payload.type`` is ``message`` and whose
-    role is user/assistant are rendered. ``session_meta``, ``event_msg``,
-    ``turn_context``, tool traffic (``function_call``/``function_call_output``),
-    reasoning and ``developer``-role turns are skipped.
+    ``truncated`` is True when the rollout holds more rendered messages than
+    ``max_messages`` — the callers decide how to surface it (Detail prepends a
+    notice; the sidebar just caps its message_count).
     """
     messages: list[dict] = []
+    truncated = False
     try:
         with path.open('r', encoding='utf-8', errors='replace') as fh:
             for line in fh:
-                if len(messages) >= max_messages:
-                    break
                 line = line.strip()
                 if not line:
                     continue
@@ -288,19 +286,43 @@ def parse_codex_rollout(
                 ts = _parse_timestamp(raw.get('timestamp') or payload.get('timestamp'))
                 if ts is not None:
                     item['timestamp'] = ts
+                if len(messages) >= max_messages:
+                    truncated = True
+                if len(messages) == max_messages:
+                    messages.pop(0)
                 messages.append(item)
     except OSError:
-        return []
+        return [], False
     except Exception:
         logger.debug('Codex rollout parse failed for %s', path, exc_info=True)
-        return []
+        return [], False
+    return messages, truncated
+
+
+def parse_codex_rollout(
+    path: Path, *, max_messages: int = CODEX_MAX_MESSAGES_PER_FILE
+) -> list[dict]:
+    """Parse one rollout JSONL into ``{role, content, timestamp}`` messages.
+
+    Only ``response_item`` records whose ``payload.type`` is ``message`` and whose
+    role is user/assistant are rendered. ``session_meta``, ``event_msg``,
+    ``turn_context``, tool traffic (``function_call``/``function_call_output``),
+    reasoning and ``developer``-role turns are skipped.
+
+    The transcript is append-only and grows newest-last, so the most recent
+    turns are the tail of the file. To keep a newly-finished conversation's
+    latest turns (the ones a reader actually wants) instead of the stale head,
+    this keeps the **newest** ``max_messages`` rendered messages.
+    """
+    messages, _truncated = _parse_codex_rollout_impl(path, max_messages=max_messages)
     return messages
 
 
-def parse_codex_rollout_cached(
+
+def _parse_codex_rollout_cached_impl(
     path: Path, *, max_messages: int = CODEX_MAX_MESSAGES_PER_FILE
-) -> list[dict]:
-    """``parse_codex_rollout`` memoized on the file's (mtime_ns, size, ctime_ns).
+) -> tuple[list[dict], bool]:
+    """``_parse_codex_rollout_impl`` memoized on the file's stat signature.
 
     The sidebar build parses every visible rollout to get a message count, and
     those files are append-only and rarely change between polls, so the stat
@@ -312,15 +334,15 @@ def parse_codex_rollout_cached(
         st = path.stat()
         key = (str(path), st.st_mtime_ns, st.st_size, st.st_ctime_ns, int(max_messages))
     except OSError:
-        return parse_codex_rollout(path, max_messages=max_messages)
+        return _parse_codex_rollout_impl(path, max_messages=max_messages)
 
     with _PARSE_CACHE_LOCK:
         hit = _PARSE_CACHE.get(key)
         if hit is not None:
             _PARSE_CACHE.move_to_end(key)
-            return list(hit)
+            return (list(hit[0]), hit[1])
 
-    parsed = parse_codex_rollout(path, max_messages=max_messages)
+    parsed = _parse_codex_rollout_impl(path, max_messages=max_messages)
 
     with _PARSE_CACHE_LOCK:
         if key not in _PARSE_CACHE:
@@ -328,7 +350,31 @@ def parse_codex_rollout_cached(
             _PARSE_CACHE.move_to_end(key)
             while len(_PARSE_CACHE) > _PARSE_CACHE_MAX:
                 _PARSE_CACHE.popitem(last=False)
-    return list(parsed)
+    return (list(parsed[0]), parsed[1])
+
+
+def parse_codex_rollout_cached(
+    path: Path, *, max_messages: int = CODEX_MAX_MESSAGES_PER_FILE
+) -> list[dict]:
+    """``parse_codex_rollout`` memoized on the file's (mtime_ns, size, ctime_ns).
+
+    Keeps the historical single-list return shape for sidebar/simple callers.
+    """
+    messages, _truncated = _parse_codex_rollout_cached_impl(
+        path, max_messages=max_messages
+    )
+    return messages
+
+
+def parse_codex_rollout_detail_cached(
+    path: Path, *, max_messages: int = CODEX_MAX_MESSAGES_PER_FILE
+) -> tuple[list[dict], bool]:
+    """Like ``parse_codex_rollout_cached`` but also reports ``truncated``.
+
+    Backs the Detail endpoint so a reader of a very long Codex conversation can
+    be told the render window dropped the oldest turns.
+    """
+    return _parse_codex_rollout_cached_impl(path, max_messages=max_messages)
 
 
 def clear_codex_parse_cache() -> None:
@@ -538,9 +584,13 @@ def get_codex_session_detail(
         return None
     row = rows[0]
     path = _resolve_rollout_path(row.get('rollout_path'), home)
-    messages = parse_codex_rollout_cached(path) if path is not None else []
+    if path is not None:
+        messages, truncated = parse_codex_rollout_detail_cached(path)
+    else:
+        messages, truncated = [], False
     detail = _sidebar_row(row, messages, str(row.get('cwd') or ''))
     detail['messages'] = messages
+    detail['truncated'] = bool(truncated)
     detail['source'] = str(row.get('source') or '') or None
     detail['first_user_message'] = str(row.get('first_user_message') or '') or None
     detail['git_origin_url'] = str(row.get('git_origin_url') or '') or None

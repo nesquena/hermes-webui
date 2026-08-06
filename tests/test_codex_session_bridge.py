@@ -344,14 +344,14 @@ def test_parse_cache_is_keyed_on_file_stat(tmp_path):
     rollout = home / "sessions" / "2026" / "08" / "01" / f"rollout-2026-08-01T01-20-52-{THREAD_A}.jsonl"
 
     calls = 0
-    real_parse = codex.parse_codex_rollout
+    real_parse = codex._parse_codex_rollout_impl
 
     def counting_parse(path, **kwargs):
         nonlocal calls
         calls += 1
         return real_parse(path, **kwargs)
 
-    codex.parse_codex_rollout = counting_parse
+    codex._parse_codex_rollout_impl = counting_parse
     try:
         first = codex.parse_codex_rollout_cached(rollout)
         second = codex.parse_codex_rollout_cached(rollout)
@@ -458,3 +458,75 @@ def test_show_codex_sessions_is_a_known_bool_setting():
 
     assert _SETTINGS_DEFAULTS["show_codex_sessions"] is True
     assert "show_codex_sessions" in _SETTINGS_BOOL_KEYS
+
+
+def test_parse_keeps_newest_messages_and_reports_truncation(tmp_path):
+    """Long rollouts keep the NEWEST turns (not the oldest) and flag truncation."""
+    import api.codex_sessions as codex
+
+    rollout = tmp_path / "long.jsonl"
+    rows = []
+    for i in range(5):
+        rows.append(
+            {
+                "timestamp": f"2026-08-01T00:00:{i:02d}.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": f"turn-{i}",
+                },
+            }
+        )
+    _write_rollout(rollout, rows)
+
+    messages, truncated = codex._parse_codex_rollout_impl(rollout, max_messages=3)
+    assert truncated is True
+    # The window holds the newest 3 of 5 rendered turns.
+    assert [m["content"] for m in messages] == ["turn-2", "turn-3", "turn-4"]
+    # First message is the oldest RETAINED one (not the true transcript head),
+    # so only the oldest turns were dropped.
+    assert messages[0]["content"] == "turn-2"
+
+    # Within the cap: no truncation, all turns kept in order.
+    messages2, truncated2 = codex._parse_codex_rollout_impl(rollout, max_messages=10)
+    assert truncated2 is False
+    assert [m["content"] for m in messages2] == [f"turn-{i}" for i in range(5)]
+
+
+def test_detail_exposes_truncated_flag(tmp_path):
+    """get_codex_session_detail sets truncated when the rollout exceeds the cap."""
+    import api.codex_sessions as codex
+
+    home = _make_codex_home(tmp_path)
+    # Overwrite the single thread's rollout with a long one exceeding the cap.
+    rollout = (
+        home
+        / "sessions"
+        / "2026"
+        / "08"
+        / "01"
+        / f"rollout-2026-08-01T01-20-52-{THREAD_A}.jsonl"
+    )
+    rows = []
+    for i in range(codex.CODEX_MAX_MESSAGES_PER_FILE + 5):
+        rows.append(
+            {
+                "timestamp": f"2026-08-01T00:00:{i % 60:02d}.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": f"turn-{i}",
+                },
+            }
+        )
+    _write_rollout(rollout, rows)
+
+    detail = codex.get_codex_session_detail(f"codex_{THREAD_A}", home_dir=home)
+    assert detail is not None
+    assert detail["truncated"] is True
+    assert len(detail["messages"]) == codex.CODEX_MAX_MESSAGES_PER_FILE
+    # The retained window starts after the dropped head.
+    assert detail["messages"][0]["content"] == "turn-5"
+    assert detail["messages"][-1]["content"] == f"turn-{codex.CODEX_MAX_MESSAGES_PER_FILE + 4}"
