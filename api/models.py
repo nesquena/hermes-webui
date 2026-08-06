@@ -1421,6 +1421,14 @@ class Session:
         # constructed sessions (never loaded) default to 0, i.e. they reconcile
         # against any first truncation.
         self._loaded_truncate_generation = None
+        # #6422 re-gate: the message count this object was loaded with, used by
+        # ``_merge_concurrent_appends_locked()`` to recognize a first turn from
+        # an EMPTY base (loaded with zero rows): when disk and our transcript
+        # share no prefix but our base was empty, every disk row is a
+        # concurrent append from the same empty base and is merged by
+        # concatenation instead of bailing.  None = never loaded (fresh
+        # construction) — full divergence then stays a bail-to-safe case.
+        self._loaded_message_count = None
         # #6422: set by the truncation entry points (truncate_session_at_keep,
         # undo_last, retry_last) so save() can stamp a generation strictly
         # greater than anything on disk even when this object is a stale cache
@@ -1469,9 +1477,23 @@ class Session:
         Caller must hold ``_session_sidecar_cross_process_lock`` (or be in the
         advisory pre-pass, where the subsequent ``save()`` transaction
         re-validates everything under the lock).
+
+        Append intent is represented as an explicit BASE IDENTITY (the
+        fingerprint of the on-disk state this object's messages are based on)
+        plus the local delta (``self.messages``).  The base identity is ALWAYS
+        recorded — an empty sidecar and a zero-length disk tail are VALID
+        bases, never reasons to skip validation: ``save()`` re-reads under the
+        per-session cross-process lock and re-merges whenever the fingerprint
+        moved, so two writers that both preflighted against the same disk can
+        no longer have the second save overwrite the first's rows (PR #6422
+        re-gate).
         """
         self._merge_snapshot_fingerprint = None  # Reset on every call.
         if not self.path.exists():
+            # New sidecar: the base is the empty state.  Record it so save()
+            # re-validates — two first turns from the same empty base must
+            # both survive instead of the second save clobbering the first.
+            self._merge_snapshot_fingerprint = _fast_fingerprint('')
             return
         try:
             existing_text = self.path.read_text(encoding='utf-8')
@@ -1480,8 +1502,6 @@ class Session:
             return
         existing_msgs = existing.get('messages') or []
         our_msgs = self.messages or []
-        if not existing_msgs or not our_msgs:
-            return
 
         # ── #6422 authoritative truncate/clear generation guard ─────────
         # Row counts can never distinguish an intentional truncation (/undo,
@@ -1491,17 +1511,39 @@ class Session:
         # is the EXPECTED mid-turn state, not evidence of a truncation.  Only a
         # ``truncate_generation`` strictly NEWER than the one this object
         # loaded with is authoritative proof the user truncated since load.
+        # This comparison runs BEFORE the empty-list exits below: a
+        # clear-to-empty disk state (or an empty in-memory transcript) must
+        # never skip it, or a stale stream could resurrect a newer
+        # clear-to-empty transcript.
         disk_gen = int(existing.get('truncate_generation') or 0)
         loaded_gen = int(getattr(self, '_loaded_truncate_generation', None) or 0)
         if disk_gen > loaded_gen:
             # Fail closed: adopt the truncated disk state and its generation
-            # (never regress it).  This may drop our own new messages in the
-            # rare truncate-while-streaming case, but it cannot resurrect
-            # messages the user deleted.
+            # (never regress it).  Adopt BOTH the display transcript
+            # (``messages``) and the model-context truncation state
+            # (``context_messages``) so a newer non-empty generation cannot
+            # leave stale context behind to be persisted.  This may drop our
+            # own new messages in the rare truncate-while-streaming case, but
+            # it cannot resurrect messages the user deleted.
             self.messages = list(existing_msgs)
+            if isinstance(existing.get('context_messages'), list):
+                self.context_messages = list(existing['context_messages'])
             self.truncate_generation = disk_gen
             self._loaded_truncate_generation = disk_gen
             self._merge_snapshot_fingerprint = _fast_fingerprint(existing_text)
+            return
+
+        # Record the base identity ALWAYS.  A zero-tail disk (disk is a strict
+        # prefix of our transcript) and an empty disk are valid merge bases —
+        # ``save()`` must still re-validate under the lock, or two writers
+        # that both preflighted against the same disk would have their second
+        # save overwrite the first's rows (re-gate finding #1).
+        self._merge_snapshot_fingerprint = _fast_fingerprint(existing_text)
+
+        if not existing_msgs or not our_msgs:
+            # Nothing to reconcile (disk empty, or we carry no transcript).
+            # The base identity above keeps ``save()``'s CAS re-validation
+            # active for both shapes.
             return
 
         # Find the longest prefix where every position matches.  When both
@@ -1542,7 +1584,15 @@ class Session:
             prefix_len += 1
 
         if prefix_len == 0:
-            return  # No common ground — bail, don't risk data corruption.
+            # No shared prefix.  Valid ONLY when our base was empty (two first
+            # turns from a brand-new session): every disk row is a concurrent
+            # append from the same empty base, so concatenate disk rows first,
+            # then ours.  A divergent NON-empty base is corruption — bail
+            # rather than concatenate unrelated transcripts.
+            loaded_count = getattr(self, '_loaded_message_count', None)
+            if loaded_count == 0:
+                self.messages = list(existing_msgs) + list(our_msgs)
+            return
 
         # Messages on disk beyond the common prefix.
         disk_tail = existing_msgs[prefix_len:]
@@ -1550,12 +1600,13 @@ class Session:
             # Disk has nothing we don't already have.  A shorter on-disk
             # transcript at the SAME generation is a pre-turn checkpoint (or
             # stale copy), NOT a truncation — keep our completed transcript.
+            # The base identity recorded above keeps save()'s CAS re-validation
+            # active for this zero-tail shape (re-gate finding #1).
             return
 
         # Case 1: our messages are a prefix of disk (append race).
         if prefix_len == len(our_msgs):
             self.messages = list(our_msgs) + list(disk_tail)
-            self._merge_snapshot_fingerprint = _fast_fingerprint(existing_text)
             return
 
         # Case 2: divergent tails (concurrent equal-length append, or disk
@@ -1563,7 +1614,6 @@ class Session:
         # Merge: keep the common prefix, insert disk's extras, then our extras.
         our_tail = our_msgs[prefix_len:]
         self.messages = list(our_msgs[:prefix_len]) + list(disk_tail) + list(our_tail)
-        self._merge_snapshot_fingerprint = _fast_fingerprint(existing_text)
 
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
@@ -1678,7 +1728,11 @@ class Session:
             existing_gen = int((existing or {}).get('truncate_generation') or 0)
             if self._truncation_pending:
                 self.truncate_generation = max(int(self.truncate_generation or 0), existing_gen + 1)
-                self._truncation_pending = False
+                # NOTE: _truncation_pending is NOT cleared here.  It stays set
+                # until the temp write/fsync/atomic replace below succeeds, so
+                # a failed write preserves the pending truncation intent for
+                # the caller's retry instead of silently downgrading the next
+                # save to a plain (non-truncating) one (re-gate finding #2).
             else:
                 self.truncate_generation = max(int(self.truncate_generation or 0), existing_gen)
             if meta.get('truncate_generation') != self.truncate_generation:
@@ -1752,7 +1806,12 @@ class Session:
                     try:
                         _cas_text = self.path.read_text(encoding='utf-8')
                     except OSError:
-                        break  # File vanished — proceed, atomic write will create it.
+                        # File vanished (or never existed — empty base).  The
+                        # empty state is a valid CAS base: only a writer that
+                        # left the file empty (or absent) matches the recorded
+                        # empty-base identity; anything else forces a re-merge
+                        # that adopts the concurrent writer's rows.
+                        _cas_text = ''
                     _cur_fp = _fast_fingerprint(_cas_text)
                     if _cur_fp == _cas_fp:
                         break  # File unchanged since merge — continue to write.
@@ -1789,6 +1848,16 @@ class Session:
                 except Exception:
                     pass
                 raise
+            # ── #6422 re-gate: commit succeeded.  Advance the object's loaded
+            # truncate generation so a cache-resident follow-up turn on THIS
+            # object compares against the generation we just persisted (not
+            # the load-time one) — otherwise the next merge would see its own
+            # newer on-disk generation and misclassify it as a truncation,
+            # dropping the follow-up turn's rows.  Clear the pending-truncation
+            # flag only NOW: a failed write above re-raises and preserves the
+            # truncation intent for the retry.
+            self._truncation_pending = False
+            self._loaded_truncate_generation = int(self.truncate_generation or 0)
         if not skip_index:
             _write_session_index(updates=[self])
 
@@ -1838,6 +1907,10 @@ class Session:
         # truncation (disk generation newer than this) from a plain pre-turn
         # checkpoint (same generation, just shorter).
         session._loaded_truncate_generation = int(session.truncate_generation or 0)
+        # #6422 re-gate: remember the loaded message count so the merge can
+        # recognize a first turn from an EMPTY base (loaded with zero rows) —
+        # the one valid shape where disk and our transcript share no prefix.
+        session._loaded_message_count = len(session.messages or [])
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching

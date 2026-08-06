@@ -279,3 +279,403 @@ class TestAtomicMergeReplaceTransaction:
         assert _durable_contents(session_dir, sid) == [
             "start", "client-1-msg", "intruder-msg", "client-2-msg",
         ]
+
+
+class TestEmptyTailAndEmptyBaseCAS:
+    """Re-gate finding #1: the CAS base identity must be recorded even when
+    the disk tail is empty or the base is empty, so two writers that BOTH
+    preflight before either save cannot have the second save overwrite the
+    first's rows."""
+
+    def test_two_writers_both_preflight_before_any_save_both_rows_kept(self, _isolate_session_dir):
+        """Both clients load [start], append divergent rows, and run the
+        advisory merge while disk is STILL [start] — the zero-tail shape that
+        previously skipped fingerprint recording and let the second save
+        overwrite the first."""
+        session_dir, index_file = _isolate_session_dir
+        sid = "preflight_race"
+        base = [{"role": "user", "content": "start"}]
+
+        s0 = Session(session_id=sid, messages=[dict(m) for m in base])
+        s0.save()
+
+        # Client 1 loads [start], appends, preflights (zero disk tail).
+        c1 = Session.load(sid)
+        c1.messages.append({"role": "user", "content": "client-1"})
+        c1._merge_concurrent_appends()
+
+        # Client 2 loads [start] BEFORE client 1 saves, appends its own row,
+        # and preflights against the SAME [start] disk.
+        c2 = Session.load(sid)
+        c2.messages.append({"role": "user", "content": "client-2"})
+        c2._merge_concurrent_appends()
+
+        # Saves serialize; the second must detect the fingerprint change under
+        # the lock and merge, not overwrite.
+        c1.save()
+        c2.save()
+
+        assert _durable_contents(session_dir, sid) == ["start", "client-1", "client-2"]
+
+    def test_two_first_turns_from_empty_base_both_kept(self, _isolate_session_dir):
+        """A brand-new chat persisted as an empty sidecar; both clients load
+        the EMPTY base (``_loaded_message_count == 0``), append their first
+        turn, and preflight before either saves.  The empty base is a VALID
+        CAS base — the second save must re-merge and keep both first turns."""
+        session_dir, index_file = _isolate_session_dir
+        sid = "empty_base_first_turns"
+
+        # New chat persisted with zero messages (production shape).
+        s0 = Session(session_id=sid, messages=[])
+        s0.save()
+
+        c1 = Session.load(sid)
+        assert c1._loaded_message_count == 0
+        c1.messages.append({"role": "user", "content": "first-1"})
+        c1._merge_concurrent_appends()
+
+        c2 = Session.load(sid)
+        assert c2._loaded_message_count == 0
+        c2.messages.append({"role": "user", "content": "first-2"})
+        c2._merge_concurrent_appends()
+
+        c1.save()
+        c2.save()
+
+        assert _durable_contents(session_dir, sid) == ["first-1", "first-2"]
+
+    def test_second_save_after_empty_base_first_turn_keeps_both(self, _isolate_session_dir):
+        """Variant where the second writer LOADS the empty base but only
+        preflights AFTER the first writer saved (disk [first-1]): our base is
+        empty and disk shares no prefix, so the empty-base branch must
+        concatenate disk rows then ours instead of bailing and overwriting."""
+        session_dir, index_file = _isolate_session_dir
+        sid = "empty_base_serialized"
+
+        s0 = Session(session_id=sid, messages=[])
+        s0.save()
+
+        c1 = Session.load(sid)
+        c1.messages.append({"role": "user", "content": "first-1"})
+        c1._merge_concurrent_appends()
+
+        # c2 loads the EMPTY base before c1 saves, but only preflights after
+        # c1's write lands.
+        c2 = Session.load(sid)
+        assert c2._loaded_message_count == 0
+        c2.messages.append({"role": "user", "content": "first-2"})
+
+        c1.save()  # disk now [first-1]
+
+        c2._merge_concurrent_appends()
+        c2.save()
+
+        assert _durable_contents(session_dir, sid) == ["first-1", "first-2"]
+
+
+class TestAuthoritativeGenerationBoundaries:
+    """Re-gate finding #2: truncate_generation is authoritative across clear,
+    context, and failure boundaries."""
+
+    def test_clear_to_empty_newer_generation_beats_stale_stream(self, _isolate_session_dir):
+        """A stale stream must NOT resurrect a newer clear-to-empty
+        transcript: the generation comparison runs BEFORE the empty-list
+        exits."""
+        session_dir, index_file = _isolate_session_dir
+        sid = "clear_vs_stale"
+        base = [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+        ]
+
+        s0 = Session(session_id=sid, messages=[dict(m) for m in base])
+        s0.save()
+
+        # Stale client loaded the pre-clear transcript and completes a turn.
+        stale = Session.load(sid)
+        stale.messages = list(base) + [
+            {"role": "user", "content": "stale user"},
+            {"role": "assistant", "content": "stale reply"},
+        ]
+
+        # Another client clears via the production path → gen 1, messages [].
+        clear = Session.load(sid)
+        truncate_session_at_keep(clear, 0)
+        clear.save()
+        persisted = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+        assert persisted["messages"] == []
+        assert persisted["truncate_generation"] == 1
+
+        # The stale stream merges + saves: the clear must win.
+        stale._merge_concurrent_appends()
+        stale.save()
+
+        assert _durable_contents(session_dir, sid) == []
+        persisted = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+        assert persisted["truncate_generation"] == 1
+
+    def test_newer_nonempty_generation_adopts_display_and_context(self, _isolate_session_dir):
+        """When a newer non-empty generation wins the merge, BOTH the display
+        transcript (``messages``) and the model-context truncation state
+        (``context_messages``) must be adopted — a stale ``context_messages``
+        must never survive to be persisted."""
+        session_dir, index_file = _isolate_session_dir
+        sid = "gen_adopts_context"
+        base_msgs = [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "a2"},
+        ]
+        base_ctx = [
+            {"role": "user", "content": "ctx-q1"},
+            {"role": "assistant", "content": "ctx-a1"},
+            {"role": "user", "content": "ctx-q2"},
+            {"role": "assistant", "content": "ctx-a2"},
+        ]
+
+        s0 = Session(
+            session_id=sid,
+            messages=[dict(m) for m in base_msgs],
+            context_messages=[dict(m) for m in base_ctx],
+        )
+        s0.save()
+
+        # Client B truncates via the production path: display AND context both
+        # shrink to 2 rows, generation bumps to 1.
+        b = Session.load(sid)
+        truncate_session_at_keep(b, 2)
+        b.save()
+        persisted = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+        assert persisted["truncate_generation"] == 1
+        assert len(persisted["messages"]) == 2
+        assert len(persisted["context_messages"]) == 2
+
+        # Stale client A (loaded at generation 0) completes a turn carrying
+        # the FULL old display AND old context.
+        stale = Session(
+            session_id=sid,
+            messages=[dict(m) for m in base_msgs],
+            context_messages=[dict(m) for m in base_ctx],
+        )
+        stale.messages.append({"role": "assistant", "content": "stale reply"})
+        stale._merge_concurrent_appends()
+        stale.save()
+
+        reloaded = Session.load(sid)
+        assert [m.get("content") for m in reloaded.messages] == ["q1", "a1"]
+        assert [m.get("content") for m in reloaded.context_messages] == ["ctx-q1", "ctx-a1"]
+        persisted = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+        assert persisted["truncate_generation"] == 1
+
+    def test_cache_resident_truncate_then_new_turn_keeps_rows(self, _isolate_session_dir):
+        """A successful save advances the object's loaded generation, so a
+        cache-resident follow-up turn on the SAME object does not misclassify
+        its own persisted generation as a newer external truncation."""
+        session_dir, index_file = _isolate_session_dir
+        sid = "cache_resident_followup"
+        base = [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "q2"},
+        ]
+
+        s0 = Session(session_id=sid, messages=[dict(m) for m in base])
+        s0.save()
+
+        # Cache-resident object: truncates (gen → 1) and saves...
+        resident = Session.load(sid)
+        truncate_session_at_keep(resident, 1)
+        resident.save()
+        assert resident._loaded_truncate_generation == 1
+
+        # ...then — WITHOUT reloading — completes a NEW turn on the same
+        # object.  Its own generation on disk must not read as a truncation.
+        resident.messages.append({"role": "assistant", "content": "fresh reply"})
+        resident._merge_concurrent_appends()
+        resident.save()
+
+        assert _durable_contents(session_dir, sid) == ["q1", "fresh reply"]
+        persisted = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+        assert persisted["truncate_generation"] == 1
+
+    def test_failed_replace_preserves_truncation_pending_for_retry(self, _isolate_session_dir, monkeypatch):
+        """A failed atomic replace must preserve the pending truncation
+        intent: the retry stamps a generation STRICTLY greater than disk,
+        even when another writer advanced disk in between."""
+        session_dir, index_file = _isolate_session_dir
+        sid = "failed_replace_retry"
+        base = [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "q2"},
+        ]
+
+        s0 = Session(session_id=sid, messages=[dict(m) for m in base])
+        s0.save()
+
+        s = Session.load(sid)
+        truncate_session_at_keep(s, 1)
+        assert s._truncation_pending is True
+
+        real_replace = models.os.replace
+        failed = {"n": 0}
+
+        def _flaky_replace(src, dst):
+            if dst == s.path and failed["n"] == 0:
+                failed["n"] += 1
+                raise OSError("simulated replace failure")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(models.os, "replace", _flaky_replace)
+
+        with pytest.raises(OSError):
+            s.save()
+
+        # Truncation intent survived the failed write; nothing committed.
+        assert s._truncation_pending is True
+        persisted = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+        assert persisted["truncate_generation"] == 0
+
+        # Another client truncates again while our write is down (disk gen 1).
+        other = Session.load(sid)
+        truncate_session_at_keep(other, 1)
+        other.save()
+        persisted = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+        assert persisted["truncate_generation"] == 1
+
+        # Retry must stamp STRICTLY greater than disk (2), not merely carry
+        # forward the stale in-memory value (1).
+        s.save()
+        assert s._truncation_pending is False
+        persisted = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+        assert persisted["truncate_generation"] == 2
+        assert _durable_contents(session_dir, sid) == ["q1"]
+
+
+class TestGenerationAwareRecovery:
+    """Re-gate finding #3: recovery is generation-aware and runs under the
+    same per-session cross-process lock as Session.save()."""
+
+    def _write_sidecar(self, session_dir, sid, messages, truncate_generation=0, suffix=""):
+        path = session_dir / f"{sid}.json{suffix}"
+        path.write_text(
+            json.dumps({
+                "session_id": sid,
+                "messages": [{"role": "user", "content": m} for m in messages],
+                "truncate_generation": truncate_generation,
+            }),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_recovery_forbids_backup_with_lower_truncate_generation(self, _isolate_session_dir):
+        """A backup that predates an intentional truncation carries a LOWER
+        truncate_generation: recovery must NOT restore it, or the monotonic
+        generation would move backward and deleted rows would resurrect."""
+        from api.session_recovery import inspect_session_recovery_status, recover_session
+
+        session_dir, index_file = _isolate_session_dir
+        sid = "gen_aware"
+        live = self._write_sidecar(session_dir, sid, ["q1"], truncate_generation=2)
+        bak = self._write_sidecar(
+            session_dir, sid,
+            ["q1", "a1", "q2", "a2"],
+            truncate_generation=1,
+            suffix=".bak",
+        )
+
+        status = inspect_session_recovery_status(live)
+        assert status["recommend"] == "no_action"
+        assert status["newer_truncate_generation"] is True
+
+        result = recover_session(live)
+        assert result["restored"] is False
+        persisted = json.loads(live.read_text(encoding="utf-8"))
+        assert [m["content"] for m in persisted["messages"]] == ["q1"]
+        assert persisted["truncate_generation"] == 2
+
+    def test_startup_recovery_is_generation_aware(self, _isolate_session_dir):
+        """The startup scanner routes through the same generation-aware
+        decision: a truncated session is left untouched."""
+        from api.session_recovery import recover_all_sessions_on_startup
+
+        session_dir, index_file = _isolate_session_dir
+        sid = "gen_aware_startup"
+        live = self._write_sidecar(session_dir, sid, ["q1"], truncate_generation=2)
+        self._write_sidecar(
+            session_dir, sid,
+            ["q1", "a1", "q2", "a2"],
+            truncate_generation=1,
+            suffix=".bak",
+        )
+
+        result = recover_all_sessions_on_startup(session_dir)
+        assert result["restored"] == 0
+        persisted = json.loads(live.read_text(encoding="utf-8"))
+        assert persisted["truncate_generation"] == 2
+
+    def test_recovery_still_restores_backup_at_equal_generation(self, _isolate_session_dir):
+        """Control: the #1558 data-loss shape (shrink WITHOUT a generation
+        bump) is still restored — generation equality means the shrink was
+        NOT an intentional truncation."""
+        from api.session_recovery import inspect_session_recovery_status, recover_session
+
+        session_dir, index_file = _isolate_session_dir
+        sid = "gen_equal_loss"
+        live = self._write_sidecar(session_dir, sid, ["q1"], truncate_generation=0)
+        bak = self._write_sidecar(
+            session_dir, sid,
+            ["q1", "a1", "q2", "a2"],
+            truncate_generation=0,
+            suffix=".bak",
+        )
+
+        status = inspect_session_recovery_status(live)
+        assert status["recommend"] == "restore"
+
+        result = recover_session(live)
+        assert result["restored"] is True
+        persisted = json.loads(live.read_text(encoding="utf-8"))
+        assert [m["content"] for m in persisted["messages"]] == ["q1", "a1", "q2", "a2"]
+        assert bak.exists()  # the backup source is read-only, never consumed
+
+    def test_recover_session_holds_sidecar_lock_through_replace(self, _isolate_session_dir, monkeypatch):
+        """The per-session cross-process lock is held at the recovery replace:
+        a second open of the session's lock file must fail to acquire LOCK_EX
+        non-blockingly."""
+        import fcntl
+
+        from api.session_recovery import recover_session
+
+        session_dir, index_file = _isolate_session_dir
+        sid = "lock_held_recover"
+        live = self._write_sidecar(session_dir, sid, ["q1"])
+        self._write_sidecar(session_dir, sid, ["q1", "q2"], suffix=".bak")
+        lock_path = session_dir / f".{sid}.sidecar.lock"
+        observed = {}
+        real_replace = models.os.replace
+
+        def _replace_checking_lock(src, dst):
+            if dst != live:
+                return real_replace(src, dst)
+            try:
+                fd = os.open(lock_path, os.O_RDWR)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    observed["acquired"] = True
+                except BlockingIOError:
+                    observed["acquired"] = False
+                finally:
+                    os.close(fd)
+            except OSError as e:
+                observed["error"] = str(e)
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(models.os, "replace", _replace_checking_lock)
+
+        result = recover_session(live)
+        assert result["restored"] is True
+        assert observed.get("acquired") is False, (
+            f"sidecar lock must be held through the recovery replace; observed={observed}"
+        )
