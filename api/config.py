@@ -550,11 +550,17 @@ def _capture_profile_config_snapshot() -> dict:
             if isinstance(expanded, dict):
                 _apply_config_defaults(expanded)
                 return expanded
-        try:
-            active_cfg = cfg if cfg is not _cfg_cache else _cfg_cache
-        except NameError:
-            active_cfg = _cfg_cache
-        return copy.deepcopy(active_cfg)
+        # Raw YAML unavailable (missing/empty/invalid/non-mapping). Never copy
+        # the shared cache here: it may hold ANOTHER profile's data (populated
+        # by a concurrent reload between our staleness check and this branch),
+        # which would leak that profile's providers/models/aliases/endpoints
+        # into this request (greptile P1). Produce THIS profile's
+        # empty/default configuration instead — the same shape
+        # _refresh_config_cache() leaves for a missing file, and exactly what
+        # get_config() returns for it.
+        empty_defaults: dict = {}
+        _apply_config_defaults(empty_defaults)
+        return empty_defaults
 
 
 def get_webui_session_save_mode(config_data: dict | None = None) -> str:
