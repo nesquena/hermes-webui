@@ -120,12 +120,12 @@ class TestCustomProviderModelsDict:
         finally:
             _invalidate()
 
-    def test_dict_models_ignore_legacy_model_field(self, monkeypatch):
-        """When models is a dict, the singular ``model`` field is NOT appended.
+    def test_singular_model_appears_first_before_dict_models(self, monkeypatch):
+        """The singular ``model`` field appears first, then dict catalog models.
 
-        The dict is the authoritative catalog — the legacy ``model`` field is
-        sticky metadata (default/sticky selection) and is not merged into the
-        list.  This holds whether or not ``model`` matches a dict key.
+        This matches the sticky-before-plural ordering used by the model picker
+        (api/config.py:7308-7314), so the Providers card stays consistent.
+        The sticky model appears even when it is not a key in the models dict.
         """
         prov, _invalidate = _setup_providers_module(monkeypatch)
         monkeypatch.setattr(
@@ -150,9 +150,8 @@ class TestCustomProviderModelsDict:
             result = prov.get_providers()
             cp = next(p for p in result["providers"] if p.get("is_custom"))
             model_ids = [m["id"] for m in cp["models"]]
-            # Only dict keys; legacy model field is not appended.
-            assert model_ids == ["Best", "Fast"]
-            assert "glm-5.2" not in model_ids
+            # Sticky model first, then dict keys.
+            assert model_ids == ["glm-5.2", "Best", "Fast"]
         finally:
             _invalidate()
 
@@ -186,7 +185,7 @@ class TestCustomProviderModelsDict:
             result = prov.get_providers()
             cp = next(p for p in result["providers"] if p.get("is_custom"))
             model_ids = [m["id"] for m in cp["models"]]
-            # No duplicates, dict insertion order preserved.
+            # No duplicates, sticky-first then dict insertion order.
             assert model_ids == ["Best", "Coding", "Fast"]
             assert model_ids.count("Best") == 1
         finally:
@@ -226,9 +225,10 @@ class TestCustomProviderModelsDict:
             _invalidate()
 
     def test_whitespace_and_duplicate_keys_normalized(self, monkeypatch):
-        """Whitespace-padded and duplicate keys collapse to one clean entry.
+        """Whitespace-padded and duplicate dict keys collapse to clean entries.
 
         Matches _configured_model_ids behaviour: strip, drop empties, dedup.
+        The singular model field (Coding) is prepended as sticky-first.
         """
         prov, _invalidate = _setup_providers_module(monkeypatch)
         monkeypatch.setattr(
@@ -243,7 +243,7 @@ class TestCustomProviderModelsDict:
                         "api_key": "sk-test",
                         "models": {
                             "Best": {},
-                            " Best ": {},      # whitespace variant
+                            " Best ": {},      # whitespace variant → deduped
                             "   ": {},          # whitespace-only → dropped
                         },
                     },
@@ -254,8 +254,9 @@ class TestCustomProviderModelsDict:
             result = prov.get_providers()
             cp = next(p for p in result["providers"] if p.get("is_custom"))
             model_ids = [m["id"] for m in cp["models"]]
-            assert model_ids == ["Best"]
-            assert cp["models_total"] == 1
+            # Sticky-first, then normalized dict keys (no dupes, no empties).
+            assert model_ids == ["Coding", "Best"]
+            assert cp["models_total"] == 2
         finally:
             _invalidate()
 

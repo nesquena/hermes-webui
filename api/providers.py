@@ -2810,17 +2810,19 @@ def get_providers() -> dict[str, Any]:
                     cp_name,
                 )
                 continue
-            # Collect models via the shared normalizer so the Providers card
-            # stays consistent with the model picker (_configured_model_ids
-            # handles dict, list, and list-of-dicts shapes — stripping
-            # whitespace, dropping empty IDs, and de-duplicating).
-            # Fall back to the singular ``model`` field when the normalized
-            # catalog is empty (#6774).
-            cp_model_ids = _configured_model_ids(cp.get("models"))
-            if not cp_model_ids and cp.get("model"):
-                fallback_id = str(cp["model"]).strip()
-                if fallback_id:
-                    cp_model_ids = [fallback_id]
+            # Build the model list using the same sticky-before-plural
+            # ordering as the model picker (api/config.py:7308-7314):
+            # the singular ``model`` field goes first, then unique IDs from
+            # the ``models`` catalog are appended via _configured_model_ids
+            # (which strips whitespace, drops empty IDs, and de-duplicates).
+            # This keeps the Providers card consistent with the picker.
+            cp_model_ids: list[str] = []
+            _singular_model = str(cp.get("model") or "").strip()
+            if _singular_model:
+                cp_model_ids.append(_singular_model)
+            for _mid in _configured_model_ids(cp.get("models")):
+                if _mid not in cp_model_ids:
+                    cp_model_ids.append(_mid)
             cp_models = [{"id": mid, "label": mid} for mid in cp_model_ids]
             # Check for env var reference (${VAR_NAME} pattern)
             cp_api_key = str(cp.get("api_key") or "")
