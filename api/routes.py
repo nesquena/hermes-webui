@@ -7115,8 +7115,20 @@ def _read_profile_model_config(
 
     try:
         from api.profiles import get_hermes_home_for_profile
+        from api.profiles import is_valid_profile_identity
 
         _profile_name = str(session.profile or "")
+        # #6718 review 3 (SILENT): fail closed on an INVALID persisted
+        # session.profile. ``get_hermes_home_for_profile`` maps names that do
+        # not match the profile-id shape to the ROOT home, so an invalid
+        # stored name would load the ROOT config here — and this function's
+        # ``profile_config`` result feeds the custom-provider slug normalizer
+        # (GET /api/session display, chat/start wakeup, goal paths), letting a
+        # root-only provider slug remap inside that session. Validate BEFORE
+        # resolution; anything that is neither a root alias nor a valid named
+        # profile yields None (no config), never the root fallback.
+        if not is_valid_profile_identity(_profile_name):
+            return None, None, None
         _profile_home = get_hermes_home_for_profile(_profile_name)
         _profile_cfg_path = os.path.join(str(_profile_home), "config.yaml")
         if not os.path.isfile(_profile_cfg_path):
