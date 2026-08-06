@@ -14800,36 +14800,39 @@ def handle_post(handler, parsed) -> bool:
             files = []
         if isinstance(files, list) and len(files) > _MAX_DRAFT_FILES:
             files = files[:_MAX_DRAFT_FILES]
-        try:
-            # Drafts are UI metadata. A metadata-only load avoids parsing the
-            # large transcript when this session is not already cached, and the
-            # dedicated draft sidecar keeps the write path independent from the
-            # full per-session mutation lock.
-            s = get_session(sid, metadata_only=True)
-        except KeyError:
-            return bad(handler, "Session not found", 404)
-        _draft_mark("after_get_session")
         unchanged = False
-        with draft_store.draft_lock(sid):
-            _draft_mark("acquired_lock")
-            current_draft = draft_store.load_draft(
-                sid,
-                fallback=getattr(s, "composer_draft", {}) or {},
-            )
-            next_draft = dict(current_draft)
-            if text is not None:
-                next_draft["text"] = text
-            if files is not None:
-                next_draft["files"] = files
-            if next_draft == current_draft:
-                unchanged = True
-                saved_draft = current_draft
-            else:
-                saved_draft = draft_store.save_draft(sid, next_draft)
-                # Keep an already-cached Session projection current for the
-                # current request/session without saving the transcript.
-                s.composer_draft = saved_draft
-        _draft_mark("released_lock")
+        with session_runtime_state.runtime_state_lock(sid):
+            if not _session_owner_present(sid):
+                return bad(handler, "Session not found", 404)
+            try:
+                # Drafts are UI metadata. A metadata-only load avoids parsing the
+                # large transcript when this session is not already cached, and the
+                # dedicated draft sidecar keeps the write path independent from the
+                # full per-session mutation lock.
+                s = get_session(sid, metadata_only=True)
+            except KeyError:
+                return bad(handler, "Session not found", 404)
+            _draft_mark("after_get_session")
+            with draft_store.draft_lock(sid):
+                _draft_mark("acquired_lock")
+                current_draft = draft_store.load_draft(
+                    sid,
+                    fallback=getattr(s, "composer_draft", {}) or {},
+                )
+                next_draft = dict(current_draft)
+                if text is not None:
+                    next_draft["text"] = text
+                if files is not None:
+                    next_draft["files"] = files
+                if next_draft == current_draft:
+                    unchanged = True
+                    saved_draft = current_draft
+                else:
+                    saved_draft = draft_store.save_draft(sid, next_draft)
+                    # Keep an already-cached Session projection current for the
+                    # current request/session without saving the transcript.
+                    s.composer_draft = saved_draft
+            _draft_mark("released_lock")
         payload = {"ok": True, "draft": saved_draft}
         if unchanged:
             payload["unchanged"] = True
@@ -14953,33 +14956,34 @@ def handle_post(handler, parsed) -> bool:
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         try:
-            with LOCK:
-                SESSIONS.pop(sid, None)
-            try:
-                p = (SESSION_DIR / f"{sid}.json").resolve()
-                p.relative_to(SESSION_DIR.resolve())
-            except Exception:
-                return bad(handler, "Invalid session_id", 400)
-            sidecar_deleted = False
-            _delete_session_sidecars(sid)
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session file %s", p)
-            sidecar_deleted = not p.exists()
-            try:
-                prune_session_from_index(sid)
-            except Exception:
-                logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
-            try:
-                p.with_suffix('.json.bak').unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-            if sidecar_deleted and not is_messaging_session:
+            with session_runtime_state.runtime_state_lock(sid):
+                with LOCK:
+                    SESSIONS.pop(sid, None)
                 try:
-                    _record_webui_deleted_session_tombstone(sid)
+                    p = (SESSION_DIR / f"{sid}.json").resolve()
+                    p.relative_to(SESSION_DIR.resolve())
                 except Exception:
-                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+                    return bad(handler, "Invalid session_id", 400)
+                sidecar_deleted = False
+                _delete_session_sidecars(sid)
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    logger.debug("Failed to unlink session file %s", p)
+                sidecar_deleted = not p.exists()
+                try:
+                    prune_session_from_index(sid)
+                except Exception:
+                    logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
+                try:
+                    p.with_suffix('.json.bak').unlink(missing_ok=True)
+                except Exception:
+                    logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+                if sidecar_deleted and not is_messaging_session:
+                    try:
+                        _record_webui_deleted_session_tombstone(sid)
+                    except Exception:
+                        logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
         # Evict outside the mutation lock: lifecycle commit may perform provider
@@ -21898,6 +21902,19 @@ def _handle_bg_task_complete_ack(handler, body):
         },
         extra_headers={"Deprecation": "true"} if legacy_process_id_used else {},
     )
+
+
+def _session_owner_present(session_id: str) -> bool:
+    with LOCK:
+        if session_id in SESSIONS:
+            return True
+    try:
+        from api import models
+
+        session_dir = Path(models.SESSION_DIR)
+    except Exception:
+        session_dir = SESSION_DIR
+    return (session_dir / f"{session_id}.json").exists()
 
 
 def _delete_session_sidecars(session_id: str) -> None:
