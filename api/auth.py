@@ -748,7 +748,10 @@ def _trusted_auth_bound_profile(handler) -> str | None:
     groups = set(_trusted_groups_header_value(handler))
     for group, profile in mapping.items():
         if group in groups:
-            return profile
+            # A mapping value of "*" means this group is not bound to a
+            # single profile: the session can switch freely across all
+            # profiles (admin access), instead of being locked to one.
+            return None if profile == '*' else profile
     return 'default'
 
 
@@ -887,15 +890,28 @@ def ensure_trusted_auth_session(handler) -> dict | None:
         return handler._trusted_auth_session_reconciled
     cookie_value = parse_cookie(handler)
     info = get_session_info(cookie_value) if cookie_value and verify_session(cookie_value) else None
-    if info and info.get('auth_type') != 'trusted':
+
+    # A request that arrives through the trusted proxy and asserts an
+    # identity via the trusted header must always be reconciled below,
+    # even when a stale non-trusted session cookie is already present
+    # (e.g. a shared-password session created before trusted-header auth
+    # was enabled, or another trusted user's leftover cookie on a shared
+    # browser). Otherwise that old cookie wins forever and Authelia's
+    # asserted identity/profile binding is silently ignored.
+    from api.routes import _raw_peer_is_trusted_proxy
+
+    trusted_request = (
+        is_trusted_auth_enabled()
+        and _raw_peer_is_trusted_proxy(handler)
+        and bool(_trusted_auth_username(handler))
+    )
+    if info and info.get('auth_type') != 'trusted' and not trusted_request:
         return _remember_trusted_auth_session(handler, info)
     if not is_trusted_auth_enabled():
         if info:
             invalidate_session(cookie_value)
             handler._trusted_auth_session_rejected = True
         return _remember_trusted_auth_session(handler, None)
-    from api.routes import _raw_peer_is_trusted_proxy
-
     if not _raw_peer_is_trusted_proxy(handler):
         if info:
             invalidate_session(cookie_value)
