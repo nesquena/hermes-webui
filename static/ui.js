@@ -15854,6 +15854,12 @@ function _reanchorPinnedTailAfterRender(wasNearTail){
   if(!wasNearTail) return;
   const el=$('messages');
   if(!el) return;
+  // #6653 re-gate: honor a false follow-intent cache. The re-anchor is an
+  // AUTOMATIC writer — it must never flip a reader's scroll-away back to
+  // "following". A reader who scrolled up (cache synchronously invalidated on
+  // authoritative upward input) stays where they are and the false cache stays
+  // sticky; only a confirmed tail-follower (cache still true) is re-anchored.
+  if(_messageFollowIntentCache===false) return;
   const settledMax=Math.max(0, el.scrollHeight-el.clientHeight);
   if(el.scrollTop < settledMax-1){
     _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
