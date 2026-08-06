@@ -302,10 +302,10 @@ def test_stream_scoped_fallback_notices_dict_exists():
         "cancel_stream()'s snapshot sees a consistent value."
     )
 
-    # 3. cancel_stream() claims the notice under STREAMS_LOCK after interrupt()
-    # returns, then stamps it on the current-turn row before _cs.save().
-    # The ownership handoff ensures the worker's finally cannot pop the notice
-    # before cancel stamps it (reviewer requirement #1/#2).
+    # 3. cancel_stream() claims the notice under STREAMS_LOCK BEFORE interrupt()
+    # so the worker's finally cannot pop it before cancel stamps it.
+    # The ownership handoff (claim BEFORE interrupt) ensures the worker's
+    # finally sees _cancel_claimed and skips popping, so cancel can stamp it.
     cancel_claim = src.find("_fb_entry['_cancel_claimed'] = True")
     assert cancel_claim != -1, (
         "cancel_stream() must claim the fallback notice by setting "

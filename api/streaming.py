@@ -11887,6 +11887,25 @@ def cancel_stream(stream_id: str) -> bool:
                 agent = cached[0]
         except Exception:
             pass
+    # ── Synchronized fallback-notice ownership handoff ──
+    # Claim the fallback notice UNDER STREAMS_LOCK BEFORE calling
+    # agent.interrupt().  interrupt() signals and returns immediately — it does
+    # NOT join the conversation worker.  The worker's finally block (which pops
+    # _STREAM_FALLBACK_NOTICES under STREAMS_LOCK) can therefore run AFTER
+    # interrupt() returns but BEFORE we reach the claim.  If the claim were
+    # after interrupt() (as in earlier iterations), the worker could pop the
+    # entry first, and cancel would find nothing to stamp — losing the notice
+    # on reload.  By claiming BEFORE interrupt(), the worker's finally always
+    # sees _cancel_claimed=True and skips popping, regardless of thread
+    # scheduling.  Cancel stamps and pops the entry in its own finally block.
+    # If no notice has been published yet, the claim finds nothing — the worker's
+    # own error-path save will persist it via _pending_fallback_notices.
+    with streams_lock:
+        _fb_entry = _STREAM_FALLBACK_NOTICES.get(stream_id)
+        if _fb_entry is not None:
+            _fb_entry['_cancel_claimed'] = True
+            _claimed_fb_notice = _fb_entry
+
     if agent:
         try:
             agent.interrupt("Cancelled by user")
@@ -11903,22 +11922,6 @@ def cancel_stream(stream_id: str) -> bool:
             f"Cancel requested for stream {stream_id} before agent ready - "
             f"cancel_event flag set, will be checked on agent startup"
         )
-
-    # ── Synchronized fallback-notice ownership handoff ──
-    # After interrupt() returns, no more _agent_status_callback calls fire, so
-    # any notice that was going to be published is already in the map.  Claim
-    # it under STREAMS_LOCK: set _cancel_claimed so the worker's finally skips
-    # popping (it would otherwise pop the entry before we can stamp it, losing
-    # the notice on reload).  If the worker's finally already ran and popped
-    # the entry, the worker's own error-path save persisted the notice — we
-    # have nothing to stamp.
-    # This replaces the old pre/post-interrupt snapshot approach with a single
-    # ownership handoff (reviewer requirement #1/#2).
-    with streams_lock:
-        _fb_entry = _STREAM_FALLBACK_NOTICES.get(stream_id)
-        if _fb_entry is not None:
-            _fb_entry['_cancel_claimed'] = True
-            _claimed_fb_notice = _fb_entry
 
     # Clear any pending clarify prompt so the blocked tool call can unwind.
     try:
