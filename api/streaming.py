@@ -12549,6 +12549,17 @@ def cancel_stream(stream_id: str) -> bool:
                 if (_settle_cur is not None
                         and id(_settle_cur) == id(_claimed_fb_notice)):
                     _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+            elif _leave_notice_for_worker:
+                # The notice is left in the map for the worker's
+                # _persist_cancelled_turn.  Strip the _cancel_claimed flag
+                # from the dict so the worker's _retire_worker_cancelled_state
+                # can take ownership and pop it after its own successful save
+                # (gate-certifier blocker #2: a failed cancel save must not
+                # leave the notice permanently locked — the worker must be
+                # able to retire it once it durably persists).
+                _left = _STREAM_FALLBACK_NOTICES.get(stream_id)
+                if _left is not None and '_cancel_claimed' in _left:
+                    _left.pop('_cancel_claimed', None)
             _STREAM_CANCEL_CLAIMED.discard(stream_id)
             _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
         _claimed_fb_notice = None

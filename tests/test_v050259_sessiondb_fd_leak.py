@@ -288,18 +288,15 @@ def test_stream_scoped_fallback_notices_dict_exists():
         "_STREAM_FALLBACK_NOTICES must be declared as a module-level dict."
     )
 
-    # 2. The callback writes to it under STREAMS_LOCK (greptile P1: write must
-    # be atomic w.r.t. cancel_stream()'s under-lock snapshot)
-    callback_write_idx = src.find("with STREAMS_LOCK:")
-    assert callback_write_idx != -1, "STREAMS_LOCK not found in source"
-    fb_write_in_lock = src.find(
-        "_STREAM_FALLBACK_NOTICES[stream_id] = _pending_fallback_notices[-1]",
-        callback_write_idx,
-    )
-    assert fb_write_in_lock != -1, (
-        "_agent_status_callback must mirror the latest notice to "
-        "_STREAM_FALLBACK_NOTICES[stream_id] under STREAMS_LOCK so "
-        "cancel_stream()'s snapshot sees a consistent value."
+    # 2. The callback publishes through the gated _publish_fallback_notice(),
+    # which holds STREAMS_LOCK and rejects post-terminal publications
+    # (greptile P1: write must be atomic w.r.t. cancel_stream()'s under-lock
+    # snapshot; gate-certifier blocker #1: post-CAS notice B must be rejected).
+    publish_call_idx = src.find("_publish_fallback_notice(stream_id, _pending_fallback_notices[-1])")
+    assert publish_call_idx != -1, (
+        "_agent_status_callback must publish the latest notice through "
+        "_publish_fallback_notice() so the write is atomic under STREAMS_LOCK "
+        "and post-terminal publications are rejected."
     )
 
     # 3. cancel_stream() claims the notice under STREAMS_LOCK BEFORE flag.set()
