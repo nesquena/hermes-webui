@@ -177,7 +177,6 @@ def test_singular_model_does_not_filter_live_catalog(monkeypatch):
     """A provider configured with ONLY the singular ``model`` field (no
     ``models`` allowlist) must return the FULL live catalog — the sticky
     default must not hide the rest of the live list (#6646 finding 3)."""
-    import json
     import api.routes as routes
 
     custom_providers = [
@@ -204,7 +203,6 @@ def test_singular_model_does_not_filter_live_catalog(monkeypatch):
 def test_live_catalog_filtered_only_by_plural_models(monkeypatch):
     """A provider with a plural ``models`` allowlist filters the live catalog
     to that list — the plural list IS the allowlist signal."""
-    import json
     import api.routes as routes
 
     custom_providers = [
