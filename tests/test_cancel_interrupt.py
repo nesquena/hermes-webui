@@ -19,9 +19,10 @@ class TestCancelInterrupt:
         STREAMS.clear()
         CANCEL_FLAGS.clear()
         ACTIVE_RUNS.clear()
-        from api.streaming import _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED
+        from api.streaming import _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED, _STREAM_FALLBACK_DEAD_LETTER
         _STREAM_FALLBACK_NOTICES.clear()
         _STREAM_CANCEL_CLAIMED.clear()
+        _STREAM_FALLBACK_DEAD_LETTER.clear()
         with SESSION_AGENT_CACHE_LOCK:
             SESSION_AGENT_CACHE.clear()
 
@@ -31,9 +32,10 @@ class TestCancelInterrupt:
         STREAMS.clear()
         CANCEL_FLAGS.clear()
         ACTIVE_RUNS.clear()
-        from api.streaming import _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED
+        from api.streaming import _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED, _STREAM_FALLBACK_DEAD_LETTER
         _STREAM_FALLBACK_NOTICES.clear()
         _STREAM_CANCEL_CLAIMED.clear()
+        _STREAM_FALLBACK_DEAD_LETTER.clear()
         with SESSION_AGENT_CACHE_LOCK:
             SESSION_AGENT_CACHE.clear()
 
@@ -974,17 +976,26 @@ class TestCancelInterrupt:
         assert stream_id not in _STREAM_FALLBACK_NOTICES
         assert stream_id not in _STREAM_CANCEL_CLAIMED
 
-    def test_settlement_save_failure_retires_registries(self):
-        """If Session.save() raises during the settlement loop, the outer
-        finally must still retire both registries so they cannot grow
-        unbounded (gate-certifier blocker #2: bounded registry retirement).
+    def test_settlement_save_failure_transfers_to_dead_letter(self):
+        """If Session.save() raises during the settlement loop, the unsaved
+        notice must be transferred to _STREAM_FALLBACK_DEAD_LETTER — not
+        silently dropped.  Both registries are still retired so they cannot
+        grow unbounded (gate-certifier blocker #2).
 
-        The unsaved notice is lost (save failed), but the registries must
-        be cleaned — that's the safety property.
+        The prior version of this test (test_settlement_save_failure_retires
+        _registries) explicitly accepted loss — the bot said that was wrong.
+        Now it asserts the dead-letter transfer (blocker #2: "transfer the
+        unsaved generation to a named bounded retry/reaper/dead-letter
+        owner.  Final cleanup may retire only a generation proven durable
+        or explicitly transferred — never treat deletion as successful
+        settlement").
         """
         import threading
         from unittest.mock import patch, Mock
-        from api.streaming import _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED,
+            _STREAM_FALLBACK_DEAD_LETTER,
+        )
         from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
 
         stream_id = "settlement_save_fail"
@@ -999,6 +1010,7 @@ class TestCancelInterrupt:
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
         _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice)
+        _STREAM_FALLBACK_DEAD_LETTER.clear()
 
         _prior = {"role": "assistant", "content": "Prior.", "timestamp": 1000}
         mock_session = Mock()
@@ -1026,6 +1038,19 @@ class TestCancelInterrupt:
         assert stream_id not in _STREAM_CANCEL_CLAIMED, (
             "claim leaked after save failure"
         )
+        # The unsaved notice MUST have been transferred to dead-letter
+        # — NOT silently lost (blocker #2)
+        assert stream_id in _STREAM_FALLBACK_DEAD_LETTER, (
+            "unsaved notice was silently lost instead of transferred to dead-letter"
+        )
+        _dl = _STREAM_FALLBACK_DEAD_LETTER[stream_id]
+        assert _dl.get("message") == _notice["message"]
+        assert _dl.get("to_model") == _notice["to_model"]
+        assert _dl.get("to_provider") == _notice["to_provider"]
+        assert set(_dl.keys()) == {"message", "to_model", "to_provider"}, (
+            f"dead-letter entry has dirty keys: {set(_dl.keys())}"
+        )
+        _STREAM_FALLBACK_DEAD_LETTER.clear()
 
     def test_settlement_stale_stream_does_not_mutate_messages(self):
         """An old stream whose active_stream_id no longer matches must return
@@ -1159,3 +1184,286 @@ class TestCancelInterrupt:
         # Registries retired
         assert stream_id not in _STREAM_FALLBACK_NOTICES
         assert stream_id not in _STREAM_CANCEL_CLAIMED
+
+    def test_settlement_publish_B_after_equality_check_before_cleanup(self):
+        """Deterministic test: the status callback publishes a newer notice B
+        AFTER the settlement loop's equality check sees the same generation
+        but BEFORE the loop atomically pops and retires it.
+
+        With the atomic pop inside the lock (fix #1), the equality-check
+        and the pop happen under the same lock acquisition.  B can only be
+        published after the pop releases the lock — so B is found on the
+        next iteration and persisted.  Without the atomic pop (the old
+        code), the inner cleanup unconditionally popped whatever was in
+        the map (which could be B), discarding it without persistence.
+
+        This test hooks the save() to publish B after the first save
+        completes (simulating a status callback firing between save and
+        the post-save lock reacquire).  The loop must detect B on the
+        next iteration and persist it.
+
+        Uses deep-copied per-save snapshots to prove durability.
+        """
+        import copy
+        from unittest.mock import patch, Mock
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED, STREAMS_LOCK,
+        )
+        from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
+
+        stream_id = "settlement_post_eq_pub"
+        session_id = "sess_settlement_post_eq"
+
+        _notice_a = {"message": "A", "to_model": "ma", "to_provider": "pa"}
+        _notice_b = {"message": "B", "to_model": "mb", "to_provider": "pb"}
+
+        q = queue.Queue()
+        STREAMS[stream_id] = q
+        CANCEL_FLAGS[stream_id] = threading.Event()
+        STREAM_PARTIAL_TEXT[stream_id] = "partial"
+        STREAM_REASONING_TEXT[stream_id] = ""
+        STREAM_LIVE_TOOL_CALLS[stream_id] = []
+        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice_a)
+
+        _save_snapshots = []
+        _published_b = [False]
+
+        def _save_then_publish_b():
+            _save_snapshots.append(copy.deepcopy(mock_session.messages))
+            if not _published_b[0]:
+                _published_b[0] = True
+                # Publish B AFTER this save completes.  The post-save
+                # equality check will see A (same generation), atomically
+                # pop it, then B is visible on the next iteration.
+                with STREAMS_LOCK:
+                    _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice_b)
+
+        _prior = {"role": "assistant", "content": "Prior.", "timestamp": 1000}
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id
+        mock_session.pending_user_message = "q"
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = 1.0
+        mock_session.messages = [_prior]
+        mock_session.save = Mock(side_effect=_save_then_publish_b)
+
+        mock_agent = Mock()
+        mock_agent.session_id = session_id
+        AGENT_INSTANCES[stream_id] = mock_agent
+
+        with patch("api.streaming.get_session", return_value=mock_session):
+            result = cancel_stream(stream_id)
+
+        assert result is True
+
+        # Two saves: first persisted A, second persisted B
+        assert len(_save_snapshots) == 2, (
+            f"expected 2 saves (A then B), got {len(_save_snapshots)} — "
+            "the loop must iterate when a newer generation appears after "
+            "the equality check"
+        )
+
+        # First snapshot had A
+        first = _save_snapshots[0]
+        first_stamped = [m for m in first if isinstance(m, dict) and m.get("_fallbackNotice")]
+        assert len(first_stamped) == 1
+        assert first_stamped[0]["_fallbackNotice"].get("to_model") == "ma"
+
+        # Final durable is B
+        final = _save_snapshots[-1]
+        stamped = [m for m in final if isinstance(m, dict) and m.get("_fallbackNotice")]
+        assert len(stamped) == 1
+        assert stamped[0]["_fallbackNotice"].get("to_model") == "mb", (
+            "B was not persisted — the unconditional pop discarded B "
+            "without saving it"
+        )
+
+        # Registries retired
+        assert stream_id not in _STREAM_FALLBACK_NOTICES
+        assert stream_id not in _STREAM_CANCEL_CLAIMED
+
+    def test_settlement_loop_exhaustion_transfers_to_dead_letter(self):
+        """If the settlement loop hits _SETTLEMENT_MAX_ITERS (16+ continuous
+        replacements), the current unsaved generation must be transferred
+        to dead-letter — not silently dropped (blocker #2: "exhaust the
+        loop without data loss").
+
+        The test sets up a save() side-effect that publishes a newer
+        generation on EVERY save call, so the loop never converges.  After
+        _SETTLEMENT_MAX_ITERS iterations, the loop must transfer the final
+        generation to _STREAM_FALLBACK_DEAD_LETTER.
+        """
+        from unittest.mock import patch, Mock
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED,
+            _STREAM_FALLBACK_DEAD_LETTER, STREAMS_LOCK,
+        )
+        from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
+
+        stream_id = "settlement_loop_exhaust"
+        session_id = "sess_loop_exhaust"
+
+        q = queue.Queue()
+        STREAMS[stream_id] = q
+        CANCEL_FLAGS[stream_id] = threading.Event()
+        STREAM_PARTIAL_TEXT[stream_id] = "partial"
+        STREAM_REASONING_TEXT[stream_id] = ""
+        STREAM_LIVE_TOOL_CALLS[stream_id] = []
+        _STREAM_FALLBACK_DEAD_LETTER.clear()
+
+        # Start with generation 0
+        _STREAM_FALLBACK_NOTICES[stream_id] = {
+            "message": "gen0", "to_model": "m0", "to_provider": "p0",
+        }
+
+        _save_count = [0]
+
+        def _save_then_publish_next():
+            _save_count[0] += 1
+            # Publish a newer generation on every save — the loop never
+            # converges because the generation always changes.
+            with STREAMS_LOCK:
+                _STREAM_FALLBACK_NOTICES[stream_id] = {
+                    "message": f"gen{_save_count[0]}",
+                    "to_model": f"m{_save_count[0]}",
+                    "to_provider": f"p{_save_count[0]}",
+                }
+
+        _prior = {"role": "assistant", "content": "Prior.", "timestamp": 1000}
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id
+        mock_session.pending_user_message = "q"
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = 1.0
+        mock_session.messages = [_prior]
+        mock_session.save = Mock(side_effect=_save_then_publish_next)
+
+        mock_agent = Mock()
+        mock_agent.session_id = session_id
+        AGENT_INSTANCES[stream_id] = mock_agent
+
+        with patch("api.streaming.get_session", return_value=mock_session):
+            result = cancel_stream(stream_id)
+
+        assert result is True
+
+        # The loop must have run _SETTLEMENT_MAX_ITERS times
+        from api.streaming import _SETTLEMENT_MAX_ITERS_GLOBAL
+        assert _save_count[0] >= _SETTLEMENT_MAX_ITERS_GLOBAL, (
+            f"loop ran only {_save_count[0]} times, expected >= {_SETTLEMENT_MAX_ITERS_GLOBAL}"
+        )
+
+        # The final unsaved generation must be in dead-letter — not lost
+        assert stream_id in _STREAM_FALLBACK_DEAD_LETTER, (
+            "loop exhaustion silently dropped the unsaved generation "
+            "instead of transferring to dead-letter"
+        )
+        _dl = _STREAM_FALLBACK_DEAD_LETTER[stream_id]
+        assert set(_dl.keys()) == {"message", "to_model", "to_provider"}, (
+            f"dead-letter entry has dirty keys: {set(_dl.keys())}"
+        )
+
+        # Registries retired
+        assert stream_id not in _STREAM_FALLBACK_NOTICES
+        assert stream_id not in _STREAM_CANCEL_CLAIMED
+        _STREAM_FALLBACK_DEAD_LETTER.clear()
+
+    def test_settlement_identical_partial_signatures_across_turns(self):
+        """When two turns have identical _partial signatures, the stamp
+        helper must stamp the current-turn row (found in the current-turn
+        slice before the cancel marker), NOT an earlier turn's row with
+        the same signature (fix #3: "use identical partial signatures
+        across turns + a non-last cancel marker").
+
+        Setup: two user turns, each followed by an identical _partial
+        assistant row.  The cancel marker is NOT the last message (a
+        prior assistant turn follows it).  The stamp must land on the
+        CURRENT turn's partial, not the earlier one.
+        """
+        from unittest.mock import patch, Mock
+        from api.streaming import _STREAM_FALLBACK_NOTICES
+        from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
+
+        stream_id = "identical_sig_turns"
+        session_id = "sess_identical_sig"
+
+        _fb_notice = {
+            "message": "Switched to fallback",
+            "to_model": "m1",
+            "to_provider": "p1",
+        }
+
+        q = queue.Queue()
+        STREAMS[stream_id] = q
+        CANCEL_FLAGS[stream_id] = threading.Event()
+        STREAM_PARTIAL_TEXT[stream_id] = "same partial text"
+        STREAM_REASONING_TEXT[stream_id] = ""
+        STREAM_LIVE_TOOL_CALLS[stream_id] = []
+        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_fb_notice)
+
+        mock_agent = Mock()
+        mock_agent.session_id = session_id
+        AGENT_INSTANCES[stream_id] = mock_agent
+
+        # Two user turns, each with an identical _partial assistant row
+        _user1 = {"role": "user", "content": "first question", "timestamp": 100}
+        _partial1 = {
+            "role": "assistant", "content": "same partial text",
+            "_partial": True, "timestamp": 101,
+        }
+        _user2 = {"role": "user", "content": "second question", "timestamp": 200}
+        _partial2 = {
+            "role": "assistant", "content": "same partial text",
+            "_partial": True, "timestamp": 201,
+        }
+        # A prior assistant turn AFTER the cancel marker position —
+        # proves the no-partial branch uses cancel_marker_idx, not [-1]
+        _prior_after = {
+            "role": "assistant", "content": "some other message",
+            "timestamp": 300,
+        }
+
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id
+        mock_session.pending_user_message = "second question"
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = 200.0
+        # messages: [user1, partial1, user2, partial2, prior_after]
+        # The cancel marker will be appended after partial2 (current turn).
+        # cancel_marker_idx will point to it.  _prior_after is NOT in
+        # the current-turn slice.
+        mock_session.messages = [_user1, _partial1, _user2, _partial2]
+
+        mock_session.save = Mock()
+
+        with patch("api.streaming.get_session", return_value=mock_session):
+            result = cancel_stream(stream_id)
+
+        assert result is True
+
+        # The notice must be on partial2 (current turn), NOT partial1
+        assert "._fallbackNotice" not in _partial1, (
+            "notice was stamped on the WRONG turn's partial — "
+            "identical signatures caused the stamp to hit the earlier turn"
+        )
+        assert "_fallbackNotice" in _partial2, (
+            "notice was NOT stamped on the current-turn partial — "
+            "the stamp helper must search only within the current-turn slice"
+        )
+        notice = _partial2["_fallbackNotice"]
+        assert notice.get("message") == _fb_notice["message"]
+        assert set(notice.keys()) == {"message", "to_model", "to_provider"}
+
+        # Exactly one stamped row
+        stamped = [
+            m for m in mock_session.messages
+            if isinstance(m, dict) and m.get("_fallbackNotice")
+        ]
+        assert len(stamped) == 1, (
+            f"expected exactly 1 stamped row, got {len(stamped)}"
+        )
+
+        assert stream_id not in _STREAM_FALLBACK_NOTICES
