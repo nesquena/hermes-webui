@@ -7467,9 +7467,21 @@ def _load_cli_sessions_uncached(
     if source_filter == CLAUDE_CODE_SOURCE:
         return cli_sessions
 
+    # get_last_workspace() reads files + probes and returns the same workspace
+    # for the whole sidebar build; resolve it ONCE, lazily, shared by the Codex
+    # path and the cron/webhook projection below (#4842 keeps this cold-path
+    # call single — two separate caches here would re-pay it and regress the
+    # <=1 assertion in test_issue4842). Defined before the Codex early-return
+    # because _cli_workspace() must be callable from that branch.
+    _cli_workspace_cache: list = [None]  # list-as-cell; None = not yet resolved
+    def _cli_workspace() -> str:
+        if _cli_workspace_cache[0] is None:
+            _cli_workspace_cache[0] = str(get_last_workspace())
+        return _cli_workspace_cache[0]
+
     if source_filter in (None, CODEX_SOURCE) and include_codex:
         try:
-            cli_sessions.extend(get_codex_sessions(default_workspace=str(get_last_workspace())))
+            cli_sessions.extend(get_codex_sessions(default_workspace=_cli_workspace()))
         except Exception:
             logger.debug("Codex session scan failed", exc_info=True)
 
@@ -7526,15 +7538,9 @@ def _load_cli_sessions_uncached(
             return None
         return _cron_job_names().get(parts[1])
 
-    # get_last_workspace() reads up to two files + an is_dir()/remote probe and
-    # returns the SAME active workspace for every projected row, so calling it
-    # per row was redundant I/O on the cold sidebar build (#4842; mirrors the
-    # #4718 hoist on the Claude Code path). Resolve it once for this scan.
-    _cli_workspace_cache: list = [None]  # list-as-cell; None = not yet resolved
-    def _cli_workspace():
-        if _cli_workspace_cache[0] is None:
-            _cli_workspace_cache[0] = str(get_last_workspace())
-        return _cli_workspace_cache[0]
+    # _cli_workspace() (lazy get_last_workspace memo) is defined earlier in
+    # this function, before the Codex branch, so the Codex path and this
+    # projection share ONE resolve for the whole build (#4842).
 
     _webhook_pid_cache: list[str | None] = [None]
     def _webhook_pid():
