@@ -12063,6 +12063,9 @@ def cancel_stream(stream_id: str) -> bool:
         # so the cancel-path mutation races neither the checkpoint thread nor
         # concurrent undo/retry calls.
         if _cancel_session_id:
+            _fb_generation_id = None  # identity token of the notice generation we persisted
+            _partial_msg = None
+            _cancel_marker_idx = 0
             with _get_session_agent_lock(_cancel_session_id):
                 try:
                     _cs = get_session(_cancel_session_id)
@@ -12220,20 +12223,23 @@ def cancel_stream(stream_id: str) -> bool:
                     # again here — the worker's finally skips popping when
                     # _STREAM_CANCEL_CLAIMED is set, so a late entry survives
                     # (gate-certifier finding #5: late publication is owned).
-                    # Bind to the exact current-turn row: the inserted/deduplicated
-                    # partial row when present, otherwise the newly created
-                    # cancellation marker.  Do not reverse-search arbitrary prior
-                    # partial rows (reviewer requirement #3).
+                    # Generation-aware notice settlement
+                    # (gate-certifier blocker #3: stale-first and lossy).
+                    # The production status callback can replace the stream
+                    # notice under STREAMS_LOCK at :7695-7696 during the
+                    # interval between the map read and Session.save().
+                    # To prevent stale-A persisted / newer-B discarded:
+                    # 1. Under STREAMS_LOCK, capture the current notice and
+                    #    record its identity (id()) as a generation token.
+                    # 2. Persist that exact generation.
+                    # 3. After save, re-acquire STREAMS_LOCK and compare the
+                    #    map entry's identity.  Only pop if it is still the
+                    #    same generation.  If a newer generation replaced it,
+                    #    durably save the newer notice before popping.
                     with streams_lock:
-                        # Re-read the CURRENT generation at commit time under
-                        # the lock — the lock-protected latest-notice
-                        # ownership record.  If notice A existed at claim time
-                        # and the status callback published newer notice B
-                        # before this save, B is now the latest and must win.
-                        # Using the stale `_claimed_fb_notice` snapshot here
-                        # would always prefer A and discard B
-                        # (gate-certifier blocker #3: stale-first and lossy).
                         _fb_to_stamp = _STREAM_FALLBACK_NOTICES.get(stream_id)
+                        if _fb_to_stamp is not None:
+                            _fb_generation_id = id(_fb_to_stamp)
                     if _fb_to_stamp:
                         _fb_notice_clean = _clean_fallback_notice(_fb_to_stamp)
                         if _partial_msg is not None:
@@ -12265,18 +12271,78 @@ def cancel_stream(stream_id: str) -> bool:
                             # marker we just appended (the current-turn row).
                             _cs.messages[-1]['_fallbackNotice'] = _fb_notice_clean
                     _cs.save()
+                    # Generation-aware post-save settlement: if a newer
+                    # notice replaced the one we just persisted, save the
+                    # newer one too so it is not lost.  Then pop only if
+                    # the map still contains the generation we handled
+                    # (or we have durably saved the replacement).
+                    with streams_lock:
+                        _post_fb = _STREAM_FALLBACK_NOTICES.get(stream_id)
+                        if _post_fb is not None and id(_post_fb) != _fb_generation_id:
+                            # A newer notice replaced the one we persisted.
+                            # Durably save the newer notice on the same
+                            # current-turn row before removing the map
+                            # entry.
+                            _post_fb_clean = _clean_fallback_notice(_post_fb)
+                            if _partial_msg is not None:
+                                _stamp_target2 = _partial_msg
+                                if _partial_marker_already_present(
+                                    _cs.messages,
+                                    _partial_msg,
+                                    before_idx=_cancel_marker_idx,
+                                ):
+                                    _candidate_sig2 = _partial_message_signature(_partial_msg)
+                                    for _m2 in _cs.messages[:_cancel_marker_idx]:
+                                        if (isinstance(_m2, dict)
+                                                and _m2.get('role') == 'assistant'
+                                                and _m2.get('_partial')
+                                                and _partial_message_signature(_m2) == _candidate_sig2):
+                                            _stamp_target2 = _m2
+                                            break
+                                _stamp_target2['_fallbackNotice'] = _post_fb_clean
+                            else:
+                                _cs.messages[-1]['_fallbackNotice'] = _post_fb_clean
+                            _cs.save()
                     _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
                 except Exception:
                     logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
                 finally:
-                    # Release ownership of the fallback notice and clean up the map
-                    # entry.  Runs regardless of whether the save succeeded.
-                    # Pop whatever entry exists for this stream (whether the
-                    # originally claimed notice or a late-published one) so the
-                    # map cannot grow unbounded.  The worker's finally skips
-                    # popping when _STREAM_CANCEL_CLAIMED is set, so cancel must
-                    # pop the entry itself.
+                    # Generation-aware cleanup: pop the map entry only if it
+                    # is still the generation we persisted.  If a newer
+                    # notice replaced it during the save interval, durably
+                    # save the newer one before removing the entry so it
+                    # is not lost (gate-certifier blocker #3).
                     with streams_lock:
+                        _final_fb = _STREAM_FALLBACK_NOTICES.get(stream_id)
+                        if _final_fb is not None and id(_final_fb) != _fb_generation_id:
+                            # A newer notice replaced the one we persisted.
+                            # Save it durably before popping.
+                            try:
+                                _final_fb_clean = _clean_fallback_notice(_final_fb)
+                                if _partial_msg is not None:
+                                    _stamp_t = _partial_msg
+                                    if _partial_marker_already_present(
+                                        _cs.messages, _partial_msg,
+                                        before_idx=_cancel_marker_idx,
+                                    ):
+                                        _csig = _partial_message_signature(_partial_msg)
+                                        for _m3 in _cs.messages[:_cancel_marker_idx]:
+                                            if (isinstance(_m3, dict)
+                                                    and _m3.get('role') == 'assistant'
+                                                    and _m3.get('_partial')
+                                                    and _partial_message_signature(_m3) == _csig):
+                                                _stamp_t = _m3
+                                                break
+                                    _stamp_t['_fallbackNotice'] = _final_fb_clean
+                                else:
+                                    _cs.messages[-1]['_fallbackNotice'] = _final_fb_clean
+                                _cs.save()
+                            except Exception:
+                                logger.debug(
+                                    "Failed to save replacement notice in "
+                                    "cancel finally for %s",
+                                    _cancel_session_id,
+                                )
                         _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
                         _STREAM_CANCEL_CLAIMED.discard(stream_id)
                     _claimed_fb_notice = None

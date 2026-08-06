@@ -884,3 +884,121 @@ class TestCancelInterrupt:
         assert stream_id not in _STREAM_CANCEL_CLAIMED, (
             "_STREAM_CANCEL_CLAIMED not retired after replacement publication"
         )
+
+    def test_cancel_replacement_B_published_during_save_B_is_sole_durable(self):
+        """Production-composed cancel_stream() regression: notice A exists at
+        claim time and the status callback publishes newer notice B AFTER the
+        commit-time map read but BEFORE Session.save() snapshots the messages.
+
+        This exercises the exact race interval the gate-certifier identified:
+        - cancel_stream() re-reads the current notice under STREAMS_LOCK (gets A)
+        - lock is released
+        - during Session.save(), the production status callback replaces A with B
+          in _STREAM_FALLBACK_NOTICES under STREAMS_LOCK
+        - the generation-aware post-save settlement must detect that the map
+          entry changed and durably save B (not A) before popping
+
+        Without the generation-aware fix, stale A would be persisted, newer B
+        would be discarded, and both registries would be empty — the unsafe
+        result the reviewer reproduced.
+
+        Asserts: B is the sole durable _fallbackNotice (not A), clean keys,
+        both registries empty at return, prior turn not mutated.
+        """
+        import threading
+        from unittest.mock import patch, Mock
+        from api.streaming import _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED
+        from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
+
+        stream_id = "replacement_during_save"
+        session_id = "sess_replacement_during_save"
+
+        # Notice A: exists at claim time
+        _notice_a = {
+            "message": "Switched to fallback model: gpt-4 via openai → m1 via p1",
+            "to_model": "m1",
+            "to_provider": "p1",
+        }
+        # Notice B: published DURING Session.save() — after the map read but
+        # before the save snapshots the messages.  Must be the sole durable.
+        _notice_b = {
+            "message": "Switched to fallback model: gpt-4 via openai → m2 via p2",
+            "to_model": "m2",
+            "to_provider": "p2",
+        }
+
+        q = queue.Queue()
+        STREAMS[stream_id] = q
+        CANCEL_FLAGS[stream_id] = threading.Event()
+        STREAM_PARTIAL_TEXT[stream_id] = "partial answer"
+        STREAM_REASONING_TEXT[stream_id] = ""
+        STREAM_LIVE_TOOL_CALLS[stream_id] = []
+        _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice_a)
+
+        _prior_assistant = {
+            "role": "assistant",
+            "content": "Previous turn.",
+            "timestamp": 1000,
+        }
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id
+        mock_session.pending_user_message = "q"
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = 1.0
+        mock_session.messages = [_prior_assistant]
+
+        # Key: Session.save() publishes notice B under STREAMS_LOCK — this is
+        # the exact race interval (after map read, before save completes).
+        _save_call_count = [0]
+
+        def _save_publishes_b():
+            _save_call_count[0] += 1
+            if _save_call_count[0] == 1:
+                # First save: the status callback replaces A with B during
+                # the save window (after the map read, before save finishes)
+                from api.streaming import STREAMS_LOCK
+                with STREAMS_LOCK:
+                    _STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice_b)
+
+        mock_session.save = Mock(side_effect=_save_publishes_b)
+
+        mock_agent = Mock()
+        mock_agent.session_id = session_id
+        AGENT_INSTANCES[stream_id] = mock_agent
+
+        with patch("api.streaming.get_session", return_value=mock_session):
+            result = cancel_stream(stream_id)
+
+        assert result is True
+
+        # B must be the sole durable notice — NOT A
+        stamped = [
+            m for m in mock_session.messages
+            if isinstance(m, dict) and m.get("_fallbackNotice")
+        ]
+        assert len(stamped) == 1, (
+            f"expected exactly 1 durable notice, got {len(stamped)}"
+        )
+        notice = stamped[0]["_fallbackNotice"]
+        assert "_cancel_claimed" not in notice, (
+            f"_cancel_claimed leaked into persisted notice: {notice}"
+        )
+        # B is the sole durable notice — A must NOT be persisted
+        assert notice.get("message") == _notice_b["message"], (
+            f"stale notice A persisted instead of latest B: {notice}"
+        )
+        assert notice.get("to_model") == _notice_b["to_model"]
+        assert notice.get("to_provider") == _notice_b["to_provider"]
+        assert set(notice.keys()) == {"message", "to_model", "to_provider"}
+
+        # Prior turn must NOT be mutated
+        assert "_fallbackNotice" not in _prior_assistant
+
+        # Both registries must be empty at return
+        assert stream_id not in _STREAM_FALLBACK_NOTICES, (
+            "_STREAM_FALLBACK_NOTICES not cleaned after save-time replacement"
+        )
+        assert stream_id not in _STREAM_CANCEL_CLAIMED, (
+            "_STREAM_CANCEL_CLAIMED not retired after save-time replacement"
+        )
