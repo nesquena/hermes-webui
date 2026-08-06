@@ -21886,7 +21886,7 @@ def _handle_chat_start(handler, body, diag=None):
 
             pending_decision = get_pending_decision(s.session_id, resolves_decision_id)
             if not pending_decision or pending_decision.get("state") != "waiting_for_user":
-                return bad(handler, "pending decision is not active", 409)
+                return bad(handler, "That decision is no longer active.", 409)
             decision_option = str(body.get("decision_option") or "").strip()
             if decision_option not in (pending_decision.get("options") or []):
                 return bad(handler, "decision_option must select an offered option", 400)

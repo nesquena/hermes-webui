@@ -1759,13 +1759,45 @@ async function send(){
     _pendingMoaConfig=null;
     postStartData = startData;
   }catch(e){
-    const errMsg=String((e&&e.message)||'');
+    let err=e;
+    let errMsg=String((err&&err.message)||'');
+    if(pendingDecisionResolution&&err&&err.status===409&&/pending decision is not active/i.test(errMsg)){
+      if(_pendingDecisionSend===pendingDecisionResolution){
+        _pendingDecisionSend=null;
+        _clearClarifyPendingForSession(activeSid);
+        hideClarifyCard(true,'sent');
+      }
+      const staleDecisionNotice='That decision is no longer active. Sending your reply as a normal message.';
+      if(typeof setStatus==='function') setStatus(staleDecisionNotice);
+      try{
+        const retryModelState=modelStateForPostStart||_chatPayloadModelState();
+        const retryStartData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
+          session_id:activeSid,message:msgText,
+          model:retryModelState.model,workspace:S.session.workspace,
+          model_provider:retryModelState.model_provider,
+          profile:S.activeProfile||S.session.profile||'default',
+          explicit_model_pick:explicitPickForPostStart||undefined,
+          attachments:uploaded.length?uploaded:undefined,
+          moa_config:_pendingMoaConfig?true:undefined
+        })});
+        _pendingMoaConfig=null;
+        postStartData = retryStartData;
+        if(typeof showToast==='function') showToast(staleDecisionNotice, 2600);
+      }catch(retryErr){
+        err=retryErr;
+        errMsg=String((err&&err.message)||'');
+      }
+    }
+    if(postStartData){
+      // Retry recovered the stale pending-decision reply as a normal chat
+      // turn; continue into the normal post-start stream attach path below.
+    } else {
     // If /api/chat/start returns 404, the session was deleted server-side
     // (its sidecar is gone) while GET kept returning a CLI stub (#2782). Strip
     // the stale /session/<id> URL and clear localStorage so a reload does not
     // re-inject the dead id via _sessionIdFromLocation(), then reset to the
     // empty state instead of pushing a confusing error bubble into the chat.
-    if(e&&e.status===404){
+    if(err&&err.status===404){
       try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
       try{
         if(typeof _appRootPath==='function') history.replaceState(null,'',_appRootPath());
@@ -1824,6 +1856,7 @@ async function send(){
     // Reconcile with server truth after immediately clearing the optimistic spinner.
     if(typeof renderSessionList==='function') void renderSessionList();
     return;
+    }
   }
 
   const startData = postStartData || {};
