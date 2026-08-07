@@ -216,6 +216,55 @@ def test_stream_done_runs_scroll_preserving_collapse_pass_after_disarm():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node required for behavioral test")
+def test_done_defers_live_dom_removal_but_other_terminal_paths_still_clear():
+    """The normal done handoff must not expose an empty live-worklog frame.
+
+    The settled transcript render owns replacement of the live DOM.  Calling the
+    shared cleanup helper in preserve-DOM mode may stop timers and reset intent,
+    but must leave the visible rows in place until that replacement occurs.
+    Default cleanup remains destructive for error/cancel paths.
+    """
+    clear_live = _extract("clearLiveToolCards")
+    done_start = MESSAGES_JS.index("source.addEventListener('done',e=>{")
+    done = MESSAGES_JS[done_start : done_start + 14000]
+    harness = textwrap.dedent(f"""
+        let removed = 0;
+        let timerClears = 0;
+        let intentClears = 0;
+        const rows = [{{remove() {{ removed++; }}}}, {{remove() {{ removed++; }}}}];
+        const inner = {{querySelectorAll() {{ return rows; }}}};
+        const legacy = {{innerHTML: 'legacy', style: {{display: ''}}}};
+        globalThis._clearActivityElapsedTimer = () => {{ timerClears++; }};
+        globalThis._clearLiveActivityUserIntent = () => {{ intentClears++; }};
+        globalThis._assistantTurnBlocks = () => inner;
+        globalThis.$ = (id) => id === 'liveAssistantTurn' ? {{}} : id === 'liveToolCards' ? legacy : null;
+        {clear_live}
+        clearLiveToolCards({{preserveDom: true}});
+        const preserved = {{removed, timerClears, intentClears, legacy: legacy.innerHTML, legacyDisplay: legacy.style.display}};
+        clearLiveToolCards();
+        const defaultCleared = {{removed, timerClears, intentClears, legacy: legacy.innerHTML, legacyDisplay: legacy.style.display}};
+        console.log(JSON.stringify({{preserved, defaultCleared}}));
+    """)
+    res = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=30)
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout.strip())
+    assert out["preserved"] == {
+        "removed": 0,
+        "timerClears": 1,
+        "intentClears": 1,
+        "legacy": "",
+        "legacyDisplay": "none",
+    }, "preserveDom cleanup must leave the live worklog visible until the settled render replaces it"
+    assert out["defaultCleared"]["removed"] == 2, "error/cancel cleanup must still remove live rows"
+    assert out["defaultCleared"]["legacy"] == "", "default cleanup must still clear the legacy container"
+    assert out["defaultCleared"]["legacyDisplay"] == "none", "legacy cleanup must hide the container"
+    assert "clearLiveToolCards({preserveDom:true})" in done, (
+        "the normal done handler must preserve the visible live Worklog until its "
+        "settled transcript render replaces it"
+    )
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for behavioral test")
 def test_prescroll_snapshot_bypasses_capture_no_option_fallback_still_captures():
     """Sentinel _prescrollSnapshot reaches restore without re-capture.
 
@@ -296,4 +345,3 @@ def test_prescroll_snapshot_bypasses_capture_no_option_fallback_still_captures()
     assert out["test3_usedCapture"] is True, (
         "empty-options call's captured snapshot must reach _restoreMessageScrollSnapshotSameFrame"
     )
-
