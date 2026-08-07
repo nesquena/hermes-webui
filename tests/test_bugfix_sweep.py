@@ -1,3 +1,4 @@
+import io
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +27,51 @@ def test_read_body_rejects_negative_content_length_without_unbounded_read():
     handler = SimpleNamespace(headers=_Headers({"Content-Length": "-1"}), rfile=_RejectNegativeRead(), close_connection=False)
 
     with pytest.raises(ValueError, match="Content-Length"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_decodes_chunked_transfer_encoding():
+    from api.helpers import read_body
+
+    body = b'{"a": 1}'
+    chunked = b"8\r\n" + body + b"\r\n0\r\n\r\n"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    assert read_body(handler) == {"a": 1}
+    assert handler.close_connection is False
+
+
+def test_read_body_rejects_malformed_chunk_size():
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(b"zz\r\n"),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Malformed chunk size"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_oversized_chunked_body():
+    from api.helpers import MAX_BODY_BYTES, read_body
+
+    size = MAX_BODY_BYTES + 1
+    chunked = b"%x\r\n" % size + b"x" * size + b"\r\n0\r\n\r\n"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Request body too large"):
         read_body(handler)
     assert handler.close_connection is True
 
