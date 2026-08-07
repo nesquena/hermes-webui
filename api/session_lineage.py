@@ -20,7 +20,7 @@ from typing import BinaryIO
 
 _MAX_LINEAGE_HOPS = 20
 _TRANSITION_VERSION = 1
-_TRANSITION_STATES = frozenset({"pending", "committed"})
+_TRANSITION_STATES = frozenset({"pending", "recoverable", "committed"})
 _TRANSITION_DIR_NAME = "_session_lineage_transitions"
 _PERMIT_DIR_NAME = "_session_lineage_permits"
 _COMPLETION_CLAIM_DIR_NAME = "_completion_delivery_claims"
@@ -76,6 +76,9 @@ class CompletionDeliveryContext:
     profile: str
     correlation_sha256: str
     turn_id: str
+    # Restart repair may route accepted work to a newer compression tip while
+    # the immutable receipt remains in the delivery identity that accepted it.
+    receipt_delivery_session_id: str | None = None
 
     @property
     def completion_kind(self) -> str:
@@ -263,7 +266,7 @@ def record_lineage_transition(
     state: str,
     session_dir: Path | str | None = None,
 ) -> dict:
-    """Durably publish one pending or committed compression transition."""
+    """Durably publish one compression-transition lifecycle state."""
     root = _safe_session_id(root_session_id)
     previous_tip = _safe_session_id(previous_tip_session_id)
     delivery = _safe_session_id(delivery_session_id)
@@ -316,7 +319,19 @@ def record_lineage_transition(
     return dict(record)
 
 
-def _is_non_compression_child(row: dict) -> bool:
+def _is_non_compression_child(row: dict, transitions: list[dict] | None = None) -> bool:
+    session_id = str(row.get("session_id") or "").strip()
+    parent_id = str(row.get("parent_session_id") or "").strip()
+    for transition in transitions or ():
+        if (
+            transition.get("state") in {"recoverable", "committed"}
+            and transition.get("previous_tip_session_id") == parent_id
+            and transition.get("delivery_session_id") == session_id
+        ):
+            # A durable transition is the authoritative edge. Fork/child source
+            # metadata is inherited by continuations for UI identity and must
+            # not split every later compressed segment into a new root.
+            return False
     source = str(row.get("session_source") or "").strip().lower()
     relationship = str(row.get("relationship_type") or "").strip().lower()
     return source == "fork" or relationship == "child_session"
@@ -376,7 +391,7 @@ def resolve_session_lineage(
     for _ in range(_MAX_LINEAGE_HOPS + 1):
         row = rows[current]
         parent_value = row.get("parent_session_id")
-        if not parent_value or _is_non_compression_child(row):
+        if not parent_value or _is_non_compression_child(row, transitions):
             break
         parent_id = _safe_session_id(parent_value)
         parent = rows.get(parent_id)
@@ -411,7 +426,7 @@ def resolve_session_lineage(
             child
             for child in rows.values()
             if str(child.get("parent_session_id") or "").strip() == current
-            and not _is_non_compression_child(child)
+            and not _is_non_compression_child(child, transitions)
         ]
         foreign_children = [
             child
@@ -452,7 +467,7 @@ def resolve_session_lineage(
         }
         if transition["state"] == "pending" and chain_ids.intersection(involved):
             raise LineageResolutionError("pending lineage transition")
-        if transition["state"] != "committed":
+        if transition["state"] not in {"recoverable", "committed"}:
             continue
         previous_tip = transition["previous_tip_session_id"]
         if previous_tip not in chain_ids:
@@ -469,6 +484,20 @@ def resolve_session_lineage(
             raise LineageResolutionError("committed transition conflicts with sidecars")
         if transition["root_session_id"] != root:
             raise LineageResolutionError("committed transition conflicts with stable root")
+        if transition["state"] == "recoverable":
+            try:
+                record_lineage_transition(
+                    root_session_id=transition["root_session_id"],
+                    previous_tip_session_id=transition["previous_tip_session_id"],
+                    delivery_session_id=transition["delivery_session_id"],
+                    profile=transition["profile"],
+                    state="committed",
+                    session_dir=directory,
+                )
+            except Exception as exc:
+                raise LineageResolutionError(
+                    "recoverable lineage transition remains uncommitted"
+                ) from exc
 
     return LineageResolution(
         root_session_id=root,
@@ -823,7 +852,9 @@ def _completion_receipt_identity(context: CompletionDeliveryContext) -> dict:
         "completion_id": context.completion_id,
         "lineage_id": context.lineage_id,
         "origin_session_id": context.origin_session_id,
-        "delivery_session_id": context.delivery_session_id,
+        "delivery_session_id": (
+            context.receipt_delivery_session_id or context.delivery_session_id
+        ),
         "correlation_id": context.correlation_id,
         "turn_id": context.turn_id,
     }
@@ -987,32 +1018,75 @@ def accepted_completion_delivery_contexts(
     for completion_key, record in sorted(document["receipts"].items()):
         if not isinstance(record, dict):
             raise CompletionDeliveryReceiptError("malformed completion receipt remains visible")
-        completion_kind = str(record.get("completion_kind") or "")
-        completion_id = str(record.get("completion_id") or "")
+        completion_kind = record.get("completion_kind")
+        completion_id = record.get("completion_id")
         if (
-            completion_kind not in {"process", "async_delegation"}
+            not isinstance(completion_kind, str)
+            or not isinstance(completion_id, str)
+            or not completion_id
+            or completion_kind not in {"process", "async_delegation"}
             or completion_key != f"{completion_kind}:{completion_id}"
         ):
             raise CompletionDeliveryReceiptError("conflicting completion receipt remains visible")
-        event = {
-            "type": "async_delegation" if completion_kind == "async_delegation" else "process_complete",
-            "session_key": f"ui:{record.get('lineage_id') or ''}",
-            "origin_ui_session_id": record.get("origin_session_id"),
-        }
-        event["delegation_id" if completion_kind == "async_delegation" else "process_id"] = completion_id
         try:
-            context = build_completion_delivery_context(
-                event,
-                str(record.get("delivery_session_id") or ""),
-                session_dir=directory,
+            lineage_id = _safe_session_id(record.get("lineage_id"))
+            origin_session_id = _safe_session_id(record.get("origin_session_id"))
+            receipt_delivery_session_id = _safe_session_id(
+                record.get("delivery_session_id")
             )
+            if origin_session_id != lineage_id:
+                raise CompletionDeliveryReceiptError(
+                    "conflicting completion receipt origin"
+                )
+            correlation = hashlib.sha256(completion_key.encode("utf-8")).hexdigest()
+            receipt_context = CompletionDeliveryContext(
+                kind=completion_kind,
+                completion_id=completion_id,
+                completion_key=completion_key,
+                session_key=f"ui:{lineage_id}",
+                origin_ui_session_id=origin_session_id,
+                root_session_id=lineage_id,
+                delivery_session_id=receipt_delivery_session_id,
+                profile="default",
+                correlation_sha256=correlation,
+                turn_id=f"completion-{correlation[:32]}",
+                receipt_delivery_session_id=receipt_delivery_session_id,
+            )
+            validated = _validated_completion_receipt_record(receipt_context, record)
         except Exception as exc:
             raise CompletionDeliveryReceiptError(
                 "conflicting completion receipt remains visible"
             ) from exc
-        validated = _validated_completion_receipt_record(context, record)
-        if validated["state"] == "accepted":
-            accepted.append(context)
+        if validated["state"] != "accepted":
+            continue
+        try:
+            target = resolve_session_lineage(
+                receipt_delivery_session_id,
+                session_dir=directory,
+            )
+        except Exception as exc:
+            raise CompletionDeliveryReceiptError(
+                "accepted completion delivery lineage is not recoverable"
+            ) from exc
+        if target.root_session_id != lineage_id:
+            raise CompletionDeliveryReceiptError(
+                "accepted completion delivery crossed lineage"
+            )
+        accepted.append(
+            CompletionDeliveryContext(
+                kind=completion_kind,
+                completion_id=completion_id,
+                completion_key=completion_key,
+                session_key=f"ui:{lineage_id}",
+                origin_ui_session_id=origin_session_id,
+                root_session_id=lineage_id,
+                delivery_session_id=target.delivery_session_id,
+                profile=target.profile,
+                correlation_sha256=receipt_context.correlation_sha256,
+                turn_id=receipt_context.turn_id,
+                receipt_delivery_session_id=receipt_delivery_session_id,
+            )
+        )
     return accepted
 
 

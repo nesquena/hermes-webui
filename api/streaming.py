@@ -8106,19 +8106,64 @@ def _run_agent_streaming_core(
     _compression_transition = None
     _writeback_owner_session_ids = {str(session_id)}
 
+    def _read_back_compression_transition() -> None:
+        if not _compression_transition:
+            return
+        previous_id = _compression_transition["previous_tip_session_id"]
+        delivery_id = _compression_transition["delivery_session_id"]
+        try:
+            previous = json.loads(
+                (SESSION_DIR / f"{previous_id}.json").read_text(encoding="utf-8")
+            )
+            delivery = json.loads(
+                (SESSION_DIR / f"{delivery_id}.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError("compression continuation read-back failed") from exc
+        expected_profile = str(_compression_transition["profile"] or "default").strip()
+        if (
+            not isinstance(previous, dict)
+            or previous.get("session_id") != previous_id
+            or not bool(previous.get("pre_compression_snapshot"))
+            or not isinstance(delivery, dict)
+            or delivery.get("session_id") != delivery_id
+            or delivery.get("parent_session_id") != previous_id
+            or bool(delivery.get("pre_compression_snapshot"))
+            or str(previous.get("profile") or "default").strip() != expected_profile
+            or str(delivery.get("profile") or "default").strip() != expected_profile
+        ):
+            raise RuntimeError("compression continuation read-back mismatch")
+
     def _commit_compression_transition() -> None:
         nonlocal _compression_transition
         if not _compression_transition:
             return
         from api.session_lineage import record_lineage_transition
 
-        record_lineage_transition(
-            root_session_id=_compression_transition["root_session_id"],
-            previous_tip_session_id=_compression_transition["previous_tip_session_id"],
-            delivery_session_id=_compression_transition["delivery_session_id"],
-            profile=_compression_transition["profile"],
-            state="committed",
-        )
+        transition = dict(_compression_transition)
+        try:
+            _read_back_compression_transition()
+            record_lineage_transition(
+                root_session_id=transition["root_session_id"],
+                previous_tip_session_id=transition["previous_tip_session_id"],
+                delivery_session_id=transition["delivery_session_id"],
+                profile=transition["profile"],
+                state="committed",
+            )
+        except Exception:
+            # The durable continuation may be valid even when the final marker
+            # replace fails. Move the fence out of ``pending`` while retaining
+            # an explicit owner/evidence record. A later lineage resolution
+            # validates the sidecar chain and retries the commit deterministically.
+            record_lineage_transition(
+                root_session_id=transition["root_session_id"],
+                previous_tip_session_id=transition["previous_tip_session_id"],
+                delivery_session_id=transition["delivery_session_id"],
+                profile=transition["profile"],
+                state="recoverable",
+            )
+            _compression_transition = None
+            raise
         _compression_transition = None
 
     _rt = {}

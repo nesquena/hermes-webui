@@ -29,6 +29,7 @@ def _write_session(
     parent_session_id: str | None = None,
     profile: str | None = "default",
     pre_compression_snapshot: bool = False,
+    **extra,
 ) -> None:
     payload = {
         "session_id": session_id,
@@ -37,6 +38,7 @@ def _write_session(
         "pre_compression_snapshot": pre_compression_snapshot,
         "session_source": "webui",
         "messages": [],
+        **extra,
     }
     (session_dir / f"{session_id}.json").write_text(
         json.dumps(payload), encoding="utf-8"
@@ -174,6 +176,66 @@ def test_pending_fork_cycle_and_cross_profile_lineage_fail_closed(tmp_path):
         lineage.resolve_session_lineage("segment21", session_dir=long_dir)
 
 
+@pytest.mark.parametrize(
+    "boundary_marker",
+    [
+        {"session_source": "fork"},
+        {"relationship_type": "child_session"},
+    ],
+)
+def test_non_compression_child_keeps_one_stable_compression_root(
+    tmp_path,
+    boundary_marker,
+):
+    """C8: inherited fork/child metadata must not advance the root per rotation."""
+    lineage = _lineage_module()
+    _write_session(tmp_path, "parent", pre_compression_snapshot=True)
+    for session_id, parent_id, snapshot in (
+        ("childroot", "parent", True),
+        ("childmiddle", "childroot", True),
+        ("childtip", "childmiddle", False),
+    ):
+        _write_session(
+            tmp_path,
+            session_id,
+            parent_session_id=parent_id,
+            pre_compression_snapshot=snapshot,
+            **boundary_marker,
+        )
+    for previous_tip, delivery in (
+        ("childroot", "childmiddle"),
+        ("childmiddle", "childtip"),
+    ):
+        lineage.record_lineage_transition(
+            root_session_id="childroot",
+            previous_tip_session_id=previous_tip,
+            delivery_session_id=delivery,
+            profile="default",
+            state="committed",
+            session_dir=tmp_path,
+        )
+
+    for requested in ("childroot", "childmiddle", "childtip"):
+        resolved = lineage.resolve_session_lineage(requested, session_dir=tmp_path)
+        assert resolved.root_session_id == "childroot"
+        assert resolved.delivery_session_id == "childtip"
+        assert resolved.hop_count == 2
+
+    _write_session(
+        tmp_path,
+        "unrelatedchild",
+        parent_session_id="childroot",
+        **boundary_marker,
+    )
+    unrelated = lineage.resolve_session_lineage(
+        "unrelatedchild",
+        session_dir=tmp_path,
+    )
+    assert unrelated.root_session_id == "unrelatedchild"
+    assert unrelated.delivery_session_id == "unrelatedchild"
+    assert unrelated.hop_count == 0
+
+
 def _completion_event(kind: str, completion_id: str, *, profile: str = "default") -> dict:
     event = {
         "type": "async_delegation" if kind == "async_delegation" else "process_complete",
@@ -251,6 +313,89 @@ def test_completion_receipt_is_single_owner_restart_safe_and_prompt_free(tmp_pat
     assert first.receipt_path.stat().st_mode & 0o777 == 0o600
 
 
+def test_restart_scan_checks_terminal_receipt_before_rebinding_delivery_tip(tmp_path):
+    """C1: incorporated work stays terminal after its original tip rotates."""
+    lineage = _lineage_module()
+    _write_two_segment_completion_lineage(tmp_path)
+    context = lineage.build_completion_delivery_context(
+        _completion_event("process", "proc-terminal-before-rebind"),
+        "root",
+        session_dir=tmp_path,
+    )
+    claim = lineage.claim_completion_delivery(context, session_dir=tmp_path)
+    lineage.mark_completion_incorporated(claim, session_dir=tmp_path)
+    lineage.release_completion_delivery_claim(claim)
+    retry_context = lineage.build_completion_delivery_context(
+        _completion_event("process", "proc-accepted-after-terminal"),
+        "root",
+        session_dir=tmp_path,
+    )
+    retry_claim = lineage.claim_completion_delivery(
+        retry_context,
+        session_dir=tmp_path,
+    )
+    lineage.release_completion_delivery_claim(retry_claim)
+
+    _write_session(
+        tmp_path,
+        "tip",
+        parent_session_id="root",
+        pre_compression_snapshot=True,
+    )
+    _write_session(tmp_path, "newtip", parent_session_id="tip")
+    lineage.record_lineage_transition(
+        root_session_id="root",
+        previous_tip_session_id="tip",
+        delivery_session_id="newtip",
+        profile="default",
+        state="committed",
+        session_dir=tmp_path,
+    )
+
+    [rebound] = lineage.accepted_completion_delivery_contexts(session_dir=tmp_path)
+    assert rebound.completion_key == retry_context.completion_key
+    assert rebound.delivery_session_id == "newtip"
+    assert rebound.receipt_delivery_session_id == "tip"
+
+
+def test_restart_scan_rebinds_only_accepted_receipt_and_keeps_persisted_identity(tmp_path):
+    """C1: retry routing advances, while receipt CAS stays in its accepted domain."""
+    lineage = _lineage_module()
+    _write_two_segment_completion_lineage(tmp_path)
+    context = lineage.build_completion_delivery_context(
+        _completion_event("process", "proc-accepted-rebind"),
+        "root",
+        session_dir=tmp_path,
+    )
+    first = lineage.claim_completion_delivery(context, session_dir=tmp_path)
+    lineage.release_completion_delivery_claim(first)
+
+    _write_session(
+        tmp_path,
+        "tip",
+        parent_session_id="root",
+        pre_compression_snapshot=True,
+    )
+    _write_session(tmp_path, "newtip", parent_session_id="tip")
+    lineage.record_lineage_transition(
+        root_session_id="root",
+        previous_tip_session_id="tip",
+        delivery_session_id="newtip",
+        profile="default",
+        state="committed",
+        session_dir=tmp_path,
+    )
+
+    [rebound] = lineage.accepted_completion_delivery_contexts(session_dir=tmp_path)
+    assert rebound.delivery_session_id == "newtip"
+    assert rebound.receipt_delivery_session_id == "tip"
+    retried = lineage.claim_completion_delivery(rebound, session_dir=tmp_path)
+    assert retried.attempt == 2
+    lineage.release_completion_delivery_claim(retried)
+    durable = json.loads(first.receipt_path.read_text(encoding="utf-8"))
+    assert durable["receipts"][context.completion_key]["delivery_session_id"] == "tip"
+
+
 def test_completion_receipt_namespaces_process_and_delegation_ids(tmp_path):
     lineage = _lineage_module()
     _write_two_segment_completion_lineage(tmp_path)
@@ -306,6 +451,27 @@ def test_conflicting_completion_receipt_identity_fails_closed(tmp_path):
 
     with pytest.raises(lineage.CompletionDeliveryReceiptError, match="conflicting"):
         lineage.claim_completion_delivery(context, session_dir=tmp_path)
+
+
+def test_tampered_incorporated_receipt_still_fails_restart_scan_closed(tmp_path):
+    """C1: terminal state skips routing only after immutable identity validation."""
+    lineage = _lineage_module()
+    _write_two_segment_completion_lineage(tmp_path)
+    context = lineage.build_completion_delivery_context(
+        _completion_event("process", "proc-tampered-incorporated"),
+        "root",
+        session_dir=tmp_path,
+    )
+    claim = lineage.claim_completion_delivery(context, session_dir=tmp_path)
+    lineage.mark_completion_incorporated(claim, session_dir=tmp_path)
+    receipt_path = claim.receipt_path
+    lineage.release_completion_delivery_claim(claim)
+    document = json.loads(receipt_path.read_text(encoding="utf-8"))
+    document["receipts"][context.completion_key]["correlation_id"] = "0" * 64
+    receipt_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(lineage.CompletionDeliveryReceiptError, match="conflicting"):
+        lineage.accepted_completion_delivery_contexts(session_dir=tmp_path)
 
 
 def test_completion_context_rejects_cross_profile_origin(tmp_path):

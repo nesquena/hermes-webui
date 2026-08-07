@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import multiprocessing
 import os
 from pathlib import Path
@@ -76,6 +77,67 @@ def test_different_roots_are_independent_across_real_processes(tmp_path):
     )
     try:
         assert _child_permit_result("rootb", lock_dir) == "acquired"
+    finally:
+        permit.release()
+
+
+@pytest.mark.parametrize(
+    "boundary_marker",
+    [
+        {"session_source": "fork"},
+        {"relationship_type": "child_session"},
+    ],
+)
+def test_compressed_child_ids_share_one_real_process_permit_key(
+    tmp_path,
+    boundary_marker,
+):
+    """C8: old/new child ids resolve to one process-wide exclusion owner."""
+    lineage = _lineage_module()
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    old = {
+        "session_id": "childold",
+        "profile": "default",
+        "parent_session_id": "parent",
+        "pre_compression_snapshot": True,
+        **boundary_marker,
+    }
+    new = {
+        "session_id": "childnew",
+        "profile": "default",
+        "parent_session_id": "childold",
+        "pre_compression_snapshot": False,
+        **boundary_marker,
+    }
+    (session_dir / "childold.json").write_text(json.dumps(old), encoding="utf-8")
+    (session_dir / "childnew.json").write_text(json.dumps(new), encoding="utf-8")
+    lineage.record_lineage_transition(
+        root_session_id="childold",
+        previous_tip_session_id="childold",
+        delivery_session_id="childnew",
+        profile="default",
+        state="committed",
+        session_dir=session_dir,
+    )
+    old_root = lineage.resolve_session_lineage(
+        "childold",
+        session_dir=session_dir,
+    ).root_session_id
+    new_root = lineage.resolve_session_lineage(
+        "childnew",
+        session_dir=session_dir,
+    ).root_session_id
+    assert old_root == new_root == "childold"
+
+    lock_dir = tmp_path / "permits"
+    permit = lineage.acquire_lineage_turn_permit(
+        old_root,
+        lock_dir=lock_dir,
+        backend="fcntl",
+    )
+    try:
+        assert _child_permit_result(new_root, lock_dir) == "busy"
     finally:
         permit.release()
 
