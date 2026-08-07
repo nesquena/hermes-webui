@@ -1105,7 +1105,7 @@ def _read_chunked_body(handler, max_bytes: int) -> bytes:
             raise ValueError(f'Request body too large (> {max_bytes} bytes)')
         try:
             out.extend(_read_exact(rfile, size))
-        except ValueError as err:
+        except ValueError:
             handler.close_connection = True
             raise
         try:
