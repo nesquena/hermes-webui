@@ -142,9 +142,11 @@ def _get_state_db_path(hermes_home: Path | None = None) -> Path:
     return hermes_home / 'state.db'
 
 
-def _get_agent_sessions_from_db(db_path: Path | None = None) -> list:
+def _get_agent_sessions_from_db(db_path: Path | None = None) -> list | None:
     """Read all non-webui sessions from state.db.
-    Returns list of session dicts, or empty list on any error.
+
+    Returns a list of session dicts (including an empty list for a successful
+    empty projection), or ``None`` when the projection fails.
     """
     db_path = Path(db_path) if db_path is not None else _get_state_db_path()
     if not db_path.exists():
@@ -167,7 +169,7 @@ def _get_agent_sessions_from_db(db_path: Path | None = None) -> list:
             })
         return sessions
     except Exception:
-        return []
+        return None
 
 
 # ── GatewayWatcher ──────────────────────────────────────────────────────────
@@ -339,6 +341,8 @@ class GatewayWatcher:
             return False
 
         sessions = _get_agent_sessions_from_db(db_path)
+        if sessions is None:
+            return False
         current_hash = _snapshot_hash(sessions)
         if cheap_fp is not None:
             self._last_cheap_fp = cheap_fp
