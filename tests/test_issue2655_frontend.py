@@ -24,8 +24,8 @@ def test_workspace_artifacts_tab_collects_session_files_and_previews_them():
     assert "panel.dataset.activeTab = _workspacePanelActiveTab" in WORKSPACE_JS
     assert "projectSessionArtifactsForOwner(sid);" in SESSIONS_JS
     assert "typeof scheduleRenderSessionArtifacts==='function'" in MESSAGES_JS
-    assert "S.toolCalls=d.session.tool_calls.map" in MESSAGES_JS
     assert "projectSessionArtifactsForOwner(completedSid);" in MESSAGES_JS
+    assert "S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(completedSession.tool_calls);" in MESSAGES_JS
     assert ".workspace-artifact-item" in STYLE_CSS
 
 

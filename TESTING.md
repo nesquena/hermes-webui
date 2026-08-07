@@ -309,6 +309,23 @@ WebKit when their Playwright builds are installed and launch
 unlaunchable engine is reported as skipped.
 Run it locally with `python tests/browser_session_row_activation.py`.
 
+## Terminal session windows
+
+Ordinary terminal SSE snapshots carry up to 30 renderable messages, with a
+300-raw-row backstop and explicit raw offsets and total counts. The persisted
+transcript remains complete. Settlement must preserve an already-loaded prefix,
+pagination coordinates, tool metadata, and the final answer, including direct
+compression continuations. Gateway cancellation retains its existing bounded
+session-recovery request.
+
+Run `./scripts/test.sh -q tests/test_terminal_session_tail_and_merge.py` for
+projection and reconciliation regressions. For browser validation, complete a
+turn in a long conversation after loading earlier messages; confirm the loaded
+prefix and scroll position remain available, tool cards survive, and no full
+history is sent in the terminal event. Exercise cancellation and compression
+continuation as well as normal completion. Compare payload bytes and browser
+main-thread settlement timing on the same transcript and base revision.
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic
