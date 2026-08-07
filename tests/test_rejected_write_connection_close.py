@@ -10,6 +10,7 @@ from typing import Any, cast
 
 
 def test_auth_rejected_write_closes_connection(monkeypatch):
+    import api.auth as auth
     import server
 
     handler = SimpleNamespace(
@@ -20,7 +21,7 @@ def test_auth_rejected_write_closes_connection(monkeypatch):
     monkeypatch.setattr(server, "reset_trusted_auth_request_state", lambda _handler: None)
     monkeypatch.setattr(server, "get_profile_cookie", lambda _handler: None)
     monkeypatch.setattr(server, "clear_request_profile", lambda: None)
-    monkeypatch.setattr(server, "check_auth", lambda _handler, _parsed: False)
+    monkeypatch.setattr(auth, "check_auth", lambda _handler, _parsed: False)
 
     def route_must_not_run(_handler, _parsed):
         raise AssertionError("route ran after auth rejection")
