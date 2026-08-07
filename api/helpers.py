@@ -1067,11 +1067,12 @@ def _read_chunked_body(handler, max_bytes: int) -> bytes:
     every proxied POST. See RFC 7230 section 4.1.
 
     The decoder is fail-closed: chunk-size tokens must be pure hex digits,
-    every chunk must be followed by its CRLF delimiter, the trailer section
-    is bounded and must end with a real blank line (EOF is not a terminator),
-    and a body that never reaches its terminating 0-chunk is rejected. A
-    malformed or hostile client therefore cannot desynchronize the framing or
-    occupy a worker thread indefinitely.
+    every line (size line, chunk data delimiter, trailer lines) must use
+    CRLF framing per RFC 7230 — bare-LF endings are rejected — the trailer
+    section is bounded and must end with a real blank line (EOF is not a
+    terminator), and a body that never reaches its terminating 0-chunk is
+    rejected. A malformed or hostile client therefore cannot desynchronize
+    the framing or occupy a worker thread indefinitely.
     """
     rfile = handler.rfile
     out = bytearray()
@@ -1080,7 +1081,10 @@ def _read_chunked_body(handler, max_bytes: int) -> bytes:
         size_line = rfile.readline(65536)
         if not size_line:
             break
-        size_token = size_line.split(b';', 1)[0].strip()
+        if not size_line.endswith(b'\r\n'):
+            handler.close_connection = True
+            raise ValueError(f'Malformed chunk size line: {size_line!r}')
+        size_token = size_line[:-2].split(b';', 1)[0].strip()
         if not _CHUNK_SIZE_RE.match(size_token):
             handler.close_connection = True
             raise ValueError(f'Malformed chunk size: {size_token!r}')
@@ -1094,7 +1098,10 @@ def _read_chunked_body(handler, max_bytes: int) -> bytes:
                 if trailer_bytes > MAX_CHUNKED_TRAILER_BYTES:
                     handler.close_connection = True
                     raise ValueError(f'Chunked trailers too large (> {MAX_CHUNKED_TRAILER_BYTES} bytes)')
-                if trailer in (b'\r\n', b'\n'):
+                if trailer.endswith(b'\n') and not trailer.endswith(b'\r\n'):
+                    handler.close_connection = True
+                    raise ValueError(f'Malformed trailer line: {trailer!r}')
+                if trailer == b'\r\n':
                     break
                 if not trailer:
                     handler.close_connection = True

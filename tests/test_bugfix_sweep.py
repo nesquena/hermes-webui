@@ -252,6 +252,48 @@ def test_read_body_rejects_empty_transfer_encoding_header():
     assert handler.close_connection is True
 
 
+def test_read_body_rejects_bare_lf_size_line():
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(b"8\n{\"a\": 1}\r\n0\r\n\r\n"),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Malformed chunk size line"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_bare_lf_trailer_terminator():
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(b"0\r\n\n"),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Malformed trailer line"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_accepts_trailer_fields():
+    from api.helpers import read_body
+
+    chunked = b"8\r\n{\"a\": 1}\r\n0\r\nFoo: bar\r\n\r\n"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    assert read_body(handler) == {"a": 1}
+    assert handler.close_connection is False
+
+
 def test_session_save_rejects_unsafe_session_id(tmp_path, monkeypatch):
     import api.models as models
 
