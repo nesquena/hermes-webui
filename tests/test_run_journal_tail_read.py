@@ -658,30 +658,26 @@ def test_record_is_structurally_complete_returns_fallback_if_handle_error(
 
 
 def test_read_jsonl_tail_handles_file_deleted_during_boundary_scan(tmp_path, monkeypatch):
-    """End-to-end TOCTOU (reviewer round 9, item 3): a journal BIGGER than the
-    tail cap so the boundary-scan path fires, and a ``read`` failure mid-recovery
-    returns the safe fallback, never propagates to the HTTP handler.
+    """End-to-end TOCTOU (reviewer round 9/10, item 3): a journal BIGGER than the
+    tail cap so the boundary-scan path fires, and a read failure INSIDE the
+    boundary scan (not the forward tail read) returns the safe fallback, never
+    propagates to the HTTP handler.
 
-    No longer vacuous (r9): the OLD test used an obsolete two-argument helper
-    signature AND a ~100 KiB fixture that never exceeded the 4 MiB cap, so the
-    boundary helper was never reached. This version (a) builds a fixture
-    exceeding ``_SESSION_REPLAY_MAX_BYTES`` (proving the boundary path actually
-    fires by recovering the straddling record) and (b) uses the current
-    descriptor-based signature — patching the single ``Path.open`` handle so a
-    body-level ``read`` (the forward tail read, protected only by
-    ``_read_jsonl_tail``'s outer ``except (FileNotFoundError, OSError)``) raises.
-
-    The contract under test: a read failure mid-recovery returns the safe
-    fallback ``([], [])`` (or whatever events it already has), never propagates.
-    The body-level forward tail read is the read whose OSError is NOT swallowed
-    by any helper's inner try/except — so it directly exercises the outer
-    except, which is the round-9 single-open recovery guard."""
+    Discriminating (r10): the OLD test's ``_FailingHandle(fail_on_read=1)``
+    raised on read #1 — which is the forward tail read populating ``raw`` — so
+    ``_find_record_start_before`` and the whole boundary scan NEVER ran. The test
+    passed whether or not the boundary helpers were TOCTOU-safe. This version
+    (a) builds a >cap fixture, (b) asserts the boundary path recovers the
+    straddling record under a normal read (non-vacuity), (c) patches
+    ``_find_record_start_before`` to unlink the pinned file and raise OSError
+    INSIDE the reached boundary call — so the descriptor that was opened by
+    ``_read_jsonl_tail`` is the one that sees the failure, and (d) asserts the
+    boundary hook actually ran and ``Path.open`` was called exactly once (the
+    pinned descriptor is reused, not reopened)."""
     from pathlib import Path
     from api import run_journal
     from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _read_jsonl_tail
 
-    # Build a journal whose tail window straddles a record (size > cap) so the
-    # boundary helpers fire: a small valid token, then an oversized done.
     cap = _SESSION_REPLAY_MAX_BYTES
     token_line = '{"seq":1,"event":"token","payload":{"t":"ok"}}\n'
     oversized_done = (
@@ -697,77 +693,66 @@ def test_read_jsonl_tail_handles_file_deleted_during_boundary_scan(tmp_path, mon
         fh.write(oversized_done.encode("utf-8"))
     assert path.stat().st_size > cap, "fixture must exceed the cap so the boundary scan fires"
 
-    # --- Part A: NON-VACUITY. A normal read on the oversized fixture must run
-    # the boundary path and recover the straddling done's summary (seq=2) —
-    # proving the boundary helpers actually fire (the old test's ~100 KiB
-    # fixture never reached them). This is the r9 "force the boundary path" fix.
+    # --- Part A: NON-VACUITY. A normal read recovers the straddling done's
+    # summary (seq=2) — proving the boundary helpers actually fire.
     events_normal, _ = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
     seqs = {e.get("seq") for e in events_normal if isinstance(e, dict)}
     assert 2 in seqs, (
         f"the oversized done (seq=2) straddling summary must be recovered by the "
-        f"boundary scan — if not, the fixture is vacuous (old bug); got seqs={seqs}"
+        f"boundary scan — if not, the fixture is vacuous; got seqs={seqs}"
     )
 
-    # --- Part B: MUTATION-KILLING CONTRACT. Patch Path.open so the forward tail
-    # read (a body-level read protected ONLY by the outer except) raises OSError
-    # — the realistic single-open TOCTOU (fd invalidated mid-recovery).
-    # _read_jsonl_tail must catch it and return the safe fallback, never raise.
+    # --- Part B: MUTATION-KILLING CONTRACT. Hook _find_record_start_before (the
+    # FIRST boundary helper after the forward tail read succeeds) so a failure
+    # INSIDE the reached boundary call returns the safe fallback, never raises,
+    # and the pinned descriptor is reused (Path.open called exactly once).
+    open_calls = {"n": 0}
+    boundary_calls = {"n": 0}
     real_open = Path.open
 
-    class _FailingHandle:
-        """Lets the first read (forward tail) succeed, then raises OSError on
-        every subsequent read. The forward read populating the body is read #1;
-        the boundary-scan helpers each swallow their own OSErrors internally, so
-        to directly exercise the OUTER except we additionally test the read-#1
-        failure mode below."""
-        def __init__(self, real, fail_on_read=1):
-            self._real = real
-            self._reads = 0
-            self._fail_on_read = fail_on_read
+    def patched_open(self, *args, **kwargs):
+        open_calls["n"] += 1
+        return real_open(self, *args, **kwargs)
 
-        def fileno(self):
-            return self._real.fileno()
+    def patched_find(fh, size, seek_pos, *, budget=None):
+        boundary_calls["n"] += 1
+        # Unlink the pinned file from under the open descriptor and raise — the
+        # realistic single-open TOCTOU (fd invalidated mid-recovery, inside the
+        # boundary scan that the old test never reached).
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise OSError("simulated fd invalidation inside the boundary scan")
 
-        def seek(self, *a, **kw):
-            return self._real.seek(*a, **kw)
+    monkeypatch.setattr(Path, "open", patched_open)
+    monkeypatch.setattr(run_journal, "_find_record_start_before", patched_find)
 
-        def read(self, n=-1):
-            self._reads += 1
-            if self._reads >= self._fail_on_read:
-                raise OSError("simulated fd invalidation mid-recovery")
-            return self._real.read(n)
-
-        def close(self):
-            return self._real.close()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return self._real.__exit__(*a)
-
-    def make_patched_open(fail_on_read):
-        def patched_open(self, *args, **kwargs):
-            real = real_open(self, *args, **kwargs)
-            mode = args[0] if args else kwargs.get("mode", "r")
-            return _FailingHandle(real, fail_on_read) if "b" in mode else real
-        return patched_open
-
-    # Read #1 failure: the forward tail read itself raises. This read is
-    # body-level (only the outer except protects it), so this is the case that
-    # directly tests the outer try/except and is killed if that except re-raises.
-    monkeypatch.setattr(Path, "open", make_patched_open(fail_on_read=1))
     events, malformed = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
     assert isinstance(events, list) and isinstance(malformed, list), (
         f"_read_jsonl_tail must return a (list, list) safe fallback; got "
         f"({type(events).__name__}, {type(malformed).__name__})"
     )
+    assert boundary_calls["n"] >= 1, (
+        "the boundary helper _find_record_start_before was never reached — the "
+        "test is non-discriminating (the failure fired on the forward tail read)"
+    )
+    assert open_calls["n"] == 1, (
+        f"_read_jsonl_tail reopened the journal ({open_calls['n']} opens) instead "
+        f"of reusing the pinned descriptor — single-open contract broken"
+    )
 
     # The same contract holds through the summary reader's path (no propagation
-    # to the HTTP handler): a read failure mid-recovery yields a dict summary.
-    monkeypatch.setattr(Path, "open", make_patched_open(fail_on_read=1))
+    # to the HTTP handler). Re-create the file first since Part B unlinked it.
+    with path.open("wb") as fh:
+        fh.write(token_line.encode("utf-8"))
+        fh.write(oversized_done.encode("utf-8"))
+    open_calls["n"] = 0
+    boundary_calls["n"] = 0
     summary = run_journal.latest_run_summary("s1", "r1", session_dir=tmp_path)
     assert isinstance(summary, dict), "latest_run_summary must return a dict, not raise"
+    assert boundary_calls["n"] >= 1, "the boundary helper must be reached via latest_run_summary too"
+    assert open_calls["n"] == 1, "latest_run_summary must reuse the pinned descriptor"
 
 
 def test_blank_line_before_oversized_partial_done_recovers_preceding_event(tmp_path, monkeypatch):
@@ -1385,3 +1370,237 @@ def test_balanced_invalid_oversized_predecessor_skipped_malformed_nested_value(t
     assert not result.get("terminal"), (
         "a non-terminal token must be recovered, not a fabricated terminal done"
     )
+
+
+def test_read_jsonl_tail_boundary_scan_uses_shared_budget_no_read_after_exhaustion(tmp_path, monkeypatch):
+    """Regression (reviewer round 10, item 1): the PRODUCTION boundary path in
+    ``_read_jsonl_tail`` must use ONE shared ``_ReadBudget`` across boundary
+    lookup, prefix extraction, validity proof, and the backward predecessor
+    scan — so physical I/O is bounded and NO read occurs after exhaustion.
+
+    The r9 physical-budget test only covered ``_read_last_complete_line_before``
+    (the predecessor helper). The r9 PRODUCTION composition called the boundary
+    helpers WITHOUT a shared budget (each ran unbounded). This test instruments
+    the PRODUCTION reader end-to-end and asserts:
+      (a) the boundary helpers are reached (the straddling seq=2 is recovered);
+      (b) the SAME ``_ReadBudget`` instance is threaded through boundary lookup,
+          prefix extraction, validity proof, AND the predecessor scan (the
+          helpers receive a non-None budget, all with one shared id);
+      (c) physical reads are bounded by the shared budget envelope.
+
+    (b) is the discrimination the r9 test lacked: it proves the budget is
+    SHARED, not just that the bytes happen to be bounded by a ceiling constant.
+    A mutation that passes ``budget=None`` to any helper (the r9 bug) fails (b)."""
+    from pathlib import Path
+    from api import run_journal
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _read_jsonl_tail
+
+    cap = _SESSION_REPLAY_MAX_BYTES
+    token_line = '{"seq":1,"event":"token","payload":{"t":"valid"}}\n'
+    # A VALID oversized done: the validity proof returns True, exercising the
+    # boundary lookup + prefix extraction + validity helpers on the happy path.
+    oversized_done = (
+        '{"seq":2,"event":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"t":"'
+        + "X" * (cap + 1000)
+        + '"}}\n'
+    )
+    path = tmp_path / "_run_journal" / "s1" / "r1.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as fh:
+        fh.write(token_line.encode("utf-8"))
+        fh.write(oversized_done.encode("utf-8"))
+    assert path.stat().st_size > cap
+
+    # Instrument the four boundary helpers to record whether a non-None budget
+    # was passed and its id(). The SAME id must appear across all of them.
+    budget_ids_seen = {"find": [], "extract": [], "valid": []}
+    real_find = run_journal._find_record_start_before
+    real_extract = run_journal._extract_boundary_record_summary
+    real_valid = run_journal._record_is_valid_complete
+
+    def patched_find(fh, size, seek_pos, *, budget=None):
+        if budget is not None:
+            budget_ids_seen["find"].append(id(budget))
+        return real_find(fh, size, seek_pos, budget=budget)
+
+    def patched_extract(fh, record_start, *, budget=None):
+        if budget is not None:
+            budget_ids_seen["extract"].append(id(budget))
+        return real_extract(fh, record_start, budget=budget)
+
+    def patched_valid(fh, size, record_start, *, budget=None):
+        if budget is not None:
+            budget_ids_seen["valid"].append(id(budget))
+        return real_valid(fh, size, record_start, budget=budget)
+
+    monkeypatch.setattr(run_journal, "_find_record_start_before", patched_find)
+    monkeypatch.setattr(run_journal, "_extract_boundary_record_summary", patched_extract)
+    monkeypatch.setattr(run_journal, "_record_is_valid_complete", patched_valid)
+
+    # Also count physical reads via the handle.
+    real_open = Path.open
+    captured = {}
+
+    class _CountingHandle:
+        def __init__(self, real):
+            self._real = real
+            self.total_returned = 0
+        def fileno(self): return self._real.fileno()
+        def seek(self, *a, **kw): return self._real.seek(*a, **kw)
+        def read(self, n=-1):
+            data = self._real.read(n)
+            self.total_returned += len(data)
+            return data
+        def close(self): return self._real.close()
+        def __enter__(self): return self
+        def __exit__(self, *a): return self._real.__exit__(*a)
+
+    def patched_open(self, *args, **kwargs):
+        real = real_open(self, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if "b" in mode:
+            h = _CountingHandle(real)
+            captured["handle"] = h
+            return h
+        return real
+
+    monkeypatch.setattr(Path, "open", patched_open)
+    events, _ = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
+
+    # (a) Non-vacuity: the boundary helpers ran and recovered seq=2.
+    seqs = {e.get("seq") for e in events if isinstance(e, dict)}
+    assert 2 in seqs, (
+        f"the boundary helpers must have run (seq=2 recovered); got {seqs}. "
+        f"If absent the test is vacuous."
+    )
+    # (b) The SAME shared _ReadBudget threads through find + extract + valid.
+    # (The predecessor scan only runs on rejection; here the valid done is
+    # accepted so the predecessor helper is not reached — that path is covered
+    # by test_backward_scan_budget_bounds_physical_descriptor_reads.)
+    assert budget_ids_seen["find"], "boundary lookup received no budget (budget=None) — not shared"
+    assert budget_ids_seen["extract"], "prefix extraction received no budget (budget=None) — not shared"
+    assert budget_ids_seen["valid"], "validity proof received no budget (budget=None) — not shared"
+    shared_id = budget_ids_seen["find"][0]
+    assert all(bid == shared_id for bid in budget_ids_seen["find"]), (
+        f"boundary lookup used multiple budget instances: {budget_ids_seen['find']}"
+    )
+    assert all(bid == shared_id for bid in budget_ids_seen["extract"]), (
+        f"prefix extraction used a different budget instance: find={shared_id} extract={budget_ids_seen['extract']}"
+    )
+    assert all(bid == shared_id for bid in budget_ids_seen["valid"]), (
+        f"validity proof used a different budget instance: find={shared_id} valid={budget_ids_seen['valid']}"
+    )
+    # (c) Physical reads are bounded by the shared budget envelope.
+    handle = captured.get("handle")
+    assert handle is not None, "the patched Path.open never returned a binary handle"
+    total = handle.total_returned
+    boundary_helper_bytes = total - cap  # subtract the one forward tail-window read
+    assert boundary_helper_bytes <= 2 * cap, (
+        f"boundary-helper physical reads ({boundary_helper_bytes} bytes) exceeded "
+        f"the 2*cap shared budget ({2*cap}) — the production path is not bounding "
+        f"physical I/O via the shared meter (#6139 r10 item 1)"
+    )
+    assert total < 3 * cap, (
+        f"total physical reads ({total}) far exceed the expected envelope; the "
+        f"production boundary scan is reading unboundedly"
+    )
+
+
+def test_balanced_invalid_oversized_boundary_record_trailing_comma(tmp_path):
+    """Regression (reviewer round 10, item 2): a brace-balanced, newline-
+    terminated oversized BOUNDARY record (the straddling record itself, not a
+    predecessor) that is INVALID JSON (trailing comma after the payload value)
+    must NOT be fabricated into a terminal summary. The r9 tests covered only the
+    predecessor helper; the PRODUCTION ``_read_jsonl_tail`` primary path still
+    trusted the fabricated prefix when brace depth returned to zero.
+
+    Full ``_read_jsonl`` correctly retains only the valid token (seq=1); the tail
+    reader must MATCH it (not promote a fabricated terminal seq=2)."""
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _read_jsonl, _read_jsonl_tail
+
+    cap = _SESSION_REPLAY_MAX_BYTES
+    big = "Q" * (cap + 50_000)
+    token = '{"seq":1,"event":"token","payload":{"t":"valid"}}\n'
+    oversized_boundary = (
+        '{"seq":2,"event":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"t":"' + big + '"},}\n'
+    )
+    path = tmp_path / "_run_journal" / "s1" / "r1.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as fh:
+        fh.write(token.encode("utf-8"))
+        fh.write(oversized_boundary.encode("utf-8"))
+
+    full_events, _ = _read_jsonl(path)
+    tail_events, _ = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
+    full_seqs = {e.get("seq") for e in full_events if isinstance(e, dict)}
+    tail_seqs = {e.get("seq") for e in tail_events if isinstance(e, dict)}
+    assert 2 not in full_seqs, "baseline: the trailing-comma record is invalid JSON (full reader rejects it)"
+    assert 2 not in tail_seqs, (
+        f"the tail reader PROMOTED the brace-balanced-but-invalid oversized "
+        f"boundary record as terminal (tail_seqs={tail_seqs}); the fabricated "
+        f"prefix must not be trusted without whole-record JSON validity "
+        f"(#6139 r10 item 2)"
+    )
+    # The tail reader must not mark terminal (the invalid record is rejected,
+    # only the non-terminal token seq=1 survives — matching the full reader).
+    tail_promoted = any(e.get("_summary_extracted_from_oversized_record") for e in tail_events)
+    assert not tail_promoted, (
+        "the invalid boundary record was fabricated into a summary with "
+        "_summary_extracted_from_oversized_record=True"
+    )
+    # Through the summary reader too: must NOT report completed.
+    summary = __import__("api.run_journal", fromlist=["latest_run_summary"]).latest_run_summary(
+        "s1", "r1", session_dir=tmp_path
+    )
+    assert summary["terminal"] is False, (
+        f"latest_run_summary marked terminal={summary['terminal']} for an invalid "
+        f"(trailing-comma) oversized boundary record — fail-closed should leave it nonterminal"
+    )
+    assert summary["terminal_state"] != "completed", (
+        f"latest_run_summary reported terminal_state={summary['terminal_state']!r} "
+        f"for an invalid boundary record"
+    )
+
+
+def test_balanced_invalid_oversized_boundary_record_malformed_nested_value(tmp_path):
+    """Companion to test_balanced_invalid_oversized_boundary_record_trailing_comma
+    (reviewer round 10, item 2): a brace-balanced, newline-terminated oversized
+    BOUNDARY record invalid JSON due to a malformed nested value (unquoted nested
+    key) — also rejected by the production tail reader, matching the full reader."""
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _read_jsonl, _read_jsonl_tail
+
+    cap = _SESSION_REPLAY_MAX_BYTES
+    big = "Q" * (cap + 50_000)
+    token = '{"seq":1,"event":"token","payload":{"t":"valid"}}\n'
+    oversized_boundary = (
+        '{"seq":2,"event":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"t":"' + big + '",bad:nested}}\n'
+    )
+    path = tmp_path / "_run_journal" / "s2" / "r2.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as fh:
+        fh.write(token.encode("utf-8"))
+        fh.write(oversized_boundary.encode("utf-8"))
+
+    full_events, _ = _read_jsonl(path)
+    tail_events, _ = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
+    full_seqs = {e.get("seq") for e in full_events if isinstance(e, dict)}
+    tail_seqs = {e.get("seq") for e in tail_events if isinstance(e, dict)}
+    assert 2 not in full_seqs, "baseline: the malformed-nested-value record is invalid JSON"
+    assert 2 not in tail_seqs, (
+        f"the tail reader PROMOTED the brace-balanced-but-invalid oversized "
+        f"boundary record (malformed nested value) as terminal (tail_seqs={tail_seqs}); "
+        f"#6139 r10 item 2"
+    )
+    tail_promoted = any(e.get("_summary_extracted_from_oversized_record") for e in tail_events)
+    assert not tail_promoted, "the invalid boundary record was fabricated into a summary"
+    summary = __import__("api.run_journal", fromlist=["latest_run_summary"]).latest_run_summary(
+        "s2", "r2", session_dir=tmp_path
+    )
+    assert summary["terminal"] is False, (
+        f"latest_run_summary marked terminal={summary['terminal']} for an invalid "
+        f"(malformed-nested-value) oversized boundary record"
+    )
+    assert summary["terminal_state"] != "completed"
