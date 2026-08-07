@@ -12564,7 +12564,7 @@ function _anchorSceneNodeForRow(row, opts){
     });
   }else if(row.role==='terminal'){
     const status=String(row.status||row.source_event_type||'').trim();
-    const isError=['error','failed','connection_lost','interrupted','compression_exhausted','tool_limit_reached','no_response'].includes(status);
+    const isError=['error','failed','connection_lost','interrupted','compression_exhausted','tool_limit_reached','no_response','incomplete_final'].includes(status);
     node=_activityStatusNode({
       kind:isError?'warning':'done',
       label:row.text||status||'Turn ended',
@@ -13389,7 +13389,7 @@ function _anchorSceneSceneHasWorklogWorthyRows(scene){
 // preservation) are left to their existing behavior — this is scoped to the
 // error/failure family the report is about.
 const _ANCHOR_SCENE_ERRORED_TERMINAL_STATES=new Set([
-  'error','no_response','degraded','connection_lost','tool_limit_reached','compression_exhausted',
+  'error','no_response','degraded','connection_lost','tool_limit_reached','compression_exhausted','incomplete_final',
 ]);
 function _anchorSceneHasErroredTerminalState(scene){
   const state=String(scene&&scene.terminal_state||'').trim().toLowerCase();

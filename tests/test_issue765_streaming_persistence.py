@@ -404,7 +404,7 @@ class TestIssue765FollowupHardening:
         pre-initialising _checkpoint_stop = None outside any raiseable code
         keeps the finally safe."""
 
-        def mimic_run_agent_streaming():
+        def mimic_run_agent_streaming_core():
             _checkpoint_stop = None  # pre-init (the fix)
             try:
                 # Anything here could raise — simulate early failure
@@ -416,7 +416,7 @@ class TestIssue765FollowupHardening:
                     _checkpoint_stop.set()
 
         with pytest.raises(ValueError, match="early failure"):
-            mimic_run_agent_streaming()
+            mimic_run_agent_streaming_core()
 
     def test_agent_lock_null_guard_in_except_block(self):
         """The except block must not crash with AttributeError when _agent_lock

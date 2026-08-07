@@ -537,6 +537,8 @@ def test_stream_owner_unregistered_on_worker_early_return(monkeypatch):
     """
     from api import config
     import api.streaming as streaming
+    from api.session_lineage import TurnAdmission
+    from unittest.mock import MagicMock
 
     with config.STREAM_SESSION_OWNERS_LOCK:
         previous = dict(config.STREAM_SESSION_OWNERS)
@@ -547,8 +549,22 @@ def test_stream_owner_unregistered_on_worker_early_return(monkeypatch):
     try:
         with config.STREAMS_LOCK:
             config.STREAMS.pop("leak-stream", None)
-        streaming._run_agent_streaming(
-            "some_session", "hi", "m", "/tmp", "leak-stream",
+        permit = MagicMock()
+        permit.acquired = True
+        admission = TurnAdmission.create_for_test(
+            stream_id="leak-stream",
+            root_session_id="some_session",
+            delivery_session_id="some_session",
+            permit=permit,
+        )
+        admission.gate.set()
+        streaming._run_admitted_agent_streaming(
+            "some_session",
+            "hi",
+            "m",
+            "/tmp",
+            "leak-stream",
+            admission=admission,
         )
         with config.STREAM_SESSION_OWNERS_LOCK:
             assert "leak-stream" not in config.STREAM_SESSION_OWNERS

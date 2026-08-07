@@ -35,8 +35,7 @@ from api.config import (
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _alias_session_agent_lock,
     _set_thread_env, _clear_thread_env,
-    register_active_run, update_active_run, unregister_active_run,
-    unregister_stream_owner,
+    register_active_run, update_active_run,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
     resolve_custom_provider_connection,
@@ -47,12 +46,18 @@ from api.config import (
     coerce_reasoning_effort_for_model,
     _main_model_request_overrides,
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
+    BG_TASK_COMPLETE_EVENTS_SEEN, BG_TASK_COMPLETE_EVENTS_SEEN_LOCK,
 )
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.metering import meter
 from api.run_journal import RunJournalWriter
+from api.run_journal import (
+    latest_run_summary,
+    read_run_events,
+    run_events_have_observable_activity,
+)
 from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
@@ -149,7 +154,7 @@ def _cancel_event_payload(
 # save/restore — held only briefly across the env-mutation critical section,
 # NOT for the entire agent run. The agent runs outside the lock; the finally
 # block re-acquires to atomically restore env vars. See narrow-lock pattern
-# in _run_agent_streaming (line ~2719) and profile_env_for_background_worker
+# in _run_agent_streaming_core and profile_env_for_background_worker
 # (api/profiles.py:715).
 _ENV_LOCK = threading.Lock()
 
@@ -1206,6 +1211,41 @@ def _provider_error_probe_text(value) -> tuple[str, int | None]:
 
     _walk(value)
     return ' '.join(t for t in _texts if t).strip(), _status_code
+
+
+def _missing_final_terminal_state(
+    *,
+    has_activity: bool,
+    has_durable_final: bool,
+    hard_failure_state: str | None = None,
+) -> str:
+    """Resolve terminal truth without inferring a provider cause from silence."""
+    if has_durable_final:
+        return "completed"
+    if hard_failure_state:
+        return str(hard_failure_state)
+    return "incomplete_final" if has_activity else "no_response"
+
+
+def _stream_has_observable_activity(session_id: str, stream_id: str) -> bool:
+    if str(STREAM_PARTIAL_TEXT.get(stream_id) or "").strip():
+        return True
+    if str(STREAM_REASONING_TEXT.get(stream_id) or "").strip():
+        return True
+    if STREAM_LIVE_TOOL_CALLS.get(stream_id):
+        return True
+    try:
+        journal = read_run_events(session_id, stream_id)
+    except Exception:
+        return False
+    return run_events_have_observable_activity(journal.get("events") or [])
+
+
+def _run_journal_has_completed_truth(session_id: str, stream_id: str) -> bool:
+    try:
+        return latest_run_summary(session_id, stream_id).get("terminal_state") == "completed"
+    except Exception:
+        return False
 
 
 def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = False) -> dict:
@@ -2293,7 +2333,7 @@ def _reset_streaming_hermes_home_override(override_mod, override_token, override
 # raced on one slot: session A's spawn could capture session B's id, and at
 # completion the server-side wakeup turn started for the WRONG session
 # (RCA t_f62ff1e8, agent.log:6632). The agent worker runs synchronously inside
-# the _run_agent_streaming thread (concurrent tool batches use
+# the _run_agent_streaming_core thread (concurrent tool batches use
 # contextvars.copy_context() so children inherit this binding); binding the
 # context-local here makes the capture task/thread-local and race-immune.
 def _set_turn_session_identity(session_id: str):
@@ -2376,7 +2416,7 @@ def _reset_turn_session_identity(tokens) -> None:
 def _bind_turn_session_identity(session_id: str):
     """Context-manager form of the per-turn session-identity binding.
 
-    The ``_run_agent_streaming`` worker uses the explicit ``_set``/``_reset``
+    The ``_run_agent_streaming_core`` worker uses the explicit ``_set``/``_reset``
     pair directly because its single ``try/finally`` already spans the whole
     turn (~2k lines) and the binding must cover every mid-turn background
     spawn; this wrapper is the canonical single-call API for other callers and
@@ -2620,6 +2660,22 @@ def _drain_webui_process_notifications(
                     "(age %.0fs > cap %.0fs)",
                     evt_sid, stale_age, stale_completion_max_age,
                 )
+            continue
+
+        # The background completion worker may already own this event in its
+        # durable receipt flow. Its process-local seen marker is diagnostic,
+        # not an ACK: skip this duplicate queue copy without marking the core
+        # completion consumed. The deferred/receipt path remains restart-safe
+        # and performs the only terminal ACK after incorporation.
+        try:
+            with BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+                owned_by_receipt_flow = any(
+                    evt_sid in process_ids
+                    for process_ids in BG_TASK_COMPLETE_EVENTS_SEEN.values()
+                )
+        except Exception:
+            owned_by_receipt_flow = False
+        if owned_by_receipt_flow:
             continue
 
         if is_stale:
@@ -7138,7 +7194,7 @@ def _snapshot_and_append_partial_on_error(session, stream_id) -> dict | None:
 def _last_resort_sync_from_core(session, stream_id, agent_lock):
     """Final-exit guard: if the stream exits with pending_user_message still set,
     sync messages from the core transcript or add an error marker.
-    Called from the outer finally block of _run_agent_streaming.
+    Called from the outer finally block of _run_agent_streaming_core.
     Must never raise.
     """
     from api.models import _get_profile_home, _apply_core_sync_or_error_marker
@@ -7600,14 +7656,94 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
 
     if getattr(agent, 'api_mode', None) == 'anthropic_messages':
         if hasattr(agent, '_anthropic_api_key'):
-            rt['anthropic_api_key'] = getattr(agent, '_anthropic_api_key')
+            rt['anthropic_api_key'] = agent._anthropic_api_key
         if hasattr(agent, '_anthropic_base_url'):
-            rt['anthropic_base_url'] = getattr(agent, '_anthropic_base_url')
+            rt['anthropic_base_url'] = agent._anthropic_base_url
         if hasattr(agent, '_is_anthropic_oauth'):
-            rt['is_anthropic_oauth'] = getattr(agent, '_is_anthropic_oauth')
+            rt['is_anthropic_oauth'] = agent._is_anthropic_oauth
 
 
-def _run_agent_streaming(
+def _run_admitted_agent_streaming(
+    session_id,
+    msg_text,
+    model,
+    workspace,
+    stream_id,
+    attachments=None,
+    *,
+    admission,
+    completion_observer=None,
+    ephemeral=False,
+    model_provider=None,
+    goal_related=False,
+    moa_config=None,
+):
+    """Park an admitted local worker, run its core, and release exact ownership."""
+    from api.session_lineage import TurnAdmission, release_turn_admission
+
+    if not isinstance(admission, TurnAdmission):
+        raise ValueError("local streaming requires an exact TurnAdmission")
+    try:
+        try:
+            register_active_run(
+                stream_id,
+                lineage_id=admission.root_session_id,
+                delivery_session_id=admission.delivery_session_id,
+                admission=admission,
+                session_id=session_id,
+                started_at=time.time(),
+                phase="parked",
+                workspace=str(workspace),
+                model=model,
+                provider=model_provider,
+                ephemeral=bool(ephemeral),
+            )
+        except (RuntimeError, ValueError):
+            admission.abort.set()
+            admission.admitted.set()
+            return
+        admission.admitted.set()
+        while not admission.gate.wait(timeout=0.05):
+            if admission.abort.is_set():
+                return
+        if admission.abort.is_set():
+            return
+        return _run_agent_streaming_core(
+            session_id,
+            msg_text,
+            model,
+            workspace,
+            stream_id,
+            attachments,
+            ephemeral=ephemeral,
+            model_provider=model_provider,
+            goal_related=goal_related,
+            moa_config=moa_config,
+            _lineage_root_session_id=admission.root_session_id,
+        )
+    except BaseException:
+        admission.abort.set()
+        admission.admitted.set()
+        raise
+    finally:
+        try:
+            if callable(completion_observer):
+                completion_observer()
+        finally:
+            release_turn_admission(admission)
+            try:
+                from api.background_process import drain_deferred_wakeups_for_session
+
+                drain_deferred_wakeups_for_session(admission.root_session_id)
+            except Exception:
+                logger.debug(
+                    "admitted turn deferred-wakeup drain failed for lineage %s",
+                    admission.root_session_id,
+                    exc_info=True,
+                )
+
+
+def _run_agent_streaming_core(
     session_id,
     msg_text,
     model,
@@ -7619,6 +7755,7 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    _lineage_root_session_id=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -7629,21 +7766,11 @@ def _run_agent_streaming(
     _turn_route_provider = model_provider
     q = STREAMS.get(stream_id)
     if q is None:
-        # The stream was cancelled before the worker started; the route layer
-        # already registered the stream owner, so release it here to avoid
-        # leaking a STREAM_SESSION_OWNERS entry that the teardown finally never sees.
-        unregister_stream_owner(stream_id)
         return
-    register_active_run(
-        stream_id,
-        session_id=session_id,
-        started_at=time.time(),
-        phase="starting",
-        workspace=str(workspace),
-        model=model,
-        provider=model_provider,
-        ephemeral=bool(ephemeral),
-    )
+    if not _lineage_root_session_id:
+        from api.session_lineage import resolve_session_lineage
+
+        _lineage_root_session_id = resolve_session_lineage(session_id).root_session_id
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
     except Exception:
@@ -7659,6 +7786,23 @@ def _run_agent_streaming(
         except Exception:
             logger.debug("Failed to append worker_started turn journal event", exc_info=True)
     s = None
+    _compression_transition = None
+
+    def _commit_compression_transition() -> None:
+        nonlocal _compression_transition
+        if not _compression_transition:
+            return
+        from api.session_lineage import record_lineage_transition
+
+        record_lineage_transition(
+            root_session_id=_compression_transition["root_session_id"],
+            previous_tip_session_id=_compression_transition["previous_tip_session_id"],
+            delivery_session_id=_compression_transition["delivery_session_id"],
+            profile=_compression_transition["profile"],
+            state="committed",
+        )
+        _compression_transition = None
+
     _rt = {}
     old_cwd = None
     old_exec_ask = None
@@ -7982,11 +8126,22 @@ def _run_agent_streaming(
     _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
 
     _success_writeback_committed = False
+    _semantic_terminal_event = [None]
 
     def put(event, data):
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror'):
             return
+        if event in {'done', 'cancel', 'apperror', 'error'}:
+            if _semantic_terminal_event[0] is not None:
+                logger.warning(
+                    "Dropping conflicting terminal event %s for stream %s after %s",
+                    event,
+                    stream_id,
+                    _semantic_terminal_event[0],
+                )
+                return
+            _semantic_terminal_event[0] = event
         event_id = None
         if run_journal is not None:
             try:
@@ -9774,10 +9929,23 @@ def _run_agent_streaming(
                     new_sid = _agent_sid
                     _compression_origin_session_id = old_sid
                     _compression_continuation_session_id = new_sid
+                    from api.session_lineage import record_lineage_transition
+
+                    _compression_transition = {
+                        "root_session_id": _lineage_root_session_id,
+                        "previous_tip_session_id": old_sid,
+                        "delivery_session_id": new_sid,
+                        "profile": getattr(s, "profile", None)
+                        or _resolved_profile_name,
+                    }
+                    record_lineage_transition(
+                        **_compression_transition,
+                        state="pending",
+                    )
                     s.session_id = new_sid
                     # Carry profile identity across the compression boundary.
                     # Without this, s.profile stays None on the continuation
-                    # session. On the next request, _run_agent_streaming calls
+                    # session. On the next request, _run_agent_streaming_core calls
                     # get_hermes_home_for_profile(getattr(s, 'profile', None))
                     # which falls back to the default profile's HERMES_HOME.
                     # Memory writes then land in the wrong profile's MEMORY.md.
@@ -9887,6 +10055,17 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     msg_text,
                 )
+                _durable_current_turn_final = (
+                    _current_turn_already_has_visible_assistant_answer(
+                        _align_current_turn_display(
+                            _previous_messages,
+                            _previous_owner_context_messages,
+                            _active_turn_identity,
+                        )[0],
+                        active_turn_identity=_active_turn_identity,
+                    )
+                    or _run_journal_has_completed_truth(s.session_id, stream_id)
+                )
                 _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
                 # #5940: if the Agent aborted on a non-retryable provider error
                 # (captured from its lifecycle status_callback) but left no error on
@@ -9894,15 +10073,23 @@ def _run_agent_streaming(
                 # surface the real cause (model_not_found / auth) instead of the
                 # misleading no_response "silent rate limit, try again" fallback.
                 _captured_terminal_failure = bool(_captured_terminal_error[0])
-                if not _last_err and _captured_terminal_failure:
+                if (
+                    not _last_err
+                    and _captured_terminal_failure
+                    and not _durable_current_turn_final
+                ):
                     _last_err = _captured_terminal_error[0]
+                _result_status = str(result.get('status') or result.get('state') or '').strip().lower()
+                _result_has_hard_failure_state = (
+                    _result_status in {'failed', 'error', 'compression_exhausted'}
+                    or bool(result.get('failed'))
+                    or bool(result.get('compression_exhausted'))
+                )
                 _classification = _classify_provider_error(
                     str(_last_err) if _last_err else '',
                     _last_err,
                     silent_failure=not bool(_last_err),
                 )
-                _is_quota = _classification['type'] == 'quota_exhausted'
-                _is_auth = _classification['type'] == 'auth_mismatch'
                 _drop_replayed_assistant = (
                     _captured_terminal_failure
                     or _agent_result_terminal_failure(result)
@@ -9920,28 +10107,48 @@ def _run_agent_streaming(
                 )
                 if (
                     not _all_result_messages
-                    and _current_turn_already_has_visible_assistant_answer(
-                        _align_current_turn_display(
-                            _previous_messages,
-                            _previous_owner_context_messages,
-                            _active_turn_identity,
-                        )[0],
-                        active_turn_identity=_active_turn_identity,
-                    )
+                    and _durable_current_turn_final
                 ):
                     _saved_transcript_lacks_final_answer = False
+                if _durable_current_turn_final:
+                    _saved_transcript_lacks_final_answer = False
+                _turn_has_activity = _stream_has_observable_activity(
+                    s.session_id, stream_id
+                )
+                if (
+                    _saved_transcript_lacks_final_answer
+                    and _classification['type'] == 'no_response'
+                    and not _captured_terminal_failure
+                    and not _result_has_hard_failure_state
+                    and _missing_final_terminal_state(
+                        has_activity=_turn_has_activity,
+                        has_durable_final=False,
+                    ) == 'incomplete_final'
+                ):
+                    _classification = {
+                        'type': 'incomplete_final',
+                        'label': 'Response incomplete',
+                        'hint': (
+                            'The run produced activity but did not commit a final answer. '
+                            'Retry or continue from the visible partial work.'
+                        ),
+                    }
+                _is_quota = _classification['type'] == 'quota_exhausted'
+                _is_auth = _classification['type'] == 'auth_mismatch'
                 if not _assistant_added and not _saved_transcript_lacks_final_answer:
                     _assistant_added = True
                 _is_agent_result_terminal = _agent_result_terminal_failure(result)
                 _terminal_failure = (
-                    _captured_terminal_failure
-                    or _is_agent_result_terminal
+                    (
+                        _captured_terminal_failure
+                        or _is_agent_result_terminal
+                    )
+                    and not _durable_current_turn_final
                     or (
                         _saved_transcript_lacks_final_answer
                         and _classification['type'] not in {'cancelled', 'interrupted'}
                     )
                 )
-                _result_status = str(result.get('status') or result.get('state') or '').strip().lower()
                 _soft_partial_terminal_failure = (
                     _is_agent_result_terminal
                     and (_result_status == 'partial' or bool(result.get('partial')))
@@ -10132,6 +10339,7 @@ def _run_agent_streaming(
                             _err_type,
                             _err_hint,
                         )
+                        _error_payload['terminal_state'] = _err_type
                         if _turn_pending_source == 'process_wakeup':
                             _recorded_pause = record_process_wakeup_provider_unavailable_pause(
                                 s,
@@ -10172,6 +10380,7 @@ def _run_agent_streaming(
                             'content': _error_content,
                             'timestamp': int(time.time()),
                             '_error': True,
+                            '_terminal_state': _err_type,
                         }
                         if _turn_duration is not None:
                             _error_message['_turnDuration'] = _turn_duration
@@ -10195,6 +10404,7 @@ def _run_agent_streaming(
                         s.messages.append(_error_message)
                         try:
                             s.save()
+                            _commit_compression_transition()
                         except Exception:
                             pass
                         _error_payload['session'] = redact_session_data(
@@ -10643,6 +10853,7 @@ def _run_agent_streaming(
                     return
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
+                    _commit_compression_transition()
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
                     try:
@@ -11437,6 +11648,22 @@ def _run_agent_streaming(
             _error_payload['old_session_id'] = session_id
         put('apperror', _error_payload)
     finally:
+        # The compression transition is turn-owned state.  Every successful
+        # rotation path persists the continuation before leaving the worker
+        # (normal result, cancelled finalization, or outer-exception
+        # settlement), so release the durable ``pending`` fence from this one
+        # lifecycle owner rather than trying to enumerate return statements.
+        # The helper clears its in-memory ownership only after the committed
+        # record is durably replaced and is idempotent with the earlier
+        # writeback calls.
+        try:
+            _commit_compression_transition()
+        except Exception:
+            logger.error(
+                "Failed to finalize compression lineage transition for stream %s",
+                stream_id,
+                exc_info=True,
+            )
         # #4633/#2476: symmetric metering teardown. begin_session() (top of the
         # outer try) had no paired end_session(), so zero-token turns leaked a
         # _sessions[stream_id] entry that get_stats() pruning never reclaims (its
@@ -11497,10 +11724,6 @@ def _run_agent_streaming(
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)  # Clean up tool calls (#1361 §B)
             STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)  # Clean up event_id pointer (stage-364)
-            unregister_active_run(stream_id)
-            # Clean up the stream-owner registry so stale stream_id→session_id
-            # mappings do not accumulate over thousands of completed streams (#6351).
-            unregister_stream_owner(stream_id)
             # NOTE: do NOT discard PENDING_GOAL_CONTINUATION here. The marker
             # is set by goal_continue (line ~3328) inside the SAME function
             # call and consumed atomically by `_start_chat_stream_for_session`
@@ -11510,36 +11733,6 @@ def _run_agent_streaming(
             # POST /api/chat/start round-trip and erase the marker before
             # the next stream can read it, breaking the goal-continuation
             # chain. Stage-326 critical fix per Opus advisor review.
-
-        # ── Defer-path fix: turn-teardown idle-hook ────────────────────────
-        # The session has just transitioned active→idle: unregister_active_run
-        # above cleared this stream's ACTIVE_RUNS row (under ACTIVE_RUNS_LOCK,
-        # independent of STREAMS_LOCK), so _session_has_active_turn() is now
-        # False for this session unless a *different* stream is still active
-        # (cancel/reconnect — drain_deferred_wakeups_for_session guards on
-        # that and leaves the marker for the later teardown). A FAST
-        # background task that completed while this turn was tearing down was
-        # deferred by api/background_process._process_one (it could not start
-        # a turn → would 409) and its wakeup_prompt persisted in
-        # DEFERRED_PROCESS_WAKEUPS. For an autonomous agent there is no next
-        # user turn, so the PR #2279 next-turn drain never runs; without this
-        # hook the deferred wakeup is lost forever (the Test B failure). This
-        # makes the busy-at-completion case symmetric with the idle case:
-        # idle now → fire now (Option Z idle branch); busy now → fire here at
-        # turn-end. claim_deferred_wakeups pops atomically, so this is
-        # idempotent with the next-turn drain (no double-fire) and the wakeup
-        # turn's own teardown finds nothing claimed (no wakeup loop). The
-        # drain spawns its own daemon thread, so teardown never blocks.
-        try:
-            from api.background_process import drain_deferred_wakeups_for_session
-
-            drain_deferred_wakeups_for_session(session_id)
-        except Exception:
-            logger.debug(
-                "turn-teardown deferred-wakeup drain failed for session %s",
-                session_id,
-                exc_info=True,
-            )
 
 # ============================================================
 # SECTION: HTTP Request Handler

@@ -1468,3 +1468,108 @@ def test_reconnect_without_tail_forces_fresh_segment_after_activity():
     assert "reconnecting" in fresh_line
     assert "segmentStart>0" in fresh_line
     assert "segmentStart>=String(assistantText||'').length" in fresh_line
+
+
+def test_turn_admission_requires_exact_owner_and_releases_once(tmp_path, monkeypatch):
+    """A foreign token cannot remove a reserved root; its exact owner can."""
+    from unittest.mock import MagicMock
+
+    import pytest
+
+    from api import config, models, routes
+    from api.models import Session
+    from api.session_lineage import TurnAdmission, release_turn_admission
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    session = Session(session_id="admission-root", workspace=str(tmp_path), profile="default")
+    session.save()
+
+    admission = routes._reserve_turn_admission(session, "stream-admission")
+    assert admission.reservation_id == "stream-admission"
+    assert admission.stream_id == "stream-admission"
+    assert admission.permit.acquired is True
+    with config.ACTIVE_RUNS_LOCK:
+        row = dict(config.ACTIVE_RUNS["stream-admission"])
+    assert row["owner_token"] == admission.owner_token
+    assert config.register_active_run(
+        admission.stream_id,
+        admission=admission,
+        lineage_id=admission.root_session_id,
+        delivery_session_id=admission.delivery_session_id,
+        phase="worker",
+        worker_id="worker-1",
+    ) is True
+    with config.ACTIVE_RUNS_LOCK:
+        merged = dict(config.ACTIVE_RUNS[admission.stream_id])
+    assert merged["admission"] is admission
+    assert merged["permit"] is admission.permit
+    assert merged["owner_token"] == admission.owner_token
+    assert merged["lineage_id"] == admission.root_session_id
+    assert merged["phase"] == "worker"
+    with pytest.raises(ValueError, match="admission identity mismatch"):
+        config.register_active_run(
+            admission.stream_id,
+            lineage_id="foreign-root",
+            admission=admission,
+        )
+
+    session.active_stream_id = admission.stream_id
+    assert routes._active_stream_blocks_chat_start(
+        session,
+        admission.stream_id,
+        admission=admission,
+    ) is False
+    assert routes._active_run_stream_for_session(
+        session.session_id,
+        admission=admission,
+    ) is None
+
+    foreign_permit = MagicMock()
+    foreign_permit.acquired = True
+    foreign = TurnAdmission.create_for_test(
+        stream_id=admission.stream_id,
+        root_session_id=admission.root_session_id,
+        delivery_session_id=admission.delivery_session_id,
+        permit=foreign_permit,
+    )
+    assert routes._active_stream_blocks_chat_start(
+        session,
+        admission.stream_id,
+        admission=foreign,
+    ) is True
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS[admission.stream_id]["lineage_id"] = "foreign-root"
+    try:
+        assert routes._active_run_stream_for_session(
+            session.session_id,
+            admission=admission,
+        ) == admission.stream_id
+    finally:
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS[admission.stream_id]["lineage_id"] = admission.root_session_id
+    assert routes._active_run_stream_for_session(
+        session.session_id,
+        admission=foreign,
+    ) == admission.stream_id
+    assert release_turn_admission(foreign) is False
+    assert foreign_permit.release.call_count == 0
+    assert admission.permit.acquired is True
+
+    assert config.unregister_active_run("stream-admission", owner_token="foreign") is False
+    assert admission.permit.acquired is True
+    assert release_turn_admission(admission) is True
+    assert admission.permit.acquired is False
+    assert release_turn_admission(admission) is False
+    with pytest.raises(ValueError, match="acquired lineage permit"):
+        config.register_active_run(
+            admission.stream_id,
+            admission=admission,
+            lineage_id=admission.root_session_id,
+            delivery_session_id=admission.delivery_session_id,
+        )
+    with config.ACTIVE_RUNS_LOCK:
+        assert admission.stream_id not in config.ACTIVE_RUNS
