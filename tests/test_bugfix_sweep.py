@@ -266,6 +266,21 @@ def test_read_body_rejects_bare_lf_size_line():
     assert handler.close_connection is True
 
 
+def test_read_body_rejects_whitespace_padded_chunk_size():
+    from api.helpers import read_body
+
+    for padded in (b" 8\r\n{\"a\": 1}\r\n0\r\n\r\n", b"8 \r\n{\"a\": 1}\r\n0\r\n\r\n", b"\t8\r\n{\"a\": 1}\r\n0\r\n\r\n"):
+        handler = SimpleNamespace(
+            headers=_Headers({"Transfer-Encoding": "chunked"}),
+            rfile=io.BytesIO(padded),
+            close_connection=False,
+        )
+
+        with pytest.raises(ValueError, match="Malformed chunk size"):
+            read_body(handler)
+        assert handler.close_connection is True
+
+
 def test_read_body_rejects_bare_lf_trailer_terminator():
     from api.helpers import read_body
 

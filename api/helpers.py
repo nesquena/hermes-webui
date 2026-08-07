@@ -1084,7 +1084,7 @@ def _read_chunked_body(handler, max_bytes: int) -> bytes:
         if not size_line.endswith(b'\r\n'):
             handler.close_connection = True
             raise ValueError(f'Malformed chunk size line: {size_line!r}')
-        size_token = size_line[:-2].split(b';', 1)[0].strip()
+        size_token = size_line[:-2].split(b';', 1)[0]
         if not _CHUNK_SIZE_RE.match(size_token):
             handler.close_connection = True
             raise ValueError(f'Malformed chunk size: {size_token!r}')
