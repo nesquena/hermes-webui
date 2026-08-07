@@ -720,9 +720,9 @@ if(muteCalls.length!==0) throw new Error(`phase3 must not mute, got ${muteCalls.
 def _fade_fake_node(tag='div', text=''):
     """Fake DOM node with dynamic textContent (sums descendant text), parentNode
     backlinks and classList — enough for _streamFadeMuteRenderedPrefix."""
-    return f"""
-class FakeNode{{
-  constructor(tag='div',text=''){{
+    return """
+class FakeNode{
+  constructor(tag='div',text=''){
     this.tagName=String(tag).toUpperCase();
     this.nodeType=(tag==='#text')?3:1;
     this.type=(tag==='#text')?'text':undefined;
@@ -730,25 +730,25 @@ class FakeNode{{
     this.parentNode=null;
     this.className='';
     this._text=text;
-    if(text!=='' && tag!=='#text'){{ this.appendChild(new FakeNode('#text',text)); }}
-  }}
-  appendChild(child){{ child.parentNode=this; this.children.push(child); return child; }}
-  get childNodes(){{ return this.children; }}
-  get textContent(){{
+    if(text!=='' && tag!=='#text'){ this.appendChild(new FakeNode('#text',text)); }
+  }
+  appendChild(child){ child.parentNode=this; this.children.push(child); return child; }
+  get childNodes(){ return this.children; }
+  get textContent(){
     if(this.nodeType===3) return this._text;
     let s='';
     for(const c of this.children) s+=c.textContent;
     return s;
-  }}
-  set textContent(v){{ this._text=String(v); }}
-  get classList(){{
+  }
+  set textContent(v){ this._text=String(v); }
+  get classList(){
     const self=this;
-    return {{
-      contains(c){{ return (' '+self.className+' ').indexOf(' '+c+' ')>-1; }},
-      remove(c){{ self.className=(' '+self.className+' ').replace(' '+c+' ',' ').trim(); }},
-    }};
-  }}
-}}
+    return {
+      contains(c){ return (' '+self.className+' ').indexOf(' '+c+' ')>-1; },
+      remove(c){ self.className=(' '+self.className+' ').replace(' '+c+' ',' ').trim(); },
+    };
+  }
+}
 """
 
 
