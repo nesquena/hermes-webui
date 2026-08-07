@@ -58,8 +58,8 @@ def _revert_running_cleanup(source: str) -> str:
 
     old_branch = source[branch_start : else_close + 1]
     assert "clearCompressionUi()" in old_branch
-    assert "sessionId:d.session.session_id" in old_branch.replace(" ", "")
-    reverted = "window._compressionUi={...window._compressionUi, sessionId:d.session.session_id};"
+    assert "sessionId:completedSession.session_id" in old_branch.replace(" ", "")
+    reverted = "window._compressionUi={...window._compressionUi, sessionId:completedSession.session_id};"
     return source[:branch_start] + reverted + source[else_close + 1 :]
 
 
@@ -132,6 +132,8 @@ async ({kind, doneSid}) => {
   S.session = {session_id: activeSid, messages: []};
   S.messages = [];
   S.toolCalls = [];
+  _oldestIdx = 0;
+  _messagesTruncated = false;
   S.activeStreamId = streamId;
   S.busy = true;
   window._compressionUi = null;
