@@ -4,14 +4,16 @@ Mirrors tests/test_5682_profile_query_switch.py: the JS functions are
 extracted from the static sources and executed in node, so the tests fail
 if the functions disappear or change contract — no browser needed.
 
-The boot-block tests execute the actual routing block from static/boot.js
-against stubbed collaborators (S, newSession, profile intent flags), giving
-deterministic behavioral coverage of:
+The boot-block tests execute the actual profile-switch and workspace routing
+blocks extracted verbatim from static/boot.js against stubbed collaborators
+(S, newSession, switchToProfile), giving deterministic behavioral coverage of:
 - an encoded Windows absolute path reaching the session-create request;
 - a server-acceptable path whose basename contains "..";
-- compound ?profile=&workspace= launches where the profile switch did not
-  complete (returned false / threw): newSession() must not be called and the
-  workspace parameter must not be consumed;
+- length boundaries (1023 / 1024 / above): every nonblank value reaches
+  newSession() — server rejection is the authority, there is no client cap;
+- compound ?profile=&workspace= launches where switchToProfile() actually
+  returns false and where it actually throws: newSession() must not be called
+  and the workspace parameter must not be consumed;
 - the successful compound case: creation occurs under the switched profile.
 """
 import json
@@ -30,8 +32,10 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
-BLOCK_START = "// ?workspace=<path> (one-shot, symmetric to ?profile=)"
-BLOCK_END = "const _profileQueryBlocksSavedLocal"
+PROFILE_BLOCK_START = "let _profileSwitchCompleted=false;"
+PROFILE_BLOCK_END = "if(typeof fetchReasoningChip"
+WS_BLOCK_START = "// ?workspace=<path> (one-shot, symmetric to ?profile=)"
+WS_BLOCK_END = "const _profileQueryBlocksSavedLocal"
 
 
 def _run_node(source: str) -> str:
@@ -87,30 +91,49 @@ global.window = {{
     }}
   }}
 }};
+global.localStorage = {{
+  _s: {{}},
+  getItem(k) {{ return Object.prototype.hasOwnProperty.call(this._s, k) ? this._s[k] : null; }},
+  setItem(k, v) {{ this._s[k] = String(v); }},
+  removeItem(k) {{ delete this._s[k]; }}
+}};
 evalSession('_workspaceQueryIntentFromLocation');
 evalSession('_consumeWorkspaceQueryParamFromLocation');
+evalSession('_consumeProfileQueryParamFromLocation');
 """
 
 
 def _node_boot_runner() -> str:
-    """Wrap the real boot routing block into a callable that takes stubs.
+    """Run the real profile-switch block, then the real workspace routing
+    block, both extracted verbatim from static/boot.js, in a shared scope.
 
-    The block is executed verbatim (extracted between its comment marker and
-    the statement that follows it), so these tests exercise the shipped code
-    path, not a re-implementation.
+    switchToProfile is stubbed per scenario (true / false / throw), so the
+    completion flag is computed by the shipped code, not preset by the test.
     """
     return _node_prelude() + f"""
 const bootSrc = {BOOT_JS!r};
-const _bs = bootSrc.indexOf({BLOCK_START!r});
-const _be = bootSrc.indexOf({BLOCK_END!r});
-if (_bs < 0 || _be < 0 || _be <= _bs) throw new Error('workspace boot block not found');
-const bootBlock = bootSrc.slice(_bs, _be);
-async function runBootBlock(ctx) {{
+function slice(start, end) {{
+  const s = bootSrc.indexOf(start);
+  const e = bootSrc.indexOf(end);
+  if (s < 0 || e < 0 || e <= s) throw new Error('boot block not found: ' + start.slice(0, 40));
+  return bootSrc.slice(s, e);
+}}
+const profileBlock = slice({PROFILE_BLOCK_START!r}, {PROFILE_BLOCK_END!r});
+const wsBlock = slice({WS_BLOCK_START!r}, {WS_BLOCK_END!r});
+async function runBootBlocks(ctx) {{
   const S = ctx.S;
   const profileIntent = ctx.profileIntent;
-  const _profileSwitchCompleted = ctx.profileSwitchCompleted;
-  const prefillIntent = ctx.prefillIntent || null;
+  const prefillIntent = null;
   const calls = ctx.calls;
+  const _profileSwitchProfileBefore = S.activeProfile || 'default';
+  const _profileSwitchIsDefaultBefore = !!S.activeProfileIsDefault;
+  async function switchToProfile(name) {{
+    ctx.switchCalls.push(name);
+    if (ctx.switchOutcome === 'throws') throw new Error('switch failed');
+    if (ctx.switchOutcome === 'returns-false') return false;
+    S.activeProfile = name;
+    return true;
+  }}
   async function newSession(fresh, opts) {{
     calls.push({{
       fresh, opts,
@@ -125,17 +148,13 @@ async function runBootBlock(ctx) {{
   const renderSessionList = async () => {{}};
   const _finalizeComposerPrefillOnBoot = async () => {{}};
   const _startBootModelDropdown = () => {{}};
-  const routed = await (async () => {{ {'{'}
-    // eval keeps the block's own `return` semantics: undefined => routed+returned
-    return await eval('(async () => {{' + bootBlock + '; return "fell-through";}})()');
-  {'}'} }})();
-  return routed;
+  return await eval('(async () => {{' + profileBlock + ';' + wsBlock + '; return "fell-through";}})()');
 }}
 """
 
 
 # ---------------------------------------------------------------------------
-# Intent parsing — the client must not narrow the server's path language
+# Intent parsing — after trimming, any nonempty value is a routing candidate
 # ---------------------------------------------------------------------------
 
 def test_valid_absolute_unix_path_intent():
@@ -174,6 +193,25 @@ console.log(JSON.stringify(_workspaceQueryIntentFromLocation()));
     intent = json.loads(out)
     assert intent["valid"] is True
     assert intent["path"] == "/Users/x/notes..archive"
+
+
+@pytest.mark.parametrize("length", [1023, 1024, 4096])
+def test_long_paths_are_routing_candidates(length):
+    """No client-side length cap: a deeply nested but valid host path is
+    accepted by resolve_trusted_workspace(), so the browser must not
+    classify it as invalid before the server sees it."""
+    out = _run_node(_node_prelude() + f"""
+const seg = 'a'.repeat(63);
+let p = '/base';
+while (p.length < {length}) p += '/' + seg;
+p = p.slice(0, {length});
+applyUrl('/?workspace=' + encodeURIComponent(p));
+const intent = _workspaceQueryIntentFromLocation();
+console.log(JSON.stringify({{valid: intent.valid, len: intent.path.length}}));
+""")
+    state = json.loads(out)
+    assert state["valid"] is True
+    assert state["len"] == length
 
 
 def test_missing_param_is_empty_intent():
@@ -230,26 +268,30 @@ console.log(JSON.stringify({calls: window.history.calls.length}));
 
 
 # ---------------------------------------------------------------------------
-# Boot block behavior — executed verbatim from static/boot.js with stubs
+# Boot behavior — profile-switch and workspace blocks executed verbatim from
+# static/boot.js; switchToProfile is stubbed per scenario
 # ---------------------------------------------------------------------------
 
-def _boot_scenario(url: str, *, profile_intent: str, switch_completed: bool,
-                   new_session_throws: bool = False) -> str:
+def _boot_scenario(url: str, *, profile_intent: str, switch_outcome: str,
+                   new_session_throws: bool = False,
+                   extra_js: str = "") -> str:
     return _node_boot_runner() + f"""
 (async () => {{
-  applyUrl({url!r});
+  {extra_js}
   const ctx = {{
-    S: {{ activeProfile: 'default', _profileSwitchWorkspace: null, session: null }},
+    S: {{ activeProfile: 'default', activeProfileIsDefault: true,
+          _profileSwitchWorkspace: null, session: null }},
     profileIntent: {profile_intent},
-    profileSwitchCompleted: {'true' if switch_completed else 'false'},
+    switchOutcome: {switch_outcome!r},
     newSessionThrows: {'true' if new_session_throws else 'false'},
-    calls: []
+    calls: [],
+    switchCalls: []
   }};
-  if (ctx.profileSwitchCompleted) ctx.S.activeProfile = 'work';
-  const routed = await runBootBlock(ctx);
+  const routed = await runBootBlocks(ctx);
   console.log(JSON.stringify({{
     routed: routed === undefined ? 'routed' : routed,
     calls: ctx.calls,
+    switchCalls: ctx.switchCalls,
     search: window.location.search,
     cueAfter: ctx.S._profileSwitchWorkspace
   }}));
@@ -257,12 +299,16 @@ def _boot_scenario(url: str, *, profile_intent: str, switch_completed: bool,
 """
 
 
+def _apply(url: str) -> str:
+    return f"applyUrl({url!r});"
+
+
 def test_windows_path_reaches_session_create():
     """An encoded Windows absolute path must flow through the one-shot cue
     into the session-create request."""
     out = _run_node(_boot_scenario(
-        "/?workspace=" + "C%3A%5CUsers%5Cname%5Cproject",
-        profile_intent="null", switch_completed=False))
+        "", profile_intent="null", switch_outcome="returns-true",
+        extra_js=_apply("/?workspace=C%3A%5CUsers%5Cname%5Cproject")))
     state = json.loads(out)
     assert state["routed"] == "routed"
     assert len(state["calls"]) == 1
@@ -274,64 +320,74 @@ def test_windows_path_reaches_session_create():
 
 def test_dotdot_basename_reaches_session_create():
     out = _run_node(_boot_scenario(
-        "/?workspace=%2FUsers%2Fx%2Fnotes..archive",
-        profile_intent="null", switch_completed=False))
+        "", profile_intent="null", switch_outcome="returns-true",
+        extra_js=_apply("/?workspace=%2FUsers%2Fx%2Fnotes..archive")))
     state = json.loads(out)
     assert state["routed"] == "routed"
     assert state["calls"][0]["workspaceAtCall"] == "/Users/x/notes..archive"
 
 
-@pytest.mark.parametrize("reason", ["returned-false", "threw"])
-def test_incomplete_profile_switch_defers_workspace(reason):
-    """Compound ?profile=&workspace= where the switch did not complete
-    (switchToProfile returned false or threw — both leave the completion flag
-    unset in boot.js): newSession() must not be called and the workspace
+@pytest.mark.parametrize("length", [1023, 1024, 2048])
+def test_boundary_length_paths_reach_session_create(length):
+    """Every nonblank value reaches newSession(); server rejection remains
+    the authority (no parser-only cap)."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        extra_js=f"""
+  const seg = 'a'.repeat(63);
+  let p = '/base';
+  while (p.length < {length}) p += '/' + seg;
+  p = p.slice(0, {length});
+  applyUrl('/?workspace=' + encodeURIComponent(p));
+"""))
+    state = json.loads(out)
+    assert state["routed"] == "routed"
+    assert len(state["calls"]) == 1
+    assert len(state["calls"][0]["workspaceAtCall"]) == length
+
+
+@pytest.mark.parametrize("outcome", ["returns-false", "throws"])
+def test_incomplete_profile_switch_defers_workspace(outcome):
+    """Compound ?profile=&workspace= where switchToProfile() actually returns
+    false or actually throws (the stub exercises both outcomes through the
+    real boot.js block): newSession() must not be called and the workspace
     parameter must survive in the URL for a retry."""
     out = _run_node(_boot_scenario(
-        "/?profile=work&workspace=%2FUsers%2Fx%2Fproj",
-        profile_intent="{hasParam:true,valid:true,name:'work'}",
-        switch_completed=False))
+        "", profile_intent="{hasParam:true,valid:true,name:'work'}",
+        switch_outcome=outcome,
+        extra_js=_apply("/?profile=work&workspace=%2FUsers%2Fx%2Fproj")))
     state = json.loads(out)
-    assert state["calls"] == []
-    assert "workspace=" in state["search"]
+    assert state["switchCalls"] == ["work"]      # the switch was attempted
+    assert state["calls"] == []                  # but no session was created
+    assert "workspace=" in state["search"]       # and the intent survives
     assert state["routed"] == "fell-through"
 
 
 def test_completed_profile_switch_routes_workspace_under_new_profile():
     """Successful compound case: the session is created under the switched
-    profile, and the workspace parameter is consumed."""
+    profile, and both parameters are consumed."""
     out = _run_node(_boot_scenario(
-        "/?profile=work&workspace=%2FUsers%2Fx%2Fproj",
-        profile_intent="{hasParam:true,valid:true,name:'work'}",
-        switch_completed=True))
+        "", profile_intent="{hasParam:true,valid:true,name:'work'}",
+        switch_outcome="returns-true",
+        extra_js=_apply("/?profile=work&workspace=%2FUsers%2Fx%2Fproj")))
     state = json.loads(out)
     assert state["routed"] == "routed"
+    assert state["switchCalls"] == ["work"]
     assert len(state["calls"]) == 1
     assert state["calls"][0]["profileAtCall"] == "work"
     assert state["calls"][0]["workspaceAtCall"] == "/Users/x/proj"
     assert "workspace=" not in state["search"]
+    assert "profile=" not in state["search"]
 
 
 def test_failed_session_create_clears_cue_and_falls_through():
     """A server-rejected path must clear the one-shot cue (so a later manual
     newSession() does not inherit it) and fall back to normal restore."""
     out = _run_node(_boot_scenario(
-        "/?workspace=%2Fnot%2Fallowed",
-        profile_intent="null", switch_completed=False,
-        new_session_throws=True))
+        "", profile_intent="null", switch_outcome="returns-true",
+        new_session_throws=True,
+        extra_js=_apply("/?workspace=%2Fnot%2Fallowed")))
     state = json.loads(out)
     assert state["routed"] == "fell-through"
     assert state["cueAfter"] is None
     assert len(state["calls"]) == 1
-
-
-def test_profile_switch_failure_does_not_mark_completed_in_source():
-    """Source-level guard: in boot.js, a switchToProfile() that throws is
-    caught without setting the completion flag, so the behavioral gate above
-    covers both the returned-false and the threw cases."""
-    idx = BOOT_JS.find("_profileSwitchCompleted=await switchToProfile")
-    assert idx > 0
-    tail = BOOT_JS[idx : idx + 800]
-    assert "catch(e)" in tail
-    catch_body = tail[tail.find("catch(e)"):]
-    assert "_profileSwitchCompleted=true" not in catch_body
