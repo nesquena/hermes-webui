@@ -72,9 +72,12 @@ contributor guidance; it does not change runtime behavior or CI gates.
   stream `GET /api/sessions/{session_id}/events` (#4812). Distinct from the
   existing global session-list stream `GET /api/sessions/events`. Start here for
   any work that touches per-session SSE, `Last-Event-ID` replay, or session
-  lifecycle event delivery. The Phase 1 server contract is now shipped; the RFC
-  remains the vocabulary reference while broader client and platform claims stay
-  behind the recorded proof gates.
+  lifecycle event delivery. The Phase 1 **server route and journal relay** for
+  `GET /api/sessions/{session_id}/events` are implemented; broader client,
+  platform, and semantic-taxonomy claims in the RFC remain behind the recorded
+  proof gates. Prefer the RFC's **Authoritative emitted events** table (live
+  `/api/chat/stream` wire names) over the aspirational semantic taxonomy when
+  writing clients against current source.
 
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,

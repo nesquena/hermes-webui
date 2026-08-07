@@ -111,19 +111,43 @@ def _insert(sid_session):
 
 # ─────────────────────────── config knob ────────────────────────────────────
 
+def test_default_sessions_cache_cap_is_100():
+    """The shipped no-override session cache default is 100 (#6351)."""
+    from api import config as _cfg
+
+    assert _cfg.DEFAULT_SESSIONS_CACHE_MAX == 100
+
+
 def test_cache_cap_reads_config_yaml_key():
     """The cap is configurable via config.yaml webui.sessions_cache_max (#4765)."""
     from api import config as _cfg
 
-    assert _cfg.get_sessions_cache_max({"webui": {"sessions_cache_max": 42}}) == 42
-    # Invalid / missing values must fall back, never disable the bound.
-    fallback = _cfg.get_sessions_cache_max({"webui": {"sessions_cache_max": "nope"}})
-    assert isinstance(fallback, int) and fallback >= 1
-    assert _cfg.get_sessions_cache_max({"webui": {}}) >= 1
-    assert _cfg.get_sessions_cache_max({}) >= 1
-    # A zero/negative typo must not disable the cap.
-    assert _cfg.get_sessions_cache_max({"webui": {"sessions_cache_max": 0}}) >= 1
-    assert _cfg.get_sessions_cache_max({"webui": {"sessions_cache_max": -5}}) >= 1
+    old_sessions_max = _cfg.SESSIONS_MAX
+    try:
+        _cfg.SESSIONS_MAX = 222
+        assert _cfg.get_sessions_cache_max({"webui": {"sessions_cache_max": 42}}) == 42
+        # Invalid / missing values must fall back, never disable the bound.
+        assert _cfg.get_sessions_cache_max({"webui": {"sessions_cache_max": "nope"}}) == 222
+        assert _cfg.get_sessions_cache_max({"webui": {"sessions_cache_max": 0}}) == 222
+        assert _cfg.get_sessions_cache_max({"webui": {"sessions_cache_max": -5}}) == 222
+    finally:
+        _cfg.SESSIONS_MAX = old_sessions_max
+
+
+def test_cache_cap_preserves_environment_fallback():
+    """The parsed env fallback still wins when config is absent or invalid (#6351)."""
+    from api import config as _cfg
+
+    old_sessions_max = _cfg.SESSIONS_MAX
+    try:
+        _cfg.SESSIONS_MAX = 222
+        assert _cfg.get_sessions_cache_max({"webui": {}}) == 222
+        assert _cfg.get_sessions_cache_max({}) == 222
+        _cfg.SESSIONS_MAX = _cfg.DEFAULT_SESSIONS_CACHE_MAX
+        assert _cfg.get_sessions_cache_max({"webui": {}}) == _cfg.DEFAULT_SESSIONS_CACHE_MAX
+        assert _cfg.get_sessions_cache_max({}) == _cfg.DEFAULT_SESSIONS_CACHE_MAX
+    finally:
+        _cfg.SESSIONS_MAX = old_sessions_max
 
 
 # ─────────────────────────── invariant 1: eviction ──────────────────────────

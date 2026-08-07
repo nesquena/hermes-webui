@@ -2068,14 +2068,23 @@ def test_anchor_scene_hydration_seals_unmatched_live_running_activity_rows():
                         "text": "only live prose",
                     },
                     {
-                        "row_id": "live-tool:stream-1:call-1",
-                        "local_id": "live-tool:stream-1:call-1",
+                        "row_id": "tool:call-1:0",
+                        "local_id": "call-1",
                         "role": "tool",
                         "kind": "tool_started",
                         "source_event_type": "tool",
                         "status": "running",
+                        "run_id": "run-1",
+                        "stream_id": "stream-1",
+                        "identity": {
+                            "local_id": "call-1",
+                            "run_id": "run-1",
+                            "stream_id": "stream-1",
+                        },
+                        "group": {"group_key": "segment:1", "activity_segment_seq": 1},
                         "tool_call_id": "call-1",
                         "tool": {"id": "call-1", "name": "terminal", "done": False},
+                        "payload": {"tid": "call-1", "status": "running", "done": False},
                     },
                     {"row_id": "done", "role": "terminal", "kind": "terminal_status", "source_event_type": "done"},
                 ],
@@ -2089,6 +2098,29 @@ def test_anchor_scene_hydration_seals_unmatched_live_running_activity_rows():
     activity_rows = [row for row in rows if row.get("role") in {"thinking", "prose", "tool"}]
     assert [row.get("status") for row in activity_rows] == ["completed", "completed", "completed"]
     assert [row.get("role") for row in activity_rows] == ["thinking", "prose", "tool"]
+    tool_row = activity_rows[-1]
+    assert tool_row["tool"]["done"] is True
+    assert tool_row["payload"]["status"] == "completed"
+    assert tool_row["payload"]["done"] is True
+
+
+def test_anchor_scene_settlement_does_not_reclassify_transcript_owned_tool_row():
+    from api import routes
+
+    row = {
+        "row_id": "hydrated:stream-1:tool:call-1",
+        "local_id": "call-1",
+        "role": "tool",
+        "status": "running",
+        "stream_id": "stream-1",
+        "group": {"assistant_msg_idx": 1},
+        "tool": {"id": "call-1", "done": False},
+        "payload": {"tid": "call-1", "status": "running", "done": False},
+    }
+
+    assert routes._anchor_scene_settle_live_running_row(row, has_settled_thinking=False) is row
+    assert row["tool"]["done"] is False
+    assert row["payload"]["done"] is False
 
 
 def test_runtime_journal_anchor_scene_matches_settled_hydrated_visible_semantics(tmp_path, monkeypatch):

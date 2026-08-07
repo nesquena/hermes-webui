@@ -18,10 +18,8 @@ from pathlib import Path
 import pytest
 
 # Skip the entire module when the optional `mcp` package isn't installed.
-# CI runs with stdlib-only deps (pyyaml + pytest + pytest-timeout), and the
-# `mcp` package is only required for users who actually run the MCP server.
-# Locally with `pip install mcp pytest-asyncio` these tests run; on CI they
-# skip cleanly without breaking the matrix.
+# CI and the local test runner install the compatible dependency; minimal
+# runtime environments can still collect the rest of the suite without it.
 pytest.importorskip("mcp", reason="mcp package not installed (optional MCP server dep)")
 
 # pytest-asyncio is also optional but always installed alongside mcp tests
