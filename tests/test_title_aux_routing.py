@@ -6,6 +6,8 @@ Covers:
   - aux→agent fallback triggers on 'llm_invalid_aux' status
   - _aux_title_timeout rejects zero, negative, and non-numeric values
 """
+import importlib
+import importlib.util
 import os
 from pathlib import Path
 import sys
@@ -13,13 +15,35 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-# Stub agent.auxiliary_client so it is importable in the test environment
-# (the real package lives in hermes-agent, which is not installed here).
-_agent_stub = types.ModuleType('agent')
-_aux_stub = types.ModuleType('agent.auxiliary_client')
-sys.modules.setdefault('agent', _agent_stub)
-sys.modules.setdefault('agent.auxiliary_client', _aux_stub)
-_agent_stub.auxiliary_client = _aux_stub
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _scoped_auxiliary_client_module(monkeypatch):
+    """Provide the optional Agent call boundary without poisoning collection."""
+    try:
+        auxiliary_client = importlib.import_module("agent.auxiliary_client")
+    except Exception:
+        agent_module = sys.modules.get("agent")
+        if agent_module is None:
+            agent_spec = importlib.util.spec_from_loader(
+                "agent", loader=None, is_package=True
+            )
+            agent_module = importlib.util.module_from_spec(agent_spec)
+            monkeypatch.setitem(sys.modules, "agent", agent_module)
+
+        auxiliary_spec = importlib.util.spec_from_loader(
+            "agent.auxiliary_client", loader=None
+        )
+        auxiliary_client = importlib.util.module_from_spec(auxiliary_spec)
+        monkeypatch.setitem(
+            sys.modules, "agent.auxiliary_client", auxiliary_client
+        )
+        monkeypatch.setattr(
+            agent_module, "auxiliary_client", auxiliary_client, raising=False
+        )
+
+    yield auxiliary_client
 
 
 def _patch_tg_config(config_dict):
@@ -219,7 +243,11 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
             'base_url': 'http://openrouter:4000/v1',
             'api_key': 'test-title-api-key',
         }
-        with _patch_tg_config(tg_config):
+        # Patch the streaming boundary directly so this regression is
+        # independent of any real/stub Agent module or shared config/import
+        # state from another test.  The blank provider assertion below is the
+        # route-preservation contract for an explicit custom endpoint.
+        with patch('api.streaming._get_aux_title_config', return_value=tg_config):
             with patch('agent.auxiliary_client.call_llm', side_effect=fake_call_llm, create=True):
                 result, status = generate_title_raw_via_aux(
                     user_text='Summarize this title routing bug.',
