@@ -3878,6 +3878,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const value=String(text||'');
     const fade=typeof _shouldUseLiveProseFade==='function'&&_shouldUseLiveProseFade();
     let st;
+    let _rewindPrevRendered='';
     try{
       st=_anchorProseSmdCache.get(key);
       // Self-heal desyncs (edit/sanitize made the text no longer a pure append):
@@ -3887,10 +3888,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // is-new span and replay the fade on ALL visible words at once. Mute the
       // fade renderer for the common prefix so only the post-rewind tail fades.
       if(st && st.writtenText && !value.startsWith(st.writtenText)){
-        let _commonLen=0;
-        const _maxCommon=Math.min(st.writtenText.length,value.length);
-        while(_commonLen<_maxCommon&&st.writtenText.charCodeAt(_commonLen)===value.charCodeAt(_commonLen)) _commonLen+=1;
-        _streamFadeSilentPrefixChars=_commonLen;
+        // Snapshot the OLD rendered text BEFORE clearing the node. The silent
+        // prefix is later recomputed in RENDERED-text space (old node text vs
+        // new node text) — source-space byte counts are wrong here because
+        // markdown delimiters, link destinations and MEDIA tokens never reach
+        // the fade add_text hook, so a source-space budget over-mutes the
+        // first genuinely new word after a rewind (#6783 review).
+        const oldBody=st.node&&st.node.querySelector&&st.node.querySelector('.msg-body');
+        _rewindPrevRendered=oldBody?(oldBody.textContent||''):'';
         st=null;
       }
       if(st && st.fade!==fade) st=null;
@@ -3927,6 +3932,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(delta){
         window.smd.parser_write(st.parser,delta);
         st.writtenText=value;
+      }
+      // Rewind rebuild: mute the rendered common prefix (old node text vs new
+      // node text) so already-visible words do not replay their fade; only the
+      // post-rewind tail animates. Rendered-space compare, not source-space
+      // (#6783 review — markdown/MEDIA bytes never reach add_text).
+      if(_rewindPrevRendered && typeof _streamFadeMuteRenderedPrefix==='function'){
+        _streamFadeMuteRenderedPrefix(body,_rewindPrevRendered);
+        _rewindPrevRendered='';
       }
       if(finalize){
         _finalizeAnchorProseIncrementalNode(st);
@@ -4346,23 +4359,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdWrite(displayText, fade=false){
     if(!_smdParser||!window.smd) return;
     displayText=String(displayText||'');
-    // Self-heal desyncs: if displayText no longer starts with what we've already
-    // written (e.g. due to stream sanitization/tag stripping), incremental slicing
+    let _rewindPrevRendered='';
+    // Self-heal desyncs: if displayText no longer starts with what we have
+    // already written (e.g. due to stream sanitization/tag stripping), incremental slicing
     // can skip characters. Rebuild parser from the full current displayText.
     if(_smdWrittenText && !displayText.startsWith(_smdWrittenText)){
       // Fade-flash fix: when the visible text REWINDS (tool-call XML stripping
       // makes displayText a strict prefix of what was already written), the
       // rebuild below would clear the body and re-create every word as a new
       // `is-new` span — replaying the fade animation on ALL visible text at
-      // once (a full-message blink on every tool call). Instead, compute the
-      // common prefix and mute the fade renderer for it: words inside the
-      // prefix are written as plain text (no animation), only the tail after
-      // the rewind point fades in.
-      let _silentCommon=0;
-      const _prevWritten=_smdWrittenText;
-      const _maxCommon=Math.min(_prevWritten.length,displayText.length);
-      while(_silentCommon<_maxCommon&&_prevWritten.charCodeAt(_silentCommon)===displayText.charCodeAt(_silentCommon)) _silentCommon+=1;
-      _streamFadeSilentPrefixChars=_silentCommon;
+      // once (a full-message blink on every tool call). Instead, snapshot the
+      // OLD RENDERED text and mute the rebuild prefix spans AFTER the
+      // parser_write, in RENDERED-text space: source-space byte counts include
+      // markdown delimiters / link destinations / MEDIA token bytes that never
+      // reach the fade add_text hook, so a source-space budget over-mutes the
+      // first genuinely new word after a rewind (#6783 review).
+      if(assistantBody && typeof assistantBody.textContent==='string'){
+        _rewindPrevRendered=assistantBody.textContent;
+      }
       _smdParser=null;
       _smdWrittenLen=0;
       _smdWrittenText='';
@@ -4375,6 +4389,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     try{window.smd.parser_write(_smdParser,delta);}catch(_){}
     _smdWrittenLen=displayText.length;
     _smdWrittenText=displayText;
+    // Rebuild after a rewind: strip is-new from spans covered by the
+    // RENDERED common prefix (old node text vs new node text), so already-
+    // visible words stay plain while only the post-rewind tail fades.
+    if(_rewindPrevRendered && typeof _streamFadeMuteRenderedPrefix==='function'){
+      _streamFadeMuteRenderedPrefix(assistantBody,_rewindPrevRendered);
+    }
     // URL scheme safety is handled by the renderer's set_attr hook
     // (_safeSmdRenderer or _streamFadeRenderer), applied inline as smd
     // creates each DOM node — no post-hoc full-DOM scan needed.
@@ -4893,6 +4913,49 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       frag.appendChild(document.createTextNode(value.slice(last)));
     }
     el.appendChild(frag);
+  }
+  // Rendered-text-space mute for rewind rebuilds (#6783 review): after a
+  // rewind-triggered rebuild every word is a fresh `is-new` span. Compare the
+  // OLD rendered text (snapshot before rebuild) with the NEW rendered text in
+  // RENDERED coordinates — what smd's add_text actually emits; markdown
+  // delimiters, link destinations and MEDIA token bytes never reach it — and
+  // strip `is-new` from spans inside the common prefix, so already-visible
+  // words don't replay their fade while the genuinely new tail still animates.
+  function _streamFadeMuteRenderedPrefix(rootEl, prevRendered){
+    if(!rootEl || !prevRendered) return;
+    const newRendered=(rootEl.textContent||'');
+    if(!newRendered) return;
+    const _maxCommon=Math.min(prevRendered.length,newRendered.length);
+    let _common=0;
+    while(_common<_maxCommon&&prevRendered.charCodeAt(_common)===newRendered.charCodeAt(_common)) _common+=1;
+    if(_common<=0) return;
+    let consumed=0;
+    const _walk=(node)=>{
+      if(!node||consumed>_common) return;
+      const isText=node.nodeType===3||node.type==='text';
+      if(isText){
+        const len=(node.textContent||'').length;
+        const start=consumed;
+        consumed+=len;
+        // Text node inside a fade span that starts before the common-prefix
+        // boundary → mute the span (drop is-new, keeping the word visible
+        // without replaying its animation).
+        if(start<_common){
+          const parent=node.parentNode;
+          if(parent&&/\bstream-fade-word\b/.test(parent.className||'')&&/\bis-new\b/.test(parent.className||'')){
+            if(parent.classList&&typeof parent.classList.remove==='function'){
+              parent.classList.remove('is-new');
+            }else{
+              parent.className=String(parent.className||'').replace(/\bis-new\b/g,'').replace(/\s{2,}/g,' ').trim();
+            }
+          }
+        }
+        return;
+      }
+      const kids=node.childNodes||node.children;
+      if(kids){ for(let i=0;i<kids.length;i++) _walk(kids[i]); }
+    };
+    _walk(rootEl);
   }
   function _streamFadePauseAfter(text, paragraphBreakIndex){
     if(paragraphBreakIndex>=0) return 90;
