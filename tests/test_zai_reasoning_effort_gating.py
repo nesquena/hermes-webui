@@ -268,10 +268,10 @@ def test_aggregator_providers_keep_family_reasoning(model_id, provider_id):
 def test_non_glm_model_on_zai_provider_unaffected():
     # A non-GLM model id routed through the zai provider must not be gated
     # by the GLM-specific branch — the gate keys on "glm" in the bare id, so
-    # non-GLM models fall through unchanged. (The OpenAI-family ceiling does NOT
-    # fire here because that branch is keyed on provider, not model family.)
+    # non-GLM models bypass the GLM-specific branch. The GPT-5 ceiling is still
+    # model-scoped across serving lanes, so older GPT-5 cannot retain max/ultra.
     efforts = cfg.resolve_model_reasoning_efforts("gpt-5", provider_id="zai")
-    assert set(efforts) == {"minimal", "low", "medium", "high", "xhigh", "max"}
+    assert set(efforts) == {"minimal", "low", "medium", "high", "xhigh"}
 
 
 # ── Coercion agrees with advertising (UI/coercion invariant) ─────────────────────
