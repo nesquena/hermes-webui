@@ -26,6 +26,7 @@
 <script>(function(){try{var t=localStorage.getItem('hermes-theme')||'dark';if(t==='system')t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';var c=t==='dark'?'#141425':'#FAF7F0';document.querySelectorAll('meta[name="theme-color"]').forEach(function(m){m.setAttribute('content',c);m.removeAttribute('media');});}catch(e){}})()</script>
 <script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
 <script>(function(){try{if(localStorage.getItem('hermes-webui-sidebar-collapsed')==='1')document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
+<script>(function(){try{var raw=localStorage.getItem('hermes-wallpaper-meta'),v=raw&&JSON.parse(raw),keys=v&&Object.keys(v).sort().join(',');if(!v||keys!=='has_wallpaper,image_version,mime_type,opacity,scope'||v.has_wallpaper!==true||typeof v.opacity!=='number'||!isFinite(v.opacity)||v.opacity<0||v.opacity>1||(v.scope!=='chat'&&v.scope!=='app')||typeof v.mime_type!=='string'||!/^image\/(jpeg|png|webp)$/.test(v.mime_type)||!(/^[0-9a-f]{64}$/).test(v.image_version||''))return;var u=new URL('api/wallpaper/image?v='+encodeURIComponent(v.image_version),document.baseURI);document.documentElement.dataset.wallpaper='active';document.documentElement.dataset.wallpaperScope=v.scope;document.documentElement.style.setProperty('--wallpaper-image','url('+JSON.stringify(u.href)+')');document.documentElement.style.setProperty('--wallpaper-opacity',String(v.opacity));}catch(e){try{localStorage.removeItem('hermes-wallpaper-meta')}catch(_){}}})()</script>
 <link rel="preload" href="static/pwa-startup.js?v=__WEBUI_VERSION__" as="script">
 <script src="static/pwa-startup.js?v=__WEBUI_VERSION__"></script>
 <script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__};</script>
@@ -118,6 +119,7 @@
   </script>
 </head>
 <body>
+<div id="wallpaperLayer" aria-hidden="true"></div>
 <header class="app-titlebar" role="banner">
   <div class="app-titlebar-left">
     <button class="app-titlebar-profile" id="titlebarProfileBtn" type="button" onclick="toggleProfileDropdown(event)" aria-label="Switch profile" style="display:none">
@@ -1018,6 +1020,34 @@
               </div>
               <input type="hidden" id="settingsFontSize" value="default">
             </div>
+            <div class="settings-field wallpaper-settings" id="wallpaperSettingsField" aria-busy="false">
+              <label data-i18n="settings_wallpaper_title">Wallpaper</label>
+              <div id="wallpaperDescription" class="wallpaper-description" data-i18n="settings_wallpaper_description">Choose one JPEG, PNG, or WebP image up to 10 MB. Changes apply only after Save.</div>
+              <input type="file" id="wallpaperFileInput" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" aria-describedby="wallpaperDescription wallpaperStatus" hidden>
+              <div id="wallpaperDropZone" class="wallpaper-drop-zone" role="button" tabindex="0" aria-controls="wallpaperFileInput" aria-describedby="wallpaperDescription wallpaperStatus">
+                <img id="wallpaperPreview" alt="Wallpaper preview" data-i18n-alt="settings_wallpaper_preview_alt" hidden>
+                <div class="wallpaper-drop-copy">
+                  <strong data-i18n="settings_wallpaper_choose">Choose or drop an image</strong>
+                  <span data-i18n="settings_wallpaper_drop">JPEG, PNG, or WebP · 10 MB maximum</span>
+                </div>
+              </div>
+              <div id="wallpaperFileName" class="wallpaper-file-name"></div>
+              <div class="wallpaper-control-row">
+                <label for="wallpaperOpacity" data-i18n="settings_wallpaper_opacity">Image opacity</label>
+                <output id="wallpaperOpacityValue" for="wallpaperOpacity">80%</output>
+              </div>
+              <input type="range" id="wallpaperOpacity" min="0" max="100" step="1" value="80" aria-describedby="wallpaperDescription">
+              <fieldset id="wallpaperScope" class="wallpaper-scope">
+                <legend data-i18n="settings_wallpaper_scope">Show wallpaper in</legend>
+                <label><input type="radio" id="wallpaperScopeChat" name="wallpaperScope" value="chat" checked> <span data-i18n="settings_wallpaper_scope_chat">Chat only</span></label>
+                <label><input type="radio" id="wallpaperScopeApp" name="wallpaperScope" value="app"> <span data-i18n="settings_wallpaper_scope_app">Entire application</span></label>
+              </fieldset>
+              <div id="wallpaperStatus" class="wallpaper-status" role="status" aria-live="polite" aria-atomic="true"></div>
+              <div class="wallpaper-actions">
+                <button type="button" class="settings-action-btn" id="wallpaperSaveBtn" data-i18n="settings_wallpaper_save" disabled>Save wallpaper</button>
+                <button type="button" class="settings-action-btn danger" id="wallpaperClearBtn" data-i18n="settings_wallpaper_clear" disabled>Clear</button>
+              </div>
+            </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsWorkspacePanelOpen" style="width:15px;height:15px;accent-color:var(--accent)">
@@ -1767,6 +1797,7 @@
 <script src="static/assistant_turn_anchors.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/workspace.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/wallpaper.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/terminal.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/sessions.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>

@@ -15,6 +15,11 @@ ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 def _function_block(name: str, *, extra: int = 2200) -> str:
     start = PANELS_JS.find(f"function {name}")
     assert start >= 0, f"{name} not found"
+    next_function = PANELS_JS.find("\nfunction ", start + 1)
+    next_async = PANELS_JS.find("\nasync function ", start + 1)
+    ends = [position for position in (next_function, next_async) if position >= 0]
+    if ends:
+        return PANELS_JS[start:min(ends)]
     return PANELS_JS[start:start + extra]
 
 

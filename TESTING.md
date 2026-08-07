@@ -68,6 +68,20 @@ without ruff aren't blocked, while CI (which installs ruff) enforces it. The
 diff-scoped gate runs as the `lint` job in `.github/workflows/tests.yml` and is
 also part of the maintainer pre-release pre-gate.
 
+## Custom wallpaper manual checklist
+
+Use an isolated instance and verify Settings → Appearance:
+
+1. Select valid JPEG, PNG, and static WebP files; the draft appears only in the 16:9 thumbnail until **Save wallpaper** is selected.
+2. Reject SVG, HTML, spoofed, empty, malformed, and over-10-MB files without changing the saved wallpaper.
+3. Confirm the default opacity is 80%, metadata-only Save keeps the image version stable, and replacement changes it.
+4. Check **Chat only** with sidebar/right panel open and closed: only chat/message/composer surfaces expose the wallpaper.
+5. Check **Entire application** across light/dark and every built-in skin: shell chrome is translucent while controls, cards, dialogs, code, and content surfaces remain readable and interactive.
+6. Refresh and restart the server; the saved wallpaper, scope, and opacity persist without a stale flash. Simulate a stale cached image and confirm authoritative reconciliation clears it.
+7. Clear with confirmation, then clear again through the API to prove idempotency; ordinary theme/skin/font autosave must remain independent.
+8. Use keyboard activation on the drop zone, range, scope radios, Save, Clear, and settings search. Confirm visible focus, polite live status, and concise errors at desktop, laptop, and mobile widths.
+9. Inspect `/api/wallpaper/image` 200/304 responses for the strong ETag, `private, no-cache`, and `nosniff` headers. Subpath URL behavior is covered by the executable `/hermes/` frontend and service-worker tests.
+
 ## Automated browser smoke (runtime brick-class gate)
 
 The ESLint guard above catches `const`-reassign / import-assign statically. The
