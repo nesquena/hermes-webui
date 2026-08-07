@@ -2,6 +2,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlparse
 
+import pytest
+
 
 class _FakeSession:
     def __init__(self, messages):
@@ -26,6 +28,15 @@ class _FakeSession:
         self.pending_attachments = []
         self.pending_started_at = None
         self.composer_draft = {}
+        self.created_at = 1
+        self.updated_at = 2
+        self.profile = "default"
+        self.is_cli_session = True
+        self.source_tag = "cli"
+        self.raw_source = "cli"
+        self.session_source = "cli"
+        self.source_label = "CLI"
+        self.read_only = False
 
     def compact(self):
         return {
@@ -61,6 +72,28 @@ def _invoke(session, query=None):
          patch("api.routes._clear_stale_stream_state", return_value=False), \
          patch("api.routes._lookup_cli_session_metadata", return_value={}), \
          patch("api.routes.get_state_db_session_messages", return_value=[]), \
+         patch("api.routes.redact_session_data", side_effect=lambda raw: raw), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes.handle_get(SimpleNamespace(), parsed)
+    return captured["data"]["session"]
+
+
+def _invoke_synthesized(session, query):
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_j(_handler, data, status=200, extra_headers=None):
+        captured["data"] = data
+        captured["status"] = status
+        return data
+
+    parsed = urlparse(f"/api/session?{query}")
+    with patch("api.routes.get_session", side_effect=KeyError), \
+         patch("api.routes._lookup_cli_session_metadata", return_value={"profile": "default"}), \
+         patch("api.routes._session_visible_to_active_profile", return_value=True), \
+         patch("api.routes._claim_or_synthesize_cli_session", return_value=(session, "materialized")), \
+         patch("api.routes._merge_cli_sidebar_metadata", side_effect=lambda raw, _meta: raw), \
          patch("api.routes.redact_session_data", side_effect=lambda raw: raw), \
          patch("api.routes.j", side_effect=fake_j):
         routes.handle_get(SimpleNamespace(), parsed)
@@ -277,3 +310,182 @@ def test_msg_limit_tail_preserves_list_tool_content_type_when_truncated():
     assert not isinstance(tool_msg["content"], str)
     assert tool_msg["content"][0]["type"] == "text"
     assert "Tool output truncated" in tool_msg["content"][0]["text"]
+
+
+@pytest.mark.parametrize("role", ["user", "assistant"])
+def test_msg_limit_tail_truncates_oversized_renderable_text_without_mutating_session(role):
+    # Matches the measured shape that made WKWebView spin at 100% CPU: one
+    # multi-megabyte historical text row inside an otherwise paginated load.
+    huge_content = "x" * 5_378_133
+    session = _FakeSession([
+        {"role": role, "content": huge_content},
+    ])
+
+    payload = _invoke(
+        session,
+        query="session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=1",
+    )
+
+    message = payload["messages"][0]
+    assert message["role"] == role
+    assert message["_content_truncated"] is True
+    assert message["_content_original_chars"] == len(huge_content)
+    assert len(message["content"]) < len(huge_content)
+    assert "Message content truncated" in message["content"]
+    assert session.messages[0]["content"] == huge_content
+
+
+@pytest.mark.parametrize(
+    "huge_content",
+    [
+        "x" * 100_000,
+        [{"type": "text", "text": "x" * 100_000}],
+        {"type": "text", "text": "x" * 100_000},
+    ],
+    ids=["string", "text-block-list", "top-level-dict"],
+)
+def test_full_load_preserves_oversized_renderable_content(huge_content):
+    session = _FakeSession([
+        {"role": "user", "content": huge_content},
+    ])
+
+    payload = _invoke(
+        session,
+        query="session_id=tail_payload_001&messages=1&resolve_model=0",
+    )
+
+    assert payload["messages"][0]["content"] == huge_content
+    assert "_content_truncated" not in payload["messages"][0]
+
+
+def test_msg_limit_tail_reserves_notice_space_inside_renderable_content_limit():
+    content = "x" * ((64 * 1024) + 1)
+    session = _FakeSession([
+        {"role": "user", "content": content},
+    ])
+
+    payload = _invoke(
+        session,
+        query="session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=1",
+    )
+
+    bounded = payload["messages"][0]["content"]
+    assert len(bounded) <= 64 * 1024
+    assert len(bounded) < len(content)
+    assert "Message content truncated" in bounded
+
+
+@pytest.mark.parametrize("role", ["user", "assistant"])
+def test_msg_limit_tail_truncates_oversized_structured_renderable_content(role):
+    huge_content = [{"type": "text", "text": "x" * 5_378_133}]
+    session = _FakeSession([
+        {"role": role, "content": huge_content},
+    ])
+
+    payload = _invoke(
+        session,
+        query="session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=1",
+    )
+
+    message = payload["messages"][0]
+    assert message["_content_truncated"] is True
+    assert isinstance(message["content"], list)
+    visible_text = "".join(
+        part["text"]
+        for part in message["content"]
+        if isinstance(part, dict) and part.get("type") == "text"
+    ).strip()
+    assert len(visible_text) <= 64 * 1024
+    assert "Message content truncated" in visible_text
+    assert session.messages[0]["content"] == huge_content
+
+
+def test_structured_preview_does_not_expose_non_text_blocks():
+    huge_content = [
+        {"type": "thinking", "text": "HIDDEN_THOUGHT"},
+        {"type": "text", "text": "visible answer" + "x" * 100_000},
+        {"type": "tool_use", "id": "call-1", "name": "example", "text": "HIDDEN_TOOL_INPUT"},
+        {"type": "text", "text": "continued"},
+        "HIDDEN_RAW_PART",
+    ]
+    session = _FakeSession([
+        {"role": "assistant", "content": huge_content},
+    ])
+
+    payload = _invoke(
+        session,
+        query="session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=1",
+    )
+
+    bounded_content = payload["messages"][0]["content"]
+    assert isinstance(bounded_content, list)
+    assert bounded_content[0] == huge_content[0]
+    assert bounded_content[2] == huge_content[2]
+    assert bounded_content[4] == huge_content[4]
+    preview = "".join(
+        part["text"]
+        for part in bounded_content
+        if isinstance(part, dict) and part.get("type") == "text"
+    ).strip()
+    assert preview.startswith("visible answer")
+    assert "Message content truncated" in preview
+    assert "HIDDEN_THOUGHT" not in preview
+    assert "HIDDEN_TOOL_INPUT" not in preview
+    assert "HIDDEN_RAW_PART" not in preview
+
+
+def test_structured_preview_does_not_expose_top_level_dict_text():
+    secret = "DICT_SECRET" * 10_000
+    huge_content = {"type": "text", "text": secret}
+    session = _FakeSession([
+        {"role": "assistant", "content": huge_content},
+    ])
+
+    payload = _invoke(
+        session,
+        query="session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=1",
+    )
+
+    message = payload["messages"][0]
+    assert isinstance(message["content"], dict)
+    assert message["content"] == huge_content
+    assert "_content_truncated" not in message
+    assert session.messages[0]["content"] == huge_content
+
+
+def test_synthesized_session_msg_limit_uses_window_and_renderable_guard():
+    huge_content = "x" * 100_000
+    session = _FakeSession([
+        {"role": "user", "content": "older"},
+        {"role": "user", "content": huge_content},
+    ])
+
+    payload = _invoke_synthesized(
+        session,
+        query="session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=1",
+    )
+
+    assert payload["message_count"] == 2
+    assert payload["_messages_truncated"] is True
+    assert payload["_messages_offset"] == 1
+    assert len(payload["messages"]) == 1
+    message = payload["messages"][0]
+    assert len(message["content"]) == 64 * 1024
+    assert message["_content_truncated"] is True
+    assert "Message content truncated" in message["content"]
+    assert session.messages[1]["content"] == huge_content
+
+
+def test_synthesized_session_full_load_preserves_oversized_content():
+    huge_content = "x" * 100_000
+    session = _FakeSession([
+        {"role": "user", "content": huge_content},
+    ])
+
+    payload = _invoke_synthesized(
+        session,
+        query="session_id=tail_payload_001&messages=1&resolve_model=0",
+    )
+
+    assert payload["messages"][0]["content"] == huge_content
+    assert "_content_truncated" not in payload["messages"][0]
