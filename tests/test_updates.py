@@ -1825,3 +1825,31 @@ def test_apply_update_pull_lock_no_stash_when_clean(tmp_path, monkeypatch):
     # No stash pop on a clean pull-lock path.
     assert not any(c[0] == 'stash' for c in git_calls)
 
+
+def test_check_repo_fetch_uses_thirty_second_timeout(tmp_path):
+    """The update-check fetch contract is 30s (pinned via mock assertion)."""
+    (tmp_path / '.git').mkdir()
+    fetch_timeouts = []
+
+    def fake(args, cwd, timeout=10):
+        if args == ['fetch', 'origin', '--tags', '--force']:
+            fetch_timeouts.append(timeout)
+        return _fake_git_for_release_fetch_failure(args, cwd, timeout)
+
+    with patch.object(updates, '_run_git', side_effect=fake):
+        info = updates._check_repo(tmp_path, 'webui')
+
+    assert fetch_timeouts == [30]
+    assert info is not None
+    assert info['stale_check'] is True
+
+
+def test_apply_path_fetches_keep_fifteen_second_timeout():
+    """Only the update-check fetch moves to 30s; apply paths stay at 15s."""
+    import re
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / 'api' / 'updates.py').read_text(encoding='utf-8')
+    fetch_15 = len(re.findall(r"_run_git\(.*?timeout=15", source, re.S))
+    assert fetch_15 == 3
+
