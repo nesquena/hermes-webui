@@ -57,9 +57,15 @@ async function cancelStream(reason){
     setBusy(false);
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
-    // /api/chat/cancel only exposes `cancelled:bool`, so we cannot
-    // distinguish reasons — keep the toast generic and short.
-    if(typeof showToast==='function') showToast('Stream is no longer active',2000);
+    // Surface persistence failure honestly (gate-certifier blocker #3):
+    // when the backend reports persistence_failed, the terminal fallback
+    // notice could not be saved — show a truthful warning instead of the
+    // generic "stream no longer active" toast.
+    if(respBody.persistence_failed && typeof showToast==='function'){
+      showToast('Cancellation incomplete — response may not be fully saved',4000);
+    }else if(typeof showToast==='function'){
+      showToast('Stream is no longer active',2000);
+    }
   }
   return respOk;
 }

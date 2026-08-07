@@ -992,7 +992,10 @@ class TestCancelInterrupt:
         assert notice.get("message") == _notice_a["message"]
         assert set(notice.keys()) == {"message", "to_model", "to_provider"}
 
-        # All registries and fence must be retired
+        # All registries and fence must be retired (fence is retired by the
+        # worker's finally, not cancel's finally — gate-certifier blocker #2).
+        from api.streaming import _retire_worker_cancelled_state
+        _retire_worker_cancelled_state(stream_id)
         assert stream_id not in _STREAM_FALLBACK_NOTICES
         assert stream_id not in _STREAM_CANCEL_CLAIMED
         assert stream_id not in _STREAM_SETTLEMENT_TERMINAL
@@ -1146,19 +1149,21 @@ class TestCancelInterrupt:
         # for the worker's _persist_cancelled_turn as a backstop.
         assert result is False
 
-        # Claim and terminal fence MUST be retired even though save failed
+        # Claim retired; fence was never set on the failure path
         assert stream_id not in _STREAM_CANCEL_CLAIMED, (
             "claim leaked after save failure"
         )
         assert stream_id not in _STREAM_SETTLEMENT_TERMINAL, (
             "terminal fence leaked after save failure"
         )
-        # The unsaved notice MUST remain in the map for the worker's
-        # _persist_cancelled_turn — NOT silently dropped (blocker #2)
-        assert stream_id in _STREAM_FALLBACK_NOTICES, (
-            "unsaved notice was silently dropped instead of left in map for worker"
+        # The unsaved notice MUST be in dead-letter (bounded owner) — NOT
+        # silently dropped and NOT left ownerless in _STREAM_FALLBACK_NOTICES
+        # (gate-certifier blocker #3).
+        from api.streaming import _STREAM_FALLBACK_DEAD_LETTER
+        assert stream_id in _STREAM_FALLBACK_DEAD_LETTER, (
+            "unsaved notice was silently dropped instead of transferred to dead-letter"
         )
-        _fb = _STREAM_FALLBACK_NOTICES[stream_id]
+        _fb = _STREAM_FALLBACK_DEAD_LETTER[stream_id]
         assert _fb.get("message") == _notice["message"]
         assert _fb.get("to_model") == _notice["to_model"]
         assert _fb.get("to_provider") == _notice["to_provider"]
@@ -1169,7 +1174,7 @@ class TestCancelInterrupt:
         assert stream_id not in _STREAM_WORKER_SAVED, (
             "worker-saved registry leaked after cancel-side save failure"
         )
-        _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+        _STREAM_FALLBACK_DEAD_LETTER.pop(stream_id, None)
 
     def test_settlement_stale_stream_does_not_mutate_messages(self):
         """An old stream whose active_stream_id no longer matches must return
@@ -1482,23 +1487,25 @@ class TestCancelInterrupt:
             f"loop ran only {_save_count[0]} times, expected >= {_SETTLEMENT_MAX_ITERS_GLOBAL}"
         )
 
-        # The final unsaved generation must remain in the map — not lost
-        assert stream_id in _STREAM_FALLBACK_NOTICES, (
+        # The final unsaved generation must be in dead-letter (bounded owner)
+        # — not silently dropped (gate-certifier blocker #3).
+        from api.streaming import _STREAM_FALLBACK_DEAD_LETTER
+        assert stream_id in _STREAM_FALLBACK_DEAD_LETTER, (
             "loop exhaustion silently dropped the unsaved generation "
-            "instead of leaving it in map for worker"
+            "instead of transferring to dead-letter"
         )
-        _fb = _STREAM_FALLBACK_NOTICES[stream_id]
+        _fb = _STREAM_FALLBACK_DEAD_LETTER[stream_id]
         assert set(_fb.keys()) == {"message", "to_model", "to_provider"}, (
-            f"map entry has dirty keys: {set(_fb.keys())}"
+            f"dead-letter entry has dirty keys: {set(_fb.keys())}"
         )
 
-        # Claim and terminal fence retired
+        # Claim and fence retired (fence was never set on failure path)
         assert stream_id not in _STREAM_CANCEL_CLAIMED
         assert stream_id not in _STREAM_SETTLEMENT_TERMINAL
         # Worker never claimed durability on the cancel-side loop-exhaustion
         # path — bounded registry, no growth (gate-certifier #2).
         assert stream_id not in _STREAM_WORKER_SAVED
-        _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+        _STREAM_FALLBACK_DEAD_LETTER.pop(stream_id, None)
 
     def test_settlement_identical_partial_signatures_across_turns(self):
         """When two turns have identical _partial signatures, the stamp
@@ -1743,7 +1750,10 @@ class TestCancelInterrupt:
         assert len(stamped) >= 1, (
             "cancel failed to persist the notice left by the failed worker"
         )
-        # Bounded registries after the full composed flow
+        # Bounded registries after the full composed flow (fence is retired
+        # by the worker's finally, not cancel's finally — gate-certifier
+        # blocker #2).
+        _retire_worker_cancelled_state(stream_id)
         assert stream_id not in _STREAM_FALLBACK_NOTICES
         assert stream_id not in _STREAM_WORKER_SAVED
         assert stream_id not in _STREAM_CANCEL_CLAIMED

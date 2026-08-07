@@ -16621,7 +16621,7 @@ function renderMessages(options){
       if((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs)) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
-    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||recoveryHtml||fallbackNoticeHtml);
+    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||recoveryHtml||fallbackNoticeHtml);
     if(fallbackNoticeHtml){
       seg.insertAdjacentHTML('afterbegin', fallbackNoticeHtml);
     }

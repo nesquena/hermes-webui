@@ -48,6 +48,7 @@ class TestPostCASBarrier:
         _streaming_mod._STREAM_CANCEL_CLAIMED.clear()
         _streaming_mod._STREAM_SETTLEMENT_TERMINAL.clear()
         _streaming_mod._STREAM_WORKER_SAVED.clear()
+        _streaming_mod._STREAM_FALLBACK_DEAD_LETTER.clear()
 
     def teardown_method(self):
         AGENT_INSTANCES.clear()
@@ -57,6 +58,7 @@ class TestPostCASBarrier:
         _streaming_mod._STREAM_CANCEL_CLAIMED.clear()
         _streaming_mod._STREAM_SETTLEMENT_TERMINAL.clear()
         _streaming_mod._STREAM_WORKER_SAVED.clear()
+        _streaming_mod._STREAM_FALLBACK_DEAD_LETTER.clear()
 
     def test_post_cas_barrier_rejects_B_through_real_callback(self):
         """Production-composed: after cancel_stream's CAS pops A and sets the
@@ -164,7 +166,9 @@ class TestPostCASBarrier:
         assert notice.get("to_model") == "m1", "A was not the durable notice"
         assert set(notice.keys()) == {"message", "to_model", "to_provider"}
 
-        # All registries retired
+        # All registries retired (fence is retired by the worker's finally,
+        # not cancel's finally — gate-certifier blocker #2).
+        _streaming_mod._retire_worker_cancelled_state(stream_id)
         assert stream_id not in _streaming_mod._STREAM_FALLBACK_NOTICES
         assert stream_id not in _streaming_mod._STREAM_CANCEL_CLAIMED
         assert stream_id not in _streaming_mod._STREAM_SETTLEMENT_TERMINAL
@@ -267,7 +271,9 @@ class TestPostCASBarrier:
             f"dirty keys on disk: {set(notice.keys())}"
         )
 
-        # Registries retired
+        # Registries retired (fence is retired by the worker's finally,
+        # not cancel's finally — gate-certifier blocker #2).
+        _streaming_mod._retire_worker_cancelled_state(stream_id)
         assert stream_id not in _streaming_mod._STREAM_FALLBACK_NOTICES
         assert stream_id not in _streaming_mod._STREAM_CANCEL_CLAIMED
         assert stream_id not in _streaming_mod._STREAM_SETTLEMENT_TERMINAL
@@ -320,9 +326,12 @@ class TestPostCASBarrier:
 
         # Cancel save failed -> non-silent disposition
         assert result is False
-        # Notice left in map for worker
-        assert stream_id in _streaming_mod._STREAM_FALLBACK_NOTICES
-        # Cancel registries retired
+        # Notice transferred to dead-letter (bounded owner — gate-certifier
+        # blocker #3: failed persistence has a named owner, not an ownerless
+        # residue in _STREAM_FALLBACK_NOTICES).
+        assert stream_id in _streaming_mod._STREAM_FALLBACK_DEAD_LETTER
+        # Cancel claim retired; fence was never set on the failure path
+        # (settlement did not converge — gate-certifier blocker #2).
         assert stream_id not in _streaming_mod._STREAM_CANCEL_CLAIMED
         assert stream_id not in _streaming_mod._STREAM_SETTLEMENT_TERMINAL
 
@@ -350,6 +359,7 @@ class TestPostCASBarrier:
         # Worker retirement pops the exact notice and empties all registries
         _retire_worker_cancelled_state(stream_id)
         assert stream_id not in _streaming_mod._STREAM_FALLBACK_NOTICES
+        assert stream_id not in _streaming_mod._STREAM_FALLBACK_DEAD_LETTER
         assert stream_id not in _streaming_mod._STREAM_WORKER_SAVED
         assert stream_id not in _streaming_mod._STREAM_CANCEL_CLAIMED
         assert stream_id not in _streaming_mod._STREAM_SETTLEMENT_TERMINAL
@@ -394,7 +404,7 @@ class TestPostCASBarrier:
             result = _streaming_mod.cancel_stream(stream_id)
 
         assert result is False
-        assert stream_id in _streaming_mod._STREAM_FALLBACK_NOTICES, "notice dropped after cancel save failure"
+        assert stream_id in _streaming_mod._STREAM_FALLBACK_DEAD_LETTER, "notice dropped after cancel save failure"
 
         # Worker retry also fails
         worker_session = Mock()
@@ -413,8 +423,8 @@ class TestPostCASBarrier:
 
         # Worker retirement must NOT pop (not durably saved)
         _retire_worker_cancelled_state(stream_id)
-        # Notice still in map — not silently dropped
-        assert stream_id in _streaming_mod._STREAM_FALLBACK_NOTICES, (
+        # Notice still in dead-letter — not silently dropped
+        assert stream_id in _streaming_mod._STREAM_FALLBACK_DEAD_LETTER, (
             "notice silently dropped after both cancel and worker saves failed"
         )
         # But ownership registries are retired — no unbounded growth
@@ -423,7 +433,7 @@ class TestPostCASBarrier:
         assert stream_id not in _streaming_mod._STREAM_SETTLEMENT_TERMINAL
 
         # Cleanup
-        _streaming_mod._STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+        _streaming_mod._STREAM_FALLBACK_DEAD_LETTER.pop(stream_id, None)
 
     def test_cancel_first_save_failure_settlement_exhaustion_disposition(self):
         """Settlement exhaustion disposition: cancel_stream returns False
@@ -477,10 +487,11 @@ class TestPostCASBarrier:
             f"settlement exhaustion must return False, got {result}"
         )
 
-        # Bounded-empty registries
+        # Bounded-empty registries (cancel-side)
         assert stream_id not in _streaming_mod._STREAM_CANCEL_CLAIMED
+        # Fence was never set on the failure path (settlement did not converge)
         assert stream_id not in _streaming_mod._STREAM_SETTLEMENT_TERMINAL
         assert stream_id not in _streaming_mod._STREAM_WORKER_SAVED
-        # Notice left in map (not silently dropped)
-        assert stream_id in _streaming_mod._STREAM_FALLBACK_NOTICES
-        _streaming_mod._STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+        # Notice in dead-letter (bounded owner — gate-certifier blocker #3)
+        assert stream_id in _streaming_mod._STREAM_FALLBACK_DEAD_LETTER
+        _streaming_mod._STREAM_FALLBACK_DEAD_LETTER.pop(stream_id, None)

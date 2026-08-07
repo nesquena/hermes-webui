@@ -13458,7 +13458,19 @@ def handle_get(handler, parsed) -> bool:
             cancelled = adapter.cancel_run(stream_id).accepted
         else:
             cancelled = cancel_stream(stream_id)
-        return j(handler, {"ok": True, "cancelled": cancelled, "stream_id": stream_id})
+        # Surface persistence failure honestly: when cancel_stream returns
+        # False due to settlement save failure or loop exhaustion, the
+        # terminal fallback notice could not be confirmed durable
+        # (gate-certifier blocker #3).  The route must not mask this as a
+        # generic "stream no longer active" — include persistence_failed so
+        # the UI can show a truthful message.
+        from api.streaming import _STREAM_FALLBACK_DEAD_LETTER
+        _persistence_failed = (
+            not cancelled
+            and stream_id in _STREAM_FALLBACK_DEAD_LETTER
+        )
+        return j(handler, {"ok": True, "cancelled": cancelled, "stream_id": stream_id,
+                           "persistence_failed": _persistence_failed})
 
     if parsed.path == "/api/chat/stream":
         return _handle_sse_stream(handler, parsed)
