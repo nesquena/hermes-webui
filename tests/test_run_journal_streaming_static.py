@@ -25,6 +25,20 @@ def test_streaming_journals_sse_events_before_queue_delivery():
     assert "queue_item = (event, data, event_id) if event_id and hasattr(q, \"subscribe_with_snapshot\") else (event, data)" in block
 
 
+
+def test_streaming_compacts_all_successful_agent_result_writebacks():
+    src = Path("api/streaming.py").read_text(encoding="utf-8")
+    run_src = src[src.index("def _run_agent_streaming("):]
+    settle_src = src[src.index("def _settle_result_messages("):]
+    settle_src = settle_src[: settle_src.index("\n\ndef _current_turn_already_has_visible_assistant_answer(")]
+
+    # Normal completion plus both credential self-heal retry-success paths now
+    # route through one shared settlement helper, which owns the compaction.
+    assert "def _settle_result_messages(" in src
+    assert "_compact_session_image_parts_for_persistence(session)" in settle_src
+    assert run_src.count("_settle_result_messages(") == 3
+
+
 def test_visible_process_echo_compare_ignores_all_whitespace():
     token_text = "先把 issue 4249 拉下来\n\n先看正文和评论"
     interim_text = "先把 issue 4249 拉下来先看正文和评论"

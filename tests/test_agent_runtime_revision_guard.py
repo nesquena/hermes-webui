@@ -39,6 +39,23 @@ def test_loaded_agent_runtime_fails_closed_after_source_revision_changes(tmp_pat
     probe = tmp_path / "probe.py"
     probe.write_text(
         """
+import sys
+
+# On a machine where hermes_agent is installed as an editable package, setuptools
+# registers a meta-path finder (__editable___hermes_agent_*_finder) that maps
+# `run_agent` -> the real on-disk agent module. That finder runs BEFORE the
+# PYTHONPATH-based PathFinder, so it would shadow the synthetic per-test agent
+# dir this test points HERMES_WEBUI_AGENT_DIR at (the real AIAgent has no
+# `.revision` attribute). Drop any such editable finder + purge cached agent
+# modules so `import run_agent` resolves from the test's agent_dir on PYTHONPATH.
+# On CI (no editable install) this is a harmless no-op.
+sys.meta_path[:] = [
+    _f for _f in sys.meta_path
+    if "__editable__" not in type(_f).__module__ and "__editable__" not in getattr(_f, "__module__", "")
+]
+for _m in ("run_agent", "hermes_state", "agent", "tools"):
+    sys.modules.pop(_m, None)
+
 from pathlib import Path
 import subprocess
 
@@ -578,8 +595,11 @@ def test_gateway_owned_start_run_bypasses_local_runtime_barrier(monkeypatch):
     captured = {}
     monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda: False)
     monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: False)
-    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
-    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(
+        routes,
+        "get_config",
+        lambda: (_ for _ in ()).throw(AssertionError("_start_run reread shared config")),
+    )
     monkeypatch.setattr(
         routes,
         "ensure_agent_runtime_current",
@@ -604,6 +624,7 @@ def test_gateway_owned_start_run_bypasses_local_runtime_barrier(monkeypatch):
         normalized_model=False,
         source="webui",
         route="/api/chat/start",
+        gateway_chat_enabled=True,
     )
 
     assert response["stream_id"] == "gateway-stream-1"

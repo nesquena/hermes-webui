@@ -10,6 +10,73 @@ ROOT = Path(__file__).resolve().parents[1]
 ROUTES_SRC = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 
 
+def test_gateway_terminal_error_save_failure_is_marked_unsaved(monkeypatch, tmp_path):
+    import api.gateway_chat as gateway_chat
+    import api.models as models
+    import api.streaming as streaming
+
+    session = models.Session(
+        session_id="gateway_terminal_error_save_failed",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        model_provider="openai",
+        messages=[{"role": "user", "content": "prompt"}],
+        context_messages=[],
+    )
+    session.active_stream_id = "gateway_terminal_error_stream"
+
+    def fail_save(*_args, **_kwargs):
+        raise OSError("forced gateway terminal error save failure")
+
+    session.save = fail_save
+    monkeypatch.setattr(gateway_chat, "get_session", lambda _sid: session)
+    monkeypatch.setattr(gateway_chat, "_stream_writeback_is_current", lambda *_args: True)
+    monkeypatch.setattr(streaming, "_snapshot_and_append_partial_on_error", lambda *_args: None)
+
+    payload = gateway_chat._settle_gateway_terminal_error(
+        session.session_id,
+        session.active_stream_id,
+        str(tmp_path),
+        "gpt-4o",
+        "openai",
+        "gateway exploded",
+    )
+
+    assert payload["terminal_session_persisted"] is False
+    assert "terminal_session_persisted_session_id" not in payload
+
+
+def test_gateway_terminal_error_successful_save_is_marked_persisted(monkeypatch, tmp_path):
+    import api.gateway_chat as gateway_chat
+    import api.models as models
+    import api.streaming as streaming
+
+    session = models.Session(
+        session_id="gateway_terminal_error_save_succeeds",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        model_provider="openai",
+        messages=[{"role": "user", "content": "prompt"}],
+        context_messages=[],
+    )
+    session.active_stream_id = "gateway_terminal_error_stream"
+    monkeypatch.setattr(gateway_chat, "get_session", lambda _sid: session)
+    monkeypatch.setattr(gateway_chat, "_stream_writeback_is_current", lambda *_args: True)
+    monkeypatch.setattr(streaming, "_snapshot_and_append_partial_on_error", lambda *_args: None)
+
+    payload = gateway_chat._settle_gateway_terminal_error(
+        session.session_id,
+        session.active_stream_id,
+        str(tmp_path),
+        "gpt-4o",
+        "openai",
+        "gateway exploded",
+    )
+
+    assert payload["terminal_session_persisted"] is True
+    assert payload["terminal_session_persisted_session_id"] == session.session_id
+
+
 def test_stream_status_exposes_replay_summary():
     status_pos = ROUTES_SRC.index('parsed.path == "/api/chat/stream/status"')
     block = ROUTES_SRC[status_pos : status_pos + 900]

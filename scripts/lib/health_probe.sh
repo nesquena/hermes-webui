@@ -58,31 +58,49 @@ _hermes_webui_warn_self_signed() {
     "$1" >&2
 }
 
-# _hermes_webui_http_get <url> <max_time> <mode>
+# _hermes_webui_http_get <url> <max_time> <mode> [direct]
 # mode: "insecure" disables certificate verification, anything else verifies.
+# direct: "direct" bypasses every configured proxy.
 # Prints the response body to stdout; returns the underlying client exit code.
 _hermes_webui_http_get() {
-  local url="$1" max_time="$2" mode="$3"
+  local url="$1" max_time="$2" mode="$3" direct="${4:-}"
   if command -v curl >/dev/null 2>&1; then
     if [[ "${mode}" == "insecure" ]]; then
-      curl -fsS -k --max-time "${max_time}" "${url}" 2>/dev/null
+      if [[ "${direct}" == "direct" ]]; then
+        curl -fsS -k --noproxy '*' --max-time "${max_time}" "${url}" 2>/dev/null
+      else
+        curl -fsS -k --max-time "${max_time}" "${url}" 2>/dev/null
+      fi
     else
-      curl -fsS --max-time "${max_time}" "${url}" 2>/dev/null
+      if [[ "${direct}" == "direct" ]]; then
+        curl -fsS --noproxy '*' --max-time "${max_time}" "${url}" 2>/dev/null
+      else
+        curl -fsS --max-time "${max_time}" "${url}" 2>/dev/null
+      fi
     fi
     return $?
   elif command -v wget >/dev/null 2>&1; then
     if [[ "${mode}" == "insecure" ]]; then
-      wget -qO- --no-check-certificate "--timeout=${max_time}" --tries=1 "${url}" 2>/dev/null
+      if [[ "${direct}" == "direct" ]]; then
+        wget -qO- --no-proxy --no-check-certificate "--timeout=${max_time}" --tries=1 "${url}" 2>/dev/null
+      else
+        wget -qO- --no-check-certificate "--timeout=${max_time}" --tries=1 "${url}" 2>/dev/null
+      fi
     else
-      wget -qO- "--timeout=${max_time}" --tries=1 "${url}" 2>/dev/null
+      if [[ "${direct}" == "direct" ]]; then
+        wget -qO- --no-proxy "--timeout=${max_time}" --tries=1 "${url}" 2>/dev/null
+      else
+        wget -qO- "--timeout=${max_time}" --tries=1 "${url}" 2>/dev/null
+      fi
     fi
     return $?
   fi
   return 127
 }
 
-# hermes_webui_probe_health <host> <port> [path] [max_time]
-# Prints the response body to stdout on success; warnings go to stderr.
+# hermes_webui_probe_health <host> <port> [path] [max_time] [direct]
+# Pass "direct" to bypass every configured proxy for all probe attempts.
+# Prints the response body to stdout; warnings go to stderr.
 # Returns 0 if the server answered, 1 otherwise.
 #
 # Side effect: sets the global _HERMES_WEBUI_PROBE_SCHEME to the scheme that
@@ -91,14 +109,14 @@ _hermes_webui_http_get() {
 # back to plain HTTP when the cert/key are unloadable — so the configured
 # scheme can be https:// while the live server speaks http://.
 hermes_webui_probe_health() {
-  local host="$1" port="$2" path="${3:-/health}" max_time="${4:-2}"
+  local host="$1" port="$2" path="${3:-/health}" max_time="${4:-2}" direct="${5:-}"
   local scheme body
   scheme="$(hermes_webui_probe_scheme)"
 
   local http_url="http://${host}:${port}${path}"
 
   if [[ "${scheme}" == "http" ]]; then
-    if body="$(_hermes_webui_http_get "${http_url}" "${max_time}" "")"; then
+    if body="$(_hermes_webui_http_get "${http_url}" "${max_time}" "" "${direct}")"; then
       _HERMES_WEBUI_PROBE_SCHEME="http"
       printf '%s' "${body}"
       return 0
@@ -111,20 +129,20 @@ hermes_webui_probe_health() {
 
   if _hermes_webui_truthy "${HERMES_WEBUI_TLS_INSECURE_PROBE:-}"; then
     # Explicit opt-in: skip verification, stay silent by contract.
-    if body="$(_hermes_webui_http_get "${https_url}" "${max_time}" "insecure")"; then
+    if body="$(_hermes_webui_http_get "${https_url}" "${max_time}" "insecure" "${direct}")"; then
       _HERMES_WEBUI_PROBE_SCHEME="https"
       printf '%s' "${body}"
       return 0
     fi
   else
     # 1) Verified HTTPS.
-    if body="$(_hermes_webui_http_get "${https_url}" "${max_time}" "")"; then
+    if body="$(_hermes_webui_http_get "${https_url}" "${max_time}" "" "${direct}")"; then
       _HERMES_WEBUI_PROBE_SCHEME="https"
       printf '%s' "${body}"
       return 0
     fi
     # 2) Self-signed fallback: verification failed, retry unverified + warn.
-    if body="$(_hermes_webui_http_get "${https_url}" "${max_time}" "insecure")"; then
+    if body="$(_hermes_webui_http_get "${https_url}" "${max_time}" "insecure" "${direct}")"; then
       _hermes_webui_warn_self_signed "${https_url}"
       _HERMES_WEBUI_PROBE_SCHEME="https"
       printf '%s' "${body}"
@@ -133,7 +151,7 @@ hermes_webui_probe_health() {
   fi
 
   # 3) server.py may have fallen back to plain HTTP (cert/key unloadable).
-  if body="$(_hermes_webui_http_get "${http_url}" "${max_time}" "")"; then
+  if body="$(_hermes_webui_http_get "${http_url}" "${max_time}" "" "${direct}")"; then
     _HERMES_WEBUI_PROBE_SCHEME="http"
     printf '%s' "${body}"
     return 0
