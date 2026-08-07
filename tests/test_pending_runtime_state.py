@@ -269,6 +269,29 @@ def test_cached_session_refresh_holds_runtime_lock_through_cache_insert(monkeypa
     assert observed == [True]
 
 
+def test_cached_refresh_can_reenter_runtime_lock_for_both_checks(monkeypatch):
+    sid = "cache_refresh_both_001"
+    cached = SimpleNamespace(session_id=sid)
+    first_disk = SimpleNamespace(session_id=sid)
+    second_disk = SimpleNamespace(session_id=sid)
+    loads = []
+    monkeypatch.setitem(models.SESSIONS, sid, cached)
+    monkeypatch.setattr(models, "_cached_session_lags_disk", lambda _session: True)
+    monkeypatch.setattr(models, "_inactive_cache_tail_needs_disk_check", lambda _session: True)
+    monkeypatch.setattr(models, "_cache_has_stale_unsaved_user_tail", lambda *_args: False)
+    monkeypatch.setattr(models, "_session_has_pending_journal_retry", lambda _session: False)
+    monkeypatch.setattr(models, "_sync_sidecar_from_state_db_if_newer", lambda _session: None)
+
+    def load(_sid):
+        loads.append(_sid)
+        return first_disk if len(loads) == 1 else second_disk
+
+    monkeypatch.setattr(models.Session, "load", load)
+
+    assert models.get_session(sid) is first_disk
+    assert loads == [sid, sid]
+
+
 def test_sidecar_delete_primitives_report_unlink_failure_and_retry(tmp_path, monkeypatch):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()

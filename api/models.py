@@ -4719,11 +4719,11 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
         cached = SESSIONS.get(sid)
         if cached is not None and promote_cache:
             SESSIONS.move_to_end(sid)  # LRU: mark as recently used
-    runtime_lock = nullcontext()
+    runtime_lock_factory = nullcontext
     try:
         from api.session_runtime_state import runtime_state_lock
 
-        runtime_lock = runtime_state_lock(sid)
+        runtime_lock_factory = runtime_state_lock
     except Exception:
         pass
     if cached is not None:
@@ -4745,7 +4745,7 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
     if cached is not None:
         if not metadata_only and _cached_session_lags_disk(cached):
             try:
-                with runtime_lock:
+                with runtime_lock_factory(sid):
                     disk_session = Session.load(sid)
                     with LOCK:
                         SESSIONS[sid] = disk_session
@@ -4758,7 +4758,7 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                 )
         if not metadata_only and _inactive_cache_tail_needs_disk_check(cached):
             try:
-                with runtime_lock:
+                with runtime_lock_factory(sid):
                     disk_session = Session.load(sid)
                     stale_unsaved_tail = _cache_has_stale_unsaved_user_tail(cached, disk_session)
                     if stale_unsaved_tail:
@@ -4787,7 +4787,7 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                     "state.db newer-sidecar sync failed on cache hit for session %s", sid, exc_info=True,
                 )
         return cached
-    with runtime_lock:
+    with runtime_lock_factory(sid):
         if metadata_only:
             s = Session.load_metadata_only(sid)
         else:
