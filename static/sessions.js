@@ -9445,11 +9445,129 @@ async function _saveProjectBindings(proj, fields){
   }
 }
 
+// Custom combobox for the bindings dialog: same look as a native select
+// (see .project-bindings-combo-* in style.css), but rendered as divs so an
+// option can carry a primary name AND a secondary path/subtitle. All three
+// binding fields share this component, so the dropdowns are visually
+// identical across workspace / model / effort.
+function _makeBindingsCombo(o){
+  const wrap=document.createElement('div');
+  wrap.className='project-bindings-combo';
+  const trigger=document.createElement('div');
+  trigger.className='project-bindings-combo-trigger';
+  trigger.tabIndex=0;
+  trigger.setAttribute('role','combobox');
+  trigger.setAttribute('aria-haspopup','listbox');
+  trigger.setAttribute('aria-expanded','false');
+  const nameSpan=document.createElement('span');
+  nameSpan.className='combo-trigger-name';
+  const subSpan=document.createElement('span');
+  subSpan.className='combo-trigger-sub';
+  trigger.appendChild(nameSpan);
+  trigger.appendChild(subSpan);
+  const menu=document.createElement('div');
+  menu.className='project-bindings-combo-menu';
+  menu.setAttribute('role','listbox');
+  wrap.appendChild(trigger);
+  wrap.appendChild(menu);
+
+  const state={value:(o&&o.value)||'', options:Array.isArray(o&&o.options)?o.options:[]};
+
+  function _currentOption(){
+    return state.options.find(opt=>opt.value===state.value)||null;
+  }
+  function _renderTrigger(){
+    const cur=_currentOption();
+    nameSpan.textContent=(cur&&cur.name)||(o&&o.placeholder)||'';
+    subSpan.textContent=(cur&&cur.sub)||'';
+    subSpan.style.display=(cur&&cur.sub)?'':'none';
+  }
+  function _close(){
+    menu.classList.remove('open');
+    trigger.classList.remove('open');
+    trigger.setAttribute('aria-expanded','false');
+  }
+  function _open(){
+    // Rebuild options so freshly-fetched lists (workspace names) appear.
+    menu.innerHTML='';
+    const items=state.options;
+    if(!items.length){
+      const empty=document.createElement('div');
+      empty.className='project-bindings-combo-empty';
+      empty.textContent='No options';
+      menu.appendChild(empty);
+    }else{
+      items.forEach(opt=>{
+        const row=document.createElement('div');
+        row.className='ws-opt'+(opt.value===state.value?' active':'');
+        row.setAttribute('role','option');
+        row.setAttribute('aria-selected',String(opt.value===state.value));
+        const n=document.createElement('span');
+        n.className='ws-opt-name';
+        n.textContent=opt.name||opt.value||'';
+        row.appendChild(n);
+        if(opt.sub){
+          const p=document.createElement('span');
+          p.className='ws-opt-path';
+          p.textContent=opt.sub;
+          row.appendChild(p);
+        }
+        row.onmousedown=(e)=>{e.preventDefault();};
+        row.onclick=(e)=>{
+          e.stopPropagation();
+          state.value=opt.value;
+          _renderTrigger();
+          _close();
+          if(o&&typeof o.onChange==='function') o.onChange(opt);
+        };
+        menu.appendChild(row);
+      });
+    }
+    menu.classList.add('open');
+    trigger.classList.add('open');
+    trigger.setAttribute('aria-expanded','true');
+  }
+  trigger.onclick=(e)=>{
+    e.stopPropagation();
+    if(menu.classList.contains('open')){_close();}else{_open();}
+  };
+  trigger.onkeydown=(e)=>{
+    if(e.key==='Enter'||e.key===' '||e.key==='ArrowDown'){
+      e.preventDefault();
+      if(!menu.classList.contains('open')) _open();
+    }else if(e.key==='Escape'){
+      _close();
+    }else if(e.key==='ArrowUp'&&menu.classList.contains('open')){
+      // Move selection up through the rendered options.
+      e.preventDefault();
+      const rows=Array.from(menu.querySelectorAll('.ws-opt'));
+      const idx=rows.findIndex(r=>r.classList.contains('active'));
+      const next=idx<=0?rows.length-1:idx-1;
+      if(rows[next]){rows[next].click();}
+    }else if(e.key==='ArrowDown'&&menu.classList.contains('open')){
+      e.preventDefault();
+      const rows=Array.from(menu.querySelectorAll('.ws-opt'));
+      const idx=rows.findIndex(r=>r.classList.contains('active'));
+      const next=idx<0?0:(idx+1)%rows.length;
+      if(rows[next]){rows[next].click();}
+    }
+  };
+  document.addEventListener('click',(e)=>{
+    if(!wrap.contains(e.target)) _close();
+  });
+  _renderTrigger();
+  return {
+    el:wrap,
+    getValue:()=>state.value,
+    setValue:(v)=>{state.value=v||'';_renderTrigger();},
+    setOptions:(opts)=>{state.options=Array.isArray(opts)?opts:[];_renderTrigger();},
+  };
+}
+
 // Modal dialog for editing a project's bindings (workspace / model / effort).
-// All three fields are combobox-style controls — workspace is an input with a
-// datalist of saved workspace paths (also accepts a fresh path; the server
-// auto-registers it), model and effort are dropdowns. Each field has a
-// "(none)" option to unbind it individually.
+// All three fields use the SAME custom combobox component so the dropdowns
+// look identical; workspace options show name-first with the path as the
+// secondary line. Each field has a "(none)" option to unbind it.
 function _showProjectBindingsDialog(proj){
   const overlay=document.createElement('div');
   overlay.className='project-bindings-overlay';
@@ -9472,81 +9590,63 @@ function _showProjectBindingsDialog(proj){
     wrap.appendChild(control);
     return wrap;
   };
-  const _controlStyle='width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--panel,#fff);color:var(--text);font-size:13px;';
 
-  // ── Workspace: input + datalist of saved paths ──
-  const wsInput=document.createElement('input');
-  wsInput.type='text';
-  wsInput.style.cssText=_controlStyle;
-  wsInput.placeholder='(none) — select a workspace or type a path';
-  wsInput.value=proj.workspace||'';
-  wsInput.setAttribute('list','projectBindingsWsDatalist');
-  // datalist must live as a SIBLING (a datalist inside an input is invalid
-  // and the browser ignores it — the input references it by id via `list`).
-  const wsDatalist=document.createElement('datalist');
-  wsDatalist.id='projectBindingsWsDatalist';
-  const wsWrap=_field('Workspace',wsInput);
-  dialog.appendChild(wsWrap);
-  dialog.appendChild(wsDatalist);
-
-  // Fill the datalist from the saved workspace list (fresh fetch so a path
-  // bound earlier or added in Settings is always present).
+  // ── Workspace: name-first combobox backed by the saved workspace list ──
+  const wsCombo=_makeBindingsCombo({
+    placeholder:'(none) — inherit default',
+    value:proj.workspace||'',
+    options:[{value:'',name:'(none) — inherit default'}],
+  });
+  dialog.appendChild(_field('Workspace',wsCombo.el));
+  // Fill options from /api/workspaces ({name, path}). Current binding is
+  // always present even if it was never added through Settings.
   (async()=>{
     try{
       const wsRes=await api('/api/workspaces');
-      const paths=(wsRes&&wsRes.workspaces||[]).map(w=>w&&w.path).filter(Boolean);
-      if(!paths.includes(proj.workspace)&&proj.workspace) paths.unshift(proj.workspace);
-      paths.forEach(p=>{
-        const opt=document.createElement('option');
-        opt.value=p;
-        wsDatalist.appendChild(opt);
-      });
-    }catch(_){ /* datalist is a convenience; a failed fetch degrades to free-text */ }
+      const rows=(wsRes&&wsRes.workspaces||[]).map(w=>({
+        value:w&&w.path||'',
+        name:(w&&w.name)||((w&&w.path)?String(w.path).split(/[\\/]/).pop():'')||'',
+        sub:w&&w.path||'',
+      })).filter(x=>x.value);
+      if(proj.workspace&&!rows.some(r=>r.value===proj.workspace)){
+        rows.unshift({value:proj.workspace,name:String(proj.workspace).split(/[\\/]/).pop(),sub:proj.workspace});
+      }
+      wsCombo.setOptions([{value:'',name:'(none) — inherit default'},...rows]);
+    }catch(_){ /* keep the (none) fallback */ }
   })();
 
-  // ── Model: dropdown cloned from the composer modelSelect ──
-  const modelSel=document.createElement('select');
-  modelSel.style.cssText=_controlStyle;
-  const noneOpt=document.createElement('option');
-  noneOpt.value='';
-  noneOpt.textContent='(none) — inherit default';
-  modelSel.appendChild(noneOpt);
+  // ── Model: name-first combobox cloned from the composer modelSelect ──
+  const modelOptions=[{value:'',name:'(none) — inherit default'}];
   const srcModelSel=(typeof $==='function')?$('modelSelect'):null;
   if(srcModelSel&&srcModelSel.options){
     Array.from(srcModelSel.options).forEach(o=>{
-      const opt=document.createElement('option');
-      opt.value=o.value||'';
-      opt.textContent=o.textContent||o.value||'';
-      if(o.dataset&&o.dataset.provider) opt.dataset.provider=o.dataset.provider;
-      if(o.dataset&&o.dataset.model) opt.dataset.model=o.dataset.model;
-      modelSel.appendChild(opt);
+      const val=o.value||'';
+      if(!val) return;
+      const label=(o.textContent||val).trim();
+      const provider=(o.dataset&&o.dataset.provider)||'';
+      if(!modelOptions.some(x=>x.value===val)){
+        modelOptions.push({value:val,name:label,sub:provider});
+      }
     });
   }
-  const modelWrap=_field('Model',modelSel);
-  dialog.appendChild(modelWrap);
-
-  // ── Reasoning effort: dropdown of the standard ladder ──
-  const effortSel=document.createElement('select');
-  effortSel.style.cssText=_controlStyle;
-  const effNone=document.createElement('option');
-  effNone.value='';
-  effNone.textContent='(none) — inherit default';
-  effortSel.appendChild(effNone);
-  ['minimal','low','medium','high','xhigh','max'].forEach(eff=>{
-    const opt=document.createElement('option');
-    opt.value=eff;
-    opt.textContent=eff.charAt(0).toUpperCase()+eff.slice(1);
-    effortSel.appendChild(opt);
+  const modelCombo=_makeBindingsCombo({
+    placeholder:'(none) — inherit default',
+    value:proj.model||'',
+    options:modelOptions,
   });
-  const effortWrap=_field('Reasoning effort',effortSel);
-  dialog.appendChild(effortWrap);
+  dialog.appendChild(_field('Model',modelCombo.el));
 
-  // Preselect current values (after options are populated).
-  if(proj.model){
-    const match=Array.from(modelSel.options).find(o=>o.value===proj.model);
-    if(match) modelSel.value=proj.model;
-  }
-  if(proj.reasoning_effort) effortSel.value=proj.reasoning_effort;
+  // ── Reasoning effort: name-first combobox of the standard ladder ──
+  const effortOptions=[{value:'',name:'(none) — inherit default'}];
+  ['minimal','low','medium','high','xhigh','max'].forEach(eff=>{
+    effortOptions.push({value:eff,name:eff.charAt(0).toUpperCase()+eff.slice(1)});
+  });
+  const effortCombo=_makeBindingsCombo({
+    placeholder:'(none) — inherit default',
+    value:proj.reasoning_effort||'',
+    options:effortOptions,
+  });
+  dialog.appendChild(_field('Reasoning effort',effortCombo.el));
 
   // ── Actions ──
   const btnRow=document.createElement('div');
@@ -9561,17 +9661,17 @@ function _showProjectBindingsDialog(proj){
   };
   btnRow.appendChild(_btn('Cancel','background:transparent;color:var(--muted);',()=>{overlay.remove();}));
   btnRow.appendChild(_btn('Save','background:var(--accent,#6366f1);color:#fff;border-color:transparent;',async()=>{
-    const wsVal=wsInput.value.trim();
-    const modelVal=modelSel.value;
-    const effortVal=effortSel.value;
+    const wsVal=wsCombo.getValue();
+    const modelVal=modelCombo.getValue();
+    const effortVal=effortCombo.getValue();
     const fields={};
     // Workspace: empty → unbind; non-empty → bind (server validates + auto-registers).
     fields.workspace=wsVal||null;
-    // Model: empty → unbind; else bind model (+ provider when the option has one).
+    // Model: empty → unbind; else bind model (+ provider from the option).
     if(modelVal){
       fields.model=modelVal;
-      const chosen=modelSel.options[modelSel.selectedIndex];
-      if(chosen&&chosen.dataset&&chosen.dataset.provider) fields.model_provider=chosen.dataset.provider;
+      const hit=modelOptions.find(x=>x.value===modelVal);
+      if(hit&&hit.sub) fields.model_provider=hit.sub;
     }else{
       fields.model=null;
     }
@@ -9584,7 +9684,7 @@ function _showProjectBindingsDialog(proj){
   overlay.appendChild(dialog);
   overlay.onclick=(e)=>{if(e.target===overlay) overlay.remove();};
   document.body.appendChild(overlay);
-  try{wsInput.focus();}catch(_){}
+  try{overlay.querySelector('.project-bindings-combo-trigger').focus();}catch(_){}
 }
 
 function _startProjectRename(proj, chip){
