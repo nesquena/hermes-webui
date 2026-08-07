@@ -644,6 +644,9 @@ def test_named_custom_provider_hints_keep_model_scoped_effort_ceilings(monkeypat
             assert cfg.coerce_reasoning_effort_for_model(
                 "ultra", model, provider_id="custom:frontier-gw"
             ) == expected, model
+            inferred_efforts = cfg.resolve_model_reasoning_efforts(model)
+            assert ("max" in inferred_efforts and "ultra" in inferred_efforts) is keeps_top_tiers
+            assert cfg.coerce_reasoning_effort_for_model("ultra", model) == expected
     finally:
         if original is None:
             cfg.cfg.pop("custom_providers", None)
@@ -758,4 +761,15 @@ def test_metadata_unavailable_fallback_applies_gpt56_check(monkeypatch):
     custom = cfg.resolve_model_reasoning_efforts("kimi-k2.5", provider_id="custom:unlisted")
     assert "xhigh" in custom
     assert "max" not in custom and "ultra" not in custom
+
+
+def test_negative_metadata_does_not_hide_first_party_gpt56_contract(monkeypatch):
+    monkeypatch.setattr(cfg, "_models_dev_reasoning_efforts", lambda *a, **k: [])
+    efforts = cfg.resolve_model_reasoning_efforts(
+        "gpt-5.6-sol", provider_id="openai-codex"
+    )
+    assert "max" in efforts and "ultra" in efforts
+    assert cfg.coerce_reasoning_effort_for_model(
+        "ultra", "gpt-5.6-sol", provider_id="openai-codex"
+    ) == "ultra"
 
