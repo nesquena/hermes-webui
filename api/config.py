@@ -3540,6 +3540,7 @@ def _filter_reasoning_efforts_for_provider(
         return [eff for eff in normalized if eff in {"low", "medium", "high"}]
     if bare.startswith("gpt-5") and "gpt-5.6" not in bare:
         return [eff for eff in normalized if eff not in {"max", "ultra"}]
+
     # Generic top tiers must not be advertised to providers whose native ladder
     # tops out lower; the downgrade ladder then lands on xhigh/high safely.
     if provider in {"gemini", "google", "google-gemini", "google-vertex", "vertex"}:
@@ -3558,7 +3559,9 @@ def _filter_reasoning_efforts_for_provider(
     # GLM and forced-thinking GLM-4.7); None → not a zai GLM case, defer.
     zai_supports = _zai_glm_reasoning_efforts_supported(model_id, provider_id)
     if zai_supports is True:
-        return normalized
+        # Z.AI documents ``max`` as the top GLM-5.2 reasoning_effort value; the
+        # Codex product-only ``ultra`` tier must not leak into its native ladder.
+        return [eff for eff in normalized if eff != "ultra"]
     if zai_supports is False:
         return []
     # DEFAULT-DENY for custom/unrecognized providers: their native effort
@@ -3945,6 +3948,27 @@ def _lmstudio_model_reasoning_options(
         )
 
 
+def _resolve_reasoning_context(
+    model_id: str | None,
+    provider_id: str | None,
+    base_url: str | None,
+) -> tuple[str, str, str | None]:
+    """Canonicalize the model routing tuple used by reasoning capability gates."""
+    model = str(model_id or "").strip()
+    provider = str(provider_id or "").strip().lower()
+    resolved_base_url = str(base_url or "").strip() or None
+    if model and not provider:
+        try:
+            resolved_model, resolved_provider, inferred_base_url = resolve_model_provider(model)
+            model = str(resolved_model or model).strip()
+            provider = str(resolved_provider or "").strip().lower()
+            if resolved_base_url is None:
+                resolved_base_url = str(inferred_base_url or "").strip() or None
+        except Exception:
+            provider = str((cfg.get("model") or {}).get("provider") or "").strip().lower()
+    return model, _resolve_provider_alias(provider), resolved_base_url
+
+
 def resolve_model_reasoning_efforts(
     model_id: str | None = None,
     provider_id: str | None = None,
@@ -3958,20 +3982,23 @@ def resolve_model_reasoning_efforts(
     pre-adaptive/cloud-hosted Claude cap below the generic top tiers. The UI
     dropdown and streaming coercion therefore agree on every offered level.
     """
-    raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
+    model, provider, resolved_base_url = _resolve_reasoning_context(
+        model_id, provider_id, base_url
+    )
+    raw = _resolve_model_reasoning_efforts_impl(model, provider, resolved_base_url)
     if not raw:
         return raw
     # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
     # disabled, so the 'none' sentinel must NOT appear in their supported list —
     # otherwise the UI offers an "off" option that has no effect and contradicts
     # the forced-tier contract. (#6219 round-3)
-    if _zai_glm_classification(model_id, provider_id) == "forced":
+    if _zai_glm_classification(model, provider) == "forced":
         return []
     # Preserve any explicit 'none' sentinel (valid UI option = "no reasoning");
     # the ceiling filter only knows the reasoning LEVELS.
     had_none = "none" in raw
     filtered = _filter_reasoning_efforts_for_provider(
-        [e for e in raw if e != "none"], str(model_id or ""), str(provider_id or "")
+        [e for e in raw if e != "none"], model, provider
     )
     if had_none:
         # Keep 'none' in its original leading position if it was there.
@@ -4124,6 +4151,16 @@ def _resolve_model_reasoning_efforts_impl(
     # _models_dev_reasoning_efforts already applies the provider/model filter
     # internally, so it is returned as-is here (filtering again would be
     # redundant — the filter is idempotent but the double pass obscures flow).
+    # GPT-5.6 top-tier support is a first-party transport contract. A stale or
+    # negative registry answer must not erase it after explicit config has had
+    # its higher precedence above.
+    if provider in {"openai-codex", "openai", "openai-api", "azure", "azure-openai"}:
+        bare_model = hinted_model.lower().rsplit("/", 1)[-1]
+        if "gpt-5.6" in bare_model:
+            return _filter_reasoning_efforts_for_provider(
+                list(VALID_REASONING_EFFORTS), hinted_model, provider
+            )
+
     metadata_efforts = _models_dev_reasoning_efforts(hinted_model, provider)
     if metadata_efforts is not None:
         return metadata_efforts
@@ -4141,21 +4178,24 @@ def coerce_reasoning_effort_for_model(
     raw = str(effort or "").strip().lower()
     if not raw:
         return ""
+    model, provider, resolved_base_url = _resolve_reasoning_context(
+        model_id, provider_id, base_url
+    )
     # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
     # disabled at all — a stored 'none' must coerce to '' (provider default =
     # thinking on) so streaming does not build disabled reasoning for a model
     # that forces thinking on regardless. Checked BEFORE the generic 'none'
     # early-return below so the forced-tier contract wins. (#6219 round-3)
-    if raw == "none" and _zai_glm_classification(model_id, provider_id) == "forced":
+    if raw == "none" and _zai_glm_classification(model, provider) == "forced":
         return ""
     if raw == "none":
         return "none"
     if raw not in VALID_REASONING_EFFORTS:
         return ""
     supported = resolve_model_reasoning_efforts(
-        model_id,
-        provider_id=provider_id,
-        base_url=base_url,
+        model,
+        provider_id=provider,
+        base_url=resolved_base_url,
     )
     # Hard provider ceilings must win regardless of what the sourced capability
     # list says. resolve_model_reasoning_efforts() draws from hermes_cli /
@@ -4166,7 +4206,7 @@ def coerce_reasoning_effort_for_model(
     # excludes the requested level, degrade down the ladder even when the sourced
     # list is empty or overly broad.
     ceiling = _filter_reasoning_efforts_for_provider(
-        list(VALID_REASONING_EFFORTS), str(model_id or ""), str(provider_id or "")
+        list(VALID_REASONING_EFFORTS), model, provider
     )
     if ceiling and raw not in ceiling:
         ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh..max..ultra
