@@ -10,6 +10,7 @@ leave the server.
 from __future__ import annotations
 
 import shutil
+import threading
 import time
 from importlib import import_module
 from datetime import datetime, timezone
@@ -163,6 +164,10 @@ _PROC_NET_DEV = Path("/proc/net/dev")
 # Cross-request window for throughput deltas. Kept tiny and module-local so the
 # endpoint stays stateless per request but can still report a bytes/sec rate.
 _NET_SAMPLE: dict[str, Any] = {"rx": None, "tx": None, "ts": None}
+# QuietHTTPServer (server.py) serves /api/system/health from many request
+# threads (multiple tabs). The sample read-modify-write must be one critical
+# section, or a caller's poll distorts another caller's interval baseline.
+_NET_SAMPLE_LOCK = threading.Lock()
 
 
 def _read_proc_net_dev() -> tuple[int, int]:
@@ -186,7 +191,12 @@ def _read_proc_net_dev() -> tuple[int, int]:
                 except ValueError:
                     continue
     except OSError:
-        return 0, 0
+        # Non-Linux hosts (macOS/Windows) or restricted containers lack procfs.
+        # Mirror the CPU/memory fallback: use psutil's aggregate counters when
+        # available; if psutil is missing, RuntimeError("psutil_unavailable")
+        # propagates so the metric reports unavailable instead of fake zeros.
+        counters = _load_optional_psutil().net_io_counters()
+        return int(counters.bytes_recv), int(counters.bytes_sent)
     return rx_total, tx_total
 
 
@@ -196,35 +206,38 @@ def _network_throughput() -> dict[str, float]:
     Stateless over requests: keeps the previous total byte count + timestamp in
     a small module cache and computes a delta. The first call returns zeros to
     avoid a bogus spike. No per-interface breakdown or peer data leaves the server.
+    The sample read-modify-write is guarded by _NET_SAMPLE_LOCK because the
+    server serves /api/system/health from many concurrent request threads.
     """
     rx_now, tx_now = _read_proc_net_dev()
     now = time.monotonic()
-    prev = _NET_SAMPLE
-    if prev["ts"] is None:
+    with _NET_SAMPLE_LOCK:
+        prev = _NET_SAMPLE
+        if prev["ts"] is None:
+            prev["rx"], prev["tx"], prev["ts"] = rx_now, tx_now, now
+            return {
+                "rx_bytes_per_s": 0.0,
+                "tx_bytes_per_s": 0.0,
+                "rx_total_bytes": rx_now,
+                "tx_total_bytes": tx_now,
+            }
+        elapsed = now - prev["ts"]
+        if elapsed <= 0:
+            return {
+                "rx_bytes_per_s": 0.0,
+                "tx_bytes_per_s": 0.0,
+                "rx_total_bytes": rx_now,
+                "tx_total_bytes": tx_now,
+            }
+        rx_rate = max(0.0, (rx_now - prev["rx"]) / elapsed)
+        tx_rate = max(0.0, (tx_now - prev["tx"]) / elapsed)
         prev["rx"], prev["tx"], prev["ts"] = rx_now, tx_now, now
         return {
-            "rx_bytes_per_s": 0.0,
-            "tx_bytes_per_s": 0.0,
+            "rx_bytes_per_s": round(rx_rate, 1),
+            "tx_bytes_per_s": round(tx_rate, 1),
             "rx_total_bytes": rx_now,
             "tx_total_bytes": tx_now,
         }
-    elapsed = now - prev["ts"]
-    if elapsed <= 0:
-        return {
-            "rx_bytes_per_s": 0.0,
-            "tx_bytes_per_s": 0.0,
-            "rx_total_bytes": rx_now,
-            "tx_total_bytes": tx_now,
-        }
-    rx_rate = max(0.0, (rx_now - prev["rx"]) / elapsed)
-    tx_rate = max(0.0, (tx_now - prev["tx"]) / elapsed)
-    prev["rx"], prev["tx"], prev["ts"] = rx_now, tx_now, now
-    return {
-        "rx_bytes_per_s": round(rx_rate, 1),
-        "tx_bytes_per_s": round(tx_rate, 1),
-        "rx_total_bytes": rx_now,
-        "tx_total_bytes": tx_now,
-    }
 
 
 def build_system_health_payload() -> dict[str, Any]:

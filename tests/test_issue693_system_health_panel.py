@@ -480,6 +480,91 @@ def test_resource_status_bar_polls_without_insights_open():
     assert "function _formatBytesPerSec(bytesPerSec)" in UI_JS
     # Always poll when the bar is mounted (and enabled), independent of Insights.
     assert "if($('resourceStatusBar') && _resourceBarEnabled()) return true;" in UI_JS
-    # Mounted on load (DOMContentLoaded or immediately).
-    assert "document.addEventListener('DOMContentLoaded',_mountResourceStatusBar)" in UI_JS
-    assert "_mountResourceStatusBar();" in UI_JS
+    # Booted via the deferred-script helper: DOMContentLoaded fires only after
+    # every defer script (including panels.js) is parsed, so _renderResourceStatusBar
+    # exists before mounting (regression guard for a84363950's boot fix).
+    assert "function _bootResourceStatusBar()" in UI_JS
+    assert "document.addEventListener('DOMContentLoaded',_bootResourceStatusBar)" in UI_JS
+    assert "_bootResourceStatusBar();" in UI_JS
+
+
+def test_system_health_network_unavailable_yields_partial(monkeypatch):
+    from api import system_health
+
+    class _MissingProcPath:
+        def open(self, *args, **kwargs):
+            raise FileNotFoundError("/private/proc/net/dev")
+
+    def missing_psutil(name):
+        if name == "psutil":
+            raise ModuleNotFoundError("No module named 'psutil'")
+        raise AssertionError(f"unexpected import: {name}")
+
+    monkeypatch.setattr(system_health, "_PROC_NET_DEV", _MissingProcPath())
+    monkeypatch.setattr(system_health, "import_module", missing_psutil)
+    monkeypatch.setattr(system_health, "_cpu_percent", lambda: 42.25)
+    monkeypatch.setattr(
+        system_health,
+        "_memory_usage",
+        lambda: {"used_bytes": 750, "total_bytes": 1000, "percent": 75.0},
+    )
+    monkeypatch.setattr(
+        system_health,
+        "_disk_usage",
+        lambda: {"used_bytes": 1, "total_bytes": 4, "percent": 25.0},
+    )
+
+    payload = system_health.build_system_health_payload()
+    assert payload["status"] == "partial"
+    assert payload["available"] is True
+    assert payload["network"] is None
+    assert {e["metric"] for e in payload["errors"]} == {"network"}
+
+
+def test_network_collector_falls_back_to_psutil_when_procfs_unavailable(monkeypatch):
+    from api import system_health
+
+    class _MissingProcPath:
+        def open(self, *args, **kwargs):
+            raise FileNotFoundError("/private/proc/net/dev")
+
+    class _FakeNetCounters:
+        bytes_recv = 1234
+        bytes_sent = 567
+
+    fake_psutil = SimpleNamespace(net_io_counters=lambda: _FakeNetCounters())
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(system_health, "_PROC_NET_DEV", _MissingProcPath())
+
+    assert system_health._read_proc_net_dev() == (1234, 567)
+
+
+def test_network_throughput_concurrent_callers_do_not_distort_rates():
+    import threading
+
+    from api import system_health
+
+    system_health._NET_SAMPLE = {"rx": None, "tx": None, "ts": None}
+    results = []
+    errors = []
+
+    def poll():
+        try:
+            for _ in range(30):
+                results.append(system_health._network_throughput())
+        except Exception as exc:  # pragma: no cover - defensive regression clarity
+            errors.append(exc)
+
+    threads = [threading.Thread(target=poll) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert len(results) == 8 * 30
+    for r in results:
+        assert r["rx_bytes_per_s"] >= 0.0
+        assert r["tx_bytes_per_s"] >= 0.0
+        assert r["rx_total_bytes"] >= 0
+        assert r["tx_total_bytes"] >= 0
