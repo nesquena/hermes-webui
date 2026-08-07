@@ -227,6 +227,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Create a public read-only share link for the active conversation from the Control Center; shared pages show a sanitized transcript snapshot without workspace, profile, or live controls
 - Sessions persist across page reloads and SSH tunnel reconnects
 - Browser tab title reflects the active session name
+- Boot deep links -- `?workspace=<path>` starts a fresh session bound to that workspace (one-shot: the parameter is removed from the URL once consumed, symmetric to `?profile=`); combine with `?q=<text>` to prefill the composer so external launchers can open the agent on the right project. The path is validated server-side (`resolve_trusted_workspace()`); if it is rejected the boot falls back to restoring the saved session. With both `?profile=` and `?workspace=`, the workspace routing waits for the profile switch to complete and is retried on the next load if the switch fails.
 - CLI session bridge -- CLI sessions from hermes-agent's SQLite store appear in the sidebar with a gold "cli" badge; click to import with full history and reply normally
 - Token/cost display -- input tokens, output tokens, estimated cost shown per conversation (toggle in Settings or `/usage` command)
 
