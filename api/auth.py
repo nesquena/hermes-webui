@@ -1188,6 +1188,14 @@ def check_auth(handler, parsed) -> bool:
     return False
 
 
+def check_auth_or_close(handler, parsed) -> bool:
+    """Check auth; close the connection when rejected so an unread body can't poison HTTP/1.1 reuse."""
+    if not check_auth(handler, parsed):
+        handler.close_connection = True
+        return False
+    return True
+
+
 def _is_loopback(addr: str) -> bool:
     """Return True if *addr* is a loopback address (127.x.x.x, ::1, or ::ffff:127.x.x.x)."""
     import ipaddress as _ipaddress
