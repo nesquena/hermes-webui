@@ -132,6 +132,9 @@ function _rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent){
 function _profileQueryBlocksSavedLocalRestore(profileIntent, urlSession){
   return !!(profileIntent&&profileIntent.hasParam&&profileIntent.valid&&!urlSession);
 }
+function _shouldStartFreshPwaChat(action,urlSession){
+  return action==='new-chat'&&!urlSession;
+}
 async function _applyComposerPrefillOnBoot(prefillIntent){
   if(!prefillIntent||!prefillIntent.hasText) return;
   const msg=(typeof $==='function')?$('msg'):document.getElementById('msg');
@@ -3676,7 +3679,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
     ? window.HermesPWA.launchAction()
     : null;
-  if(pwaLaunchAction==='new-chat'){
+  if(_shouldStartFreshPwaChat(pwaLaunchAction,urlSession)){
     try{
       await newSession(true);
       // New-chat PWA launches need the empty conversation visible immediately.

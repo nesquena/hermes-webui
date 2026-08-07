@@ -2033,17 +2033,8 @@ async function loadSession(sid){
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
 
 
-  function _mergePendingSessionMessage(session,messages){
-    if(!Array.isArray(messages)) return false;
-    const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,messages):null;
-    if(!pendingMsg) return false;
-    const liveAssistantIdx=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
-    const currentTurnMessages=liveAssistantIdx>=0?messages.slice(0,liveAssistantIdx):messages;
-    if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
-    if(liveAssistantIdx>=0) messages.splice(liveAssistantIdx,0,pendingMsg);
-    else messages.push(pendingMsg);
-    return true;
-  }
+  // _mergePendingSessionMessage is the global identity-aware helper shared by
+  // loadSession and refreshSession; see its definition below.
 
   // Phase 2a: If session is streaming, restore the persisted transcript first,
   // then merge the local INFLIGHT live tail. INFLIGHT is a recovery tail, not a
@@ -3298,6 +3289,32 @@ function _hasCurrentTailUserDuplicate(messages,candidate){
   return !!(existing&&_sameTranscriptMessage(existing,candidate));
 }
 
+// Keep pending-user recovery ordering identical across load, reconnect, and
+// explicit refresh paths. The pending prompt owns the live assistant tail and
+// must be projected before it, regardless of which recovery response arrived.
+function _mergePendingSessionMessage(session,messages){
+  if(!Array.isArray(messages)) return false;
+  const liveAssistantIdx=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
+  const currentTurnMessages=liveAssistantIdx>=0?messages.slice(0,liveAssistantIdx):messages;
+  const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,currentTurnMessages):null;
+  if(!pendingMsg) return false;
+  if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
+  if(liveAssistantIdx>=0){
+    const misplacedIdx=messages.findIndex((m,idx)=>
+      idx>liveAssistantIdx&&m&&m.role==='user'&&_sameTranscriptMessage(m,pendingMsg)
+    );
+    if(misplacedIdx>=0){
+      const [misplacedUser]=messages.splice(misplacedIdx,1);
+      messages.splice(liveAssistantIdx,0,misplacedUser);
+    }else{
+      messages.splice(liveAssistantIdx,0,pendingMsg);
+    }
+  }else{
+    messages.push(pendingMsg);
+  }
+  return true;
+}
+
 function _currentTurnAssistantText(messages){
   const list=Array.isArray(messages)?messages:[];
   let start=-1;
@@ -4154,7 +4171,11 @@ function _sessionUrlForSid(sid){
     current.searchParams.delete('q');
     current.searchParams.delete('prompt');
     current.searchParams.delete('send');
-    base.search=current.searchParams.toString();
+    const retained=new URLSearchParams();
+    current.searchParams.forEach((value,key)=>{
+      if(key!=='action'||value!=='new-chat') retained.append(key,value);
+    });
+    base.search=retained.toString();
     base.hash=current.hash;
   }catch(_e){}
   return base.pathname+base.search+base.hash;
@@ -4163,7 +4184,13 @@ function _setActiveSessionUrl(sid){
   if(typeof window==='undefined'||!window.history||!sid) return;
   const next=_sessionUrlForSid(sid);
   if(next && next!==(window.location.pathname+window.location.search+window.location.hash)){
-    window.history.pushState({session_id:sid},'',next);
+    let consumeLaunchAction=false;
+    try{
+      const current=new URL(window.location.href);
+      consumeLaunchAction=current.searchParams.getAll('action').includes('new-chat');
+    }catch(_e){}
+    const method=consumeLaunchAction?'replaceState':'pushState';
+    window.history[method]({session_id:sid},'',next);
   }
 }
 
