@@ -25,6 +25,76 @@ from api.process_event_utils import is_hidden_transcript_row
 logger = logging.getLogger(__name__)
 
 AUTO_TITLE_LABELS = {'untitled', 'new chat'}
+_LIMITED_TOOL_CONTENT_MAX_CHARS = 4096
+_LIMITED_TOOL_CONTENT_NOTICE = (
+    "\n\n[Tool output truncated in paginated session response; "
+    "load the full transcript to inspect the complete result.]"
+)
+
+
+def _tool_message_for_limited_payload(message):
+    """Return a bounded copy of a large hidden tool-result row."""
+    if not isinstance(message, dict) or str(message.get("role") or "").lower() != "tool":
+        return message
+    content = message.get("content")
+    if content in (None, ""):
+        return message
+    if isinstance(content, str):
+        text = content
+    else:
+        try:
+            text = json.dumps(content, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(content)
+    if len(text) <= _LIMITED_TOOL_CONTENT_MAX_CHARS:
+        return message
+    clipped = dict(message)
+    preview = text[:_LIMITED_TOOL_CONTENT_MAX_CHARS] + _LIMITED_TOOL_CONTENT_NOTICE
+    if isinstance(content, str):
+        clipped["content"] = preview
+    elif isinstance(content, list):
+        clipped["content"] = [{"type": "text", "text": preview}]
+    elif isinstance(content, dict):
+        clipped["content"] = {"_truncated": True, "preview": preview}
+    else:
+        clipped["content"] = preview
+    clipped["_content_truncated"] = True
+    clipped["_content_original_chars"] = len(text)
+    return clipped
+
+
+def _messages_for_limited_payload(messages) -> list:
+    """Bound hidden tool-result rows before a limited session payload is sent."""
+    return [_tool_message_for_limited_payload(message) for message in list(messages or [])]
+
+
+def _exact_message_owner_positions(source_messages, projected_messages):
+    """Map source row positions through a projection only when object identity survives."""
+    projected = {id(row): index for index, row in enumerate(projected_messages or [])}
+    return {
+        index: projected[id(row)]
+        for index, row in enumerate(source_messages or [])
+        if id(row) in projected
+    }
+
+
+def _rebase_tool_calls_to_owner_positions(tool_calls, owner_positions, *, preserve_unowned=False):
+    """Rebase cards through proven row owners, dropping indexed owners not in the projection."""
+    projected = []
+    for card in tool_calls or []:
+        if not isinstance(card, dict):
+            projected.append(card)
+            continue
+        owner = card.get("assistant_msg_idx")
+        if type(owner) is int:
+            if owner == -1 and preserve_unowned:
+                projected.append(card)
+                continue
+            if owner not in owner_positions:
+                continue
+            card = dict(card, assistant_msg_idx=owner_positions[owner])
+        projected.append(card)
+    return projected
 
 
 class RegenerationUnavailable(Exception):

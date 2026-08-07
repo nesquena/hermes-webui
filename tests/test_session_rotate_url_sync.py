@@ -22,21 +22,32 @@ def test_stream_completion_syncs_rotated_session_id_to_tab_state(
     past. Transcript helpers are stubs; session assignment and tab writes are not.
     """
     if path == "completion":
-        start = MESSAGES_JS.index("S.session=d.session;")
+        start = MESSAGES_JS.index("S.session=completedSession;")
         end = MESSAGES_JS.index("const _markerOnlyAssistantError=", start)
     else:
-        start = MESSAGES_JS.index("S.session=session;")
+        restore_start = MESSAGES_JS.index("async function _restoreSettledSession")
+        staged = MESSAGES_JS.index("const _nextMsgs3018=Array.isArray(session.messages)?session.messages:[];", restore_start)
+        start = MESSAGES_JS.rindex("S.session=session;", restore_start, staged)
         # Paging/revision bookkeeping now precedes the tab sync. Include the
         # storage and URL writes, stopping before transcript staging begins.
         end = MESSAGES_JS.index("const _stagedMessages=", start)
     block = MESSAGES_JS[start:end]
     script = """
 const assert=require('node:assert/strict');
-const S={session:{session_id:'A'},messages:[]};
-const session={session_id:'B',messages:[{role:'assistant',content:'Done'}]};
+const S={session:{session_id:'A'},messages:[{role:'user',content:'Earlier'}]};
+const session={session_id:'B',_messages_offset:900,_messages_truncated:true,message_count:902,messages:[{role:'user',content:'Earlier'},{role:'assistant',content:'Done'}],regeneration_revision:'rev-2'};
 const d={session};
+const completedSession=session;
 const completedSid='B';
-const _pendingTitleUpdates=new Map();
+const pathName=PATH_VALUE;
+const _terminalSessionSameSid=false;
+const _mergedTerminalSession=session;
+const _currentTerminalMessages=S.messages;
+let _messagesTruncated=true,_oldestIdx=8;
+const _pendingTitleUpdates=new Map([['B','Recovered title']]);
+const _pendingTitleExpectedCurrent=new Map([['B','Old title']]);
+const titleUpdates=[];
+const applySessionTitleUpdate=(sid,title,options)=>titleUpdates.push([sid,title,options]);
 const _carryForwardEphemeralTurnFields=(_, next)=>next;
 const _filterRecoveryControlMessages=messages=>messages;
 const _attachProjectedAnchorSceneToLastAssistant=()=>{};
@@ -45,6 +56,9 @@ const _attachProjectedAnchorSceneToLastAssistant=()=>{};
 const _preSettle=[];
 const _doneFinalAnswer='';
 const _adoptDoneSnapshotMessages=(prev,next)=>({messages:next});
+const _adoptRegenerationRevision=payload=>{S.session.regeneration_revision=payload.regeneration_revision;};
+const _hydrateTodosFromSession=()=>{};
+const clearVisibleMessageRowCache=()=>{};
 const preserveVisibleOnShorterTerminalSnapshot=false;
 const stored=new Map([['hermes-webui-session','A']]);
 const urls=[];
@@ -55,9 +69,18 @@ const localStorage={setItem(key,value){
 const _setActiveSessionUrl=URL_HELPER_AVAILABLE?(sid=>urls.push(sid)):undefined;
 """ + block + """
 assert.equal(S.session.session_id,'B');
+assert.equal(_oldestIdx,900);
+assert.equal(_messagesTruncated,true);
 assert.equal(stored.get('hermes-webui-session'),STORAGE_BLOCKED?'A':'B');
 assert.deepEqual(urls,URL_HELPER_AVAILABLE?['B']:[]);
+if(pathName==='completion'){
+  assert.equal(S.session.regeneration_revision,'rev-2');
+  assert.deepEqual(titleUpdates,[['B','Recovered title',{expectedCurrent:'Old title'}]]);
+  assert.equal(_pendingTitleUpdates.has('B'),false);
+  assert.equal(_pendingTitleExpectedCurrent.has('B'),false);
+}
 """
+    script = script.replace("PATH_VALUE", json.dumps(path))
     script = script.replace("STORAGE_BLOCKED", json.dumps(storage_blocked))
     script = script.replace("URL_HELPER_AVAILABLE", json.dumps(url_helper_available))
     result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
