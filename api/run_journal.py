@@ -291,9 +291,22 @@ def _read_jsonl(
 # memory even when a single record (e.g. the terminal `done` with the full
 # transcript) is many MB.
 _BOUNDARY_SUMMARY_PREFIX_BYTES = 8192
+# Ceiling on materializing the single straddling boundary record to PROVE
+# whole-record JSON validity before trusting its fabricated prefix summary
+# (#6139 r10 item 2). The record is the terminal `done` (full transcript) —
+# legitimately ~``_SESSION_REPLAY_MAX_BYTES``. We allow up to 2x the tail window
+# so a valid oversized record is proven valid, while a pathological multi-GB
+# record fails closed (recovers the older valid event instead of reading
+# unbounded). This is the ONLY place a record is materialized on the summary
+# path; the prefix-summary extractor stays bounded at 8 KB. The validity check
+# is single-pass (one read → ``json.loads``), so it charges the record length
+# once against the shared boundary-recovery budget.
+_VALIDITY_PROOF_MAX_BYTES = 2 * _SESSION_REPLAY_MAX_BYTES
 
 
-def _find_record_start_before(fh, size: int, seek_pos: int) -> int:
+def _find_record_start_before(
+    fh, size: int, seek_pos: int, *, budget: _ReadBudget | None = None
+) -> int:
     """Return the byte offset where the JSONL record overlapping ``seek_pos``
     begins, i.e. the byte just after the last newline strictly before seek_pos.
     Returns 0 if there is no preceding newline (the record starts at byte 0).
@@ -301,6 +314,15 @@ def _find_record_start_before(fh, size: int, seek_pos: int) -> int:
 
     The caller owns the handle and passes the pinned size from os.fstat — this
     ensures all reads use a single inode generation (single-generation contract).
+
+    When ``budget`` is a ``_ReadBudget``, every ``fh.read`` is capped at the
+    budget's remaining allowance via ``budget.take`` (the read covers the LAST
+    ``to_read`` bytes of the candidate ``[read_from, pos)`` range, since we scan
+    backward — the suffix is the highest-value window). If the allowance hits 0
+    the scan stops and returns 0 (fail-quiet fallback). When ``budget`` is None
+    the helper runs unbounded (the whole tail read is already bounded by the
+    caller). Capping only ever narrows the examined window — the byte-found
+    offset math is unchanged when the full chunk is read. (#6139 r10 item 1.)
     """
     if seek_pos <= 0:
         return 0
@@ -309,12 +331,23 @@ def _find_record_start_before(fh, size: int, seek_pos: int) -> int:
     try:
         while pos > 0:
             read_from = max(0, pos - chunk_size)
-            fh.seek(read_from)
-            block = fh.read(pos - read_from)
+            want = pos - read_from
+            if budget is not None:
+                to_read = budget.take(want)
+                if to_read == 0:
+                    return 0  # exhausted before this read — fail-quiet fallback
+                # Read the LAST `to_read` bytes of [read_from, pos): scanning
+                # backward, the suffix is the highest-value window to examine.
+                seek_to = pos - to_read
+            else:
+                to_read = want
+                seek_to = read_from
+            fh.seek(seek_to)
+            block = fh.read(to_read)
             nl = block.rfind(b"\n")
             if nl >= 0:
-                return read_from + nl + 1
-            pos = read_from
+                return seek_to + nl + 1
+            pos = seek_to
     except (FileNotFoundError, OSError):
         # TOCTOU: journal deleted between the stat() above and this open/read
         # (cleanup racing a status poll). Return the safe fallback rather than
@@ -323,7 +356,7 @@ def _find_record_start_before(fh, size: int, seek_pos: int) -> int:
     return 0
 
 
-def _read_last_complete_line_before(fh, size: int, end_offset: int, *, budget: int | None = None) -> dict | None:
+def _read_last_complete_line_before(fh, size: int, end_offset: int, *, budget: int | _ReadBudget | None = None) -> dict | None:
     """Return the summary of the last complete JSONL record strictly before
     ``end_offset``, without materializing a multi-MB payload.
 
@@ -348,16 +381,25 @@ def _read_last_complete_line_before(fh, size: int, end_offset: int, *, budget: i
     extraction) charges a single shared ``_ReadBudget`` meter, so the scan
     stops as soon as the allowance is exhausted (#6139 r9 item 1). ``rows_scanned``
     is retained as a secondary row-cap guard (a pathological file of tiny rows
-    could fit many rows in the byte budget). If ``budget`` is None it defaults to
+    could fit many rows in the byte budget). ``budget`` may be an ``int`` (a fresh
+    meter of that size is created) or a pre-existing ``_ReadBudget`` (shared with
+    the caller — used by the production boundary-recovery composition so the
+    predecessor scan counts against the SAME allowance as boundary lookup /
+    structural validation). If ``budget`` is None it defaults to
     ``_SESSION_REPLAY_MAX_BYTES``.
     """
     if end_offset <= 0:
         return None
     scan_end = min(end_offset, size)
     # One shared remaining-work meter across every descriptor read in this scan
-    # so physical I/O never exceeds the caller's allowance (#6139 r9 item 1).
-    budget_bytes = budget if budget is not None else _SESSION_REPLAY_MAX_BYTES
-    budget_obj = _ReadBudget(budget_bytes)
+    # so physical I/O never exceeds the caller's allowance (#6139 r9 item 1). If
+    # the caller passed an existing ``_ReadBudget`` (the production composition),
+    # share it so predecessor recovery counts against the same boundary budget.
+    if isinstance(budget, _ReadBudget):
+        budget_obj = budget
+    else:
+        budget_bytes = budget if budget is not None else _SESSION_REPLAY_MAX_BYTES
+        budget_obj = _ReadBudget(budget_bytes)
     rows_scanned = 0
     # Loop backward across preceding complete lines, skipping blank / malformed /
     # non-dict lines (and oversized predecessors, fail-closed), until a valid
@@ -504,8 +546,11 @@ def _record_is_structurally_complete(
     ``budget`` is a ``_ReadBudget``, every ``fh.read`` is capped at the budget's
     remaining allowance via ``budget.take``; if the allowance hits 0 before the
     record's closing brace is confirmed, returns False (fail-closed — can't
-    prove completeness within the budget). When ``budget`` is None the helper
-    runs unbounded. The brace-depth + terminator logic is unchanged.
+    prove completeness within the budget). The terminator look-aheads
+    (``fh.read(1)`` / ``fh.read(2)`` after the closing brace) are also charged
+    via ``budget.take`` and fail-closed if the allowance is exhausted (#6139 r10
+    item 1). When ``budget`` is None the helper runs unbounded. The brace-depth
+    + terminator logic is otherwise unchanged.
     """
     chunk_size = _SESSION_REPLAY_READ_CHUNK_BYTES
     depth = 0
@@ -560,12 +605,21 @@ def _record_is_structurally_complete(
                             if nb == 0x0D:  # \r — need to check for \r\n
                                 if ci + 2 < chunk_len:
                                     return chunk[ci + 2] == 0x0A
-                                # \r at chunk end: read from file to check for \n
+                                # \r at chunk end: read from file to check for \n.
+                                # Charge the terminator look-ahead against the
+                                # shared budget (#6139 r10 item 1: "cap every
+                                # request to the remainder" — the exact-exhaustion
+                                # leak was an uncharged fh.read(1) here).
+                                if budget is not None and budget.take(1) == 0:
+                                    return False  # can't prove terminator within budget — fail-closed
                                 fh.seek(pos + 1)
                                 return fh.read(1) == b"\n"
                             return False  # any other byte after } is not a terminator
                         # Terminator is in the next chunk: read up to 2 bytes
                         # from file to distinguish \r\n (CRLF) from a bare \r.
+                        # Charge the terminator look-ahead (same r10 fix).
+                        if budget is not None and budget.take(2) == 0:
+                            return False  # can't prove terminator within budget — fail-closed
                         fh.seek(pos)
                         nb = fh.read(2)
                         return nb == b"\r\n" or nb[:1] == b"\n"
@@ -582,6 +636,77 @@ def _record_is_structurally_complete(
         # record not complete) rather than letting the exception escape to the
         # HTTP handler. (#6139 Greptile P1)
         return False
+
+
+def _record_is_valid_complete(
+    fh, size: int, record_start: int, *, budget: _ReadBudget | None = None
+) -> bool:
+    """Return True iff the JSONL record at ``record_start`` is a structurally
+    complete AND grammatically valid JSON value (a dict) followed by a newline
+    terminator.
+
+    This is the validity gate for trusting a fabricated boundary-record summary
+    (#6139 r10 item 2): brace balance is necessary but NOT sufficient for JSON
+    validity. A brace-balanced record with a trailing comma (``...,}``) or a
+    malformed nested value (``...bad:nested...}``) is NOT valid JSON and must
+    NOT be fabricated into a terminal event. The full reader ``_read_jsonl``
+    correctly rejects such rows; the tail reader must MATCH it.
+
+    Implementation: rather than a hand-written streaming JSON validator
+    (error-prone — a rejected r10 prototype mis-classified ~80% of fuzz inputs),
+    a bounded window (``_VALIDITY_PROOF_MAX_BYTES``) starting at ``record_start``
+    is materialized ONCE and parsed with ``json.JSONDecoder.raw_decode``, which
+    parses exactly one JSON value and returns its end offset. The byte at that
+    offset must be a newline terminator (the JSONL line separator). This proves
+    grammar validity AND terminator completeness from a single read, and does
+    NOT over-reach when trailing records follow the boundary record on the same
+    file (the window may contain them but raw_decode stops at the first value's
+    end). If the record extends beyond the window (pathologically large),
+    validity cannot be proven within the bound → fail-closed (return False →
+    recover the older valid event). The transient memory is one record's worth
+    of bytes (bounded), only for the single straddling boundary record.
+
+    The caller owns the handle and passes the pinned size. ``budget`` charges
+    the read against the shared boundary-recovery meter; if the allowance can't
+    cover the window, returns False (fail-closed).
+    """
+    if record_start < 0 or record_start >= size:
+        return False
+    # Read a bounded window from record_start. raw_decode will parse exactly one
+    # value and stop; the byte right after it must be the record's newline.
+    window_len = min(size - record_start, _VALIDITY_PROOF_MAX_BYTES)
+    if window_len <= 0:
+        return False
+    if budget is not None:
+        to_read = budget.take(window_len)
+        if to_read <= 0:
+            return False  # exhausted before reading — fail-closed
+        window_len = min(window_len, to_read)
+    try:
+        fh.seek(record_start)
+        window = fh.read(window_len)
+    except (FileNotFoundError, OSError):
+        return False  # TOCTOU: journal deleted mid-read — safe fallback
+    if not window:
+        return False
+    text = window.decode("utf-8", errors="replace")
+    try:
+        obj, end_idx = json.JSONDecoder().raw_decode(text)
+    except (json.JSONDecodeError, ValueError):
+        return False  # not valid JSON (truncated, trailing comma, malformed) — fail-closed
+    if not isinstance(obj, dict):
+        return False  # the journal record layout is always an object
+    # The value ended at text[end_idx-1]; the next byte(s) must be the record's
+    # newline terminator (LF, or CRLF). A bare \r is rejected (matches the rest
+    # of the tail reader's terminator gate). If the value consumed the whole
+    # window without reaching a terminator, the record is larger than the window
+    # → can't prove validity within the bound → fail-closed.
+    terminator = text[end_idx:]
+    if terminator.startswith("\r\n"):
+        return True
+    if terminator.startswith("\n"):
+        return True
+    return False
 
 
 def _extract_boundary_record_summary(
@@ -749,26 +874,44 @@ def _read_jsonl_tail(
         boundary_summary: dict | None = None
         if size > read_bytes:
             seek_pos = size - read_bytes
-            record_start = _find_record_start_before(fh, size, seek_pos)
+            # ONE shared remaining-work meter for the WHOLE boundary-recovery scan:
+            # boundary lookup + prefix extraction + validity proof + (if rejected)
+            # the backward predecessor scan + candidate parse. Physical I/O never
+            # exceeds this allowance (#6139 r10 item 1: "create one remaining-work
+            # authority ... thread that same object through boundary lookup, prefix
+            # extraction, structural validation, predecessor search, and candidate
+            # parsing"). Sized at 2x the tail window: the boundary record (the
+            # terminal `done` with the full transcript) is legitimately ~cap bytes,
+            # and the single-pass validity proof charges the record length once, so
+            # 2x cap covers a valid record plus a small predecessor recovery margin.
+            # A pathological multi-GB record fails closed (recovers the older valid
+            # event) rather than reading unbounded.
+            boundary_budget = _ReadBudget(2 * read_bytes_cap)
+            record_start = _find_record_start_before(fh, size, seek_pos, budget=boundary_budget)
             # record_start is where the straddling record begins. Extract its summary
             # via a bounded prefix read (never materializes the payload) — BUT only
-            # trust it as terminal if the record is structurally complete. A crash-
-            # truncated `done` (write interrupted mid-payload: no closing brace, no
-            # newline) must NOT be fabricated into a terminal event, or an interrupted
-            # run is misreported as completed and its apperror recovery signal is
-            # silently dropped. Stale-but-nonterminal is recoverable; falsely-terminal
-            # is not. If incomplete, discard the summary and fall through to the
-            # preceding complete records (the run stays nonterminal/`running`).
-            boundary_summary = _extract_boundary_record_summary(fh, record_start)
-            if boundary_summary is not None and not _record_is_structurally_complete(fh, size, record_start):
-                boundary_summary = None  # crash-truncated record: don't trust its prefix
-                # Retain the last COMPLETE event before the truncated boundary record,
-                # so last_seq/running survive and the apperror recovery signal fires
-                # (matching master). Without this, rejecting the boundary record also
-                # drops the preceding valid event → event_count=0, last_seq=0, no
-                # recovery. Read the last complete record's summary via bounded prefix
-                # extraction (never materializes a multi-MB payload).
-                preceding = _read_last_complete_line_before(fh, size, record_start, budget=read_bytes_cap)
+            # trust it as terminal if the record is a structurally-complete AND
+            # grammatically-valid JSON record. Brace balance is NOT JSON validity
+            # (#6139 r10 item 2): a brace-balanced record with a trailing comma or a
+            # malformed nested value must NOT be fabricated into a terminal event.
+            # Prove whole-record validity before trusting the fabricated prefix; if
+            # validity cannot be established within the budget, fail closed and
+            # recover the older valid event. Stale-but-nonterminal is recoverable;
+            # falsely-terminal is not.
+            boundary_summary = _extract_boundary_record_summary(fh, record_start, budget=boundary_budget)
+            if boundary_summary is not None and not _record_is_valid_complete(
+                fh, size, record_start, budget=boundary_budget
+            ):
+                boundary_summary = None  # invalid/incomplete record: don't trust its prefix
+                # Retain the last COMPLETE valid event before the rejected boundary
+                # record, so last_seq/running survive and the apperror recovery
+                # signal fires (matching master). Without this, rejecting the
+                # boundary record also drops the preceding valid event →
+                # event_count=0, last_seq=0, no recovery. Read the last complete
+                # record's summary via bounded prefix extraction (never materializes
+                # a multi-MB payload), sharing the SAME budget so the aggregate
+                # boundary-recovery work stays bounded.
+                preceding = _read_last_complete_line_before(fh, size, record_start, budget=boundary_budget)
                 if preceding is not None:
                     events.append(preceding)
             # Now drop the partial first fragment from the window so we only parse
