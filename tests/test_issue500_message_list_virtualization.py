@@ -112,8 +112,8 @@ def test_render_messages_uses_virtual_window_and_spacer_measurement_path():
     assert "_messageVirtualSpacer(virtualWindow.topPad,'before')" in render_body
     assert "_messageVirtualSpacer(virtualWindow.bottomPad,'after')" in render_body
     assert "_updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);" in render_body
-    assert "const renderableRawIdxs=new Set(visWithIdx.map(e=>e.rawIdx));" in render_body
-    assert "if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;" in render_body
+    assert "const _isRenderableRawIdx=" in render_body
+    assert "if(virtualWindow.virtualized&&_isRenderableRawIdx(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;" in render_body
     assert "if(hasServerOlder){" in render_body
     assert "_showEarlierRenderedMessages();" not in render_body
     top_spacer_idx = render_body.index("_messageVirtualSpacer(virtualWindow.topPad,'before')")
@@ -885,6 +885,7 @@ function $(id){ return id === 'messages' ? container : null; }
 function _captureMessageViewportAnchor(){ return null; }
 let _programmaticScroll = false;
 let _lastScrollTop = 0;
+let _messageVirtualScrollActive = false;
 function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function requestAnimationFrame(cb){ cb(); }
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
@@ -937,6 +938,7 @@ function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollReset
 let renderCalls = [];
 function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function requestAnimationFrame(cb){ cb(); }
+let _messageVirtualScrollActive = false;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({
@@ -989,6 +991,7 @@ function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollReset
 let renderCalls = [];
 function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function requestAnimationFrame(cb){ cb(); }
+let _messageVirtualScrollActive = false;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({
@@ -1041,6 +1044,7 @@ function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollResetTimer);_programmaticScrollResetTimer=setTimeout(()=>{_programmaticScroll=false;},ms||80);}
 function requestAnimationFrame(cb){ cb(); }
 function setTimeout(cb, delay){ cb(); return 1; }
+let _messageVirtualScrollActive = false;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({
@@ -1141,3 +1145,91 @@ console.log(JSON.stringify({
     assert metrics["timerCleared"] is True, (
         "_clearMessageVirtualHeightCache must call clearTimeout on the pending settle timer"
     )
+
+
+def test_isRenderableRawIdx_returns_false_for_gap_in_sparse_visWithIdx():
+    """_isRenderableRawIdx must use exact membership, not a min/max range check.
+
+    visWithIdx is sparse because _getVisibleMessagesWithIdx() filters through
+    _messageIsRenderable(). A raw index between the minimum and maximum is
+    therefore not necessarily present in visWithIdx. Treating every index in
+    that range as renderable can suppress legacy tool/thinking reconstruction
+    for filtered assistant messages in a virtualized transcript.
+
+    This test extracts the production _isRenderableRawIdx predicate from
+    renderMessages() and exercises it directly — no reimplemented algorithm.
+    """
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    # Extract renderMessages to find _isRenderableRawIdx definition
+    render_start = js.index("function renderMessages(options)")
+    render_end = js.index("function _toolDisplayName", render_start)
+    render_body = js[render_start:render_end]
+
+    # Verify the production code defines _isRenderableRawIdx with binary search
+    assert "const _isRenderableRawIdx=" in render_body, (
+        "renderMessages must define _isRenderableRawIdx"
+    )
+    # The old range-check pattern must NOT be present
+    assert "visRawMin" not in render_body
+    assert "visRawMax" not in render_body
+
+    # Extract the production predicate source using brace counting
+    # (arrow function body has nested braces from the while loop).
+    pred_start = render_body.index("const _isRenderableRawIdx=")
+    brace_open = render_body.index("{", pred_start)
+    depth = 0
+    brace_close = brace_open
+    for i in range(brace_open, len(render_body)):
+        if render_body[i] == "{":
+            depth += 1
+        elif render_body[i] == "}":
+            depth -= 1
+            if depth == 0:
+                brace_close = i
+                break
+    else:
+        raise AssertionError("Could not find closing brace for _isRenderableRawIdx")
+    production_pred = render_body[pred_start:brace_close + 1]
+
+    # Verify the extracted predicate uses binary search (not range check)
+    assert "lo<=hi" in production_pred or "lo <= hi" in production_pred, (
+        "Production _isRenderableRawIdx must use binary search"
+    )
+
+    # Embed the production predicate directly (not via eval — module scope isolation)
+    source = f"""
+// visWithIdx with a gap at rawIdx=5 (filtered by _messageIsRenderable)
+const visWithIdx = [
+  {{rawIdx: 3, m: {{role: 'user'}}}},
+  {{rawIdx: 4, m: {{role: 'assistant'}}}},
+  {{rawIdx: 6, m: {{role: 'assistant'}}}},  // gap: rawIdx 5 is missing
+  {{rawIdx: 7, m: {{role: 'user'}}}},
+  {{rawIdx: 8, m: {{role: 'assistant'}}}},
+];
+
+// Production predicate extracted from renderMessages()
+{production_pred}
+
+console.log(JSON.stringify({{
+  idx3: _isRenderableRawIdx(3),   // present
+  idx4: _isRenderableRawIdx(4),   // present
+  idx5: _isRenderableRawIdx(5),   // GAP — should be false
+  idx6: _isRenderableRawIdx(6),   // present
+  idx7: _isRenderableRawIdx(7),   // present
+  idx8: _isRenderableRawIdx(8),   // present
+  idx9: _isRenderableRawIdx(9),   // outside range — should be false
+  idx2: _isRenderableRawIdx(2),   // below range — should be false
+}}));
+"""
+    result = json.loads(_run_node(source))
+    assert result["idx3"] is True, "rawIdx 3 should be renderable (present in visWithIdx)"
+    assert result["idx4"] is True, "rawIdx 4 should be renderable (present in visWithIdx)"
+    assert result["idx5"] is False, (
+        "rawIdx 5 should NOT be renderable (gap in sparse visWithIdx) — "
+        "this is the regression: range check would incorrectly return true"
+    )
+    assert result["idx6"] is True, "rawIdx 6 should be renderable (present in visWithIdx)"
+    assert result["idx7"] is True, "rawIdx 7 should be renderable (present in visWithIdx)"
+    assert result["idx8"] is True, "rawIdx 8 should be renderable (present in visWithIdx)"
+    assert result["idx9"] is False, "rawIdx 9 should NOT be renderable (outside range)"
+    assert result["idx2"] is False, "rawIdx 2 should NOT be renderable (below range)"

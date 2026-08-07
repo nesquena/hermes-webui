@@ -691,6 +691,15 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           return true;
         }}
 
+        function _findRunStartForWindow(visWithIdx, windowStart) {{
+          let i = windowStart;
+          while (i > 0) {{
+            const m = visWithIdx[i-1] && visWithIdx[i-1].m;
+            if (m && m.role === 'assistant') i--;
+            else break;
+          }}
+          return i;
+        }}
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
         eval({json.dumps(render_source)});
