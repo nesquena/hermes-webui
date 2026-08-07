@@ -4133,7 +4133,8 @@ function _workspaceQueryIntentFromLocation(){
   // directory, system-root and saved-workspace decisions belong to the
   // server (resolve_trusted_workspace() behind POST /api/session/new), which
   // canonicalizes cross-platform paths (Unix, Windows drive paths, ~ homes).
-  // Narrowing the path language client-side would reject valid workspaces.
+  // No client-side restriction on the path language: server rejection falls
+  // back to the normal boot restore.
   const empty={hasParam:false,valid:false,path:''};
   if(typeof window==='undefined'||!window.location) return empty;
   try{
@@ -4143,7 +4144,7 @@ function _workspaceQueryIntentFromLocation(){
     const trimmed=path.trim();
     return {
       hasParam:true,
-      valid:trimmed.length>0&&trimmed.length<1024,
+      valid:trimmed.length>0,
       path:trimmed
     };
   }catch(_e){return empty;}
