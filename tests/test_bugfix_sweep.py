@@ -123,6 +123,135 @@ def test_read_body_rejects_oversized_chunked_trailers():
     assert handler.close_connection is True
 
 
+def test_read_body_rejects_empty_chunked_stream():
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(b""),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="missing terminating chunk"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_eof_in_trailer_section():
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(b"0\r\n"),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="EOF in trailer section"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_negative_chunk_size():
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(b"-1\r\n"),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Malformed chunk size"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_invalid_chunk_data_delimiter():
+    from api.helpers import read_body
+
+    # 8 bytes of data followed by "xx" instead of CRLF
+    chunked = b"8\r\n{\"a\": 1}xx"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Invalid chunk data delimiter"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_accepts_multiple_chunks():
+    from api.helpers import read_body
+
+    # {"a": 1} split as 4 + 4 bytes
+    chunked = b"4\r\n{\"a\"\r\n4\r\n: 1}\r\n0\r\n\r\n"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    assert read_body(handler) == {"a": 1}
+    assert handler.close_connection is False
+
+
+def test_read_body_accepts_chunk_extensions():
+    from api.helpers import read_body
+
+    chunked = b"8;foo=bar\r\n{\"a\": 1}\r\n0\r\n\r\n"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    assert read_body(handler) == {"a": 1}
+    assert handler.close_connection is False
+
+
+def test_read_body_accepts_mixed_case_chunked_token():
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "Chunked"}),
+        rfile=io.BytesIO(b"8\r\n{\"a\": 1}\r\n0\r\n\r\n"),
+        close_connection=False,
+    )
+
+    assert read_body(handler) == {"a": 1}
+    assert handler.close_connection is False
+
+
+def test_read_body_rejects_non_chunked_transfer_encoding():
+    from api.helpers import read_body
+
+    for header_value in ("gzip, chunked", "xchunked", "identity"):
+        handler = SimpleNamespace(
+            headers=_Headers({"Transfer-Encoding": header_value}),
+            rfile=io.BytesIO(b""),
+            close_connection=False,
+        )
+
+        with pytest.raises(ValueError, match="Unsupported Transfer-Encoding"):
+            read_body(handler)
+        assert handler.close_connection is True
+
+
+def test_read_body_rejects_empty_transfer_encoding_header():
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": " "}),
+        rfile=io.BytesIO(b""),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Invalid Transfer-Encoding"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
 def test_session_save_rejects_unsafe_session_id(tmp_path, monkeypatch):
     import api.models as models
 
