@@ -5507,6 +5507,32 @@ def _csrf_rejection_error(handler) -> str:
     return "Cross-origin request rejected"
 
 
+def _csrf_rejection_payload(handler) -> dict:
+    """JSON body for a CSRF 403, with recovery material on session rotation.
+
+    When trusted-header reconciliation rotated the session mid-request, the
+    open tab still holds the CSRF token minted for the dead session and has no
+    way to obtain the replacement token without a full reload. Hand it back on
+    the rejection itself so the client fetch wrapper can refresh its token and
+    the advertised immediate retry actually succeeds. The recipient is the
+    same-origin, proxy-authenticated browser that owns the replacement session
+    cookie riding on this very response, so this discloses nothing it could
+    not read from the authenticated shell.
+    """
+    payload = {"error": _csrf_rejection_error(handler)}
+    if getattr(handler, _CSRF_FAILURE_ATTR, "") == "session_rotated":
+        replacement = getattr(handler, "_trusted_auth_session_cookie_value", None)
+        if replacement:
+            from api.auth import csrf_token_for_session, verify_session
+
+            if verify_session(replacement):
+                token = csrf_token_for_session(replacement)
+                if token:
+                    payload["reason"] = "session_rotated"
+                    payload["csrf_token"] = token
+    return payload
+
+
 def _check_csrf(handler) -> bool:
     """Reject cross-origin or tokenless authenticated browser unsafe requests."""
     if not _check_same_origin_browser_request(handler):
@@ -5703,7 +5729,7 @@ def _handle_extension_sidecar_proxy(
     # DELETE fell through the CSRF compatibility path that intentionally admits
     # non-browser clients, giving unsafe methods weaker provenance than GET.
     if not _check_same_origin_browser_request(handler, require_provenance=True):
-        return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
+        return j(handler, _csrf_rejection_payload(handler), status=403)
     try:
         request_body = _read_body_bytes(handler) if read_request_body else None
     except ValueError as exc:
@@ -12053,9 +12079,14 @@ def handle_get(handler, parsed) -> bool:
                 from api.auth import csrf_token_for_session, is_auth_enabled, parse_cookie, verify_session
 
                 if is_auth_enabled():
-                    cookie_val = parse_cookie(handler)
+                    # Prefer the session reconciled by trusted-header auth for
+                    # THIS request: when a stale cookie was just rotated,
+                    # parse_cookie() still returns the dead value, the shell
+                    # would render an empty CSRF token, and every subsequent
+                    # unsafe request would 403 until a manual reload.
+                    cookie_val = getattr(handler, "_trusted_auth_session_cookie_value", None)
                     if not cookie_val:
-                        cookie_val = getattr(handler, "_trusted_auth_session_cookie_value", None)
+                        cookie_val = parse_cookie(handler)
                     if cookie_val and verify_session(cookie_val):
                         csrf_token = csrf_token_for_session(cookie_val) or ""
             except Exception:
@@ -13999,7 +14030,7 @@ def handle_post(handler, parsed) -> bool:
         diag.stage("csrf")
     if not _csrf_exempt_path(parsed.path) and not _check_csrf(handler):
         try:
-            return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
+            return j(handler, _csrf_rejection_payload(handler), status=403)
         finally:
             if diag:
                 diag.finish()
@@ -16616,7 +16647,7 @@ def handle_post(handler, parsed) -> bool:
 def handle_patch(handler, parsed) -> bool:
     """Handle all PATCH routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
-        return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
+        return j(handler, _csrf_rejection_payload(handler), status=403)
     proxy_result = _handle_extension_sidecar_proxy(
         handler,
         parsed,
@@ -16644,7 +16675,7 @@ def handle_patch(handler, parsed) -> bool:
 def handle_delete(handler, parsed) -> bool:
     """Handle all DELETE routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
-        return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
+        return j(handler, _csrf_rejection_payload(handler), status=403)
     proxy_result = _handle_extension_sidecar_proxy(
         handler,
         parsed,
@@ -16680,7 +16711,7 @@ def handle_delete(handler, parsed) -> bool:
 def handle_put(handler, parsed) -> bool:
     """Handle all PUT routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
-        return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+        return j(handler, _csrf_rejection_payload(handler), status=403)
     proxy_result = _handle_extension_sidecar_proxy(
         handler,
         parsed,

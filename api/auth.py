@@ -939,13 +939,28 @@ def ensure_trusted_auth_session(handler) -> dict | None:
     ):
         _apply_trusted_session_profile(handler, bound_profile, cookie_value)
         return _remember_trusted_auth_session(handler, info, cookie_value)
+    preserved_profile = None
     if info:
+        if bound_profile is None:
+            # The request's profile cookie is signed against the session
+            # being invalidated. A bound replacement re-signs its own
+            # profile below, but an UNBOUND one (no group map, or a "*"
+            # mapping) would leave the dead signature in place: the next
+            # request rejects it and silently falls back to the process
+            # default profile. Capture the authenticated selection while
+            # the old session can still verify it.
+            try:
+                from api.helpers import get_profile_cookie
+
+                preserved_profile = get_profile_cookie(handler)
+            except Exception:
+                preserved_profile = None
         invalidate_session(cookie_value)
         # The request's cookie was just replaced mid-request. An unsafe
         # request whose CSRF token was minted for the old session will fail
         # token validation; flag the rotation so the CSRF gate can reject it
-        # as deliberately retryable (the replacement cookie is emitted with
-        # the 403, so a retry/reload succeeds).
+        # as deliberately retryable (the replacement cookie and its CSRF
+        # token are emitted with the 403, so a retry/reload succeeds).
         handler._trusted_auth_session_rotated = True
     cookie_value = create_session(
         auth_type='trusted',
@@ -954,6 +969,19 @@ def ensure_trusted_auth_session(handler) -> dict | None:
     )
     _queue_pending_cookie(handler, _auth_cookie_header(cookie_value, handler))
     _apply_trusted_session_profile(handler, bound_profile, cookie_value)
+    if preserved_profile:
+        try:
+            from api.profiles import set_request_profile
+
+            set_request_profile(preserved_profile)
+            _queue_pending_cookie(
+                handler, _build_profile_cookie_header(preserved_profile, cookie_value)
+            )
+        except Exception:
+            logger.warning(
+                "Failed to re-sign profile cookie for rotated unbound session",
+                exc_info=True,
+            )
     info = get_session_info(cookie_value)
     return _remember_trusted_auth_session(handler, info, cookie_value)
 
