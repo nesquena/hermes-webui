@@ -434,6 +434,57 @@ def test_structured_preview_does_not_expose_non_text_blocks():
     assert "HIDDEN_RAW_PART" not in preview
 
 
+def test_structured_preview_bounds_large_leading_whitespace_and_keeps_visible_text():
+    huge_content = [{"type": "text", "text": (" " * 100_000) + "answer"}]
+    session = _FakeSession([
+        {"role": "assistant", "content": huge_content},
+    ])
+
+    payload = _invoke(
+        session,
+        query="session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=1",
+    )
+
+    message = payload["messages"][0]
+    preview = "".join(
+        part["text"]
+        for part in message["content"]
+        if isinstance(part, dict) and part.get("type") == "text"
+    ).strip()
+    assert message["_content_truncated"] is True
+    assert message["_content_original_chars"] == len(huge_content[0]["text"])
+    assert len(preview) <= 64 * 1024
+    assert preview.startswith("answer")
+    assert "Message content truncated" in preview
+
+
+def test_structured_preview_does_not_spend_visible_budget_on_whitespace_only_block():
+    huge_content = [
+        {"type": "text", "text": " " * 70_000},
+        {"type": "thinking", "text": "HIDDEN_THOUGHT"},
+        {"type": "text", "text": "ANSWER" + ("x" * 70_000)},
+    ]
+    session = _FakeSession([
+        {"role": "assistant", "content": huge_content},
+    ])
+
+    payload = _invoke(
+        session,
+        query="session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=1",
+    )
+
+    bounded_content = payload["messages"][0]["content"]
+    preview = "".join(
+        part["text"]
+        for part in bounded_content
+        if isinstance(part, dict) and part.get("type") == "text"
+    ).strip()
+    assert len(preview) <= 64 * 1024
+    assert preview.startswith("ANSWER")
+    assert "Message content truncated" in preview
+    assert bounded_content[1] == huge_content[1]
+
+
 def test_structured_preview_does_not_expose_top_level_dict_text():
     secret = "DICT_SECRET" * 10_000
     huge_content = {"type": "text", "text": secret}

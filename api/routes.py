@@ -8748,23 +8748,38 @@ def _renderable_content_preview_for_limited_payload(content):
     ]
     if not text_indexes:
         return None
-    original_chars = len("".join(content[index]["text"] for index in text_indexes).strip())
+    joined_text = "".join(content[index]["text"] for index in text_indexes)
+    original_chars = len(joined_text)
     if original_chars <= _LIMITED_RENDERABLE_CONTENT_MAX_CHARS:
         return None
 
-    remaining = preview_chars
-    last_text_index = text_indexes[-1]
+    # Match msgContent()'s visible-text semantics without letting leading/trailing
+    # whitespace consume the payload budget. Keep each surviving character in
+    # its original text block so interleaved non-text blocks retain their order.
+    visible_text = joined_text.strip()
+    bounded_visible_chars = min(len(visible_text), preview_chars)
+    visible_start = len(joined_text) - len(joined_text.lstrip())
+    visible_end = visible_start + bounded_visible_chars
     bounded_content = list(content)
+    cursor = 0
     for index in text_indexes:
         part = content[index]
-        clipped_part = dict(part)
         text = part["text"]
-        take = min(len(text), remaining)
-        clipped_part["text"] = text[:take]
-        remaining -= take
-        if index == last_text_index:
-            clipped_part["text"] += _LIMITED_RENDERABLE_CONTENT_NOTICE
+        part_start = cursor
+        part_end = cursor + len(text)
+        slice_start = max(part_start, visible_start)
+        slice_end = min(part_end, visible_end)
+        clipped_part = dict(part)
+        if slice_start < slice_end:
+            clipped_part["text"] = text[
+                slice_start - part_start : slice_end - part_start
+            ]
+        else:
+            clipped_part["text"] = ""
         bounded_content[index] = clipped_part
+        cursor = part_end
+    last_text_index = text_indexes[-1]
+    bounded_content[last_text_index]["text"] += _LIMITED_RENDERABLE_CONTENT_NOTICE
     return bounded_content, original_chars
 
 
