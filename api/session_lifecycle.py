@@ -190,8 +190,22 @@ def mark_turn_completed(session_id: str, *, agent=None) -> int:
             segments[-1]["end"] = generation
         else:
             segments.append({"start": generation, "end": generation, "agent": owner})
+        _discard_temporary_uncommitted_work(session_id, entry)
         _condition.notify_all()
         return generation
+
+
+def _discard_temporary_uncommitted_work(session_id: str, entry: dict) -> None:
+    """Temporary chats skip durable memory — do not retain phantom uncommitted work."""
+    try:
+        from api.models import get_session
+
+        session = get_session(session_id, metadata_only=True)
+        if session is None or not bool(getattr(session, "temporary", False)):
+            return
+    except Exception:
+        return
+    entry["committed_generation"] = entry["generation"]
 
 
 def has_uncommitted_work(session_id: str) -> bool:
@@ -215,6 +229,14 @@ def _first_uncommitted_segment(entry: dict) -> dict | None:
 def commit_session_memory(session_id: str, agent=None, *, wait: bool = False, timeout: float | None = None) -> bool:
     if not session_id:
         return False
+    # Temporary chats must never seed durable memory.
+    try:
+        from api.models import get_session
+        session = get_session(session_id)
+        if session is not None and bool(getattr(session, "temporary", False)):
+            return False
+    except Exception:
+        pass
     deadline = time.monotonic() + timeout if timeout is not None else None
     with _condition:
         entry = _sessions.get(session_id)

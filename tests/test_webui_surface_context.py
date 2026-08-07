@@ -38,6 +38,20 @@ def test_webui_ephemeral_prompt_includes_browser_surface_context():
     assert "Need script" in prompt
     assert "Need inspect email" in prompt
     assert "clear user-facing progress" in prompt
+    assert "temporary chat" not in prompt.lower()
+
+
+def test_webui_ephemeral_prompt_temporary_hint():
+    prompt = _webui_ephemeral_system_prompt(
+        None,
+        surface_context={
+            "source": "webui",
+            "session_id": "temp-1",
+            "temporary": True,
+        },
+    )
+    assert "temporary chat" in prompt.lower()
+    assert "do not write durable memory" in prompt.lower()
 
 
 def test_webui_ephemeral_prompt_skips_empty_surface_fields():
