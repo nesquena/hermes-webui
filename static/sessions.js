@@ -9445,6 +9445,148 @@ async function _saveProjectBindings(proj, fields){
   }
 }
 
+// Modal dialog for editing a project's bindings (workspace / model / effort).
+// All three fields are combobox-style controls — workspace is an input with a
+// datalist of saved workspace paths (also accepts a fresh path; the server
+// auto-registers it), model and effort are dropdowns. Each field has a
+// "(none)" option to unbind it individually.
+function _showProjectBindingsDialog(proj){
+  const overlay=document.createElement('div');
+  overlay.className='project-bindings-overlay';
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9998;display:flex;align-items:center;justify-content:center;';
+  const dialog=document.createElement('div');
+  dialog.className='project-bindings-dialog';
+  dialog.style.cssText='background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 20px;width:min(520px,92vw);max-height:80vh;overflow:auto;box-shadow:0 8px 32px rgba(0,0,0,.45);color:var(--text);font-size:13px;';
+  const title=document.createElement('div');
+  title.textContent='Bindings — '+proj.name;
+  title.style.cssText='font-size:15px;font-weight:600;margin-bottom:14px;';
+  dialog.appendChild(title);
+
+  const _field=(labelText,control)=>{
+    const wrap=document.createElement('div');
+    wrap.style.cssText='margin-bottom:12px;';
+    const lab=document.createElement('div');
+    lab.textContent=labelText;
+    lab.style.cssText='font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:5px;';
+    wrap.appendChild(lab);
+    wrap.appendChild(control);
+    return wrap;
+  };
+  const _controlStyle='width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--panel,#fff);color:var(--text);font-size:13px;';
+
+  // ── Workspace: input + datalist of saved paths ──
+  const wsInput=document.createElement('input');
+  wsInput.type='text';
+  wsInput.style.cssText=_controlStyle;
+  wsInput.placeholder='(none) — select a workspace or type a path';
+  wsInput.value=proj.workspace||'';
+  wsInput.setAttribute('list','projectBindingsWsDatalist');
+  // datalist must live as a SIBLING (a datalist inside an input is invalid
+  // and the browser ignores it — the input references it by id via `list`).
+  const wsDatalist=document.createElement('datalist');
+  wsDatalist.id='projectBindingsWsDatalist';
+  const wsWrap=_field('Workspace',wsInput);
+  dialog.appendChild(wsWrap);
+  dialog.appendChild(wsDatalist);
+
+  // Fill the datalist from the saved workspace list (fresh fetch so a path
+  // bound earlier or added in Settings is always present).
+  (async()=>{
+    try{
+      const wsRes=await api('/api/workspaces');
+      const paths=(wsRes&&wsRes.workspaces||[]).map(w=>w&&w.path).filter(Boolean);
+      if(!paths.includes(proj.workspace)&&proj.workspace) paths.unshift(proj.workspace);
+      paths.forEach(p=>{
+        const opt=document.createElement('option');
+        opt.value=p;
+        wsDatalist.appendChild(opt);
+      });
+    }catch(_){ /* datalist is a convenience; a failed fetch degrades to free-text */ }
+  })();
+
+  // ── Model: dropdown cloned from the composer modelSelect ──
+  const modelSel=document.createElement('select');
+  modelSel.style.cssText=_controlStyle;
+  const noneOpt=document.createElement('option');
+  noneOpt.value='';
+  noneOpt.textContent='(none) — inherit default';
+  modelSel.appendChild(noneOpt);
+  const srcModelSel=(typeof $==='function')?$('modelSelect'):null;
+  if(srcModelSel&&srcModelSel.options){
+    Array.from(srcModelSel.options).forEach(o=>{
+      const opt=document.createElement('option');
+      opt.value=o.value||'';
+      opt.textContent=o.textContent||o.value||'';
+      if(o.dataset&&o.dataset.provider) opt.dataset.provider=o.dataset.provider;
+      if(o.dataset&&o.dataset.model) opt.dataset.model=o.dataset.model;
+      modelSel.appendChild(opt);
+    });
+  }
+  const modelWrap=_field('Model',modelSel);
+  dialog.appendChild(modelWrap);
+
+  // ── Reasoning effort: dropdown of the standard ladder ──
+  const effortSel=document.createElement('select');
+  effortSel.style.cssText=_controlStyle;
+  const effNone=document.createElement('option');
+  effNone.value='';
+  effNone.textContent='(none) — inherit default';
+  effortSel.appendChild(effNone);
+  ['minimal','low','medium','high','xhigh','max'].forEach(eff=>{
+    const opt=document.createElement('option');
+    opt.value=eff;
+    opt.textContent=eff.charAt(0).toUpperCase()+eff.slice(1);
+    effortSel.appendChild(opt);
+  });
+  const effortWrap=_field('Reasoning effort',effortSel);
+  dialog.appendChild(effortWrap);
+
+  // Preselect current values (after options are populated).
+  if(proj.model){
+    const match=Array.from(modelSel.options).find(o=>o.value===proj.model);
+    if(match) modelSel.value=proj.model;
+  }
+  if(proj.reasoning_effort) effortSel.value=proj.reasoning_effort;
+
+  // ── Actions ──
+  const btnRow=document.createElement('div');
+  btnRow.style.cssText='display:flex;gap:8px;justify-content:flex-end;margin-top:16px;';
+  const _btn=(label,style,onclick)=>{
+    const b=document.createElement('button');
+    b.type='button';
+    b.textContent=label;
+    b.style.cssText='padding:7px 16px;border-radius:8px;border:1px solid var(--border);cursor:pointer;font-size:13px;'+style;
+    b.onclick=onclick;
+    return b;
+  };
+  btnRow.appendChild(_btn('Cancel','background:transparent;color:var(--muted);',()=>{overlay.remove();}));
+  btnRow.appendChild(_btn('Save','background:var(--accent,#6366f1);color:#fff;border-color:transparent;',async()=>{
+    const wsVal=wsInput.value.trim();
+    const modelVal=modelSel.value;
+    const effortVal=effortSel.value;
+    const fields={};
+    // Workspace: empty → unbind; non-empty → bind (server validates + auto-registers).
+    fields.workspace=wsVal||null;
+    // Model: empty → unbind; else bind model (+ provider when the option has one).
+    if(modelVal){
+      fields.model=modelVal;
+      const chosen=modelSel.options[modelSel.selectedIndex];
+      if(chosen&&chosen.dataset&&chosen.dataset.provider) fields.model_provider=chosen.dataset.provider;
+    }else{
+      fields.model=null;
+    }
+    fields.reasoning_effort=effortVal||null;
+    overlay.remove();
+    await _saveProjectBindings(proj,fields);
+  }));
+  dialog.appendChild(btnRow);
+
+  overlay.appendChild(dialog);
+  overlay.onclick=(e)=>{if(e.target===overlay) overlay.remove();};
+  document.body.appendChild(overlay);
+  try{wsInput.focus();}catch(_){}
+}
+
 function _startProjectRename(proj, chip){
   const inp=document.createElement('input');
   inp.className='project-create-input';
@@ -9530,100 +9672,26 @@ function _showProjectContextMenu(e, proj, chip){
   menu.appendChild(bindSep);
 
   // ── Project bindings: workspace / model / reasoning effort ──────────────
-  // Each binding pins the project's context so the quick-create (+) button
-  // opens a new session pre-configured with it. Clicking a bound item re-binds
-  // it (prompt / inline picker); the Unbind items below clear them.
-  const _bindItem=(label, current)=>{
-    const item=document.createElement('div');
-    item.textContent=current?`${label}: ${current}`:label;
-    item.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
-    if(current){
-      item.style.opacity='0.9';
-      item.title=current;
-    }
-    item.onmouseenter=()=>item.style.background='var(--hover-bg)';
-    item.onmouseleave=()=>item.style.background='';
-    return item;
-  };
-
-  // Bind workspace — prompt for a path (pre-filled with the current binding
-  // or the active session's workspace as a convenient default).
-  const wsItem=_bindItem('Bind workspace', proj.workspace);
-  wsItem.onclick=async()=>{
+  // One entry opens a modal dialog where all three fields are comboboxes
+  // (workspace: input+datalist of saved paths; model: dropdown cloned from
+  // the composer modelSelect; effort: the standard effort ladder). Each
+  // field has a "(none)" option to unbind it individually.
+  const boundParts=[];
+  if(proj.workspace) boundParts.push('ws');
+  if(proj.model) boundParts.push('model');
+  if(proj.reasoning_effort) boundParts.push('effort:'+proj.reasoning_effort);
+  const bindItem=document.createElement('div');
+  bindItem.textContent=boundParts.length
+    ? 'Bindings… ('+boundParts.join(' · ')+')'
+    : 'Bindings…';
+  bindItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  bindItem.onmouseenter=()=>bindItem.style.background='var(--hover-bg)';
+  bindItem.onmouseleave=()=>bindItem.style.background='';
+  bindItem.onclick=()=>{
     menu.remove();
-    const current=proj.workspace||(S&&S.session&&S.session.workspace)||'';
-    const input=await showPromptDialog({
-      title:'Bind workspace',
-      message:'Workspace path for this project (sessions created from the + button will start here):',
-      value:current,
-      placeholder:'D:\\projects\\…',
-      confirmLabel:'Bind',
-    });
-    if(input===null||input===undefined) return;
-    await _saveProjectBindings(proj,{workspace:String(input).trim()});
+    _showProjectBindingsDialog(proj);
   };
-  menu.appendChild(wsItem);
-
-  // Bind model — prompt for a model ID (optionally provider/model or
-  // @provider:model; the provider is extracted when present).
-  const modelItem=_bindItem('Bind model', proj.model);
-  modelItem.onclick=async()=>{
-    menu.remove();
-    const input=await showPromptDialog({
-      title:'Bind model',
-      message:'Model ID for this project (e.g. deepseek-v4-flash, or provider/model):',
-      value:proj.model||'',
-      placeholder:'model or provider/model',
-      confirmLabel:'Bind',
-    });
-    if(input===null||input===undefined) return;
-    const raw=String(input).trim();
-    if(!raw) return;
-    const fields={model:raw};
-    const atIdx=raw.indexOf('@')===0?1:-1;
-    const slashIdx=raw.indexOf('/');
-    if(slashIdx>0&&(atIdx<0||slashIdx>atIdx)){
-      // provider/model split — bind both so the fast path can route correctly.
-      fields.model_provider=raw.slice(atIdx>=0?atIdx:0,slashIdx);
-      fields.model=raw.slice(slashIdx+1);
-    }
-    await _saveProjectBindings(proj,fields);
-  };
-  menu.appendChild(modelItem);
-
-  // Bind reasoning effort — inline picker of the same effort ladder the
-  // composer reasoning chip uses; "" (Default) clears the binding.
-  const effortLabel=(proj.reasoning_effort?proj.reasoning_effort:'');
-  const effortItem=_bindItem('Bind reasoning effort', effortLabel||null);
-  effortItem.onclick=()=>{
-    menu.remove();
-    const em=document.createElement('div');
-    em.className='project-ctx-menu';
-    em.style.cssText=menu.style.cssText;
-    em.style.left=e.clientX+'px';
-    em.style.top=e.clientY+'px';
-    const title=document.createElement('div');
-    title.textContent='Reasoning effort for this project';
-    title.style.cssText='padding:5px 14px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;';
-    em.appendChild(title);
-    const efforts=['','minimal','low','medium','high','xhigh','max'];
-    efforts.forEach(eff=>{
-      const row=document.createElement('div');
-      row.textContent=eff?eff:'Default (clear binding)';
-      row.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
-      if(eff===proj.reasoning_effort) row.style.background='var(--hover-bg)';
-      row.onmouseenter=()=>row.style.background='var(--hover-bg)';
-      row.onmouseleave=()=>row.style.background=eff===proj.reasoning_effort?'var(--hover-bg)':'';
-      row.onclick=()=>{
-        em.remove();
-        _saveProjectBindings(proj,{reasoning_effort:eff});
-      };
-      em.appendChild(row);
-    });
-    document.body.appendChild(em);
-    setTimeout(()=>document.addEventListener('click',()=>em.remove(),{once:true}),0);
-  };
-  menu.appendChild(effortItem);
+  menu.appendChild(bindItem);
 
   // Unbind items — only shown for fields that are currently bound.
   const _unbindItem=(label,key)=>{
