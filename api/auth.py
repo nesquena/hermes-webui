@@ -746,13 +746,15 @@ def _trusted_auth_bound_profile(handler) -> str | None:
     if mapping is None:
         return None
     groups = set(_trusted_groups_header_value(handler))
-    for group, profile in mapping.items():
-        if group in groups:
-            # A mapping value of "*" means this group is not bound to a
-            # single profile: the session can switch freely across all
-            # profiles (admin access), instead of being locked to one.
-            return None if profile == '*' else profile
-    return 'default'
+    matches = [profile for group, profile in mapping.items() if group in groups]
+    # A mapping value of "*" means the group is not bound to a single
+    # profile: the session can switch freely across all profiles (admin
+    # access). The wildcard dominates concrete mappings regardless of map
+    # order — an identity in both a bound group and a wildcard group must
+    # never end up bound. Among concrete profiles, mapping order wins.
+    if '*' in matches:
+        return None
+    return matches[0] if matches else 'default'
 
 
 def _queue_pending_cookie(handler, cookie_header: str) -> None:
@@ -858,6 +860,7 @@ def reset_trusted_auth_request_state(handler) -> None:
     for name in (
         '_trusted_auth_session_reconciled',
         '_trusted_auth_session_rejected',
+        '_trusted_auth_session_rotated',
         '_trusted_auth_session_info',
         '_trusted_auth_session_cookie_value',
         # Clear any auth cookie queued by a prior request but not yet flushed.
@@ -924,11 +927,26 @@ def ensure_trusted_auth_session(handler) -> dict | None:
             handler._trusted_auth_session_rejected = True
         return _remember_trusted_auth_session(handler, None)
     bound_profile = _trusted_auth_bound_profile(handler)
-    if info and info.get('username') == username and info.get('bound_profile') == bound_profile:
+    # Reuse is only safe when the existing session is itself trusted: a
+    # non-trusted record carrying the same username/bound_profile (which
+    # create_session permits for other auth flows) must not carry its
+    # security context across authentication mechanisms.
+    if (
+        info
+        and info.get('auth_type') == 'trusted'
+        and info.get('username') == username
+        and info.get('bound_profile') == bound_profile
+    ):
         _apply_trusted_session_profile(handler, bound_profile, cookie_value)
         return _remember_trusted_auth_session(handler, info, cookie_value)
     if info:
         invalidate_session(cookie_value)
+        # The request's cookie was just replaced mid-request. An unsafe
+        # request whose CSRF token was minted for the old session will fail
+        # token validation; flag the rotation so the CSRF gate can reject it
+        # as deliberately retryable (the replacement cookie is emitted with
+        # the 403, so a retry/reload succeeds).
+        handler._trusted_auth_session_rotated = True
     cookie_value = create_session(
         auth_type='trusted',
         username=username,

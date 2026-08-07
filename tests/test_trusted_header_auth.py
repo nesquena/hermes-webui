@@ -799,3 +799,183 @@ signOut().then(() => process.stdout.write(JSON.stringify(window.location.href)))
 
     assert run_sign_out("https://auth.example.com/logout") == "https://auth.example.com/logout"
     assert run_sign_out(None) == "login"
+
+
+# ── PR #6798: stale non-trusted sessions vs. trusted-header reconciliation ──
+
+
+@pytest.mark.parametrize(
+    "group_map",
+    [
+        {"devs": "dev", "admins": "*"},
+        {"admins": "*", "devs": "dev"},
+    ],
+)
+def test_wildcard_group_dominates_concrete_mappings_regardless_of_order(monkeypatch, group_map):
+    # An identity in both a bound group and a wildcard (unbound/admin) group
+    # must be unbound no matter how the operator ordered the mapping.
+    _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map=group_map)
+    handler = _Handler(headers={"Remote-User": "alice", "Remote-Groups": "devs,admins"})
+
+    info = auth.ensure_trusted_auth_session(handler)
+
+    assert info["auth_type"] == "trusted"
+    assert info["bound_profile"] is None
+    assert auth.trusted_session_allows_active_profile(info) is True
+
+
+def test_wildcard_only_match_creates_unbound_session(monkeypatch):
+    _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"admins": "*"})
+    handler = _Handler(headers={"Remote-User": "alice", "Remote-Groups": "admins"})
+
+    info = auth.ensure_trusted_auth_session(handler)
+
+    assert info["auth_type"] == "trusted"
+    assert info["bound_profile"] is None
+    # No profile cookie is forced for an unbound session.
+    pending = getattr(handler, "_pending_set_cookies", [])
+    assert not any(cookie.startswith("hermes_profile=") for cookie in pending)
+
+
+def _stale_session_cases():
+    # (case id, create_session kwargs, group map, groups header value)
+    return [
+        pytest.param({}, None, None, id="legacy-password-no-metadata"),
+        pytest.param(
+            {"auth_type": "password", "username": "mallory", "bound_profile": "other"},
+            None,
+            None,
+            id="non-trusted-different-identity",
+        ),
+        pytest.param(
+            {"auth_type": "password", "username": "alice", "bound_profile": None},
+            {"admins": "*"},
+            "admins",
+            id="non-trusted-exact-match-wildcard-unbound",
+        ),
+        pytest.param(
+            {"auth_type": "password", "username": "alice", "bound_profile": "devops"},
+            {"hermes_devops": "devops"},
+            "hermes_devops",
+            id="non-trusted-exact-match-bound-profile",
+        ),
+    ]
+
+
+@pytest.mark.parametrize("session_kwargs,group_map,groups_value", _stale_session_cases())
+def test_stale_non_trusted_cookie_replaced_on_trusted_get(
+    monkeypatch, session_kwargs, group_map, groups_value
+):
+    # Any non-trusted session presented on a valid trusted request must be
+    # invalidated and replaced by a trusted session — including a non-trusted
+    # record whose username/bound_profile exactly match the proxy assertion
+    # (create_session permits arbitrary metadata for other auth flows).
+    _trusted_env(
+        monkeypatch,
+        groups_header="Remote-Groups" if group_map else None,
+        group_map=group_map,
+    )
+    stale_cookie = auth.create_session(**session_kwargs)
+    headers = {"Cookie": f"hermes_session={stale_cookie}", "Remote-User": "alice"}
+    if groups_value:
+        headers["Remote-Groups"] = groups_value
+    handler = _Handler(headers=headers)
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is True
+
+    # The old cookie is dead, the replacement is trusted, exactly one new
+    # auth cookie is queued.
+    assert auth.verify_session(stale_cookie) is False
+    info = handler._trusted_auth_session_info
+    assert info["auth_type"] == "trusted"
+    assert info["username"] == "alice"
+    replacement = handler._trusted_auth_session_cookie_value
+    assert replacement != stale_cookie
+    assert auth.verify_session(replacement) is True
+    auth_cookies = [
+        cookie for cookie in handler._pending_set_cookies if cookie.startswith("hermes_session=")
+    ]
+    assert len(auth_cookies) == 1
+    assert getattr(handler, "_trusted_auth_session_rotated", False) is True
+
+
+def test_untrusted_peer_with_stale_non_trusted_cookie_does_not_rotate(monkeypatch):
+    # The same header from an untrusted network peer must not gain
+    # trusted-session rotation: no invalidation, no trusted cookie.
+    _trusted_env(monkeypatch)
+    stale_cookie = auth.create_session(auth_type="password", username="alice")
+    handler = _Handler(
+        headers={"Cookie": f"hermes_session={stale_cookie}", "Remote-User": "alice"},
+        client_address=("10.0.0.5", 12345),
+    )
+
+    info = auth.ensure_trusted_auth_session(handler)
+
+    assert info["auth_type"] == "password"
+    assert auth.verify_session(stale_cookie) is True
+    assert not hasattr(handler, "_trusted_auth_session_info")
+    assert getattr(handler, "_pending_set_cookies", []) == []
+    assert getattr(handler, "_trusted_auth_session_rotated", False) is False
+
+
+def test_first_unsafe_request_during_rotation_is_deliberately_retryable(monkeypatch):
+    # First browser POST carrying a stale non-trusted cookie plus its CSRF
+    # token: reconciliation rotates the session mid-request, so the CSRF gate
+    # rejects the write with the deliberate retryable reason while the
+    # replacement trusted cookie is emitted on the 403 response.
+    _trusted_env(monkeypatch)
+    stale_cookie = auth.create_session(auth_type="password", username="alice")
+    handler = _Handler(
+        headers={
+            "Cookie": f"hermes_session={stale_cookie}",
+            "Remote-User": "alice",
+            "Host": "127.0.0.1:8787",
+            "Origin": "http://127.0.0.1:8787",
+            auth.CSRF_HEADER_NAME: auth.csrf_token_for_session(stale_cookie),
+        }
+    )
+    handler.command = "POST"
+
+    # Authentication reconciles first (server.py order) and rotates.
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is True
+    assert auth.verify_session(stale_cookie) is False
+
+    # The CSRF gate then sees the old request cookie: deliberate rejection.
+    assert routes._check_csrf(handler) is False
+    assert routes._csrf_rejection_error(handler) == "Session was re-authenticated - retry the request"
+
+    # The production 403 path flushes the queued replacement cookie.
+    from api.helpers import j
+
+    j(handler, {"error": routes._csrf_rejection_error(handler)}, status=403)
+    assert handler.status == 403
+    set_cookies = handler.header_values("Set-Cookie")
+    assert any(cookie.startswith("hermes_session=") for cookie in set_cookies)
+    replacement = handler._trusted_auth_session_cookie_value
+    assert auth.verify_session(replacement) is True
+
+
+def test_second_request_after_rotation_succeeds_with_replacement_cookie(monkeypatch):
+    # The retry with the replacement cookie and its CSRF token goes through.
+    _trusted_env(monkeypatch)
+    stale_cookie = auth.create_session(auth_type="password", username="alice")
+    first = _Handler(headers={"Cookie": f"hermes_session={stale_cookie}", "Remote-User": "alice"})
+    assert auth.check_auth(first, SimpleNamespace(path="/api/sessions", query="")) is True
+    replacement = first._trusted_auth_session_cookie_value
+
+    second = _Handler(
+        headers={
+            "Cookie": f"hermes_session={replacement}",
+            "Remote-User": "alice",
+            "Host": "127.0.0.1:8787",
+            "Origin": "http://127.0.0.1:8787",
+            auth.CSRF_HEADER_NAME: auth.csrf_token_for_session(replacement),
+        }
+    )
+    second.command = "POST"
+
+    assert auth.check_auth(second, SimpleNamespace(path="/api/sessions", query="")) is True
+    assert routes._check_csrf(second) is True
+    # No further rotation: the trusted session is reused as-is.
+    assert second._trusted_auth_session_cookie_value == replacement
+    assert getattr(second, "_trusted_auth_session_rotated", False) is False

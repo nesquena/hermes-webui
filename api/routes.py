@@ -5497,6 +5497,11 @@ def _csrf_rejection_error(handler) -> str:
     reason = getattr(handler, _CSRF_FAILURE_ATTR, "")
     if reason == "origin_mismatch":
         return "Cross-origin mismatch - check reverse proxy headers"
+    if reason == "session_rotated":
+        # Trusted-header reconciliation replaced the session during this
+        # request; the replacement cookie rides on this 403, so a retry with
+        # refreshed state succeeds.
+        return "Session was re-authenticated - retry the request"
     if reason == "token_mismatch":
         return "Session expired - reload the page"
     return "Cross-origin request rejected"
@@ -5517,6 +5522,8 @@ def _check_csrf(handler) -> bool:
     submitted = handler.headers.get(CSRF_HEADER_NAME) or handler.headers.get("X-CSRF-Token")
     if verify_csrf_token(cookie_val or "", submitted or ""):
         return True
+    if getattr(handler, "_trusted_auth_session_rotated", False):
+        return _set_csrf_failure_reason(handler, "session_rotated")
     return _set_csrf_failure_reason(handler, "token_mismatch")
 
 
