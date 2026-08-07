@@ -4128,19 +4128,23 @@ function _profileQueryIntentFromLocation(){
   }catch(_e){return empty;}
 }
 function _workspaceQueryIntentFromLocation(){
-  // ?workspace=/abs/path — one-shot workspace routing at boot, symmetric to
-  // ?profile=. Validity: absolute path, no traversal. The server re-validates
-  // via resolve_trusted_workspace(), this is only a cheap client-side gate.
+  // ?workspace=<path> — one-shot workspace routing at boot, symmetric to
+  // ?profile=. Any nonblank value is a routing candidate: trust, existence,
+  // directory, system-root and saved-workspace decisions belong to the
+  // server (resolve_trusted_workspace() behind POST /api/session/new), which
+  // canonicalizes cross-platform paths (Unix, Windows drive paths, ~ homes).
+  // Narrowing the path language client-side would reject valid workspaces.
   const empty={hasParam:false,valid:false,path:''};
   if(typeof window==='undefined'||!window.location) return empty;
   try{
     const qs=new URLSearchParams(window.location.search||'');
     if(!qs.has('workspace')) return empty;
     const path=String(qs.get('workspace')||'');
+    const trimmed=path.trim();
     return {
       hasParam:true,
-      valid:path.startsWith('/')&&!path.includes('..')&&path.length<1024,
-      path
+      valid:trimmed.length>0&&trimmed.length<1024,
+      path:trimmed
     };
   }catch(_e){return empty;}
 }
