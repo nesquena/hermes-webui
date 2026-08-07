@@ -1239,7 +1239,7 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # after a squash-merge that re-points a release tag at a new SHA) jams
     # the update path indefinitely with "would clobber existing tag" errors.
     # See #2756.
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=15)
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=60)
     if not fetch_ok:
         release_info = _check_repo_release(path, name, channel)
         message = 'fetch failed'
