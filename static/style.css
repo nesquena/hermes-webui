@@ -2628,6 +2628,13 @@
   .composer-workspace-chip.active{color:var(--text);background:var(--accent-bg);}
   .composer-workspace-icon,.composer-workspace-chevron{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;}
   .composer-workspace-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .composer-capy-space-wrap{position:relative;flex:0 1 auto;min-width:0;display:inline-flex;align-items:center;gap:2px;}
+  .composer-capy-space-chip{display:inline-flex;align-items:center;gap:8px;max-width:220px;padding:8px 10px 8px 12px;border-radius:999px 0 0 999px;border:1px solid var(--accent-bg-strong);background:var(--accent-bg);color:var(--accent-text);font-weight:600;cursor:pointer;transition:background-color .15s,border-color .15s,transform .15s;}
+  .composer-capy-space-chip:hover{background:var(--hover-bg);border-color:var(--accent);transform:translateY(-1px);}
+  .composer-capy-space-clear{display:inline-flex;align-items:center;justify-content:center;width:30px;height:34px;border-radius:0 999px 999px 0;border:1px solid var(--accent-bg-strong);border-left:none;background:var(--accent-bg);color:var(--accent-text);font-size:16px;line-height:1;font-weight:700;cursor:pointer;transition:background-color .15s,border-color .15s,transform .15s;}
+  .composer-capy-space-clear:hover{background:var(--hover-bg);border-color:var(--accent);transform:translateY(-1px);}
+  .composer-capy-space-icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;font-size:12px;}
+  .composer-capy-space-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .composer-reasoning-chip{display:inline-flex;align-items:center;gap:5px;max-width:none;padding:8px 10px;border-radius:999px;border:1px solid transparent;background-color:transparent;color:var(--muted);font-weight:500;cursor:pointer;transition:color .15s,background-color .15s,border-color .15s;}
   .composer-reasoning-chip.inactive{opacity:.78;}
   .composer-reasoning-chip:hover{color:var(--text);background-color:var(--hover-bg);}
@@ -4905,6 +4912,7 @@ body.resizing .sidebar{transition:none!important;}
 .main-view{flex:1;min-height:0;min-width:0;display:flex;flex-direction:column;background:var(--bg);}
 main.main > #mainChat,
 main.main > #mainSettings,
+main.main > #mainCapySpaces,
 main.main > #mainSkills,
 main.main > #mainMemory,
 main.main > #mainTasks,
@@ -4913,8 +4921,9 @@ main.main > #mainWorkspaces,
 main.main > #mainProfiles,
 main.main > #mainInsights,
 main.main > #mainLogs{display:none;}
-main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
+main.main:not(.showing-settings):not(.showing-capy-spaces):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
+main.main.showing-capy-spaces > #mainCapySpaces{display:flex;}
 main.main.showing-skills > #mainSkills{display:flex;}
 main.main.showing-memory > #mainMemory{display:flex;}
 main.main.showing-tasks > #mainTasks{display:flex;}
