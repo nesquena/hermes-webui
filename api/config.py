@@ -4153,11 +4153,59 @@ def coerce_reasoning_effort_for_model(
     return raw
 
 
+def resolve_effective_reasoning_effort(
+    config_data: dict,
+    model_id: str | None,
+    *,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+    session_effort: str | None = None,
+) -> str:
+    """Resolve session > per-model > global effort, then clamp to capability."""
+    raw_effort = str(session_effort or "").strip().lower()
+    if not raw_effort:
+        resolved = None
+        try:
+            from hermes_constants import resolve_reasoning_config
+
+            resolved = resolve_reasoning_config(config_data, model_id or "")
+        except (ImportError, ModuleNotFoundError):
+            # hermes-webui's CI and standalone installs do not necessarily ship
+            # hermes-agent on sys.path. Preserve the same resolution contract
+            # locally instead of silently disabling reasoning in that case.
+            agent_cfg = config_data.get("agent") if isinstance(config_data, dict) else {}
+            agent_cfg = agent_cfg if isinstance(agent_cfg, dict) else {}
+            overrides = agent_cfg.get("reasoning_overrides")
+            overrides = overrides if isinstance(overrides, dict) else {}
+            model_raw = str(model_id or "").strip()
+            candidates = [model_raw]
+            if model_raw.startswith("@") and ":" in model_raw:
+                candidates.append(model_raw.split(":", 1)[1])
+            if "/" in model_raw:
+                candidates.append(model_raw.rsplit("/", 1)[-1])
+            override = next(
+                (overrides[key] for key in candidates if key and key in overrides),
+                agent_cfg.get("reasoning_effort"),
+            )
+            resolved = {"enabled": str(override or "").strip().lower() != "none", "effort": override}
+        except Exception:
+            resolved = None
+        if isinstance(resolved, dict):
+            raw_effort = "none" if resolved.get("enabled") is False else str(resolved.get("effort") or "")
+    return coerce_reasoning_effort_for_model(
+        raw_effort,
+        model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
+
+
 def get_reasoning_status(
     *,
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    session_effort: str | None = None,
 ) -> dict:
     """Return current reasoning configuration from the active profile's
     config.yaml — the same source of truth the CLI reads from.
@@ -4183,6 +4231,14 @@ def get_reasoning_status(
                 resolve_provider = str(model_cfg["provider"]).strip()
             if not resolve_base_url and model_cfg.get("base_url"):
                 resolve_base_url = str(model_cfg["base_url"]).strip()
+
+    effort_raw = resolve_effective_reasoning_effort(
+        config_data,
+        resolve_model,
+        provider_id=resolve_provider,
+        base_url=resolve_base_url,
+        session_effort=session_effort,
+    )
 
     supported_efforts = resolve_model_reasoning_efforts(
         resolve_model,
