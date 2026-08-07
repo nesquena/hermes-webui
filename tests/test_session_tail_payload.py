@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlparse
@@ -26,6 +27,15 @@ class _FakeSession:
         self.pending_attachments = []
         self.pending_started_at = None
         self.composer_draft = {}
+        self.created_at = 1
+        self.updated_at = 3
+        self.profile = None
+        self.is_cli_session = True
+        self.source_tag = "tui"
+        self.raw_source = "tui"
+        self.session_source = "tui"
+        self.source_label = "TUI"
+        self.read_only = True
 
     def compact(self):
         return {
@@ -67,6 +77,27 @@ def _invoke(session, query=None):
     return captured["data"]["session"]
 
 
+def _invoke_foreign(session, query):
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_j(_handler, data, status=200, extra_headers=None):
+        captured["data"] = data
+        captured["status"] = status
+        return data
+
+    parsed = urlparse(f"/api/session?{query}")
+    with patch("api.routes.get_session", side_effect=KeyError(session.session_id)), \
+         patch("api.routes._claim_or_synthesize_cli_session", return_value=(session, "not_claimable")), \
+         patch("api.routes._session_visible_to_active_profile", return_value=True), \
+         patch("api.routes._lookup_cli_session_metadata", return_value={}), \
+         patch("api.routes.redact_session_data", side_effect=lambda raw: raw), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes.handle_get(SimpleNamespace(), parsed)
+    return captured["data"]["session"]
+
+
 def test_tail_window_includes_windowed_session_tool_calls_even_when_messages_have_tool_metadata():
     session = _FakeSession([
         {"role": "user", "content": "older"},
@@ -86,6 +117,99 @@ def test_tail_window_includes_windowed_session_tool_calls_even_when_messages_hav
         {"name": "visible-tool", "snippet": "visible snippet", "assistant_msg_idx": 0}
     ]
     assert payload["_messages_truncated"] is True
+
+
+def test_foreign_tail_load_is_bounded_and_keeps_full_history_todo_state():
+    import api.routes as routes
+
+    session = _FakeSession([
+        {"role": "user", "content": "older"},
+        {
+            "role": "tool",
+            "content": json.dumps({
+                "todos": [{"id": "todo-1", "content": "finish", "status": "pending"}],
+                "summary": {"total": 1, "pending": 1},
+            }),
+        },
+        {"role": "assistant", "content": "latest"},
+    ])
+
+    payload = _invoke_foreign(
+        session,
+        "session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=1",
+    )
+
+    assert payload["messages"] == [session.messages[-1]]
+    assert payload["message_count"] == len(session.messages)
+    assert payload["_messages_truncated"] is True
+    assert payload["_messages_offset"] == 2
+    assert payload["_msg_limit_max"] == routes._MAX_MSG_LIMIT
+    assert payload["tool_calls"] == []
+    assert payload["todo_state"]["todos"][0]["id"] == "todo-1"
+
+
+def test_foreign_msg_before_page_reaches_offset_zero():
+    import api.routes as routes
+
+    session = _FakeSession([
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "second"},
+        {"role": "assistant", "content": "third"},
+    ])
+
+    payload = _invoke_foreign(
+        session,
+        "session_id=tail_payload_001&messages=1&resolve_model=0&msg_before=1&msg_limit=1",
+    )
+
+    assert payload["messages"] == session.messages[:1]
+    assert payload["message_count"] == 3
+    assert payload["_messages_offset"] == 0
+    assert payload["_messages_truncated"] is False
+    assert payload["_msg_limit_max"] == routes._MAX_MSG_LIMIT
+
+
+def test_foreign_messages_zero_returns_metadata_without_transcript():
+    import api.routes as routes
+
+    session = _FakeSession([
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "second"},
+    ])
+
+    payload = _invoke_foreign(
+        session,
+        "session_id=tail_payload_001&messages=0&resolve_model=0",
+    )
+
+    assert payload["messages"] == []
+    assert payload["tool_calls"] == []
+    assert payload["message_count"] == 2
+    assert payload["_messages_offset"] == 0
+    assert payload["_messages_truncated"] is False
+    assert payload["_msg_limit_max"] == routes._MAX_MSG_LIMIT
+    assert "todo_state" not in payload
+
+
+def test_foreign_no_msg_limit_keeps_full_load():
+    import api.routes as routes
+
+    session = _FakeSession([
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "second"},
+    ])
+
+    payload = _invoke_foreign(
+        session,
+        "session_id=tail_payload_001&messages=1&resolve_model=0",
+    )
+
+    assert payload["messages"] == session.messages
+    assert payload["message_count"] == 2
+    assert payload["_messages_offset"] == 0
+    assert payload["_messages_truncated"] is False
+    assert payload["_msg_limit_max"] == routes._MAX_MSG_LIMIT
+    assert payload["tool_calls"] == []
 
 
 def test_tail_window_keeps_only_visible_session_tool_calls_for_legacy_messages_without_metadata():

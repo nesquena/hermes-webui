@@ -2051,9 +2051,67 @@ $('btnNewChat').onclick=async()=>{
   }
   await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
 };
-$('btnDownload').onclick=()=>{
+$('btnDownload').onclick=async()=>{
   if(!S.session)return;
-  const blob=new Blob([transcript()],{type:'text/markdown'});
+  const sid=S.session.session_id;
+  let transcriptSession=S.session;
+  let transcriptMessages=S.messages;
+  if(typeof _messagesTruncated!=='undefined'&&_messagesTruncated){
+    if(S.busy||S.activeStreamId){
+      if(typeof showToast==='function'){
+        showToast((typeof t==='function'&&t('download_transcript_busy_full'))||'Wait for the current response to finish before downloading the full transcript.',3000,'warning');
+      }
+      return;
+    }
+    if(typeof _readFullSessionSnapshot!=='function'){
+      if(typeof showToast==='function'){
+        showToast((typeof t==='function'&&t('download_transcript_failed_full'))||'Failed to load the full transcript.',4000,'error');
+      }
+      return;
+    }
+    if(typeof showToast==='function'){
+      showToast((typeof t==='function'&&t('download_transcript_preparing_full'))||'Preparing full transcript…',2000);
+    }
+    try{
+      const snapshot=await _readFullSessionSnapshot(sid);
+      if(!snapshot||!snapshot.session){
+        throw new Error('full transcript snapshot unavailable');
+      }
+      transcriptSession=snapshot.session;
+      transcriptMessages=snapshot.messages||[];
+    }catch(e){
+      console.warn('btnDownload full-load failed:',e);
+      if(typeof showToast==='function'){
+        showToast((typeof t==='function'&&t('download_transcript_failed_full'))||'Failed to load the full transcript.',4000,'error');
+      }
+      return;
+    }
+    if(!S.session||S.session.session_id!==sid){
+      if(typeof showToast==='function'){
+        showToast((typeof t==='function'&&t('download_transcript_changed_full'))||'The conversation changed while the full transcript was loading. Try again.',3000,'warning');
+      }
+      return;
+    }
+    if(S.busy||S.activeStreamId){
+      if(typeof showToast==='function'){
+        showToast(
+          (typeof t==='function'&&t(
+            S.busy||S.activeStreamId
+              ? 'download_transcript_busy_full'
+              : 'download_transcript_changed_full'
+          ))||(
+            S.busy||S.activeStreamId
+              ? 'Wait for the current response to finish before downloading the full transcript.'
+              : 'The conversation changed while the full transcript was loading. Try again.'
+          ),
+          3000,
+          'warning'
+        );
+      }
+      return;
+    }
+  }
+  const blob=new Blob([transcript(transcriptSession,transcriptMessages)],{type:'text/markdown'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);
   a.download=`hermes-${S.session.session_id}.md`;a.click();URL.revokeObjectURL(a.href);
 };

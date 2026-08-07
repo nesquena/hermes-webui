@@ -355,6 +355,15 @@ function _workspaceTodosTabIsActive(){
   return !!(tab&&panel&&!tab.hidden&&!panel.hidden);
 }
 
+function _workspaceArtifactsTabIsActive(){
+  if(typeof document==='undefined') return false;
+  const rightPanel=document.querySelector('.rightpanel');
+  if(!rightPanel||!rightPanel.dataset||rightPanel.dataset.activeTab!=='artifacts') return false;
+  const tab=document.getElementById('workspaceArtifactsTab');
+  const panel=document.getElementById('workspaceArtifacts');
+  return !!(tab&&panel&&!tab.hidden&&!panel.hidden);
+}
+
 function _resetWorkspaceTodosRenderCache(){
   _workspaceTodosLastRenderedHash=null;
 }
@@ -518,6 +527,8 @@ async function refreshOpenPreviewIfMutated(){
 }
 
 function collectSessionArtifacts(){
+  const messagesInput = arguments.length > 0 ? arguments[0] : null;
+  const toolCallsInput = arguments.length > 1 ? arguments[1] : null;
   const items = [];
   const seen = new Set();
   const push = (path, source) => {
@@ -527,12 +538,14 @@ function collectSessionArtifacts(){
   };
   // Source 1: session-level tool call summaries (may be empty when messages
   // carry their own tool metadata — see _syncToolCallsForLoadedMessages).
-  for(const tc of (S.toolCalls || [])){
+  const toolCalls = Array.isArray(toolCallsInput) ? toolCallsInput : (S.toolCalls || []);
+  const messages = Array.isArray(messagesInput) ? messagesInput : (S.messages || []);
+  for(const tc of toolCalls){
     for(const a of _artifactCandidatesFromToolCall(tc)) push(a.path, a.kind || tc.name || 'tool');
   }
   // Source 2 & 3: message-level data — both text-mined diffs and structured
   // tool_calls / tool_use content blocks that survive the S.toolCalls clear.
-  for(const msg of (S.messages || [])){
+  for(const msg of messages){
     if(!msg) continue;
     const text = msg.content || msg.text || msg.message || '';
     // Text-mined diff/patch fences (existing path).
@@ -569,44 +582,84 @@ function renderSessionArtifacts(){
   const root = $('workspaceArtifacts');
   const count = $('workspaceArtifactsCount');
   if(!root) return;
-  const items = collectSessionArtifacts();
-  if(count) count.textContent = String(items.length);
-  if(!S.session){
-    root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
-    return;
-  }
-  if(!items.length){
-    root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
-    return;
-  }
-  // Strip workspace prefix for display so long absolute paths don't clutter the list.
-  const ws = S.session && S.session.workspace;
-  const normWs = ws ? ws.replace(/\/+$/,'') + '/' : '';
-  const displayPath = (p) => {
-    if(normWs && p.startsWith(normWs)) return p.slice(normWs.length);
-    return p;
-  };
-  const splitArtifactDisplayPath = (path) => {
-    const slash = path.lastIndexOf('/');
-    if(slash < 0) return {name: path, head: '', tail: ''};
-    const directory = path.slice(0, slash + 1);
-    const parentSlash = directory.lastIndexOf('/', directory.length - 2);
-    return {
-      name: path.slice(slash + 1),
-      head: directory.slice(0, parentSlash + 1),
-      tail: directory.slice(parentSlash + 1),
+  const sid = S.session && S.session.session_id;
+  const startGeneration = typeof _messagesGeneration === 'number' ? _messagesGeneration : null;
+  const artifactsVisible = typeof _workspaceArtifactsTabIsActive==='function' && _workspaceArtifactsTabIsActive();
+  const hasTruncatedHistory = !!(
+    sid &&
+    typeof _messagesTruncated !== 'undefined' &&
+    _messagesTruncated
+  );
+  const _renderNow = (messagesInput, toolCallsInput) => {
+    const items = collectSessionArtifacts(messagesInput, toolCallsInput);
+    if(count) count.textContent = String(items.length);
+    if(!S.session){
+      root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
+      return;
+    }
+    if(!items.length){
+      root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
+      return;
+    }
+    // Strip workspace prefix for display so long absolute paths don't clutter the list.
+    const ws = S.session && S.session.workspace;
+    const normWs = ws ? ws.replace(/\/+$/,'') + '/' : '';
+    const displayPath = (p) => {
+      if(normWs && p.startsWith(normWs)) return p.slice(normWs.length);
+      return p;
     };
+    const splitArtifactDisplayPath = (path) => {
+      const slash = path.lastIndexOf('/');
+      if(slash < 0) return {name: path, head: '', tail: ''};
+      const directory = path.slice(0, slash + 1);
+      const parentSlash = directory.lastIndexOf('/', directory.length - 2);
+      return {
+        name: path.slice(slash + 1),
+        head: directory.slice(0, parentSlash + 1),
+        tail: directory.slice(parentSlash + 1),
+      };
+    };
+    root.innerHTML = items.map(item => {
+      const path = displayPath(item.path);
+      const parts = splitArtifactDisplayPath(path);
+      const directory = (parts.head || parts.tail)
+        ? `<div class="workspace-artifact-directory"><span class="workspace-artifact-directory-head">${esc(parts.head)}</span><span class="workspace-artifact-directory-tail">${esc(parts.tail)}</span></div>`
+        : '';
+      const source = item.source ? esc(item.source) : esc(t('workspace_artifact_source_session') || 'session');
+      const sourceAttrs = item.source ? '' : ' data-i18n="workspace_artifact_source_session"';
+      return `<button type="button" class="workspace-artifact-item" title="${esc(path)}" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div></button>`;
+    }).join('');
   };
-  root.innerHTML = items.map(item => {
-    const path = displayPath(item.path);
-    const parts = splitArtifactDisplayPath(path);
-    const directory = (parts.head || parts.tail)
-      ? `<div class="workspace-artifact-directory"><span class="workspace-artifact-directory-head">${esc(parts.head)}</span><span class="workspace-artifact-directory-tail">${esc(parts.tail)}</span></div>`
-      : '';
-    const source = item.source ? esc(item.source) : esc(t('workspace_artifact_source_session') || 'session');
-    const sourceAttrs = item.source ? '' : ' data-i18n="workspace_artifact_source_session"';
-    return `<button type="button" class="workspace-artifact-item" title="${esc(path)}" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div></button>`;
-  }).join('');
+  const needsFullLoad = !!(
+    sid &&
+    artifactsVisible &&
+    !(S.busy || S.activeStreamId) &&
+    typeof _readFullSessionSnapshot === 'function' &&
+    typeof _messagesTruncated !== 'undefined' &&
+    _messagesTruncated
+  );
+  if(hasTruncatedHistory && artifactsVisible){
+    root.innerHTML = `<div class="workspace-artifact-empty" data-i18n="workspace_artifact_loading_full_history">${esc((typeof t==='function'&&t('workspace_artifact_loading_full_history'))||'Loading full history…')}</div>`;
+    if(S.busy || S.activeStreamId) return;
+  }
+  if(!needsFullLoad){
+    _renderNow();
+    return;
+  }
+  return Promise.resolve(_readFullSessionSnapshot(sid)).then((snapshot) => {
+    if(root.isConnected === false) return;
+    if(!S.session || S.session.session_id !== sid || S.busy || S.activeStreamId) return;
+    if(!(typeof _workspaceArtifactsTabIsActive==='function'&&_workspaceArtifactsTabIsActive())) return;
+    if(!snapshot || (startGeneration !== null && _messagesGeneration !== startGeneration)){
+      _renderNow();
+      return;
+    }
+    _renderNow(snapshot.messages, snapshot.toolCalls);
+  }).catch(e => {
+    console.warn('renderSessionArtifacts full-load failed:',e);
+    if(root.isConnected === false) return;
+    if(typeof _workspaceArtifactsTabIsActive==='function'&&_workspaceArtifactsTabIsActive()) _renderNow();
+  });
 }
 
 async function _workspacePathExists(path){
