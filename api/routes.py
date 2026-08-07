@@ -2236,8 +2236,12 @@ def _build_session_list_cache_payload(
             or session.get("has_pending_user_message")
         )
 
+    supports_lineage_metadata = _callable_accepts_kwarg(
+        all_sessions, "include_lineage_metadata"
+    )
+
     def _all_sessions_for_sidebar():
-        if _callable_accepts_kwarg(all_sessions, "include_lineage_metadata"):
+        if supports_lineage_metadata:
             return all_sessions(diag=diag, include_lineage_metadata=False)
         # Focused tests and third-party callers sometimes monkeypatch
         # routes.all_sessions with the historical diag-only signature.
@@ -4829,23 +4833,27 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
                     push(row)
                     order += 1
     external_tool_counts = {}
+    # ``tool_calls`` uses the same visible-relative coordinate as ``messages``
+    # in this hydration contract. The window offset is applied exactly once
+    # when matching the full-coordinate scene rows below.
     for call in tool_calls or []:
         if not isinstance(call, dict):
             continue
         try:
-            absolute_idx = int(call.get("assistant_msg_idx"))
+            local_idx = int(call.get("assistant_msg_idx"))
         except (TypeError, ValueError):
             continue
+        absolute_idx = local_idx + int(message_offset or 0)
         external_tool_counts[absolute_idx] = external_tool_counts.get(absolute_idx, 0) + 1
     external_tool_ordinals = {}
     for call in tool_calls or []:
         if not isinstance(call, dict):
             continue
         try:
-            absolute_idx = int(call.get("assistant_msg_idx"))
+            local_idx = int(call.get("assistant_msg_idx"))
         except (TypeError, ValueError):
             continue
-        local_idx = absolute_idx - int(message_offset or 0)
+        absolute_idx = local_idx + int(message_offset or 0)
         if not (turn_start < local_idx <= local_final_idx):
             continue
         row = _anchor_scene_tool_row(call, order, absolute_idx, stream_id)
@@ -5073,6 +5081,8 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
                 # WebUI continuation path without clobbering later divergent
                 # WebUI-owned turns.
                 s.messages = list(latest_messages)
+                from api.transcript_mutations import reconcile_dismissals
+                reconcile_dismissals(s, s.messages)
         return s
     except KeyError:
         pass
@@ -8799,7 +8809,9 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         limit = max(1, int(msg_limit))
     except (TypeError, ValueError):
         return None, sidecar_messages
-    raw_budget = max(300, limit * 10)
+    from api.transcript_mutations import active_dismissal_count
+    effective_active = min(active_dismissal_count(session), _STATE_DB_DISPLAY_ROW_BACKSTOP)
+    raw_budget = min(_STATE_DB_DISPLAY_ROW_BACKSTOP, max(300, (limit + effective_active) * 10))
     if len(sidecar_messages) <= raw_budget:
         _sid = getattr(session, "session_id", "") or ""
         if not _sid or not _sidecar_file_exceeds_threshold(_sid, _SIDECAR_BYTE_TAIL_THRESHOLD):
@@ -8996,6 +9008,66 @@ def _merged_webui_lineage_messages_for_display(session, messages=None) -> list:
     return merged_messages
 
 
+def _final_projected_messages_for_display(session, messages=None, *, cli_messages=None, project=True) -> list:
+    """Own the final display coordinate space and dismissal projection."""
+    if messages is None:
+        if _is_messaging_session_record(session):
+            messages = _merged_session_messages_for_display(session, cli_messages)
+        else:
+            state_db_messages = get_state_db_session_messages(
+                getattr(session, "session_id", None),
+                profile=getattr(session, "profile", None) or None,
+            )
+            messages = merge_session_messages_append_only(
+                _webui_sidecar_lineage_messages_for_display(session),
+                state_db_messages,
+                truncation_watermark=getattr(session, "truncation_watermark", None),
+                truncation_boundary=getattr(session, "truncation_boundary", None),
+            )
+            messages = _merged_webui_lineage_messages_for_display(session, messages)
+    if not project:
+        return list(messages or [])
+    from api.transcript_mutations import decorate_projection, project_transcript
+    projection = project_transcript(session, messages)
+    return decorate_projection(session, projection)
+
+
+def _final_transcript_projection(session, messages=None, *, cli_messages=None):
+    if messages is None:
+        messages = _final_projected_messages_for_display(
+            session, cli_messages=cli_messages, project=False
+        )
+    from api.transcript_mutations import project_transcript
+    return project_transcript(
+        session,
+        messages,
+        source_messages=getattr(session, "messages", None),
+        merge_key=_session_message_merge_key,
+    )
+
+
+def _session_payload_from_projection(session, projection) -> dict:
+    from api.transcript_mutations import decorate_projection
+    visible = decorate_projection(session, projection)
+    payload = session.compact() | {
+        "messages": visible,
+        "message_count": projection.projected_count,
+        "tool_calls": projection.tool_calls,
+    }
+    return payload
+
+
+def _rebase_session_dismissals(session, messages=None) -> bool:
+    from api.transcript_mutations import reconcile_dismissals
+    return reconcile_dismissals(session, messages if messages is not None else getattr(session, "messages", []))
+
+
+def _final_projected_session_payload(session, messages=None, *, cli_messages=None) -> dict:
+    """Return session metadata whose count matches visible transcript rows."""
+    projection = _final_transcript_projection(session, messages, cli_messages=cli_messages)
+    return _session_payload_from_projection(session, projection)
+
+
 def _message_summary(messages) -> dict:
     messages = list(messages or [])
     last_message_at = 0.0
@@ -9007,6 +9079,21 @@ def _message_summary(messages) -> dict:
         except (TypeError, ValueError):
             pass
     return {"message_count": len(messages), "last_message_at": last_message_at}
+
+
+def _metadata_only_display_count(session, metadata_summary: dict) -> int:
+    """Adjust the cheap metadata count by the validated active-key count."""
+    from api.transcript_mutations import active_dismissal_count, projected_message_count
+    summary_count = metadata_summary.get("message_count")
+    if not summary_count:
+        summary_count = getattr(session, "_metadata_message_count", 0)
+    return projected_message_count(
+        summary_count,
+        active_dismissal_count(session),
+        has_pending_user_message=bool(
+            getattr(session, "pending_user_message", None)
+        ),
+    )
 
 
 def _metadata_only_message_summary(sid: str, profile: str | None = None) -> dict:
@@ -9150,7 +9237,12 @@ def _normalize_sidebar_source_flags(session: dict) -> dict:
     return normalized
 
 
-def _reconcile_session_detail_source_flags(session: dict, state_meta: dict) -> dict:
+def _reconcile_session_detail_source_flags(
+    session: dict,
+    state_meta: dict,
+    *,
+    active_dismissal_count_value=None,
+) -> dict:
     """Return a /api/session payload whose source flags match state.db truth.
 
     WebUI-origin sidecars can carry stale CLI/import flags after older repair or
@@ -9165,6 +9257,13 @@ def _reconcile_session_detail_source_flags(session: dict, state_meta: dict) -> d
         return dict(session)
 
     reconciled = dict(session)
+    from api.transcript_mutations import projected_message_count
+
+    if active_dismissal_count_value is None:
+        active_dismissal_count_value = reconciled.get(
+            "_transcript_dismissal_active_count",
+            reconciled.get("transcript_dismissal_active_count", 0),
+        )
     reconciled["is_cli_session"] = False
     reconciled["read_only"] = False
     reconciled["source_tag"] = _safe_first(state_meta.get("source_tag"), "webui")
@@ -9174,12 +9273,22 @@ def _reconcile_session_detail_source_flags(session: dict, state_meta: dict) -> d
     if state_meta.get("source"):
         reconciled["source"] = state_meta["source"]
 
-    for key in ("message_count", "actual_message_count"):
-        if state_meta.get(key) is not None:
-            reconciled[key] = max(
-                _numeric_count(reconciled.get(key)),
-                _numeric_count(state_meta.get(key)),
-            )
+    if state_meta.get("message_count") is not None:
+        reconciled["message_count"] = max(
+            _numeric_count(reconciled.get("message_count")),
+            projected_message_count(
+                state_meta.get("message_count"),
+                active_dismissal_count_value,
+                has_pending_user_message=bool(
+                    reconciled.get("pending_user_message")
+                ),
+            ),
+        )
+    if state_meta.get("actual_message_count") is not None:
+        reconciled["actual_message_count"] = max(
+            _numeric_count(reconciled.get("actual_message_count")),
+            _numeric_count(state_meta.get("actual_message_count")),
+        )
     for key in ("created_at", "updated_at", "last_message_at"):
         if state_meta.get(key) is not None:
             current = reconciled.get(key)
@@ -12755,23 +12864,21 @@ def handle_get(handler, parsed) -> bool:
                     _summary_message_count = metadata_summary["message_count"]
                     _summary_last_message_at = metadata_summary["last_message_at"]
                     _all_msgs = []
+            _display_projection = None
+            if load_messages:
+                _display_projection = _final_transcript_projection(
+                    s, _all_msgs, cli_messages=cli_messages
+                )
+                from api.transcript_mutations import decorate_projection
+                _all_msgs = decorate_projection(s, _display_projection)
             if not load_messages:
                 if metadata_summary is None:
                     metadata_summary = _message_summary(_all_msgs)
                     _summary_message_count = metadata_summary["message_count"]
                     _summary_last_message_at = metadata_summary["last_message_at"]
-                if _summary_message_count == 0:
-                    # Legacy session with no loaded sidecar and no state.db summary —
-                    # fall back to the persisted metadata count from session JSON.
-                    # See PR #2605 (LumenYoung): without this, the metadata poll
-                    # returns 0 and the active-session external-refresh signal
-                    # never trips on legacy sessions.
-                    try:
-                        metadata_count = getattr(s, "_metadata_message_count", None)
-                        if metadata_count is not None:
-                            _summary_message_count = max(0, int(metadata_count))
-                    except (TypeError, ValueError):
-                        pass
+                # Metadata-only responses still expose the display count, while
+                # preserving zero after the final row is removed by projection.
+                _summary_message_count = _metadata_only_display_count(s, metadata_summary)
             else:
                 _summary_message_count = None
                 _summary_last_message_at = None
@@ -12788,7 +12895,15 @@ def handle_get(handler, parsed) -> bool:
                     _truncated_msgs,
                     getattr(s, "anchor_activity_scenes", None),
                     message_offset=_messages_offset,
-                    tool_calls=getattr(s, "tool_calls", None),
+                    tool_calls=(
+                        _tool_calls_for_message_window(
+                            _display_projection.tool_calls,
+                            _messages_offset,
+                            len(_all_msgs),
+                        )
+                        if _display_projection is not None
+                        else []
+                    ),
                 )
             else:
                 _truncated_msgs = []
@@ -12856,7 +12971,11 @@ def handle_get(handler, parsed) -> bool:
                             _fb_cl,
                         )
                     _persisted_cl = _fb_cl
-            _session_tool_calls = getattr(s, "tool_calls", []) if load_messages else []
+            _session_tool_calls = (
+                list(_display_projection.tool_calls)
+                if load_messages and _display_projection is not None
+                else []
+            )
             # Always include session-level tool_calls so the browser can merge
             # them with per-message tool_calls for messages that lack the
             # per-message variant (older messages whose tool_calls live only
@@ -12868,7 +12987,11 @@ def handle_get(handler, parsed) -> bool:
                     _messages_offset,
                     len(_truncated_msgs),
                 )
-            _merged_message_count = _summary_message_count if _summary_message_count is not None else len(_all_msgs)
+            _merged_message_count = (
+                len(_all_msgs)
+                if load_messages
+                else _summary_message_count
+            )
             _merged_last_message_at = _summary_last_message_at if _summary_last_message_at is not None else 0
             if _summary_last_message_at is None and _all_msgs:
                 try:
@@ -12887,6 +13010,12 @@ def handle_get(handler, parsed) -> bool:
                 )
             except TypeError:
                 compact_session = s.compact()
+            if load_messages:
+                _merged_message_count = (
+                    _display_projection.projected_count
+                    if _display_projection is not None
+                    else len(_all_msgs)
+                )
             raw = compact_session | {
                 "messages": _truncated_msgs,
                 "message_count": _merged_message_count,
@@ -12947,7 +13076,13 @@ def handle_get(handler, parsed) -> bool:
             if continuation_sid:
                 raw["continuation_session_id"] = continuation_sid
             if cli_meta and _session_source_is_webui(cli_meta):
-                raw = _reconcile_session_detail_source_flags(raw, cli_meta)
+                from api.transcript_mutations import active_dismissal_count
+
+                raw = _reconcile_session_detail_source_flags(
+                    raw,
+                    cli_meta,
+                    active_dismissal_count_value=active_dismissal_count(s),
+                )
             elif cli_meta and _is_messaging_session_record(cli_meta):
                 raw = _merge_cli_sidebar_metadata(raw, cli_meta)
                 # ``message_count`` in /api/session is the display coordinate
@@ -13058,7 +13193,7 @@ def handle_get(handler, parsed) -> bool:
             # Build the legacy dict response from the synthesized Session so
             # the wire shape stays byte-equivalent to the previous inline
             # synthesis (the frontend has been reading these exact keys).
-            msgs = list(synth.messages or [])
+            msgs = _final_projected_messages_for_display(synth, list(synth.messages or []))
             sess = {
                 "session_id": synth.session_id,
                 "title": synth.title,
@@ -14228,7 +14363,7 @@ def handle_post(handler, parsed) -> bool:
                     "created_at": share_meta["share_created_at"],
                     "updated_at": share_meta["share_updated_at"],
                 },
-                "session": response_session.compact() | {"messages": response_session.messages},
+                "session": _final_projected_session_payload(response_session),
             },
         )
 
@@ -14267,7 +14402,7 @@ def handle_post(handler, parsed) -> bool:
             handler,
             {
                 "ok": True,
-                "session": response_session.compact() | {"messages": response_session.messages},
+                "session": _final_projected_session_payload(response_session),
             },
         )
 
@@ -14397,7 +14532,7 @@ def handle_post(handler, parsed) -> bool:
                 profile=getattr(s, "profile", None),
                 session_id=getattr(s, "session_id", None),
             )
-        payload = {"session": s.compact() | {"messages": s.messages}}
+        payload = {"session": _final_projected_session_payload(s)}
         if worktree_skipped:
             # Config-default worktree was skipped (non-git workspace); tell the
             # client the session is plain so the UI doesn't assume isolation.
@@ -14420,61 +14555,60 @@ def handle_post(handler, parsed) -> bool:
                 # 404, not 400 — missing resource, not a malformed request.
                 return bad(handler, "Session not found", status=404)
 
-            # Deep-copy mutable lists so the duplicate is *actually* independent.
-            # `Session.__init__` does `self.messages = messages or []` — plain
-            # assignment, no copy. Without deepcopy, both sessions share the same
-            # list object in memory; appending to one mutates the other.
-            # Items inside `messages` are dicts with mutable values (tool_calls,
-            # content arrays), so a shallow `list(...)` is not enough.
+            # Project into a detached coordinate so the source remains untouched.
+            from api.transcript_mutations import materialize_duplicate
+            projection = _final_transcript_projection(session)
+            copied_session_id = uuid.uuid4().hex[:12]
+            copied_messages, copied_tool_calls = materialize_duplicate(
+                projection,
+                source_session_id=session.session_id,
+                destination_session_id=copied_session_id,
+            )
             copied_session = Session(
-                session_id=uuid.uuid4().hex[:12],
-                # Defensive: legacy sessions may have title=None on disk; fall back to 'Untitled'
-                # so `+ " (copy)"` doesn't TypeError.
+                session_id=copied_session_id,
+                # Legacy sessions may have title=None on disk.
                 title=(session.title or "Untitled") + " (copy)",
                 workspace=session.workspace,
                 model=session.model,
                 model_provider=session.model_provider,
-                messages=copy.deepcopy(session.messages),
-                tool_calls=copy.deepcopy(session.tool_calls),
-                # Reset ephemeral / per-session-instance flags. Duplicating an
-                # archived conversation should produce a visible (un-archived)
-                # copy; pinned status doesn't transfer either.
+                messages=copy.deepcopy(copied_messages),
+                tool_calls=copy.deepcopy(copied_tool_calls),
+                # Reset per-session-instance flags for the new visible copy.
                 pinned=False,
                 archived=False,
                 project_id=session.project_id,
                 profile=session.profile,
+                source_tag="webui",
+                raw_source="webui",
+                session_source="webui",
+                source_label="WebUI",
                 input_tokens=session.input_tokens,
                 output_tokens=session.output_tokens,
                 estimated_cost=session.estimated_cost,
                 cache_read_tokens=getattr(session, "cache_read_tokens", 0),
                 cache_write_tokens=getattr(session, "cache_write_tokens", 0),
-                # Per-session settings the user may have customized — carry them over
-                # so the duplicate behaves identically until further edits. Compression
-                # anchor + last_prompt_tokens are intentionally NOT carried — those
-                # re-derive on the next turn.
+                # Preserve customized settings; compression anchors re-derive.
                 personality=session.personality,
                 enabled_toolsets=getattr(session, "enabled_toolsets", None),
                 context_length=getattr(session, "context_length", None),
                 threshold_tokens=getattr(session, "threshold_tokens", None),
                 truncation_watermark=getattr(session, "truncation_watermark", None),
                 truncation_boundary=getattr(session, "truncation_boundary", None),
-                # context_messages is the authoritative model-facing prefix — must be
-                # deepcopied so the duplicate has its own independent context that won't
-                # be mutated when the original session's context changes (#2914).
+                # Keep the model-facing context independent from the original.
                 context_messages=copy.deepcopy(getattr(session, "context_messages", None) or []),
-                # Gateway routing — if the user customized routing for this session,
-                # the duplicate should behave identically.
+                # Preserve customized gateway routing.
                 gateway_routing=copy.deepcopy(getattr(session, "gateway_routing", None)),
                 gateway_routing_history=copy.deepcopy(getattr(session, "gateway_routing_history", None) or []),
-                # Preserve LLM-generated title flag so we don't regenerate title on duplicate.
+                # Preserve title-generation state.
                 llm_title_generated=getattr(session, "llm_title_generated", False),
                 manual_title=getattr(session, "manual_title", False),
-                # Composer draft — preserve per-session draft state.
+                # Preserve the composer draft.
                 composer_draft=copy.deepcopy(getattr(session, "composer_draft", None) or {}),
-                # Context engine state — preserve so the duplicate's context engine
-                # starts from the same point as the original.
+                # Preserve context-engine state.
                 context_engine=getattr(session, "context_engine", None),
                 context_engine_state=copy.deepcopy(getattr(session, "context_engine_state", None) or {}),
+                transcript_dismissals={"version": 2, "entries": [], "active_keys": []},
+                transcript_dismissal_active_count=0,
                 created_at=time.time(),
                 updated_at=time.time(),
             )
@@ -14494,7 +14628,7 @@ def handle_post(handler, parsed) -> bool:
                 session_id=getattr(copied_session, "session_id", None),
             )
 
-            return j(handler, {"session": copied_session.compact() | {"messages": copied_session.messages}})
+            return j(handler, {"session": _final_projected_session_payload(copied_session)})
         except Exception as e:
             return bad(handler, str(e))
 
@@ -14625,6 +14759,74 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/session/anchor-scene":
         return _handle_session_anchor_scene(handler, body)
+
+    if parsed.path == "/api/session/message/dismiss-error":
+        try:
+            require(body, "session_id", "capability", "display_index")
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        sid = body["session_id"]
+        try:
+            display_index = int(body["display_index"])
+        except (TypeError, ValueError):
+            return bad(handler, "display_index must be a non-negative integer", 400)
+        if display_index < 0:
+            return bad(handler, "display_index must be a non-negative integer", 400)
+        if _session_is_subagent_view_only(sid):
+            return bad(handler, "Session is view-only", 403)
+        try:
+            s = _get_or_materialize_session(sid, refresh_cli_messages=True)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        except PermissionError:
+            return bad(handler, "Session is read-only", 403)
+        if getattr(s, "read_only", False) or _is_messaging_session_record(s):
+            return bad(handler, "Session is read-only", 403)
+        if getattr(s, "active_stream_id", None) or getattr(s, "pending_user_message", None):
+            return bad(handler, "Session is busy", 409)
+        from api.transcript_mutations import (
+            decorate_projection,
+            is_webui_owned_provider_error,
+            message_identity,
+            project_transcript,
+            record_dismissal,
+            validate_capability,
+        )
+        with _get_session_agent_lock(sid):
+            s = _ensure_full_session_before_mutation(sid, s)
+            if getattr(s, "active_stream_id", None) or getattr(s, "pending_user_message", None):
+                return bad(handler, "Session is busy", 409)
+            coordinate = _final_projected_messages_for_display(s, project=False)
+            projection = project_transcript(s, coordinate)
+            display = decorate_projection(s, projection)
+            resolved = None
+            for row_index, row in enumerate(display):
+                if row_index != display_index:
+                    continue
+                parsed_capability = validate_capability(s, body.get("capability"), row)
+                if parsed_capability:
+                    resolved = (parsed_capability, row)
+                    break
+            if resolved is None:
+                return bad(handler, "Dismissal is stale", 409)
+            (source_sid, _identity), row = resolved
+            if (
+                not is_webui_owned_provider_error(row, s, source_session_id=source_sid)
+                or source_sid != getattr(s, "session_id", None)
+                or message_identity(row) != _identity
+            ):
+                return bad(handler, "Dismissal is not eligible", 409)
+            record_dismissal(s, source_sid, row)
+            _rebase_session_dismissals(s, coordinate)
+            s.save()
+            with LOCK:
+                SESSIONS[sid] = s
+                SESSIONS.move_to_end(sid)
+            updated_projection = _final_transcript_projection(s, coordinate)
+        return j(
+            handler,
+            {"ok": True, "session": _session_payload_from_projection(s, updated_projection)},
+        )
 
     if parsed.path == "/api/session/rename":
         try:
@@ -14893,7 +15095,7 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 logger.debug("Failed to close workspace terminal after workspace update")
         set_last_workspace(new_ws)
-        return j(handler, {"session": s.compact() | {"messages": s.messages}})
+        return j(handler, {"session": _final_projected_session_payload(s)})
     if parsed.path == "/api/session/worktree/remove":
         sid = body.get("session_id", "")
         if not sid or not isinstance(sid, str) or not sid.strip():
@@ -15170,7 +15372,7 @@ def handle_post(handler, parsed) -> bool:
         from api.config import _evict_session_agent
         _evict_session_agent(body["session_id"])
         return j(
-            handler, {"ok": True, "session": s.compact() | {"messages": s.messages}}
+            handler, {"ok": True, "session": _final_projected_session_payload(s)}
         )
 
     if parsed.path == "/api/session/branch":
@@ -15218,15 +15420,22 @@ def handle_post(handler, parsed) -> bool:
         cli_meta = _lookup_cli_session_metadata(source.session_id) if _session_requires_cli_metadata_lookup(source) else {}
         is_messaging_session = _is_messaging_session_record(source) or _is_messaging_session_record(cli_meta)
         cli_messages = get_cli_session_messages(source.session_id) if is_messaging_session else []
-        source_messages = (
-            _merged_session_messages_for_display(source, cli_messages)
-            if is_messaging_session and cli_messages
-            else list(source.messages or [])
-        )
+        if is_messaging_session and cli_messages:
+            source_messages = _merged_session_messages_for_display(source, cli_messages)
+        else:
+            from api.transcript_mutations import lineage_messages_for_projection
+            source_messages, _source_sidecar_messages = lineage_messages_for_projection(source)
+        from api.transcript_mutations import materialize_fork
+        source_projection = _final_transcript_projection(source, source_messages)
+        source_messages, source_tool_calls = materialize_fork(source_projection)
         if keep_count is not None:
             forked_messages = source_messages[:keep_count]
+            forked_tool_calls = _tool_calls_for_message_window(
+                source_tool_calls, 0, len(forked_messages)
+            )
         else:
             forked_messages = list(source_messages)
+            forked_tool_calls = source_tool_calls
 
         # Derive title
         if custom_title:
@@ -15251,6 +15460,7 @@ def handle_post(handler, parsed) -> bool:
             profile=getattr(source, "profile", None),
             title=branch_title,
             messages=forked_messages,
+            tool_calls=copy.deepcopy(forked_tool_calls),
             project_id=getattr(source, "project_id", None),
             personality=getattr(source, "personality", None),
             enabled_toolsets=getattr(source, "enabled_toolsets", None),
@@ -15264,7 +15474,12 @@ def handle_post(handler, parsed) -> bool:
             context_engine=getattr(source, "context_engine", None),
             context_engine_state=copy.deepcopy(getattr(source, "context_engine_state", None) or {}),
             parent_session_id=source.session_id,
+            source_tag="webui",
+            raw_source="webui",
             session_source="fork",
+            source_label="WebUI",
+            transcript_dismissals={"version": 2, "entries": [], "active_keys": []},
+            transcript_dismissal_active_count=0,
         )
         with LOCK:
             SESSIONS[branch.session_id] = branch
@@ -21918,6 +22133,9 @@ def _handle_session_compression_recovery_start(handler, body):
                 project_id=getattr(source, "project_id", None),
                 profile=getattr(source, "profile", None),
                 session_source="fork",
+                source_tag="webui",
+                raw_source="webui",
+                source_label="WebUI",
                 personality=getattr(source, "personality", None),
                 enabled_toolsets=copy.deepcopy(getattr(source, "enabled_toolsets", None)),
                 context_length=getattr(source, "context_length", None),
@@ -21954,7 +22172,7 @@ def _handle_session_compression_recovery_start(handler, body):
             profile=getattr(copied_session, "profile", None),
             session_id=getattr(copied_session, "session_id", None),
         )
-    session_payload = redact_session_data(copied_session.compact() | {"messages": copied_session.messages})
+    session_payload = redact_session_data(_final_projected_session_payload(copied_session))
     return j(
         handler,
         {
@@ -22624,6 +22842,7 @@ def _handle_chat_sync(handler, body):
             msg,
             source=getattr(s, "pending_user_source", None) or "webui",
         )
+        _rebase_session_dismissals(s, s.messages)
         _compact_session_image_parts_for_persistence(s)
         # Only auto-generate title when still default; preserves user renames
         if s.title == "Untitled":
@@ -22658,7 +22877,7 @@ def _handle_chat_sync(handler, body):
         {
             "answer": result.get("final_response") or "",
             "status": "done" if result.get("completed", True) else "partial",
-            "session": s.compact() | {"messages": s.messages},
+            "session": _final_projected_session_payload(s),
             "result": {k: v for k, v in result.items() if k != "messages"},
         },
     )
@@ -24913,9 +25132,8 @@ def _handle_session_compress(handler, body):
                 pass
 
         session_payload = redact_session_data(
-            s.compact() | {
-                "messages": s.messages,
-                "tool_calls": s.tool_calls,
+            _final_projected_session_payload(s)
+            | {
                 "active_stream_id": s.active_stream_id,
                 "pending_user_message": s.pending_user_message,
                 "pending_attachments": s.pending_attachments,
@@ -25982,6 +26200,7 @@ def _handle_session_import_cli(handler, body):
                 or _is_subagent_child_session_id(sid)
             )
         if changed:
+            _rebase_session_dismissals(existing, existing.messages)
             existing.save(touch_updated_at=False)
             publish_session_list_changed(
                 "session_import_cli",
@@ -25992,7 +26211,8 @@ def _handle_session_import_cli(handler, body):
             {
                 "session": existing.compact()
                 | {
-                    "messages": existing.messages,
+                    "messages": (_visible_messages := _final_projected_messages_for_display(existing)),
+                    "message_count": len(_visible_messages),
                     "is_cli_session": (False if _existing_is_sa else True),
                     # Greptile #4911 follow-up: read read_only from
                     # the persisted Session, NOT from cli_meta.  This
@@ -26060,12 +26280,30 @@ def _handle_session_import_cli(handler, body):
         cron_project_id = ensure_cron_project(create=_profile_has_user_projects())
 
     if _read_only_view:
+        read_only_session = Session(
+            session_id=sid,
+            title=title,
+            workspace=str(get_last_workspace()),
+            model=model,
+            messages=msgs,
+            created_at=created_at,
+            updated_at=updated_at,
+            profile=profile,
+            parent_session_id=cli_parent_session_id,
+            transcript_dismissals={"version": 2, "entries": [], "active_keys": []},
+            transcript_dismissal_active_count=0,
+        )
+        read_only_session.source_tag = cli_source_tag
+        read_only_session.raw_source = cli_raw_source or cli_source_tag
+        read_only_session.session_source = cli_session_source
+        read_only_session.read_only = True
+        visible_msgs = _final_projected_messages_for_display(read_only_session, msgs)
         session_payload = {
             "session_id": sid,
             "title": title,
             "workspace": str(get_last_workspace()),
             "model": model,
-            "message_count": len(msgs),
+            "message_count": len(visible_msgs),
             "created_at": created_at,
             "updated_at": updated_at,
             "last_message_at": updated_at or created_at,
@@ -26083,7 +26321,7 @@ def _handle_session_import_cli(handler, body):
             "source_label": cli_source_label,
             "parent_session_id": cli_parent_session_id,
             "read_only": True,
-            "messages": msgs,
+            "messages": visible_msgs,
             "tool_calls": [],
         }
         return j(handler, {"session": session_payload, "imported": False})
@@ -26112,6 +26350,7 @@ def _handle_session_import_cli(handler, body):
     s.session_key = cli_session_key
     s.platform = cli_platform
     s._cli_origin = sid
+    _rebase_session_dismissals(s, msgs)
     s.save(touch_updated_at=False)
     publish_session_list_changed(
         "session_import_cli",
@@ -26128,12 +26367,14 @@ def _handle_session_import_cli(handler, body):
             "read_only": cli_read_only,
         },
     )
+    _visible_messages = _final_projected_messages_for_display(s, msgs)
     return j(
         handler,
         {
             "session": s.compact()
             | {
-                "messages": msgs,
+                "messages": _visible_messages,
+                "message_count": len(_visible_messages),
                 "is_cli_session": True,
             },
             "imported": True,
@@ -26161,6 +26402,10 @@ def _handle_session_import(handler, body):
         messages=messages,
         tool_calls=body.get("tool_calls", []),
         profile=get_active_profile_name(),
+        source_tag="webui",
+        raw_source="webui",
+        session_source="webui",
+        source_label="WebUI",
     )
     s.pinned = body.get("pinned", False)
     with LOCK:
@@ -26169,7 +26414,7 @@ def _handle_session_import(handler, body):
         _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
     s.save()
     publish_session_list_changed("session_import")
-    return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
+    return j(handler, {"ok": True, "session": _final_projected_session_payload(s)})
 
 
 def _mask_secrets(obj):

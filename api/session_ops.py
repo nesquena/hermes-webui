@@ -99,6 +99,14 @@ def _truncation_watermark_for(messages):
         return 0.0
 
 
+def _reconcile_after_transcript_shrink(session) -> None:
+    from api.transcript_mutations import reconcile_dismissals
+    from api.transcript_mutations import lineage_messages_for_projection
+
+    displayed_messages, _source_messages = lineage_messages_for_projection(session)
+    reconcile_dismissals(session, displayed_messages)
+
+
 def truncate_context_for_display_keep(
     context_messages: list | None,
     full_messages: list | None,
@@ -403,6 +411,7 @@ def truncate_session_at_keep(session, keep: int) -> tuple[int, int]:
     old_msg_count = len(full_messages)
     old_ctx_count = len(getattr(session, 'context_messages', None) or [])
     session.messages = full_messages[:keep]
+    _reconcile_after_transcript_shrink(session)
     if isinstance(getattr(session, 'context_messages', None), list):
         session.context_messages = truncate_context_for_display_keep(
             session.context_messages,
@@ -462,6 +471,7 @@ def retry_last(session_id: str) -> dict[str, Any]:
             last_user_text = _extract_text(history[last_user_idx].get('content', ''))
             removed_count = len(history) - last_user_idx
             s.messages = history[:last_user_idx]
+            _reconcile_after_transcript_shrink(s)
             s.truncation_watermark = _truncation_watermark_for(s.messages)
             # Persist the original truncate cutoff so empty-sidecar recovery
             # can distinguish legitimate prefix from deleted suffix.
@@ -505,6 +515,7 @@ def undo_last(session_id: str) -> dict[str, Any]:
             removed_text = _extract_text(history[last_user_idx].get('content', ''))
             removed_count = len(history) - last_user_idx
             s.messages = history[:last_user_idx]
+            _reconcile_after_transcript_shrink(s)
             s.truncation_watermark = _truncation_watermark_for(s.messages)
             # Persist the original truncate cutoff.
             s.truncation_boundary = s.truncation_watermark

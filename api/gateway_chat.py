@@ -751,6 +751,8 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             error_message["_turnDuration"] = turn_duration
         if error_payload.get("details"):
             error_message["provider_details"] = error_payload["details"]
+        from api.transcript_mutations import admit_generated_provider_error
+        admit_generated_provider_error(error_message, session)
         if not isinstance(session.messages, list):
             session.messages = []
         session.messages.append(error_message)

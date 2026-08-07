@@ -1338,6 +1338,17 @@ class Session:
             except (TypeError, ValueError):
                 parsed_message_count = None
         self._metadata_message_count = parsed_message_count if parsed_message_count is not None and parsed_message_count >= 0 else None
+        raw_dismissals = kwargs.get('transcript_dismissals')
+        self.transcript_dismissals = (
+            copy.deepcopy(raw_dismissals)
+            if isinstance(raw_dismissals, dict)
+            else {'version': 2, 'entries': [], 'active_keys': []}
+        )
+        raw_active_dismissals = kwargs.get('transcript_dismissal_active_count', 0)
+        try:
+            self.transcript_dismissal_active_count = max(0, int(raw_active_dismissals or 0))
+        except (TypeError, ValueError, OverflowError):
+            self.transcript_dismissal_active_count = 0
 
     @property
     def path(self):
@@ -1393,6 +1404,7 @@ class Session:
             'enabled_toolsets', 'composer_draft',
             'process_wakeup_pause',
             'share_token', 'share_created_at',
+            'transcript_dismissals', 'transcript_dismissal_active_count',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         # #5854: message_count and a compact anchor-scene fingerprint go in the
@@ -1629,14 +1641,28 @@ class Session:
                 if _facts is not None:
                     parsed['anchor_scene_index'] = _facts.get('scene_index') or {}
                     session = cls(**parsed)
-                    session._metadata_message_count = _parse_nonnegative_int(_facts.get('message_count'))
+                    fact_count = _parse_nonnegative_int(_facts.get('message_count'))
+                    session._metadata_message_count = max(
+                        count for count in (fact_count, index_message_count)
+                        if count is not None
+                    ) if fact_count is not None or index_message_count is not None else None
+                    session._metadata_message_count_from_index = (
+                        index_message_count is not None
+                    )
                     session._loaded_metadata_only = True
                     return session
                 # Cache miss → full-load. cls.load() itself populates the legacy
                 # facts cache with a TOCTOU-guarded write (expected_sig), so we
                 # do NOT re-cache here (an unguarded second write could stamp
                 # stale facts under a replacement file's signature — Codex r5).
-                return cls.load(sid)
+                loaded = cls.load(sid)
+                if loaded is not None and loaded._metadata_message_count is None:
+                    loaded._metadata_message_count = index_message_count
+                if loaded is not None:
+                    loaded._metadata_message_count_from_index = (
+                        index_message_count is not None
+                    )
+                return loaded
             # Modern sidecars carry an accurate message_count, so it is the
             # source of truth and we skip the per-row _index.json read in the
             # common case. The sidebar index is only a cache (it can lag behind
@@ -1648,6 +1674,9 @@ class Session:
                 if count is not None
             ]
             session._metadata_message_count = max(known_counts) if known_counts else None
+            session._metadata_message_count_from_index = (
+                sidecar_message_count is None and index_message_count is not None
+            )
             # Mark this session as a metadata-only stub. save() refuses to write
             # such a session because doing so would atomically replace the
             # on-disk JSON with messages=[], wiping the conversation. Any
@@ -1704,18 +1733,37 @@ class Session:
             if self._metadata_message_count is not None
             else len(self.messages)
         )
-        if has_pending_user_message:
-            message_count = max(message_count, 1)
+        if getattr(self, '_metadata_message_count_from_index', False):
+            from api.transcript_mutations import (
+                active_dismissal_count,
+                projected_message_count,
+            )
+            message_count = projected_message_count(
+                max(message_count, int(self._metadata_message_count or 0)),
+                active_dismissal_count(self),
+                has_pending_user_message=has_pending_user_message,
+            )
+        else:
+            from api.transcript_mutations import projected_count_for_session
+            message_count = projected_count_for_session(
+                self,
+                raw_count=message_count,
+                messages=self.messages,
+            )
+            if has_pending_user_message:
+                message_count = max(message_count, 1)
         last_message_at = _last_message_timestamp(self.messages) or self.updated_at
         if has_pending_user_message and self.pending_started_at:
             last_message_at = self.pending_started_at
         return {
             'session_id': self.session_id,
+            **({'parent_session_id': self.parent_session_id} if self.parent_session_id else {}),
             'title': self.title,
             'workspace': self.workspace,
             'model': self.model,
             'model_provider': self.model_provider,
             'message_count': message_count,
+            'transcript_dismissal_active_count': self.transcript_dismissal_active_count,
             'created_at': self.created_at,
             'updated_at': self.updated_at,
             'last_message_at': last_message_at,
@@ -1750,7 +1798,6 @@ class Session:
             'manual_title': self.manual_title,
             # Only emit 'parent_session_id' when set (the /branch fork link, #1342).
             # Sessions without a fork must not leak None — see test_session_lineage_metadata_api.
-            **({'parent_session_id': self.parent_session_id} if self.parent_session_id else {}),
             **({
                 'compression_recovery_source_session_id': self.compression_recovery_source_session_id,
                 'compression_recovery_action': self.compression_recovery_action,
@@ -5395,10 +5442,11 @@ def _refresh_index_rows_from_sidecar_metadata(
             if value is not None:
                 refreshed[key] = value
         try:
-            refreshed['message_count'] = max(
-                int(session.get('message_count') or 0),
-                int(compact.get('message_count') or 0),
-            )
+            refreshed['message_count'] = int(compact.get('message_count') or 0)
+            if 'transcript_dismissal_active_count' in compact:
+                refreshed['transcript_dismissal_active_count'] = compact[
+                    'transcript_dismissal_active_count'
+                ]
         except (TypeError, ValueError):
             pass
         if _session_sort_timestamp(compact) > _session_sort_timestamp(session):
@@ -6015,12 +6063,29 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
             # sidecar metadata-only write happened after the state.db append,
             # keep the conservative anti-resurrection guard and wait for a
             # newer settled state.db message before overlaying counts again.
-            if state_count > current_count and (state_last <= 0 or state_last > current_last):
+            try:
+                active_dismissals = max(
+                    0,
+                    int(session.get('transcript_dismissal_active_count') or 0),
+                )
+            except (TypeError, ValueError, OverflowError):
+                active_dismissals = 0
+            raw_current_count = current_count + active_dismissals
+            if state_count > current_count and (
+                state_last <= 0
+                or state_last > current_last
+                or state_count > raw_current_count
+            ):
                 try:
                     existing_actual = max(0, int(session.get('actual_message_count') or 0))
                 except (TypeError, ValueError):
                     existing_actual = 0
-                session['message_count'] = state_count
+                from api.transcript_mutations import projected_message_count
+                session['message_count'] = projected_message_count(
+                    state_count,
+                    active_dismissals,
+                    has_pending_user_message=bool(session.get('pending_user_message')),
+                )
                 session['actual_message_count'] = max(state_count, existing_actual)
                 if state_last > 0:
                     session['last_message_at'] = max(float(session.get('last_message_at') or 0), state_last)
@@ -6134,7 +6199,14 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
                     _diag_stage(diag, "all_sessions.backfill_load")
                     full = Session.load(s.get('session_id'))
                     if full:
-                        index[i] = full.compact()
+                        if (
+                            not full.messages
+                            and int(s.get('message_count') or 0) > int(full.compact().get('message_count') or 0)
+                        ):
+                            full._metadata_message_count = int(s['message_count'])
+                            full._metadata_message_count_from_index = True
+                        backfilled_row = full.compact()
+                        index[i] = backfilled_row
                         backfilled.append(full)
             if backfilled:
                 try:
@@ -6153,10 +6225,27 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
             index_map = {s['session_id']: s for s in index}
             with LOCK:
                 for s in SESSIONS.values():
-                    index_map[s.session_id] = s.compact(
+                    compact = s.compact(
                         include_runtime=True,
                         active_stream_ids=active_stream_ids,
                     )
+                    indexed = index_map.get(s.session_id)
+                    if (
+                        indexed
+                        and not s.messages
+                        and not s.pending_user_message
+                        and int(indexed.get('message_count') or 0) > int(compact.get('message_count') or 0)
+                    ):
+                        from api.transcript_mutations import (
+                            active_dismissal_count,
+                            projected_message_count,
+                        )
+                        compact['message_count'] = projected_message_count(
+                            int(indexed['message_count']),
+                            active_dismissal_count(s),
+                            has_pending_user_message=False,
+                        )
+                    index_map[s.session_id] = compact
             missing_persisted_ids = []
             if persisted_ids is not None:
                 indexed_ids = {str(sid) for sid in index_map.keys() if sid}
@@ -6230,6 +6319,8 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
             if include_lineage_metadata:
                 _diag_stage(diag, "all_sessions.lineage_metadata")
                 _enrich_sidebar_lineage_metadata(result)
+                _diag_stage(diag, "all_sessions.projected_count_overlays")
+                _apply_sidebar_state_db_overrides(result)
             else:
                 _diag_stage(diag, "all_sessions.state_db_overrides")
                 _apply_sidebar_state_db_overrides(result)
@@ -6285,6 +6376,8 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
     if include_lineage_metadata:
         _diag_stage(diag, "all_sessions.lineage_metadata")
         _enrich_sidebar_lineage_metadata(result)
+        _diag_stage(diag, "all_sessions.projected_count_overlays")
+        _apply_sidebar_state_db_overrides(result)
     else:
         _diag_stage(diag, "all_sessions.state_db_overrides")
         _apply_sidebar_state_db_overrides(result)

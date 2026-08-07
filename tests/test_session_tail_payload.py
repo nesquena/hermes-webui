@@ -3,6 +3,216 @@ from unittest.mock import patch
 from urllib.parse import urlparse
 
 
+def test_tail_projection_rebases_session_tool_calls_after_filtered_row():
+    from api.models import Session
+    from api.transcript_mutations import project_transcript, record_dismissal, admit_generated_provider_error
+
+    session = Session(
+        session_id="tail-projection-6610",
+        source_tag="webui",
+        raw_source="webui",
+        session_source="webui",
+        messages=[],
+        tool_calls=[{"name": "tail", "assistant_msg_idx": 2}],
+    )
+    error = {"role": "assistant", "content": "dismissed", "_error": True}
+    admit_generated_provider_error(error, session)
+    rows = [{"role": "user", "content": "first"}, error, {"role": "assistant", "content": "tail"}]
+    record_dismissal(session, session.session_id, error)
+    projection = project_transcript(session, rows)
+    assert [row["content"] for row in projection.messages] == ["first", "tail"]
+    assert projection.tool_calls[0]["assistant_msg_idx"] == 1
+
+
+def test_lineage_merge_maps_tool_calls_by_message_key_before_projection():
+    from api.models import Session
+    from api.routes import _session_message_merge_key
+    from api.transcript_mutations import admit_generated_provider_error, project_transcript, record_dismissal
+
+    session = Session(
+        session_id="lineage-projection-6610",
+        source_tag="webui",
+        raw_source="webui",
+        session_source="webui",
+        messages=[],
+        tool_calls=[{"name": "later", "assistant_msg_idx": 2}],
+    )
+    error = {"id": "dismissed", "role": "assistant", "content": "dismissed", "_error": True}
+    admit_generated_provider_error(error, session)
+    source_messages = [
+        {"id": "first", "role": "user", "content": "first"},
+        error,
+        {"id": "later", "role": "assistant", "content": "later"},
+    ]
+    merged_messages = [
+        {"id": "parent-only", "role": "assistant", "content": "compressed parent"},
+        *source_messages,
+    ]
+    record_dismissal(session, session.session_id, error)
+    projection = project_transcript(
+        session,
+        merged_messages,
+        source_messages=source_messages,
+        merge_key=_session_message_merge_key,
+    )
+    assert [row["id"] for row in projection.messages] == ["parent-only", "first", "later"]
+    assert projection.tool_calls[0]["assistant_msg_idx"] == 2
+
+
+def test_lineage_projection_reconstructs_compression_parent_for_branch_and_sse(tmp_path, monkeypatch):
+    import api.models as models
+    from api.transcript_mutations import lineage_messages_for_projection
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    parent = models.Session(
+        session_id="lineage-parent-6610",
+        workspace=str(tmp_path),
+        source_tag="webui",
+        raw_source="webui",
+        session_source="webui",
+        pre_compression_snapshot=True,
+        messages=[{"id": "old", "role": "user", "content": "old"}],
+    )
+    parent.save()
+    child = models.Session(
+        session_id="lineage-child-6610",
+        workspace=str(tmp_path),
+        source_tag="webui",
+        raw_source="webui",
+        session_source="webui",
+        parent_session_id=parent.session_id,
+        messages=[{"id": "new", "role": "assistant", "content": "new"}],
+    )
+    display, source = lineage_messages_for_projection(child)
+    assert [row["id"] for row in display] == ["old", "new"]
+    assert [row["id"] for row in source] == ["new"]
+
+
+def test_settled_sse_payload_uses_real_lineage_projection(tmp_path, monkeypatch):
+    import api.models as models
+    from api.streaming import _session_payload_with_full_messages
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    parent = models.Session(
+        session_id="sse-parent-6610",
+        workspace=str(tmp_path),
+        source_tag="webui",
+        raw_source="webui",
+        session_source="webui",
+        pre_compression_snapshot=True,
+        messages=[{"id": "old", "role": "user", "content": "old"}],
+    )
+    parent.save()
+    child = models.Session(
+        session_id="sse-child-6610",
+        workspace=str(tmp_path),
+        source_tag="webui",
+        raw_source="webui",
+        session_source="webui",
+        parent_session_id=parent.session_id,
+        messages=[{"id": "new", "role": "assistant", "content": "new"}],
+    )
+    payload = _session_payload_with_full_messages(child, tool_calls=[])
+    assert [row["id"] for row in payload["messages"]] == ["old", "new"]
+    assert payload["message_count"] == 2
+
+
+def test_branch_route_materializes_real_compression_lineage(tmp_path, monkeypatch):
+    import api.models as models
+    from api import routes
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    parent = models.Session(
+        session_id="branch-parent-6610",
+        workspace=str(tmp_path),
+        source_tag="webui",
+        raw_source="webui",
+        session_source="webui",
+        pre_compression_snapshot=True,
+        messages=[{"id": "old", "role": "user", "content": "old"}],
+    )
+    parent.save()
+    source = models.Session(
+        session_id="branch-source-6610",
+        title="Source",
+        workspace=str(tmp_path),
+        source_tag="webui",
+        raw_source="webui",
+        session_source="webui",
+        parent_session_id=parent.session_id,
+        messages=[{"id": "new", "role": "assistant", "content": "new"}],
+    )
+    source.save()
+    captured = {}
+
+    class Handler:
+        headers = {"Content-Type": "application/json", "Content-Length": "1"}
+        client_address = ("127.0.0.1", 12345)
+        rfile = __import__("io").BytesIO(b"")
+        wfile = __import__("io").BytesIO()
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, *_args):
+            pass
+
+        def end_headers(self):
+            pass
+
+    handler = Handler()
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": source.session_id})
+    monkeypatch.setattr(routes, "get_session", lambda _sid, **_kwargs: source)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *args, **kwargs: None)
+    monkeypatch.setattr(routes, "j", lambda _handler, data, **_kwargs: captured.setdefault("data", data) or True)
+    monkeypatch.setattr(routes, "bad", lambda _handler, message, *args, **kwargs: captured.setdefault("error", message) or True)
+
+    routes.handle_post(handler, __import__("urllib.parse").parse.urlparse("/api/session/branch"))
+
+    assert "error" not in captured
+    branched = models.Session.load(captured["data"]["session_id"])
+    assert [row["id"] for row in branched.messages] == ["old", "new"]
+
+
+def test_anchor_hydration_treats_windowed_tool_index_as_visible_relative():
+    from api import routes
+
+    messages = [{"role": "assistant", "content": "answer"}]
+    records = {
+        "scene": {
+            "message_index": 2,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[0]),
+            "stream_id": "anchor-offset-6610",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "answer",
+                "activity_rows": [],
+            },
+        }
+    }
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        messages,
+        records,
+        message_offset=2,
+        tool_calls=[{
+            "assistant_msg_idx": 0,
+            "tid": "offset-call",
+            "name": "terminal",
+            "snippet": "done",
+        }],
+    )
+    tool_rows = [
+        row for row in hydrated[0]["_anchor_activity_scene"]["activity_rows"]
+        if row.get("role") == "tool"
+    ]
+    assert [row.get("tool_call_id") for row in tool_rows] == ["offset-call"]
+
+
 class _FakeSession:
     def __init__(self, messages):
         self.session_id = "tail_payload_001"
