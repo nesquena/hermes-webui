@@ -267,3 +267,91 @@ def test_cached_session_refresh_holds_runtime_lock_through_cache_insert(monkeypa
 
     assert models.get_session(sid) is refreshed
     assert observed == [True]
+
+
+def test_sidecar_delete_primitives_report_unlink_failure_and_retry(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    sid = "unlink_failure_001"
+    draft_store.save_draft(sid, {"text": "stale draft", "files": []})
+    session_runtime_state.save_runtime_state(
+        sid, {"active_stream_id": "stale-stream", "pending_user_message": "stale pending"}
+    )
+    draft_path = draft_store.draft_path(sid)
+    runtime_path = session_runtime_state.runtime_state_path(sid)
+    real_unlink = type(draft_path).unlink
+    failed = {"draft": True, "runtime": True}
+
+    def fail_selected_unlink(path, *args, **kwargs):
+        if path == draft_path and failed["draft"]:
+            raise OSError("draft unlink injected failure")
+        if path == runtime_path and failed["runtime"]:
+            raise OSError("runtime unlink injected failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(draft_path), "unlink", fail_selected_unlink)
+    assert draft_store.delete_draft(sid) is False
+    assert session_runtime_state.clear_runtime_state(sid) is False
+    assert draft_path.exists()
+    assert runtime_path.exists()
+
+    failed["draft"] = False
+    failed["runtime"] = False
+    assert draft_store.delete_draft(sid) is True
+    assert session_runtime_state.clear_runtime_state(sid) is True
+    assert not draft_path.exists()
+    assert not runtime_path.exists()
+
+
+def test_sidecar_cleanup_failure_is_retryable_and_blocks_stale_reuse(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    sid = "sidecar_retry_001"
+    draft_store.save_draft(sid, {"text": "old draft", "files": []})
+    session_runtime_state.save_runtime_state(
+        sid, {"active_stream_id": "old-stream", "pending_user_message": "old pending"}
+    )
+    draft_path = draft_store.draft_path(sid)
+    real_unlink = type(draft_path).unlink
+    fail_draft = {"value": True}
+
+    def fail_draft_unlink(path, *args, **kwargs):
+        if path == draft_path and fail_draft["value"]:
+            raise OSError("draft unlink injected failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(draft_path), "unlink", fail_draft_unlink)
+    assert models._delete_webui_sidecars_for_session(sid) is False
+    assert sid in models._load_webui_deleted_session_tombstone()
+    assert draft_path.exists()
+
+    fail_draft["value"] = False
+    assert models._delete_webui_sidecars_for_session(sid) is True
+    assert not draft_path.exists()
+    assert not session_runtime_state.runtime_state_path(sid).exists()
+
+
+def test_tombstoned_reused_session_does_not_overlay_old_sidecars(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    sid = "reused_sidecar_001"
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "new owner"}],
+    )
+    session.save()
+    draft_store.save_draft(sid, {"text": "old owner draft", "files": []})
+    session_runtime_state.save_runtime_state(
+        sid, {"active_stream_id": "old-stream", "pending_user_message": "old pending"}
+    )
+    models._record_webui_deleted_session_tombstone(sid)
+
+    loaded = models.Session.load(sid)
+    assert loaded is not None
+    assert loaded.composer_draft == {"text": "", "files": []}
+    assert loaded.active_stream_id is None
+    assert loaded.pending_user_message is None

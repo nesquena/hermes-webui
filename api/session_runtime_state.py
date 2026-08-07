@@ -46,6 +46,15 @@ def _is_safe_session_id(session_id: object) -> bool:
     return models.is_safe_session_id(session_id)
 
 
+def _sidecar_is_retired(session_id: str) -> bool:
+    try:
+        from api import models
+
+        return session_id in models._load_webui_deleted_session_tombstone()
+    except Exception:
+        return False
+
+
 def runtime_state_path(session_id: str) -> Path:
     if not _is_safe_session_id(session_id):
         raise ValueError(f"Unsafe session_id {session_id!r}")
@@ -87,6 +96,8 @@ def _normalize_state(state: object) -> dict[str, Any]:
 
 
 def load_runtime_state(session_id: str) -> dict[str, Any]:
+    if _sidecar_is_retired(session_id):
+        return {}
     with runtime_state_lock(session_id):
         path = runtime_state_path(session_id)
         try:
@@ -124,13 +135,15 @@ def save_runtime_state(session_id: str, state: object) -> dict[str, Any]:
         return copy.deepcopy(payload)
 
 
-def clear_runtime_state(session_id: str) -> None:
+def clear_runtime_state(session_id: str) -> bool:
+    """Remove runtime state, returning False when unlink fails."""
     with runtime_state_lock(session_id):
         path = runtime_state_path(session_id)
         try:
             path.unlink(missing_ok=True)
         except OSError:
-            logger.debug("Failed to clear runtime state sidecar for %s", session_id, exc_info=True)
+            logger.warning("Failed to clear runtime state sidecar for %s", session_id, exc_info=True)
+            return False
         # A load can have overlaid the sidecar immediately before terminal
         # cleanup. Clear only transient fields on any cached projection so the
         # cache cannot retain a deleted pending turn.
@@ -147,6 +160,7 @@ def clear_runtime_state(session_id: str) -> None:
                     cached.pending_user_source = None
         except Exception:
             logger.debug("Failed to invalidate cached runtime state for %s", session_id, exc_info=True)
+    return True
 
 
 def runtime_state_from_session(session) -> dict[str, Any]:

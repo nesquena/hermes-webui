@@ -69,8 +69,19 @@ def draft_lock(session_id: str) -> Iterator[None]:
         yield
 
 
+def _sidecar_is_retired(session_id: str) -> bool:
+    try:
+        from api import models
+
+        return session_id in models._load_webui_deleted_session_tombstone()
+    except Exception:
+        return False
+
+
 def load_draft(session_id: str, *, fallback: object = None) -> dict[str, Any]:
     """Load a draft sidecar, falling back to the legacy embedded value."""
+    if _sidecar_is_retired(session_id):
+        return _normalize_draft(fallback)
     path = draft_path(session_id)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -108,10 +119,12 @@ def save_draft(session_id: str, draft: object) -> dict[str, Any]:
     return copy.deepcopy(payload)
 
 
-def delete_draft(session_id: str) -> None:
-    """Remove a draft sidecar when its owning session is deleted."""
+def delete_draft(session_id: str) -> bool:
+    """Remove a draft sidecar, returning False when unlink fails."""
     with draft_lock(session_id):
         try:
             draft_path(session_id).unlink(missing_ok=True)
         except OSError:
-            logger.debug("Failed to delete composer draft sidecar for %s", session_id, exc_info=True)
+            logger.warning("Failed to delete composer draft sidecar for %s", session_id, exc_info=True)
+            return False
+    return True

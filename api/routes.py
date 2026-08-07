@@ -14964,13 +14964,11 @@ def handle_post(handler, parsed) -> bool:
                     p.relative_to(SESSION_DIR.resolve())
                 except Exception:
                     return bad(handler, "Invalid session_id", 400)
-                sidecar_deleted = False
-                _delete_session_sidecars(sid)
+                sidecar_cleanup_failed = not _delete_session_sidecars(sid)
                 try:
                     p.unlink(missing_ok=True)
                 except Exception:
                     logger.debug("Failed to unlink session file %s", p)
-                sidecar_deleted = not p.exists()
                 try:
                     prune_session_from_index(sid)
                 except Exception:
@@ -14979,7 +14977,7 @@ def handle_post(handler, parsed) -> bool:
                     p.with_suffix('.json.bak').unlink(missing_ok=True)
                 except Exception:
                     logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-                if sidecar_deleted and not is_messaging_session:
+                if not p.exists() and not is_messaging_session:
                     try:
                         _record_webui_deleted_session_tombstone(sid)
                     except Exception:
@@ -15037,6 +15035,8 @@ def handle_post(handler, parsed) -> bool:
                 from api.models import delete_cli_session
 
                 state_db_cleanup_failed = not delete_cli_session(sid)
+                if not state_db_cleanup_failed:
+                    sidecar_cleanup_failed = False
             except Exception:
                 state_db_cleanup_failed = True
                 logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
@@ -15046,6 +15046,7 @@ def handle_post(handler, parsed) -> bool:
             {
                 "ok": True,
                 "state_db_cleanup_failed": state_db_cleanup_failed,
+                "sidecar_cleanup_failed": sidecar_cleanup_failed,
                 **worktree_retained,
             },
         )
@@ -21925,20 +21926,28 @@ def _session_owner_present(session_id: str) -> bool:
     return (session_dir / f"{session_id}.json").exists()
 
 
-def _delete_session_sidecars(session_id: str) -> None:
+def _delete_session_sidecars(session_id: str) -> bool:
     """Remove transient sidecars before deleting the owning transcript."""
     try:
-        from api.draft_store import delete_draft
+        from api import draft_store, session_runtime_state
 
-        delete_draft(session_id)
+        success = (
+            draft_store.delete_draft(session_id)
+            and session_runtime_state.clear_runtime_state(session_id)
+        )
     except Exception:
-        logger.debug("Failed to delete composer draft sidecar for %s", session_id, exc_info=True)
+        logger.warning("Failed to delete sidecars for %s", session_id, exc_info=True)
+        success = False
     try:
-        from api.session_runtime_state import clear_runtime_state
-
-        clear_runtime_state(session_id)
+        from api.models import _record_webui_deleted_session_tombstone
+        if success:
+            _record_webui_deleted_session_tombstone(session_id)
+        else:
+            _record_webui_deleted_session_tombstone(session_id)
     except Exception:
-        logger.debug("Failed to delete runtime state sidecar for %s", session_id, exc_info=True)
+        logger.warning("Failed to update sidecar cleanup tombstone for %s", session_id, exc_info=True)
+        success = False
+    return success
 
 
 def _handle_session_compression_recovery_start(handler, body):

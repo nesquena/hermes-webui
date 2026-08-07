@@ -1187,6 +1187,8 @@ def model_explicit_pick_signature(model, model_provider) -> str:
 
 def _load_composer_draft_sidecar(session_id: str, fallback: object = None) -> dict:
     """Overlay the lightweight draft sidecar over legacy embedded metadata."""
+    if session_id in _load_webui_deleted_session_tombstone():
+        return {"text": "", "files": []}
     try:
         from api.draft_store import load_draft
 
@@ -1198,6 +1200,8 @@ def _load_composer_draft_sidecar(session_id: str, fallback: object = None) -> di
 
 def _load_runtime_state_sidecar(session_id: str) -> dict:
     """Return lightweight pending/run metadata for a session, if present."""
+    if session_id in _load_webui_deleted_session_tombstone():
+        return {}
     try:
         from api.session_runtime_state import load_runtime_state
 
@@ -9506,27 +9510,45 @@ def _cleanup_manifest_thread_lock(hermes_home):
         return lock
 
 
-def _delete_webui_sidecars_for_session(session_id: str) -> None:
-    """Remove WebUI-owned transient state for an Agent/CLI-deleted session."""
+def _delete_webui_sidecars_for_session(session_id: str) -> bool:
+    """Remove WebUI sidecars and retain failed IDs for retry."""
+    success = False
     try:
+        from api.draft_store import delete_draft
         from api.session_runtime_state import clear_runtime_state, runtime_state_lock
 
         with runtime_state_lock(session_id):
             with LOCK:
                 SESSIONS.pop(session_id, None)
+            # The tombstone is both the durable retry record and the loader
+            # guard that prevents stale state from attaching to a reused ID.
             _record_webui_deleted_session_tombstone(session_id)
-            try:
-                from api.draft_store import delete_draft
-
-                delete_draft(session_id)
-            except Exception:
-                logger.debug("Failed to delete WebUI draft sidecar for %s", session_id, exc_info=True)
-            try:
-                clear_runtime_state(session_id)
-            except Exception:
-                logger.debug("Failed to delete WebUI runtime sidecar for %s", session_id, exc_info=True)
+            success = delete_draft(session_id) and clear_runtime_state(session_id)
     except Exception:
-        logger.debug("Failed to coordinate WebUI sidecar cleanup for %s", session_id, exc_info=True)
+        logger.warning("Failed to coordinate WebUI sidecar cleanup for %s", session_id, exc_info=True)
+    if success:
+        # Keep the tombstone until the owning transcript artifact is removed.
+        _record_webui_deleted_session_tombstone(session_id)
+    else:
+        _record_webui_deleted_session_tombstone(session_id)
+    return success
+
+
+def _retry_webui_deleted_sidecars() -> bool:
+    """Retry tombstoned sidecars only while the retired owner is absent."""
+    complete = True
+    for session_id in tuple(_load_webui_deleted_session_tombstone()):
+        with LOCK:
+            cached_owner = session_id in SESSIONS
+        if cached_owner or (SESSION_DIR / f"{session_id}.json").exists():
+            # Never let retry cleanup delete a newly recreated owner.
+            complete = False
+            continue
+        if not _delete_webui_sidecars_for_session(session_id):
+            complete = False
+        else:
+            _clear_webui_deleted_session_tombstone(session_id)
+    return complete
 
 
 def delete_cli_session(sid) -> bool:
@@ -9567,6 +9589,7 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
     # removals get another chance even when the current session ID
     # is unrelated.
     stale_cleanup_complete = _process_stale_cleanup_manifests(hermes_home)
+    sidecar_cleanup_complete = _retry_webui_deleted_sidecars()
 
     db_path = hermes_home / 'state.db'
     if not db_path.exists():
@@ -9836,7 +9859,8 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
 
             conn.commit()
             for removed_id in all_removed_ids:
-                _delete_webui_sidecars_for_session(str(removed_id))
+                if not _delete_webui_sidecars_for_session(str(removed_id)):
+                    sidecar_cleanup_complete = False
 
             # Post-commit artifact cleanup.  Scan ALL outstanding manifests
             # (including the one just written) and retry every pending ID.
@@ -9941,7 +9965,15 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
                 else:
                     mp.unlink(missing_ok=True)
 
-            return stale_cleanup_complete and not artifact_cleanup_failed
+            cleanup_clean = (
+                stale_cleanup_complete
+                and sidecar_cleanup_complete
+                and not artifact_cleanup_failed
+            )
+            if cleanup_clean:
+                for removed_id in all_removed_ids:
+                    _clear_webui_deleted_session_tombstone(str(removed_id))
+            return cleanup_clean
     except Exception:
         logger.warning("Failed to delete CLI session %s from state.db", sid, exc_info=True)
         return False
