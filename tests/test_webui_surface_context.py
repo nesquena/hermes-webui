@@ -4,6 +4,7 @@ from api.streaming import (
     _normalize_prefill_messages_before_user_turn,
     _prefill_messages_with_webui_context,
     _webui_ephemeral_system_prompt,
+    _webui_project_surface_context,
 )
 
 
@@ -56,6 +57,59 @@ def test_webui_ephemeral_prompt_skips_empty_surface_fields():
     assert "Session ID:" not in prompt
     assert "Profile:" not in prompt
     assert "Workspace:" not in prompt
+
+
+def test_webui_ephemeral_prompt_includes_passive_project_metadata():
+    prompt = _webui_ephemeral_system_prompt(
+        None,
+        surface_context={
+            "source": "webui",
+            "project_id": "proj_abc123",
+            "project_name": "Initial setup",
+        },
+    )
+
+    assert "Project ID: proj_abc123" in prompt
+    assert "Project name: Initial setup" in prompt
+    assert "dossier" not in prompt.lower()
+    assert "assign the chat" not in prompt.lower()
+
+
+def test_webui_project_surface_context_resolves_assigned_project(monkeypatch):
+    import api.streaming as streaming
+
+    class Session:
+        project_id = "proj_abc123"
+
+    monkeypatch.setattr(
+        streaming,
+        "load_projects",
+        lambda: [{"project_id": "proj_abc123", "name": "Initial setup"}],
+    )
+
+    assert _webui_project_surface_context(Session()) == {
+        "project_id": "proj_abc123",
+        "project_name": "Initial setup",
+    }
+
+
+def test_webui_project_surface_context_omits_unassigned_project():
+    class Session:
+        project_id = None
+
+    assert _webui_project_surface_context(Session()) == {}
+
+
+def test_all_webui_chat_paths_forward_project_surface_context():
+    from pathlib import Path
+
+    streaming = Path("api/streaming.py").read_text(encoding="utf-8")
+    gateway = Path("api/gateway_chat.py").read_text(encoding="utf-8")
+    routes = Path("api/routes.py").read_text(encoding="utf-8")
+
+    assert "**_webui_project_surface_context(s)" in streaming
+    assert "**_webui_project_surface_context(s)" in gateway
+    assert "project_context = _webui_project_surface_context(s)" in routes
 
 
 def test_ephemeral_prompt_avoids_platform_info_when_no_config():
