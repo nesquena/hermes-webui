@@ -365,6 +365,86 @@ def test_initial_missing_db_does_not_publish_an_empty_snapshot(tmp_path):
     assert watcher._last_full_projection_at is None
 
 
+def test_initial_projection_failure_does_not_publish_empty_and_retries(
+    tmp_path, monkeypatch
+):
+    gw = importlib.import_module("api.gateway_watcher")
+    db, conn = _make_db(tmp_path)
+    conn.close()
+    attempts = []
+
+    def fail_once_then_project_empty(*args, **kwargs):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("projection failed")
+        return []
+
+    monkeypatch.setattr(
+        gw, "read_importable_agent_session_rows", fail_once_then_project_empty
+    )
+    watcher = gw.GatewayWatcher(state_db_path=db)
+    subscriber = watcher.subscribe()
+
+    assert watcher._poll_once(now=1.0) is False
+    assert attempts == [True]
+    assert subscriber.empty()
+    assert watcher._last_sessions == []
+    assert watcher._last_hash == ""
+    assert watcher._last_cheap_fp == ""
+    assert watcher._last_full_projection_at is None
+
+    assert watcher._poll_once(now=2.0) is True
+    assert attempts == [True, True]
+    assert subscriber.get_nowait()["sessions"] == []
+    assert watcher._last_full_projection_at == 2.0
+
+
+def test_projection_failure_preserves_populated_state_and_parity_retry(
+    tmp_path, monkeypatch
+):
+    gw = importlib.import_module("api.gateway_watcher")
+    db, conn = _make_db(tmp_path)
+    _add_session(conn, "tg1", "telegram", mc=2)
+
+    watcher = gw.GatewayWatcher(state_db_path=db)
+    subscriber = watcher.subscribe()
+    assert watcher._poll_once(now=1.0) is True
+    initial_event = subscriber.get_nowait()
+    assert [row["session_id"] for row in initial_event["sessions"]] == ["tg1"]
+    initial_sessions = watcher._last_sessions
+    initial_hash = watcher._last_hash
+    initial_fingerprint = watcher._last_cheap_fp
+    real_projection = gw.read_importable_agent_session_rows
+    attempts = []
+
+    def fail_once_then_project(*args, **kwargs):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("projection failed")
+        return real_projection(*args, **kwargs)
+
+    monkeypatch.setattr(
+        gw, "read_importable_agent_session_rows", fail_once_then_project
+    )
+    at_deadline = 1.0 + watcher.PROJECTION_PARITY_INTERVAL
+
+    assert watcher._poll_once(now=at_deadline) is False
+    assert attempts == [True]
+    assert subscriber.empty()
+    assert watcher._last_sessions is initial_sessions
+    assert watcher._last_hash == initial_hash
+    assert watcher._last_cheap_fp == initial_fingerprint
+    assert watcher._last_full_projection_at == 1.0
+
+    assert watcher._poll_once(now=at_deadline + 1.0) is True
+    assert attempts == [True, True]
+    assert subscriber.empty()
+    assert watcher._last_sessions is initial_sessions
+    assert watcher._last_hash == initial_hash
+    assert watcher._last_cheap_fp == initial_fingerprint
+    assert watcher._last_full_projection_at == at_deadline + 1.0
+
+
 def test_cheap_fingerprint_detects_lineage_only_change(tmp_path):
     """Lineage/visibility fields the projection uses for collapse (parent_session_id,
     end_reason, ended_at) must be part of the fingerprint."""
