@@ -715,6 +715,96 @@ def test_msg_limit_compression_child_fast_path_preserves_pagination_cursor(
     ]
 
 
+def test_msg_limit_compression_child_fast_path_filters_tool_calls_in_child_coordinates(
+    monkeypatch,
+    tmp_path,
+):
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "parent_compression_snapshot_tool_calls"
+    child_sid = "continuation_child_tool_calls"
+    parent_messages = [
+        {"role": "assistant", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(120)
+    ]
+    child_messages = [
+        {"role": "assistant", "content": f"child {idx}", "timestamp": 300.0 + idx}
+        for idx in range(500)
+    ]
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 200.0
+    parent.save(touch_updated_at=False)
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        tool_calls=[
+            {"name": "older-child-tool", "assistant_msg_idx": 100},
+            {"name": "visible-older-child-tool", "assistant_msg_idx": 445},
+            {"name": "visible-child-tool", "assistant_msg_idx": 475},
+            {
+                "name": "global-older-window-decoy",
+                "assistant_msg_idx": len(parent_messages) + 445,
+            },
+            {
+                "name": "global-window-decoy",
+                "assistant_msg_idx": len(parent_messages) + 475,
+            },
+        ],
+        anchor_activity_scenes={
+            "child-local-scene": {
+                "version": "anchor_activity_scene_record_v1",
+                "message_index": 475,
+                "message_ref": "child-local-scene",
+                "stream_id": "stream-child-local-scene",
+                "scene": {
+                    "version": "activity_scene_v1",
+                    "mode": "compact_worklog",
+                    "activity_rows": [{"row_id": "tool-visible", "role": "tool"}],
+                    "final_answer": "child 475",
+                },
+                "updated_at": 900.0,
+            }
+        },
+        parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=_disjoint_parent_boundary(parent, child_messages),
+        created_at=300.0,
+        updated_at=900.0,
+    )
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_messages)
+
+    handler = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    payload = handler.response_json["session"]
+    assert payload["_messages_offset"] == len(parent_messages) + 470
+    assert payload["tool_calls"] == [
+        {"name": "visible-child-tool", "assistant_msg_idx": 5}
+    ]
+    assert payload["messages"][5]["_anchor_activity_scene"]["final_answer"] == "child 475"
+
+    older = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0"
+        f"&msg_limit=30&msg_before={payload['_messages_offset']}"
+    )
+    routes.handle_get(older, urlparse(older.path))
+
+    assert older.status == 200
+    older_payload = older.response_json["session"]
+    assert older_payload["_messages_offset"] == len(parent_messages) + 440
+    assert older_payload["tool_calls"] == [
+        {"name": "visible-older-child-tool", "assistant_msg_idx": 5}
+    ]
+
+
 def test_msg_limit_partial_parent_suffix_replay_falls_back_with_contiguous_pagination(
     monkeypatch,
     tmp_path,
