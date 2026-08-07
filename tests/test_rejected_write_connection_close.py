@@ -54,3 +54,21 @@ def test_token_rejected_csrf_closes_connection(monkeypatch):
 
     assert routes._check_csrf(handler) is False
     assert handler.close_connection is True
+
+
+def test_sidecar_provenance_rejected_closes_connection(monkeypatch):
+    """Sidecar proxy provenance rejection also runs before read_body()."""
+    import api.routes as routes
+
+    handler = SimpleNamespace(
+        path="/api/extensions/ext1/sidecar/proxy",
+        command="POST",
+        close_connection=False,
+    )
+    monkeypatch.setattr(routes, "_match_extension_sidecar_proxy_path", lambda _path: ("ext1", "/proxy"))
+    monkeypatch.setattr(routes, "_check_same_origin_browser_request", lambda _handler, **_: False)
+    monkeypatch.setattr(routes, "j", lambda _handler, _payload, status=200: None)
+
+    routes._handle_extension_sidecar_proxy(handler, SimpleNamespace(path=handler.path, query=""), "POST")
+
+    assert handler.close_connection is True

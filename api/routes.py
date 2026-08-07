@@ -5881,6 +5881,10 @@ def _handle_extension_sidecar_proxy(
     # DELETE fell through the CSRF compatibility path that intentionally admits
     # non-browser clients, giving unsafe methods weaker provenance than GET.
     if not _check_same_origin_browser_request(handler, require_provenance=True):
+        # Provenance rejection runs before read_body(); close rather than
+        # reusing an HTTP/1.1 connection whose unread body would corrupt the
+        # next request (same class as _check_csrf close-on-reject).
+        handler.close_connection = True
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     try:
         request_body = _read_body_bytes(handler) if read_request_body else None
