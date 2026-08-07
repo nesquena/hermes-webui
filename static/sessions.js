@@ -1409,12 +1409,14 @@ async function newSession(flash, options={}){
     _messagesTruncated=false;
     _oldestIdx=0;
     clearLiveToolCards();
-    // Explicit profile switch wins, then the current conversation, then the profile default.
+    // Project-bound workspace (quick-create with bindings) wins first,
+    // then explicit profile-switch, then current conversation, then profile default.
     // Provenance lets the server recover only a deleted inherited path; explicit paths stay strict.
     const switchWs=S._profileSwitchWorkspace;
     S._profileSwitchWorkspace=null;
     const sessionWs=(!switchWs&&S.session)?S.session.workspace:null;
-    const inheritWs=switchWs||sessionWs||(S._profileDefaultWorkspace||null);
+    const boundWs=(options&&options.workspace)||null;
+    const inheritWs=boundWs||switchWs||sessionWs||(S._profileDefaultWorkspace||null);
     const reqBody={
       workspace:inheritWs,
       profile:S.activeProfile||'default',
@@ -1439,11 +1441,17 @@ async function newSession(flash, options={}){
     const explicitModelOverride=(typeof _readEmptyComposerModelOverride==='function')
       ? _readEmptyComposerModelOverride()
       : null;
+    // Project-bound model (quick-create with bindings) wins over everything
+    // else — the project pins the model for sessions opened from its + button.
+    const boundModel=(options&&options.model)||null;
+    const boundProvider=(options&&options.model_provider)||null;
     const hasLoadedSession=!!(S.session&&S.session.session_id);
     let newModelState=null;
     let consumedExplicitModelOverride=false;
     let usingConfiguredDefault=false;
-    if(!hasLoadedSession&&explicitModelOverride&&explicitModelOverride.model){
+    if(boundModel){
+      newModelState={model:boundModel, model_provider:boundProvider||null};
+    }else if(!hasLoadedSession&&explicitModelOverride&&explicitModelOverride.model){
       newModelState=explicitModelOverride;
       consumedExplicitModelOverride=true;
     }else if(window._defaultModel){
@@ -1497,9 +1505,11 @@ async function newSession(flash, options={}){
         if(s.startsWith('google')||s.startsWith('gemini'))return 'google';return s;};
       const _familyMismatch=_familyProvider&&_fallbackProvider&&_normProv(_fallbackProvider)!==_familyProvider;
       const _fallbackIsNamedCustom=String(_fallbackProvider||'').toLowerCase().startsWith('custom:');
-      reqBody.model_provider=newModelState.model_provider
-        ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
-        ||null;
+      reqBody.model_provider=boundModel
+        ? (boundProvider||null)  // project-bound model: pin its provider, or null → server resolves
+        : (newModelState.model_provider
+          ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
+          ||null);
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
@@ -1510,6 +1520,23 @@ async function newSession(flash, options={}){
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
+    // Project-bound reasoning effort: apply after the session exists so the
+    // effort chip / agent config reflects the project's pinned level. The
+    // binding's own model+provider are used as the effort context (falling
+    // back to the session's model) so the effort is attached to the right
+    // model family rather than the currently-selected one.
+    const boundEffort=(options&&options.reasoning_effort)||null;
+    if(boundEffort&&typeof api==='function'){
+      const effModel=boundModel||(data.session&&data.session.model)||null;
+      const effProvider=boundProvider||(data.session&&data.session.model_provider)||null;
+      const effBody={effort:boundEffort};
+      if(effModel) effBody.model=effModel;
+      if(effProvider) effBody.provider=effProvider;
+      try{
+        const st=await api('/api/reasoning',{method:'POST',body:JSON.stringify(effBody)});
+        if(typeof _applyReasoningChip==='function') _applyReasoningChip((st&&st.reasoning_effort)||boundEffort, st||{});
+      }catch(_){ /* effort is a preference; a failed apply must not fail the session */ }
+    }
     if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
@@ -7614,6 +7641,21 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
   return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows);
 }
 
+function _projectBindingsForNewSession(project){
+  // Assemble the newSession options that carry a project's pinned context:
+  // workspace / model / model_provider / reasoning_effort. Only fields that
+  // are actually bound are forwarded — an unbound project creates sessions
+  // with the usual defaults.
+  const o={};
+  if(project){
+    if(project.workspace) o.workspace=project.workspace;
+    if(project.model) o.model=project.model;
+    if(project.model_provider) o.model_provider=project.model_provider;
+    if(project.reasoning_effort) o.reasoning_effort=project.reasoning_effort;
+  }
+  return o;
+}
+
 function _attachProjectQuickCreateButton(chip, project){
   const btn=document.createElement('button');
   btn.type='button';
@@ -7634,10 +7676,11 @@ function _attachProjectQuickCreateButton(chip, project){
   };
   btn.onclick=async(e)=>{
     stop(e);
+    const bindings=_projectBindingsForNewSession(project);
     if(_newSessionInFlight){
       // The initiating tap already owns the filter change and rollback path.
       try{
-        await newSession(false,{project_id:project.project_id});
+        await newSession(false,Object.assign({project_id:project.project_id},bindings));
       }catch(_){
         // The initiating tap already owns the visible failure path.
       }
@@ -7646,7 +7689,7 @@ function _attachProjectQuickCreateButton(chip, project){
     const previousProject=(typeof _activeProject!=='undefined')?_activeProject:NO_PROJECT_FILTER;
     _setActiveProjectFilter(project.project_id);
     try{
-      await newSession(false,{project_id:project.project_id});
+      await newSession(false,Object.assign({project_id:project.project_id},bindings));
       // newSession() does not repaint the sidebar (callers own that — see the
       // newSession contract). Repaint from the post-create state so the new
       // project-assigned session appears deterministically.
@@ -9382,6 +9425,26 @@ function _startProjectCreate(bar, addBtn){
   setTimeout(()=>inp.focus(),10);
 }
 
+async function _saveProjectBindings(proj, fields){
+  // Persist one or more binding fields via /api/projects/bind (null clears a
+  // field), then refresh the in-memory project cache + sidebar so chips and
+  // future quick-creates see the new bindings immediately.
+  const body=Object.assign({project_id:proj.project_id}, fields||{});
+  try{
+    const res=await api('/api/projects/bind',{method:'POST',body:JSON.stringify(body)});
+    const updated=res&&res.project;
+    if(updated&&Array.isArray(_allProjects)){
+      const idx=_allProjects.findIndex(p=>p.project_id===proj.project_id);
+      if(idx>=0) _allProjects[idx]=updated;
+    }
+    try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
+    try{ if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false}); }catch(_){}
+    if(typeof showToast==='function') showToast('Project bindings updated');
+  }catch(e){
+    if(typeof showToast==='function') showToast('Binding update failed: '+(e&&e.message||e));
+  }
+}
+
 function _startProjectRename(proj, chip){
   const inp=document.createElement('input');
   inp.className='project-create-input';
@@ -9460,6 +9523,129 @@ function _showProjectContextMenu(e, proj, chip){
     colorRow.appendChild(dot);
   });
   menu.appendChild(colorRow);
+
+  // Divider before bindings
+  const bindSep=document.createElement('hr');
+  bindSep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+  menu.appendChild(bindSep);
+
+  // ── Project bindings: workspace / model / reasoning effort ──────────────
+  // Each binding pins the project's context so the quick-create (+) button
+  // opens a new session pre-configured with it. Clicking a bound item re-binds
+  // it (prompt / inline picker); the Unbind items below clear them.
+  const _bindItem=(label, current)=>{
+    const item=document.createElement('div');
+    item.textContent=current?`${label}: ${current}`:label;
+    item.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+    if(current){
+      item.style.opacity='0.9';
+      item.title=current;
+    }
+    item.onmouseenter=()=>item.style.background='var(--hover-bg)';
+    item.onmouseleave=()=>item.style.background='';
+    return item;
+  };
+
+  // Bind workspace — prompt for a path (pre-filled with the current binding
+  // or the active session's workspace as a convenient default).
+  const wsItem=_bindItem('Bind workspace', proj.workspace);
+  wsItem.onclick=async()=>{
+    menu.remove();
+    const current=proj.workspace||(S&&S.session&&S.session.workspace)||'';
+    const input=await showPromptDialog({
+      title:'Bind workspace',
+      message:'Workspace path for this project (sessions created from the + button will start here):',
+      value:current,
+      placeholder:'D:\\projects\\…',
+      confirmLabel:'Bind',
+    });
+    if(input===null||input===undefined) return;
+    await _saveProjectBindings(proj,{workspace:String(input).trim()});
+  };
+  menu.appendChild(wsItem);
+
+  // Bind model — prompt for a model ID (optionally provider/model or
+  // @provider:model; the provider is extracted when present).
+  const modelItem=_bindItem('Bind model', proj.model);
+  modelItem.onclick=async()=>{
+    menu.remove();
+    const input=await showPromptDialog({
+      title:'Bind model',
+      message:'Model ID for this project (e.g. deepseek-v4-flash, or provider/model):',
+      value:proj.model||'',
+      placeholder:'model or provider/model',
+      confirmLabel:'Bind',
+    });
+    if(input===null||input===undefined) return;
+    const raw=String(input).trim();
+    if(!raw) return;
+    const fields={model:raw};
+    const atIdx=raw.indexOf('@')===0?1:-1;
+    const slashIdx=raw.indexOf('/');
+    if(slashIdx>0&&(atIdx<0||slashIdx>atIdx)){
+      // provider/model split — bind both so the fast path can route correctly.
+      fields.model_provider=raw.slice(atIdx>=0?atIdx:0,slashIdx);
+      fields.model=raw.slice(slashIdx+1);
+    }
+    await _saveProjectBindings(proj,fields);
+  };
+  menu.appendChild(modelItem);
+
+  // Bind reasoning effort — inline picker of the same effort ladder the
+  // composer reasoning chip uses; "" (Default) clears the binding.
+  const effortLabel=(proj.reasoning_effort?proj.reasoning_effort:'');
+  const effortItem=_bindItem('Bind reasoning effort', effortLabel||null);
+  effortItem.onclick=()=>{
+    menu.remove();
+    const em=document.createElement('div');
+    em.className='project-ctx-menu';
+    em.style.cssText=menu.style.cssText;
+    em.style.left=e.clientX+'px';
+    em.style.top=e.clientY+'px';
+    const title=document.createElement('div');
+    title.textContent='Reasoning effort for this project';
+    title.style.cssText='padding:5px 14px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;';
+    em.appendChild(title);
+    const efforts=['','minimal','low','medium','high','xhigh','max'];
+    efforts.forEach(eff=>{
+      const row=document.createElement('div');
+      row.textContent=eff?eff:'Default (clear binding)';
+      row.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+      if(eff===proj.reasoning_effort) row.style.background='var(--hover-bg)';
+      row.onmouseenter=()=>row.style.background='var(--hover-bg)';
+      row.onmouseleave=()=>row.style.background=eff===proj.reasoning_effort?'var(--hover-bg)':'';
+      row.onclick=()=>{
+        em.remove();
+        _saveProjectBindings(proj,{reasoning_effort:eff});
+      };
+      em.appendChild(row);
+    });
+    document.body.appendChild(em);
+    setTimeout(()=>document.addEventListener('click',()=>em.remove(),{once:true}),0);
+  };
+  menu.appendChild(effortItem);
+
+  // Unbind items — only shown for fields that are currently bound.
+  const _unbindItem=(label,key)=>{
+    const item=document.createElement('div');
+    item.textContent='Unbind '+label;
+    item.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--muted);';
+    item.onmouseenter=()=>item.style.background='var(--hover-bg)';
+    item.onmouseleave=()=>item.style.background='';
+    item.onclick=()=>{menu.remove();_saveProjectBindings(proj,{[key]:null});};
+    return item;
+  };
+  const hasWs=!!proj.workspace;
+  const hasModel=!!proj.model;
+  const hasEffort=!!proj.reasoning_effort;
+  if(hasWs||hasModel||hasEffort){
+    const unbindSep=document.createElement('hr');
+    unbindSep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+    menu.appendChild(unbindSep);
+    if(hasWs) menu.appendChild(_unbindItem('workspace','workspace'));
+    if(hasModel) menu.appendChild(_unbindItem('model','model'));
+    if(hasEffort) menu.appendChild(_unbindItem('reasoning effort','reasoning_effort'));
+  }
 
   // Divider + Delete
   const sep=document.createElement('hr');

@@ -16547,6 +16547,85 @@ def handle_post(handler, parsed) -> bool:
         save_projects(projects)
         return j(handler, {"ok": True, "project": proj})
 
+    if parsed.path == "/api/projects/bind":
+        # Project bindings: attach a workspace / model / reasoning effort to a
+        # project so the quick-create (+) button opens a new session already
+        # configured for that project's context. Each binding field is
+        # OPTIONAL in the body; passing null or '' unbinds that field.
+        try:
+            require(body, "project_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+
+        projects = load_projects()
+        proj = next(
+            (p for p in projects if p["project_id"] == body["project_id"]), None
+        )
+        if not proj:
+            return bad(handler, "Project not found", 404)
+        # #1614: a project can only be bound by the profile that owns it.
+        active_profile = get_active_profile_name()
+        if not _profiles_match(proj.get("profile"), active_profile):
+            return bad(handler, "Project not found", 404)
+
+        # workspace: null/'' clears the binding; a non-empty value must pass
+        # the same trusted-path validation as /api/session/new so a project
+        # can never pin a session to an untrusted or non-existent directory.
+        # The path is ALSO auto-registered in the saved workspace list so an
+        # admin-style path outside home (e.g. D:\projects\...) can be bound in
+        # one step instead of requiring a separate add-workspace round-trip.
+        if "workspace" in body:
+            ws = body.get("workspace")
+            if ws is None or str(ws).strip() == "":
+                proj.pop("workspace", None)
+            else:
+                ws_str = str(ws).strip()
+                try:
+                    registered = validate_workspace_to_add(ws_str)
+                    wss = load_workspaces()
+                    if not any(w["path"] == str(registered) for w in wss):
+                        wss.append({"path": str(registered), "name": registered.name})
+                        save_workspaces(wss)
+                    proj["workspace"] = str(
+                        resolve_trusted_workspace(registered)
+                    )
+                except (TypeError, ValueError) as e:
+                    return bad(handler, str(e))
+
+        # model / model_provider: pair stored verbatim; null/'' clears.
+        if "model" in body:
+            model = body.get("model")
+            if model is None or str(model).strip() == "":
+                proj.pop("model", None)
+                proj.pop("model_provider", None)
+            else:
+                proj["model"] = str(model).strip()
+        if "model_provider" in body:
+            mp = body.get("model_provider")
+            if mp is None or str(mp).strip() == "":
+                proj.pop("model_provider", None)
+            else:
+                proj["model_provider"] = str(mp).strip()
+
+        # reasoning_effort: must be a valid effort level or empty (clear).
+        if "reasoning_effort" in body:
+            from api.config import VALID_REASONING_EFFORTS
+
+            effort = body.get("reasoning_effort")
+            if effort is None or str(effort).strip() == "":
+                proj.pop("reasoning_effort", None)
+            else:
+                effort = str(effort).strip().lower()
+                if effort not in VALID_REASONING_EFFORTS:
+                    return bad(
+                        handler,
+                        f"reasoning_effort must be one of {', '.join(VALID_REASONING_EFFORTS)}",
+                    )
+                proj["reasoning_effort"] = effort
+
+        save_projects(projects)
+        return j(handler, {"ok": True, "project": proj})
+
     if parsed.path == "/api/projects/delete":
         try:
             require(body, "project_id")
