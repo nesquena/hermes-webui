@@ -1573,6 +1573,15 @@ class Session:
 
     @classmethod
     def load(cls, sid):
+        try:
+            from api.session_runtime_state import runtime_state_lock
+        except Exception:
+            return cls._load_unlocked(sid)
+        with runtime_state_lock(sid):
+            return cls._load_unlocked(sid)
+
+    @classmethod
+    def _load_unlocked(cls, sid):
         # Validate session ID format to prevent path traversal.  API/gateway
         # session ids may contain hyphens (for example ``api-*`` and
         # ``reachy-voice-*``); allow those but still reject dots/slashes.
@@ -1626,6 +1635,15 @@ class Session:
 
     @classmethod
     def load_metadata_only(cls, sid, *, index_message_counts=None):
+        try:
+            from api.session_runtime_state import runtime_state_lock
+        except Exception:
+            return cls._load_metadata_only_unlocked(sid, index_message_counts=index_message_counts)
+        with runtime_state_lock(sid):
+            return cls._load_metadata_only_unlocked(sid, index_message_counts=index_message_counts)
+
+    @classmethod
+    def _load_metadata_only_unlocked(cls, sid, *, index_message_counts=None):
         """Load only the compact metadata fields, skipping the messages array.
 
         Session JSON files have metadata fields (session_id, title, model, etc.)

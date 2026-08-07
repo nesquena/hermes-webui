@@ -292,6 +292,79 @@ def test_cached_refresh_can_reenter_runtime_lock_for_both_checks(monkeypatch):
     assert loads == [sid, sid]
 
 
+def test_direct_session_load_holds_runtime_lock_through_overlay(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    sid = "direct_load_lock_001"
+    models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "history"}],
+    ).save()
+    observed = []
+
+    def load_runtime_state_sidecar(session_id):
+        observed.append(session_runtime_state._lock_for(session_id)._is_owned())
+        return {}
+
+    monkeypatch.setattr(models, "_load_runtime_state_sidecar", load_runtime_state_sidecar)
+    assert models.Session.load(sid) is not None
+    assert observed == [True]
+
+
+def test_chat_start_rechecks_ownership_before_stream_registration(tmp_path, monkeypatch):
+    sid = "chat_delete_race_001"
+    owner = {"present": True}
+    registered = []
+    workers = []
+    session = SimpleNamespace(
+        session_id=sid,
+        path=tmp_path / f"{sid}.json",
+        active_stream_id=None,
+        pending_user_message=None,
+        pending_attachments=[],
+        pending_started_at=None,
+        pending_user_source=None,
+        title="Race",
+    )
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **kwargs: None)
+    monkeypatch.setattr(routes, "_active_stream_blocks_chat_start", lambda *args, **kwargs: False)
+    monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda _sid: None)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: threading.Lock())
+    monkeypatch.setattr(routes, "_session_owner_present", lambda _sid: owner["present"])
+    monkeypatch.setattr(routes, "_is_hidden_empty_session", lambda _session: False)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda _workspace: None)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
+    monkeypatch.setattr(routes, "register_stream_owner", lambda *args: registered.append(args))
+    monkeypatch.setattr(routes, "_run_agent_streaming", lambda *args, **kwargs: workers.append(args))
+    monkeypatch.setattr(
+        routes,
+        "_prepare_chat_start_session_for_stream",
+        lambda *args, **kwargs: owner.update(present=False),
+    )
+    import api.turn_journal as turn_journal
+    monkeypatch.setattr(
+        turn_journal,
+        "append_turn_journal_event",
+        lambda *args, **kwargs: {"turn_id": "turn-race"},
+    )
+
+    response = routes._start_chat_stream_for_session(
+        session,
+        msg="race",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="openai/gpt-5",
+        model_provider="openai",
+        external_runtime_owned=False,
+    )
+
+    assert response["_status"] == 404
+    assert registered == []
+    assert workers == []
+
+
 def test_sidecar_delete_primitives_report_unlink_failure_and_retry(tmp_path, monkeypatch):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()

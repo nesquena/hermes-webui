@@ -21366,48 +21366,55 @@ def _start_chat_stream_for_session(
                     "active_stream_id": getattr(s, "active_stream_id", None),
                     "_status": 409,
                 }
-    if was_hidden_empty_session:
-        publish_session_list_changed(
-            "session_new",
-            profile=getattr(s, "profile", None),
-            session_id=getattr(s, "session_id", None),
-        )
-    diag.stage("set_last_workspace") if diag else None
-    set_last_workspace(workspace)
-    diag.stage("stream_registration") if diag else None
-    stream = create_stream_channel()
-    register_stream_owner(stream_id, s.session_id)
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
-    # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
-    if goal_related:
-        STREAM_GOAL_RELATED[stream_id] = True
-    diag.stage("worker_thread_start") if diag else None
-    worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
-    if moa_config and not backend_is_gateway:
-        worker_kwargs["moa_config"] = moa_config
-    if backend_is_gateway:
-        from api.gateway_chat import _mark_gateway_run_starting
-        _mark_gateway_run_starting(stream_id)
-    thr = threading.Thread(
-        target=worker_target,
-        args=(s.session_id, msg, model, workspace, stream_id, attachments),
-        kwargs=worker_kwargs,
-        daemon=True,
-    )
-    try:
-        thr.start()
-    except Exception:
+    with session_lock:
+        if hasattr(s, "path") and not _session_owner_present(s.session_id):
+            diag.stage("response_write") if diag else None
+            return {
+                "error": "Session not found",
+                "_status": 404,
+            }
+        if was_hidden_empty_session:
+            publish_session_list_changed(
+                "session_new",
+                profile=getattr(s, "profile", None),
+                session_id=getattr(s, "session_id", None),
+            )
+        diag.stage("set_last_workspace") if diag else None
+        set_last_workspace(workspace)
+        diag.stage("stream_registration") if diag else None
+        stream = create_stream_channel()
+        register_stream_owner(stream_id, s.session_id)
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = stream
+        # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
+        if goal_related:
+            STREAM_GOAL_RELATED[stream_id] = True
+        diag.stage("worker_thread_start") if diag else None
+        worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
+        worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+        if moa_config and not backend_is_gateway:
+            worker_kwargs["moa_config"] = moa_config
         if backend_is_gateway:
-            try:
-                from api.gateway_chat import _finish_gateway_run_starting
-                _finish_gateway_run_starting(stream_id)
-                from api.gateway_chat import _clear_gateway_run_starting
-                _clear_gateway_run_starting(stream_id)
-            except Exception:
-                logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
-        raise
+            from api.gateway_chat import _mark_gateway_run_starting
+            _mark_gateway_run_starting(stream_id)
+        thr = threading.Thread(
+            target=worker_target,
+            args=(s.session_id, msg, model, workspace, stream_id, attachments),
+            kwargs=worker_kwargs,
+            daemon=True,
+        )
+        try:
+            thr.start()
+        except Exception:
+            if backend_is_gateway:
+                try:
+                    from api.gateway_chat import _finish_gateway_run_starting
+                    _finish_gateway_run_starting(stream_id)
+                    from api.gateway_chat import _clear_gateway_run_starting
+                    _clear_gateway_run_starting(stream_id)
+                except Exception:
+                    logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+            raise
     response = {
         "stream_id": stream_id,
         "session_id": s.session_id,
