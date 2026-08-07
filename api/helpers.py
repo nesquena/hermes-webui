@@ -290,6 +290,7 @@ def t(
 
 
 MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
+MAX_CHUNKED_TRAILER_BYTES = 64 * 1024  # cap on the chunked trailer section (RFC 7230 §4.1.2)
 
 
 # ── Credential redaction ──────────────────────────────────────────────────────
@@ -1040,12 +1041,16 @@ def redact_session_data(session_dict: dict) -> dict:
 
 
 def _read_exact(rfile, n: int) -> bytes:
-    """Read exactly n bytes, tolerating short reads from the socket buffer."""
+    """Read exactly n bytes, tolerating short reads from the socket buffer.
+
+    Raises ValueError if the stream ends before n bytes arrive, so an
+    incomplete chunk is never treated as a complete body.
+    """
     buf = bytearray()
     while len(buf) < n:
         chunk = rfile.read(n - len(buf))
         if not chunk:
-            break
+            raise ValueError(f'Incomplete chunk body: expected {n} bytes, got {len(buf)}')
         buf.extend(chunk)
     return bytes(buf)
 
@@ -1059,9 +1064,14 @@ def _read_chunked_body(handler, max_bytes: int) -> bytes:
     HTTP/1.1 origin — notably Cloudflare Tunnel (cloudflared) — forward request
     bodies this way, so without decoding here the server sees an empty body on
     every proxied POST. See RFC 7230 section 4.1.
+
+    The trailer section is bounded and incomplete framing is rejected, so a
+    malformed or hostile client cannot occupy a worker thread indefinitely or
+    have a partial body acted on as if it were complete.
     """
     rfile = handler.rfile
     out = bytearray()
+    terminated = False
     while True:
         size_line = rfile.readline(65536)
         if not size_line:
@@ -1073,16 +1083,29 @@ def _read_chunked_body(handler, max_bytes: int) -> bytes:
             handler.close_connection = True
             raise ValueError(f'Malformed chunk size: {size_token!r}') from err
         if size == 0:
+            terminated = True
+            trailer_bytes = 0
             while True:
                 trailer = rfile.readline(65536)
+                trailer_bytes += len(trailer)
+                if trailer_bytes > MAX_CHUNKED_TRAILER_BYTES:
+                    handler.close_connection = True
+                    raise ValueError(f'Chunked trailers too large (> {MAX_CHUNKED_TRAILER_BYTES} bytes)')
                 if trailer in (b'\r\n', b'\n', b''):
                     break
             break
         if len(out) + size > max_bytes:
             handler.close_connection = True
             raise ValueError(f'Request body too large (> {max_bytes} bytes)')
-        out.extend(_read_exact(rfile, size))
+        try:
+            out.extend(_read_exact(rfile, size))
+        except ValueError as err:
+            handler.close_connection = True
+            raise
         rfile.readline(3)
+    if out and not terminated:
+        handler.close_connection = True
+        raise ValueError('Incomplete chunked body: missing terminating chunk')
     return bytes(out)
 
 

@@ -76,6 +76,53 @@ def test_read_body_rejects_oversized_chunked_body():
     assert handler.close_connection is True
 
 
+def test_read_body_rejects_incomplete_chunk_body():
+    from api.helpers import read_body
+
+    # Declares 8 bytes but the stream ends after 5
+    chunked = b"8\r\n{\"a\":"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Incomplete chunk body"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_missing_terminating_chunk():
+    from api.helpers import read_body
+
+    # One complete chunk, but no terminating 0-chunk before EOF
+    chunked = b"8\r\n{\"a\": 1}\r\n"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="missing terminating chunk"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_oversized_chunked_trailers():
+    from api.helpers import MAX_CHUNKED_TRAILER_BYTES, read_body
+
+    chunked = b"0\r\n" + b"x" * (MAX_CHUNKED_TRAILER_BYTES + 100) + b"\r\n"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="trailers too large"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
 def test_session_save_rejects_unsafe_session_id(tmp_path, monkeypatch):
     import api.models as models
 
