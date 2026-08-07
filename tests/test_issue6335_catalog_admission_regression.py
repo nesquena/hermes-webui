@@ -126,6 +126,8 @@ def _call_get_available_models(monkeypatch, tmp_path):
 
     old_cfg = dict(config.cfg)
     old_mtime = config._cfg_mtime
+    old_path = config._cfg_path
+    old_fingerprint = config._cfg_fingerprint
     config.cfg.clear()
     config.cfg["model"] = {"provider": "openai-codex"}
     config.cfg["providers"] = {
@@ -133,10 +135,20 @@ def _call_get_available_models(monkeypatch, tmp_path):
         "google": {"name": "Google"},
         "openai-api": {"name": "OpenAI API"},
     }
+    cfg_path = config.Path(config._get_config_path())
     try:
-        config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+        config._cfg_mtime = cfg_path.stat().st_mtime
     except Exception:
         config._cfg_mtime = 0.0
+    # Pin the path/fingerprint globals to THIS fixture so the path_changed /
+    # fingerprint staleness checks cannot force a disk reload that wipes the
+    # in-memory overrides above.  A preceding config test (e.g.
+    # test_byok_model_dropdown.py) can leave _cfg_path pointing at its own
+    # deleted temp config; without the pin, get_available_models() sees
+    # path_changed=True and reloads from disk, dropping the fixture's x-ai /
+    # google entries (gate certification 2026-08-07: byok -> 6335 = 1 failed).
+    config._cfg_path = cfg_path
+    config._cfg_fingerprint = config._fingerprint_config(config.cfg)
 
     config.invalidate_models_cache()
     try:
@@ -145,6 +157,8 @@ def _call_get_available_models(monkeypatch, tmp_path):
         config.cfg.clear()
         config.cfg.update(old_cfg)
         config._cfg_mtime = old_mtime
+        config._cfg_path = old_path
+        config._cfg_fingerprint = old_fingerprint
         config.invalidate_models_cache()
 
 
@@ -154,6 +168,44 @@ def _group_ids(result):
 
 def _group_names(result):
     return [g.get("provider") for g in result.get("groups", [])]
+
+
+def test_predecessor_leaked_cfg_path_fingerprint_does_not_break_admission(
+    monkeypatch, tmp_path
+):
+    """Predecessor-order regression: leaked ``_cfg_path``/``_cfg_fingerprint``
+    must not trigger a disk reload that wipes the fixture providers.
+
+    A preceding config test (``tests/test_byok_model_dropdown.py`` sorts
+    before this file) repoints ``_get_config_path`` at its own temporary
+    config and leaves ``config._cfg_path`` / ``config._cfg_fingerprint``
+    pointing at that now-deleted file.  The next
+    ``get_available_models()`` call then sees ``path_changed=True`` and
+    reloads from disk, dropping the fixture's ``x-ai`` / ``google`` entries
+    (reproduced by the 2026-08-07 gate certification: byok -> 6335 = 1
+    failed, ``got ['openai-codex', 'gemini']``).
+
+    This test runs FIRST in this file, deliberately simulates that exact
+    leaked state, and asserts the helper pins over it — proving the two
+    admission tests below also pass after a leaking predecessor.
+    """
+    import api.config as config
+
+    leaked_path = tmp_path / "deleted-predecessor-config.yaml"
+    old_path, old_fingerprint = config._cfg_path, config._cfg_fingerprint
+    try:
+        config._cfg_path = leaked_path
+        config._cfg_fingerprint = "stale-predecessor-fingerprint"
+        result = _call_get_available_models(monkeypatch, tmp_path)
+        ids = _group_ids(result)
+        assert "openai-codex" in ids, f"active provider group missing; got {ids}"
+        assert "x-ai" in ids, f"leaked _cfg_path must not wipe x-ai; got {ids}"
+        assert "google" in ids, f"leaked _cfg_path must not wipe google; got {ids}"
+        assert "xAI" in _group_names(result)
+        assert "Google" in _group_names(result)
+    finally:
+        config._cfg_path = old_path
+        config._cfg_fingerprint = old_fingerprint
 
 
 def test_credentialed_alias_config_providers_stay_admitted(monkeypatch, tmp_path):
