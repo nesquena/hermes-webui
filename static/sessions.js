@@ -7165,7 +7165,8 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
   if(!S.session||!S.session.session_id) return;
   const sid=S.session.session_id;
   const nowSec=Math.floor((Number(timestampMs)||Date.now())/1000);
-  const localCount=Array.isArray(S.messages)?S.messages.length:0;
+  const loadedOffset=typeof _messagesTruncated!=='undefined'&&_messagesTruncated&&typeof _oldestIdx==='number'&&Number.isSafeInteger(_oldestIdx)&&_oldestIdx>=0?_oldestIdx:0;
+  const localCount=loadedOffset+(Array.isArray(S.messages)?S.messages.length:0);
   const count=Math.max(Number(S.session.message_count||0),Number(messageCount||0),localCount,1);
   S.session.message_count=count;
   S.session.last_message_at=nowSec;

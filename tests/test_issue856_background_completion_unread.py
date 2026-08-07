@@ -64,7 +64,8 @@ def test_background_completion_unread_uses_explicit_marker_not_message_delta():
 def test_background_done_sets_marker_when_session_not_actively_viewed():
     done_block = _done_block()
     assert "const isSessionViewed=_isSessionActivelyViewed(activeSid);" in done_block
-    assert "const completedSession=d.session||{session_id:activeSid};" in done_block
+    assert "const _mergedTerminalSession=_hasTerminalSession&&_applyEmbeddedTerminalSession(" in done_block
+    assert "const completedSession=_mergedTerminalSession||(" in done_block
     assert "const completedSid=completedSession.session_id||activeSid;" in done_block
     assert "const completedMessageCount=completedSession.message_count != null" in done_block
     assert "if(!isSessionViewed && typeof _markSessionCompletionUnread==='function')" in done_block
@@ -437,7 +438,7 @@ def test_hidden_active_done_still_updates_current_pane_but_not_read_state():
     active_const_idx = done_block.find("const isActiveSession=_isSessionCurrentPane(activeSid);")
     viewed_const_idx = done_block.find("const isSessionViewed=_isSessionActivelyViewed(activeSid);")
     active_guard_idx = done_block.find("if(isActiveSession){", viewed_const_idx)
-    session_update_idx = done_block.find("S.session=d.session", active_guard_idx)
+    session_update_idx = done_block.find("S.session=completedSession", active_guard_idx)
     render_idx = done_block.find("renderMessages(", active_guard_idx)
     load_dir_idx = done_block.find("preservePreview", active_guard_idx)
     mark_viewed_idx = done_block.find("if(isSessionViewed) _markSessionViewed(completedSid", active_guard_idx)

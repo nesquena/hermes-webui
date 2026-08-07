@@ -57,8 +57,6 @@ function installRuntimeHelpers() {
   const helpers = [
     "_isMarkerOnlyAssistantMessage",
     "_streamRecoveryControlMessageText",
-    "_streamRecoveryControlMessage",
-    "_filterRecoveryControlMessages",
     "_replaceMarkerOnlyAssistantWithStreamError",
     "_messageIdentityKey",
     "_isHistoricalAnchorActivityScene",
