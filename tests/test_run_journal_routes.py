@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 from urllib.parse import urlparse
 import io
 import json
@@ -539,9 +540,59 @@ def test_runtime_snapshot_transport_projection_keeps_tool_fallback_without_scene
 
 
 def test_paginated_session_followup_does_not_repeat_runtime_snapshot():
-    source = open("api/routes.py", encoding="utf-8").read()
-    assert "if journal_active and (not load_messages or msg_limit is None):" in source
-    assert 'raw["runtime_journal_snapshot"] = _runtime_journal_snapshot_for_session_payload(snapshot)' in source
+    from tests.test_session_tail_payload import _FakeSession, _invoke
+
+    stream_id = "stream-paginated-snapshot"
+    session = _FakeSession([
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "answer"},
+    ])
+    session.active_stream_id = stream_id
+    snapshot = {
+        "stream_id": stream_id,
+        "last_seq": 2,
+        "last_event_id": f"{stream_id}:2",
+        "messages": [{"role": "assistant", "content": "live progress", "_live": True}],
+        "last_assistant_text": "live progress",
+        "last_reasoning_text": "",
+        "tool_calls": [],
+        "anchor_activity_scene": {
+            "version": "activity_scene_v1",
+            "identity": {"session_id": session.session_id, "stream_id": stream_id, "run_id": stream_id},
+            "activity_rows": [{
+                "row_id": "prose-1", "local_id": "prose-1",
+                "kind": "process_prose", "role": "prose",
+                "source_event_type": "token", "status": "running", "text": "live progress",
+            }],
+        },
+    }
+    projected = {
+        **snapshot,
+        "messages": [],
+    }
+
+    with patch("api.routes._active_stream_ids", return_value={stream_id}), \
+         patch("api.routes.find_run_summary", return_value={
+             "session_id": session.session_id,
+             "run_id": stream_id,
+             "last_seq": 2,
+             "last_event_id": f"{stream_id}:2",
+             "terminal": False,
+         }), \
+         patch("api.routes._run_journal_live_snapshot", return_value=snapshot):
+        full = _invoke(
+            session,
+            query=f"session_id={session.session_id}&messages=1&resolve_model=0",
+        )
+        paginated = _invoke(
+            session,
+            query=f"session_id={session.session_id}&messages=1&resolve_model=0&msg_limit=1",
+        )
+
+    assert full["runtime_journal_snapshot"] == projected
+    assert "runtime_journal_snapshot" not in paginated
+    assert paginated["runtime_journal"]["last_seq"] == 2
+    assert paginated["runtime_journal"]["terminal"] is False
 
 
 def test_live_journal_snapshot_bounds_pathological_tool_args(monkeypatch):
