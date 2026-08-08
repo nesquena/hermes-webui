@@ -59,8 +59,20 @@ def test_boot_has_profile_namespaced_mirror_helpers():
 
 def test_boot_success_path_persists_mirror():
     src = _read("static/boot.js")
-    assert "window._autoScrollFollow=_persistAutoScrollFollow(" in src, (
-        "boot settings path must write the resolved value into the mirror"
+    # Success path must NOT persist synchronously (S.activeProfile is still
+    # 'default' there — P1 round 3 review) — it defers the mirror write.
+    m = re.search(
+        r"window\._autoScrollFollow=s\.auto_scroll_follow!==false;\n(.*?)window\._largeTextPasteAsAttachment",
+        src,
+        re.S,
+    )
+    assert m, "success path block not found"
+    block = m.group(1)
+    assert "_persistAutoScrollFollow(" not in block, (
+        "success path must not persist before the profile resolves (P1 round 3)"
+    )
+    assert "window._autoScrollFollowDeferredPersist=window._autoScrollFollow;" in block, (
+        "success path must defer the mirror write via _autoScrollFollowDeferredPersist"
     )
 
 
@@ -77,11 +89,15 @@ def test_boot_fallback_reads_mirror_not_hardcoded_true():
     fallback_idx = src.find("_sessionEndlessScrollEnabled=false;")
     profile_idx = src.find("S.activeProfile = activeProfileState.profile;")
     reapply_idx = src.find("_autoScrollFollowDeferredReapply){")
+    persist_idx = src.find("_autoScrollFollowDeferredPersist!==undefined")
     assert fallback_idx != -1 and profile_idx != -1 and reapply_idx != -1, (
         "deferred re-apply anchors missing"
     )
     assert fallback_idx < profile_idx < reapply_idx, (
         "deferred re-apply must run AFTER S.activeProfile resolves (P1 follow-up)"
+    )
+    assert persist_idx != -1 and profile_idx < persist_idx, (
+        "deferred persist must also run AFTER S.activeProfile resolves (P1 round 3)"
     )
 
 
@@ -154,6 +170,21 @@ if (window._autoScrollFollowDeferredReapply) {
 }
 if (window._autoScrollFollow !== false) throw new Error('deferred re-apply must read the maintainer OFF entry');
 if (window._autoScrollFollowDeferredReapply !== false) throw new Error('deferred flag must clear');
+// 3b. P1 round 3: SUCCESS path must also defer its mirror WRITE until the
+//     profile resolves — a non-default profile's successful boot must store
+//     its value under ITS OWN namespace, not 'default'.
+S = { activeProfile: 'default' };   // boot success-path state (profile unknown)
+window._autoScrollFollow = false;   // server said OFF
+window._autoScrollFollowDeferredPersist = window._autoScrollFollow;  // deferred write
+S = { activeProfile: 'maintainer' };  // profile resolves
+if (window._autoScrollFollowDeferredPersist !== undefined) {
+  _persistAutoScrollFollow(window._autoScrollFollowDeferredPersist);
+  window._autoScrollFollowDeferredPersist = undefined;
+}
+S = { activeProfile: 'maintainer' };
+if (_readPersistedAutoScrollFollow() !== false) throw new Error('deferred persist must write under the resolved profile (P1 round 3)');
+S = { activeProfile: 'default' };
+if (_readPersistedAutoScrollFollow() !== true) throw new Error('deferred persist must NOT write under default namespace');
 // 4. per-profile isolation via S.activeProfile
 S = { activeProfile: 'default' };
 if (_readPersistedAutoScrollFollow() !== true) throw new Error('default profile must keep default ON');
