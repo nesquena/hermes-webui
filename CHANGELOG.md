@@ -31,6 +31,8 @@
 
 ### Fixed
 
+- **Branching a session no longer cuts the fork short or drops the assistant conclusion you selected.** The branch/fork operation sliced its `keep_count` boundary against the raw stored transcript, but that count is computed by the frontend against the merged display view (`GET /api/session`). When the two differ — replayed sidecar/state.db duplicate rows, filtered prefixes, compression-continuation stitching — the fork cut too early, sometimes stopping mid tool-run and omitting the final answer. The fork now rebuilds its source transcript through the exact same display-merge path the frontend counts against, so the slice lands on the row you actually chose. Thanks @ruizanthony. (#6735)
+
 - **A phantom "Compressing context" barrier no longer sticks in the transcript when a compression event is lost or delayed.** If the automatic-compression `compressed` SSE event was dropped or arrived late, the compression UI could stay stuck in its running state after the turn already finished, leaving a permanent "Compressing context" placeholder. When a turn reaches its terminal `done` while the compression UI is still running, that stale state is now cleared through the canonical teardown, covering both the session-rotating (A→B) and non-rotating (A→A) compression paths. Thanks @soria-clawd-bot. (#6572)
 
 - **Repeated completions in the same session now raise a fresh notification instead of silently updating one in the background.** Same-session desktop/PWA notifications share a per-session tag; without re-notification, a second completion silently replaced the first in the OS notification center (Windows Action Center) with no new alert. Same-tag notifications now re-alert, so each completion is surfaced. Thanks @webtecnica. (#6681, #6673)
