@@ -1336,6 +1336,41 @@ const _DEFAULT_MESSAGE_MODES=['queue','interrupt','steer'];
 // existing user's persisted busy-input-mode preference survives the rename.
 const _LEGACY_DEFAULT_MESSAGE_MODE_KEY='hermes-busy-input-mode';
 const _DEFAULT_MESSAGE_MODE_KEY='hermes-default-message-mode';
+// ── Auto-follow eager mirror (#6819) ────────────────────────────────────────
+// The Auto-follow new content toggle must survive a transient settings-fetch
+// failure at boot. The settings-fetch failure path used to hardcode
+// `window._autoScrollFollow=true`, silently clobbering an explicit OFF for the
+// whole session (post-turn scroll yanks until the next refresh). Mirror the
+// resolved value into localStorage, PROFILE-NAMESPACED (one JSON map keyed by
+// profile name) so switching profiles never leaks one profile's preference
+// into another. The fallback reads the mirror instead of hardcoding ON.
+const _AUTO_SCROLL_FOLLOW_KEY='hermes-auto-scroll-follow';
+function _autoScrollFollowProfileKey(){
+  return (typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+}
+function _persistAutoScrollFollow(enabled){
+  try{
+    const raw=localStorage.getItem(_AUTO_SCROLL_FOLLOW_KEY);
+    let map={};
+    if(raw){ try{ map=JSON.parse(raw)||{}; }catch(_){ map={}; } }
+    map[_autoScrollFollowProfileKey()]=enabled?1:0;
+    localStorage.setItem(_AUTO_SCROLL_FOLLOW_KEY,JSON.stringify(map));
+  }catch(_){}
+  return enabled;
+}
+function _readPersistedAutoScrollFollow(){
+  try{
+    const raw=localStorage.getItem(_AUTO_SCROLL_FOLLOW_KEY);
+    if(raw){
+      const map=JSON.parse(raw)||{};
+      const v=map[_autoScrollFollowProfileKey()];
+      if(v!==undefined&&v!==null) return v===1;
+    }
+  }catch(_){}
+  return true;  // default: follow ON (matches config.py default)
+}
+window._persistAutoScrollFollow=_persistAutoScrollFollow;
+window._readPersistedAutoScrollFollow=_readPersistedAutoScrollFollow;
 function _normalizeDefaultMessageMode(mode){
   return _DEFAULT_MESSAGE_MODES.includes(mode)?mode:'steer';
 }
@@ -3286,7 +3321,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showBusyPlaceholderHint=!!s.show_busy_placeholder_hint;
     window._newChatOnWorkspaceSwitch=!!s.new_chat_on_workspace_switch;  // #5473 opt-in
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
-    window._autoScrollFollow=s.auto_scroll_follow!==false;
+    window._autoScrollFollow=_persistAutoScrollFollow(s.auto_scroll_follow!==false);
     window._largeTextPasteAsAttachment=s.large_text_paste_as_attachment!==false;
     window._projectQuickCreate=!!s.project_quick_create_buttons;
     window._composerControlVisibility=_composerControlVisibilityFromSettings(s);
@@ -3428,7 +3463,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._defaultMessageMode=_readPersistedDefaultMessageMode();
     window._showBusyPlaceholderHint=false;
     window._sessionEndlessScrollEnabled=false;
-    window._autoScrollFollow=true;
+    // #6819: honor the persisted auto-follow preference on settings-fetch
+    // failure instead of hardcoding ON (which silently clobbered an explicit
+    // OFF and caused post-turn scroll yanks until the next refresh).
+    window._autoScrollFollow=_readPersistedAutoScrollFollow();
     window._composerControlVisibility=_composerControlVisibilityFromSettings(null);
     window._composerControlOrder=[];
     _applyComposerControlOrder(window._composerControlOrder);
