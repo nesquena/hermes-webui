@@ -320,6 +320,7 @@ async function authorizeWorkspaceEscapeNavigation(item){
 
 let _workspacePanelActiveTab = 'files';
 let _renderSessionArtifactsTimer = null;
+let _artifactsFullHistoryRequest = null;
 let _workspaceTodosLastRenderedHash = null;
 
 function _setWorkspacePanelTabDataset(){
@@ -333,6 +334,25 @@ function scheduleRenderSessionArtifacts(){
     _renderSessionArtifactsTimer = null;
     renderSessionArtifacts();
   }, 100);
+}
+
+function _artifactsFullHistoryRequestFor(sid, generation){
+  const current = _artifactsFullHistoryRequest;
+  if(current && current.sessionId === sid && current.generation === generation) return current;
+  const record = {sessionId: sid, generation, settled: false, snapshot: null, promise: null};
+  record.promise = Promise.resolve(_readFullSessionSnapshot(sid)).then(snapshot => {
+    if(_artifactsFullHistoryRequest !== record) return null;
+    record.settled = true;
+    record.snapshot = snapshot;
+    return snapshot;
+  }).catch(error => {
+    if(_artifactsFullHistoryRequest !== record) return null;
+    record.settled = true;
+    record.snapshot = null;
+    throw error;
+  });
+  _artifactsFullHistoryRequest = record;
+  return record;
 }
 
 function _workspaceTodosHash(items){
@@ -638,28 +658,29 @@ function renderSessionArtifacts(){
     typeof _messagesTruncated !== 'undefined' &&
     _messagesTruncated
   );
-  if(hasTruncatedHistory && artifactsVisible){
-    root.innerHTML = `<div class="workspace-artifact-empty" data-i18n="workspace_artifact_loading_full_history">${esc((typeof t==='function'&&t('workspace_artifact_loading_full_history'))||'Loading full history…')}</div>`;
-    if(S.busy || S.activeStreamId) return;
-  }
+  if(hasTruncatedHistory && artifactsVisible) _renderNow();
   if(!needsFullLoad){
     _renderNow();
     return;
   }
-  return Promise.resolve(_readFullSessionSnapshot(sid)).then((snapshot) => {
-    if(root.isConnected === false) return;
-    if(!S.session || S.session.session_id !== sid || S.busy || S.activeStreamId) return;
-    if(!(typeof _workspaceArtifactsTabIsActive==='function'&&_workspaceArtifactsTabIsActive())) return;
-    if(!snapshot || (startGeneration !== null && _messagesGeneration !== startGeneration)){
-      _renderNow();
-      return;
-    }
-    _renderNow(snapshot.messages, snapshot.toolCalls);
-  }).catch(e => {
-    console.warn('renderSessionArtifacts full-load failed:',e);
-    if(root.isConnected === false) return;
-    if(typeof _workspaceArtifactsTabIsActive==='function'&&_workspaceArtifactsTabIsActive()) _renderNow();
-  });
+  const record = _artifactsFullHistoryRequestFor(sid, startGeneration);
+  if(record.settled && record.snapshot) _renderNow(record.snapshot.messages, record.snapshot.toolCalls);
+  if(!record.renderPromise){
+    record.renderPromise = record.promise.then(snapshot => {
+      if(_artifactsFullHistoryRequest !== record) return;
+      if(root.isConnected === false) return;
+      if(!S.session || S.session.session_id !== sid || S.busy || S.activeStreamId) return;
+      if(!(typeof _workspaceArtifactsTabIsActive==='function'&&_workspaceArtifactsTabIsActive())) return;
+      if(!snapshot || (startGeneration !== null && _messagesGeneration !== startGeneration)) return;
+      _renderNow(snapshot.messages, snapshot.toolCalls);
+    }).catch(e => {
+      if(_artifactsFullHistoryRequest !== record) return;
+      console.warn('renderSessionArtifacts full-load failed:',e);
+      if(root.isConnected === false) return;
+      if(typeof _workspaceArtifactsTabIsActive==='function'&&_workspaceArtifactsTabIsActive()) _renderNow();
+    });
+  }
+  return record.renderPromise;
 }
 
 async function _workspacePathExists(path){
