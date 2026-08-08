@@ -118,12 +118,12 @@ def restart_active_profile_gateway(
                 active_home,
             )
         proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-        )
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True, encoding="utf-8", errors="replace",
+                    env=env,
+                )
 
         try:
             stdout, stderr = proc.communicate(timeout=quick_timeout_seconds)
