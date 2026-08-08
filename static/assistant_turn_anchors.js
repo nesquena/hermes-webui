@@ -89,6 +89,9 @@
     approval:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     clarify:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     pending_steer_leftover:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
+    // The delivered half of steer: observed at the HTTP response, not on the stream,
+    // hence source:'client'. The event carries status:'delivered' explicitly.
+    steer_delivered:Object.freeze({classification:'activity',kind:'control_boundary',source:'client'}),
     goal_continue:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     artifact_reference:Object.freeze({classification:'artifact',kind:'artifact_reference',source:'derived'}),
     state_saved:Object.freeze({classification:'side_effect',kind:null,source:'sse'}),
@@ -952,7 +955,11 @@
     });
   }
 
-  function _activityRowRole(kind){
+  function _activityRowRole(kind, sourceType){
+    // A delivered steer is the user's own input inside the assistant turn, so it
+    // projects as a user row rather than a control row. Scoped to this one source
+    // type: every other control_boundary keeps role 'control'.
+    if(sourceType==='steer_delivered') return 'user';
     if(kind==='process_prose') return 'prose';
     if(kind==='reasoning') return 'thinking';
     if(_isToolActivityKind(kind)) return 'tool';
@@ -962,7 +969,8 @@
     return 'activity';
   }
 
-  function _activityRowDisplayHint(kind, mode){
+  function _activityRowDisplayHint(kind, mode, sourceType){
+    if(sourceType==='steer_delivered') return 'user_message';
     if(mode==='transparent_stream') return 'chronological_activity';
     if(kind==='process_prose') return 'main_prose';
     if(kind==='reasoning') return 'collapsed_thinking';
@@ -973,10 +981,10 @@
     return 'activity_row';
   }
 
-  function _activityRowDisplayHints(kind){
+  function _activityRowDisplayHints(kind, sourceType){
     return Object.freeze({
-      compact_worklog:_activityRowDisplayHint(kind,'compact_worklog'),
-      transparent_stream:_activityRowDisplayHint(kind,'transparent_stream'),
+      compact_worklog:_activityRowDisplayHint(kind,'compact_worklog',sourceType),
+      transparent_stream:_activityRowDisplayHint(kind,'transparent_stream',sourceType),
     });
   }
 
@@ -987,14 +995,15 @@
     const text=_activityRowText(event);
     const toolCallId=_activityRowToolId(event,kind);
     const sanitizedPayload=_sanitizePayload(payload);
+    const sourceType=_cleanString(_own(event,'source_event_type'))||null;
     return Object.freeze({
       row_id:_activityRowId(event,index),
       order_index:index,
       kind,
-      role:_activityRowRole(kind),
-      display_hint:_activityRowDisplayHint(kind,mode),
-      display_hints:_activityRowDisplayHints(kind),
-      source_event_type:_cleanString(_own(event,'source_event_type'))||null,
+      role:_activityRowRole(kind,sourceType),
+      display_hint:_activityRowDisplayHint(kind,mode,sourceType),
+      display_hints:_activityRowDisplayHints(kind,sourceType),
+      source_event_type:sourceType,
       event_id:_cleanString(_own(event,'event_id'))||null,
       local_id:_cleanString(_own(event,'local_id'))||null,
       run_id:_cleanString(_own(event,'run_id'))||null,
@@ -1549,8 +1558,8 @@
     return null;
   }
 
-  function _rendererSnapshotRole(kind){
-    return _activityRowRole(kind||'activity');
+  function _rendererSnapshotRole(kind, sourceType){
+    return _activityRowRole(kind||'activity', sourceType);
   }
 
   function _rendererSnapshotSourceEventType(row, kind){
@@ -1578,7 +1587,9 @@
       row_id:_rendererSnapshotRowId(row),
       order_index:index,
       kind,
-      role:_rendererSnapshotRole(kind),
+      // Both role-deriving paths in this module take the source type, so a rendered
+      // steer row cannot report role 'control' here while the scene row says 'user'.
+      role:_rendererSnapshotRole(kind,sourceEventType),
       source_event_type:sourceEventType,
       status,
       text:_rendererSnapshotText(row),

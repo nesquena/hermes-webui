@@ -8470,6 +8470,15 @@ function _pickChatActivityDisplayMode(mode){
   _syncChatActivityDisplayModeControl(mode);
   if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
   if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+  if(typeof S!=='undefined'&&S.activeStreamId&&S.session&&typeof window!=='undefined'&&typeof window._renderLiveAnchorActivitySceneForStream==='function'){
+    const streamId=S.activeStreamId;
+    const sessionId=S.session.session_id;
+    setTimeout(()=>{
+      if(S.activeStreamId===streamId&&S.session&&S.session.session_id===sessionId){
+        window._renderLiveAnchorActivitySceneForStream(streamId,sessionId);
+      }
+    },0);
+  }
   _scheduleAppearanceAutosave();
 }
 if(typeof window!=='undefined') window._pickChatActivityDisplayMode=_pickChatActivityDisplayMode;
@@ -8536,6 +8545,15 @@ async function _autosaveAppearanceSettings(payload){
         if(window._chatActivityDisplayMode!==beforeMode||((window._transparentEventTimestamps!==false)!==beforeTimestamps)){
           if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
           if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+          if(typeof S!=='undefined'&&S.activeStreamId&&S.session&&typeof window!=='undefined'&&typeof window._renderLiveAnchorActivitySceneForStream==='function'){
+            const streamId=S.activeStreamId;
+            const sessionId=S.session.session_id;
+            setTimeout(()=>{
+              if(S.activeStreamId===streamId&&S.session&&S.session.session_id===sessionId){
+                window._renderLiveAnchorActivitySceneForStream(streamId,sessionId);
+              }
+            },0);
+          }
         }
       }
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();

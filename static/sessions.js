@@ -846,8 +846,15 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   if (S.busy) { S.busy=false; changed=true; }
   if (S.activeStreamId) { S.activeStreamId=null; changed=true; }
   if (INFLIGHT&&INFLIGHT[sid]) {
-    delete INFLIGHT[sid];
-    if (typeof clearInflightState==='function') clearInflightState(sid);
+    const pending=INFLIGHT[sid];
+    const delivered=Array.isArray(pending.deliveredSteers)?pending.deliveredSteers:[];
+    if(delivered.length){
+      INFLIGHT[sid]={...pending,streamId:pending.streamId||null,deliveredSteers:delivered};
+      if(typeof saveInflightState==='function') saveInflightState(sid,INFLIGHT[sid]);
+    }else{
+      delete INFLIGHT[sid];
+      if (typeof clearInflightState==='function') clearInflightState(sid);
+    }
     changed=true;
   }
   if (S.session) {
@@ -943,6 +950,12 @@ function _purgeStaleInflightEntries() {
     }
     const s = sessionsById.get(sid);
     if (!s.is_streaming) {
+      // A delivered steer remains browser-owned until the anchor scene write
+      // succeeds, so an idle sidebar refresh must not purge its recovery copy.
+      if(typeof _inflightHasVisibleLiveState==='function'&&_inflightHasVisibleLiveState(INFLIGHT[sid])&&
+          Array.isArray(INFLIGHT[sid].deliveredSteers)&&INFLIGHT[sid].deliveredSteers.length){
+        continue;
+      }
       // Session exists but is not streaming — purge it.
       delete INFLIGHT[sid];
       if (typeof clearInflightState === 'function') clearInflightState(sid);
@@ -988,6 +1001,7 @@ function _rememberRenderedStreamingState(s, isStreaming) {
 
 function _inflightHasVisibleLiveState(inflight) {
   if (!inflight || typeof inflight !== 'object') return false;
+  if (Array.isArray(inflight.deliveredSteers) && inflight.deliveredSteers.length) return true;
   if (String(inflight.lastAssistantText || '').trim()) return true;
   if (String(inflight.lastReasoningText || '').trim()) return true;
   if (String(inflight.liveTurnHtml || '').trim()) return true;
@@ -1083,10 +1097,24 @@ function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeSt
   const serverId=String(serverLiveSnapshot.streamId||'').trim();
   const activeId=requestedActiveId||serverId;
   const selectDurableSnapshot=()=>{
-    if(activeId&&localId===activeId&&Array.isArray(localInflight.todos)&&localInflight.todoStateMeta){
-      return {...serverLiveSnapshot,todos:localInflight.todos,todoStateMeta:localInflight.todoStateMeta};
+    const carried={};
+    // Delivered steers are browser-observed and can belong to a replaced
+    // stream, so carry every local record even when the journal snapshot owns
+    // a different active stream. Reattach filters records by stream later.
+    if(Array.isArray(localInflight.deliveredSteers)&&localInflight.deliveredSteers.length){
+      const hasActiveDelivery=!activeId||localInflight.deliveredSteers.some(record=>{
+        const payload=record&&record.payload&&typeof record.payload==='object'?record.payload:{};
+        return String(record&&record.stream_id||payload.stream_id||'')===activeId;
+      });
+      if(hasActiveDelivery) carried.deliveredSteers=localInflight.deliveredSteers;
     }
-    return serverLiveSnapshot;
+    if(activeId&&localId===activeId){
+      if(Array.isArray(localInflight.todos)&&localInflight.todoStateMeta){
+        carried.todos=localInflight.todos;
+        carried.todoStateMeta=localInflight.todoStateMeta;
+      }
+    }
+    return Object.keys(carried).length?{...serverLiveSnapshot,...carried}:serverLiveSnapshot;
   };
   if(requestedActiveId&&serverId&&serverId!==requestedActiveId){
     return localId===requestedActiveId?localInflight:null;
@@ -1667,6 +1695,15 @@ async function _switchProfileForSessionLoad(profile){
   }
 }
 
+function _preserveSettledDeliveredSteersForRecovery(sid, records){
+  if(!sid||!Array.isArray(records)||!records.length) return false;
+  const existing=INFLIGHT[sid];
+  if(existing&&existing.streamId) return false;
+  INFLIGHT[sid]={streamId:null,deliveredSteers:records};
+  if(typeof saveInflightState==='function') saveInflightState(sid,INFLIGHT[sid]);
+  return true;
+}
+
 async function loadSession(sid){
   const opts = arguments[1] || {};
   // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
@@ -2002,6 +2039,24 @@ async function loadSession(sid){
   // so a server_turn_started that attaches a live stream MID-RELOAD is honored
   // by the attach/idle decision instead of being clobbered by the stale snapshot.
   let activeStreamId=S.session.active_stream_id||null;
+  let settledDeliveredSteers=[];
+  if(!activeStreamId){
+    S.busy=false;
+    S.activeStreamId=null;
+    const localDeliveredSteers=INFLIGHT[sid]&&Array.isArray(INFLIGHT[sid].deliveredSteers)
+      ? INFLIGHT[sid].deliveredSteers
+      : [];
+    const storedIdleState=typeof loadInflightState==='function'?loadInflightState(sid):null;
+    const storedDeliveredSteers=storedIdleState&&Array.isArray(storedIdleState.deliveredSteers)
+      ? storedIdleState.deliveredSteers
+      : [];
+    settledDeliveredSteers=localDeliveredSteers.length?localDeliveredSteers:storedDeliveredSteers;
+  }
+  const preserveSettledDeliveredSteers=()=>{
+    if(typeof _preserveSettledDeliveredSteersForRecovery==='function'){
+      _preserveSettledDeliveredSteersForRecovery(sid,settledDeliveredSteers);
+    }
+  };
   // If the server says the session is idle, reset browser-side streaming flags
   // NOW — BEFORE _acknowledgeSessionVisit() below (whose sidebar repaint would
   // otherwise inherit the PREVIOUS session's busy/stream state) and before the
@@ -2020,6 +2075,7 @@ async function loadSession(sid){
       delete INFLIGHT[sid];
       if(typeof clearInflightState==='function') clearInflightState(sid);
     }
+    preserveSettledDeliveredSteers();
   }
 
   // and syncs the polling snapshot so a deferred /api/sessions poll landing
@@ -2063,6 +2119,10 @@ async function loadSession(sid){
         lastRunJournalEventId:String(stored.lastRunJournalEventId||''),
         journalReplayFromStart:!!stored.journalReplayFromStart,
         anchorActivityScene:(stored.anchorActivityScene&&stored.anchorActivityScene.version==='activity_scene_v1')?stored.anchorActivityScene:null,
+        // #3058: the delivered-steer records are browser-observed, so this cache is
+        // their only copy until settlement writes the anchor scene. This whitelist
+        // is what a reload reads, so omitting the field loses the row permanently.
+        deliveredSteers:Array.isArray(stored.deliveredSteers)?stored.deliveredSteers:[],
         currentActivityBurstId:Number(stored.currentActivityBurstId||0)||0,
         currentLiveSegmentSeq:Number(stored.currentLiveSegmentSeq||0)||0,
         activityBurstAnchors:Array.isArray(stored.activityBurstAnchors)?stored.activityBurstAnchors:[],
@@ -2071,8 +2131,15 @@ async function loadSession(sid){
   }
 
   if(INFLIGHT[sid]&&INFLIGHT[sid].journalReplayFromStart&&activeStreamId){
+    const replayDeliveredSteers=Array.isArray(INFLIGHT[sid].deliveredSteers)
+      ? INFLIGHT[sid].deliveredSteers
+      : [];
     delete INFLIGHT[sid];
     if(typeof clearInflightState==='function') clearInflightState(sid);
+    if(replayDeliveredSteers.length){
+      INFLIGHT[sid]={streamId:activeStreamId,deliveredSteers:replayDeliveredSteers,reattach:true};
+      if(typeof saveInflightState==='function') saveInflightState(sid,INFLIGHT[sid]);
+    }
   }
 
   if(activeStreamId&&INFLIGHT[sid]&&!_inflightHasVisibleLiveState(INFLIGHT[sid])){
@@ -2105,6 +2172,7 @@ async function loadSession(sid){
       await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
     } catch(e) {
       if (!_isCurrentLoad()) {
+        preserveSettledDeliveredSteers();
         _rearmActiveSessionStream();
         return;
       }
@@ -2224,10 +2292,19 @@ async function loadSession(sid){
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
       if (_isCurrentLoad()) _loadingSessionId = null;
+      preserveSettledDeliveredSteers();
       return;
     }
     // Stale? A newer loadSession() call has already started (#1060).
-    if (!_isCurrentLoad()) return;
+    if (!_isCurrentLoad()) {
+      preserveSettledDeliveredSteers();
+      return;
+    }
+
+    // Re-read ownership before consuming the idle snapshot. A stream can start
+    // for this session while the message request is awaiting; its recovery cache
+    // must take the live path instead of being projected as a stale idle scene.
+    activeStreamId = activeStreamId || ((S.activeStreamId && S.session && S.session.session_id===sid) ? S.activeStreamId : null);
 
     // Restore any queued message that survived page refresh or tab restore.
     if(typeof queueSessionMessage==='function'){
@@ -2272,6 +2349,35 @@ async function loadSession(sid){
     // same-session stream into activeStreamId so the existing attach branch
     // (and all its `attachLiveStream(sid, activeStreamId, ...)` calls) keeps it.
     activeStreamId = activeStreamId || ((S.activeStreamId && S.session && S.session.session_id===sid) ? S.activeStreamId : null);
+
+    if(!activeStreamId&&settledDeliveredSteers.length&&typeof _restoreDeliveredSteersIntoSettledMessages==='function'){
+      const restoredRecords=[];
+      const restoredSettledSteers=_restoreDeliveredSteersIntoSettledMessages(
+        S.messages,
+        sid,
+        settledDeliveredSteers,
+        records=>{ if(Array.isArray(records)) restoredRecords.push(...records); },
+      );
+      if(restoredSettledSteers){
+        if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+        const restoredKeys=new Set(restoredRecords.map(record=>{
+          const payload=record&&record.payload&&typeof record.payload==='object'?record.payload:{};
+          return `${String(record&&record.stream_id||payload.stream_id||'')}|${String(record&&record.local_id||payload.local_id||record&&record.event_id||payload.event_id||'')}`;
+        }));
+        const remaining=settledDeliveredSteers.filter(record=>{
+          const payload=record&&record.payload&&typeof record.payload==='object'?record.payload:{};
+          const key=`${String(record&&record.stream_id||payload.stream_id||'')}|${String(record&&record.local_id||payload.local_id||record&&record.event_id||payload.event_id||'')}`;
+          return !restoredKeys.has(key);
+        });
+        if(remaining.length){
+          INFLIGHT[sid]={streamId:null,deliveredSteers:remaining};
+          if(typeof saveInflightState==='function') saveInflightState(sid,INFLIGHT[sid]);
+        }else{
+          delete INFLIGHT[sid];
+          if(typeof clearInflightState==='function') clearInflightState(sid);
+        }
+      }
+    }
 
     if(activeStreamId){
       S.busy=true;
