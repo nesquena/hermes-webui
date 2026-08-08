@@ -1753,7 +1753,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     }
 
 
-_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, int, float]] = {}
+_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, tuple[int, int, int], float]] = {}
 _SKILLS_STATS_CACHE_TTL = 300.0  # seconds — long because .clear() handles programmatic changes
 
 # Per-profile compute locks (#5364). Without these, concurrent cold-startup
@@ -1782,16 +1782,12 @@ def _skills_stats_lock_for(profile_dir: Path) -> threading.Lock:
         return lock
 
 
-def _skill_tree_max_mtime_ns(skills_dir: Path, config_path: Path) -> int:
-    """Return the max st_mtime_ns across config.yaml, skill dirs, and SKILL.md files."""
-    max_ns = 0
-    try:
-        if config_path.exists():
-            max_ns = max(max_ns, config_path.stat().st_mtime_ns)
-    except OSError:
-        pass
+def _iter_skill_probe_paths(skills_dir: Path, config_path: Path):
+    """Yield config/skill paths visited by the stat-only cache probe."""
+    if config_path.exists():
+        yield config_path
     if not skills_dir.is_dir():
-        return max_ns
+        return
     try:
         from agent.skill_utils import EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS
     except Exception:
@@ -1814,23 +1810,49 @@ def _skill_tree_max_mtime_ns(skills_dir: Path, config_path: Path) -> int:
                 if d not in EXCLUDED_SKILL_DIRS
                 and not (has_skill_md and d in SKILL_SUPPORT_DIRS)
             ]
-            try:
-                max_ns = max(max_ns, root_path.stat().st_mtime_ns)
-            except OSError:
-                pass
+            yield root_path
             for dirname in dirnames:
-                try:
-                    max_ns = max(max_ns, (root_path / dirname).stat().st_mtime_ns)
-                except OSError:
-                    pass
+                yield root_path / dirname
             if "SKILL.md" in filenames:
-                try:
-                    max_ns = max(max_ns, (root_path / "SKILL.md").stat().st_mtime_ns)
-                except OSError:
-                    pass
+                yield root_path / "SKILL.md"
     except Exception:
-        pass
+        return
+
+
+def _skill_tree_max_mtime_ns(skills_dir: Path, config_path: Path) -> int:
+    """Return the max st_mtime_ns across config.yaml, skill dirs, and SKILL.md files."""
+    max_ns = 0
+    for path in _iter_skill_probe_paths(skills_dir, config_path):
+        try:
+            max_ns = max(max_ns, path.stat().st_mtime_ns)
+        except OSError:
+            pass
     return max_ns
+
+
+def _skill_tree_probe(skills_dir: Path, config_path: Path) -> tuple[int, int, int]:
+    """Return a cheap mtime/name fingerprint for config.yaml + skill index files.
+
+    A max-mtime-only probe can miss rapid add/remove operations on filesystems
+    that stamp several creates with the same ``st_mtime_ns``.  Keep the public
+    mtime helper numeric for existing tests/callers, but include counts and a
+    stable path-name fingerprint in the cache key so a new ``SKILL.md`` is
+    visible immediately even when the timestamp does not advance.
+    """
+    max_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+    entries = 0
+    path_fingerprint = 0
+    for path in _iter_skill_probe_paths(skills_dir, config_path):
+        entries += 1
+        try:
+            rel = str(path.relative_to(skills_dir))
+        except ValueError:
+            rel = str(path)
+        # Deterministic tiny rolling hash; enough to distinguish path set changes
+        # inside this process-local cache without importing a heavier hasher.
+        for ch in rel:
+            path_fingerprint = ((path_fingerprint * 131) + ord(ch)) & 0xFFFFFFFF
+    return (max_ns, entries, path_fingerprint)
 
 
 def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
@@ -1905,44 +1927,44 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
 
     # Always run the cheap stat-only probe first — this is what catches an
     # out-of-band create/edit/delete within the same request (not after the TTL).
-    current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+    current_probe = _skill_tree_probe(skills_dir, config_path)
 
     # Read via .get() (not membership-check + index) so a concurrent
     # _SKILLS_STATS_CACHE.clear() on another thread can't raise KeyError
     # between the `in` test and the lookup.
     cached = _SKILLS_STATS_CACHE.get(profile_dir)
     if cached is not None:
-        enabled, compat, cached_mtime_ns, expiry = cached
+        enabled, compat, cached_probe, expiry = cached
         # Fast path: files unchanged (by the cheap probe above) AND still within
         # the TTL → serve cached without re-reading any SKILL.md. The mtime probe
         # already ran, so an out-of-band change is caught immediately regardless
         # of the TTL. On TTL expiry we deliberately fall through to a full
         # recompute (the TTL is a safety net for mtime-preserving changes that
         # the probe can't see — e.g. a git checkout that restores the old mtime).
-        if current_mtime_ns == cached_mtime_ns and now < expiry:
+        if current_probe == cached_probe and now < expiry:
             return enabled, compat
 
-    # Cache miss, mtime changed, or TTL expired — serialize per-profile so a
+    # Cache miss, probe changed, or TTL expired — serialize per-profile so a
     # burst of concurrent misses (cold startup) collapses to ONE compute instead
     # of a thundering herd of simultaneous os.walk + SKILL.md parses (#5364).
     lock = _skills_stats_lock_for(profile_dir)
     with lock:
         # Double-checked locking: another thread may have populated a fresh entry
-        # while we waited for the lock. Reuse it when the mtime we already probed
+        # while we waited for the lock. Reuse it when the probe we already ran
         # still matches and the entry is within its TTL — no second compute.
         cached = _SKILLS_STATS_CACHE.get(profile_dir)
         if cached is not None:
-            enabled, compat, cached_mtime_ns, expiry = cached
-            if current_mtime_ns == cached_mtime_ns and time.time() < expiry:
+            enabled, compat, cached_probe, expiry = cached
+            if current_probe == cached_probe and time.time() < expiry:
                 return enabled, compat
 
-        # Snapshot mtime BEFORE compute so any concurrent SKILL.md write during
-        # the compute window causes a mismatch on the next probe instead of
-        # silently serving stale data (TOCTOU).
-        new_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+        # Snapshot the full probe BEFORE compute so any concurrent SKILL.md write
+        # or path-set change during the compute window causes a mismatch on the
+        # next probe instead of silently serving stale data (TOCTOU).
+        new_probe = _skill_tree_probe(skills_dir, config_path)
         res = _compute_profile_skills_stats(profile_dir)
         _SKILLS_STATS_CACHE[profile_dir] = (
-            res[0], res[1], new_mtime_ns, time.time() + _SKILLS_STATS_CACHE_TTL
+            res[0], res[1], new_probe, time.time() + _SKILLS_STATS_CACHE_TTL
         )
         return res
 
