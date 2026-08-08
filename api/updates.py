@@ -528,17 +528,37 @@ _agent_version_lock = threading.Lock()
 
 
 def _gateway_health_base_url() -> str:
-    """Return the configured/default Hermes Agent gateway base URL."""
+    """Return the configured/default Hermes Agent gateway base URL.
+
+    Mirrors the canonical precedence in
+    ``api.agent_health._remote_gateway_base_url`` (#3281):
+    ``GATEWAY_HEALTH_URL`` > ``HERMES_GATEWAY_HEALTH_URL`` > ``HERMES_API_URL``
+    > ``HERMES_WEBUI_GATEWAY_BASE_URL``, falling back to the Docker default
+    ``http://hermes-agent:8642`` for local/single-container setups. Custom
+    two-container / remote-gateway deployments that set only
+    ``HERMES_API_URL`` or ``HERMES_WEBUI_GATEWAY_BASE_URL`` therefore probe the
+    right host instead of an unresolvable ``hermes-agent`` service name.
+
+    Any of these env vars may legitimately point AT a health endpoint
+    (e.g. ``GATEWAY_HEALTH_URL=http://host:8642/health``). Since the probe
+    appends ``/health`` / ``/health/detailed`` to the returned base, a
+    trailing health-path suffix is stripped first (same normalization and
+    suffix list as the canonical resolver), and surrounding whitespace is
+    ignored.
+    """
     raw = (
         os.environ.get('GATEWAY_HEALTH_URL')
         or os.environ.get('HERMES_GATEWAY_HEALTH_URL')
+        or os.environ.get('HERMES_API_URL')
+        or os.environ.get('HERMES_WEBUI_GATEWAY_BASE_URL')
         or 'http://hermes-agent:8642'
     ).strip()
-    if raw.endswith('/health/detailed'):
-        raw = raw[: -len('/health/detailed')]
-    elif raw.endswith('/health'):
-        raw = raw[: -len('/health')]
-    return raw.rstrip('/')
+    base = raw.rstrip('/')
+    for suffix in ('/health/detailed', '/health', '/v1/health', '/status'):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)].rstrip('/')
+            break
+    return base
 
 
 def _version_from_gateway_health_payload(payload: object) -> str | None:

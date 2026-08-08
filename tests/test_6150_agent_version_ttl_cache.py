@@ -11,8 +11,10 @@ Covers the re-gate requirements:
   4. Refresh is single-flight — concurrent requests never stack probes.
 """
 import http.client
+import os
 import time
 
+import pytest
 from unittest.mock import patch, MagicMock
 
 
@@ -107,9 +109,16 @@ class TestAgentVersionCache:
         mock_threading.Thread.assert_not_called()
 
     def test_refresh_starts_one_daemon_thread_when_idle(self):
+        """An explicitly expired cache with no refresh in flight starts exactly
+        one daemon worker. The expired cache is installed explicitly so the
+        test does not depend on process-global test order (a fresh entry left
+        behind by an earlier test would suppress the worker)."""
         import api.updates as upd
 
-        with patch.object(upd, '_agent_version_refresh_in_progress', False), \
+        past = time.monotonic() - 1
+        with patch.object(upd, '_agent_version_cache',
+                          {'value': None, 'expires_at': past}), \
+             patch.object(upd, '_agent_version_refresh_in_progress', False), \
              patch.object(upd, 'threading') as mock_threading:
             upd._schedule_agent_version_refresh()
 
@@ -242,13 +251,53 @@ class TestSchedulingCoherence:
             assert mock_threading.Thread.call_count == 2
             assert upd._agent_version_refresh_in_progress is True
 
+    def test_thread_constructor_failure_clears_ownership_and_allows_retry(self):
+        """If Thread() construction itself raises (before start), the claimed
+        ownership is rolled back under the lock so a later request can retry."""
+        import api.updates as upd
+
+        past = time.monotonic() - 1
+
+        with patch.object(upd, '_agent_version_cache',
+                          {'value': None, 'expires_at': past}), \
+             patch.object(upd, '_agent_version_refresh_in_progress', False), \
+             patch.object(upd, 'threading') as mock_threading:
+            mock_threading.Thread.side_effect = RuntimeError('thread construction failed')
+            with pytest.raises(RuntimeError):
+                upd._schedule_agent_version_refresh()
+            # Construction failed -> ownership must be released...
+            assert upd._agent_version_refresh_in_progress is False
+            # ...so the retry is allowed and claims ownership again.
+            mock_threading.Thread.side_effect = None
+            mock_threading.Thread.return_value = MagicMock()
+            upd._schedule_agent_version_refresh()
+            assert mock_threading.Thread.call_count == 2
+            assert upd._agent_version_refresh_in_progress is True
+
     def test_concurrent_cold_callers_single_probe_and_clean_settle(self):
         """Concurrent cold/expired callers launch exactly ONE probe and settle
-        in a clean state: value + future expiry published, ownership released."""
+        in a clean state: value + future expiry published, ownership released.
+
+        The spawned worker is captured and joined INSIDE the patch scope, and
+        cache publication + ownership settlement are asserted there too. Patch
+        teardown restores the module-level ownership global, so asserting
+        after the ``with`` block would make settlement vacuous and let a late
+        worker cross into another test."""
         import api.updates as upd
         import threading as real_threading
+        import types as real_types
 
         cache = {'value': None, 'expires_at': 0.0}
+        created = []
+
+        def tracking_thread(*args, **kwargs):
+            t = real_threading.Thread(*args, **kwargs)
+            created.append(t)
+            return t
+
+        threading_shim = real_types.ModuleType('threading')
+        threading_shim.Thread = tracking_thread
+
         probe_entered = real_threading.Event()
         release_probe = real_threading.Event()
         probe_calls = []
@@ -262,7 +311,8 @@ class TestSchedulingCoherence:
         with patch.object(upd, '_agent_version_cache', cache), \
              patch.object(upd, '_agent_version_refresh_in_progress', False), \
              patch.object(upd, '_detect_agent_version_from_gateway_health',
-                          side_effect=slow_probe):
+                          side_effect=slow_probe), \
+             patch.object(upd, 'threading', threading_shim):
             barrier = real_threading.Barrier(5)
 
             def caller():
@@ -278,10 +328,75 @@ class TestSchedulingCoherence:
             for t in threads:
                 t.join(timeout=5)
 
-        assert len(probe_calls) == 1, 'concurrent callers stacked probes'
-        assert cache['value'] == 'v0.14.7'
-        assert cache['expires_at'] > time.monotonic()
-        assert upd._agent_version_refresh_in_progress is False
+            # Join the spawned worker INSIDE the patch scope so the settlement
+            # assertions below are the worker's real outcome, not a teardown
+            # artifact (patch teardown restores the ownership global to False).
+            assert len(created) == 1, 'concurrent callers stacked workers'
+            created[0].join(timeout=5)
+            assert not created[0].is_alive(), 'worker did not settle'
+
+            assert len(probe_calls) == 1, 'concurrent callers stacked probes'
+            assert cache['value'] == 'v0.14.7'
+            assert cache['expires_at'] > time.monotonic()
+            assert upd._agent_version_refresh_in_progress is False
+
+    def test_worker_baseexception_still_settles_ownership(self):
+        """A BaseException raised inside the worker (e.g. KeyboardInterrupt)
+        must not leak ownership: settlement runs in ``finally`` even though
+        the exception bypasses the cache publication, so a later request can
+        retry against a cold cache."""
+        import api.updates as upd
+        import threading as real_threading
+        import types as real_types
+
+        cache = {'value': None, 'expires_at': 0.0}
+        created = []
+
+        def tracking_thread(*args, **kwargs):
+            # Wrap the worker target: the BaseException must propagate through
+            # _run (exercising its finally-settlement) and then be swallowed at
+            # the thread boundary so pytest does not flag an unhandled thread
+            # exception — settlement already happened.
+            target = kwargs.get('target')
+            if target is not None:
+                def wrapped(*a, **k):
+                    try:
+                        target(*a, **k)
+                    except BaseException:
+                        pass
+                kwargs['target'] = wrapped
+            t = real_threading.Thread(*args, **kwargs)
+            created.append(t)
+            return t
+
+        threading_shim = real_types.ModuleType('threading')
+        threading_shim.Thread = tracking_thread
+
+        def boom(**kwargs):
+            raise KeyboardInterrupt('interrupted during probe')
+
+        with patch.object(upd, '_agent_version_cache', cache), \
+             patch.object(upd, '_agent_version_refresh_in_progress', False), \
+             patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          side_effect=boom), \
+             patch.object(upd, 'threading', threading_shim):
+            upd._schedule_agent_version_refresh()
+            assert len(created) == 1
+            created[0].join(timeout=5)
+            assert not created[0].is_alive(), 'worker did not settle'
+            # Ownership settled by finally even though BaseException skipped
+            # the cache publication...
+            assert upd._agent_version_refresh_in_progress is False
+            # ...and the cache stayed cold so a later request can retry.
+            assert cache['value'] is None
+            assert cache['expires_at'] == 0.0
+
+            # The freed ownership lets a follow-up request claim and retry.
+            upd._schedule_agent_version_refresh()
+            assert len(created) == 2
+            created[1].join(timeout=5)
+            assert not created[1].is_alive()
+            assert upd._agent_version_refresh_in_progress is False
 
     def test_failed_probe_publishes_none_with_backoff_expiry(self):
         """A failed probe settles ``None`` with its own backoff expiry, and the
@@ -312,3 +427,96 @@ class TestSchedulingCoherence:
             with patch.object(upd, 'threading') as mock_threading:
                 upd._schedule_agent_version_refresh()
             mock_threading.Thread.assert_not_called()
+
+
+class TestGatewayHealthBaseUrl:
+    """Canonical gateway-base precedence for the agent-version probe (#6156 re-gate).
+
+    The background refresh must honor every supported remote-gateway location
+    in the same order as ``api.agent_health._remote_gateway_base_url``, then
+    fall back to the Docker default, and strip trailing health-path suffixes
+    so the probe never builds ``/health/health``. All env vars are cleared per
+    case so the tests are deterministic regardless of the host environment.
+    """
+
+    def _resolve(self, env):
+        import api.updates as upd
+        with patch.dict(os.environ, env, clear=True):
+            return upd._gateway_health_base_url()
+
+    def test_each_supported_variable_resolves_individually(self):
+        cases = {
+            'GATEWAY_HEALTH_URL': 'http://gw-a.invalid:8642',
+            'HERMES_GATEWAY_HEALTH_URL': 'http://gw-b.invalid:8642',
+            'HERMES_API_URL': 'http://gw-c.invalid:8642',
+            'HERMES_WEBUI_GATEWAY_BASE_URL': 'http://gw-d.invalid:8642',
+        }
+        for var, url in cases.items():
+            assert self._resolve({var: url}) == url, var
+
+    def test_precedence_gateway_health_url_wins(self):
+        assert self._resolve({
+            'GATEWAY_HEALTH_URL': 'http://first.invalid:8642',
+            'HERMES_GATEWAY_HEALTH_URL': 'http://second.invalid:8642',
+            'HERMES_API_URL': 'http://third.invalid:8642',
+            'HERMES_WEBUI_GATEWAY_BASE_URL': 'http://fourth.invalid:8642',
+        }) == 'http://first.invalid:8642'
+
+    def test_precedence_hermes_gateway_health_url_beats_api_url(self):
+        assert self._resolve({
+            'HERMES_GATEWAY_HEALTH_URL': 'http://second.invalid:8642',
+            'HERMES_API_URL': 'http://third.invalid:8642',
+            'HERMES_WEBUI_GATEWAY_BASE_URL': 'http://fourth.invalid:8642',
+        }) == 'http://second.invalid:8642'
+
+    def test_precedence_hermes_api_url_beats_webui_gateway_base(self):
+        assert self._resolve({
+            'HERMES_API_URL': 'http://third.invalid:8642',
+            'HERMES_WEBUI_GATEWAY_BASE_URL': 'http://fourth.invalid:8642',
+        }) == 'http://third.invalid:8642'
+
+    def test_precedence_webui_gateway_base_url_is_last_supported(self):
+        assert self._resolve({
+            'HERMES_WEBUI_GATEWAY_BASE_URL': 'http://fourth.invalid:8642',
+        }) == 'http://fourth.invalid:8642'
+
+    def test_docker_default_when_no_variable_set(self):
+        assert self._resolve({}) == 'http://hermes-agent:8642'
+
+    def test_surrounding_whitespace_is_ignored(self):
+        assert self._resolve({
+            'GATEWAY_HEALTH_URL': '  http://gw.invalid:8642  ',
+        }) == 'http://gw.invalid:8642'
+
+    @pytest.mark.parametrize('var', [
+        'GATEWAY_HEALTH_URL',
+        'HERMES_GATEWAY_HEALTH_URL',
+        'HERMES_API_URL',
+        'HERMES_WEBUI_GATEWAY_BASE_URL',
+    ])
+    @pytest.mark.parametrize('suffix,expected', [
+        ('/health/detailed', 'http://gw.invalid:8642'),
+        ('/health', 'http://gw.invalid:8642'),
+        # '/v1/health' also ends with '/health', which the canonical suffix
+        # list matches FIRST, so only that segment is stripped. The probe then
+        # appends '/health' again, round-tripping to the configured endpoint.
+        ('/v1/health', 'http://gw.invalid:8642/v1'),
+        ('/status', 'http://gw.invalid:8642'),
+    ])
+    def test_health_path_suffix_stripped_for_each_variable(self, var, suffix, expected):
+        assert self._resolve({var: f'http://gw.invalid:8642{suffix}'}) == expected
+
+    @pytest.mark.parametrize('var', [
+        'GATEWAY_HEALTH_URL',
+        'HERMES_GATEWAY_HEALTH_URL',
+        'HERMES_API_URL',
+        'HERMES_WEBUI_GATEWAY_BASE_URL',
+    ])
+    def test_trailing_slash_after_health_suffix_is_normalized(self, var):
+        assert self._resolve({var: 'http://gw.invalid:8642/health/'}) \
+            == 'http://gw.invalid:8642'
+
+    def test_non_health_path_is_preserved(self):
+        assert self._resolve({
+            'GATEWAY_HEALTH_URL': 'http://gw.invalid:8642/api/v1',
+        }) == 'http://gw.invalid:8642/api/v1'
