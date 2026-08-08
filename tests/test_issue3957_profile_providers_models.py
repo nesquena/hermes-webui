@@ -189,7 +189,7 @@ def test_active_request_scope_prefers_profile_key_over_process_env_for_custom_pr
     monkeypatch.setenv("ISSUE_3957_CUSTOM_KEY", "from-process-env")
     monkeypatch.setattr(
         config,
-        "get_config",
+        "get_config_snapshot",
         lambda: {
             "custom_providers": [
                 {"name": "Team", "api_key": "${ISSUE_3957_CUSTOM_KEY}"}
@@ -397,8 +397,12 @@ def test_models_sync_rebuild_uses_legacy_mirrored_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "_available_models_cache_ts", 0.0)
     monkeypatch.setattr(config, "_available_models_cache_source_fingerprint", None)
     monkeypatch.setattr(config, "_cache_build_in_progress", False)
-    monkeypatch.setattr(config, "_load_models_cache_from_disk", lambda: None)
-    monkeypatch.setattr(config, "_save_models_cache_to_disk", lambda result: None)
+    monkeypatch.setattr(config, "_load_models_cache_from_disk", lambda *, config_data=None: None)
+    monkeypatch.setattr(
+        config,
+        "_save_models_cache_to_disk",
+        lambda result, *, source_fingerprint=None: None,
+    )
     monkeypatch.setattr(config, "_models_cache_source_fingerprint", lambda: "issue-3957")
     seen = {}
 
@@ -507,7 +511,7 @@ def test_detached_worker_prefers_profile_key_for_custom_provider(monkeypatch, tm
     monkeypatch.setenv("ISSUE_3957_CUSTOM_KEY", "from-process-env")
     monkeypatch.setattr(
         config,
-        "get_config",
+        "get_config_snapshot",
         lambda: {
             "custom_providers": [
                 {"name": "team", "api_key": "${ISSUE_3957_CUSTOM_KEY}"}
@@ -912,4 +916,3 @@ def test_expand_env_vars_does_not_leak_process_env_under_block_scope(monkeypatch
             config._thread_ctx.env = {}
         else:
             config._thread_ctx.env = prev_env
-

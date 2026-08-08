@@ -1652,13 +1652,28 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         if not home.is_dir():
             raise ValueError(f"Profile '{name}' does not exist.")
 
-    with _profile_lock:
+    def _apply_switch_state() -> None:
+        global _active_profile
         _SKILLS_STATS_CACHE.clear()
         if process_wide:
-            global _active_profile
             _active_profile = name
             _set_hermes_home(home)
             _reload_dotenv(home)
+
+    if process_wide:
+        from api.streaming import _ENV_LOCK
+
+        # Provider-key writes decide whether to mutate live os.environ while
+        # holding _ENV_LOCK. Process-wide switches mutate the same authority, so
+        # they share this critical section with _profile_lock nested inside it:
+        # _ENV_LOCK -> _profile_lock is the single lock order for profile-owned
+        # live-env changes.
+        with _ENV_LOCK:
+            with _profile_lock:
+                _apply_switch_state()
+    else:
+        with _profile_lock:
+            _apply_switch_state()
 
     if process_wide:
         # Write sticky default for CLI consistency
@@ -2637,15 +2652,34 @@ def delete_profile_api(name: str) -> dict:
         raise ValueError("Cannot delete the default profile.")
     _validate_profile_name(name)
 
-    # If deleting the active profile, switch to default first
-    if _active_profile == name:
-        try:
-            switch_profile('default')
-        except RuntimeError:
-            raise RuntimeError(
-                f"Cannot delete active profile '{name}' while an agent is running. "
-                "Cancel or wait for it to finish."
-            )
+    try:
+        from api import auth as _auth
+
+        _auth._assert_profile_delete_has_no_active_trusted_binding(name)
+    except RuntimeError:
+        raise
+    except Exception:
+        logger.debug(
+            "Could not validate trusted profile deletion dependencies",
+            exc_info=True,
+        )
+        raise RuntimeError(
+            "Cannot validate trusted auth dependencies for profile deletion"
+        ) from None
+
+    # Browser profile switches are per-request cookie/TLS scoped. If the browser
+    # deletes its current profile, hand it back to default in the same response so
+    # the next request does not carry a now-unknown HttpOnly cookie.
+    request_profile = getattr(_tls, 'profile', None)
+    request_active_matches = request_profile is not None and _profiles_match(request_profile, name)
+
+    # Process-wide authority is separate: if it still points at the target, switch
+    # it to root/default first and let switch_profile fail closed while streams are
+    # active, before any persisted profile state is removed.
+    if _profiles_match(_active_profile, name):
+        switch_profile("default", process_wide=True)
+    if request_active_matches:
+        switch_profile("default", process_wide=False)
 
     try:
         from hermes_cli.profiles import delete_profile
@@ -2657,10 +2691,13 @@ def delete_profile_api(name: str) -> dict:
         if profile_dir.is_dir():
             shutil.rmtree(str(profile_dir))
         else:
-            raise ValueError(f"Profile '{name}' does not exist.")
-
+            raise ValueError(f"Profile '{name}' does not exist.") from None
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
     _SKILLS_STATS_CACHE.clear()
     _invalidate_list_profiles_cache()
     _invalidate_root_profile_cache()
-    return {'ok': True, 'name': name}
+    result = {'ok': True, 'name': name}
+    if request_active_matches:
+        set_request_profile("default")
+        result['active'] = 'default'
+    return result

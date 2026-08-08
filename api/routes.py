@@ -2864,6 +2864,8 @@ from api.config import (
     PENDING_GOAL_CONTINUATION,
     _get_config_path,
     _load_yaml_config_file,
+    _load_yaml_config_file_raw,
+    _expand_env_vars_for_profile_home,
     _save_yaml_config_file,
     reload_config,
     get_config_for_profile_home,
@@ -7314,7 +7316,8 @@ def _resolve_compatible_session_model_state(
             catalog = get_available_models()
     else:
         catalog = get_available_models()
-    default_model = str(catalog.get("default_model") or DEFAULT_MODEL or "").strip()
+    catalog_default_model = str(catalog.get("default_model") or "").strip()
+    default_model = str(catalog_default_model or DEFAULT_MODEL or "").strip()
 
     # Profile-aware resolution: when the caller supplies profile context
     # (not an explicit per-chat override), use the profile's provider and
@@ -7572,7 +7575,7 @@ def _resolve_compatible_session_model_state(
         if model_provider in routable_provider_ids or has_openrouter_group:
             return model, requested_provider, False
         # Model prefix is not routable — stale cross-provider reference, clear it.
-        if default_model:
+        if catalog_default_model:
             return default_model, requested_provider, True
         return model, requested_provider, False
 
@@ -12567,7 +12570,9 @@ def handle_get(handler, parsed) -> bool:
             days = max(1, min(int(days_raw), 365))
         except (ValueError, TypeError):
             days = 7
-        return j(handler, get_provider_cost_history(provider_id, days))
+        from api.profiles import profile_env_for_active_request_readonly
+        with profile_env_for_active_request_readonly("/api/provider/cost-history", logger_override=logger):
+            return j(handler, get_provider_cost_history(provider_id, days))
 
     if parsed.path == "/api/settings":
         settings = load_settings()
@@ -15781,11 +15786,31 @@ def handle_post(handler, parsed) -> bool:
         if not name:
             return bad(handler, "name is required")
         try:
+            from api.auth import ensure_trusted_auth_session
             from api.profiles import delete_profile_api, _validate_profile_name
+            from api.helpers import build_profile_cookie
 
             _validate_profile_name(name)
+            session_info = ensure_trusted_auth_session(handler)
+            if getattr(handler, '_trusted_auth_session_rejected', False):
+                return bad(handler, 'Authentication required', 401)
+            bound_profile = str((session_info or {}).get("bound_profile") or "").strip() or None
+            if bound_profile and _profiles_match(bound_profile, name):
+                return bad(handler, "Profile is bound to the current session", 403)
             result = delete_profile_api(name)
-            return j(handler, result)
+            extra_headers = None
+            active_profile = result.get("active") if isinstance(result, dict) else None
+            if active_profile:
+                session_cookie_value = getattr(handler, '_trusted_auth_session_cookie_value', None)
+                if session_cookie_value:
+                    profile_cookie = build_profile_cookie(
+                        str(active_profile),
+                        session_cookie_value=session_cookie_value,
+                    )
+                else:
+                    profile_cookie = build_profile_cookie(str(active_profile), handler)
+                extra_headers = {"Set-Cookie": profile_cookie}
+            return j(handler, result, extra_headers=extra_headers)
         except PermissionError as e:
             return bad(handler, _sanitize_error(e), 403)
         except (ValueError, FileNotFoundError) as e:
@@ -15822,6 +15847,17 @@ def handle_post(handler, parsed) -> bool:
             body["_clear_password"] = True
 
         current_password = body.pop("_current_password", None)
+        profile_for_auth_state_cookie = None
+        if requested_password or requested_clear_password:
+            try:
+                # Preserve an explicit selected UI profile when this request
+                # changes the cookie auth format. Requests without
+                # hermes_profile can keep using the default fallback.
+                from api.helpers import get_profile_cookie
+
+                profile_for_auth_state_cookie = get_profile_cookie(handler)
+            except Exception:
+                profile_for_auth_state_cookie = None
 
         # #1560: HERMES_WEBUI_PASSWORD env var takes precedence in
         # api.auth.get_password_hash(), so writing password_hash to settings.json
@@ -15939,6 +15975,17 @@ def handle_post(handler, parsed) -> bool:
         if auth_just_enabled and not logged_in_before:
             new_cookie = create_session()
             logged_in_after = True
+        profile_cookie_header = None
+        if profile_for_auth_state_cookie and auth_enabled_before != auth_enabled_after:
+            from api.helpers import build_profile_cookie
+
+            if auth_enabled_after:
+                profile_cookie_header = build_profile_cookie(
+                    profile_for_auth_state_cookie,
+                    session_cookie_value=new_cookie or current_cookie,
+                )
+            else:
+                profile_cookie_header = build_profile_cookie(profile_for_auth_state_cookie)
 
         saved["auth_enabled"] = auth_enabled_after
         saved["password_auth_enabled"] = get_password_hash() is not None
@@ -15957,7 +16004,8 @@ def handle_post(handler, parsed) -> bool:
             pass
 
         if not new_cookie:
-            return j(handler, saved)
+            extra_headers = {"Set-Cookie": profile_cookie_header} if profile_cookie_header else None
+            return j(handler, saved, extra_headers=extra_headers)
 
         response_body = json.dumps(saved, ensure_ascii=False, indent=2).encode("utf-8")
         handler.send_response(200)
@@ -15965,6 +16013,8 @@ def handle_post(handler, parsed) -> bool:
         handler.send_header("Content-Length", str(len(response_body)))
         handler.send_header("Cache-Control", "no-store")
         set_auth_cookie(handler, new_cookie)
+        if profile_cookie_header:
+            handler.send_header("Set-Cookie", profile_cookie_header)
         _security_headers(handler)
         handler.end_headers()
         handler.wfile.write(response_body)
@@ -19981,7 +20031,7 @@ def _handle_live_models(handler, parsed):
     provider = (qs.get("provider", [""])[0] or "").lower().strip()
 
     try:
-        from api.config import get_config as _gc
+        from api.config import get_config_snapshot as _gc
         cfg = _gc()
         if not provider:
             provider = cfg.get("model", {}).get("provider") or ""
@@ -26307,7 +26357,107 @@ def _parse_mcp_enabled(value) -> bool:
     return True
 
 
-def _mcp_runtime_status_by_name() -> dict[str, dict]:
+def _mcp_profile_home_key(value) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    try:
+        return str(Path(text).expanduser().resolve())
+    except Exception:
+        try:
+            return str(Path(text).expanduser())
+        except Exception:
+            return text
+
+
+def _mcp_runtime_entry_owner_key(entry) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    for key in ("profile_home", "hermes_home", "home", "profile_dir"):
+        value = entry.get(key)
+        if value:
+            owner_key = _mcp_profile_home_key(value)
+            if owner_key:
+                return owner_key
+    profile_name = str(entry.get("profile") or entry.get("profile_name") or "").strip()
+    if profile_name:
+        try:
+            from api.profiles import get_hermes_home_for_profile
+
+            return _mcp_profile_home_key(get_hermes_home_for_profile(profile_name))
+        except Exception:
+            return ""
+    return ""
+
+
+def _mcp_runtime_status_key(entry) -> tuple[str, str] | None:
+    if not isinstance(entry, dict):
+        return None
+    server_name = str(entry.get("name") or "").strip()
+    if not server_name:
+        return None
+    return (_mcp_runtime_entry_owner_key(entry), server_name)
+
+
+def _mcp_runtime_entries_for_active_profile(
+    runtime_by_name,
+    active_home_key: str,
+    *,
+    allow_ownerless: bool = False,
+):
+    if not isinstance(runtime_by_name, dict):
+        return
+    active_home_key = _mcp_profile_home_key(active_home_key)
+    parsed_entries = []
+    has_owner_metadata = False
+    for raw_key, runtime in runtime_by_name.items():
+        if not isinstance(runtime, dict):
+            continue
+        owner_key = ""
+        server_name = ""
+        if isinstance(raw_key, tuple) and len(raw_key) >= 2:
+            owner_key = _mcp_profile_home_key(raw_key[0])
+            server_name = str(raw_key[1] or "").strip()
+        else:
+            server_name = str(raw_key or "").strip()
+        server_name = str(runtime.get("name") or server_name).strip()
+        owner_key = owner_key or _mcp_runtime_entry_owner_key(runtime)
+        if owner_key:
+            has_owner_metadata = True
+        if not server_name:
+            continue
+        parsed_entries.append((owner_key, server_name, runtime))
+    if not has_owner_metadata and not allow_ownerless:
+        return
+    for owner_key, server_name, runtime in parsed_entries:
+        if has_owner_metadata and owner_key != active_home_key:
+            continue
+        yield server_name, runtime
+
+
+def _mcp_runtime_status_for_server(
+    runtime_by_name,
+    active_home_key: str,
+    server_name: str,
+    *,
+    allow_ownerless: bool = False,
+):
+    target = str(server_name or "").strip()
+    if not target:
+        return None
+    for name, runtime in _mcp_runtime_entries_for_active_profile(
+        runtime_by_name,
+        active_home_key,
+        allow_ownerless=allow_ownerless,
+    ):
+        if name == target:
+            return runtime
+    return None
+
+
+def _mcp_runtime_status_by_name() -> dict[tuple[str, str], dict]:
     """Return already-known MCP runtime status without starting servers.
 
     ``tools.mcp_tool.get_mcp_status()`` only reads the existing MCP registry and
@@ -26321,11 +26471,12 @@ def _mcp_runtime_status_by_name() -> dict[str, dict]:
         return {}
     if not isinstance(statuses, list):
         return {}
-    return {
-        str(entry.get("name")): entry
-        for entry in statuses
-        if isinstance(entry, dict) and entry.get("name")
-    }
+    out = {}
+    for entry in statuses:
+        key = _mcp_runtime_status_key(entry)
+        if key is not None:
+            out[key] = entry
+    return out
 
 
 def _server_summary(name, cfg, runtime_status=None):
@@ -26477,20 +26628,88 @@ def _mcp_tool_summary(name, tool, server_summary):
     }
 
 
-def _mcp_tools_from_runtime_status(runtime_by_name, server_summaries):
+def _active_profile_mcp_config_path() -> Path:
+    """Return the active profile config path for profile-scoped MCP writes."""
+    test_override_module = getattr(_get_config_path, "__module__", "")
+    if test_override_module != "api.config":
+        return Path(_get_config_path()).expanduser()
+    if _is_isolated_profile_mode() or _is_root_profile(get_active_profile_name()):
+        return Path(_get_config_path()).expanduser()
+    active_home = str(get_active_hermes_home() or "").strip()
+    if not active_home:
+        raise ValueError("active profile home is not available")
+    return Path(active_home).expanduser() / "config.yaml"
+
+
+def _active_profile_mcp_expansion_home(config_path: Path) -> Path:
+    try:
+        active_home = get_active_hermes_home()
+        if active_home:
+            return Path(active_home).expanduser()
+    except Exception:
+        pass
+    return Path(config_path).expanduser().parent
+
+
+def _active_profile_mcp_config_data() -> dict:
+    """Return the same active-profile MCP config snapshot used by MCP writes."""
+    config_path = _active_profile_mcp_config_path()
+    expansion_home = _active_profile_mcp_expansion_home(config_path)
+    with _cfg_lock:
+        raw = _load_yaml_config_file_raw(config_path)
+        snapshot = copy.deepcopy(raw) if isinstance(raw, dict) else {}
+        expanded = _expand_env_vars_for_profile_home(snapshot, expansion_home)
+    return expanded if isinstance(expanded, dict) else {}
+
+
+def _active_profile_allows_ownerless_mcp_inventory() -> bool:
+    """Return whether ownerless Agent registry/runtime data is provably scoped."""
+    try:
+        if _is_isolated_profile_mode():
+            return True
+    except Exception:
+        return False
+    try:
+        rows = list_profiles_api()
+        active_profile = get_active_profile_name() or "default"
+    except Exception:
+        return False
+    names = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if name:
+            names.append(name)
+    if len(names) != 1:
+        return False
+    return _profiles_match(names[0], active_profile)
+
+
+def _mcp_tools_from_runtime_status(
+    runtime_by_name,
+    server_summaries,
+    active_home_key: str,
+    *,
+    allow_ownerless: bool = False,
+):
     """Read detailed MCP tool payloads from runtime status when available."""
     tools = []
     if not isinstance(runtime_by_name, dict):
         return tools
-    for server_name, runtime in runtime_by_name.items():
-        if not isinstance(runtime, dict):
+    for server_name, runtime in _mcp_runtime_entries_for_active_profile(
+        runtime_by_name,
+        active_home_key,
+        allow_ownerless=allow_ownerless,
+    ):
+        if server_name not in server_summaries:
             continue
         raw_tools = runtime.get("tools")
         if not isinstance(raw_tools, list):
             raw_tools = runtime.get("tool_schemas")
         if not isinstance(raw_tools, list):
             continue
-        server_summary = server_summaries.get(str(server_name), {"name": str(server_name)})
+        server_summary = server_summaries[server_name]
         for index, tool in enumerate(raw_tools):
             fallback_name = f"{server_name}:{index}"
             summary = _mcp_tool_summary(fallback_name, tool, server_summary)
@@ -26499,51 +26718,185 @@ def _mcp_tools_from_runtime_status(runtime_by_name, server_summaries):
     return tools
 
 
-def _mcp_tools_from_registry(server_summaries):
+def _mcp_registry_call_for_profile(
+    registry,
+    method_name: str,
+    *args,
+    active_home_key: str,
+):
+    """Call a registry query with an explicit owner or fail closed."""
+    method = getattr(registry, method_name, None)
+    if not callable(method):
+        raise AttributeError(method_name)
+    try:
+        parameters = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        parameters = ()
+    supports_profile_home = any(
+        parameter.name == "profile_home"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if supports_profile_home:
+        return method(*args, profile_home=active_home_key)
+    raise TypeError(
+        f"Agent registry method {method_name!r} does not support profile_home"
+    )
+
+
+def _mcp_registry_tool_owner_key(
+    registry,
+    tool_name: str,
+    active_home_key: str,
+) -> str:
+    """Return a registered MCP tool's owning profile home, if known."""
+    for method_name in (
+        "get_profile_home_for_tool",
+        "get_tool_profile_home",
+        "get_hermes_home_for_tool",
+        "get_tool_hermes_home",
+    ):
+        try:
+            owner_key = _mcp_profile_home_key(
+                _mcp_registry_call_for_profile(
+                    registry,
+                    method_name,
+                    tool_name,
+                    active_home_key=active_home_key,
+                )
+            )
+        except Exception:
+            owner_key = ""
+        if owner_key:
+            return owner_key
+
+    for method_name in ("get_tool_metadata", "get_metadata", "get_tool_info"):
+        try:
+            metadata = _mcp_registry_call_for_profile(
+                registry,
+                method_name,
+                tool_name,
+                active_home_key=active_home_key,
+            )
+        except Exception:
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        for key in ("profile_home", "hermes_home", "home", "profile_dir"):
+            owner_key = _mcp_profile_home_key(metadata.get(key))
+            if owner_key:
+                return owner_key
+        profile_name = str(
+            metadata.get("profile") or metadata.get("profile_name") or ""
+        ).strip()
+        if profile_name:
+            try:
+                from api.profiles import get_hermes_home_for_profile
+
+                return _mcp_profile_home_key(get_hermes_home_for_profile(profile_name))
+            except Exception:
+                return ""
+    return ""
+
+
+def _mcp_tools_from_registry(
+    server_summaries,
+    active_home_key: str,
+    *,
+    allow_ownerless: bool = False,
+):
     """Read already-registered MCP tool schemas without probing MCP servers."""
     try:
         from tools.registry import registry
     except Exception:
         return []
-    tools = []
     try:
-        names = registry.get_all_tool_names()
+        names = _mcp_registry_call_for_profile(
+            registry,
+            "get_all_tool_names",
+            active_home_key=active_home_key,
+        )
     except Exception:
         return []
+    candidates = []
+    has_owner_metadata = False
+    active_home_key = _mcp_profile_home_key(active_home_key)
     for tool_name in names:
         try:
-            toolset = registry.get_toolset_for_tool(tool_name)
+            toolset = _mcp_registry_call_for_profile(
+                registry,
+                "get_toolset_for_tool",
+                tool_name,
+                active_home_key=active_home_key,
+            )
         except Exception:
             continue
         if not isinstance(toolset, str) or not toolset.startswith("mcp-"):
             continue
         server_name = toolset[len("mcp-"):]
-        schema = registry.get_schema(tool_name) or {}
-        server_summary = server_summaries.get(server_name, {
-            "name": server_name,
-            "enabled": True,
-            "active": False,
-            "status": "configured",
-        })
-        tools.append(_mcp_tool_summary(tool_name, schema, server_summary))
+        if server_name not in server_summaries:
+            continue
+        owner_key = _mcp_registry_tool_owner_key(
+            registry,
+            tool_name,
+            active_home_key,
+        )
+        if owner_key:
+            has_owner_metadata = True
+        schema = _mcp_registry_call_for_profile(
+            registry,
+            "get_schema",
+            tool_name,
+            active_home_key=active_home_key,
+        ) or {}
+        server_summary = server_summaries[server_name]
+        candidates.append((owner_key, _mcp_tool_summary(tool_name, schema, server_summary)))
+    if not has_owner_metadata and not allow_ownerless:
+        return []
+    tools = []
+    for owner_key, summary in candidates:
+        if has_owner_metadata and owner_key != active_home_key:
+            continue
+        tools.append(summary)
     return tools
 
 
 def _handle_mcp_tools_list(handler):
     """List known MCP tools from already-available runtime inventory only."""
-    cfg = get_config_for_profile_home(get_active_hermes_home())
+    active_home = get_active_hermes_home()
+    active_home_key = _mcp_profile_home_key(active_home)
+    cfg = _active_profile_mcp_config_data()
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
     runtime = _mcp_runtime_status_by_name()
+    allow_ownerless = _active_profile_allows_ownerless_mcp_inventory()
     server_summaries = {
-        str(name): _server_summary(str(name), scfg, runtime.get(str(name)))
+        str(name): _server_summary(
+            str(name),
+            scfg,
+            _mcp_runtime_status_for_server(
+                runtime,
+                active_home_key,
+                str(name),
+                allow_ownerless=allow_ownerless,
+            ),
+        )
         for name, scfg in servers.items()
     }
-    tools = _mcp_tools_from_runtime_status(runtime, server_summaries)
+    tools = _mcp_tools_from_runtime_status(
+        runtime,
+        server_summaries,
+        active_home_key,
+        allow_ownerless=allow_ownerless,
+    )
     source = "mcp_runtime_status"
     if not tools:
-        tools = _mcp_tools_from_registry(server_summaries)
+        tools = _mcp_tools_from_registry(
+            server_summaries,
+            active_home_key,
+            allow_ownerless=allow_ownerless,
+        )
         source = "tool_registry" if tools else "none"
     tools.sort(key=lambda row: (row.get("server", ""), row.get("name", "")))
     unavailable_servers = [
@@ -26689,7 +27042,7 @@ def _notes_sources_from_mcp_inventory(server_summaries: dict, tools: list[dict])
         by_server.setdefault(server, []).append(tool)
 
     if isinstance(server_summaries, dict):
-        for server, summary in server_summaries.items():
+        for server in server_summaries:
             server_name = str(server or "").strip()
             if not server_name or server_name in by_server:
                 continue
@@ -26730,7 +27083,9 @@ def _notes_sources_from_mcp_inventory(server_summaries: dict, tools: list[dict])
 
 def _handle_notes_sources_list(handler):
     """List note/knowledge MCP sources for the WebUI Notes drawer."""
-    cfg = get_config()
+    active_home = get_active_hermes_home()
+    active_home_key = _mcp_profile_home_key(active_home)
+    cfg = _active_profile_mcp_config_data()
     if not _external_notes_sources_enabled(cfg):
         return j(handler, {
             "enabled": False,
@@ -26745,14 +27100,33 @@ def _handle_notes_sources_list(handler):
     if not isinstance(servers, dict):
         servers = {}
     runtime = _mcp_runtime_status_by_name()
+    allow_ownerless = _active_profile_allows_ownerless_mcp_inventory()
     server_summaries = {
-        str(name): _server_summary(str(name), scfg, runtime.get(str(name)))
+        str(name): _server_summary(
+            str(name),
+            scfg,
+            _mcp_runtime_status_for_server(
+                runtime,
+                active_home_key,
+                str(name),
+                allow_ownerless=allow_ownerless,
+            ),
+        )
         for name, scfg in servers.items()
     }
-    tools = _mcp_tools_from_runtime_status(runtime, server_summaries)
+    tools = _mcp_tools_from_runtime_status(
+        runtime,
+        server_summaries,
+        active_home_key,
+        allow_ownerless=allow_ownerless,
+    )
     source = "mcp_runtime_status"
     if not tools:
-        tools = _mcp_tools_from_registry(server_summaries)
+        tools = _mcp_tools_from_registry(
+            server_summaries,
+            active_home_key,
+            allow_ownerless=allow_ownerless,
+        )
         source = "tool_registry" if tools else "none"
     return j(handler, {
         "enabled": True,
@@ -27045,13 +27419,25 @@ def _handle_notes_item(handler, parsed):
 
 def _handle_mcp_servers_list(handler):
     """List configured MCP servers with safe, read-only runtime visibility."""
-    cfg = get_config_for_profile_home(get_active_hermes_home())
+    active_home = get_active_hermes_home()
+    active_home_key = _mcp_profile_home_key(active_home)
+    cfg = _active_profile_mcp_config_data()
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
     runtime = _mcp_runtime_status_by_name()
+    allow_ownerless = _active_profile_allows_ownerless_mcp_inventory()
     result = [
-        _server_summary(name, scfg, runtime.get(str(name)))
+        _server_summary(
+            name,
+            scfg,
+            _mcp_runtime_status_for_server(
+                runtime,
+                active_home_key,
+                str(name),
+                allow_ownerless=allow_ownerless,
+            ),
+        )
         for name, scfg in servers.items()
     ]
     return j(handler, {
@@ -27067,15 +27453,21 @@ def _handle_mcp_server_delete(handler, name):
     name = unquote(name)
     if not name:
         return bad(handler, "name is required")
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    if name not in servers:
+    missing = False
+    with _cfg_lock:
+        config_path = _active_profile_mcp_config_path()
+        cfg = _load_yaml_config_file_raw(config_path)
+        servers = cfg.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            servers = {}
+        if name not in servers:
+            missing = True
+        else:
+            del servers[name]
+            cfg["mcp_servers"] = servers
+            _save_yaml_config_file(config_path, cfg)
+    if missing:
         return bad(handler, f"MCP server '{name}' not found", 404)
-    del servers[name]
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
     reload_config()
     return j(handler, {"ok": True, "deleted": name})
 
@@ -27089,17 +27481,23 @@ def _handle_mcp_server_toggle(handler, name, body):
     if "enabled" not in body:
         return bad(handler, "enabled field is required")
     enabled = bool(body["enabled"])
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    if name not in servers:
-        return bad(handler, f"MCP server '{name}' not found", 404)
-    if not isinstance(servers[name], dict):
-        return bad(handler, f"MCP server '{name}' has invalid config", 400)
-    servers[name]["enabled"] = enabled
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    error = None
+    with _cfg_lock:
+        config_path = _active_profile_mcp_config_path()
+        cfg = _load_yaml_config_file_raw(config_path)
+        servers = cfg.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            servers = {}
+        if name not in servers:
+            error = (f"MCP server '{name}' not found", 404)
+        elif not isinstance(servers[name], dict):
+            error = (f"MCP server '{name}' has invalid config", 400)
+        else:
+            servers[name]["enabled"] = enabled
+            cfg["mcp_servers"] = servers
+            _save_yaml_config_file(config_path, cfg)
+    if error:
+        return bad(handler, error[0], error[1])
     reload_config()
     return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
@@ -27131,31 +27529,47 @@ def _handle_mcp_server_update(handler, name, body):
     if not name:
         return bad(handler, "name is required")
     # Validate: must have url (http) or command (stdio)
-    server_cfg = {}
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    existing_cfg = servers.get(name, {})
-    if body.get("url"):
-        server_cfg["url"] = body["url"].strip()
-        if body.get("headers"):
-            server_cfg["headers"] = _strip_masked_values(body["headers"], existing_cfg.get("headers", {}))
-    elif body.get("command"):
-        server_cfg["command"] = body["command"].strip()
-        if body.get("args"):
-            server_cfg["args"] = body["args"] if isinstance(body["args"], list) else [body["args"]]
-        if body.get("env"):
-            server_cfg["env"] = _strip_masked_values(body["env"], existing_cfg.get("env", {}))
-    else:
+    if not body.get("url") and not body.get("command"):
         return bad(handler, "url or command is required")
-    if body.get("timeout") is not None:
-        try:
-            server_cfg["timeout"] = int(body["timeout"])
-        except (ValueError, TypeError):
-            pass
-    servers[name] = server_cfg
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    with _cfg_lock:
+        config_path = _active_profile_mcp_config_path()
+        cfg = _load_yaml_config_file_raw(config_path)
+        servers = cfg.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            servers = {}
+        existing_cfg = servers.get(name, {})
+        if not isinstance(existing_cfg, dict):
+            existing_cfg = {}
+        server_cfg = {}
+        if "enabled" in body:
+            server_cfg["enabled"] = bool(body["enabled"])
+        elif "enabled" in existing_cfg:
+            server_cfg["enabled"] = existing_cfg["enabled"]
+        if body.get("url"):
+            server_cfg["url"] = body["url"].strip()
+            if body.get("headers"):
+                server_cfg["headers"] = _strip_masked_values(
+                    body["headers"], existing_cfg.get("headers", {})
+                )
+        else:
+            server_cfg["command"] = body["command"].strip()
+            if body.get("args"):
+                server_cfg["args"] = (
+                    body["args"]
+                    if isinstance(body["args"], list)
+                    else [body["args"]]
+                )
+            if body.get("env"):
+                server_cfg["env"] = _strip_masked_values(
+                    body["env"], existing_cfg.get("env", {})
+                )
+        if body.get("timeout") is not None:
+            try:
+                server_cfg["timeout"] = int(body["timeout"])
+            except (ValueError, TypeError):
+                pass
+        servers[name] = server_cfg
+        cfg["mcp_servers"] = servers
+        _save_yaml_config_file(config_path, cfg)
     reload_config()
     return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})

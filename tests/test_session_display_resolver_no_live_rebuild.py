@@ -48,11 +48,21 @@ def cold_models_cache(monkeypatch):
     monkeypatch.setattr(
         cfg, "_available_models_cache_source_fingerprint", None, raising=False
     )
+    monkeypatch.setattr(cfg, "_available_models_live_rebuild_ts", 0.0, raising=False)
+    monkeypatch.setattr(cfg, "_models_cache_provenance", None, raising=False)
+    monkeypatch.setattr(cfg, "_advertised_model_ids_memo", None, raising=False)
     monkeypatch.setattr(cfg, "_cache_build_in_progress", False, raising=False)
+    monkeypatch.setattr(cfg, "_cfg_cache_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        cfg,
+        "cfg",
+        {"model": {"provider": "anthropic", "default": "claude-opus-4-7"}},
+        raising=False,
+    )
     # Never read/write the real on-disk cache during the test.
-    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda *, config_data=None: None)
     monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda *_a, **_k: None)
-    monkeypatch.setattr(cfg, "_delete_models_cache_on_disk", lambda: None)
+    monkeypatch.setattr(cfg, "_delete_models_cache_on_disk", lambda *, config_data=None: None)
     yield
 
 

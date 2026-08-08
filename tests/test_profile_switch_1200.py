@@ -16,6 +16,26 @@ import tempfile
 import textwrap
 from pathlib import Path
 
+import pytest
+
+
+@pytest.fixture
+def preserve_stream_state():
+    import api.routes as routes
+
+    with routes.STREAMS_LOCK:
+        previous_streams = dict(routes.STREAMS)
+    try:
+        yield
+    finally:
+        with routes.STREAMS_LOCK:
+            created_stream_ids = set(routes.STREAMS) - set(previous_streams)
+            routes.STREAMS.clear()
+            routes.STREAMS.update(previous_streams)
+        for stream_id in created_stream_ids:
+            routes.unregister_stream_owner(stream_id)
+            routes.STREAM_GOAL_RELATED.pop(stream_id, None)
+
 
 def test_switch_profile_returns_target_workspace_not_current(tmp_path, monkeypatch):
     """
@@ -664,7 +684,11 @@ def test_get_available_models_reloads_when_request_profile_changes_even_with_reb
         config.invalidate_models_cache()
 
 
-def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_path):
+def test_chat_start_retags_empty_session_to_request_profile(
+    monkeypatch,
+    tmp_path,
+    preserve_stream_state,
+):
     """An empty session created under profile A can be sent under profile B after a switch."""
     import api.routes as routes
 
@@ -737,7 +761,11 @@ def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_pat
     assert payloads and payloads[-1][0] == 200
 
 
-def test_chat_start_does_not_retag_non_empty_session(monkeypatch, tmp_path):
+def test_chat_start_does_not_retag_non_empty_session(
+    monkeypatch,
+    tmp_path,
+    preserve_stream_state,
+):
     """Profile retagging is limited to empty placeholder sessions."""
     import api.routes as routes
 

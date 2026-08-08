@@ -104,8 +104,8 @@ def test_done_event_updates_sidebar_cache_immediately_after_completion_marker():
     assert cache_idx != -1, "done handler must update the sidebar cache immediately"
     assert refresh_idx != -1 and sound_idx != -1
     assert marker_idx < cleanup_idx < cache_idx < refresh_idx < sound_idx, (
-        "the sidebar should flip from spinner to dot from the done payload before "
-        "waiting for /api/sessions or playing the completion cue"
+        "the completion marker must be written before owner cleanup and the "
+        "sidebar cache update, while idle rendering and the completion cue follow"
     )
 
 
