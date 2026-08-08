@@ -149,6 +149,22 @@ class _SuccessfulAgent(_MockAgent):
         }
 
 
+def _payload_builder_that_fails_at_compact(builder):
+    def _fail_payload(session):
+        original_compact = session.compact
+
+        def _fail_compact():
+            raise RuntimeError("compact failed")
+
+        session.compact = _fail_compact
+        try:
+            return builder(session)
+        finally:
+            session.compact = original_compact
+
+    return _fail_payload
+
+
 class _FakeCredentialPoolEntry:
     def __init__(self, payload):
         self._payload = dict(payload)
@@ -2233,7 +2249,7 @@ def test_gateway_post_save_cancel_after_success_commit_emits_done(tmp_path, monk
     session.save()
     models.SESSIONS[session_id] = session
 
-    original_payload = streaming._session_payload_with_full_messages
+    original_payload = streaming._redacted_terminal_session_payload
     payload_calls = {"count": 0}
 
     def _payload_and_cancel_after_success_commit(*args, **kwargs):
@@ -2241,7 +2257,7 @@ def test_gateway_post_save_cancel_after_success_commit_emits_done(tmp_path, monk
         config.CANCEL_FLAGS[stream_id].set()
         return original_payload(*args, **kwargs)
 
-    monkeypatch.setattr(streaming, "_session_payload_with_full_messages", _payload_and_cancel_after_success_commit)
+    monkeypatch.setattr(streaming, "_redacted_terminal_session_payload", _payload_and_cancel_after_success_commit)
 
     gateway_chat._run_gateway_chat_streaming(
         session_id,
@@ -2367,7 +2383,7 @@ def test_streaming_post_save_cancel_after_success_commit_emits_done(tmp_path, mo
     session.save()
     models.SESSIONS[session_id] = session
 
-    original_payload = streaming._session_payload_with_full_messages
+    original_payload = streaming._redacted_terminal_session_payload
     payload_calls = {"count": 0}
 
     def _payload_and_cancel_after_success_commit(*args, **kwargs):
@@ -2375,7 +2391,7 @@ def test_streaming_post_save_cancel_after_success_commit_emits_done(tmp_path, mo
         config.CANCEL_FLAGS[stream_id].set()
         return original_payload(*args, **kwargs)
 
-    monkeypatch.setattr(streaming, "_session_payload_with_full_messages", _payload_and_cancel_after_success_commit)
+    monkeypatch.setattr(streaming, "_redacted_terminal_session_payload", _payload_and_cancel_after_success_commit)
 
     with mock.patch.object(streaming, "_get_ai_agent", return_value=_SuccessfulAgent), \
          mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
@@ -2419,7 +2435,7 @@ def test_streaming_no_pause_post_save_cancel_after_success_commit_emits_done(tmp
     session.save()
     models.SESSIONS[session_id] = session
 
-    original_payload = streaming._session_payload_with_full_messages
+    original_payload = streaming._redacted_terminal_session_payload
     payload_calls = {"count": 0}
 
     def _payload_and_cancel_after_success_commit(*args, **kwargs):
@@ -2427,7 +2443,7 @@ def test_streaming_no_pause_post_save_cancel_after_success_commit_emits_done(tmp
         config.CANCEL_FLAGS[stream_id].set()
         return original_payload(*args, **kwargs)
 
-    monkeypatch.setattr(streaming, "_session_payload_with_full_messages", _payload_and_cancel_after_success_commit)
+    monkeypatch.setattr(streaming, "_redacted_terminal_session_payload", _payload_and_cancel_after_success_commit)
 
     with mock.patch.object(streaming, "_get_ai_agent", return_value=_SuccessfulAgent), \
          mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
@@ -2456,6 +2472,182 @@ def test_streaming_no_pause_post_save_cancel_after_success_commit_emits_done(tmp
     assert "done" in queued_events
     assert "stream_end" in queued_events
     assert "cancel" not in queued_events
+
+
+def test_streaming_done_survives_terminal_payload_failure(tmp_path, monkeypatch):
+    stream_id = "streaming-done-payload-failure"
+    session_id = "streaming_done_payload_failure"
+    stream_queue = queue.Queue()
+    config.STREAMS[stream_id] = stream_queue
+    session = Session(
+        session_id=session_id,
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+        messages=[{"role": "user", "content": "before"}],
+        context_messages=[{"role": "user", "content": "before"}],
+        active_stream_id=stream_id,
+        pending_user_message="hello",
+        pending_user_source="webui",
+    )
+    session.save()
+    models.SESSIONS[session_id] = session
+
+    monkeypatch.setattr(
+        streaming,
+        "_redacted_terminal_session_payload",
+        _payload_builder_that_fails_at_compact(streaming._redacted_terminal_session_payload),
+    )
+    with mock.patch.object(streaming, "_get_ai_agent", return_value=_SuccessfulAgent), \
+         mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
+        streaming._run_agent_streaming(
+            session_id=session_id,
+            msg_text="hello",
+            model="test-model",
+            model_provider="test-provider",
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+        )
+
+    events = list(stream_queue.queue)
+    done_payload = next(item[1] for item in events if item[0] == "done")
+    assert "session" not in done_payload
+    assert not any(item[0] == "apperror" for item in events)
+
+
+def test_ephemeral_done_does_not_embed_parent_transcript(tmp_path, monkeypatch):
+    stream_id = "streaming-ephemeral-done-bounded"
+    session_id = "streaming_ephemeral_done_bounded"
+    stream_queue = queue.Queue()
+    config.STREAMS[stream_id] = stream_queue
+    messages = [{"role": "user", "content": f"row-{index}"} for index in range(2000)]
+    session = Session(
+        session_id=session_id,
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+        messages=messages,
+        context_messages=list(messages),
+        active_stream_id=stream_id,
+        pending_user_message="What is this?",
+        pending_user_source="webui",
+    )
+    session.save()
+    models.SESSIONS[session_id] = session
+
+    with mock.patch.object(streaming, "_get_ai_agent", return_value=_SuccessfulAgent), \
+         mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
+        streaming._run_agent_streaming(
+            session_id=session_id,
+            msg_text="What is this?",
+            model="test-model",
+            model_provider="test-provider",
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+            ephemeral=True,
+        )
+
+    done_payload = next(item[1] for item in list(stream_queue.queue) if item[0] == "done")
+    assert done_payload["answer"] == "Stream reply"
+    assert done_payload["ephemeral"] is True
+    assert done_payload["session"] == {"session_id": session_id}
+    assert "messages" not in done_payload["session"]
+    assert "row-1999" not in json.dumps(done_payload)
+
+
+def test_gateway_done_survives_terminal_payload_failure(tmp_path, monkeypatch):
+    stream_id = "gateway-done-payload-failure"
+    session_id = "gateway_done_payload_failure"
+    stream_queue = queue.Queue()
+    config.STREAMS[stream_id] = stream_queue
+    monkeypatch.setattr(gateway_chat, "RunJournalWriter", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(gateway_chat, "gateway_approval_unavailable_reason", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(config, "get_config", lambda: {"webui_gateway_base_url": "http://gateway.test"})
+
+    class _GatewayResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def __iter__(self):
+            return iter([
+                b'data: {"choices":[{"delta":{"content":"Gateway reply"}}]}\n',
+                b"data: [DONE]\n",
+            ])
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda *_args, **_kwargs: _GatewayResponse())
+    monkeypatch.setattr(
+        streaming,
+        "_redacted_terminal_session_payload",
+        _payload_builder_that_fails_at_compact(streaming._redacted_terminal_session_payload),
+    )
+    session = Session(
+        session_id=session_id,
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+        messages=[],
+        context_messages=[],
+        active_stream_id=stream_id,
+        pending_user_message="hello",
+        pending_user_source="webui",
+    )
+    session.save()
+    models.SESSIONS[session_id] = session
+
+    gateway_chat._run_gateway_chat_streaming(
+        session_id,
+        "hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        model_provider="test-provider",
+    )
+
+    events = list(stream_queue.queue)
+    done_payload = next(item[1] for item in events if item[0] == "done")
+    assert "session" not in done_payload
+    assert not any(item[0] in {"apperror", "gateway_error"} for item in events)
+
+
+def test_gateway_terminal_error_survives_terminal_payload_failure(tmp_path, monkeypatch):
+    stream_id = "gateway-error-payload-failure"
+    session_id = "gateway_error_payload_failure"
+    session = Session(
+        session_id=session_id,
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+        messages=[],
+        context_messages=[],
+        active_stream_id=stream_id,
+        pending_user_message="hello",
+        pending_user_source="webui",
+    )
+    session.save()
+    models.SESSIONS[session_id] = session
+    monkeypatch.setattr(
+        streaming,
+        "_redacted_terminal_session_payload",
+        _payload_builder_that_fails_at_compact(streaming._redacted_terminal_session_payload),
+    )
+
+    payload = gateway_chat._settle_gateway_terminal_error(
+        session_id,
+        stream_id,
+        str(tmp_path),
+        "test-model",
+        "test-provider",
+        "gateway exploded",
+    )
+
+    assert payload["type"] == "error"
+    assert payload["session_id"] == session_id
+    assert "session" not in payload
 
 
 def test_stale_credential_empty_process_wakeup_still_records_pause(tmp_path):
