@@ -2035,7 +2035,7 @@ from api.workspace import set_last_workspace
 # metadata added by the webui and must be stripped before the API call.
 # `reasoning_content` is provider-facing for reasoning-capable models. Display
 # metadata such as `reasoning`, `thinking`, and `_reasoning` stays omitted here.
-_API_SAFE_MSG_KEYS = {'role', 'content', 'tool_calls', 'tool_call_id', 'name', 'refusal', 'reasoning_content'}
+_API_SAFE_MSG_KEYS = {'role', 'content', 'tool_calls', 'tool_call_id', 'name', 'refusal', 'reasoning_content', 'codex_reasoning_items', 'codex_message_items'}
 
 _NATIVE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
 

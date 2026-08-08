@@ -244,6 +244,24 @@ def test_sanitize_messages_for_api_no_oob_in_output():
     assert sanitized[1]["reasoning_content"] == "provider-facing reasoning metadata"
 
 
+def test_sanitize_messages_for_api_preserves_codex_responses_metadata():
+    reasoning_items = [{"id": "reasoning-1", "type": "reasoning"}]
+    message_items = [{"id": "message-1", "type": "message"}]
+    messages = [{
+        "role": "assistant",
+        "content": "answer",
+        "codex_reasoning_items": reasoning_items,
+        "codex_message_items": message_items,
+        "_display_only": "omit",
+    }]
+
+    sanitized = _sanitize_messages_for_api(messages)
+
+    assert sanitized[0]["codex_reasoning_items"] == reasoning_items
+    assert sanitized[0]["codex_message_items"] == message_items
+    assert "_display_only" not in sanitized[0]
+
+
 def test_sanitize_messages_for_api_preserves_tool_chains():
     messages = [
         {"role": "user", "content": f"please inspect\n{OOB_BLOCK}\nvisible request"},
