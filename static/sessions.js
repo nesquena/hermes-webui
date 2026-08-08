@@ -9180,15 +9180,31 @@ function _showProjectPicker(session, anchorEl){
   const rect=anchorEl.getBoundingClientRect();
   picker.style.position='fixed';
   picker.style.zIndex='999';
-  // Prefer opening below; flip above if too close to bottom of viewport
-  const spaceBelow=window.innerHeight-rect.bottom;
-  if(spaceBelow<160&&rect.top>160){
-    picker.style.bottom=(window.innerHeight-rect.top+4)+'px';
-    picker.style.top='auto';
+  const margin=8;
+  const gap=4;
+  // Measure the rendered picker instead of guessing its height. A fixed threshold
+  // fails as soon as the user has enough projects to make the menu taller.
+  picker.style.maxHeight='';
+  picker.style.overflowY='';
+  const pickerH=picker.offsetHeight||0;
+  const spaceBelow=Math.max(0,window.innerHeight-margin-rect.bottom-gap);
+  const spaceAbove=Math.max(0,rect.top-gap-margin);
+  let top=rect.bottom+gap;
+  if(pickerH<=spaceBelow){
+    // Preferred placement: directly below the session action button.
+  }else if(pickerH<=spaceAbove){
+    top=rect.top-gap-pickerH;
   }else{
-    picker.style.top=(rect.bottom+4)+'px';
-    picker.style.bottom='auto';
+    // Neither side fits the natural height. Use the roomier side and keep every
+    // project reachable by scrolling inside the picker.
+    const openAbove=spaceAbove>spaceBelow;
+    const available=openAbove?spaceAbove:spaceBelow;
+    top=openAbove?margin:rect.bottom+gap;
+    picker.style.maxHeight=available+'px';
+    picker.style.overflowY='auto';
   }
+  picker.style.top=top+'px';
+  picker.style.bottom='auto';
   // Align right edge of picker with right edge of button; keep within viewport
   const pickerW=Math.min(220,Math.max(160,picker.scrollWidth||160));
   let left=rect.right-pickerW;
