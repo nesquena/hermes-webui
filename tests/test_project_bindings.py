@@ -136,3 +136,146 @@ def test_bind_unknown_project_404():
         "workspace": "C:/Users/Admin/workspace",
     })
     assert "error" in res, "unknown project must be rejected"
+
+
+def test_bind_multiple_workspaces_with_default(tmp_path):
+    """A project can bind several workspaces; the marked default drives new
+    sessions, and default must always be a member of the workspaces list."""
+    pid = _create_project()
+    ws_a = tmp_path / "ws-a"
+    ws_b = tmp_path / "ws-b"
+    ws_a.mkdir()
+    ws_b.mkdir()
+    a, b = str(ws_a).replace("/", "\\"), str(ws_b).replace("/", "\\")
+
+    res = _post("/api/projects/bind", {
+        "project_id": pid,
+        "workspaces": [a, b],
+        "default_workspace": b,
+        "auto_assign": True,
+    })
+    assert res.get("ok"), f"bind failed: {res}"
+    p = res["project"]
+    assert set(p["workspaces"]) == {a, b}, p["workspaces"]
+    assert p["default_workspace"] == b
+    assert p.get("auto_assign") is True
+
+    # Default can also auto-add itself to the list (invariant holds).
+    res2 = _post("/api/projects/bind", {
+        "project_id": pid,
+        "default_workspace": a,
+    })
+    p2 = res2["project"]
+    assert p2["default_workspace"] == a
+    assert a in p2["workspaces"]
+
+
+def test_bind_workspaces_clear_with_null():
+    pid = _create_project()
+    _post("/api/projects/bind", {
+        "project_id": pid,
+        "workspaces": ["C:/Users/Admin/workspace"],
+        "default_workspace": "C:/Users/Admin/workspace",
+    })
+    res = _post("/api/projects/bind", {"project_id": pid, "workspaces": None})
+    assert res.get("ok"), f"unbind failed: {res}"
+    p = res["project"]
+    assert "workspaces" not in p
+    assert "default_workspace" not in p
+
+
+def test_bind_auto_assign_off():
+    pid = _create_project()
+    _post("/api/projects/bind", {
+        "project_id": pid,
+        "workspaces": ["C:/Users/Admin/workspace"],
+        "auto_assign": True,
+    })
+    res = _post("/api/projects/bind", {
+        "project_id": pid,
+        "auto_assign": False,
+    })
+    assert res.get("ok")
+    assert "auto_assign" not in res["project"]
+
+
+def test_auto_assign_project_for_workspace(tmp_path, monkeypatch):
+    """_auto_assign_project_for_workspace picks the owning project in list order."""
+    import api.routes as routes
+
+    pid1 = _create_project()
+    pid2 = _create_project()
+    ws = tmp_path / "shared"
+    ws.mkdir()
+    ws_str = str(ws).replace("/", "\\")
+    _post("/api/projects/bind", {
+        "project_id": pid1,
+        "workspaces": [ws_str],
+        "auto_assign": True,
+    })
+    _post("/api/projects/bind", {
+        "project_id": pid2,
+        "workspaces": [ws_str],
+        "auto_assign": True,
+    })
+
+    # First match in on-disk list order wins; reload from disk to avoid cache.
+    assert routes._auto_assign_project_for_workspace(ws_str) in (pid1, pid2)
+
+    # Unclaimed workspace → None
+    assert routes._auto_assign_project_for_workspace("Z:/not/claimed") is None
+    # Disabled flag → None
+    _post("/api/projects/bind", {"project_id": pid1, "auto_assign": False})
+    _post("/api/projects/bind", {"project_id": pid2, "auto_assign": False})
+    assert routes._auto_assign_project_for_workspace(ws_str) is None
+
+
+def test_apply_project_auto_assign_files_existing_sessions(tmp_path, monkeypatch):
+    """_apply_project_auto_assign re-files existing sessions whose workspace
+    is bound, skipping cross-profile rows and already-owned sessions."""
+    import api.routes as routes
+
+    # Point the index at a temp file with three sessions: two in the bound
+    # workspace, one in another workspace.
+    ws = tmp_path / "bound-ws"
+    ws.mkdir()
+    ws_str = str(ws).replace("/", "\\")
+    index_file = tmp_path / "_index.json"
+    index_file.write_text(json.dumps([
+        {"session_id": "sess_aaa", "workspace": ws_str, "profile": "default",
+         "project_id": None, "message_count": 3},
+        {"session_id": "sess_bbb", "workspace": ws_str, "profile": "default",
+         "project_id": "already-owned", "message_count": 1},
+        {"session_id": "sess_ccc", "workspace": "C:/Users/Admin/workspace",
+         "profile": "default", "project_id": None, "message_count": 2},
+        {"session_id": "sess_ddd", "workspace": ws_str, "profile": "other",
+         "project_id": None, "message_count": 4},
+    ]))
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+
+    saved = {}
+    class _FakeSession:
+        def __init__(self, sid):
+            self.session_id = sid
+            self.project_id = None
+        def save(self):
+            saved[self.session_id] = self.project_id
+
+    monkeypatch.setattr(routes, "get_session",
+                        lambda sid: _FakeSession(sid) if sid in (
+                            "sess_aaa", "sess_bbb", "sess_ccc", "sess_ddd") else None)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    proj = {"project_id": "proj_xyz", "profile": "default",
+            "workspaces": [ws_str], "auto_assign": True}
+    changed = routes._apply_project_auto_assign(proj)
+
+    # sess_aaa: bound ws, unowned → re-filed.
+    assert saved.get("sess_aaa") == "proj_xyz"
+    # sess_bbb: already owned by another project → untouched.
+    assert "sess_bbb" not in saved
+    # sess_ccc: different workspace → untouched.
+    assert "sess_ccc" not in saved
+    # sess_ddd: other profile → untouched.
+    assert "sess_ddd" not in saved
+    assert changed == 1
