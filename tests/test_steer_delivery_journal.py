@@ -1,0 +1,173 @@
+"""Durability coverage for accepted mid-run steer deliveries."""
+from __future__ import annotations
+
+import json
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+@pytest.fixture
+def isolated_steer_state():
+    from api.config import (
+        SESSION_AGENT_CACHE,
+        SESSION_AGENT_CACHE_LOCK,
+        STREAMS,
+        STREAMS_LOCK,
+    )
+
+    with SESSION_AGENT_CACHE_LOCK:
+        cache_snapshot = dict(SESSION_AGENT_CACHE)
+        SESSION_AGENT_CACHE.clear()
+    with STREAMS_LOCK:
+        streams_snapshot = dict(STREAMS)
+        STREAMS.clear()
+    try:
+        yield SESSION_AGENT_CACHE, STREAMS
+    finally:
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE.clear()
+            SESSION_AGENT_CACHE.update(cache_snapshot)
+        with STREAMS_LOCK:
+            STREAMS.clear()
+            STREAMS.update(streams_snapshot)
+
+
+def _handler():
+    handler = MagicMock()
+    handler.wfile = MagicMock()
+    handler.headers = MagicMock()
+    handler.headers.get = MagicMock(return_value="")
+    return handler
+
+
+def _response(handler):
+    raw = handler.wfile.write.call_args_list[-1][0][0]
+    return json.loads(raw.decode("utf-8"))
+
+
+def test_accepted_steer_uses_one_journal_identity_for_live_broadcast(
+    isolated_steer_state,
+):
+    from api import streaming
+    from api.config import SESSION_AGENT_CACHE_LOCK, STREAMS_LOCK, create_stream_channel
+
+    cache, streams = isolated_steer_state
+    sid = "steer_journal_sid"
+    stream_id = "steer_journal_run"
+    agent = MagicMock()
+    agent.steer.return_value = True
+    stream = create_stream_channel()
+    with SESSION_AGENT_CACHE_LOCK:
+        cache[sid] = (agent, "sig")
+    with STREAMS_LOCK:
+        streams[stream_id] = stream
+
+    session = MagicMock(active_stream_id=stream_id)
+    journal_event = {
+        "event_id": f"{stream_id}:7",
+        "seq": 7,
+        "run_id": stream_id,
+        "session_id": sid,
+        "created_at": 123.0,
+    }
+    with patch.object(streaming, "get_session", return_value=session), patch.object(
+        streaming,
+        "append_run_event",
+        return_value=journal_event,
+    ) as append_event:
+        handler = _handler()
+        streaming._handle_chat_steer(
+            handler,
+            {"session_id": sid, "text": "keep this steer"},
+        )
+
+    agent.steer.assert_called_once_with("keep this steer")
+    append_event.assert_called_once()
+    call = append_event.call_args
+    assert call.args[:3] == (sid, stream_id, "steer_delivered")
+    assert call.args[3]["text"] == "keep this steer"
+    assert call.args[3]["status"] == "delivered"
+
+    subscriber, snapshot = stream.subscribe_with_snapshot()
+    event_name, payload, event_id = subscriber.get_nowait()
+    assert event_name == "steer_delivered"
+    assert payload["text"] == "keep this steer"
+    assert payload["created_at"] == 123.0
+    assert event_id == f"{stream_id}:7"
+    assert snapshot["last_event_id"] == event_id
+    assert snapshot["offline_buffered_events"] == 1
+    assert _response(handler) == {
+        "accepted": True,
+        "fallback": None,
+        "stream_id": stream_id,
+    }
+
+
+def test_rejected_steer_does_not_create_a_delivery_event(isolated_steer_state):
+    from api import streaming
+    from api.config import SESSION_AGENT_CACHE_LOCK, STREAMS_LOCK, create_stream_channel
+
+    cache, streams = isolated_steer_state
+    sid = "steer_rejected_sid"
+    stream_id = "steer_rejected_run"
+    agent = MagicMock()
+    agent.steer.return_value = False
+    stream = create_stream_channel()
+    with SESSION_AGENT_CACHE_LOCK:
+        cache[sid] = (agent, "sig")
+    with STREAMS_LOCK:
+        streams[stream_id] = stream
+
+    with patch.object(
+        streaming,
+        "get_session",
+        return_value=MagicMock(active_stream_id=stream_id),
+    ), patch.object(streaming, "append_run_event") as append_event:
+        handler = _handler()
+        streaming._handle_chat_steer(handler, {"session_id": sid, "text": "no"})
+
+    append_event.assert_not_called()
+    subscriber, snapshot = stream.subscribe_with_snapshot()
+    assert subscriber.empty()
+    assert snapshot["offline_buffered_events"] == 0
+    assert _response(handler)["accepted"] is False
+
+
+def test_journal_failure_does_not_turn_runtime_acceptance_into_http_failure(
+    isolated_steer_state,
+):
+    from api import streaming
+    from api.config import SESSION_AGENT_CACHE_LOCK, STREAMS_LOCK, create_stream_channel
+
+    cache, streams = isolated_steer_state
+    sid = "steer_journal_failure_sid"
+    stream_id = "steer_journal_failure_run"
+    agent = MagicMock()
+    agent.steer.return_value = True
+    stream = create_stream_channel()
+    with SESSION_AGENT_CACHE_LOCK:
+        cache[sid] = (agent, "sig")
+    with STREAMS_LOCK:
+        streams[stream_id] = stream
+
+    with patch.object(
+        streaming,
+        "get_session",
+        return_value=MagicMock(active_stream_id=stream_id),
+    ), patch.object(
+        streaming,
+        "append_run_event",
+        side_effect=OSError("disk unavailable"),
+    ):
+        handler = _handler()
+        streaming._handle_chat_steer(handler, {"session_id": sid, "text": "accepted"})
+
+    subscriber, snapshot = stream.subscribe_with_snapshot()
+    assert subscriber.empty()
+    assert snapshot["offline_buffered_events"] == 0
+    assert _response(handler) == {
+        "accepted": True,
+        "fallback": None,
+        "stream_id": stream_id,
+    }

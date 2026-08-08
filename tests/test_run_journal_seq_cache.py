@@ -61,6 +61,52 @@ def test_writer_and_free_function_share_one_gapless_sequence(tmp_path):
     assert file_seqs == [1, 2, 3, 4]
 
 
+def test_writer_and_free_append_keep_physical_sequence_order(tmp_path, monkeypatch):
+    """A direct append cannot overtake a writer after it reserves its seq."""
+    writer = run_journal.RunJournalWriter(
+        "sess_order", "run_order", session_dir=tmp_path
+    )
+    real_append = run_journal.append_run_event
+    writer_at_append = threading.Event()
+    release_writer = threading.Event()
+    errors: list[BaseException] = []
+
+    def controlled_append(*args, **kwargs):
+        if threading.current_thread().name == "journal-writer":
+            writer_at_append.set()
+            if not release_writer.wait(timeout=10):
+                raise TimeoutError("writer interleave was not released")
+        return real_append(*args, **kwargs)
+
+    monkeypatch.setattr(run_journal, "append_run_event", controlled_append)
+
+    def write_from_writer():
+        try:
+            writer.append_sse_event("token", {"text": "writer"})
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+
+    thread = threading.Thread(target=write_from_writer, name="journal-writer")
+    thread.start()
+    assert writer_at_append.wait(timeout=10), "writer never reached append"
+    run_journal.append_run_event(
+        "sess_order",
+        "run_order",
+        "steer_delivered",
+        {"text": "direct"},
+        session_dir=tmp_path,
+    )
+    release_writer.set()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert errors == []
+    journal = run_journal.read_run_events(
+        "sess_order", "run_order", session_dir=tmp_path
+    )
+    assert [event["seq"] for event in journal["events"]] == [1, 2]
+
+
 def test_explicit_seq_keeps_cache_from_reissuing(tmp_path):
     # A caller-supplied seq must push the cache forward so a later cache append
     # does not collide with it.

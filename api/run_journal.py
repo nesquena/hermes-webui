@@ -447,18 +447,17 @@ class RunJournalWriter:
         self._lock = _lock_for(self._path)
 
     def append_sse_event(self, event_name: str, payload=None) -> dict:
-        # Draw from the shared module-level seq cache under the per-path lock so
-        # this writer and any direct append_run_event() call on the same path
-        # agree on one monotonic, gapless sequence.
-        with self._lock:
-            seq = _reserve_next_seq(self._path)
+        # append_run_event owns sequence reservation and the physical append in
+        # one per-path critical section. Reserving here and releasing the lock
+        # before calling it lets a direct concurrent append write seq=N+1 before
+        # this writer writes seq=N, which makes replay report a non-contiguous
+        # journal even though the numeric set is gapless.
         return append_run_event(
             self.session_id,
             self.run_id,
             event_name,
             payload or {},
             session_dir=self.session_dir,
-            seq=seq,
         )
 
 

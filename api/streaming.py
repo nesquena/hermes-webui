@@ -52,7 +52,7 @@ from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.metering import meter
-from api.run_journal import RunJournalWriter
+from api.run_journal import RunJournalWriter, append_run_event
 from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
@@ -11560,6 +11560,67 @@ def _run_agent_streaming(
 # ============================================================
 
 
+def _publish_accepted_steer_event(session_id: str, stream_id: str, text: str) -> None:
+    """Journal and broadcast one accepted mid-run steer delivery.
+
+    ``agent.steer()`` mutates the active runtime, but its pending value is not a
+    replay surface. Persist the accepted delivery in the run journal first, then
+    broadcast that same event identity to connected or reconnecting clients.
+    """
+    created_at = time.time()
+    payload = {
+        "session_id": str(session_id),
+        "stream_id": str(stream_id),
+        "text": str(text),
+        "status": "delivered",
+        "created_at": created_at,
+    }
+    try:
+        journaled = append_run_event(
+            str(session_id),
+            str(stream_id),
+            "steer_delivered",
+            payload,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to persist accepted steer for session=%s stream=%s",
+            session_id,
+            stream_id,
+            exc_info=True,
+        )
+        return
+
+    event_id = journaled.get("event_id") if isinstance(journaled, dict) else None
+    if isinstance(journaled, dict):
+        payload["created_at"] = journaled.get("created_at", created_at)
+    with STREAMS_LOCK:
+        stream = STREAMS.get(str(stream_id))
+    if event_id:
+        STREAM_LAST_EVENT_ID[str(stream_id)] = str(event_id)
+        if stream is not None and hasattr(stream, "note_last_event_id"):
+            try:
+                stream.note_last_event_id(str(event_id))
+            except Exception:
+                logger.debug("Failed to note steer event id %s", event_id, exc_info=True)
+    if stream is None or not callable(getattr(stream, "put_nowait", None)):
+        return
+    try:
+        item = (
+            ("steer_delivered", payload, event_id)
+            if event_id
+            else ("steer_delivered", payload)
+        )
+        stream.put_nowait(item)
+    except Exception:
+        logger.warning(
+            "Failed to broadcast accepted steer for session=%s stream=%s",
+            session_id,
+            stream_id,
+            exc_info=True,
+        )
+
+
 def _handle_chat_steer(handler, body: dict) -> bool:
     """Inject a /steer payload into the active agent for a session.
 
@@ -11672,6 +11733,8 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         return j(handler, {"accepted": False, "fallback": "steer_error",
                            "stream_id": active_stream_id})
 
+    if accepted:
+        _publish_accepted_steer_event(sid, active_stream_id, text)
     return j(handler, {"accepted": accepted, "fallback": None,
                        "stream_id": active_stream_id})
 
