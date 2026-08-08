@@ -3338,7 +3338,12 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showBusyPlaceholderHint=!!s.show_busy_placeholder_hint;
     window._newChatOnWorkspaceSwitch=!!s.new_chat_on_workspace_switch;  // #5473 opt-in
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
-    window._autoScrollFollow=_persistAutoScrollFollow(s.auto_scroll_follow!==false);
+    window._autoScrollFollow=s.auto_scroll_follow!==false;
+    // #6819: persist into the profile-namespaced mirror AFTER the active
+    // profile resolves (S.activeProfile is still 'default' here; writing now
+    // would store this profile's value under the wrong namespace — P1 round 3
+    // review on #6856). The deferred re-apply below writes it profile-correct.
+    window._autoScrollFollowDeferredPersist=window._autoScrollFollow;
     window._largeTextPasteAsAttachment=s.large_text_paste_as_attachment!==false;
     window._projectQuickCreate=!!s.project_quick_create_buttons;
     window._composerControlVisibility=_composerControlVisibilityFromSettings(s);
@@ -3612,12 +3617,19 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if (activeProfileState.status === 'recovery-redirect') return;
   S.activeProfile = activeProfileState.profile;
   S.activeProfileIsDefault = activeProfileState.isDefault;
-  // #6819: settings-fetch-failure fallback deferred its auto-follow mirror
-  // read until the active profile resolved (S.activeProfile is only known
-  // asynchronously via /api/profile/active; the hermes_profile cookie is
-  // HttpOnly so document.cookie cannot read it). Apply the profile-correct
-  // mirror value now — and only if the settings fetch actually failed (the
-  // success path already applied+persisted the authoritative value above).
+  // #6819: apply the profile-namespaced auto-follow mirror state once the
+  // active profile resolves (S.activeProfile is only known asynchronously via
+  // /api/profile/active; the hermes_profile cookie is HttpOnly so
+  // document.cookie cannot read it — P1 reviews on #6856).
+  //  - Success path: the settings fetch applied the authoritative value above
+  //    but deferred its mirror WRITE (wrong namespace before profile resolve);
+  //    persist it profile-correct now.
+  //  - Failure path: the fallback deferred its mirror READ; apply the
+  //    profile-correct value now.
+  if(window._autoScrollFollowDeferredPersist!==undefined){
+    _persistAutoScrollFollow(window._autoScrollFollowDeferredPersist);
+    window._autoScrollFollowDeferredPersist=undefined;
+  }
   if(window._autoScrollFollowDeferredReapply){
     window._autoScrollFollow=_readPersistedAutoScrollFollow();
     window._autoScrollFollowDeferredReapply=false;
