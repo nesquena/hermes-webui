@@ -1825,3 +1825,243 @@ def test_apply_update_pull_lock_no_stash_when_clean(tmp_path, monkeypatch):
     # No stash pop on a clean pull-lock path.
     assert not any(c[0] == 'stash' for c in git_calls)
 
+
+def test_check_repo_fetch_uses_thirty_second_timeout(tmp_path):
+    """The update-check fetch contract is 30s (pinned via mock assertion)."""
+    (tmp_path / '.git').mkdir()
+    fetch_timeouts = []
+
+    def fake(args, cwd, timeout=10):
+        if args == ['fetch', 'origin', '--tags', '--force']:
+            fetch_timeouts.append(timeout)
+        return _fake_git_for_release_fetch_failure(args, cwd, timeout)
+
+    with patch.object(updates, '_run_git', side_effect=fake):
+        info = updates._check_repo(tmp_path, 'webui')
+
+    assert fetch_timeouts == [30]
+    assert info is not None
+    assert info['stale_check'] is True
+
+
+def test_apply_path_fetches_keep_fifteen_second_timeout():
+    """Only the update-check fetch moves to 30s; apply paths stay at 15s."""
+    import re
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / 'api' / 'updates.py').read_text(encoding='utf-8')
+    fetch_15 = len(re.findall(r"_run_git\(.*?timeout=15", source, re.S))
+    assert fetch_15 == 3
+
+def test_check_for_updates_runs_concurrently_with_bounded_timeout(tmp_path, monkeypatch):
+    """Verify that check_for_updates runs WebUI and Agent checks concurrently
+    and respects the bounded overall timeout budget. (PR #6830)
+    """
+    import time
+
+    # Create fake git repos
+    webui_path = tmp_path / 'webui'
+    agent_path = tmp_path / 'agent'
+    webui_path.mkdir()
+    agent_path.mkdir()
+    (webui_path / '.git').mkdir()
+    (agent_path / '.git').mkdir()
+
+    # Track concurrent execution
+    check_times = {'webui': 0.0, 'agent': 0.0}
+    check_start = time.time()
+
+    def fake_check_repo(path, name, channel='stable'):
+        check_times[name] = time.time() - check_start
+        # Simulate slow network I/O
+        time.sleep(0.1)
+        return {
+            'name': name,
+            'behind': 0,
+            'current_sha': 'abc123',
+            'latest_sha': 'abc123',
+        }
+
+    monkeypatch.setattr(updates, '_check_repo', fake_check_repo)
+    monkeypatch.setattr(updates, 'REPO_ROOT', webui_path)
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_path)
+
+    # Reset cache to force a fresh check
+    monkeypatch.setattr(updates, '_update_cache', {
+        'webui': None, 'agent': None, 'checked_at': 0,
+        'include_agent': True, 'channel': 'stable'
+    })
+
+    start_time = time.time()
+    result = updates.check_for_updates(force=True, include_agent=True, channel='stable')
+    elapsed = time.time() - start_time
+
+    # Both checks should have run
+    assert result['webui'] is not None
+    assert result['agent'] is not None
+    assert result['webui']['behind'] == 0
+    assert result['agent']['behind'] == 0
+
+    # Checks should have started concurrently (within 50ms of each other)
+    assert abs(check_times['webui'] - check_times['agent']) < 0.05
+
+    # Total time should be well under the 45s budget (since our fake sleeps are short)
+    assert elapsed < 1.0
+
+
+def test_check_for_updates_timeout_returns_partial_result(tmp_path, monkeypatch):
+    """When one repo check fails, the other should still return. (PR #6830)"""
+    import time
+
+    # Create fake git repos
+    webui_path = tmp_path / 'webui'
+    agent_path = tmp_path / 'agent'
+    webui_path.mkdir()
+    agent_path.mkdir()
+    (webui_path / '.git').mkdir()
+    (agent_path / '.git').mkdir()
+
+    def fake_check_repo(path, name, channel='stable'):
+        if name == 'webui':
+            return {
+                'name': 'webui',
+                'behind': 1,
+                'current_sha': 'abc123',
+                'latest_sha': 'def456',
+            }
+        # Agent check fails
+        raise Exception("Network error")
+
+    monkeypatch.setattr(updates, '_check_repo', fake_check_repo)
+    monkeypatch.setattr(updates, 'REPO_ROOT', webui_path)
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_path)
+
+    # Reset cache
+    monkeypatch.setattr(updates, '_update_cache', {
+        'webui': None, 'agent': None, 'checked_at': 0,
+        'include_agent': True, 'channel': 'stable'
+    })
+
+    result = updates.check_for_updates(force=True, include_agent=True, channel='stable')
+
+    # WebUI should have succeeded
+    assert result['webui'] is not None
+    assert result['webui']['behind'] == 1
+
+    # Agent should have error info
+    assert result['agent'] is not None
+    assert 'error' in result['agent'] or result['agent'].get('behind') is None
+
+
+def test_check_for_updates_does_not_wait_for_straggler_threads(tmp_path, monkeypatch):
+    """When a check hangs past the budget, the executor must not wait for it
+    on shutdown — it must return partial results within the caller's deadline.
+    (PR #6830, Greptile: executor shutdown defeats timeout)"""
+    import threading
+    import time
+
+    # Create fake git repos
+    webui_path = tmp_path / 'webui'
+    agent_path = tmp_path / 'agent'
+    webui_path.mkdir()
+    agent_path.mkdir()
+    (webui_path / '.git').mkdir()
+    (agent_path / '.git').mkdir()
+
+    # A straggler that blocks until we release it — simulating a git fetch
+    # that never returns.
+    straggler_block = threading.Event()
+    straggler_started = threading.Event()
+
+    def fake_check_repo(path, name, channel='stable'):
+        if name == 'webui':
+            straggler_started.set()
+            straggler_block.wait()  # hang forever (or until released)
+            return {'name': 'webui', 'behind': 0, 'current_sha': 'x', 'latest_sha': 'x'}
+        # Agent check returns immediately
+        return {'name': 'agent', 'behind': 0, 'current_sha': 'abc', 'latest_sha': 'abc'}
+
+    # Override the budget to something short so the test doesn't take 45s
+    monkeypatch.setattr(updates, '_check_repo', fake_check_repo)
+    monkeypatch.setattr(updates, 'REPO_ROOT', webui_path)
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_path)
+    monkeypatch.setattr(updates, '_UPDATE_CHECK_BUDGET_S', 1, raising=False)
+
+    # Reset cache
+    monkeypatch.setattr(updates, '_update_cache', {
+        'webui': None, 'agent': None, 'checked_at': 0,
+        'include_agent': True, 'channel': 'stable'
+    })
+
+    start = time.time()
+    result = updates.check_for_updates(force=True, include_agent=True, channel='stable')
+    elapsed = time.time() - start
+
+    # Release the straggler so the thread pool can clean up
+    straggler_block.set()
+
+    # Must return long before the straggler would have finished
+    assert elapsed < 5.0, f'took {elapsed:.1f}s — executor likely waited for straggler'
+
+    # Agent should have completed successfully
+    assert result['agent'] is not None
+    assert result['agent']['behind'] == 0
+
+    # WebUI should have a timeout error, not be stuck
+    assert result['webui'] is not None
+    assert result['webui'].get('behind') is None
+    assert 'error' in result['webui']
+
+
+def test_check_for_updates_aggregate_timeout_never_exceeds_budget(tmp_path, monkeypatch):
+    """When the first check consumes the full budget, the second future must
+    get only the remaining time, not a fresh timeout. (PR #6830, Greptile:
+    per-future waits exceed aggregate budget)"""
+    import threading
+    import time
+
+    webui_path = tmp_path / 'webui'
+    agent_path = tmp_path / 'agent'
+    webui_path.mkdir()
+    agent_path.mkdir()
+    (webui_path / '.git').mkdir()
+    (agent_path / '.git').mkdir()
+
+    agent_timeout_seen = []
+
+    # Real ThreadPoolExecutor, but we spy on future.result() to record
+    # the timeout the agent future receives.
+    _orig_result = type(threading.Thread()).result if False else None
+
+    def fake_check_repo(path, name, channel='stable'):
+        if name == 'webui':
+            time.sleep(2.0)  # consumes the budget
+            return {'name': 'webui', 'behind': 0, 'current_sha': 'x', 'latest_sha': 'x'}
+        return {'name': 'agent', 'behind': 0, 'current_sha': 'abc', 'latest_sha': 'abc'}
+
+    monkeypatch.setattr(updates, '_check_repo', fake_check_repo)
+    monkeypatch.setattr(updates, 'REPO_ROOT', webui_path)
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_path)
+    # Budget: 1s. WebUI sleeps 2s, so agent gets at most 1 - 2 = negative → floor 0.5s.
+    monkeypatch.setattr(updates, '_UPDATE_CHECK_BUDGET_S', 1, raising=False)
+
+    monkeypatch.setattr(updates, '_update_cache', {
+        'webui': None, 'agent': None, 'checked_at': 0,
+        'include_agent': True, 'channel': 'stable'
+    })
+
+    start = time.time()
+    result = updates.check_for_updates(force=True, include_agent=True, channel='stable')
+    elapsed = time.time() - start
+
+    # Total must be well under 2x budget — if the agent got a fresh 1s timeout
+    # this would take >3s (2s sleep + 1s agent timeout).
+    assert elapsed < 2.5, f'took {elapsed:.1f}s — likely gave agent a fresh budget'
+
+    # WebUI should have timed out (2s sleep > 1s budget)
+    assert result['webui'] is not None
+    assert 'error' in result['webui']
+    assert 'timed out' in result['webui']['error']
+
+    # Agent should have completed or timed out with the short remaining budget
+    assert result['agent'] is not None

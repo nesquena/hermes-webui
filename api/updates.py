@@ -46,6 +46,7 @@ _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same re
 CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _FORCE_DIRTY_PROBE_TIMEOUT = 5
+_UPDATE_CHECK_BUDGET_S = 45  # bounded overall budget for concurrent update checks (PR #6830)
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
 _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
@@ -1239,7 +1240,7 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # after a squash-merge that re-points a release tag at a new SHA) jams
     # the update path indefinitely with "would clobber existing tag" errors.
     # See #2756.
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=15)
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=30)
     if not fetch_ok:
         release_info = _check_repo_release(path, name, channel)
         message = 'fetch failed'
@@ -1360,14 +1361,71 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
         _check_in_progress = True
 
     try:
-        # Run checks outside the lock (network I/O)
-        webui_info = _check_repo(REPO_ROOT, 'webui', channel)
-        # The update channel is a WebUI-only concept. The Agent is a separate
-        # project that tags plain v* and legitimately tracks master past its
-        # tags; it must ALWAYS use the default channel regardless of the user's
-        # WebUI channel selection. (Codex gate: passing 'experimental' here made
-        # the Agent ignore its v* tags and fall back to origin/master.)
-        agent_info = _check_repo(_AGENT_DIR, 'agent', DEFAULT_UPDATE_CHANNEL) if include_agent else _ignored_agent_update_info()
+        # Run checks concurrently with a bounded overall timeout to prevent
+        # slow network I/O from blocking the response. Each _check_repo call
+        # can take up to 30s (git fetch timeout), so the serial path could
+        # take up to 60s. We cap the aggregate at 45s and return partial
+        # results if one check times out. (PR #6830)
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+
+        webui_info = None
+        agent_info = None
+
+        def _check_webui():
+            return _check_repo(REPO_ROOT, 'webui', channel)
+
+        def _check_agent():
+            # The update channel is a WebUI-only concept. The Agent is a separate
+            # project that tags plain v* and legitimately tracks master past its
+            # tags; it must ALWAYS use the default channel regardless of the user's
+            # WebUI channel selection. (Codex gate: passing 'experimental' here made
+            # the Agent ignore its v* tags and fall back to origin/master.)
+            return _check_repo(_AGENT_DIR, 'agent', DEFAULT_UPDATE_CHANNEL)
+
+        executor = ThreadPoolExecutor(max_workers=2)
+        try:
+            webui_future = executor.submit(_check_webui)
+            agent_future = executor.submit(_check_agent) if include_agent else None
+
+            budget_start = time.time()
+            remaining = _UPDATE_CHECK_BUDGET_S
+
+            # Wait for WebUI with the full remaining budget
+            try:
+                webui_info = webui_future.result(timeout=remaining)
+            except (FutureTimeoutError, Exception) as e:
+                webui_future.cancel()
+                logger.warning('WebUI update check failed or timed out: %s', e)
+                webui_info = {
+                    'name': 'webui',
+                    'behind': None,
+                    'error': f'check timed out after {_UPDATE_CHECK_BUDGET_S}s' if isinstance(e, FutureTimeoutError) else str(e),
+                    'stale_check': True,
+                }
+
+            if agent_future is not None:
+                # Give the second future only the remaining budget so the
+                # aggregate wait never exceeds _UPDATE_CHECK_BUDGET_S.
+                # (PR #6830, Greptile: per-future waits exceed aggregate)
+                elapsed = time.time() - budget_start
+                remaining = max(0.5, _UPDATE_CHECK_BUDGET_S - elapsed)
+                try:
+                    agent_info = agent_future.result(timeout=remaining)
+                except (FutureTimeoutError, Exception) as e:
+                    agent_future.cancel()
+                    logger.warning('Agent update check failed or timed out: %s', e)
+                    agent_info = {
+                        'name': 'agent',
+                        'behind': None,
+                        'error': f'check timed out after {_UPDATE_CHECK_BUDGET_S}s' if isinstance(e, FutureTimeoutError) else str(e),
+                        'stale_check': True,
+                    }
+            else:
+                agent_info = _ignored_agent_update_info()
+        finally:
+            # Don't wait for straggler threads — shutdown immediately so the
+            # caller's deadline isn't blown past the budget. (PR #6830, Greptile)
+            executor.shutdown(wait=False)
 
         with _cache_lock:
             _update_cache['webui'] = webui_info

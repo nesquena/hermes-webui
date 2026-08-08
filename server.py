@@ -114,11 +114,39 @@ from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
 
 
+MAX_REQUEST_WORKERS_DEFAULT = 128
+MAX_REQUEST_WORKERS_MIN = 16
+MAX_REQUEST_WORKERS_MAX = 2048
+_REQUEST_WORKERS_ENV = 'HERMES_WEBUI_MAX_REQUEST_WORKERS'
+
+
+def _clamp_request_workers(value: int) -> int:
+    """Bound an operator-supplied worker count to a sane range."""
+    return max(MAX_REQUEST_WORKERS_MIN, min(MAX_REQUEST_WORKERS_MAX, value))
+
+
+def _request_workers_from_env() -> int | None:
+    """Return the operator-configured worker count, or None to keep the default.
+
+    The value is bounded so a typo cannot spawn thousands of threads. An
+    unparseable value falls back to the default with a warning.
+    """
+    raw = os.environ.get(_REQUEST_WORKERS_ENV, '').strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning('%s=%r is not an integer; using default %s', _REQUEST_WORKERS_ENV, raw, MAX_REQUEST_WORKERS_DEFAULT)
+        return None
+    return _clamp_request_workers(value)
+
+
 class QuietHTTPServer(ThreadingHTTPServer):
     """Custom HTTP server that silently handles common network errors."""
     daemon_threads = True
     request_queue_size = 64
-    max_request_workers = 128
+    max_request_workers = MAX_REQUEST_WORKERS_DEFAULT
     max_overflow_reject_workers = 16
     _OVERFLOW_RESPONSE = (
         b"HTTP/1.1 503 Service Unavailable\r\n"
@@ -131,6 +159,9 @@ class QuietHTTPServer(ThreadingHTTPServer):
         server_address = args[0] if args else kwargs.get('server_address', None)
         if server_address and ':' in server_address[0]:
             self.address_family = socket.AF_INET6
+        configured_workers = _request_workers_from_env()
+        if configured_workers is not None:
+            self.max_request_workers = configured_workers
         self.ssl_context: object | None = None
         super().__init__(*args, **kwargs)
         self._request_worker_slots = threading.BoundedSemaphore(self.max_request_workers)
