@@ -159,23 +159,23 @@ def _session_list_cache_key(
     )
 
 
-def _session_list_cache_get(
+def _session_list_cache_get_with_reason(
     key: tuple,
     allow_stale: bool = False,
-) -> tuple[dict | None, bool]:
+) -> tuple[dict | None, bool, str | None]:
     now = time.monotonic()
     current_stamp = _session_list_cache_resolved_source_stamp(key)
     with _SESSIONS_CACHE_LOCK:
         entry = _SESSIONS_CACHE.get(key)
         if not entry:
-            return None, False
+            return None, False, None
         ts, stamp, payload = entry
         if stamp != current_stamp:
             if allow_stale:
                 _SESSIONS_CACHE.move_to_end(key)
-                return copy.deepcopy(payload), False
+                return copy.deepcopy(payload), False, "source"
             _SESSIONS_CACHE.pop(key, None)
-            return None, False
+            return None, False, "source"
         # #4808: widen the freshness window while a turn is streaming so the fixed
         # streaming poll cadence doesn't force a full rebuild on every poll.
         ttl = _SESSIONS_CACHE_TTL_SECONDS
@@ -184,12 +184,23 @@ def _session_list_cache_get(
         fresh = (now - ts) < ttl
         if fresh:
             _SESSIONS_CACHE.move_to_end(key)
-            return copy.deepcopy(payload), True
+            return copy.deepcopy(payload), True, None
         if allow_stale:
             _SESSIONS_CACHE.move_to_end(key)
-            return copy.deepcopy(payload), False
+            return copy.deepcopy(payload), False, "age"
         _SESSIONS_CACHE.pop(key, None)
-        return None, False
+        return None, False, "age"
+
+
+def _session_list_cache_get(
+    key: tuple,
+    allow_stale: bool = False,
+) -> tuple[dict | None, bool]:
+    payload, fresh, _stale_reason = _session_list_cache_get_with_reason(
+        key,
+        allow_stale=allow_stale,
+    )
+    return payload, fresh
 
 
 def _session_list_cache_stale_reason(key: tuple) -> str | None:

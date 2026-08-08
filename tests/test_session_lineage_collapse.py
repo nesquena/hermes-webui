@@ -1328,6 +1328,9 @@ function extractFunc(name) {{
 function _isSessionEffectivelyStreaming(session) {{
   return !!(session && (session.is_streaming || session.pending_user_message || session.has_pending_user_message));
 }}
+function _isSessionRingStreaming(session) {{
+  return _isSessionEffectivelyStreaming(session);
+}}
 function _hasUnreadForSession(session) {{
   return !!(session && session.has_unread);
 }}
@@ -2093,7 +2096,8 @@ def test_streaming_state_recorded_from_own_state_not_bubbled_child():
     # The pattern we need: ownStreaming used for remember, isStreaming used
     # for rendering (includes child).
     assert "const ownStreaming=_isSessionEffectivelyStreaming(s);" in js
-    assert "const isStreaming=ownStreaming||!!s._child_session_streaming;" in js
+    assert "const ownRingStreaming=_isSessionRingStreaming(s);" in js
+    assert "const isStreaming=ownRingStreaming||!!s._child_session_streaming;" in js
     assert "_rememberRenderedStreamingState(s, ownStreaming);" in js
     # The old buggy pattern must not exist.
     assert "_rememberRenderedStreamingState(s, isStreaming);" not in js
