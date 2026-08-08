@@ -660,9 +660,15 @@ function renderSessionArtifacts(){
     typeof _messagesTruncated !== 'undefined' &&
     _messagesTruncated
   );
-  if(hasTruncatedHistory && artifactsVisible) _renderNow();
-  if(!needsFullLoad){
+  if(hasTruncatedHistory && artifactsVisible){
     _renderNow();
+    if(!needsFullLoad){
+      const loadingText = (typeof t==='function'&&t('workspace_artifact_loading_full_history')) || 'Loading full history…';
+      root.innerHTML += `<div class="workspace-artifact-loading" data-i18n="workspace_artifact_loading_full_history" aria-live="polite">${esc(loadingText)}</div>`;
+    }
+  }
+  if(!needsFullLoad){
+    if(!(hasTruncatedHistory && artifactsVisible)) _renderNow();
     return;
   }
   const record = _artifactsFullHistoryRequestFor(sid, startGeneration, startLoadGeneration);

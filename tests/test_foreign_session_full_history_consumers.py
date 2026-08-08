@@ -44,9 +44,12 @@ ENSURE_ALL_FN = SESSIONS_JS[
 WORKSPACE_HELPERS = WORKSPACE_JS[
     WORKSPACE_JS.index("function _workspaceTodosTabIsActive(){") : WORKSPACE_JS.index("function _resetWorkspaceTodosRenderCache(){")
 ]
-WORKSPACE_ARTIFACT_CACHE = WORKSPACE_JS[
-    WORKSPACE_JS.index("let _artifactsFullHistoryRequest = null;") : WORKSPACE_JS.index("const ARTIFACT_IGNORE_RE =")
-]
+WORKSPACE_ARTIFACT_CACHE = (
+    "\nlet _artifactsFullHistoryRequest = null;\n"
+    + WORKSPACE_JS[
+        WORKSPACE_JS.index("function _setWorkspacePanelTabDataset()") : WORKSPACE_JS.index("const ARTIFACT_IGNORE_RE =")
+    ]
+)
 WORKSPACE_CONSUMER_BLOCK = WORKSPACE_JS[
     WORKSPACE_JS.index("function _normalizeArtifactPath(") : WORKSPACE_JS.index("async function _workspacePathExists(")
 ]
@@ -98,6 +101,7 @@ def _run_node(script: str) -> dict:
             cwd=REPO,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=20,
             check=False,
         )
@@ -112,8 +116,6 @@ def _download_script(
     active_stream: bool = False,
     generation_change: bool = False,
 ) -> str:
-    boot_path = str(REPO / "static" / "boot.js")
-    messages_path = str(REPO / "static" / "messages.js")
     if fail_load:
         snapshot_body = "ensureCalls += 1; throw new Error('load failed');"
     elif switch_session:
@@ -133,33 +135,6 @@ def _download_script(
     else:
         legacy_body = "ensureCalls += 1; S.messages = fullMessages; _messagesTruncated = false;"
     return f"""
-const fs = require('fs');
-const bootSrc = fs.readFileSync({json.dumps(boot_path)}, 'utf8');
-const messagesSrc = fs.readFileSync({json.dumps(messages_path)}, 'utf8');
-function extractFunction(source, name) {{
-  const start = source.indexOf(`function ${{name}}(`);
-  if (start < 0) throw new Error(`missing function ${{name}}`);
-  const brace = source.indexOf('{{', start);
-  let depth = 0;
-  for (let i = brace; i < source.length; i++) {{
-    const ch = source[i];
-    if (ch === '{{') depth++;
-    else if (ch === '}}') {{
-      depth--;
-      if (depth === 0) return source.slice(start, i + 1);
-    }}
-  }}
-  throw new Error(`unterminated function ${{name}}`);
-}}
-function extractAssignment(source, marker, nextMarker) {{
-  const start = source.indexOf(marker);
-  if (start < 0) throw new Error(`missing assignment ${{marker}}`);
-  const end = source.indexOf(nextMarker, start);
-  if (end < 0) throw new Error(`missing next marker ${{nextMarker}}`);
-  return source.slice(start, end).trim();
-}}
-const transcriptSrc = extractFunction(messagesSrc, 'transcript');
-const downloadAssign = extractAssignment(bootSrc, "$('btnDownload').onclick=", "$('btnExportJSON').onclick=");
 const translations = {{
   download_transcript_preparing_full: 'Preparing full transcript…',
   download_transcript_busy_full: 'Wait for the current response to finish before downloading the full transcript.',
@@ -528,26 +503,7 @@ _oldestIdx = 99;
 
 
 def _download_double_invocation_script() -> str:
-    boot_path = str(REPO / "static" / "boot.js")
-    messages_path = str(REPO / "static" / "messages.js")
     return f"""
-const fs = require('fs');
-const bootSrc = fs.readFileSync({json.dumps(boot_path)}, 'utf8');
-const messagesSrc = fs.readFileSync({json.dumps(messages_path)}, 'utf8');
-function extractFunction(source, name) {{
-  const start = source.indexOf(`function ${{name}}(`);
-  const brace = source.indexOf('{{', start);
-  let depth = 0;
-  for (let i = brace; i < source.length; i++) {{
-    if (source[i] === '{{') depth++;
-    else if (source[i] === '}}' && --depth === 0) return source.slice(start, i + 1);
-  }}
-  throw new Error(`unterminated ${{name}}`);
-}}
-const transcriptSrc = extractFunction(messagesSrc, 'transcript');
-const start = bootSrc.indexOf("$('btnDownload').onclick=");
-const end = bootSrc.indexOf("$('btnExportJSON').onclick=", start);
-const downloadAssign = bootSrc.slice(start, end).trim();
 const fullMessages = [
   {{ role: 'user', content: 'older row' }},
   {{ role: 'assistant', content: 'latest row' }},
@@ -679,6 +635,7 @@ const currentMessages = [{{ role: 'assistant', tool_calls: [{{ function: {{ name
 let ensureCalls = 0;
 let pending = [];
 let _messagesGeneration = 1;
+let _loadSessionGeneration = 1;
 let _messagesTruncated = true;
 let _workspacePanelActiveTab = 'artifacts';
 const rightPanel = {{ dataset: {{ activeTab: 'artifacts' }} }};
@@ -1285,7 +1242,7 @@ def test_download_handler_owns_one_pending_operation_and_cleans_busy_state():
     }
     assert result["duringSecond"]["calls"] == 1
     assert result["duringSecond"]["pending"] == 1
-    assert result["duringSecond"]["toasts"][-1]["message"] == "Wait for the current response to finish before downloading the full transcript."
+    assert result["duringSecond"]["toasts"][-1]["message"] == "Preparing full transcript…"
     assert result["ensureCalls"] == 1
     assert result["clicked"] == 1
     assert result["pending"] == 0
@@ -1324,8 +1281,8 @@ def test_artifacts_renderer_keeps_placeholder_during_live_turn_on_truncated_sess
     result = _run_node(_artifact_script(active_stream=True, seed_existing_dom=True))
 
     assert result["ensureCalls"] == 0
-    assert "Loading full history…" not in result["htmlBeforeAwait"]
-    assert "Loading full history…" not in result["html"]
+    assert "Loading full history…" in result["htmlBeforeAwait"]
+    assert "Loading full history…" in result["html"]
     assert 'data-artifact-path="new/live.txt"' in result["html"]
     assert result["countBeforeAwait"] == "1"
     assert result["count"] == "1"
@@ -1376,6 +1333,14 @@ def test_artifacts_renderer_rejects_stale_record_completion_by_identity():
 
     assert result["ensureCalls"] == 2
     assert 'data-artifact-path="fresh/current.txt"' in result["html"]
+    assert 'data-artifact-path="stale/old.txt"' not in result["html"]
+
+
+def test_artifacts_renderer_rejects_completion_after_load_visit_changes():
+    result = _run_node(_artifact_load_visit_guard_script())
+
+    assert result["ensureCalls"] == 1
+    assert 'data-artifact-path="current/live.txt"' in result["html"]
     assert 'data-artifact-path="stale/old.txt"' not in result["html"]
 
 
@@ -1630,3 +1595,42 @@ console.log(JSON.stringify({{
     result = _run_node(script)
     assert result["matchesEnglish"] is True
     assert result["missingInSpanish"] is False
+
+
+def _artifact_load_visit_guard_script() -> str:
+    workspace_path = str(REPO / "static" / "workspace.js")
+    return f"""
+const fs = require('fs');
+const workspaceSrc = fs.readFileSync({json.dumps(workspace_path)}, 'utf8');
+const currentMessages = [{{ role: 'assistant', tool_calls: [{{ function: {{ name: 'write_file', arguments: JSON.stringify({{ path: 'current/live.txt' }}) }} }}] }}];
+let ensureCalls = 0;
+let pending = [];
+let _messagesGeneration = 1;
+let _loadSessionGeneration = 1;
+let _messagesTruncated = true;
+let _workspacePanelActiveTab = 'artifacts';
+const rightPanel = {{ dataset: {{ activeTab: 'artifacts' }} }};
+const root = {{ innerHTML: '', isConnected: true, hidden: false }};
+const count = {{ textContent: '' }};
+const artifactsTab = {{ hidden: false }};
+const document = {{ querySelector: (selector) => selector === '.rightpanel' ? rightPanel : null, getElementById: (id) => id === 'workspaceArtifactsTab' ? artifactsTab : id === 'workspaceArtifacts' ? root : null }};
+function $(id) {{ return id === 'workspaceArtifacts' ? root : id === 'workspaceArtifactsCount' ? count : null; }}
+function esc(value) {{ return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }}
+function t(key) {{ return key === 'workspace_artifact_source_session' ? 'session' : key; }}
+const S = {{ session: {{ session_id: 'foreign-1', workspace: '/ws' }}, messages: currentMessages, toolCalls: [], busy: false, activeStreamId: null }};
+async function _readFullSessionSnapshot() {{ ensureCalls += 1; return await new Promise((resolve) => pending.push(resolve)); }}
+async function _ensureAllMessagesLoaded() {{}}
+{WORKSPACE_HELPERS}
+{WORKSPACE_ARTIFACT_CONSTS}
+{WORKSPACE_ARTIFACT_CACHE}
+{WORKSPACE_CONSUMER_BLOCK}
+(async () => {{
+  const render = renderSessionArtifacts();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  _loadSessionGeneration = 2;
+  const resolveSnapshot = pending.shift();
+  resolveSnapshot({{ session: S.session, messages: [{{ role: 'assistant', tool_calls: [{{ function: {{ name: 'write_file', arguments: JSON.stringify({{ path: 'stale/old.txt' }}) }} }}] }}], toolCalls: [] }});
+  await render;
+  console.log(JSON.stringify({{ ensureCalls, html: root.innerHTML, count: count.textContent }}));
+}})().catch((err) => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""

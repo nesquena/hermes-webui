@@ -2113,7 +2113,7 @@ $('btnDownload').onclick=async()=>{
     }
     if(_downloadTranscriptOperation){
       if(typeof showToast==='function'){
-        showToast((typeof t==='function'&&t('download_transcript_busy_full'))||'Wait for the current response to finish before downloading the full transcript.',3000,'warning');
+        showToast((typeof t==='function'&&t('download_transcript_preparing_full'))||'Preparing full transcript…',2000,'warning');
       }
       return;
     }
@@ -2170,9 +2170,6 @@ $('btnDownload').onclick=async()=>{
       }
     }
   }
-  if(!S.session||S.session.session_id!==sid
-     ||(typeof _messagesGeneration==='number'&&typeof operation!=='undefined'&&operation
-       &&operation.generation!==null&&_messagesGeneration!==operation.generation)) return;
   const blob=new Blob([transcript(transcriptSession,transcriptMessages)],{type:'text/markdown'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);
   a.download=`hermes-${sid}.md`;a.click();URL.revokeObjectURL(a.href);
