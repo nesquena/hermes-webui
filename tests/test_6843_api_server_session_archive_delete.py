@@ -17,6 +17,13 @@ fix:
 The fix archives/deletes these rows directly in state.db (archive is
 WebUI-local view state — no sidecar materialization) and makes the sidebar
 projection honor the state.db ``archived`` flag when no sidecar exists.
+
+Review regressions covered (#6855): the ``archived`` projection must not break
+older state.db schemas without an ``archived`` column, the state.db
+``archived`` fallback is scoped to the api_server class only (gateway /
+messaging / cron / subagent rows keep their existing visibility), and the
+delete bypass for non-path-safe ids requires the row's source to be the
+imported/read-only api_server class (a messaging row still 400s).
 """
 from __future__ import annotations
 
@@ -33,15 +40,19 @@ from api.models import SESSIONS
 
 def _make_state_db(path: Path, sid: str, *, source: str = "api_server",
                    title: str | None = None, archived: int = 0,
-                   message_count: int = 2) -> None:
+                   message_count: int = 2,
+                   include_archived_col: bool = True) -> None:
     """Create a minimal state.db with one session row and a few messages.
 
     Schema mirrors hermes_state.SessionDB closely enough for
     read_importable_agent_session_rows / delete_cli_session.
+    ``include_archived_col=False`` reproduces older agent schemas that have NO
+    ``archived`` column (the #6843 projection must not break on those).
     """
+    archived_ddl = ", archived INTEGER DEFAULT 0" if include_archived_col else ""
     conn = sqlite3.connect(str(path))
     conn.executescript(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             source TEXT,
@@ -53,8 +64,7 @@ def _make_state_db(path: Path, sid: str, *, source: str = "api_server",
             end_reason TEXT,
             message_count INTEGER DEFAULT 0,
             title TEXT,
-            cwd TEXT,
-            archived INTEGER DEFAULT 0
+            cwd TEXT{archived_ddl}
         );
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,12 +75,20 @@ def _make_state_db(path: Path, sid: str, *, source: str = "api_server",
         );
         """
     )
-    conn.execute(
-        "INSERT OR REPLACE INTO sessions "
-        "(id, source, model, message_count, started_at, title, cwd, archived) "
-        "VALUES (?, ?, 'deepseek/deepseek-chat', ?, 1781024055.0, ?, '/root', ?)",
-        (sid, source, message_count, title, archived),
-    )
+    if include_archived_col:
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions "
+            "(id, source, model, message_count, started_at, title, cwd, archived) "
+            "VALUES (?, ?, 'deepseek/deepseek-chat', ?, 1781024055.0, ?, '/root', ?)",
+            (sid, source, message_count, title, archived),
+        )
+    else:
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions "
+            "(id, source, model, message_count, started_at, title, cwd) "
+            "VALUES (?, ?, 'deepseek/deepseek-chat', ?, 1781024055.0, ?, '/root')",
+            (sid, source, message_count, title),
+        )
     for i in range(message_count):
         conn.execute(
             "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
@@ -133,6 +151,15 @@ def _capture_post(monkeypatch, body):
         "j",
         lambda handler, payload, status=200, extra_headers=None: captured.update(
             payload=payload,
+            status=status,
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, msg, status=400: captured.update(
+            payload={"error": msg},
             status=status,
         )
         or True,
@@ -244,6 +271,61 @@ def test_archived_api_server_session_stops_flooding_sidebar(
 
 
 # ---------------------------------------------------------------------------
+# Session-visibility regression (review #6855)
+# ---------------------------------------------------------------------------
+
+
+def test_non_archived_gateway_session_stays_visible(isolated_state_db, monkeypatch):
+    """A non-archived gateway/discord session must still appear in /api/sessions.
+
+    Regression for the #6843 review: the archived-column projection broke on
+    older state.db schemas that have NO ``archived`` column (the generated
+    ``0 AS archived AS archived`` SQL raised, so the whole projection died and
+    sidecar-less gateway/messaging/cron rows vanished), and the sidecar-less
+    ``archived`` fallback must not hide non-api_server rows.
+    """
+    sid = "gw_dc_visible_001"
+    _make_state_db(
+        isolated_state_db["db"],
+        sid,
+        source="discord",
+        title="DC Visible Chat",
+        include_archived_col=False,
+    )
+
+    sessions = _sidebar_sessions()
+    row = next(
+        (s for s in sessions["sessions"] if s.get("session_id") == sid),
+        None,
+    )
+    assert row is not None, "non-archived gateway/discord session must stay visible"
+    assert row["archived"] is False
+
+
+def test_state_db_archived_flag_only_hides_api_server_class(isolated_state_db, monkeypatch):
+    """The state.db ``archived`` fallback is scoped to the api_server class.
+
+    A gateway/discord row with ``archived=1`` in state.db (no sidecar) is
+    agent-owned state and must KEEP its existing visibility — only imported
+    api_server-class rows are hidden by the fallback (#6843 review).
+    """
+    gw_sid = "gw_dc_archived_002"
+    _make_state_db(isolated_state_db["db"], gw_sid, source="discord",
+                   title="DC Archived Chat", archived=1)
+
+    api_sid = "miloco:agent:main:miloco-suggest:miloco-suggest:3c4d5e6f7a8b"
+    _make_state_db(isolated_state_db["db"], api_sid, title=None, archived=1)
+
+    sessions = _sidebar_sessions()
+    assert any(s.get("session_id") == gw_sid for s in sessions["sessions"]), (
+        "archived-in-state.db gateway row must stay visible (agent-owned state)"
+    )
+    assert all(s.get("session_id") != api_sid for s in sessions["sessions"]), (
+        "archived api_server row must leave the default visible sidebar (#6843)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Delete
 # ---------------------------------------------------------------------------
 
@@ -266,3 +348,29 @@ def test_delete_api_server_session_removes_state_db_row(
     assert captured["payload"]["state_db_cleanup_failed"] is False
     assert _row_exists(isolated_state_db["db"], sid) is False
     assert not (isolated_state_db["sessions_dir"] / f"{sid}.json").exists()
+
+
+def test_delete_unsafe_messaging_session_still_400s(isolated_state_db, monkeypatch):
+    """An unsafe id whose state.db row is a messaging session must still 400.
+
+    The #6843 delete bypass is scoped to the imported/read-only api_server
+    class. A non-path-safe id backed by a real messaging row (e.g. a discord
+    gateway session id containing colons) must NOT bypass the guard — the row
+    and its transcript must be left intact (review #6855).
+    """
+    sid = "discord:guild:channel:msg:9f8e7d6c5b4a"
+    _make_state_db(isolated_state_db["db"], sid, source="discord",
+                   title="DC Chat", archived=0)
+
+    assert models.is_safe_session_id(sid) is False, (
+        "precondition: the messaging id is not path-safe"
+    )
+
+    captured = _capture_post(monkeypatch, {"session_id": sid})
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+
+    assert captured["status"] == 400, captured
+    assert "Invalid session_id" in str(captured["payload"].get("error", ""))
+    assert _row_exists(isolated_state_db["db"], sid) is True, (
+        "messaging row must survive an unsafe-id delete attempt"
+    )

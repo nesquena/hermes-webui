@@ -123,6 +123,38 @@ def _with_normalized_source(row: dict) -> dict:
     return {**row, **normalized}
 
 
+# #6843: imported/read-only rows of the api_server class are local state.db
+# rows without a WebUI sidecar. They are the ONLY state.db-only rows the WebUI
+# treats as importable/read-only: archiving/deleting them is WebUI-local view
+# state applied directly to the state.db row (some ids are not path-safe as
+# sidecar filenames, e.g. ``miloco:agent:main:...``). Gateway, messaging, cron,
+# subagent, and other sidecar-less rows keep their existing visibility rules.
+_API_SERVER_CLASS_SOURCES = frozenset({"api", "api_server"})
+
+
+def _api_server_class_markers(row: dict) -> set[str]:
+    """Normalized source markers for a session row ('' for missing keys).
+
+    Mirrors routes._is_api_server_sidecar_row: every source field is lowercased
+    and normalized so ``api-server`` / ``api server`` match ``api_server``.
+    """
+    markers = set()
+    for key in ("source", "source_tag", "raw_source", "session_source", "source_label"):
+        marker = str(row.get(key) or "").strip().lower()
+        if marker.endswith(" session"):
+            marker = marker[: -len(" session")].strip()
+        markers.add(marker.replace("-", "_").replace(" ", "_"))
+    return markers
+
+
+def is_api_server_class_row(row: dict) -> bool:
+    """Return True when a session row belongs to the imported/read-only
+    ``api_server`` class (#6843)."""
+    if not isinstance(row, dict):
+        return False
+    return bool(_api_server_class_markers(row) & _API_SERVER_CLASS_SOURCES)
+
+
 def _optional_col(name: str, columns: set[str], fallback: str = "NULL") -> str:
     return f"s.{name}" if name in columns else f"{fallback} AS {name}"
 
@@ -683,7 +715,7 @@ def read_importable_agent_session_rows(
         select_sql = f"""
             SELECT s.id, s.title, s.model, s.message_count,
                    s.started_at, s.source,
-                   {archived_expr} AS archived,
+                   {archived_expr},
                    {session_source_expr},
                    {user_id_expr},
                    {chat_id_expr},
