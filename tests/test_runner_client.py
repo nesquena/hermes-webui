@@ -78,6 +78,7 @@ def test_runner_client_start_run_posts_explicit_boundary_payload(monkeypatch):
     assert captured["body"] == {
         "session_id": "s1",
         "message": "hello",
+        "agent_message": None,
         "attachments": [{"path": "/tmp/a.png", "mime": "image/png"}],
         "workspace": "/workspace",
         "profile": "default",
@@ -87,6 +88,89 @@ def test_runner_client_start_run_posts_explicit_boundary_payload(monkeypatch):
         "source": "webui",
         "metadata": {"route": "/api/chat/start"},
     }
+
+
+def test_runner_client_start_run_carries_resolved_agent_message(monkeypatch):
+    """RAW/agent-only split: the runner-local payload must give the model the
+    resolved skill payload in a dedicated field while `message` stays raw
+    (round-3 re-gate)."""
+    captured = {}
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeResponse({"run_id": "run-1", "stream_id": "run-1", "status": "running"})
+
+    _patch_opener(monkeypatch, fake_urlopen)
+    client = HttpRunnerClient(base_url="http://runner.local/")
+
+    client.start_run(
+        StartRunRequest(
+            session_id="s1",
+            message="/llm-wiki list pages",
+            agent_message="[IMPORTANT: The user has invoked the llm-wiki skill...]\nfull body",
+            workspace="/workspace",
+        )
+    )
+
+    assert captured["body"]["message"] == "/llm-wiki list pages"
+    assert captured["body"]["agent_message"] == (
+        "[IMPORTANT: The user has invoked the llm-wiki skill...]\nfull body"
+    )
+
+
+def test_runner_route_composed_forwarding_carries_resolved_skill(monkeypatch):
+    """Route-composed regression for the runner-local seam (round-4 re-gate).
+
+    Enters through api.routes._start_run with the raw slash command plus its
+    resolved model message and captures the outbound /v1/runs payload.
+
+    Must fail if api/routes.py omits agent_message when constructing
+    StartRunRequest (revert the forwarding line).
+    """
+    import api.models as models
+    import api.routes as routes
+
+    raw_command = "/llm-wiki list pages"
+    expansion = "[IMPORTANT: The user has invoked the llm-wiki skill...]\nfull skill body"
+
+    captured = {}
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
+    monkeypatch.setenv("HERMES_WEBUI_RUNNER_BASE_URL", "http://runner.local")
+    monkeypatch.setenv("HERMES_WEBUI_RUNNER_API_KEY", "secret")
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeResponse({
+            "run_id": "run-1",
+            "stream_id": "run-1",
+            "session_id": "sess-route",
+            "status": "started",
+        })
+
+    monkeypatch.setattr(HttpRunnerClient, "_opener", lambda self: _FakeOpener(fake_urlopen))
+
+    # Unregistered session: _start_run's runner path only reads the object, so
+    # no session file, index entry or SESSIONS registry row is created
+    # (round-5 re-gate: no shared state leaks to later tests).
+    s = models.Session(session_id="sess-route-composed", workspace="/tmp", model="test-model")
+
+    result = routes._start_run(
+        s,
+        msg=raw_command,
+        agent_message=expansion,
+        attachments=None,
+        workspace="/tmp",
+        model="test-model",
+        model_provider=None,
+        normalized_model=False,
+        source="webui",
+        route="/api/chat/start",
+        gateway_chat_enabled=False,
+    )
+
+    assert result.get("stream_id") == "run-1"
+    assert captured["body"]["message"] == raw_command
+    assert captured["body"]["agent_message"] == expansion
 
 
 def test_runner_client_maps_observe_status_and_controls(monkeypatch):
