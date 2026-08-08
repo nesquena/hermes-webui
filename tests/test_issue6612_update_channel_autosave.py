@@ -899,7 +899,7 @@ global._enqueueSettingsPost = (0, eval)(
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_channel_writer_concurrent_selection():
+def test_channel_writer_concurrent_selection(tmp_path, monkeypatch):
     """Two rapid selections serialize server writes and retain the latest UI value."""
     script = _channel_writer_script_prelude(PANELS_JS) + """
 (async () => {
@@ -907,14 +907,14 @@ def test_channel_writer_concurrent_selection():
   let resolveFirst;
   const firstCallBlocker = new Promise(resolve => { resolveFirst = resolve; });
   let apiCallCount = 0;
-  let persisted = { update_channel: 'stable' };
+  const completed = [];
 
   global.api = async function(url, opts) {
     apiCallCount++;
     const body = JSON.parse(opts.body);
     if (apiCallCount === 1) await firstCallBlocker;
-    persisted = { ...persisted, ...body };
-    return { ...persisted };
+    completed.push(body);
+    return { update_channel: body.update_channel };
   };
 
   const sel = { value: 'experimental' };
@@ -924,17 +924,25 @@ def test_channel_writer_concurrent_selection():
   const p2 = _saveUpdateChannelFromSelector(sel);  // seq=2, queued
 
   await Promise.resolve();
-  results.push({ while_first_blocked: sel.value, apiCallCount, persisted });
+  results.push({ while_first_blocked: sel.value, apiCallCount, completed });
 
   resolveFirst(null);  // unblock first call's response, then start the queued second call
   await Promise.all([p1, p2]);
-  results.push({ after_both_complete: sel.value, apiCallCount, persisted, confirmed: _confirmedUpdateChannel });
+  results.push({ after_both_complete: sel.value, apiCallCount, completed, confirmed: _confirmedUpdateChannel });
 
   console.log(JSON.stringify({ results, finalSeq: _channelSaveSeq }));
 })().catch(err => { console.error(err.message); process.exit(1); });
 """
     result = json.loads(_run_node(script))
     results = result["results"]
+    import api.config as config
+
+    settings_file = tmp_path / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_FILE", settings_file)
+    config.save_settings({"update_channel": "stable"})
+    for body in results[1]["completed"]:
+        config.save_settings(body)
+    persisted = config.load_settings().get("update_channel")
     assert results[0]["while_first_blocked"] == "stable", (
         f"second selection must remain visible while first request is queued; got {results[0]!r}"
     )
@@ -945,7 +953,11 @@ def test_channel_writer_concurrent_selection():
         f"after both serialized writes, selector must be 'stable'; "
         f"got {results[1]!r}"
     )
-    assert results[1]["persisted"] == {"update_channel": "stable"}, results
+    assert results[1]["completed"] == [
+        {"update_channel": "experimental"},
+        {"update_channel": "stable"},
+    ], results
+    assert persisted == "stable", results
     assert results[1]["confirmed"] == "stable", results
     assert results[1]["apiCallCount"] == 2, results
     assert result["finalSeq"] == 2, (
