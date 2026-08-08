@@ -18595,12 +18595,25 @@ function ensureLiveWorklogShell(){
 
 // ── Edit + Regenerate ──
 
-function editMessage(btn) {
-  if(S.busy) return;
-  const row = btn.closest('[data-msg-idx]');
+async function editMessage(btn) {
+  if(S.busy||!S.session) return;
+  let row=btn.closest('[data-msg-idx]');
   if(!row) return;
-  const msgIdx = parseInt(row.dataset.msgIdx, 10);
-  const originalText = row.dataset.rawText || '';
+  let msgIdx=parseInt(row.dataset.msgIdx,10);
+  const initialSid=S.session.session_id;
+  const absoluteMsgIdx=_oldestIdx+msgIdx;
+  const displayedMessage=S.messages[msgIdx];
+  if(displayedMessage&&displayedMessage._content_truncated===true){
+    if(typeof _ensureAllMessagesLoaded!=='function') return;
+    await _ensureAllMessagesLoaded();
+    if(!S.session||S.session.session_id!==initialSid) return;
+    renderMessages();
+    msgIdx=absoluteMsgIdx;
+    row=document.querySelector(`[data-msg-idx="${msgIdx}"]`);
+    if(!row) return;
+  }
+  const authoritativeMessage=S.messages[msgIdx];
+  const originalText=authoritativeMessage?msgContent(authoritativeMessage):(row.dataset.rawText||'');
   const body = row.querySelector('.msg-body');
   if(!body || row.dataset.editing) return;
   row.dataset.editing = '1';
@@ -18687,16 +18700,17 @@ async function regenerateResponse(btn) {
   const assistantIdx = parseInt(row.dataset.msgIdx, 10);
   const absoluteKeepCount = _oldestIdx + assistantIdx;
   const initialSid = S.session.session_id;
-  let lastUserText = '';
-  for(let i = assistantIdx - 1; i >= 0; i--) {
-    const m = S.messages[i];
-    if(m && m.role === 'user') { lastUserText = msgContent(m); break; }
-  }
-  if(!lastUserText) return;
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
   if(!S.session || S.session.session_id !== initialSid) return;
+  let lastUserText = '';
+  const lastUserSearchStart=Math.min(absoluteKeepCount-1,S.messages.length-1);
+  for(let i=lastUserSearchStart;i>=0;i--){
+    const m=S.messages[i];
+    if(m&&m.role==='user'){ lastUserText=msgContent(m); break; }
+  }
+  if(!lastUserText) return;
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
       session_id: initialSid,
