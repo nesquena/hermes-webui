@@ -3758,6 +3758,75 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     }
 
 
+def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict | None:
+    """Return the non-mutating, display-equivalent transport form of a live snapshot.
+
+    The canonical recovery snapshot intentionally keeps fallback representations.
+    Sending all of them duplicates each tool result in top-level ``tool_calls``
+    and row ``text``, ``tool``, and ``payload`` fields. Keep one authoritative
+    display source for each value at the HTTP boundary; the durable journal and
+    the canonical in-process snapshot remain unchanged.
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+
+    projected = dict(snapshot)
+    # The frontend reconstructs this single live assistant row from the
+    # authoritative last_* strings when messages is empty.
+    if projected.get("last_assistant_text") or projected.get("last_reasoning_text"):
+        projected["messages"] = []
+
+    scene = projected.get("anchor_activity_scene")
+    compact_calls = []
+    for raw_call in projected.get("tool_calls") or []:
+        if not isinstance(raw_call, dict):
+            continue
+        call = dict(raw_call)
+        if call.get("preview") == call.get("snippet"):
+            call.pop("preview", None)
+        compact_calls.append(call)
+    # Retain the compact top-level list as the degraded-render fallback. The
+    # Anchor scene is normally authoritative, but session reattach deliberately
+    # falls back to INFLIGHT.toolCalls when scene rendering is unavailable.
+    projected["tool_calls"] = compact_calls
+
+    if not isinstance(scene, dict):
+        return projected
+    compact_scene = dict(scene)
+    compact_rows = []
+    row_keys = (
+        "row_id", "local_id", "kind", "role", "source_event_type", "status",
+        "created_at", "group", "text", "thinking", "tool_call_id", "tool",
+    )
+    for raw_row in scene.get("activity_rows") or []:
+        if not isinstance(raw_row, dict):
+            continue
+        row = {
+            key: raw_row[key]
+            for key in row_keys
+            if key in raw_row and raw_row[key] not in (None, "")
+        }
+        if str(raw_row.get("role") or "") == "tool":
+            tool = raw_row.get("tool") if isinstance(raw_row.get("tool"), dict) else {}
+            compact_tool = dict(tool)
+            if compact_tool.get("preview") == compact_tool.get("snippet"):
+                compact_tool.pop("preview", None)
+            if compact_tool.get("tid") == compact_tool.get("id"):
+                compact_tool.pop("tid", None)
+            row["tool"] = compact_tool
+            # Tool cards consume args/snippet from row.tool. row.payload and
+            # row.text are byte-for-byte fallbacks of those same values.
+            row.pop("text", None)
+        else:
+            thinking = row.get("thinking")
+            if isinstance(thinking, dict) and thinking.get("text") == row.get("text"):
+                row.pop("thinking", None)
+        compact_rows.append(row)
+    compact_scene["activity_rows"] = compact_rows
+    projected["anchor_activity_scene"] = compact_scene
+    return projected
+
+
 def _ensure_full_session_before_mutation(sid: str, session):
     """Reload cached metadata-only sessions before mutating persisted fields.
 
@@ -12934,7 +13003,7 @@ def handle_get(handler, parsed) -> bool:
                         journal,
                         active=journal_active,
                     )
-                    if journal_active:
+                    if journal_active and (not load_messages or msg_limit is None):
                         try:
                             snapshot = _run_journal_live_snapshot(original_stream_id, handler=handler)
                         except Exception:
@@ -12945,7 +13014,7 @@ def handle_get(handler, parsed) -> bool:
                             )
                             snapshot = None
                         if snapshot:
-                            raw["runtime_journal_snapshot"] = snapshot
+                            raw["runtime_journal_snapshot"] = _runtime_journal_snapshot_for_session_payload(snapshot)
                             raw["pending_attachments"] = getattr(s, "pending_attachments", []) or []
             # Cold-load: derive the latest settled todo snapshot from the full
             # merged transcript, not the truncated display window. This keeps

@@ -434,6 +434,116 @@ def test_live_journal_snapshot_reconstructs_visible_progress_and_tool_aliases(mo
     assert tool["args"]["extra"] == "x" * 200
 
 
+def test_runtime_snapshot_transport_projection_dedupes_live_tool_payloads_without_mutation():
+    import api.routes as routes
+
+    repeated = "x" * 4000
+    snapshot = {
+        "messages": [{"role": "assistant", "content": "progress", "_live": True}],
+        "last_assistant_text": "progress",
+        "last_reasoning_text": "",
+        "tool_calls": [{
+            "name": "terminal",
+            "tid": "call-1",
+            "args": {"command": "pytest"},
+            "preview": repeated,
+            "snippet": repeated,
+            "done": True,
+        }],
+        "anchor_activity_scene": {
+            "version": "activity_scene_v1",
+            "identity": {"session_id": "session-1", "stream_id": "stream-1", "run_id": "run-1"},
+            "activity_rows": [{
+                "row_id": "tool:call-1:0",
+                "local_id": "call-1",
+                "order_index": 0,
+                "kind": "tool_completed",
+                "role": "tool",
+                "display_hint": "tool_row",
+                "display_hints": {"compact_worklog": "tool_row"},
+                "source_event_type": "tool_complete",
+                "event_id": None,
+                "run_id": "run-1",
+                "stream_id": "stream-1",
+                "seq": None,
+                "status": "completed",
+                "created_at": 1.0,
+                "identity": {"local_id": "call-1", "run_id": "run-1", "stream_id": "stream-1"},
+                "group": {"group_key": "activity:0"},
+                "text": repeated,
+                "thinking": None,
+                "tool_call_id": "call-1",
+                "tool": {
+                    "id": "call-1", "tid": "call-1", "name": "terminal",
+                    "args": {"command": "pytest"},
+                    "preview": repeated, "snippet": repeated,
+                    "done": True, "is_error": False,
+                },
+                "payload": {
+                    "name": "terminal", "args": {"command": "pytest"},
+                    "preview": repeated, "snippet": repeated,
+                    "tid": "call-1", "id": "call-1",
+                },
+            }],
+        },
+    }
+    original = json.loads(json.dumps(snapshot))
+
+    projected = routes._runtime_journal_snapshot_for_session_payload(snapshot)
+    row = projected["anchor_activity_scene"]["activity_rows"][0]
+
+    assert snapshot == original
+    assert projected["messages"] == []
+    assert projected["last_assistant_text"] == "progress"
+    assert projected["tool_calls"] == [{
+        "name": "terminal",
+        "tid": "call-1",
+        "args": {"command": "pytest"},
+        "snippet": repeated,
+        "done": True,
+    }]
+    assert row["tool"]["args"] == {"command": "pytest"}
+    assert row["tool"]["snippet"] == repeated
+    assert "preview" not in row["tool"]
+    assert "payload" not in row
+    assert "text" not in row
+    assert row["tool_call_id"] == "call-1"
+    assert len(json.dumps(projected)) < len(json.dumps(snapshot)) * 0.5
+
+
+def test_runtime_snapshot_transport_projection_keeps_tool_fallback_without_scene():
+    import api.routes as routes
+
+    snapshot = {
+        "messages": [],
+        "last_assistant_text": "",
+        "last_reasoning_text": "",
+        "tool_calls": [{
+            "name": "terminal",
+            "tid": "call-1",
+            "preview": "same result",
+            "snippet": "same result",
+            "args": {"command": "pytest"},
+        }],
+    }
+
+    projected = routes._runtime_journal_snapshot_for_session_payload(snapshot)
+
+    assert projected["tool_calls"] == [{
+        "name": "terminal",
+        "tid": "call-1",
+        "snippet": "same result",
+        "args": {"command": "pytest"},
+    }]
+    assert snapshot["tool_calls"][0]["preview"] == "same result"
+
+
+def test_paginated_session_followup_does_not_repeat_runtime_snapshot():
+    source = open("api/routes.py", encoding="utf-8").read()
+    assert "if journal_active and (not load_messages or msg_limit is None):" in source
+    assert 'raw["runtime_journal_snapshot"] = _runtime_journal_snapshot_for_session_payload(snapshot)' in source
+
+
 def test_live_journal_snapshot_bounds_pathological_tool_args(monkeypatch):
     import api.routes as routes
 
