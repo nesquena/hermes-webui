@@ -1,3 +1,6 @@
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -6,6 +9,40 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _read(relpath: str) -> str:
     return (ROOT / relpath).read_text(encoding="utf-8")
+
+
+def _function_source(source: str, name: str) -> str:
+    start = source.index(f"function {name}")
+    brace = source.index("{", start)
+    depth = 0
+    for index in range(brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+    raise AssertionError(f"unterminated {name}")
+
+
+def _run_workspace_prefix_behavior(helper: str) -> subprocess.CompletedProcess[str]:
+    node = shutil.which("node")
+    if not node:
+        raise AssertionError("node is required for workspace-prefix behavior coverage")
+    cases = [
+        (r"[Workspace::v1: D:\\ai]" + "\nhello", "hello"),
+        (r"[Workspace: D:\ai]" + "\nhello", "hello"),
+        ("hello", "hello"),
+        (r"prefix [Workspace::v1: D:\\ai]" + "\nhello", r"prefix [Workspace::v1: D:\\ai]" + "\nhello"),
+        (r"[Workspace::v1: D:\ai", r"[Workspace::v1: D:\ai"),
+    ]
+    script = f"""
+const assert=require('assert');
+{helper}
+const cases={json.dumps(cases)};
+for(const [input,expected] of cases) assert.strictEqual(_stripWorkspaceDisplayPrefix(input),expected);
+"""
+    return subprocess.run([node, "-e", script], text=True, capture_output=True, check=False)
 
 
 def test_workspace_display_prefix_helper_strips_leading_metadata_only():
@@ -26,6 +63,17 @@ def test_workspace_display_prefix_helper_strips_leading_metadata_only():
     assert r"\[Workspace:[^\]]+\]" in helper
     assert ".trim()" in helper
 
+    function_source = _function_source(src, "_stripWorkspaceDisplayPrefix")
+    control = _run_workspace_prefix_behavior(function_source)
+    assert control.returncode == 0, control.stderr
+
+    target = "if(stripped !== value) return stripped.trim();"
+    assert function_source.count(target) == 1
+    mutant = _run_workspace_prefix_behavior(
+        function_source.replace(target, "if(stripped !== value) return value.trim();", 1)
+    )
+    assert mutant.returncode != 0, "disabling v1 prefix stripping must RED"
+
 
 def test_user_render_uses_stripped_display_content_without_preempting_context_cards():
     src = _read("static/ui.js")
@@ -35,10 +83,11 @@ def test_user_render_uses_stripped_display_content_without_preempting_context_ca
     assert loop_end != -1, "assistant render branch not found after user branch"
     render_prefix = src[loop_start:loop_end]
 
-    display_idx = render_prefix.find("const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;")
+    display_idx = render_prefix.find("const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):")
     context_idx = render_prefix.find("if(_isContextCompactionMessage(m))")
     user_idx = render_prefix.find("if(isUser)")
     assert display_idx != -1, "display content stripper not used in render loop"
+    assert "_assistantDisplayContentFromMessage(m, content)" in render_prefix
     assert context_idx != -1, "context compaction branch not found"
     assert user_idx != -1, "user render branch not found"
     assert display_idx < context_idx < user_idx

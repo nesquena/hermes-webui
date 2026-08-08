@@ -10742,10 +10742,40 @@ function _assistantAnchorSceneFinalAnswerText(m){
   const text=scene&&typeof scene.final_answer==='string'?scene.final_answer:'';
   return String(text||'').trim()?text:'';
 }
+function _assistantCommentaryPayloadText(m){
+  if(!m||m.role!=='assistant') return '';
+  let items=m.codex_message_items;
+  if(typeof items==='string'){
+    try{items=JSON.parse(items);}catch(_){items=[];}
+  }
+  if(!Array.isArray(items)) return '';
+  const parts=[];
+  for(const item of items){
+    if(
+      !item||
+      String(item.type||'').toLowerCase()!=='message'||
+      String(item.role||'').toLowerCase()!=='assistant'||
+      String(item.phase||'').toLowerCase()!=='commentary'
+    ) continue;
+    const content=Array.isArray(item.content)?item.content:[];
+    for(const part of content){
+      if(!part||!['text','input_text','output_text'].includes(String(part.type||''))) continue;
+      const text=String(part.text||part.content||'');
+      if(text.trim()) parts.push(text);
+    }
+  }
+  return parts.join('').trim();
+}
+function _assistantDisplayContentFromMessage(m, rawContent){
+  const existing=String(rawContent||'').trim();
+  if(existing) return existing;
+  return _assistantCommentaryPayloadText(m);
+}
 function _assistantMessageHasVisibleContent(m){
   if(!m||m.role!=='assistant') return false;
   if(_isRecoveryControlMessage(m)) return false;
   if(_assistantAnchorSceneFinalAnswerText(m)) return true;
+  if(_assistantCommentaryPayloadText(m)) return true;
   const content=m.content;
   if(typeof content==='string') return !_isAssistantEmptyPlaceholderContent(m, content)&&!!content.trim();
   if(!Array.isArray(content)) return false;
@@ -10853,16 +10883,19 @@ function _assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, vis
   const isTurnFinalAssistant=!!(opts&&opts.isTurnFinalAssistant);
   const visibleText=String(visibleContent!==undefined?visibleContent:msgContent(m)||'').trim();
   const hasVisibleText=!!visibleText&&!_isAssistantEmptyPlaceholderContent(m, visibleText);
-  if(m._live) return true;
+  if(m._live) return !hasVisibleText;
   if(hasVisibleText&&m._anchor_activity_scene) return false;
   if(hasVisibleText&&isTurnFinalAssistant) return false;
+  // User-visible commentary/progress is ordinary assistant information even
+  // when it carries activity burst/segment metadata. Those fields describe
+  // chronology; they must not reclassify visible prose as Worklog Thinking.
+  if(hasVisibleText) return false;
   if(m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined) return true;
   const hasToolMetadata=!!(
     (toolCallAssistantIdxs&&toolCallAssistantIdxs.has(rawIdx))||
     (Array.isArray(m.tool_calls)&&m.tool_calls.length)||
     (Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use'))
   );
-  if(hasVisibleText) return false;
   if(hasToolMetadata) return true;
   return false;
 }
@@ -12072,7 +12105,8 @@ function _deferredWorklogRowsFromGroup(group){
   const msg=S.messages&&S.messages[Number(m[1])];
   const scene=msg&&msg._anchor_activity_scene;
   if(!scene) return null;
-  return _anchorSceneRowsForRendering(scene,{settled:true});
+  const blocks=_assistantTurnBlocks(group.closest('.assistant-turn'));
+  return _anchorSceneRowsForSettledWorklog(scene,blocks);
 }
 function _rehydrateDeferredWorklogsFromCache(root){
   // After restoring a transcript from _sessionHtmlCache, deferred settled
@@ -13410,13 +13444,34 @@ function _anchorSceneHasErroredTerminalState(scene){
   const state=String(scene&&scene.terminal_state||'').trim().toLowerCase();
   return _ANCHOR_SCENE_ERRORED_TERMINAL_STATES.has(state);
 }
+function _anchorSceneRowsForSettledWorklog(scene, blocks){
+  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const visibleCommentaryTexts=new Set();
+  if(blocks&&blocks.querySelectorAll){
+    blocks.querySelectorAll('[data-visible-commentary="1"]').forEach(node=>{
+      const key=_normalizeThinkingEchoCompare(
+        node.getAttribute('data-raw-text')||node.textContent||''
+      );
+      if(key) visibleCommentaryTexts.add(key);
+    });
+  }
+  if(!visibleCommentaryTexts.size) return rows;
+  // Commentary is ordinary assistant information. Keep tools, true reasoning
+  // and DISTINCT process prose in Worklog; remove only an exact commentary echo.
+  return rows.filter(row=>{
+    if(!row||String(row.role||'')!=='prose') return true;
+    return !visibleCommentaryTexts.has(
+      _normalizeThinkingEchoCompare(row.text||row.content||'')
+    );
+  });
+}
 function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
   if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const rows=_anchorSceneRowsForSettledWorklog(scene,blocks);
   if(!rows.length) return false;
   const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);
   // The assistant segment owns the final answer; pass it so intermediate prose
@@ -13431,7 +13486,7 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   blocks.querySelectorAll('.transparent-earlier-steps[data-anchor-earlier-steps="1"]').forEach(el=>el.remove());
   blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
     const idx=Number(node.getAttribute('data-msg-idx'));
-    if(Number.isFinite(idx)&&idx<rawIdx){
+    if(Number.isFinite(idx)&&idx<rawIdx&&node.getAttribute('data-visible-commentary')!=='1'){
       node.classList.add('assistant-segment-worklog-source');
       node.setAttribute('aria-hidden','true');
       node.hidden=true;
@@ -13581,7 +13636,7 @@ function _revealTransparentEarlierSteps(message, segment, rawIdx, affordanceEl){
   const scene=message&&message._anchor_activity_scene;
   const blocks=_assistantTurnBlocks(turnEl);
   if(!scene||!blocks){ if(affordanceEl) affordanceEl.remove(); return; }
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true})||[];
+  const rows=_anchorSceneRowsForSettledWorklog(scene,blocks)||[];
   const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);
   const finalAnswer=String(
     (scene&&typeof scene.final_answer==='string'&&scene.final_answer)
@@ -13749,11 +13804,11 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const rows=_anchorSceneRowsForSettledWorklog(scene,blocks);
   if(!rows.length) return false;
   blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
     const idx=Number(node.getAttribute('data-msg-idx'));
-    if(Number.isFinite(idx)&&idx<rawIdx){
+    if(Number.isFinite(idx)&&idx<rawIdx&&node.getAttribute('data-visible-commentary')!=='1'){
       node.classList.add('assistant-segment-worklog-source');
       node.setAttribute('aria-hidden','true');
       node.hidden=true;
@@ -16352,7 +16407,10 @@ function renderMessages(options){
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
     }
-    const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;
+    const commentaryDisplayText=!isUser?_assistantCommentaryPayloadText(m):'';
+    const isVisibleCommentary=!!(!isUser&&!String(content||'').trim()&&String(commentaryDisplayText||'').trim());
+    const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):_assistantDisplayContentFromMessage(m, content);
+    if(isVisibleCommentary) content=displayContent;
     const rowDisplayContent=displayContent;
     if(!isUser&&_isAssistantEmptyPlaceholderContent(m, displayContent)){
       content='';
@@ -16613,6 +16671,7 @@ function renderMessages(options){
     seg.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
     seg.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
     seg.dataset.rawText=String(content).trim();
+    if(isVisibleCommentary) seg.setAttribute('data-visible-commentary','1');
     if(m._activityBurstId!==undefined&&m._activityBurstId!==null) seg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
     if(Number.isFinite(Number(m._liveSegmentSeq))) seg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));
     const messageBelongsInWorklog=!S.busy&&isCompactWorklogMode()&&_assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, displayContent, {isTurnFinalAssistant});

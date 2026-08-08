@@ -140,6 +140,92 @@ def test_cold_load_expands_but_caps_at_total_renderable():
     assert window[0]["content"] == "only-user"
 
 
+def test_cold_load_keeps_previous_complete_reply_before_tool_heavy_active_turn():
+    """A long active turn must not push the last normal reply out of cold load.
+
+    Responses sessions persist one empty assistant row per tool call/commentary.
+    Those rows all have role=assistant, so the old visible-row counter consumed
+    the whole msg_limit inside activity and returned only "Thinking" after a
+    restart.  Cold load needs one stable completed turn immediately before the
+    active user turn, while cumulative pagination remains unchanged.
+    """
+    messages = [
+        {"role": "user", "content": "previous question"},
+        {"role": "assistant", "content": "previous complete answer"},
+        {"role": "user", "content": "current request"},
+    ]
+    for idx in range(120):
+        messages.extend([
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": f"call_{idx}", "function": {"name": "terminal", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": f"call_{idx}", "content": f"result {idx}"},
+            {
+                "role": "assistant",
+                "content": "",
+                "codex_message_items": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": f"progress {idx}"}],
+                }],
+                "reasoning_content": f"progress {idx}",
+            },
+        ])
+
+    window, offset = _message_window_for_display(
+        messages, msg_limit=30, expand_renderable=True
+    )
+
+    assert offset == 0
+    assert [message["content"] for message in window[:3]] == [
+        "previous question",
+        "previous complete answer",
+        "current request",
+    ]
+    assert window[-1]["codex_message_items"][0]["content"][0]["text"] == "progress 119"
+
+
+def test_cumulative_window_does_not_force_previous_turn_context():
+    messages = [
+        {"role": "user", "content": "previous question"},
+        {"role": "assistant", "content": "previous complete answer"},
+        {"role": "user", "content": "current request"},
+    ] + [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": f"call_{idx}"}]}
+        for idx in range(40)
+    ]
+
+    _window, offset = _message_window_for_display(
+        messages, msg_limit=30, expand_renderable=False
+    )
+
+    assert offset > 2
+
+
+def test_cold_load_semantic_prefix_has_a_hard_raw_row_limit():
+    messages = [
+        {"role": "user", "content": "previous question"},
+        {"role": "assistant", "content": "previous complete answer"},
+        {"role": "user", "content": "current request"},
+    ]
+    for idx in range(2000):
+        messages.extend([
+            {"role": "assistant", "content": "", "tool_calls": [{"id": f"call_{idx}"}]},
+            {"role": "tool", "tool_call_id": f"call_{idx}", "content": f"result {idx}"},
+        ])
+
+    window, offset = _message_window_for_display(
+        messages, msg_limit=30, expand_renderable=True
+    )
+
+    assert offset > 2
+    assert len(window) <= 500
+    assert all(message.get("content") != "previous complete answer" for message in window)
+
+
 def test_initial_msg_limit_keeps_matching_trailing_tool_result_row():
     """A role:tool result row whose tool_call_id matches the newest assistant
     tool-call must be retained in the paginated window — the renderer rebuilds

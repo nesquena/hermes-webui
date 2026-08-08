@@ -1162,7 +1162,7 @@ def test_transparent_stream_renders_persisted_anchor_scene_after_reload():
 
     assert "if(typeof isTransparentStream==='function'&&isTransparentStream())" in settled
     assert "return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);" in settled
-    assert "_anchorSceneRowsForRendering(scene,{settled:true})" in transparent
+    assert "_anchorSceneRowsForSettledWorklog(scene,blocks)" in transparent
     assert 'blocks.querySelectorAll(\'[data-anchor-settled-scene-row="1"],.transparent-event-row[data-anchor-scene-row="1"]\')' in transparent
     # combined fix: the final answer text is computed and threaded into the row
     # renderer so intermediate prose survives while the final-answer duplicate is dropped.
@@ -1542,7 +1542,7 @@ def test_settled_anchor_scene_final_answer_does_not_fold_into_worklog_source():
     render = _function_body(UI_JS, "renderMessages")
 
     assert "if(hasVisibleText&&m._anchor_activity_scene) return false;" in belongs
-    assert belongs.index("if(m._live) return true;") < belongs.index(
+    assert belongs.index("if(m._live) return !hasVisibleText;") < belongs.index(
         "if(hasVisibleText&&m._anchor_activity_scene) return false;"
     )
     assert belongs.index("if(hasVisibleText&&m._anchor_activity_scene) return false;") < belongs.index(

@@ -564,6 +564,8 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           }}
           return String(message.content || '');
         }}
+        function _assistantCommentaryPayloadText() {{ return ''; }}
+        function _assistantDisplayContentFromMessage(_message, content) {{ return String(content || ''); }}
         let S;
         const INFLIGHT = {{}};
         let _loadingSessionId = null;
@@ -915,18 +917,23 @@ def test_settled_legacy_activity_buckets_skip_anchor_owned_turns_before_renderin
 
 
 def test_anchor_settled_renderers_remain_the_primary_scene_path():
+    helper = _function_body(_ui_js(), "_anchorSceneRowsForSettledWorklog")
     settled = _function_body(_ui_js(), "_renderSettledAnchorSceneForMessage")
     transparent = _function_body(
         _ui_js(),
         "_renderSettledAnchorSceneTransparentForMessage",
     )
 
+    assert "_anchorSceneRowsForRendering(scene,{settled:true})" in helper
+    assert "data-visible-commentary" in helper
+    assert "String(row.role||'')!=='prose'" in helper
+
     assert "if(!message||!message._anchor_activity_scene||!segment) return false;" in settled
     assert "return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);" in settled
-    assert "_anchorSceneRowsForRendering(scene,{settled:true})" in settled
+    assert "_anchorSceneRowsForSettledWorklog(scene,blocks)" in settled
     assert "group.setAttribute('data-anchor-settled-scene-owner','1');" in settled
 
     assert "if(!message||!message._anchor_activity_scene||!segment) return false;" in transparent
-    assert "_anchorSceneRowsForRendering(scene,{settled:true})" in transparent
+    assert "_anchorSceneRowsForSettledWorklog(scene,blocks)" in transparent
     assert "const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);" in transparent
     assert "liveTokenFinalPrefixEligible:idx>lastNonTerminalWorkRowIndex" in transparent

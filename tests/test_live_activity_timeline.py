@@ -165,6 +165,7 @@ def test_message_tool_metadata_empty_assistant_tools_reuse_previous_visible_anch
     empty_placeholder_fn = _function_source(UI_JS, "_isAssistantEmptyPlaceholderContent")
     has_reasoning_fn = _function_source(UI_JS, "_messageHasReasoningPayload")
     anchor_scene_final_fn = _function_source(UI_JS, "_assistantAnchorSceneFinalAnswerText")
+    commentary_fn = _function_source(UI_JS, "_assistantCommentaryPayloadText")
     reasoning_fn = _function_source(UI_JS, "_assistantReasoningPayloadText")
     anchor_fn = _function_source(UI_JS, "_assistantToolAnchorIdxForMessage")
     script = f"""
@@ -179,6 +180,7 @@ function msgContent(m){{
 {has_reasoning_fn}
 {empty_placeholder_fn}
 {anchor_scene_final_fn}
+{commentary_fn}
 {has_visible_fn}
 {reasoning_fn}
 {anchor_fn}
