@@ -2066,6 +2066,13 @@ function closeOtherLiveStreams(activeSid){
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
+  const _attachAttemptStore=typeof window!=='undefined'
+    ? (window._liveStreamAttachAttempts||(window._liveStreamAttachAttempts={next:0,current:Object.create(null)}))
+    : {next:0,current:Object.create(null)};
+  if(!_attachAttemptStore.current) _attachAttemptStore.current=Object.create(null);
+  const _attachAttempt={id:++_attachAttemptStore.next,sid:String(activeSid),streamId:String(streamId)};
+  _attachAttemptStore.current[activeSid]=_attachAttempt;
+  const _isCurrentAttachAttempt=()=>_attachAttemptStore.current[activeSid]===_attachAttempt;
   // Keep this production entry point self-contained for focused harnesses that
   // extract attachLiveStream without evaluating the module declarations above.
   const _transportAuthority=typeof LIVE_STREAM_TRANSPORT_AUTHORITY!=='undefined'
@@ -2635,13 +2642,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _reattachOrRestoreAfterDeferredStreamError(source){
-    if(_terminalStateReached||_streamFinalized) return;
+    if(_terminalStateReached||_streamFinalized||!_isCurrentAttachAttempt()) return;
     if((S.session&&S.session.session_id)!==activeSid) return;
     (async()=>{
       try{
         if(streamId){
           const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+          if(!_isCurrentAttachAttempt()) return;
           if(st.active){
+            if(!_isCurrentAttachAttempt()) return;
             setComposerStatus('Reconnected');
             _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
             return;
@@ -2650,7 +2659,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){
         if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
       }
+      if(!_isCurrentAttachAttempt()) return;
       if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+      if(!_isCurrentAttachAttempt()) return;
       if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup(120000);
@@ -5531,6 +5542,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _wireSSE(source){
+    if(!_isCurrentAttachAttempt()) return false;
     const existingLive=LIVE_STREAMS[activeSid];
     if(existingLive&&existingLive.source&&existingLive.source!==source){
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
@@ -6574,26 +6586,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _retryDelays=[1500,3000,5000,8000,12000,20000];
         setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`);
         const _probeReconnect=async(attempt=0)=>{
-          if(_terminalStateReached || _streamFinalized) return;
+          if(_terminalStateReached || _streamFinalized || !_isCurrentAttachAttempt()) return;
           if(!_ownsCurrentTransport(source)) return;
           if(!_isSessionCurrentPane(activeSid)) return;
+          let st=null;
           try{
-            const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
-            if(st&&st.active){
-              setComposerStatus('Reconnected');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
-              return;
-            }
-            if(st&&st.replay_available){
-              setComposerStatus('Restoring stream…');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
-              return;
-            }
+            st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
           }catch(_){
             if(_deferStreamErrorIfOffline()) return;
           }
-          if(!_ownsCurrentTransport(source)) return;
+          if(!_isCurrentAttachAttempt()||!_ownsCurrentTransport(source)||!_isSessionCurrentPane(activeSid)) return;
+          if(st&&st.active){
+            if(!_isCurrentAttachAttempt()) return;
+            setComposerStatus('Reconnected');
+            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+            return;
+          }
+          if(st&&st.replay_available){
+            if(!_isCurrentAttachAttempt()) return;
+            setComposerStatus('Restoring stream…');
+            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+            return;
+          }
+          if(!_isCurrentAttachAttempt()) return;
           if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+          if(!_isCurrentAttachAttempt()) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
           const nextDelay=_retryDelays[attempt+1];
@@ -6998,11 +7015,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){
         st=null;
       }
-      if(st&&(!_isSessionCurrentPane(activeSid)
+      if(!_isCurrentAttachAttempt()) return;
+      if(!_isSessionCurrentPane(activeSid)
         ||S.activeStreamId!==streamId
         ||!S.session
         ||S.session.session_id!==activeSid
-        ||S.session.active_stream_id!==streamId)) return;
+        ||S.session.active_stream_id!==streamId) return;
       if(st&&!st.active&&st.replay_available){
         replayOnly=true;
       }else if(st&&!st.active){
@@ -7033,6 +7051,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         return;
       }
     }
+    if(!_isCurrentAttachAttempt()) return;
     const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
     _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();

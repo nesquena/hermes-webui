@@ -475,6 +475,127 @@ def _run_attach_transport_race(status: dict | None = None) -> dict:
     return json.loads(result.stdout)
 
 
+ATTACH_ATTEMPT_RACE_HARNESS = r"""
+const attachSource = Buffer.from('${ATTACH_B64}', 'base64').toString();
+const runtimeSource = Buffer.from('${RUNTIME_B64}', 'base64').toString();
+const scenario = JSON.parse(Buffer.from('${SCENARIO_B64}', 'base64').toString());
+const state = { sources: [], completionEvents: [], ownerSettlements: [], unhandled: [], starts: 0, aborts: 0 };
+const pending = [];
+function SpeechRecognition() {
+  const instance = { onresult: null, onend: null, onerror: null, start() { state.starts += 1; }, abort() { state.aborts += 1; } };
+  return instance;
+}
+class FakeEventSource {
+  static OPEN = 1;
+  constructor(url) { this.url = url; this.readyState = 0; this.handlers = {}; this.closed = false; this.closeCount = 0; state.sources.push(this); }
+  addEventListener(name, handler) { (this.handlers[name] ||= []).push(handler); }
+  close() { this.closed = true; this.closeCount += 1; this.readyState = 2; }
+  emit(name, event) { for (const handler of this.handlers[name] || []) handler(event); }
+}
+const noOp = () => {};
+const windowObj = { SpeechRecognition };
+const documentObj = {
+  hidden: false, visibilityState: 'visible', baseURI: 'http://localhost/', wasDiscarded: false,
+  addEventListener() {}, removeEventListener() {}, hasFocus() { return true; }, querySelector() { return null; },
+  querySelectorAll() { return []; }, getElementById() { return null; },
+  createElement() { return { style: {}, dataset: {}, classList: { add() {}, remove() {} } }; },
+};
+const S = { session: { session_id: 's1', active_stream_id: null, pending_started_at: 1 }, messages: [], toolCalls: [], activeStreamId: null, busy: false };
+const INFLIGHT = { s1: { streamId: 'stream-1', messages: [], uploaded: [], toolCalls: [] } };
+const localStorage = { getItem() { return null; }, setItem() {}, removeItem() {} };
+const voiceElement = () => ({ style: {}, classList: { add() {}, remove() {} }, textContent: '', className: '', value: '' });
+const modeBtn = voiceElement(), bar = voiceElement(), indicator = voiceElement(), label = voiceElement(), micBtn = voiceElement();
+const voiceApi = new Function('window','document','SpeechRecognition','localStorage','modeBtn','bar','indicator','label','micBtn','ta','S','t','autoResize','_micOriginNeedsSecureContext','_deactivate','showToast','_setButtonTooltip','stopTTS','_locale','send','setTimeout','clearTimeout','Date','_speakResponse', runtimeSource + `
+return { activate() { _voiceModeActive = true; _voiceContextId += 1; _voiceLease = _newVoiceLease(); }, start: () => _startListening(_voiceLease), adopt: window._voiceLeaseAdoptStream, state: () => _voiceModeState, lease: () => _voiceLease };`)(windowObj, documentObj, SpeechRecognition, localStorage, modeBtn, bar, indicator, label, micBtn, { value: '' }, S, key => key, noOp, () => false, noOp, noOp, noOp, noOp, { _speech: 'en-US' }, noOp, setTimeout, clearTimeout, Date, noOp);
+const originalOwnerSettlement = windowObj._voiceLeaseSettleOwner;
+windowObj._voiceLeaseSettleOwner = (...args) => { state.ownerSettlements.push(args); return originalOwnerSettlement(...args); };
+windowObj._voiceModeOnResponseComplete = (...args) => { state.completionEvents.push(args); };
+process.on('unhandledRejection', error => state.unhandled.push(String(error && error.stack || error)));
+const api = async () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
+const scope = {
+  window: windowObj, document: documentObj, location: { href: 'http://localhost/' }, S, INFLIGHT, EventSource: FakeEventSource, localStorage,
+  api, setTimeout, clearTimeout, requestAnimationFrame: callback => setTimeout(callback, 0), cancelAnimationFrame: clearTimeout,
+  URL, encodeURIComponent, console, _desktopBackgroundedForNotifications: false, _sendInProgress: false, _sendInProgressSid: null,
+  setBusy: value => { S.busy = value; }, setComposerStatus: noOp, setStatus: noOp, _isActiveSession: () => true, _isSessionCurrentPane: () => true,
+  showLiveRunStatus: noOp, hideLiveRunStatus: noOp, _clearLiveRunStatusTimer: noOp, snapshotLiveTurnHtmlForSession: noOp,
+  _resumeSessionStreamAfterLiveChat: noOp, _suspendSessionStreamForLiveChat: noOp, saveInflightState: noOp, renderSessionList: noOp,
+  renderMessages: noOp, clearInflight: noOp, clearInflightState: noOp, resetTurnWorkspaceMutations: noOp, _resetStreamScrollFollow: noOp,
+  appendThinking: noOp, ensureLiveWorklogShell: noOp, updateSendBtn: noOp, startApprovalPolling: noOp, startClarifyPolling: noOp,
+  _fetchYoloState: noOp, _clearLiveRunStatusTimer: noOp, _voiceLeaseRetargetOwner: noOp,
+};
+const builtins = new Set(['Array','Boolean','Buffer','Date','Error','EventSource','JSON','Map','Math','Number','Object','Promise','RegExp','Set','String','Symbol','URL','WeakMap','undefined','NaN','Infinity','isNaN','parseInt','encodeURIComponent','decodeURIComponent','setTimeout','clearTimeout','console']);
+for (const match of attachSource.matchAll(/\b[A-Za-z_$][\w$]*\b/g)) {
+  const name = match[0];
+  if (!builtins.has(name) && !(name in scope)) scope[name] = noOp;
+}
+const attachFactory = new Function('scope', `with(scope){
+  const LIVE_STREAMS = {};
+  const LIVE_STREAM_TRANSPORT_AUTHORITY = Object.create(null);
+  const LIVE_STREAM_TRANSPORT_SOURCE_GENERATION = new WeakMap();
+  let LIVE_STREAM_TRANSPORT_GENERATION = 0;
+  function _releaseLiveStreamTransportAuthority(sid, generation) {
+    const authority = LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
+    if (authority && authority.generation === generation) delete LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
+  }
+  window._liveStreamTransportAuthority = LIVE_STREAM_TRANSPORT_AUTHORITY;
+  window._liveStreamTransportSourceGeneration = LIVE_STREAM_TRANSPORT_SOURCE_GENERATION;
+  window._liveStreamRegistry = LIVE_STREAMS;
+  return (${attachSource});
+}`);
+const attach = attachFactory(scope);
+const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+(async () => {
+  voiceApi.activate(); voiceApi.start();
+  S.activeStreamId = 'stream-1'; S.session.active_stream_id = 'stream-1'; S.busy = true;
+  if (scenario.kind === 'rejected') {
+    attach('s1', 'stream-1', [], { reconnecting: true });
+    await flush();
+    attach('s1', 'stream-1', [], { reconnecting: true });
+    await flush();
+    pending[1].resolve({ active: true });
+    await flush(); await flush();
+    pending[0].reject(Error('stale status rejected'));
+    await flush(); await flush();
+  } else {
+    attach('s1', 'stream-1');
+    await flush();
+    const first = state.sources[0];
+    first.emit('error', {});
+    await new Promise(resolve => setTimeout(resolve, 1600));
+    attach('s1', 'stream-1', [], { reconnecting: true });
+    await flush();
+    pending[1].resolve(scenario.status);
+    await flush(); await flush();
+    pending[0].resolve(scenario.status);
+    await flush(); await flush();
+  }
+  const registry = windowObj._liveStreamRegistry.s1;
+  const authority = windowObj._liveStreamTransportAuthority.s1;
+  console.log(JSON.stringify({
+    sources: state.sources.length, closed: state.sources.map(source => source.closed), closeCounts: state.sources.map(source => source.closeCount),
+    registrySource: registry && state.sources.indexOf(registry.source), authority: authority && { streamId: authority.streamId, generation: authority.generation },
+    ownerSettlements: state.ownerSettlements.length, completionEvents: state.completionEvents.length, owner: voiceApi.lease().owner,
+    state: voiceApi.state(), activeStreamId: S.activeStreamId, sessionActiveStreamId: S.session.active_stream_id, busy: S.busy,
+    pending: pending.length, unhandled: state.unhandled,
+  }));
+})().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
+"""
+
+
+def _run_attach_attempt_race(scenario: dict) -> dict:
+    script = ATTACH_ATTEMPT_RACE_HARNESS.replace(
+        "${ATTACH_B64}", base64.b64encode(ATTACH_SOURCE.encode()).decode()
+    ).replace(
+        "${RUNTIME_B64}", base64.b64encode((_voice_runtime() + "\n" + VOICE_COMPLETE_SOURCE).encode()).decode()
+    ).replace(
+        "${SCENARIO_B64}", base64.b64encode(json.dumps(scenario).encode()).decode()
+    )
+    result = subprocess.run([NODE], input=script, capture_output=True, text=True)
+    if result.returncode:
+        raise AssertionError(result.stderr)
+    return json.loads(result.stdout)
+
+
 def _run_session_transition(source: str, setup: str, call: str) -> dict:
     encoded = base64.b64encode(source.encode()).decode()
     script = f"""
@@ -660,6 +781,49 @@ def test_reconnecting_dead_result_cannot_clear_replacement_stream_after_status_a
         "activeStreamId": "replacement",
         "sessionActiveStreamId": "replacement",
         "busy": True,
+        "unhandled": [],
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_rejected_attach_status_cannot_close_or_replace_same_session_stream_b():
+    result = _run_attach_attempt_race({"kind": "rejected"})
+    assert result == {
+        "sources": 1,
+        "closed": [False],
+        "closeCounts": [0],
+        "registrySource": 0,
+        "authority": {"streamId": "stream-1", "generation": 1},
+        "ownerSettlements": 0,
+        "completionEvents": 0,
+        "owner": {"sid": "s1", "streamId": "stream-1"},
+        "state": "thinking",
+        "activeStreamId": "stream-1",
+        "sessionActiveStreamId": "stream-1",
+        "busy": True,
+        "pending": 2,
+        "unhandled": [],
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("status", [{"active": True}, {"active": False, "replay_available": True}])
+def test_source_error_recovery_attempt_a_cannot_replace_newer_attempt_b(status):
+    result = _run_attach_attempt_race({"kind": "source-error", "status": status})
+    assert result == {
+        "sources": 2,
+        "closed": [True, False],
+        "closeCounts": [1, 0],
+        "registrySource": 1,
+        "authority": {"streamId": "stream-1", "generation": 2},
+        "ownerSettlements": 0,
+        "completionEvents": 0,
+        "owner": {"sid": "s1", "streamId": "stream-1"},
+        "state": "thinking",
+        "activeStreamId": "stream-1",
+        "sessionActiveStreamId": "stream-1",
+        "busy": True,
+        "pending": 2,
         "unhandled": [],
     }
 
