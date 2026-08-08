@@ -909,10 +909,27 @@ def _read_jsonl_tail(
             # recover the older valid event. Stale-but-nonterminal is recoverable;
             # falsely-terminal is not.
             boundary_summary = _extract_boundary_record_summary(fh, record_start, budget=boundary_budget)
-            if boundary_summary is not None and not _record_is_valid_complete(
-                fh, size, record_start, budget=boundary_budget
-            ):
-                boundary_summary = None  # invalid/incomplete record: don't trust its prefix
+            # A boundary record is REJECTED (must not be trusted as terminal, and
+            # the preceding valid event must be recovered instead) on EITHER path:
+            #   (a) the prefix summary could not be extracted at all (extraction
+            #       returned None — the record is malformed before the top-level
+            #       "payload" key, e.g. an unquoted token or a truncated head); OR
+            #   (b) the prefix was extracted but the whole record is not valid JSON
+            #       (a trailing comma, a malformed nested value) — fail-closed.
+            # Both paths must trigger predecessor recovery: the valid terminal row
+            # immediately before the rejected boundary lives OUTSIDE the tail
+            # window and is otherwise dropped, so a completed run would be
+            # misreported non-terminal (full reader `completed` → tail `running`,
+            # the preceding `done` was lost). The r11 code only recovered on path
+            # (b); path (a) skipped recovery entirely, diverging from the full
+            # reader (#6139 r12).
+            boundary_rejected = True
+            if boundary_summary is not None:
+                if _record_is_valid_complete(fh, size, record_start, budget=boundary_budget):
+                    boundary_rejected = False  # valid + complete: trust the prefix
+                else:
+                    boundary_summary = None  # extracted-but-invalid: fail-closed
+            if boundary_rejected:
                 # Retain the last COMPLETE valid event before the rejected boundary
                 # record, so last_seq/terminal survive and the recovery signal fires
                 # (matching master). Predecessor recovery gets its OWN reserved

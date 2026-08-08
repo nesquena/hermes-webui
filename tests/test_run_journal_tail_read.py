@@ -1794,3 +1794,166 @@ def test_predecessor_recovery_not_starved_by_validity_proof_budget(tmp_path):
     assert summary["terminal"] is True, (
         f"a completed run was misreported non-terminal (terminal={summary['terminal']})"
     )
+
+
+def test_malformed_oversized_boundary_extraction_none_recovers_preceding(tmp_path, monkeypatch):
+    """Regression (reviewer round 12): when ``_extract_boundary_record_summary()``
+    itself returns ``None`` for the straddling oversized boundary record (the record
+    is malformed before the top-level ``payload`` key, e.g. an unquoted token),
+    predecessor recovery must STILL run. The r11 control-flow only recovered when
+    extraction succeeded but validation failed (``boundary_summary is not None and
+    not _record_is_valid_complete(...)``); the extraction-None path skipped the
+    ENTIRE recovery block, so the valid terminal row immediately before the
+    malformed boundary was dropped — the full reader reported ``completed`` while
+    the tail reader reported ``running`` (a completed run misreported non-terminal).
+
+    Layout: valid ``done`` seq=1 (completed), oversized seq=2 malformed before
+    ``payload`` (extraction returns None), trailing valid token seq=3 (forces the
+    boundary into seq=2). The fix recovers the preceding terminal on EITHER
+    rejection path. This is a production-composed regression: it asserts the full
+    reader, tail reader, ``latest_run_summary``, AND ``find_run_summary`` all agree
+    (keep seq=1, report completed, exclude the malformed seq=2); that prefix
+    extraction returned None for the fixture; that predecessor recovery is reached
+    exactly once with a non-empty reserve budget; and that the journal is opened
+    exactly once (no pathname reopen, no O(file-size) head scan)."""
+    from pathlib import Path
+    from api import run_journal
+    from api.run_journal import (
+        _SESSION_REPLAY_MAX_BYTES,
+        _read_jsonl,
+        _read_jsonl_tail,
+        find_run_summary,
+        latest_run_summary,
+    )
+
+    cap = _SESSION_REPLAY_MAX_BYTES
+    # Valid terminal done that MUST survive predecessor recovery.
+    valid_done = ('{"seq":1,"event":"done","terminal":true,'
+                  '"terminal_state":"completed","payload":{"ok":1}}\n')
+    # Oversized straddling boundary record malformed BEFORE the top-level
+    # "payload" key: the bare `bad,` token makes the truncated head invalid JSON,
+    # so _extract_boundary_record_summary returns None (it cannot parse the prefix
+    # up to the payload key). Newline-terminated so the record is a real line.
+    big = "X" * (cap + 50_000)
+    malformed_oversized = (
+        '{"seq":2,"event":"done","terminal":true,bad,'
+        '"payload":{"t":"' + big + '"}}\n'
+    )
+    # Trailing valid token so the tail window's boundary lands inside seq=2.
+    trailing = '{"seq":3,"event":"token","payload":{"t":"z"}}\n'
+    path = tmp_path / "_run_journal" / "s1" / "r1.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as fh:
+        fh.write(valid_done.encode("utf-8"))
+        fh.write(malformed_oversized.encode("utf-8"))
+        fh.write(trailing.encode("utf-8"))
+    assert path.stat().st_size > cap, "sanity: the journal must exceed the tail window"
+
+    # (1) The fixture must actually exercise the extraction-None path: the prefix
+    # extractor returns None for the malformed oversized boundary record. This is
+    # what makes the r11 control-flow skip recovery — a non-None extraction would
+    # take a different branch and the test would not discriminate the r12 fix.
+    import os
+    with path.open("rb") as fh:
+        size = os.fstat(fh.fileno()).st_size
+        record_start = run_journal._find_record_start_before(fh, size, size - cap)
+    with path.open("rb") as fh:
+        extraction = run_journal._extract_boundary_record_summary(fh, record_start)
+    assert extraction is None, (
+        f"fixture precondition: _extract_boundary_record_summary must return None "
+        f"for the malformed-before-payload oversized record (got {extraction!r}); "
+        f"if it returns a summary, the test does not exercise the r12 path"
+    )
+
+    # (2) Ground truth: the full reader keeps the valid done (seq=1) + trailing
+    # token (seq=3) and rejects the malformed seq=2.
+    full_events, _ = _read_jsonl(path)
+    full_seqs = {e.get("seq") for e in full_events if isinstance(e, dict)}
+    assert full_seqs == {1, 3}, (
+        f"baseline: full reader keeps seq=1 (valid done) + seq=3 (token), rejects "
+        f"seq=2 (malformed); got {full_seqs}"
+    )
+
+    # (3) Instrument predecessor recovery and journal opens, scoped to ONE
+    # authoritative _read_jsonl_tail call. The r11 control-flow skipped recovery
+    # on the extraction-None path (count 0); the r12 fix reaches it exactly once.
+    recovery_calls = {"n": 0, "budgets": []}
+    real_recovery = run_journal._read_last_complete_line_before
+
+    # The real signature is (fh, size_arg, end_offset, *, budget). Patch carefully:
+    def patched_recovery_real(fh, size_arg, end_offset, *, budget=None):
+        recovery_calls["n"] += 1
+        recovery_calls["budgets"].append(budget)
+        return real_recovery(fh, size_arg, end_offset, budget=budget)
+
+    monkeypatch.setattr(run_journal, "_read_last_complete_line_before", patched_recovery_real)
+
+    # Count journal opens for this ONE tail read: must be exactly one (single
+    # pinned descriptor; no pathname reopen, no O(file-size) head scan).
+    open_calls = {"n": 0}
+    real_open = Path.open
+
+    def patched_open(self, *args, **kwargs):
+        open_calls["n"] += 1
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", patched_open)
+
+    # (4) The tail reader must keep seq=1 (recovered predecessor) and exclude
+    # seq=2, matching the full reader.
+    tail_events, _ = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
+    tail_seqs = {e.get("seq") for e in tail_events if isinstance(e, dict)}
+    assert tail_seqs == {1, 3}, (
+        f"the tail reader diverged from the full reader: tail_seqs={tail_seqs} "
+        f"(expected {{1, 3}}); the extraction-None path dropped the preceding "
+        f"terminal (seq=1) by skipping predecessor recovery (#6139 r12 blocker)"
+    )
+    assert 2 not in tail_seqs, "the malformed oversized boundary record was fabricated as a summary"
+
+    # (5) Predecessor recovery was reached exactly ONCE for this single tail read,
+    # with a non-empty reserve budget. A mutation that skips the extraction-None
+    # path makes the count 0; a mutation that double-recovers makes it > 1.
+    assert recovery_calls["n"] == 1, (
+        f"predecessor recovery was reached {recovery_calls['n']} times for a single "
+        f"tail read (expected exactly 1); the extraction-None path must trigger "
+        f"recovery once (#6139 r12: the r11 control-flow skipped it entirely)"
+    )
+    budget = recovery_calls["budgets"][0]
+    assert budget is not None, "predecessor recovery received a None budget (no reserve)"
+    # The reserve is a fresh _ReadBudget(read_bytes_cap); assert it is non-empty.
+    remaining = getattr(budget, "remaining", None)
+    assert remaining is not None and remaining > 0, (
+        f"predecessor recovery's reserve budget was empty or missing "
+        f"(remaining={remaining!r}); a >=budget validity proof must not starve it"
+    )
+
+    # (6) The journal was opened exactly once for this single tail read (single
+    # pinned descriptor; no pathname reopen, no O(file-size) head scan).
+    assert open_calls["n"] == 1, (
+        f"the journal was opened {open_calls['n']} times for a single tail read "
+        f"(expected exactly 1); the tail reader must open once and pin the inode "
+        f"(#6139 r8/r11)"
+    )
+
+    # (7) Production summary readers must report the run completed (end-to-end
+    # correctness, separate from the call-count controls above). Clear the
+    # instrumented counters first so the summary-reader calls don't pollute them.
+    recovery_calls["n"] = 0
+    recovery_calls["budgets"].clear()
+    open_calls["n"] = 0
+    summary = latest_run_summary("s1", "r1", session_dir=tmp_path)
+    assert summary["terminal_state"] == "completed", (
+        f"latest_run_summary reported terminal_state={summary['terminal_state']!r} "
+        f"(expected 'completed'); a completed run was misreported non-terminal "
+        f"because the extraction-None path skipped predecessor recovery (#6139 r12)"
+    )
+    assert summary["terminal"] is True, (
+        f"latest_run_summary marked terminal={summary['terminal']} (expected True)"
+    )
+    found = find_run_summary("r1", session_dir=tmp_path)
+    assert found is not None, "find_run_summary must locate the run"
+    assert found["terminal_state"] == "completed", (
+        f"find_run_summary reported terminal_state={found['terminal_state']!r} "
+        f"(expected 'completed'); the extraction-None path skipped recovery on the "
+        f"find_run_summary path too (#6139 r12)"
+    )
