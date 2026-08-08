@@ -57,6 +57,7 @@ from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
+    StateDBSessionMessagesSnapshot,
     _is_empty_partial_activity_message,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
@@ -1208,7 +1209,24 @@ def _provider_error_probe_text(value) -> tuple[str, int | None]:
     return ' '.join(t for t in _texts if t).strip(), _status_code
 
 
-def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = False) -> dict:
+def _result_reports_compression_snapshot_stale(result) -> bool:
+    """Return whether an Agent result carries an exact stale-snapshot marker."""
+    return (
+        isinstance(result, dict)
+        and (
+            result.get('error') == 'compression_snapshot_stale'
+            or result.get('compression_snapshot_stale') is True
+        )
+    )
+
+
+def _classify_provider_error(
+    err_str: str,
+    exc=None,
+    *,
+    silent_failure: bool = False,
+    result=None,
+) -> dict:
     """Classify provider/agent failure text for WebUI apperror UX.
 
     Keep this string-based until hermes-agent exposes stable structured
@@ -1224,6 +1242,33 @@ def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = F
     err_str = str(_probe_text or err_str or '')
     _err_lower = err_str.lower()
     _exc_name = type(exc).__name__ if exc is not None else ''
+    _result_is_compression_snapshot_stale = (
+        _result_reports_compression_snapshot_stale(result)
+    )
+    try:
+        from agent.conversation_compression import CompressionSnapshotStaleError  # type: ignore[attr-defined]
+    except ImportError:
+        # Paired deployments export the typed exception. The name-only fallback
+        # keeps a rolling WebUI/Agent upgrade actionable without text matching.
+        _is_compression_snapshot_stale = (
+            _result_is_compression_snapshot_stale
+            or _exc_name == 'CompressionSnapshotStaleError'
+        )
+    else:
+        _is_compression_snapshot_stale = (
+            _result_is_compression_snapshot_stale
+            or isinstance(exc, CompressionSnapshotStaleError)
+        )
+    if _is_compression_snapshot_stale:
+        return {
+            'label': 'Conversation changed during compression',
+            'type': 'compression_snapshot_stale',
+            'hint': (
+                'The durable conversation changed while compression was being prepared. '
+                'No automatic retry was attempted. Send your next message to reload and '
+                'reconcile the latest conversation state.'
+            ),
+        }
     _is_cancelled = (
         'cancelled by user' in _err_lower
         or 'canceled by user' in _err_lower
@@ -6624,6 +6669,62 @@ def _agent_result_terminal_failure(result) -> bool:
     return False
 
 
+def _self_heal_result_succeeded(
+    result,
+    previous_context,
+    active_turn_identity,
+) -> bool:
+    """Accept a credential retry only after authoritative turn success."""
+    if not isinstance(result, dict):
+        return False
+    if _result_reports_compression_snapshot_stale(result):
+        return False
+    if _agent_result_terminal_failure(result):
+        return False
+    result_error = result.get('error')
+    if isinstance(result_error, str):
+        if result_error.strip():
+            return False
+    elif result_error:
+        return False
+    if result.get('completed') is False:
+        return False
+    messages = result.get('messages') or []
+    previous_context = list(previous_context or [])
+    if _messages_have_prefix(messages, previous_context):
+        current_turn_rows = list(messages[len(previous_context):])
+    else:
+        current_user_idx = next(
+            (
+                index
+                for index, row in enumerate(messages)
+                if _active_turn_token_matches(row, active_turn_identity)
+            ),
+            None,
+        )
+        if current_user_idx is None:
+            current_turn_rows = []
+        else:
+            current_turn_rows = list(messages[current_user_idx + 1:])
+    next_user_idx = next(
+        (
+            index
+            for index, row in enumerate(current_turn_rows)
+            if isinstance(row, dict) and row.get('role') == 'user'
+        ),
+        None,
+    )
+    if next_user_idx is not None:
+        current_turn_rows = current_turn_rows[:next_user_idx]
+    return any(
+        isinstance(row, dict)
+        and row.get('role') == 'assistant'
+        and not row.get('_error')
+        and _assistant_message_has_final_visible_text(row)
+        for row in current_turn_rows
+    )
+
+
 _TOOL_RESULT_SNIPPET_MAX = 4000
 
 # Tool-arg keys whose values are card content / diff-reconstruction inputs.
@@ -7135,6 +7236,105 @@ def _snapshot_and_append_partial_on_error(session, stream_id) -> dict | None:
     return None
 
 
+def _append_result_partial_on_error(
+    session,
+    result,
+    pre_call_context,
+    msg_text,
+    *,
+    active_turn_identity=None,
+) -> dict | None:
+    """Retain only a current-turn partial assistant row from an Agent result."""
+    if not isinstance(result, dict) or result.get('partial') is not True:
+        return None
+    messages = result.get('messages')
+    if not isinstance(messages, list) or not isinstance(pre_call_context, list):
+        return None
+    normalized_msg_text = _normalize_user_text(msg_text)
+    if _messages_have_prefix(messages, pre_call_context):
+        # Append-only result: only rows after the pre-call baseline can
+        # belong to this call.
+        current_turn_rows = messages[len(pre_call_context):]
+        baseline_has_current_user = bool(
+            pre_call_context
+            and isinstance(pre_call_context[-1], dict)
+            and pre_call_context[-1].get('role') == 'user'
+            and _normalize_user_text(_message_text(pre_call_context[-1].get('content')))
+            == normalized_msg_text
+        )
+        if not baseline_has_current_user:
+            current_user_index = next(
+                (
+                    index
+                    for index, row in enumerate(current_turn_rows)
+                    if isinstance(row, dict)
+                    and row.get('role') == 'user'
+                    and _normalize_user_text(_message_text(row.get('content')))
+                    == normalized_msg_text
+                ),
+                None,
+            )
+            if current_user_index is None:
+                return None
+            current_turn_rows = current_turn_rows[current_user_index + 1:]
+    else:
+        # Compacted/replayed results can REPLACE the pre-call baseline instead
+        # of appending to it; a numeric suffix slice can then expose a
+        # historical assistant row as this turn's partial. Require the unique
+        # active-turn token to survive in the returned projection; a positional
+        # index belongs to the replaced projection and may coincidentally point
+        # at a repeated historical prompt after compaction.
+        current_user_idx = next(
+            (
+                index
+                for index, row in enumerate(messages)
+                if _active_turn_token_matches(row, active_turn_identity)
+            ),
+            None,
+        )
+        if current_user_idx is None:
+            return None
+        current_turn_rows = messages[current_user_idx + 1:]
+    # A later user row starts another turn. Never cross that boundary while
+    # selecting a partial assistant response for the current turn.
+    next_user_idx = next(
+        (
+            index
+            for index, row in enumerate(current_turn_rows)
+            if isinstance(row, dict) and row.get('role') == 'user'
+        ),
+        None,
+    )
+    if next_user_idx is not None:
+        current_turn_rows = current_turn_rows[:next_user_idx]
+    assistant_row = next(
+        (
+            row
+            for row in reversed(current_turn_rows)
+            if isinstance(row, dict)
+            and row.get('role') == 'assistant'
+            and row.get('content')
+            and not row.get('_error')
+        ),
+        None,
+    )
+    if assistant_row is None:
+        return None
+    partial_msg = _build_partial_message(
+        str(assistant_row.get('content') or ''),
+        None,
+        None,
+    )
+    if partial_msg is None:
+        return None
+    if not isinstance(session.messages, list):
+        session.messages = []
+    if _partial_marker_already_present(session.messages, partial_msg):
+        return None
+    session.messages.append(partial_msg)
+    return partial_msg
+
+
 def _last_resort_sync_from_core(session, stream_id, agent_lock):
     """Final-exit guard: if the stream exits with pending_user_message still set,
     sync messages from the core transcript or add an error marker.
@@ -7295,6 +7495,54 @@ def _replace_session_db_in_kwargs(agent_kwargs, state_db_path):
             logger.debug("Failed to close previous session_db handle during self-heal")
     agent_kwargs["session_db"] = _next_session_db
     return _next_session_db
+
+
+def _add_supported_run_conversation_kwarg(callable_obj, kwargs, name, value):
+    """Add a run-conversation kwarg only when the live Agent accepts it."""
+    if not isinstance(kwargs, dict):
+        return False
+    try:
+        import inspect
+
+        parameters = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        kwargs[name] = value
+        return True
+    return False
+
+
+def _build_run_conversation_kwargs(
+    callable_obj,
+    *,
+    user_message,
+    system_message,
+    conversation_history,
+    conversation_history_revision,
+    task_id,
+    persist_user_message,
+    persist_user_timestamp,
+):
+    """Build one rolling-compatible Agent invocation contract."""
+    kwargs = {
+        "user_message": user_message,
+        "system_message": system_message,
+        "conversation_history": conversation_history,
+        "task_id": task_id,
+        "persist_user_message": persist_user_message,
+        "persist_user_timestamp": persist_user_timestamp,
+    }
+    _add_supported_run_conversation_kwarg(
+        callable_obj,
+        kwargs,
+        "conversation_history_revision",
+        conversation_history_revision,
+    )
+    return kwargs
 
 
 def _attempt_credential_self_heal(
@@ -7667,6 +7915,8 @@ def _run_agent_streaming(
     old_session_platform = None
     old_hermes_home = None
     old_profile_env = {}
+    result = None
+    _result_partial_pre_call_context = []
 
     # MCP discovery moved to AFTER the per-profile HERMES_HOME mutation below
     # (was here at v0.51.30) — the previous placement always read the default
@@ -9475,31 +9725,68 @@ def _run_agent_streaming(
             # or has been zeroed out (e.g. via a buggy migration / manual file edit).
             # Truthy-check covers None, missing-attr, and 0 uniformly.
             _turn_started_at = _pending_started_at if _pending_started_at else time.time()
-            _external_state_messages = get_state_db_session_messages(getattr(s, 'session_id', None))
+            _external_state_snapshot = get_state_db_session_messages(
+                session_id,
+                profile=getattr(s, 'profile', None),
+                with_revision=True,
+            )
+
+            def _context_and_revision_from_state_snapshot(state_snapshot):
+                reconciled_snapshot = reconciled_state_db_messages_for_session(
+                    s,
+                    prefer_context=True,
+                    state_messages=state_snapshot,
+                    with_revision=True,
+                )
+                if not isinstance(reconciled_snapshot, StateDBSessionMessagesSnapshot):
+                    raise TypeError(
+                        "state.db context reconciliation did not return a revision snapshot"
+                    )
+                context_messages = _new_turn_context_from_messages(
+                    reconciled_snapshot.messages,
+                    msg_text,
+                )
+                return (
+                    _deduplicate_context_messages(context_messages),
+                    reconciled_snapshot.revision,
+                )
+
+            def _refresh_context_and_revision_from_state_db():
+                fresh_state_snapshot = get_state_db_session_messages(
+                    session_id,
+                    profile=getattr(s, 'profile', None),
+                    with_revision=True,
+                )
+                return _context_and_revision_from_state_snapshot(fresh_state_snapshot)
+
             _previous_messages = list(
                 reconciled_state_db_messages_for_session(
                     s,
-                    state_messages=_external_state_messages,
+                    state_messages=_external_state_snapshot,
                 ) or []
             )
+            # Keep the owner/context projection distinct from the display projection.
+            # Settlement and stale-result attribution require the exact pre-run owner
+            # context even when state.db reconciliation changes the visible transcript.
             _previous_owner_context_messages = list(
                 reconciled_state_db_messages_for_session(
                     s,
                     prefer_context=True,
-                    state_messages=_external_state_messages,
+                    state_messages=_external_state_snapshot,
                 ) or []
             )
             _previous_owner_context_messages = _deduplicate_context_messages(
                 _previous_owner_context_messages
             )
-            _previous_context_messages = _new_turn_context_from_messages(
-                _previous_owner_context_messages,
-                msg_text,
+            (
+                _previous_context_messages,
+                _conversation_history_revision,
+            ) = _context_and_revision_from_state_snapshot(
+                _external_state_snapshot,
             )
             # Dedup before feeding to agent — merge_session_messages_append_only
             # can produce duplicates when context_messages and state.db share
             # messages with different timestamps.
-            _previous_context_messages = _deduplicate_context_messages(_previous_context_messages)
             _pre_compression_count = getattr(
                 getattr(agent, 'context_compressor', None),
                 'compression_count', 0,
@@ -9554,7 +9841,8 @@ def _run_agent_streaming(
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
-            _run_conversation_kwargs = dict(
+            _run_conversation_kwargs = _build_run_conversation_kwargs(
+                agent.run_conversation,
                 user_message=user_message,
                 system_message=workspace_system_msg,
                 conversation_history=_sanitize_messages_for_api(
@@ -9564,6 +9852,7 @@ def _run_agent_streaming(
                     effective_provider=resolved_provider,
                     effective_base_url=resolved_base_url,
                 ),
+                conversation_history_revision=_conversation_history_revision,
                 task_id=session_id,
                 persist_user_message=msg_text,
                 persist_user_timestamp=getattr(s, 'pending_started_at', None),
@@ -9601,6 +9890,7 @@ def _run_agent_streaming(
                     cfg=_cfg,
                 )
                 _run_conversation_kwargs["user_message"] = user_message
+            _result_partial_pre_call_context = list(_previous_context_messages)
             result = agent.run_conversation(**_run_conversation_kwargs)
             _active_turn_identity = _resolve_active_turn_authority(
                 _active_turn_identity,
@@ -9911,6 +10201,7 @@ def _run_agent_streaming(
                     str(_last_err) if _last_err else '',
                     _last_err,
                     silent_failure=not bool(_last_err),
+                    result=result,
                 )
                 _is_quota = _classification['type'] == 'quota_exhausted'
                 _is_auth = _classification['type'] == 'auth_mismatch'
@@ -10002,6 +10293,7 @@ def _run_agent_streaming(
                         # Before emitting the error, try re-reading credentials
                         # and retrying once with a fresh agent.
                         _heal_result = None
+                        _heal_stale_classification = None
                         _heal_rt = _attempt_credential_self_heal(
                             resolved_provider or '', session_id, _agent_lock,
                             target_model=resolved_model,
@@ -10038,15 +10330,23 @@ def _run_agent_streaming(
                             _self_healed = True
                             _token_sent = False
                             try:
-                                _heal_kwargs = dict(
+                                (
+                                    _heal_context_messages,
+                                    _heal_conversation_history_revision,
+                                ) = _refresh_context_and_revision_from_state_db()
+                                _heal_kwargs = _build_run_conversation_kwargs(
+                                    agent.run_conversation,
                                     user_message=user_message,
                                     system_message=workspace_system_msg,
                                     conversation_history=_sanitize_messages_for_api(
-                                        _previous_context_messages,
+                                        _heal_context_messages,
                                         cfg=_cfg,
                                         effective_model=resolved_model,
                                         effective_provider=resolved_provider,
                                         effective_base_url=resolved_base_url,
+                                    ),
+                                    conversation_history_revision=(
+                                        _heal_conversation_history_revision
                                     ),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
@@ -10054,14 +10354,26 @@ def _run_agent_streaming(
                                 )
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
+                                _result_partial_pre_call_context = list(
+                                    _heal_context_messages
+                                )
                                 _heal_result = agent.run_conversation(**_heal_kwargs)
                                 _active_turn_identity = _resolve_active_turn_authority(
                                     _active_turn_identity,
                                     result=_heal_result,
                                     agent=agent,
                                 )
-                                _heal_all_msgs = _heal_result.get('messages') or []
-                                _heal_ok = _has_new_assistant_reply(_heal_all_msgs, _prev_len) or _token_sent
+                                if _result_reports_compression_snapshot_stale(_heal_result):
+                                    _heal_stale_classification = _classify_provider_error(
+                                        '',
+                                        result=_heal_result,
+                                    )
+                                    result = _heal_result
+                                _heal_ok = _self_heal_result_succeeded(
+                                    _heal_result,
+                                    _heal_context_messages,
+                                    _active_turn_identity,
+                                )
                             except Exception as _retry_exc:
                                 logger.warning(
                                     '[webui] self-heal: retry also failed: %s', _retry_exc,
@@ -10100,14 +10412,19 @@ def _run_agent_streaming(
                                 # leaving _assistant_added truthy (set below).
                                 _assistant_added = True  # prevent re-entering guard
                         if not _assistant_added:
-                            # Self-heal didn't apply or retry failed — emit error
-                            _err_label = 'Authentication failed'
-                            _err_type = 'auth_mismatch'
-                            _err_hint = (
-                                'The selected model may not be supported by your configured provider or '
-                                'your API key is invalid. Run `hermes model` in your terminal to '
-                                'update credentials, then restart the WebUI.'
-                            )
+                            # Self-heal didn't apply or retry failed — emit error.
+                            if _heal_stale_classification is not None:
+                                _err_label = _heal_stale_classification['label']
+                                _err_type = _heal_stale_classification['type']
+                                _err_hint = _heal_stale_classification['hint']
+                            else:
+                                _err_label = 'Authentication failed'
+                                _err_type = 'auth_mismatch'
+                                _err_hint = (
+                                    'The selected model may not be supported by your configured provider or '
+                                    'your API key is invalid. Run `hermes model` in your terminal to '
+                                    'update credentials, then restart the WebUI.'
+                                )
                     elif _is_auth:
                         _err_label = 'Authentication failed'
                         _err_type = 'auth_mismatch'
@@ -10138,8 +10455,13 @@ def _run_agent_streaming(
                         # fall through to normal post-result persistence below.
                         pass
                     else:
+                        _result_public_error = _err_str or f'{_err_label}.'
+                        if _err_type == 'compression_snapshot_stale':
+                            _result_public_error = (
+                                'The conversation changed while context compression was being prepared.'
+                            )
                         _error_payload = _provider_error_payload(
-                            _err_str or f'{_err_label}.',
+                            _result_public_error,
                             _err_type,
                             _err_hint,
                         )
@@ -10172,6 +10494,13 @@ def _run_agent_streaming(
                         s.pending_user_source = None
                         try:
                             _snapshot_and_append_partial_on_error(s, stream_id)
+                            _append_result_partial_on_error(
+                                s,
+                                result,
+                                _result_partial_pre_call_context,
+                                msg_text,
+                                active_turn_identity=_active_turn_identity,
+                            )
                         except Exception:
                             logger.debug("Failed to snapshot partials on error for %s", stream_id, exc_info=True)
                         _error_content = (
@@ -11208,6 +11537,9 @@ def _run_agent_streaming(
         _exc_is_cancelled = _classification['type'] == 'cancelled'
         _exc_is_interrupted = _classification['type'] == 'interrupted'
         _exc_is_compression_exhausted = _classification['type'] == 'compression_exhausted'
+        _exc_is_compression_snapshot_stale = (
+            _classification['type'] == 'compression_snapshot_stale'
+        )
 
         # The user hint still points to Settings / `hermes model` from _classify_provider_error().
         if _exc_is_quota:
@@ -11223,6 +11555,7 @@ def _run_agent_streaming(
                 _classification['label'], _classification['type'], _classification['hint'],
             )
         elif _exc_is_auth:
+            _heal_stale_classification = None
             if not _self_healed:
                 # ── Credential self-heal on 401 (#1401) ──
                 _heal_rt = _attempt_credential_self_heal(
@@ -11262,15 +11595,23 @@ def _run_agent_streaming(
                     # Retry the conversation
                     _token_sent = False
                     try:
-                        _heal_kwargs2 = dict(
+                        (
+                            _heal_context_messages,
+                            _heal_conversation_history_revision,
+                        ) = _refresh_context_and_revision_from_state_db()
+                        _heal_kwargs2 = _build_run_conversation_kwargs(
+                            _heal_agent.run_conversation,
                             user_message=user_message,
                             system_message=workspace_system_msg,
                             conversation_history=_sanitize_messages_for_api(
-                                _previous_context_messages,
+                                _heal_context_messages,
                                 cfg=_cfg,
                                 effective_model=resolved_model,
                                 effective_provider=resolved_provider,
                                 effective_base_url=resolved_base_url,
+                            ),
+                            conversation_history_revision=(
+                                _heal_conversation_history_revision
                             ),
                             task_id=session_id,
                             persist_user_message=msg_text,
@@ -11278,57 +11619,82 @@ def _run_agent_streaming(
                         )
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config
+                        _result_partial_pre_call_context = list(
+                            _heal_context_messages
+                        )
                         _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
                         _active_turn_identity = _resolve_active_turn_authority(
                             _active_turn_identity,
                             result=_heal_result,
                             agent=_heal_agent,
                         )
-                        # Retry succeeded — persist the result normally
-                        if s is not None:
-                            if _checkpoint_stop is not None:
-                                _checkpoint_stop.set()
-                            if _ckpt_thread is not None:
-                                _ckpt_thread.join(timeout=15)
-                            _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
-                            with _lock_ctx:
-                                if not ephemeral and not _stream_writeback_is_current(s, stream_id):
-                                    logger.info(
-                                        "Skipping stale stream self-heal writeback for session %s stream %s; active_stream_id=%s",
-                                        getattr(s, 'session_id', session_id),
-                                        stream_id,
-                                        getattr(s, 'active_stream_id', None),
+                        _heal_stale_classification = None
+                        if _result_reports_compression_snapshot_stale(_heal_result):
+                            _heal_stale_classification = _classify_provider_error(
+                                '',
+                                result=_heal_result,
+                            )
+                            result = _heal_result
+                        elif _self_heal_result_succeeded(
+                            _heal_result,
+                            _heal_context_messages,
+                            _active_turn_identity,
+                        ):
+                            # Retry succeeded — persist the result normally.
+                            if s is not None:
+                                if _checkpoint_stop is not None:
+                                    _checkpoint_stop.set()
+                                if _ckpt_thread is not None:
+                                    _ckpt_thread.join(timeout=15)
+                                _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
+                                with _lock_ctx:
+                                    if not ephemeral and not _stream_writeback_is_current(s, stream_id):
+                                        logger.info(
+                                            "Skipping stale stream self-heal writeback for session %s stream %s; active_stream_id=%s",
+                                            getattr(s, 'session_id', session_id),
+                                            stream_id,
+                                            getattr(s, 'active_stream_id', None),
+                                        )
+                                        return
+                                    _result_messages = _heal_result.get('messages')
+                                    if _result_messages is None:
+                                        _result_messages = _previous_context_messages
+                                    _result_messages = _settle_result_messages(
+                                        s,
+                                        _previous_messages,
+                                        _previous_owner_context_messages,
+                                        _result_messages,
+                                        msg_text,
+                                        _turn_pending_source,
+                                        _active_turn_identity,
                                     )
-                                    return
-                                _result_messages = _heal_result.get('messages')
-                                if _result_messages is None:
-                                    _result_messages = _previous_context_messages
-                                _result_messages = _settle_result_messages(
-                                    s,
-                                    _previous_messages,
-                                    _previous_owner_context_messages,
-                                    _result_messages,
-                                    msg_text,
-                                    _turn_pending_source,
-                                    _active_turn_identity,
-                                )
-                                s.save()
-                        logger.info('[webui] self-heal (except path): retry succeeded')
-                        return  # skip error emission
+                                    s.save()
+                            logger.info('[webui] self-heal (except path): retry succeeded')
+                            return  # skip error emission
                     except Exception as _retry_exc2:
                         logger.warning('[webui] self-heal (except path): retry failed: %s', _retry_exc2)
                         # Fall through to emit the original error
-            # Self-heal didn't apply or retry failed — emit the auth error
-            _exc_label, _exc_type, _exc_hint = (
-                'Authentication error', 'auth_mismatch',
-                'The selected model may not be supported by your configured provider. '
-                'Run `hermes model` in your terminal to switch providers, then restart the WebUI.',
-            )
+            if _heal_stale_classification is not None:
+                _exc_label = _heal_stale_classification['label']
+                _exc_type = _heal_stale_classification['type']
+                _exc_hint = _heal_stale_classification['hint']
+                _exc_is_compression_snapshot_stale = True
+            else:
+                # Self-heal didn't apply or retry failed — emit the auth error.
+                _exc_label, _exc_type, _exc_hint = (
+                    'Authentication error', 'auth_mismatch',
+                    'The selected model may not be supported by your configured provider. '
+                    'Run `hermes model` in your terminal to switch providers, then restart the WebUI.',
+                )
         elif _exc_is_not_found:
             _exc_label, _exc_type, _exc_hint = (
                 _classification['label'], _classification['type'], _classification['hint'],
             )
         elif _exc_is_cancelled or _exc_is_interrupted:
+            _exc_label, _exc_type, _exc_hint = (
+                _classification['label'], _classification['type'], _classification['hint'],
+            )
+        elif _exc_is_compression_snapshot_stale:
             _exc_label, _exc_type, _exc_hint = (
                 _classification['label'], _classification['type'], _classification['hint'],
             )
@@ -11339,6 +11705,12 @@ def _run_agent_streaming(
         else:
             _exc_label, _exc_type, _exc_hint = 'Error', 'error', ''
 
+        if _exc_is_compression_snapshot_stale:
+            # The typed exception may carry expected/observed revision details for
+            # diagnostics. Keep those out of the persisted transcript and SSE UI.
+            err_str = (
+                'The conversation changed while context compression was being prepared.'
+            )
         _error_payload = _provider_error_payload(err_str, _exc_type, _exc_hint)
         if s is not None:
             if _checkpoint_stop is not None:
@@ -11401,6 +11773,13 @@ def _run_agent_streaming(
                 s.pending_user_source = None
                 try:
                     _snapshot_and_append_partial_on_error(s, stream_id)
+                    _append_result_partial_on_error(
+                        s,
+                        result,
+                        _result_partial_pre_call_context,
+                        msg_text,
+                        active_turn_identity=_active_turn_identity,
+                    )
                 except Exception:
                     logger.debug("Failed to snapshot partials on error for %s", stream_id, exc_info=True)
                 _error_message = {
