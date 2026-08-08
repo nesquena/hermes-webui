@@ -74,7 +74,7 @@ _CSP_HEADER_NAME = 'Content-Security-Policy'
 _CSP_SHARED_POLICY_TEMPLATE = (
     "default-src 'self' https://*.cloudflareaccess.com; "
     "object-src 'none'; "
-    "frame-ancestors 'none'; "
+    "frame-ancestors {frame_ancestors}; "
     "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com blob:; "
     "worker-src blob: 'self' https://cdn.jsdelivr.net; "
     "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
@@ -90,7 +90,8 @@ _CSP_SHARED_POLICY_TEMPLATE = (
 # dashboard/extension iframes keep working). An operator can widen it, opt-in,
 # via HERMES_WEBUI_CSP_FRAME_EXTRA — e.g. to embed a self-hosted dashboard in an
 # extension tab. This governs what THIS page may embed; it does NOT affect
-# frame-ancestors (who may embed the WebUI), which stays 'none'.
+# frame-ancestors (who may embed the WebUI), which stays 'none' unless
+# HERMES_WEBUI_CSP_FRAME_ANCESTORS is set (see _csp_frame_ancestors).
 _CSP_FRAME_BASE = "'self'"
 
 
@@ -142,6 +143,25 @@ def _csp_extra_frame_src() -> str:
     return " " + " ".join(sources)
 
 
+def _csp_frame_ancestors() -> str:
+    """CSP frame-ancestors sources: who may embed the WebUI in an <iframe>.
+
+    Locked down to 'none' by default. An operator can opt in via
+    HERMES_WEBUI_CSP_FRAME_ANCESTORS — space-separated http(s) origins
+    (same shape as HERMES_WEBUI_CSP_FRAME_EXTRA entries), e.g. a trusted
+    local dashboard that embeds the WebUI. Malformed values are ignored
+    with a warning and the safe default is kept.
+    """
+    raw = os.getenv("HERMES_WEBUI_CSP_FRAME_ANCESTORS", "").strip()
+    if not raw:
+        return "'none'"
+    sources = raw.split()
+    if any(not _valid_csp_extra_frame_source(src) for src in sources):
+        logger.warning("Ignoring invalid HERMES_WEBUI_CSP_FRAME_ANCESTORS value")
+        return "'none'"
+    return " ".join(sources)
+
+
 def _csp_connect_src(extra_connect_src: str = "") -> str:
     return f"{_CSP_CONNECT_BASE} https://cdn.jsdelivr.net{extra_connect_src}"
 
@@ -161,6 +181,7 @@ def _build_csp_enforced_policy(
     return _CSP_SHARED_POLICY_TEMPLATE.format(
         connect_src=_csp_connect_src(extra_connect_src),
         frame_src=_csp_frame_src(extra_frame_src),
+        frame_ancestors=_csp_frame_ancestors(),
     )
 
 
@@ -181,7 +202,8 @@ def _security_headers(handler):
     handler._csp_extra_connect_src = extra_connect_src
     handler._csp_extra_frame_src = extra_frame_src
     handler.send_header('X-Content-Type-Options', 'nosniff')
-    handler.send_header('X-Frame-Options', 'DENY')
+    if _csp_frame_ancestors() == "'none'":
+        handler.send_header('X-Frame-Options', 'DENY')
     handler.send_header('Referrer-Policy', 'same-origin')
     handler.send_header(_CSP_HEADER_NAME, _build_csp_enforced_policy(extra_connect_src, extra_frame_src))
     handler.send_header(
