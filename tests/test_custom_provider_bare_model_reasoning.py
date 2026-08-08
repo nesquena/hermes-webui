@@ -145,6 +145,59 @@ def test_openrouter_slash_prefix_unaffected():
     assert set(efforts) >= {"low", "medium", "high"}
 
 
+# ── xAI Grok via custom / AI-gateway namespaces ──────────────────────────────
+#
+# Vercel AI Gateway and similar OpenAI-compatible proxies advertise Grok as
+# ``xai/grok-4.5`` (no hyphen) under provider=custom. The OpenRouter-style
+# prefix is ``x-ai/``. Both must expose the reasoning chip; grok-4.5's native
+# ladder is low/medium/high only (no minimal/xhigh/max/none).
+
+
+@pytest.mark.parametrize(
+    "model_id,provider_id",
+    [
+        ("xai/grok-4.5", "custom"),
+        ("xai/grok-4.5", "custom:vercel-vtest314"),
+        ("x-ai/grok-4.5", "custom"),
+        ("grok-4.5", "custom"),
+        ("grok-4.5", "xai"),
+    ],
+)
+def test_grok_45_custom_and_gateway_namespaces_expose_reasoning(model_id, provider_id):
+    efforts = cfg.resolve_model_reasoning_efforts(model_id, provider_id=provider_id)
+    assert efforts == ["low", "medium", "high"], (
+        f"{model_id} via {provider_id} should expose Grok 4.5's low/medium/high "
+        f"ladder, got {efforts!r}"
+    )
+
+
+def test_grok_multi_agent_matches_agent_wire_ladder():
+    efforts = cfg.resolve_model_reasoning_efforts(
+        "xai/grok-4.20-multi-agent",
+        provider_id="custom",
+    )
+    assert efforts == ["low", "medium", "high"]
+
+
+def test_grok_build_stays_hidden_without_agent_support():
+    assert cfg.resolve_model_reasoning_efforts(
+        "xai/grok-build-latest",
+        provider_id="custom",
+    ) == []
+
+
+def test_grok_models_outside_agent_allowlist_hide_chip():
+    for model_id in (
+        "xai/grok-imagine-image",
+        "xai/grok-imagine-video",
+        "xai/grok-tts",
+        "xai/grok-4.20-non-reasoning",
+        "xai/grok-4-fast-reasoning",
+        "xai/grok-4.20-0309-reasoning",
+    ):
+        assert cfg.resolve_model_reasoning_efforts(model_id, provider_id="custom") == [], model_id
+
+
 def test_generalized_model_families_and_suffixed_ids():
     test_models = [
         # GPT
