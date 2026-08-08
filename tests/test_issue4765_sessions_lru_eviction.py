@@ -13,13 +13,17 @@ unsaved session and lose data) with ``_evict_sessions_over_cap()``: it only ever
 removes clean, persisted, non-active sessions, and ``get_session()`` lazily
 reloads an evicted session from its JSON sidecar on next access.
 
-These tests prove the four required invariants:
-  1. Eviction happens once the cache grows past the cap.
+These tests prove the required invariants:
+  1. Eviction happens once the cache grows past the entry or byte cap.
   2. An active / streaming session is NEVER evicted, even when oldest.
   3. An evicted session lazily reloads from disk with identical content.
   4. No data loss: eviction removes only the in-memory copy, never the file.
+  5. Full loads/saves record serialized weight; metadata stubs stay lightweight.
+  6. One oversized most-recent transcript remains warm instead of reload-looping.
 """
 import collections
+import json
+import os
 import shutil
 import tempfile
 import threading
@@ -150,6 +154,81 @@ def test_cache_cap_preserves_environment_fallback():
         _cfg.SESSIONS_MAX = old_sessions_max
 
 
+def test_default_sessions_cache_byte_cap_is_128_mib():
+    """The entry cap also has a serialized-byte backstop for large transcripts."""
+    from api import config as _cfg
+
+    assert _cfg.DEFAULT_SESSIONS_CACHE_MAX_BYTES == 128 * 1024 * 1024
+
+
+def test_cache_byte_cap_reads_config_yaml_key_and_fails_safe():
+    """Operators can tune the byte budget without disabling it accidentally."""
+    from api import config as _cfg
+
+    mib = 1024 * 1024
+    assert _cfg.get_sessions_cache_max_bytes(
+        {"webui": {"sessions_cache_max_mb": 64}}
+    ) == 64 * mib
+    assert _cfg.get_sessions_cache_max_bytes(
+        {"webui": {"sessions_cache_max_mb": "32"}}
+    ) == 32 * mib
+    for invalid in (0, -1, "nope", None):
+        assert _cfg.get_sessions_cache_max_bytes(
+            {"webui": {"sessions_cache_max_mb": invalid}}
+        ) == _cfg.DEFAULT_SESSIONS_CACHE_MAX_BYTES
+
+
+def test_eviction_resolves_both_limits_from_one_config_snapshot(
+    isolated_session_env, monkeypatch,
+):
+    """Each pass uses one snapshot whose count and byte limits drive eviction."""
+    from api import config as _cfg
+    from api.config import LOCK, SESSIONS
+    from api.models import _evict_sessions_over_cap
+
+    calls = 0
+
+    def fake_get_config():
+        nonlocal calls
+        calls += 1
+        return {
+            "webui": {
+                "sessions_cache_max": 2,
+                "sessions_cache_max_mb": 1,
+            }
+        }
+
+    monkeypatch.setattr(_cfg, "get_config", fake_get_config)
+
+    # Count dominates: three tiny sessions are below 1 MiB but exceed cap=2.
+    count_sessions = [_make_persisted_session(700 + i) for i in range(3)]
+    with LOCK:
+        for session in count_sessions:
+            SESSIONS[session.session_id] = session
+        count_evicted = _evict_sessions_over_cap()
+    assert count_evicted == 1
+    assert list(SESSIONS) == [s.session_id for s in count_sessions[-2:]]
+
+    SESSIONS.clear()
+
+    # Bytes dominate: two ~700 KiB sessions meet cap=2 but exceed 1 MiB.
+    byte_sessions = [
+        _make_persisted_session(
+            710 + i,
+            messages=[{"role": "assistant", "content": "x" * (700 * 1024)}],
+        )
+        for i in range(2)
+    ]
+    with LOCK:
+        for session in byte_sessions:
+            SESSIONS[session.session_id] = session
+        byte_evicted = _evict_sessions_over_cap()
+
+    assert byte_evicted == 1
+    assert list(SESSIONS) == [byte_sessions[-1].session_id]
+    assert calls == 2  # exactly one configuration read per enforcement pass
+
+
 # ─────────────────────────── invariant 1: eviction ──────────────────────────
 
 def test_eviction_happens_past_the_cap(isolated_session_env):
@@ -175,6 +254,613 @@ def test_eviction_happens_past_the_cap(isolated_session_env):
     kept = set(SESSIONS.keys())
     assert created[-1].session_id in kept
     assert created[0].session_id not in kept
+
+
+def test_eviction_happens_past_the_byte_cap_below_entry_cap(isolated_session_env):
+    """A few large transcripts must not bypass the count-only LRU bound."""
+    from api.config import LOCK, SESSIONS
+    from api.models import _evict_sessions_over_cap
+
+    created = [
+        _make_persisted_session(
+            i,
+            messages=[{"role": "assistant", "content": "x" * (700 * 1024)}],
+        )
+        for i in range(3)
+    ]
+    for session in created:
+        _insert(session)
+
+    assert len(SESSIONS) == 3  # comfortably below the entry cap used below
+    with LOCK:
+        evicted = _evict_sessions_over_cap(cap=10, max_bytes=1024 * 1024)
+
+    assert evicted == 2
+    assert list(SESSIONS) == [created[-1].session_id]
+    assert sum(s._cache_resident_bytes for s in SESSIONS.values()) <= 1024 * 1024
+
+
+def test_byte_eviction_preserves_same_count_unsaved_edit(isolated_session_env):
+    """Byte pressure must not discard edits that do not change message count."""
+    from api.config import LOCK, SESSIONS
+    from api.models import _evict_sessions_over_cap, get_session
+
+    edited = _make_persisted_session(
+        90,
+        messages=[{"role": "assistant", "content": "old"}],
+    )
+    sibling = _make_persisted_session(
+        91,
+        messages=[{"role": "assistant", "content": "sibling"}],
+    )
+    _insert(edited)
+    _insert(sibling)
+
+    edited.messages[0]["content"] = "new"
+    with LOCK:
+        evicted = _evict_sessions_over_cap(cap=10, max_bytes=1)
+
+    assert evicted == 0
+    assert edited.session_id in SESSIONS
+    assert SESSIONS[edited.session_id] is edited
+    assert get_session(edited.session_id).messages[0]["content"] == "new"
+
+    # A successful save refreshes the persisted-state fingerprint, so the now
+    # clean LRU can be reclaimed and lazy reload returns the edited content.
+    edited.save()
+    get_session(sibling.session_id)  # make the sibling MRU; edited is evictable LRU
+    with LOCK:
+        evicted = _evict_sessions_over_cap(cap=10, max_bytes=1)
+    assert evicted == 1
+    assert edited.session_id not in SESSIONS
+    assert get_session(edited.session_id).messages[0]["content"] == "new"
+
+
+def test_byte_eviction_preserves_unsaved_metadata_edit(isolated_session_env):
+    """Persisted message parity cannot justify dropping changed metadata."""
+    from api.config import LOCK, SESSIONS
+    from api.models import _evict_sessions_over_cap
+
+    edited = _make_persisted_session(92)
+    sibling = _make_persisted_session(93)
+    _insert(edited)
+    _insert(sibling)
+
+    edited.title = "Unsaved title"
+    with LOCK:
+        evicted = _evict_sessions_over_cap(cap=10, max_bytes=1)
+
+    assert evicted == 0
+    assert SESSIONS[edited.session_id] is edited
+    assert SESSIONS[edited.session_id].title == "Unsaved title"
+
+
+def test_save_fingerprint_describes_serialized_snapshot_not_later_mutation(
+    isolated_session_env, monkeypatch,
+):
+    """A mutation after payload capture must remain visibly unsaved."""
+    from api import models
+    from api.config import LOCK, SESSIONS
+
+    session = _make_persisted_session(
+        89,
+        messages=[{"role": "assistant", "content": "persisted"}],
+    )
+    _insert(session)
+    real_replace = models._safe_replace
+    mutated = False
+
+    def replace_then_mutate(src, dst):
+        nonlocal mutated
+        real_replace(src, dst)
+        if Path(dst) == session.path:
+            session.title = "unsaved after payload"
+            mutated = True
+
+    monkeypatch.setattr(models, "_safe_replace", replace_then_mutate)
+    session.save(touch_updated_at=False)
+
+    persisted = json.loads(session.path.read_text(encoding="utf-8"))
+    assert mutated is True
+    assert persisted["title"] != session.title
+    assert models._session_matches_persisted_state(session) is False
+
+    sibling = _make_persisted_session(88)
+    _insert(sibling)  # make the sibling MRU so the edited session is considered
+    with LOCK:
+        evicted = models._evict_sessions_over_cap(cap=10, max_bytes=1)
+
+    assert evicted == 0
+    assert SESSIONS[session.session_id] is session
+
+
+def test_state_db_reconcile_refreshes_cached_weight_and_enforces_budget(
+    isolated_session_env, monkeypatch,
+):
+    """Reconciliation through a locked copy must update the cached projection."""
+    from api import config as _cfg
+    from api import models
+    from api.config import SESSIONS
+
+    sibling = _make_persisted_session(
+        94,
+        messages=[{"role": "assistant", "content": "s" * (400 * 1024), "timestamp": 1.0}],
+    )
+    cached = _make_persisted_session(
+        95,
+        messages=[{"role": "user", "content": "u" * (400 * 1024), "timestamp": 1.0}],
+    )
+    cached.active_stream_id = "dead-stream"
+    cached.save(touch_updated_at=False)
+    _insert(sibling)
+    _insert(cached)  # the get_session reconciliation path promotes this to MRU
+
+    state_messages = list(cached.messages) + [
+        {"role": "assistant", "content": "a" * (700 * 1024), "timestamp": 2.0}
+    ]
+    monkeypatch.setattr(models, "_active_stream_ids", lambda: set())
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda *_args, **_kwargs: {"message_count": 2, "last_message_at": 2.0},
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda *_args, **_kwargs: state_messages,
+    )
+    monkeypatch.setattr(
+        models,
+        "reconciled_state_db_messages_for_session",
+        lambda *_args, **kwargs: list(state_messages),
+    )
+    monkeypatch.setattr(
+        _cfg,
+        "get_config",
+        lambda: {
+            "webui": {
+                "sessions_cache_max": 10,
+                "sessions_cache_max_mb": 1,
+            }
+        },
+    )
+
+    assert models._sync_sidecar_from_state_db_if_newer(cached) is True
+
+    assert SESSIONS[cached.session_id] is cached
+    assert sibling.session_id not in SESSIONS
+    assert cached._cache_resident_bytes == cached.path.stat().st_size
+    assert models._session_matches_persisted_state(cached) is True
+
+
+def test_state_db_reconcile_preserves_unsaved_metadata_and_skips_byte_eviction(
+    isolated_session_env, monkeypatch,
+):
+    """A lock-owned repair cannot make unrelated cached metadata look durable."""
+    from api import config as _cfg
+    from api import models
+    from api.config import SESSIONS
+
+    cached = _make_persisted_session(
+        96,
+        messages=[{"role": "user", "content": "u" * (400 * 1024), "timestamp": 1.0}],
+    )
+    cached.active_stream_id = "dead-metadata-stream"
+    cached.save(touch_updated_at=False)
+    sibling = _make_persisted_session(
+        97,
+        messages=[{"role": "assistant", "content": "s" * (400 * 1024), "timestamp": 1.0}],
+    )
+    _insert(cached)
+    _insert(sibling)
+    cached.title = "Unsaved title"
+
+    recovered = list(cached.messages) + [
+        {"role": "assistant", "content": "a" * (700 * 1024), "timestamp": 2.0}
+    ]
+    monkeypatch.setattr(models, "_active_stream_ids", lambda: set())
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda *_args, **_kwargs: {"message_count": 2, "last_message_at": 2.0},
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda *_args, **_kwargs: list(recovered),
+    )
+    monkeypatch.setattr(
+        models,
+        "reconciled_state_db_messages_for_session",
+        lambda *_args, **_kwargs: list(recovered),
+    )
+    monkeypatch.setattr(
+        _cfg,
+        "get_config",
+        lambda: {
+            "webui": {
+                "sessions_cache_max": 10,
+                "sessions_cache_max_mb": 1,
+            }
+        },
+    )
+
+    assert models._sync_sidecar_from_state_db_if_newer(cached) is True
+
+    assert SESSIONS[cached.session_id] is cached
+    assert cached.title == "Unsaved title"
+    assert cached._cache_persisted_fingerprint is None
+    assert sibling.session_id in SESSIONS
+
+
+def test_save_enforces_byte_budget_after_resident_session_grows(
+    isolated_session_env, monkeypatch,
+):
+    """A hot session growing in place reclaims old cache entries immediately."""
+    from api import config as _cfg
+    from api.config import SESSIONS
+
+    monkeypatch.setattr(
+        _cfg,
+        "get_config",
+        lambda: {
+            "webui": {
+                "sessions_cache_max": 10,
+                "sessions_cache_max_mb": 1,
+            }
+        },
+    )
+
+    sessions = [
+        _make_persisted_session(
+            400 + i,
+            messages=[{"role": "assistant", "content": "s" * (250 * 1024)}],
+        )
+        for i in range(3)
+    ]
+    for session in sessions:
+        _insert(session)
+
+    assert list(SESSIONS) == [session.session_id for session in sessions]
+
+    current = sessions[-1]
+    current.messages = [
+        {"role": "assistant", "content": "g" * (700 * 1024)}
+    ]
+    current.save()
+
+    assert current._cache_resident_bytes == current.path.stat().st_size
+    assert sessions[0].session_id not in SESSIONS
+    assert sessions[1].session_id in SESSIONS
+    assert current.session_id in SESSIONS
+    assert sum(s._cache_resident_bytes for s in SESSIONS.values()) <= 1024 * 1024
+
+
+def test_cache_hit_full_reload_enforces_grown_sidecar_weight(
+    isolated_session_env, monkeypatch,
+):
+    """Replacing a stale cache hit must immediately reapply the byte budget."""
+    from api import config as _cfg
+    from api import models
+    from api.config import SESSIONS
+
+    monkeypatch.setattr(
+        _cfg,
+        "get_config",
+        lambda: {
+            "webui": {
+                "sessions_cache_max": 10,
+                "sessions_cache_max_mb": 1,
+            }
+        },
+    )
+    siblings = [
+        _make_persisted_session(
+            410 + i,
+            messages=[{"role": "assistant", "content": "s" * (400 * 1024)}],
+        )
+        for i in range(2)
+    ]
+    stale = _make_persisted_session(
+        412,
+        messages=[{"role": "assistant", "content": "old" * 1024}],
+    )
+    for session in [*siblings, stale]:
+        _insert(session)
+
+    external = models.Session(
+        session_id=stale.session_id,
+        title=stale.title,
+        messages=[
+            {"role": "user", "content": "new prompt"},
+            {"role": "assistant", "content": "grown" + "g" * (700 * 1024)},
+        ],
+        created_at=stale.created_at,
+        updated_at=stale.updated_at + 1,
+    )
+    external.save(touch_updated_at=False)
+
+    refreshed = models.get_session(stale.session_id)
+
+    assert refreshed is SESSIONS[stale.session_id]
+    assert refreshed is not stale
+    assert refreshed.messages[-1]["content"].startswith("grown")
+    assert refreshed._cache_resident_bytes == refreshed.path.stat().st_size
+    assert all(session.session_id not in SESSIONS for session in siblings)
+    assert sum(models._session_cache_resident_bytes(s) for s in SESSIONS.values()) <= 1024 * 1024
+
+
+def test_eviction_legacy_partial_self_heal_does_not_reacquire_cache_lock(
+    isolated_session_env,
+):
+    """Eviction can full-load and repair legacy partials without deadlocking LOCK."""
+    from api import models
+    from api.config import LOCK, SESSIONS
+
+    sid = "legacy-partial-eviction"
+    partial = {
+        "role": "assistant",
+        "content": "working",
+        "_partial": True,
+        "timestamp": 123.0,
+    }
+    # Pre-#5854 ordering: scenes precede message_count, so the cheap prefix has
+    # no authoritative count and eviction must full-load. Duplicate partials
+    # make that load invoke its self-healing save path.
+    legacy_payload = {
+        "session_id": sid,
+        "title": "Legacy partials",
+        "workspace": str(isolated_session_env.parent),
+        "model": "test",
+        "created_at": 100.0,
+        "updated_at": 200.0,
+        "anchor_activity_scenes": {},
+        "message_count": 3,
+        "messages": [
+            {"role": "user", "content": "run it"},
+            partial,
+            dict(partial),
+        ],
+        "tool_calls": [],
+    }
+    path = isolated_session_env / f"{sid}.json"
+    path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+    cached = models.Session(
+        session_id=sid,
+        title="Legacy partials",
+        messages=[legacy_payload["messages"][0], partial],
+        created_at=100.0,
+        updated_at=200.0,
+    )
+    cached._cache_resident_bytes = path.stat().st_size
+    sibling = _make_persisted_session(419)
+    SESSIONS[sid] = cached
+    SESSIONS[sibling.session_id] = sibling
+
+    failures = []
+
+    def enforce():
+        try:
+            with LOCK:
+                models._evict_sessions_over_cap(cap=1, max_bytes=1 << 30)
+        except BaseException as exc:  # surface cleanup errors after breaking a RED deadlock
+            failures.append(exc)
+
+    worker = threading.Thread(target=enforce, daemon=True)
+    worker.start()
+    worker.join(timeout=1.0)
+    deadlocked = worker.is_alive()
+    if deadlocked:
+        # A plain threading.Lock has no ownership, so release the outer hold to
+        # let the daemon unwind instead of leaking a stuck thread into pytest.
+        LOCK.release()
+        worker.join(timeout=1.0)
+
+    assert deadlocked is False, "legacy self-heal recursively acquired the cache LOCK"
+    assert failures == []
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert sum(1 for message in persisted["messages"] if message.get("_partial")) == 1
+
+
+def test_byte_eviction_preserves_active_session_and_reclaims_clean_entries(isolated_session_env):
+    """Byte pressure keeps active and MRU state while reclaiming older clean data."""
+    from api.config import LOCK, SESSIONS
+    from api.models import _evict_sessions_over_cap
+
+    clean = _make_persisted_session(
+        100,
+        messages=[{"role": "assistant", "content": "b" * (700 * 1024)}],
+    )
+    active = _make_persisted_session(
+        101,
+        messages=[{"role": "assistant", "content": "a" * (700 * 1024)}],
+    )
+    active.active_stream_id = "live-stream"
+    current = _make_persisted_session(
+        102,
+        messages=[{"role": "assistant", "content": "c" * (100 * 1024)}],
+    )
+    _insert(clean)
+    _insert(active)
+    _insert(current)
+
+    with LOCK:
+        evicted = _evict_sessions_over_cap(cap=10, max_bytes=1024 * 1024)
+
+    assert evicted == 1
+    assert clean.session_id not in SESSIONS
+    assert active.session_id in SESSIONS
+    assert current.session_id in SESSIONS
+
+
+def test_byte_eviction_keeps_mru_warm_behind_pinned_active_session(isolated_session_env):
+    """Pinned work must not force the visible MRU into a cold-load loop."""
+    from api.config import LOCK, SESSIONS
+    from api.models import _evict_sessions_over_cap
+
+    active = _make_persisted_session(
+        190,
+        messages=[{"role": "assistant", "content": "a" * (700 * 1024)}],
+    )
+    active.active_stream_id = "live-stream"
+    current = _make_persisted_session(
+        191,
+        messages=[{"role": "assistant", "content": "c" * (700 * 1024)}],
+    )
+    _insert(active)
+    _insert(current)  # MRU / currently viewed transcript
+
+    with LOCK:
+        evicted = _evict_sessions_over_cap(cap=10, max_bytes=1024 * 1024)
+
+    assert evicted == 0
+    assert list(SESSIONS) == [active.session_id, current.session_id]
+
+
+def test_byte_eviction_keeps_one_oversized_mru_to_avoid_reload_loop(isolated_session_env):
+    """One transcript may exceed the budget; retaining it avoids cold-loading every access."""
+    from api.config import LOCK, SESSIONS
+    from api.models import _evict_sessions_over_cap
+
+    oversized = _make_persisted_session(
+        200,
+        messages=[{"role": "assistant", "content": "z" * (2 * 1024 * 1024)}],
+    )
+    _insert(oversized)
+
+    with LOCK:
+        evicted = _evict_sessions_over_cap(cap=10, max_bytes=1024 * 1024)
+
+    assert evicted == 0
+    assert list(SESSIONS) == [oversized.session_id]
+    assert oversized._cache_resident_bytes > 1024 * 1024
+
+
+def test_resident_weight_tracks_save_full_load_and_metadata_stub(isolated_session_env):
+    """Weights follow retained data without deep-walking the Python object graph."""
+    from api.models import Session
+
+    session = _make_persisted_session(
+        300,
+        messages=[{"role": "assistant", "content": "w" * (256 * 1024)}],
+    )
+    sidecar_bytes = session.path.stat().st_size
+    assert session._cache_resident_bytes == sidecar_bytes
+
+    loaded = Session.load(session.session_id)
+    assert loaded is not None
+    assert loaded._cache_resident_bytes == sidecar_bytes
+    assert loaded._cache_persisted_fingerprint is not None
+
+    metadata_stub = Session.load_metadata_only(session.session_id)
+    assert metadata_stub is not None
+    assert 0 < metadata_stub._cache_resident_bytes < sidecar_bytes
+
+
+def test_full_load_weights_the_exact_bytes_read_across_atomic_replace(
+    isolated_session_env, monkeypatch,
+):
+    """A pre-read stat from the old inode cannot weight replacement JSON."""
+    from api import models
+    from api.models import Session
+
+    original = _make_persisted_session(
+        301,
+        messages=[{"role": "assistant", "content": "old"}],
+    )
+    target = original.path
+    old_sig = models._sidecar_stat_signature(target)
+    replacement_data = json.loads(target.read_text(encoding="utf-8"))
+    replacement_data["messages"] = [
+        {"role": "assistant", "content": "new" + "x" * (700 * 1024)}
+    ]
+    replacement_data["message_count"] = 1
+    replacement = target.with_suffix(".replacement")
+    replacement.write_text(
+        json.dumps(replacement_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    replacement_size = replacement.stat().st_size
+    real_signature = models._sidecar_stat_signature
+    swapped = False
+
+    def replace_after_signature(path):
+        nonlocal swapped
+        if Path(path) == target and not swapped:
+            swapped = True
+            os.replace(replacement, target)
+            return old_sig
+        return real_signature(path)
+
+    monkeypatch.setattr(models, "_sidecar_stat_signature", replace_after_signature)
+
+    loaded = Session.load(original.session_id)
+
+    assert swapped is True
+    assert loaded.messages[0]["content"].startswith("new")
+    assert loaded._cache_resident_bytes == replacement_size
+    assert replacement_size > old_sig[2]
+
+
+def test_save_measurement_failure_marks_weight_unknown_and_enforces_conservatively(
+    isolated_session_env, monkeypatch,
+):
+    """A successful save never keeps a stale pre-growth weight after size failure."""
+    from api import config as _cfg
+    from api import models
+    from api.config import SESSIONS
+
+    monkeypatch.setattr(
+        _cfg,
+        "get_config",
+        lambda: {
+            "webui": {
+                "sessions_cache_max": 10,
+                "sessions_cache_max_mb": 1,
+            }
+        },
+    )
+    sessions = [
+        _make_persisted_session(
+            310 + i,
+            messages=[{"role": "assistant", "content": "s" * (250 * 1024)}],
+        )
+        for i in range(3)
+    ]
+    for session in sessions:
+        _insert(session)
+
+    current = sessions[-1]
+    replaced = False
+    real_replace = models._safe_replace
+    real_path_stat = Path.stat
+
+    def marked_replace(src, dst):
+        nonlocal replaced
+        real_replace(src, dst)
+        if Path(dst) == current.path:
+            replaced = True
+
+    def fail_target_stat(path, *args, **kwargs):
+        if replaced and Path(path) == current.path:
+            raise OSError("post-replace stat unavailable")
+        return real_path_stat(path, *args, **kwargs)
+
+    def fail_open_file_stat(_fd):
+        raise OSError("open-file size unavailable")
+
+    monkeypatch.setattr(models, "_safe_replace", marked_replace)
+    monkeypatch.setattr(Path, "stat", fail_target_stat)
+    monkeypatch.setattr(models.os, "fstat", fail_open_file_stat)
+    current.messages = [
+        {"role": "assistant", "content": "grown" + "g" * (700 * 1024)}
+    ]
+
+    current.save()
+
+    assert current._cache_resident_bytes is None
+    assert sessions[0].session_id not in SESSIONS
+    assert current.session_id in SESSIONS
 
 
 # ────────────────────── invariant 2: never evict active ──────────────────────
@@ -489,6 +1175,74 @@ def test_scan_accessor_reuses_resident_sessions_without_promoting(isolated_sessi
 
     assert scanned is SESSIONS[first.session_id], "scan should reuse the resident object"
     assert list(SESSIONS.keys()) == order_before, "scan must not promote in the LRU"
+
+
+def test_scan_reconciliation_does_not_enforce_cache_bounds(
+    isolated_session_env, monkeypatch,
+):
+    """A scan self-heal may update disk/cache state but must not churn the LRU."""
+    from api import config as _cfg
+    from api import models
+    from api.config import SESSIONS
+
+    stale = _make_persisted_session(
+        940,
+        messages=[
+            {"role": "user", "content": "u" * (400 * 1024), "timestamp": 100.0}
+        ],
+    )
+    stale.active_stream_id = "dead-scan-stream"
+    stale.pending_user_message = "recover scan"
+    stale.pending_started_at = 102.0
+    stale.save(touch_updated_at=False)
+    siblings = [
+        _make_persisted_session(
+            941 + i,
+            messages=[
+                {"role": "assistant", "content": "s" * (400 * 1024), "timestamp": 100.0}
+            ],
+        )
+        for i in range(2)
+    ]
+    _insert(stale)
+    for sibling in siblings:
+        _insert(sibling)
+    order_before = list(SESSIONS)
+
+    recovered = list(stale.messages) + [
+        {
+            "role": "assistant",
+            "content": "recovered" + "a" * (700 * 1024),
+            "timestamp": 103.0,
+        }
+    ]
+    monkeypatch.setattr(models, "_active_stream_ids", lambda: set())
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda *_args, **_kwargs: {"message_count": 2, "last_message_at": 103.0},
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda *_args, **_kwargs: list(recovered),
+    )
+    monkeypatch.setattr(
+        _cfg,
+        "get_config",
+        lambda: {
+            "webui": {
+                "sessions_cache_max": 10,
+                "sessions_cache_max_mb": 1,
+            }
+        },
+    )
+
+    scanned = models.get_session_for_scan(stale.session_id)
+
+    assert scanned is stale
+    assert scanned.messages[-1]["content"].startswith("recovered")
+    assert list(SESSIONS) == order_before, "scan reconciliation must not evict or promote"
 
 
 def test_content_search_scan_recovers_newer_state_db_without_lru_churn(
