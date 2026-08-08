@@ -180,3 +180,135 @@ class TestGatewayProbeRobustness:
         # per-path budget would hand both the full timeout.
         assert len(seen) >= 2, 'expected both probe paths to run'
         assert seen[1] < seen[0] <= 0.5
+
+
+class TestSchedulingCoherence:
+    """Freshness + ownership are one atomic decision; rollback on start().
+
+    Required by the #6156 re-gate: fresh positive AND negative (None) cache
+    entries suppress the worker until expiry; a Thread.start() failure must
+    release ownership so a retry is possible; concurrent cold/expired callers
+    still launch exactly one probe and settle in a clean state.
+    """
+
+    def test_fresh_positive_and_negative_suppress_worker_until_expiry(self):
+        """Fresh entries (positive AND None) never start a worker; exactly one
+        worker starts once the entry is expired."""
+        import api.updates as upd
+
+        future = time.monotonic() + 3600
+        for value in ('v0.14.7', None):
+            with patch.object(upd, '_agent_version_cache',
+                              {'value': value, 'expires_at': future}), \
+                 patch.object(upd, '_agent_version_refresh_in_progress', False), \
+                 patch.object(upd, 'threading') as mock_threading:
+                upd._schedule_agent_version_refresh()
+            mock_threading.Thread.assert_not_called()
+
+        # After expiry the worker starts exactly once: the first call claims
+        # ownership and the second sees the refresh in flight.
+        past = time.monotonic() - 1
+        with patch.object(upd, '_agent_version_cache',
+                          {'value': None, 'expires_at': past}), \
+             patch.object(upd, '_agent_version_refresh_in_progress', False), \
+             patch.object(upd, 'threading') as mock_threading:
+            upd._schedule_agent_version_refresh()
+            upd._schedule_agent_version_refresh()
+        mock_threading.Thread.assert_called_once()
+
+    def test_thread_start_failure_clears_ownership_and_allows_retry(self):
+        """If Thread.start() raises, the claimed ownership is rolled back under
+        the lock so a later request can retry instead of being blocked."""
+        import api.updates as upd
+        import pytest
+
+        past = time.monotonic() - 1
+
+        with patch.object(upd, '_agent_version_cache',
+                          {'value': None, 'expires_at': past}), \
+             patch.object(upd, '_agent_version_refresh_in_progress', False), \
+             patch.object(upd, 'threading') as mock_threading:
+            mock_threading.Thread.return_value = MagicMock()
+            mock_threading.Thread.return_value.start.side_effect = [
+                RuntimeError('thread creation failed'),
+                None,
+            ]
+            with pytest.raises(RuntimeError):
+                upd._schedule_agent_version_refresh()
+            # start() failed -> ownership must be released...
+            assert upd._agent_version_refresh_in_progress is False
+            # ...so the retry is allowed and claims ownership again.
+            upd._schedule_agent_version_refresh()
+            assert mock_threading.Thread.call_count == 2
+            assert upd._agent_version_refresh_in_progress is True
+
+    def test_concurrent_cold_callers_single_probe_and_clean_settle(self):
+        """Concurrent cold/expired callers launch exactly ONE probe and settle
+        in a clean state: value + future expiry published, ownership released."""
+        import api.updates as upd
+        import threading as real_threading
+
+        cache = {'value': None, 'expires_at': 0.0}
+        probe_entered = real_threading.Event()
+        release_probe = real_threading.Event()
+        probe_calls = []
+
+        def slow_probe(**kwargs):
+            probe_calls.append(1)
+            probe_entered.set()
+            assert release_probe.wait(timeout=5), 'probe never released'
+            return 'v0.14.7'
+
+        with patch.object(upd, '_agent_version_cache', cache), \
+             patch.object(upd, '_agent_version_refresh_in_progress', False), \
+             patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          side_effect=slow_probe):
+            barrier = real_threading.Barrier(5)
+
+            def caller():
+                barrier.wait()
+                upd._schedule_agent_version_refresh()
+
+            threads = [real_threading.Thread(target=caller) for _ in range(5)]
+            for t in threads:
+                t.start()
+            assert probe_entered.wait(timeout=5), 'probe never started'
+            # While the probe is in flight every other caller must be a no-op.
+            release_probe.set()
+            for t in threads:
+                t.join(timeout=5)
+
+        assert len(probe_calls) == 1, 'concurrent callers stacked probes'
+        assert cache['value'] == 'v0.14.7'
+        assert cache['expires_at'] > time.monotonic()
+        assert upd._agent_version_refresh_in_progress is False
+
+    def test_failed_probe_publishes_none_with_backoff_expiry(self):
+        """A failed probe settles ``None`` with its own backoff expiry, and the
+        fresh negative result suppresses further workers until it lapses."""
+        import api.updates as upd
+        import threading as real_threading
+
+        cache = {'value': None, 'expires_at': 0.0}
+        release_probe = real_threading.Event()
+
+        def slow_none(**kwargs):
+            assert release_probe.wait(timeout=5), 'probe never released'
+            return None
+
+        with patch.object(upd, '_agent_version_cache', cache), \
+             patch.object(upd, '_agent_version_refresh_in_progress', False), \
+             patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          side_effect=slow_none):
+            upd._schedule_agent_version_refresh()
+            release_probe.set()
+            deadline = time.monotonic() + 5
+            while upd._agent_version_refresh_in_progress and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert cache['value'] is None
+            remaining = cache['expires_at'] - time.monotonic()
+            assert 0 < remaining <= upd._AGENT_VERSION_FAILURE_BACKOFF_SECONDS + 1
+            # While the None backoff is fresh, scheduling is a no-op.
+            with patch.object(upd, 'threading') as mock_threading:
+                upd._schedule_agent_version_refresh()
+            mock_threading.Thread.assert_not_called()

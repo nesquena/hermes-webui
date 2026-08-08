@@ -512,13 +512,19 @@ def _read_agent_source_version(agent_dir: Path) -> str | None:
 # value from this TTL cache and refresh it in a background daemon thread,
 # single-flight so concurrent requests never stack probes.
 _AGENT_VERSION_CACHE_TTL_SECONDS = 60.0
+# A failed probe publishes ``None`` with its own (shorter) backoff expiry, so
+# an outage does not turn every post-settlement request into another probe.
+_AGENT_VERSION_FAILURE_BACKOFF_SECONDS = 15.0
 _AGENT_VERSION_PROBE_DEADLINE_SECONDS = 1.5
 _AGENT_VERSION_MAX_BODY_BYTES = 64 * 1024
 
+# ONE lock guards BOTH the cache payload and the in-flight ownership, so cache
+# freshness and the single-flight claim are a single atomic scheduling decision:
+# no worker can start while a fresh positive OR negative result is still valid,
+# and two callers can never claim the refresh at the same time.
 _agent_version_cache = {'value': None, 'expires_at': 0.0}
-_agent_version_cache_lock = threading.Lock()
 _agent_version_refresh_in_progress = False
-_agent_version_refresh_lock = threading.Lock()
+_agent_version_lock = threading.Lock()
 
 
 def _gateway_health_base_url() -> str:
@@ -591,12 +597,16 @@ def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | No
 def get_cached_agent_version() -> str | None:
     """Return the fresh cached gateway agent version, or ``None`` when cold.
 
+    Freshness is judged ONLY by ``expires_at`` — a ``None`` value from a recent
+    failed probe still carries its own backoff expiry, so callers keep the
+    ``AGENT_VERSION`` fallback while the scheduler refrains from re-probing.
+
     Never performs network I/O — the caller serves an immediate value
     (``AGENT_VERSION`` fallback when this returns ``None``) and refreshes the
     cache outside the request thread via ``_schedule_agent_version_refresh``.
     """
-    with _agent_version_cache_lock:
-        if _agent_version_cache['value'] and time.monotonic() < _agent_version_cache['expires_at']:
+    with _agent_version_lock:
+        if time.monotonic() < _agent_version_cache['expires_at']:
             return _agent_version_cache['value']
     return None
 
@@ -604,30 +614,52 @@ def get_cached_agent_version() -> str | None:
 def _schedule_agent_version_refresh() -> None:
     """Single-flight, off-thread refresh of the cached agent version.
 
-    Safe to call on every settings request: if a refresh is already in flight
-    this returns immediately, so concurrent requests never stack probes.
+    Safe to call on every settings request: cache freshness and in-flight
+    ownership are ONE atomic scheduling decision under a shared lock, so we
+    never start a worker while a fresh positive OR negative result is still
+    valid, and concurrent requests never stack probes.
     """
     global _agent_version_refresh_in_progress
-    with _agent_version_refresh_lock:
+    claimed = False
+    with _agent_version_lock:
         if _agent_version_refresh_in_progress:
             return
+        if time.monotonic() < _agent_version_cache['expires_at']:
+            # Still fresh — a positive value or None-with-backoff. Either way
+            # the next probe must wait for the expiry.
+            return
         _agent_version_refresh_in_progress = True
+        claimed = True
 
     def _run() -> None:
-        try:
-            version = _detect_agent_version_from_gateway_health(
-                timeout=_AGENT_VERSION_PROBE_DEADLINE_SECONDS
-            )
-        except Exception:
-            version = None
-        with _agent_version_cache_lock:
-            _agent_version_cache['value'] = version
-            _agent_version_cache['expires_at'] = time.monotonic() + _AGENT_VERSION_CACHE_TTL_SECONDS
         global _agent_version_refresh_in_progress
-        with _agent_version_refresh_lock:
-            _agent_version_refresh_in_progress = False
+        try:
+            try:
+                version = _detect_agent_version_from_gateway_health(
+                    timeout=_AGENT_VERSION_PROBE_DEADLINE_SECONDS
+                )
+            except Exception:
+                version = None
+            ttl = (_AGENT_VERSION_CACHE_TTL_SECONDS if version
+                   else _AGENT_VERSION_FAILURE_BACKOFF_SECONDS)
+            with _agent_version_lock:
+                _agent_version_cache['value'] = version
+                _agent_version_cache['expires_at'] = time.monotonic() + ttl
+        finally:
+            # Settlement is finally-safe: ownership is released even if the
+            # probe or the cache write above raises unexpectedly.
+            with _agent_version_lock:
+                _agent_version_refresh_in_progress = False
 
-    threading.Thread(target=_run, name='agent-version-refresh', daemon=True).start()
+    try:
+        threading.Thread(target=_run, name='agent-version-refresh', daemon=True).start()
+    except Exception:
+        # start() failed — roll back the ownership WE claimed so the next
+        # request can retry instead of being blocked for the process lifetime.
+        if claimed:
+            with _agent_version_lock:
+                _agent_version_refresh_in_progress = False
+        raise
 
 
 def _detect_agent_version() -> str:
