@@ -814,6 +814,7 @@ function _isSessionLocallyStreaming(s) {
 function _isSessionEffectivelyStreaming(s) {
   return Boolean(s && (
     s.is_streaming ||
+    s.cron_running ||
     _hasPendingUserMessageSignal(s) ||
     _isSessionLocallyStreaming(s)
   ));
@@ -1214,8 +1215,12 @@ function _markPollingCompletionUnreadTransitions(sessions) {
     const lastMessageAt = Number(s.last_message_at || 0);
     const hasServerRunSignal=Boolean(s.is_streaming||_hasPendingUserMessageSignal(s));
     const canMarkCompletedStream=Boolean(hasServerRunSignal||previousSnapshot||observedStreaming);
-    const completedObservedStream = canMarkCompletedStream&&wasStreaming === true && !isStreaming;
-    const completedWithNewMessages = Boolean(
+    // #6728: cron liveness is server-side (only /api/crons/status exposes it);
+    // the sidebar must defer its completion/unread transition while the job is
+    // still running, or a mid-run message makes the row look completed.
+    const cronRunning = Boolean(s.cron_running);
+    const completedObservedStream = !cronRunning && canMarkCompletedStream && wasStreaming === true && !isStreaming;
+    const completedWithNewMessages = !cronRunning && Boolean(
       (previousSnapshot || observedStreaming)
       && !isStreaming
       && (
@@ -1223,7 +1228,7 @@ function _markPollingCompletionUnreadTransitions(sessions) {
         || lastMessageAt > Number((previousSnapshot || observedStreaming).last_message_at || 0)
       )
     );
-    const completedPersistedObservedStream = Boolean(observedStreaming && !isStreaming);
+    const completedPersistedObservedStream = !cronRunning && Boolean(observedStreaming && !isStreaming);
     if (completedObservedStream || completedPersistedObservedStream || completedWithNewMessages) {
       if (!_isSessionActivelyViewedForList(sid)) {
         // Tag cron session-list markers with source+profile so profile-switch
