@@ -1343,46 +1343,35 @@ const _DEFAULT_MESSAGE_MODE_KEY='hermes-default-message-mode';
 // * Why: the boot settings-fetch-failure path used to hardcode
 //   `window._autoScrollFollow=true`, silently clobbering an explicit OFF for
 //   the whole session (post-turn scroll yanks until the next refresh).
-// * Storage: one localStorage JSON map under `_AUTO_SCROLL_FOLLOW_KEY`,
-//   PROFILE-NAMESPACED — `{ "<profile>": 0|1 }`. Values are written ONLY when
-//   a settings response (or the boot settings path) actually resolves the
-//   setting for the CURRENT profile; the fallback path never writes.
-// * Profile key resolution: `S.activeProfile` (initialized to 'default' at
-//   ui.js load, set to the real profile asynchronously via
-//   /api/profile/active during boot). The mirror is therefore only read once
-//   the profile is known — the settings-fetch-failure path defers its read
-//   until after _resolveActiveProfileBootstrapState() resolves (the
-//   hermes_profile cookie is HttpOnly and cannot be read from JS; see the
-//   deferred re-apply in the boot IIFE).
-// * Read semantics: `_readPersistedAutoScrollFollow()` returns the mirror
-//   entry for the CURRENT profile if present, else `true` (the config.py
-//   default). The deferred boot-failure re-apply reads it once the profile
-//   is known; fresh users (no mirror) get ON.
-// * Upgrade: there is no legacy global key; the mirror is created on first
-//   settings resolve, so older sessions simply default to ON until the next
-//   settings round-trip writes their profile entry.
+// * Storage: ONE global localStorage value (`'1'`/`'0'`) under
+//   `_AUTO_SCROLL_FOLLOW_KEY` — NOT profile-keyed. The backend authority is
+//   global: `SETTINGS_FILE = STATE_DIR / "settings.json"` (api/config.py)
+//   and `/api/settings` calls `load_settings()` with no profile-specific
+//   file, so the mirror must match that single global contract. A
+//   profile-keyed map would leave a freshly-opened profile with no entry and
+//   wrongly fall back to ON despite the global OFF (maintainer review on
+//   #6856).
+// * Write semantics: written ONLY when a settings response (or the boot
+//   settings path) actually resolves the setting; the fallback path never
+//   writes.
+// * Read semantics: `_readPersistedAutoScrollFollow()` returns the stored
+//   value if present, else `true` (the config.py default). The boot-failure
+//   path reads it directly (no profile resolution needed — the mirror is
+//   global, so it can be read synchronously in the fallback). Fresh users
+//   (no mirror) get ON.
+// * Upgrade: there is no legacy key; the mirror is created on first settings
+//   resolve, so older sessions simply default to ON until the next settings
+//   round-trip writes it.
 const _AUTO_SCROLL_FOLLOW_KEY='hermes-auto-scroll-follow';
-function _autoScrollFollowProfileKey(){
-  return (typeof S!=='undefined'&&S&&S.activeProfile)||'default';
-}
 function _persistAutoScrollFollow(enabled){
-  try{
-    const raw=localStorage.getItem(_AUTO_SCROLL_FOLLOW_KEY);
-    let map={};
-    if(raw){ try{ map=JSON.parse(raw)||{}; }catch(_){ map={}; } }
-    map[_autoScrollFollowProfileKey()]=enabled?1:0;
-    localStorage.setItem(_AUTO_SCROLL_FOLLOW_KEY,JSON.stringify(map));
-  }catch(_){}
+  try{localStorage.setItem(_AUTO_SCROLL_FOLLOW_KEY,enabled?'1':'0');}catch(_){}
   return enabled;
 }
 function _readPersistedAutoScrollFollow(){
   try{
     const raw=localStorage.getItem(_AUTO_SCROLL_FOLLOW_KEY);
-    if(raw){
-      const map=JSON.parse(raw)||{};
-      const v=map[_autoScrollFollowProfileKey()];
-      if(v!==undefined&&v!==null) return v===1;
-    }
+    if(raw==='1') return true;
+    if(raw==='0') return false;
   }catch(_){}
   return true;  // default: follow ON (matches config.py default)
 }
@@ -3338,12 +3327,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showBusyPlaceholderHint=!!s.show_busy_placeholder_hint;
     window._newChatOnWorkspaceSwitch=!!s.new_chat_on_workspace_switch;  // #5473 opt-in
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
-    window._autoScrollFollow=s.auto_scroll_follow!==false;
-    // #6819: persist into the profile-namespaced mirror AFTER the active
-    // profile resolves (S.activeProfile is still 'default' here; writing now
-    // would store this profile's value under the wrong namespace — P1 round 3
-    // review on #6856). The deferred re-apply below writes it profile-correct.
-    window._autoScrollFollowDeferredPersist=window._autoScrollFollow;
+    // #6819: persist the resolved auto-follow value into the global mirror.
+    // The mirror is NOT profile-keyed (the backend setting is one global
+    // settings.json), so it can be written synchronously here — no deferred
+    // write needed.
+    window._autoScrollFollow=_persistAutoScrollFollow(s.auto_scroll_follow!==false);
     window._largeTextPasteAsAttachment=s.large_text_paste_as_attachment!==false;
     window._projectQuickCreate=!!s.project_quick_create_buttons;
     window._composerControlVisibility=_composerControlVisibilityFromSettings(s);
@@ -3487,15 +3475,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._sessionEndlessScrollEnabled=false;
     // #6819: honor the persisted auto-follow preference on settings-fetch
     // failure instead of hardcoding ON (which silently clobbered an explicit
-    // OFF and caused post-turn scroll yanks until the next refresh).
-    // NOTE: the mirror read is DEFERRED until after the active profile
-    // resolves (see the deferred re-apply below) — S.activeProfile is still
-    // 'default' here and the hermes_profile cookie is HttpOnly (unreadable
-    // from JS), so reading now would pick the wrong profile namespace.
-    // Set a safe default now; the profile-correct value lands right after
-    // _resolveActiveProfileBootstrapState() resolves.
-    window._autoScrollFollow=true;
-    window._autoScrollFollowDeferredReapply=true;
+    // OFF and caused post-turn scroll yanks until the next refresh). The
+    // mirror is global (matches the one global settings.json), so it is read
+    // synchronously here — no profile resolution or deferral needed.
+    window._autoScrollFollow=_readPersistedAutoScrollFollow();
     window._composerControlVisibility=_composerControlVisibilityFromSettings(null);
     window._composerControlOrder=[];
     _applyComposerControlOrder(window._composerControlOrder);
@@ -3617,23 +3600,6 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if (activeProfileState.status === 'recovery-redirect') return;
   S.activeProfile = activeProfileState.profile;
   S.activeProfileIsDefault = activeProfileState.isDefault;
-  // #6819: apply the profile-namespaced auto-follow mirror state once the
-  // active profile resolves (S.activeProfile is only known asynchronously via
-  // /api/profile/active; the hermes_profile cookie is HttpOnly so
-  // document.cookie cannot read it — P1 reviews on #6856).
-  //  - Success path: the settings fetch applied the authoritative value above
-  //    but deferred its mirror WRITE (wrong namespace before profile resolve);
-  //    persist it profile-correct now.
-  //  - Failure path: the fallback deferred its mirror READ; apply the
-  //    profile-correct value now.
-  if(window._autoScrollFollowDeferredPersist!==undefined){
-    _persistAutoScrollFollow(window._autoScrollFollowDeferredPersist);
-    window._autoScrollFollowDeferredPersist=undefined;
-  }
-  if(window._autoScrollFollowDeferredReapply){
-    window._autoScrollFollow=_readPersistedAutoScrollFollow();
-    window._autoScrollFollowDeferredReapply=false;
-  }
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');

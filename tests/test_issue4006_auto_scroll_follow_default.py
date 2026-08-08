@@ -45,19 +45,16 @@ def test_boot_hydration_defaults_true_when_setting_absent():
     omit the key — `!!s.auto_scroll_follow` would wrongly default it OFF for
     every existing user, contradicting the config.py default."""
     src = _read("static/boot.js")
-    # Settings path: default-true read (=== false), not the truthy-coerce form.
-    # The value is deferred for profile-namespaced persistence (#6819 — the
-    # mirror write must wait until S.activeProfile resolves).
-    assert "window._autoScrollFollow=s.auto_scroll_follow!==false" in src, (
-        "boot.js settings path must default _autoScrollFollow True when absent"
+    # Settings path: default-true read (=== false), not the truthy-coerce form,
+    # and the resolved value is persisted into the #6819 mirror (global —
+    # matches the one global settings.json, per maintainer review on #6856).
+    assert "window._autoScrollFollow=_persistAutoScrollFollow(s.auto_scroll_follow!==false)" in src, (
+        "boot.js settings path must default _autoScrollFollow True when absent "
+        "(and persist the resolved value into the #6819 mirror)"
     )
     assert "window._autoScrollFollow=!!s.auto_scroll_follow" not in src, (
         "boot.js must not use !!s.auto_scroll_follow — that defaults the True "
         "setting OFF for users with no saved value"
-    )
-    assert "window._autoScrollFollowDeferredPersist=window._autoScrollFollow;" in src, (
-        "boot.js settings path must defer the mirror write until the profile "
-        "resolves (#6819)"
     )
     # Fallback (no-settings) path must also default true for a fresh user
     # (no persisted mirror), while honoring a persisted OFF (#6819).
