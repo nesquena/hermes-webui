@@ -3775,6 +3775,10 @@ def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch, t
     # new_session() can evict a pre-existing LRU entry.
     with models.LOCK:
         pre_sessions = collections.OrderedDict(models.SESSIONS)
+    # Snapshot the gateway capability cache: the real legacy path can probe
+    # and mutate it, so it must be restored exactly (round-7 re-gate).
+    with config._GATEWAY_CAPS_LOCK:
+        pre_gateway_caps = dict(config._GATEWAY_CAPS_CACHE)
 
     def _wait_for_worker_finalization(stream_id):
         """Wait until the daemon worker removed its stream channel and its
@@ -3831,6 +3835,12 @@ def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch, t
             monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a, **k: True)
         else:
             monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a, **k: False)
+            # Deterministic legacy path: never probe the real /v1/capabilities
+            # endpoint or mutate the process-global capability cache.
+            monkeypatch.setattr(
+                gateway_chat, "gateway_approval_unavailable_reason",
+                lambda *a, **k: "approvals unavailable",
+            )
 
         s = models.new_session(workspace="/tmp", model="test-model")
         s.save()
@@ -3876,9 +3886,21 @@ def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch, t
             "chat/completions user message must be the resolved payload"
         )
         _assert_gateway_writeback_split(s_cc, raw_command, expansion)
+
+        # The acceptance test must leave the capability-cache prestate
+        # unchanged after both scenarios.
+        with config._GATEWAY_CAPS_LOCK:
+            post_gateway_caps = dict(config._GATEWAY_CAPS_CACHE)
+        assert post_gateway_caps == pre_gateway_caps, (
+            "gateway capability cache must be unchanged after both scenarios"
+        )
     finally:
         # Restore the exact ordered registry prestate (object identities and
         # order); files and the last_workspace write live under tmp_path.
         with models.LOCK:
             models.SESSIONS.clear()
             models.SESSIONS.update(pre_sessions)
+        # Restore the gateway capability cache prestate under its lock.
+        with config._GATEWAY_CAPS_LOCK:
+            config._GATEWAY_CAPS_CACHE.clear()
+            config._GATEWAY_CAPS_CACHE.update(pre_gateway_caps)
