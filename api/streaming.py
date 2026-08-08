@@ -1444,6 +1444,24 @@ def _clean_synthetic_control_messages_with_provenance(messages):
     return _drop_synthetic_control_messages(raw_messages), has_verification_nudge
 
 
+# #6481 producer/executor boundary sanitizer.
+#
+# The actual implementation lives in api.verification_sanitizer, a cycle-safe
+# module that does NOT import api.streaming at module level. It must live there
+# (not here) because api.streaming calls get_ai_agent_class() at module line
+# 631 — BEFORE this module is fully initialized — and api.agent_runtime's
+# require_ai_agent_class() needs to import the installer from a fully
+# initialized module on that cold-start path. Re-export the helpers here so the
+# model/persistence boundary call sites below (and any external callers) keep a
+# stable import surface.
+from api.verification_sanitizer import (  # noqa: F401
+    _AGENT_VERIFICATION_SANITIZER_INSTALLED,
+    _correlate_tool_call_name,
+    _install_agent_verification_evidence_sanitizer,
+    _strip_verification_evidence_from_tool_content,
+    _strip_verification_from_messages,
+)
+
 def _active_turn_authority(session, stream_id, msg_text):
     """Capture the stream-owned pending turn before settlement mutates it."""
     pending_text = getattr(session, 'pending_user_message', None)
@@ -4803,6 +4821,16 @@ def _sanitize_messages_for_api(
     causing 400s on every later text-only turn (#2297).
     """
     strip_native_images = cfg is not None and _resolve_image_input_mode(cfg) == "text"
+    # #6481: sanitize a deep copy of the FULL history before any per-message
+    # filtering. The legacy-aware stripper correlates nameless tool rows
+    # against their PRECEDING assistant tool call — a singleton list cannot
+    # see that correlation, so historical rows without ``name``/``tool_name``
+    # would bypass the strip and let fresh ``verification_evidence`` reach the
+    # model on replay. Sanitizing the full copied list once covers every row
+    # with the complete preceding context, and the deep copy keeps the caller's
+    # transcript untouched (the return value is already a fresh structure).
+    messages = copy.deepcopy(messages)
+    _strip_verification_from_messages(messages)
     # First pass: collect all tool_call_ids declared by assistant messages.
     # Handles both OpenAI ('id') and Anthropic ('call_id') field names.
     valid_tool_call_ids: set = set()
@@ -6172,6 +6200,14 @@ def _merge_display_messages_after_agent_result(
     # would otherwise slip into the merged transcript as a real delta. (#5334)
     previous_context = _drop_synthetic_control_messages(previous_context)
     result_messages = _drop_synthetic_control_messages(result_messages)
+    # Strip ``verification_evidence`` from terminal tool-role message content
+    # in ALL three inputs as a safety net. The primary strip happens in
+    # ``_sanitize_messages_for_api`` (before the model boundary); this is
+    # belt-and-suspenders at the persistence boundary for any fresh evidence
+    # from the just-returned agent result (#6481).
+    _strip_verification_from_messages(previous_display)
+    _strip_verification_from_messages(previous_context)
+    _strip_verification_from_messages(result_messages)
     if not result_messages:
         return previous_display
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))

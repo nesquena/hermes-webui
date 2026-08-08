@@ -9,9 +9,12 @@ mixed runtime and require a clean WebUI restart instead.
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 import sys
 import subprocess
 import threading
+
+logger = logging.getLogger(__name__)
 
 # Retain the discovered path as a diagnostic/test-visible compatibility value;
 # runtime identity is deliberately captured from the loaded module below.
@@ -145,6 +148,35 @@ def require_ai_agent_class():
     from run_agent import AIAgent  # noqa: PLC0415
 
     _capture_loaded_agent_revision()
+    # Close the #6481 producer/executor boundary: wrap the Agent's tool-result
+    # message builder so fresh terminal ``verification_evidence`` is stripped
+    # before the same-turn model request and before the incremental SessionDB
+    # flush. Installed once per process, at the chokepoint every Agent entry
+    # path (streaming, sync chat, gateway, heal) passes through.
+    #
+    # The installer lives in api.verification_sanitizer, a cycle-safe module
+    # that does NOT import api.streaming. That is what makes this work on a
+    # normal cold start: api/streaming.py calls get_ai_agent_class() at module
+    # line 631, i.e. while api.streaming is still partially initialized, so
+    # importing the installer from api.streaming here would fail and the
+    # wrapper would never install. Importing from the cycle-safe module keeps
+    # the wrapper active on the real startup path (#6481 re-gate).
+    try:
+        from api.verification_sanitizer import _install_agent_verification_evidence_sanitizer
+
+        installed = _install_agent_verification_evidence_sanitizer()
+    except Exception:
+        logger.warning(
+            "verification evidence sanitizer install failed on Agent entry; "
+            "phantom verification_evidence may reach the model boundary",
+            exc_info=True,
+        )
+        installed = False
+    if not installed:
+        logger.warning(
+            "verification evidence sanitizer not fully installed on Agent entry; "
+            "a later Agent entry will retry"
+        )
     return AIAgent
 
 
