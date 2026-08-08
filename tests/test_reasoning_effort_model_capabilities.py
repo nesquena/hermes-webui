@@ -676,6 +676,27 @@ def test_custom_provider_default_denies_max_ultra_for_recognized_models():
         ) == "xhigh"
 
 
+def test_gpt_5_6_first_party_fallback_is_exact_and_includes_azure_foundry(monkeypatch):
+    monkeypatch.setattr(cfg, "_models_dev_reasoning_efforts", lambda *_args: [])
+    for provider in ("openai-codex", "openai", "azure-foundry"):
+        for model in ("gpt-5.6", "gpt-5.6-sol"):
+            efforts = cfg.resolve_model_reasoning_efforts(model, provider_id=provider)
+            assert "max" in efforts and "ultra" in efforts
+        for lookalike in ("not-gpt-5.6", "gpt-5.60"):
+            efforts = cfg.resolve_model_reasoning_efforts(lookalike, provider_id=provider)
+            assert "max" not in efforts and "ultra" not in efforts
+
+
+def test_reasoning_context_fallback_accepts_legacy_string_model_config(monkeypatch):
+    monkeypatch.setitem(cfg.cfg, "model", "gpt-5.6-sol")
+    monkeypatch.setattr(
+        cfg, "resolve_model_provider", lambda *_args: (_ for _ in ()).throw(RuntimeError("probe"))
+    )
+    assert cfg._resolve_reasoning_context("gpt-5.6-sol", None, None) == (
+        "gpt-5.6-sol", "", None
+    )
+
+
 def test_custom_provider_explicit_allowlist_authorizes_max_ultra(monkeypatch):
     # Finding 1 (exception): an explicit provider reasoning_efforts allowlist
     # is the operator's authorization — max/ultra survive when listed.
