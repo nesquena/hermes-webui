@@ -35,7 +35,7 @@ def test_routes_attach_todo_state_from_webui_and_cli_session_paths():
 
     assert len(calls) >= 2
     arg_names = []
-    for call in calls[:2]:
+    for call in calls:
         assert len(call.args) == 2
         assert not call.keywords
         assert isinstance(call.args[0], ast.Name)

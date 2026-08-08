@@ -292,6 +292,22 @@ def emit_todo_state(
         return False
 
 
+def attach_todo_snapshot(payload: dict, snapshot: Any) -> bool:
+    """Attach one persisted todo snapshot after validating its public shape."""
+    try:
+        normalized = parse_todo_tool_result(snapshot)
+        if normalized is None:
+            return False
+        ts_val = _message_ts_float(snapshot.get("ts"))
+        if ts_val > 0:
+            normalized["ts"] = ts_val
+        payload[PAYLOAD_KEY] = normalized
+        return True
+    except Exception:
+        logger.debug("persisted todo_state attach failed", exc_info=True)
+        return False
+
+
 def attach_todo_state(
     payload: dict,
     messages: Optional[Iterable[dict]],
