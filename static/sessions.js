@@ -1038,6 +1038,7 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
       role:'assistant',
       content:lastAssistantText,
       reasoning:lastReasoningText||undefined,
+      _ts:snapshot.last_message_ts??snapshot.lastMessageTs??undefined,
       _live:true,
       _journal_snapshot:true,
     });
@@ -2390,7 +2391,7 @@ const _HANDOFF_THRESHOLD = 10;  // conversation rounds
 const _HANDOFF_STORAGE_PREFIX = 'handoff:';
 const _HANDOFF_SUFFIX_DISMISSED_AT = 'dismissed_at';
 const _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT = 'summary_handled_at';
-const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback']);
+const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback', 'matrix']);
 const _MESSAGING_SOURCE_LABELS = {
   weixin: 'WeChat',
   telegram: 'Telegram',
@@ -2399,6 +2400,7 @@ const _MESSAGING_SOURCE_LABELS = {
   email: 'Email',
   wecom: 'WeCom',
   wecom_callback: 'WeCom Callback',
+  matrix: 'Matrix',
 };
 
 function _isMessagingSession(session) {
@@ -3798,6 +3800,7 @@ async function _loadOlderMessages() {
           ? virtualAddedHeight
           : Math.max(0, newScrollH - prevScrollH);
         _programmaticScroll = true;
+        _programmaticScrollSetAt = performance.now();
         container.scrollTop = oldTop + addedHeight;
         requestAnimationFrame(()=>{ _programmaticScroll = false; });
       }

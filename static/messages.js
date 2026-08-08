@@ -5940,7 +5940,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             window._compressionUi.sessionId===activeSid&&
             d.session&&d.session.session_id
           ){
-            window._compressionUi={...window._compressionUi, sessionId:d.session.session_id};
+            if(window._compressionUi.phase==='running'){
+              // Turn completed (done event) but the compression UI is still in
+              // 'running' phase - the 'compressed' SSE event was lost or delayed.
+              // Clear the stale running state instead of leaving it active,
+              // which would surface a phantom "Compressing context" barrier.
+              // This covers both A->B (session rotation) and A->A (no rotation)
+              // since in both cases a running phase at done-time means the
+              // compressed event never arrived.
+              if(typeof clearCompressionUi==='function') clearCompressionUi();
+              else window._compressionUi=null;
+            } else {
+              window._compressionUi={...window._compressionUi, sessionId:d.session.session_id};
+            }
           }
           // Find the last assistant message once for both reasoning persistence and timestamp
           lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
@@ -6082,8 +6094,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof _armKeepSettledWorklogOpen==='function') _armKeepSettledWorklogOpen(_settledStreamId);
           syncTopbar();renderMessages({preserveScroll:true});
           if(typeof _disarmKeepSettledWorklogOpen==='function') _disarmKeepSettledWorklogOpen();
-          if(typeof _renderMessagesWithScrollSnapshot==='function') _renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot});
-          else renderMessages({preserveScroll:true});
+          const _collapsedInPlace=typeof _collapseJustSettledWorklogInPlace==='function'
+            && _collapseJustSettledWorklogInPlace(_settledStreamId);
+          if(!_collapsedInPlace&&typeof _renderMessagesWithScrollSnapshot==='function'){
+            _renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot});
+          }else if(!_collapsedInPlace){
+            renderMessages({preserveScroll:true});
+          }else if(_doneLiveScrollSnapshot&&typeof _restoreMessageScrollSnapshotSameFrame==='function'){
+            _restoreMessageScrollSnapshotSameFrame(_doneLiveScrollSnapshot);
+          }
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
@@ -8696,7 +8715,7 @@ function playAttentionSound(key){
 function _notificationOptions(body,options={}){
   const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);
   const url=sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href;
-  return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:false,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
+  return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
 }
 function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();
