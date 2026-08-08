@@ -271,6 +271,35 @@ overrides and returns schema defaults. Extension-owned storage uses a separate
 browser-local namespace, and clearing storage removes that namespace without
 changing settings.
 
+### Cooperative extension identity
+
+An injected extension can claim a stable browser-page identity together with its
+existing settings and storage accessors:
+
+```js
+const ext = window.hermesExt.register("desktop-companion");
+if (ext) {
+  ext.settings.set("show_badge", false);
+  ext.storage.set("lastPanel", "settings");
+}
+```
+
+`register(id)` trims the ID and succeeds only for an ID in the effective-enabled,
+Core-sanitized manifest inventory that was present at the initial page boot. It
+returns `null` for empty, malformed, unknown, or untrusted IDs without creating
+settings or storage state. Re-registering the same ID in one page returns the
+same handle object; different IDs receive different handles. The handle exposes
+only the canonical `id`, `settings`, and `storage` fields, backed by the same
+factories used by the legacy accessors.
+
+Manifest enable/disable changes still take effect after a WebUI reload. A handle
+already created in the current page may remain cached across a status refresh;
+this is expected and does not implement runtime unload. This identity is a
+cooperative attribution convenience for extensions sharing the page—not a
+sandbox, isolation mechanism, capability or permission system, or security
+boundary. Extensions still execute with the full WebUI session authority
+described above.
+
 ## URL rules
 
 Injected asset URLs are deliberately restricted:

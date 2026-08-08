@@ -6,6 +6,7 @@
   const FIELD_TYPES=new Set(['boolean','string','number','integer','enum']);
   const schemas=new Map();
   const trustedExtensions=new Map();
+  const registrations=new Map();
   let trustedSeeded=false;
 
   function extensionId(value){
@@ -228,9 +229,7 @@
     return !!(meta&&meta.storage_owned&&Array.isArray(meta.settings_schema)&&meta.settings_schema.length);
   }
 
-  function settingsForExtension(id){
-    const clean=extensionId(id);
-    const meta=schemas.get(clean)||{id:clean,name:clean,storage_owned:false,settings_schema:[]};
+  function settingsAccessor(clean,meta,isTrusted){
     const schema=supportsSettings(meta)?meta.settings_schema:[];
     const key=settingsKey(clean);
     function current(){
@@ -248,7 +247,7 @@
     }
     return {
       extensionId:clean,
-      trusted:schemas.has(clean),
+      trusted:isTrusted,
       storageOwned:!!meta.storage_owned,
       supported:supportsSettings(meta),
       schema,
@@ -277,9 +276,13 @@
     };
   }
 
-  function storageForExtension(id){
+  function settingsForExtension(id){
     const clean=extensionId(id);
     const meta=schemas.get(clean)||{id:clean,name:clean,storage_owned:false,settings_schema:[]};
+    return settingsAccessor(clean,meta,schemas.has(clean));
+  }
+
+  function storageAccessor(clean,meta){
     const allowed=!!meta.storage_owned;
     const key=storageKey(clean);
     return {
@@ -309,6 +312,29 @@
     };
   }
 
+  function storageForExtension(id){
+    const clean=extensionId(id);
+    const meta=schemas.get(clean)||{id:clean,name:clean,storage_owned:false,settings_schema:[]};
+    return storageAccessor(clean,meta);
+  }
+
+  function registerExtension(id){
+    if(typeof id!=='string') return null;
+    const clean=extensionId(id);
+    if(!clean) return null;
+    const existing=registrations.get(clean);
+    if(existing) return existing;
+    const trusted=trustedExtensions.get(clean);
+    if(!trusted) return null;
+    const handle=Object.freeze({
+      id:clean,
+      settings:settingsAccessor(clean,trusted,true),
+      storage:storageAccessor(clean,trusted),
+    });
+    registrations.set(clean,handle);
+    return handle;
+  }
+
   const api={
     normalizeSchemas,
     primeFromStatus,
@@ -325,5 +351,6 @@
   window.hermesExt.storage=window.hermesExt.storage||{};
   window.hermesExt.settings.forExtension=settingsForExtension;
   window.hermesExt.storage.forExtension=storageForExtension;
+  window.hermesExt.register=registerExtension;
   primeFromStatus(window.__HERMES_EXTENSION_CONFIG__||{});
 })();
