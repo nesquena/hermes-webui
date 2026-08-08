@@ -8542,7 +8542,14 @@ async function _autosaveAppearanceSettings(payload){
     }
     window._sessionEndlessScrollEnabled=!!(saved&&saved.session_endless_scroll);
     window._autoScrollFollow=!saved||saved.auto_scroll_follow!==false;
-    if(typeof _persistAutoScrollFollow==='function') _persistAutoScrollFollow(window._autoScrollFollow);
+    // #6819: persist ONLY from an explicit boolean in the server response.
+    // A failed autosave (`saved` falsy) or a partial response without the key
+    // would otherwise write the synthesized default (ON) into the mirror,
+    // corrupting the value a later boot-failure fallback would restore
+    // (Greptile P1 review on #6856).
+    if(saved&&typeof saved.auto_scroll_follow==='boolean'&&typeof _persistAutoScrollFollow==='function'){
+      _persistAutoScrollFollow(saved.auto_scroll_follow);
+    }
     window._largeTextPasteAsAttachment=!saved||saved.large_text_paste_as_attachment!==false;
     window._projectQuickCreate=!!(saved&&saved.project_quick_create_buttons);
     if(saved&&Object.prototype.hasOwnProperty.call(saved,'structured_code_default_view')){

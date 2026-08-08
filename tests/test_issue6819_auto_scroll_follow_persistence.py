@@ -82,8 +82,15 @@ def test_partial_body_does_not_override_follow():
 
 def test_settings_save_persists_mirror():
     src = _read("static/panels.js")
-    assert "_persistAutoScrollFollow(window._autoScrollFollow)" in src, (
-        "settings-save apply path must persist the resolved value"
+    # Greptile P1 (#6856): the autosave path must persist ONLY from an
+    # explicit boolean in the server response — a failed save (`saved` falsy)
+    # or a response without the key must not write the synthesized default
+    # (ON) into the mirror.
+    assert "_persistAutoScrollFollow(saved.auto_scroll_follow)" in src, (
+        "autosave must persist from the explicit server boolean"
+    )
+    assert "typeof saved.auto_scroll_follow==='boolean'" in src, (
+        "autosave must require an explicit boolean before persisting (P1)"
     )
 
 
@@ -131,7 +138,24 @@ if (bootFailureFallbackValue !== false) throw new Error('global mirror must surv
 // 4. ON round-trip
 if (_persistAutoScrollFollow(true) !== true) throw new Error('persist ON failed');
 if (_readPersistedAutoScrollFollow() !== true) throw new Error('persisted ON must be honored');
-// 5. storage is a single global scalar, not a profile map
+// 5. GREPTILE P1 (#6856): a FAILED autosave (`saved` falsy) must NOT write
+//    the synthesized default into the mirror — replicate the autosave guard:
+//    only an explicit boolean from the server response persists.
+//    (a) mirror holds OFF (user's real preference)
+if (_persistAutoScrollFollow(false) !== false) throw new Error('setup OFF failed');
+//    (b) failed autosave: saved=null -> guard rejects -> mirror stays OFF
+const savedFailed = null;
+if (savedFailed && typeof savedFailed.auto_scroll_follow === 'boolean' && typeof _persistAutoScrollFollow === 'function') {
+  _persistAutoScrollFollow(savedFailed.auto_scroll_follow);
+}
+if (_readPersistedAutoScrollFollow() !== false) throw new Error('failed autosave must NOT corrupt the mirror (Greptile P1)');
+//    (c) successful autosave with explicit boolean -> mirror updates
+const savedOk = { auto_scroll_follow: true };
+if (savedOk && typeof savedOk.auto_scroll_follow === 'boolean' && typeof _persistAutoScrollFollow === 'function') {
+  _persistAutoScrollFollow(savedOk.auto_scroll_follow);
+}
+if (_readPersistedAutoScrollFollow() !== true) throw new Error('successful autosave must persist the explicit boolean');
+// 6. storage is a single global scalar, not a profile map
 if (store['hermes-auto-scroll-follow'] !== '1') throw new Error('storage must be a single scalar value: '+store['hermes-auto-scroll-follow']);
 console.log('MIRROR-HELPERS-OK');
 """
