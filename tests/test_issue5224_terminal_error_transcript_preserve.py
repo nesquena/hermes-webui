@@ -273,6 +273,46 @@ function buildRuntime() {
     return;
   }
 
+  if (scenario.action === 'restore_rotation_concurrent') {
+    // #6689 re-gate (finding #2, STALE-OLD reproduction): TWO recovery
+    // requests race. The archived-parent poll (A) is in flight when the
+    // continuation session id rotates, and a SECOND recovery request (B)
+    // for the continuation is in flight concurrently — the exact
+    // interleaving the maintainer's Codex reproduction ended with
+    // (STALE-OLD: the concurrent continuation request returned 'restored'
+    // but got suppressed by _streamFinalized, leaving the wrong archived
+    // session settled). A's stale archived-parent payload must be discarded
+    // by the post-await re-read, and the continuation payload must be the
+    // ONLY one to settle — the archived parent must never set
+    // _streamFinalized nor mutate S.session / S.messages.
+    let apiCalls = 0;
+    globalThis.api = async () => {
+      apiCalls += 1;
+      if (apiCalls === 1) {
+        // Rotation lands while A's archived-parent poll is in flight (the
+        // `compressed` SSE event lands mid-roundtrip).
+        _streamCompressionContinuationSid = 'session-cont-1';
+        return scenario.parentPayload || { session: null };
+      }
+      return scenario.contPayload || { session: null };
+    };
+    const aPromise = _restoreSettledSession({}, { status: true });
+    const bPromise = _restoreSettledSession({}, { status: true });
+    const [aStatus, bStatus] = await Promise.all([aPromise, bPromise]);
+    const messages = Array.isArray(S.messages) ? S.messages : [];
+    console.log(JSON.stringify({
+      action: scenario.action,
+      aStatus,
+      bStatus,
+      apiCalls,
+      session: S.session ? { session_id: S.session.session_id } : null,
+      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      streamFinalized: !!_streamFinalized,
+      calls,
+    }));
+    return;
+  }
+
   throw new Error(`unknown action: ${scenario.action}`);
 })().catch((err) => {
   console.error(err && err.stack ? err.stack : String(err));
@@ -637,4 +677,81 @@ def test_rotation_during_await_settles_only_continuation_payload(driver_path):
     )
     # A legit settle finalizes the stream; the stale payload must not have been
     # the one to do it (it never reached the mutation block).
+    assert outcome["streamFinalized"] is True
+
+
+def test_concurrent_continuation_request_never_settles_archived_parent(driver_path):
+    """#6689 re-gate (finding #2, STALE-OLD reproduction): the archived-parent
+    /api/session poll is in flight when the continuation session id rotates
+    AND a second recovery request for the continuation is already in flight —
+    the exact interleaving the maintainer's Codex reproduction ended with.
+    The stale archived-parent payload must be discarded by the post-await
+    re-read; ONLY the continuation payload may settle (never the archived
+    parent, which must not set _streamFinalized or mutate S.session /
+    S.messages)."""
+    outcome = _run_scenario(driver_path, {
+        "action": "restore_rotation_concurrent",
+        "state": {
+            "session": {"session_id": "session-2761", "message_count": 5},
+            "messages": [
+                {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                {"role": "assistant", "content": "Live pre-compression fragment", "_ts": "a1"},
+            ],
+            "activeStreamId": "stream-2761",
+        },
+        "parentPayload": {
+            "session": {
+                "session_id": "session-2761",
+                "active_stream_id": None,
+                "pending_user_message": None,
+                "messages": [
+                    {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                    {"role": "assistant", "content": "ARCHIVED parent answer (must be discarded)", "_ts": "aParent"},
+                ],
+            },
+        },
+        "contPayload": {
+            "session": {
+                "session_id": "session-cont-1",
+                "active_stream_id": None,
+                "pending_user_message": None,
+                "messages": [
+                    {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                    {"role": "assistant", "content": "CONTINUATION final answer", "_ts": "aCont"},
+                ],
+            },
+        },
+        "activeSid": "session-2761",
+        "streamId": "stream-2761",
+        "isActiveSession": True,
+        "isSessionCurrentPane": True,
+        "isSessionActivelyViewed": False,
+    })
+
+    # The archived parent never settles: S.session is the continuation and the
+    # archived answer never lands in the transcript.
+    assert outcome["session"] == {"session_id": "session-cont-1"}, (
+        f"archived parent settled instead of continuation: {outcome['session']}"
+    )
+    contents = [item["content"] for item in outcome["messages"]]
+    assert "CONTINUATION final answer" in contents, (
+        f"continuation payload did not settle: {contents}"
+    )
+    assert "ARCHIVED parent answer" not in contents, (
+        f"stale archived-parent payload settled: {contents}"
+    )
+    # Both concurrent requests resolve 'restored': one settles the
+    # continuation, the other is suppressed by _streamFinalized — never the
+    # archived parent.
+    assert outcome["aStatus"] == "restored", f"parent-side recovery: {outcome['aStatus']}"
+    assert outcome["bStatus"] == "restored", f"continuation-side recovery: {outcome['bStatus']}"
+    # Exactly three polls: (1) A's archived-parent poll — discarded by the
+    # post-await re-read; (2) B's continuation poll — settles; (3) A's retry
+    # against the current continuation id — suppressed by _streamFinalized.
+    # The archived parent is polled exactly once and never settles.
+    assert outcome["apiCalls"] == 3, (
+        f"expected archived-parent poll + continuation poll + retry (3 calls), "
+        f"got {outcome['apiCalls']}"
+    )
+    # The stream is finalized by the continuation settle (never the archive).
     assert outcome["streamFinalized"] is True
