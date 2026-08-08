@@ -949,6 +949,103 @@ let _previewSaveRoute = '/api/file/save';  // current save adapter for the open 
 let _previewOfficeFormat = '';  // current claimed Office format, if any
 let _previewPreviewKind = '';  // preview family returned by the backend
 
+// ── Preview fullscreen toggle ──────────────────────────────────────────────
+let _previewFsResizeHandler = null;
+function _updatePreviewFsHeight(){
+  const panel = document.querySelector('.rightpanel.preview-fullscreen');
+  if(panel){
+    panel.style.height = window.innerHeight + 'px';
+    panel.style.maxHeight = window.innerHeight + 'px';
+  }
+}
+const _PREVIEW_FS_EXIT_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>';
+const _PREVIEW_FS_ENTER_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>';
+function _setPreviewFullscreenButtonState(active){
+  const btn = document.getElementById('btnPreviewFullscreen');
+  if(!btn) return;
+  btn.title = active ? 'Exit fullscreen' : 'Fullscreen';
+  btn.setAttribute('aria-label', active ? 'Exit fullscreen' : 'Fullscreen');
+  btn.innerHTML = active ? _PREVIEW_FS_EXIT_ICON : _PREVIEW_FS_ENTER_ICON;
+}
+/**
+ * Single entry/exit point for preview fullscreen. Every lifecycle path —
+ * the toolbar button, the document Escape handler, and clearPreview() —
+ * must go through here so listeners, inline sizing, classes, and button
+ * presentation can never drift out of sync.
+ */
+function setPreviewFullscreen(active){
+  const panel = document.querySelector('.rightpanel');
+  if(!panel) return;
+  const isFullscreen = !!active;
+  panel.classList.toggle('preview-fullscreen', isFullscreen);
+  document.documentElement.classList.toggle('preview-fullscreen-active', isFullscreen);
+  _setPreviewFullscreenButtonState(isFullscreen);
+  if(isFullscreen){
+    // On mobile, 100vh can include browser chrome. Set explicit height via JS
+    // for reliable full-viewport coverage; falls back to 100dvh in CSS.
+    panel.style.height = window.innerHeight + 'px';
+    panel.style.maxHeight = window.innerHeight + 'px';
+    // Update height on orientation change / chrome hide
+    if(!_previewFsResizeHandler){
+      _previewFsResizeHandler = _updatePreviewFsHeight;
+      window.addEventListener('resize', _previewFsResizeHandler);
+      window.addEventListener('orientationchange', _previewFsResizeHandler);
+    }
+  } else {
+    panel.style.height = '';
+    panel.style.maxHeight = '';
+    if(_previewFsResizeHandler){
+      window.removeEventListener('resize', _previewFsResizeHandler);
+      window.removeEventListener('orientationchange', _previewFsResizeHandler);
+      _previewFsResizeHandler = null;
+    }
+  }
+}
+function togglePreviewFullscreen(){
+  const panel = document.querySelector('.rightpanel');
+  if(!panel) return;
+  setPreviewFullscreen(!panel.classList.contains('preview-fullscreen'));
+}
+
+// ── Preview font-size zoom ──────────────────────────────────────────────────
+function _getPreviewFontSize(){
+  try{ return parseInt(localStorage.getItem('hermes-preview-font-size') || '12', 10); }catch(_){ return 12; }
+}
+function _setPreviewFontSize(px){
+  px = Math.max(8, Math.min(36, px));
+  try{ localStorage.setItem('hermes-preview-font-size', String(px)); }catch(_){}
+  document.documentElement.style.setProperty('--preview-font-size', px + 'px');
+  const label = document.getElementById('previewFontSizeLabel');
+  if(label) label.textContent = String(px);
+}
+function _applyPreviewFontSizeToEditArea(){
+  const ta = document.getElementById('previewEditArea');
+  if(ta) ta.style.fontSize = _getPreviewFontSize() + 'px';
+}
+function adjustPreviewFontSize(delta){
+  const cur = _getPreviewFontSize();
+  _setPreviewFontSize(cur + delta);
+  _applyPreviewFontSizeToEditArea();
+}
+function _showPreviewZoomControls(showZoom, showFullscreen){
+  const zoomIds = ['btnPreviewZoomOut','previewFontSizeLabel','btnPreviewZoomIn'];
+  for(const id of zoomIds){
+    const el = document.getElementById(id);
+    if(el) el.style.display = showZoom ? 'inline-flex' : 'none';
+  }
+  const fsBtn = document.getElementById('btnPreviewFullscreen');
+  if(fsBtn) fsBtn.style.display = (showZoom || showFullscreen) ? 'inline-flex' : 'none';
+  if(showZoom){
+    const label = document.getElementById('previewFontSizeLabel');
+    if(label){
+      label.style.display = 'inline';
+      label.textContent = String(_getPreviewFontSize());
+    }
+    _setPreviewFontSize(_getPreviewFontSize()); // apply persisted
+    _applyPreviewFontSizeToEditArea();
+  }
+}
+
 function showPreview(mode){
   // mode: 'code' | 'csv' | 'image' | 'md' | 'html' | 'pdf' | 'audio' | 'video'
   $('previewCode').style.display     = mode==='code'  ? '' : 'none';
@@ -968,6 +1065,11 @@ function showPreview(mode){
   const openBtn=$('btnOpenInBrowser');
   if(openBtn) openBtn.style.display = (mode==='html'||mode==='pdf')?'inline-flex':'none';
   setLargeMarkdownForceRenderVisible(false);
+  // Show zoom controls for text-based previews; fullscreen is available for
+  // every preview mode (including iframe-backed HTML/PDF).
+  const textModes = ['code','md','csv'];
+  const showZoom = textModes.includes(mode);
+  _showPreviewZoomControls(showZoom, true);
 }
 
 function updateEditBtn(){
