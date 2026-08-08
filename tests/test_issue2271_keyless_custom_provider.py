@@ -7,7 +7,7 @@ def test_keyless_named_custom_provider_uses_placeholder_and_generic_custom(monke
     monkeypatch.setattr(
         streaming,
         "resolve_custom_provider_connection",
-        lambda provider: (None, "http://gpu.local:8000/v1"),
+        lambda provider, **kwargs: (None, "http://gpu.local:8000/v1"),
     )
 
     provider, api_key, base_url = streaming._resolve_custom_provider_runtime_overrides(
@@ -25,7 +25,7 @@ def test_named_custom_provider_preserves_configured_key(monkeypatch):
     monkeypatch.setattr(
         streaming,
         "resolve_custom_provider_connection",
-        lambda provider: ("real-key", "http://gpu.local:8000/v1"),
+        lambda provider, **kwargs: ("real-key", "http://gpu.local:8000/v1"),
     )
 
     provider, api_key, base_url = streaming._resolve_custom_provider_runtime_overrides(
@@ -43,7 +43,7 @@ def test_named_custom_provider_keeps_existing_runtime_base_url(monkeypatch):
     monkeypatch.setattr(
         streaming,
         "resolve_custom_provider_connection",
-        lambda provider: (None, "http://config.example/v1"),
+        lambda provider, **kwargs: (None, "http://config.example/v1"),
     )
 
     provider, api_key, base_url = streaming._resolve_custom_provider_runtime_overrides(
@@ -60,7 +60,7 @@ def test_non_custom_provider_is_unchanged(monkeypatch):
 
     called = False
 
-    def _unexpected(provider):
+    def _unexpected(provider, **kwargs):
         nonlocal called
         called = True
         return (None, None)

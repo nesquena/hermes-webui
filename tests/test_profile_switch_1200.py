@@ -824,3 +824,62 @@ def test_chat_start_rejects_invalid_request_profile(monkeypatch):
 
     assert result == {"error": "invalid profile"}
     assert errors == [("invalid profile", 400)]
+
+
+# ── Regression guard: provider normalisation on switch ──────────────────────────
+
+
+def test_switch_profile_returns_normalized_provider_id(tmp_path, monkeypatch):
+    """
+    REGRESSION GUARD: switch_profile(process_wide=False) must normalize
+    the target profile's raw provider (e.g. ``custom:192.168.5.242:8000``)
+    through ``_resolve_configured_provider_id()`` so the response
+    ``default_model_provider`` matches the canonical hyphenated slug
+    that the frontend stores in ``window._activeProvider``.
+
+    Without this fix the raw colon-bearing string leaks through, and the
+    frontend ends up with two different "provider" strings for the same
+    custom endpoint — one from the switch response and one from the
+    providers list.
+    """
+    import api.profiles as profiles
+
+    base = tmp_path / ".hermes"
+    base.mkdir()
+
+    # Target profile with a colon-bearing custom provider
+    target_home = base / "profiles" / "customprofile"
+    target_home.mkdir(parents=True)
+    target_ws = tmp_path / "custom_workspace"
+    target_ws.mkdir()
+    (target_home / "config.yaml").write_text(
+        "model:\n"
+        "  default: qwen3.6-27b-nvfp4\n"
+        "  provider: custom:192.168.5.242:8000\n"
+        "  base_url: http://192.168.5.242:8000/v1\n"
+        "custom_providers:\n"
+        "  - name: 192.168.5.242:8000\n"
+        "    base_url: http://192.168.5.242:8000/v1\n"
+        "    model: qwen3.6-27b-nvfp4\n",
+        encoding="utf-8",
+    )
+
+    orig_default = profiles._DEFAULT_HERMES_HOME
+    orig_active = profiles._active_profile
+    profiles._DEFAULT_HERMES_HOME = base
+    profiles._active_profile = "default"
+    profiles._tls.profile = None
+
+    try:
+        result = profiles.switch_profile("customprofile", process_wide=False)
+        provider = result.get("default_model_provider")
+        assert provider == "custom:192.168.5.242-8000", (
+            f"Expected canonical hyphenated provider slug "
+            f"'custom:192.168.5.242-8000', got {provider!r}. "
+            "The raw colon-bearing value leaked through switch_profile(). "
+            "Bug: provider switch response normalisation regressed."
+        )
+    finally:
+        profiles._DEFAULT_HERMES_HOME = orig_default
+        profiles._active_profile = orig_active
+        profiles._tls.profile = None

@@ -176,9 +176,14 @@ def _read_auth_json(auth_path: Path | None = None) -> dict[str, Any]:
     return {}
 
 
-def read_auth_json():
-    """Public wrapper for streaming credential self-heal code."""
-    return _read_auth_json()
+def read_auth_json(auth_path: Path | None = None):
+    """Public wrapper for streaming credential self-heal code.
+
+    When ``auth_path`` is provided, reads that profile's auth.json instead of
+    the fixed-root ``AUTH_JSON_PATH``.  Used by the streaming self-heal to
+    read the owning profile's credentials from a detached worker thread.
+    """
+    return _read_auth_json(auth_path)
 
 
 def _write_auth_json(data: dict[str, Any], auth_path: Path | None = None) -> Path:
