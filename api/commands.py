@@ -7,6 +7,8 @@ so the frontend can still load with WEBUI_ONLY commands.
 from __future__ import annotations
 from contextlib import nullcontext
 import logging
+import os
+import shutil
 import threading
 from typing import Any
 
@@ -28,7 +30,11 @@ _AGENT_COMMAND_ALIASES = {
     'reload_skills': 'reload-skills',
     'codex_runtime': 'codex-runtime',
 }
-_ALLOWED_AGENT_COMMANDS = frozenset({'reload-mcp', 'reload-skills', 'codex-runtime', 'credits'})
+_ALLOWED_AGENT_COMMANDS = frozenset({
+    'reload-mcp', 'reload-skills', 'codex-runtime', 'credits',
+    'learn', 'fast', 'profile', 'version', 'agents', 'insights', 'rollback',
+})
+
 _RELOAD_MCP_LOCK = threading.Lock()
 _RELOAD_SKILLS_LOCK = threading.Lock()
 _CODEX_RUNTIME_LOCK = threading.Lock()
@@ -219,6 +225,20 @@ def execute_agent_command(command: str) -> str:
         return _run_codex_runtime_command(arg_string)
     if canonical == 'credits':
         return _run_credits_command()
+    if canonical == 'learn':
+        return _run_learn_command(arg_string)
+    if canonical == 'fast':
+        return _run_fast_command(arg_string)
+    if canonical == 'profile':
+        return _run_profile_command()
+    if canonical == 'version':
+        return _run_version_command()
+    if canonical == 'agents':
+        return _run_agents_command()
+    if canonical == 'insights':
+        return _run_insights_command(arg_string)
+    if canonical == 'rollback':
+        return _run_rollback_command(arg_string)
 
     raise KeyError(canonical)
 
@@ -477,3 +497,196 @@ def execute_plugin_command(command: str) -> str:
         # class of failure occurred; full traceback lives in the server log.
         logger.warning("Plugin command %r execution failed", cmd_base, exc_info=True)
         return f"Plugin command error: {type(exc).__name__}"
+
+
+def _run_learn_command(what: str) -> str:
+    """Execute the agent's /learn command — creates a skill from a description.
+
+    Dispatches to the Hermes CLI's /learn handler via subprocess so the
+    agent's built-in skill-learning pipeline handles file scanning, URL
+    fetching, and skill creation. Falls back to a descriptive message
+    when the Hermes CLI binary is not available.
+    """
+    if not what:
+        return (
+            "/learn <what to learn from>\n\n"
+            "Learn a reusable skill from a directory, URL, or your own description.\n"
+            "Example: /learn ~/my-project, /learn https://example.com/docs\n\n"
+            "This command is dispatched to Hermes Agent's built-in /learn handler."
+        )
+    try:
+        # First check that the agent knows this command
+        try:
+            from hermes_cli.commands import resolve_command
+            if resolve_command("learn") is None:
+                return "Error: /learn is not available (Hermes Agent too old or not installed)."
+        except ImportError:
+            return "Error: /learn requires Hermes Agent to be installed."
+
+        # Dispatch via the hermes CLI if available
+        import subprocess as _subprocess
+
+        hermes_bin = shutil.which("hermes")
+        if not hermes_bin:
+            hermes_bin = os.path.expanduser("~/.hermes/hermes-agent/.venv/bin/hermes")
+            if not os.path.isfile(hermes_bin):
+                return f"/learn dispatched for: {what}\n(Install Hermes Agent CLI for full execution.)"
+
+        if not os.access(hermes_bin, os.X_OK):
+            return f"/learn dispatched for: {what}\n(Hermes CLI binary at {hermes_bin} is not executable.)"
+
+        result = _subprocess.run(
+            [hermes_bin, "chat", "-q", f"/learn {what}"],
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ, "HERMES_NON_INTERACTIVE": "1"},
+        )
+        output = (result.stdout or result.stderr or "").strip()
+        return output or f"Agent processed /learn for: {what}"
+    except _subprocess.TimeoutExpired:
+        return f"/learn timed out after 120 seconds for: {what}"
+    except Exception as exc:
+        logger.warning("Failed to execute /learn command", exc_info=True)
+        return f"Learn command error: {type(exc).__name__}"
+
+
+def _run_fast_command(arg_string: str) -> str:
+    """Toggle fast processing mode (Priority Processing / Fast Mode).
+
+    Reads and writes the active WebUI profile's config via the profile-
+    aware api.config module, so the toggle affects the requesting
+    profile rather than a global config file.
+    """
+    try:
+        from api import config as _webui_config
+
+        raw = _webui_config.get_config()
+        if not isinstance(raw, dict):
+            return "Fast mode: unable to read active profile config."
+
+        current_fast = raw.get("fast", {})
+        if isinstance(current_fast, dict):
+            current_enabled = current_fast.get("enabled", False)
+        else:
+            current_enabled = False
+
+        enable = not current_enabled
+
+        raw.setdefault("fast", {})
+        if isinstance(raw["fast"], dict):
+            raw["fast"]["enabled"] = enable
+        else:
+            raw["fast"] = {"enabled": enable}
+
+        _webui_config._save_yaml_config_file(
+            _webui_config._get_config_path(), raw
+        )
+        _webui_config.reload_config()
+
+        return f"Fast mode {'enabled' if enable else 'disabled'} for active profile.\nRestart the session for the change to take full effect."
+    except Exception as exc:
+        logger.warning("Failed to toggle fast mode", exc_info=True)
+        return f"Fast mode error: {type(exc).__name__}"
+
+
+def _run_profile_command() -> str:
+    """Show active profile information from the WebUI runtime."""
+    try:
+        from api import config as _webui_config
+
+        raw = _webui_config.get_config()
+
+        profile = os.environ.get("HERMES_PROFILE", "default")
+        home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+        model = (raw or {}).get("model", {}).get("default", "not set")
+
+        lines = [
+            f"Active profile: {profile}",
+            f"Profile home: {home}",
+            f"Default model: {model}",
+        ]
+        return "\n".join(lines)
+    except Exception:
+        profile = os.environ.get("HERMES_PROFILE", "default")
+        home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+        return f"Active profile: {profile}\nHome: {home}"
+
+
+def _run_version_command() -> str:
+    """Show Hermes Agent + WebUI version info."""
+    try:
+        from hermes_cli import __version__ as agent_version
+    except (ImportError, AttributeError):
+        agent_version = "?"
+
+    try:
+        from api import __version__ as webui_version
+    except (ImportError, AttributeError):
+        webui_version = "?"
+
+    return f"Hermes Agent: {agent_version}\nHermes WebUI: {webui_version}"
+
+
+def _run_agents_command() -> str:
+    """Show active agent sessions and running tasks."""
+    try:
+        from agent.run import list_active_agents
+
+        agents = list_active_agents() or []
+        if not agents:
+            return "No active agents."
+        lines = [f"Active agents ({len(agents)}):"]
+        for agent in agents:
+            name = agent.get("name", "?")
+            sid = agent.get("session_id", "?")
+            status = agent.get("status", "?")
+            lines.append(f"  {name} [{sid}] — {status}")
+        return "\n".join(lines)
+    except Exception:
+        return "Agent status: check the WebUI session panel for active agents."
+
+
+def _run_insights_command(arg_string: str) -> str:
+    """Show usage insights and analytics."""
+    days = arg_string.strip() if arg_string else "30"
+    try:
+        from hermes_cli.insights import build_insights_report
+
+        report = build_insights_report(days=int(days))
+        if report:
+            return str(report)
+    except Exception:
+        pass
+    return f"Usage insights are available in the WebUI Insights tab (/api/analytics).\nOpen Settings → Insights or check your Hermes CLI with:\n  hermes insights --days {days}"
+
+
+def _run_rollback_command(arg_string: str) -> str:
+    """List or restore filesystem checkpoints."""
+    try:
+        from hermes_cli.checkpoints import list_checkpoints, restore_checkpoint
+
+        num_str = arg_string.strip()
+        if num_str:
+            try:
+                num = int(num_str)
+            except ValueError:
+                available = list_checkpoints() or []
+                lines = [f"Available checkpoints ({len(available)}):"]
+                for i, cp in enumerate(available, 1):
+                    label = cp.get("label", cp.get("description", f"checkpoint {i}"))
+                    lines.append(f"  {i}. {label}")
+                return "\n".join(lines)
+
+            result = restore_checkpoint(num)
+            return f"Restored checkpoint {num}: {result}" if result else f"Checkpoint {num} not found."
+
+        available = list_checkpoints() or []
+        if not available:
+            return "No checkpoints available. Enable checkpoints in config.yaml:\n  checkpoints:\n    enabled: true"
+        lines = [f"Available checkpoints ({len(available)}):"]
+        for i, cp in enumerate(available, 1):
+            label = cp.get("label", cp.get("description", f"checkpoint {i}"))
+            lines.append(f"  {i}. {label}")
+        lines.append("\nUse /rollback <number> to restore, or /rollback alone to list.")
+        return "\n".join(lines)
+    except Exception:
+        return "Checkpoints not available in this environment. Requires Hermes Agent with checkpoints enabled."
