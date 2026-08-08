@@ -5,6 +5,8 @@ This test boots the real WebUI server with isolated state, drives the real chat
 composer in Chromium, and supplies deterministic runtime events through the
 existing Hermes Gateway Runs API. It proves that one assistant turn keeps the
 same semantic activity across live streaming, settlement, and a hard reload.
+
+Proposed in #6247; first implementation slice merged as #6251.
 """
 
 from __future__ import annotations
