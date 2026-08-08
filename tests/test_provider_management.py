@@ -692,3 +692,202 @@ class TestIssue1410OllamaEnvVarBleed:
             config.cfg.clear()
             config.cfg.update(old_cfg)
             config._cfg_mtime = old_mtime
+
+
+class TestBedrockCredentials:
+    """Bedrock API key (bearer) + IAM access-key pair in Settings."""
+
+    def test_bedrock_is_configurable(self, monkeypatch, tmp_path):
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+        monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+        monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {}
+        try:
+            from api.providers import get_providers
+            by_id = {p["id"]: p for p in get_providers()["providers"]}
+            assert "bedrock" in by_id
+            assert by_id["bedrock"]["configurable"] is True
+            assert by_id["bedrock"]["is_oauth"] is False
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+
+    def test_bedrock_bearer_key(self, monkeypatch, tmp_path):
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+        monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+        monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {}
+        try:
+            from api.providers import set_provider_key, _provider_has_key, get_providers
+            result = set_provider_key("bedrock", "bedrock-bearer-token-12345")
+            assert result["ok"] is True
+            assert _provider_has_key("bedrock") is True
+            content = (tmp_path / ".env").read_text()
+            assert "AWS_BEARER_TOKEN_BEDROCK=bedrock-bearer-token-12345" in content
+            by_id = {p["id"]: p for p in get_providers()["providers"]}
+            assert by_id["bedrock"]["bedrock_has_bearer"] is True
+            assert by_id["bedrock"]["bedrock_has_iam"] is False
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+
+    def test_bedrock_iam_pair(self, monkeypatch, tmp_path):
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+        monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+        monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {}
+        try:
+            from api.providers import set_provider_key, _provider_has_key, get_providers
+            result = set_provider_key(
+                "bedrock",
+                None,
+                aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
+                aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            )
+            assert result["ok"] is True
+            assert _provider_has_key("bedrock") is True
+            content = (tmp_path / ".env").read_text()
+            assert "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE" in content
+            assert "AWS_SECRET_ACCESS_KEY=" in content
+            assert "AWS_BEARER_TOKEN_BEDROCK" not in content
+            by_id = {p["id"]: p for p in get_providers()["providers"]}
+            assert by_id["bedrock"]["bedrock_has_iam"] is True
+            assert by_id["bedrock"]["bedrock_has_bearer"] is False
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+
+    def test_bedrock_iam_partial_rejected(self, monkeypatch, tmp_path):
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+        monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+        monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+        from api.providers import set_provider_key
+        result = set_provider_key(
+            "bedrock",
+            None,
+            aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
+            aws_secret_access_key="",
+        )
+        assert result["ok"] is False
+
+    def test_bedrock_remove_clears_iam_and_bearer(self, monkeypatch, tmp_path):
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+        monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+        monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {}
+        try:
+            from api.providers import set_provider_key, remove_provider_key, _provider_has_key
+            set_provider_key("bedrock", "bedrock-bearer-token-12345")
+            set_provider_key(
+                "bedrock",
+                None,
+                aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
+                aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            )
+            result = remove_provider_key("bedrock")
+            assert result["ok"] is True
+            assert _provider_has_key("bedrock") is False
+            content = (tmp_path / ".env").read_text() if (tmp_path / ".env").exists() else ""
+            assert "AWS_BEARER_TOKEN_BEDROCK" not in content
+            assert "AWS_ACCESS_KEY_ID" not in content
+            assert "AWS_SECRET_ACCESS_KEY" not in content
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+
+    def test_bedrock_bearer_replaces_iam(self, monkeypatch, tmp_path):
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+        monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+        monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {}
+        try:
+            from api.providers import set_provider_key, get_providers
+            set_provider_key(
+                "bedrock",
+                None,
+                aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
+                aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            )
+            result = set_provider_key("bedrock", "bedrock-bearer-token-12345")
+            assert result["ok"] is True
+            content = (tmp_path / ".env").read_text()
+            assert "AWS_BEARER_TOKEN_BEDROCK=bedrock-bearer-token-12345" in content
+            assert "AWS_ACCESS_KEY_ID" not in content
+            assert "AWS_SECRET_ACCESS_KEY" not in content
+            by_id = {p["id"]: p for p in get_providers()["providers"]}
+            assert by_id["bedrock"]["bedrock_has_bearer"] is True
+            assert by_id["bedrock"]["bedrock_has_iam"] is False
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+
+    def test_bedrock_iam_replaces_bearer(self, monkeypatch, tmp_path):
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+        monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+        monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {}
+        try:
+            from api.providers import set_provider_key, get_providers
+            set_provider_key("bedrock", "bedrock-bearer-token-12345")
+            result = set_provider_key(
+                "bedrock",
+                None,
+                aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
+                aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            )
+            assert result["ok"] is True
+            content = (tmp_path / ".env").read_text()
+            assert "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE" in content
+            assert "AWS_SECRET_ACCESS_KEY=" in content
+            assert "AWS_BEARER_TOKEN_BEDROCK" not in content
+            by_id = {p["id"]: p for p in get_providers()["providers"]}
+            assert by_id["bedrock"]["bedrock_has_iam"] is True
+            assert by_id["bedrock"]["bedrock_has_bearer"] is False
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
