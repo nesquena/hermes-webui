@@ -320,9 +320,9 @@ class TestDraftRecovery:
         assert len(user_msgs) == 1
         assert user_msgs[0]["content"] == "My important question"
         assert user_msgs[0].get("_recovered") is True
-        assert user_msgs[0]["timestamp"] == int(_ts), (
-            f"Recovered turn timestamp should match pending_started_at ({_ts}), "
-            f"got {user_msgs[0]['timestamp']}"
+        assert user_msgs[0]["timestamp"] == _ts, (
+            f"Recovered turn timestamp should match pending_started_at at full "
+            f"resolution ({_ts}), got {user_msgs[0]['timestamp']}"
         )
 
     def test_pending_message_recovered_into_context_messages(self, hermes_home, monkeypatch):
@@ -2275,3 +2275,140 @@ class TestStaleFinalWholeTurnGuard:
         )
         assert _repair_stale_pending(s) is True
         self._assert_cleared_without_append(s, ["user", "assistant"])
+
+    # ── #6378 re-gate: full-res timestamps, total predicates, journal order ─
+
+    def test_same_second_identical_prompt_is_not_suppressed(self, hermes_home):
+        """#6378 review finding 1: the checkpoint match truncated timestamps
+        to whole seconds, so two identical prompts sent in the same second
+        (committed row at 1000.1, pending at 1000.9) collided and the guard
+        cleared the fresh turn as if it were the already-answered one. Full-
+        resolution finite matching must fail the checkpoint -> recovery runs
+        and the re-sent turn survives."""
+        s = _make_session(session_id="same_second_sid", messages=[
+            {"role": "user", "content": "Question?", "timestamp": 1000.1, "_source": "webui"},
+            {"role": "assistant", "content": "Committed answer."},
+        ])
+        s.pending_user_message = "Question?"
+        s.pending_started_at = 1000.9
+        s.pending_user_source = "webui"
+        s.pending_attachments = []
+        s.active_stream_id = "stream_1"
+        assert self._apply(s, hermes_home) is True
+        self._assert_recovery_preserved(s)
+
+    def test_non_finite_pending_started_at_fails_closed(self, hermes_home):
+        """#6378 review finding 1 (fail-closed): a non-finite
+        pending_started_at raised OverflowError (int(float('inf'))) / ValueError
+        (int(float('nan'))) inside the guard and aborted repair entirely. It
+        must be treated as ambiguous identity -> checkpoint never matches ->
+        recovery proceeds instead of raising."""
+        for bad in (float("inf"), float("nan")):
+            s = _make_session(session_id=f"nonfinite_sid_{bad}", messages=[
+                {"role": "user", "content": "Question?", "timestamp": 1000.0, "_source": "webui"},
+                {"role": "assistant", "content": "Committed answer."},
+            ])
+            s.pending_user_message = "Question?"
+            s.pending_started_at = bad
+            s.pending_user_source = "webui"
+            s.pending_attachments = []
+            s.active_stream_id = "stream_1"
+            assert self._apply(s, hermes_home) is True
+            self._assert_recovery_preserved(s)
+
+    def test_scalar_attachments_row_does_not_abort_recovery(self, hermes_home):
+        """#6378 review finding 2: a persisted user row whose `attachments`
+        is a scalar (int) made list(attachments) raise TypeError inside the
+        checkpoint match, aborting recovery for the whole session. The
+        predicate must be total: malformed attachments -> non-match
+        (fail-closed) -> recovery proceeds instead of raising."""
+        s = _make_session(session_id="scalar_attachments_sid", messages=[
+            {"role": "user", "content": "Question?", "timestamp": 1000.0,
+             "_source": "webui", "attachments": 5},
+            {"role": "assistant", "content": "Committed answer."},
+        ])
+        s.pending_user_message = "Question?"
+        s.pending_started_at = 1000.0
+        s.pending_user_source = "webui"
+        s.pending_attachments = []
+        s.active_stream_id = "stream_1"
+        assert self._apply(s, hermes_home) is True
+        self._assert_recovery_preserved(s)
+
+    def test_unhashable_structured_content_does_not_abort_recovery(self, hermes_home):
+        """#6378 review finding 2: a content part whose `type` is an
+        unhashable structured value (list) made `type in part_types` raise
+        TypeError inside is_context_compression_marker() during the guard
+        scan, aborting recovery. The marker predicate must be total: the row
+        is not a marker (fail-closed) and recovery proceeds."""
+        s = _make_session(session_id="unhashable_content_sid", messages=[
+            {"role": "user", "content": "Question?", "timestamp": 1000.0, "_source": "webui"},
+            {"role": "assistant",
+             "content": [{"type": ["unhashable"], "text": "[context compaction summary of earlier turns]"}]},
+        ])
+        s.pending_user_message = "Question?"
+        s.pending_started_at = 1000.0
+        s.pending_user_source = "webui"
+        s.pending_attachments = []
+        s.active_stream_id = "stream_1"
+        assert self._apply(s, hermes_home) is True
+        self._assert_recovery_preserved(s)
+
+    def test_completed_journal_restores_rows_before_stale_guard(self, hermes_home):
+        """#6378 review finding 3: with a committed final in the transcript AND
+        a journal whose terminal state is 'completed' (visible process text +
+        tool call), the stale-turn guard used to run first, clear state and
+        silently drop the journaled rows. Completed-journal recovery must run
+        BEFORE the guard so the deduplicated journal tail (process text + tool
+        call) is restored and no error marker is appended."""
+        s = _make_session(session_id="completed_journal_sid", messages=[
+            {"role": "user", "content": "Question?", "timestamp": 1000.0, "_source": "webui"},
+            {"role": "assistant", "content": "Committed answer."},
+        ])
+        s.pending_user_message = "Question?"
+        s.pending_started_at = 1000.0
+        s.pending_user_source = "webui"
+        s.pending_attachments = []
+        s.active_stream_id = "stream_1"
+        s.save()
+
+        append_run_event(
+            s.session_id,
+            "stream_1",
+            "token",
+            {"text": "I will check GitHub first."},
+        )
+        append_run_event(
+            s.session_id,
+            "stream_1",
+            "tool",
+            {
+                "name": "terminal",
+                "preview": "gh pr list --repo nesquena/hermes-webui",
+                "args": {"command": "gh pr list --repo nesquena/hermes-webui"},
+            },
+        )
+        append_run_event(
+            s.session_id,
+            "stream_1",
+            "tool_complete",
+            {"name": "terminal", "duration": 0.4, "is_error": False},
+        )
+        append_run_event(
+            s.session_id,
+            "stream_1",
+            "done",
+            {"terminal_state": "completed"},
+        )
+
+        assert self._apply(s, hermes_home) is True
+        # Journaled process text and the tool call are restored...
+        contents = [m.get("content", "") for m in s.messages]
+        assert any("I will check GitHub first." in str(c) for c in contents), contents
+        assert s.tool_calls, "completed-journal tool call must be restored"
+        assert s.tool_calls[0]["name"] == "terminal"
+        # ...stale pending state is cleared, and the completed branch appends
+        # NO error marker (the turn completed; nothing was interrupted).
+        assert s.pending_user_message is None
+        assert s.active_stream_id is None
+        assert not any(m.get("_error") for m in s.messages)
