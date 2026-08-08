@@ -197,7 +197,10 @@ class TestLoadHtmlInlineFunction:
         body = ui[idx:idx + 1200]
         assert 'const mediaSessionId=' in body
         assert "'&session_id='+encodeURIComponent(mediaSessionId)" in body
-        assert 'fetch(mediaUrl)' in body
+        assert "fetch(mediaUrl, {cache:'no-store'})" in body, (
+            "loadHtmlInline must fetch with cache:'no-store' to bypass "
+            "browser cache for stale HTML preview (got body without no-store)"
+        )
         assert "const publicMediaUrl='api/media?path='+encodeURIComponent(path);" in body
         assert "const openUrl=publicMediaUrl+'&inline=1';" in body
 

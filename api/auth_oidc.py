@@ -38,6 +38,16 @@ _discovery_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _jwks_lock = threading.Lock()
 _jwks_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
+_warned_allow_values: set[str] = set()
+
+_ALLOW_VALUES_WHITESPACE_WARNING = (
+    "webui_oidc.allow_values (HERMES_WEBUI_OIDC_ALLOW_VALUES) has one or more entries "
+    "with internal whitespace; whitespace is not a value separator, so a value like "
+    '"alice@example.com bob@example.com" is treated as a single entry. '
+    'Use a comma-delimited scalar (e.g. "value1,value2") or a YAML array. '
+    "If this is one intentional multi-word group, it is already correct and no action is needed."
+)
+
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
@@ -166,9 +176,17 @@ def _resolve_oidc_config() -> dict[str, Any]:
         return env_value if env_value is not None else raw.get(name)
 
     scopes = _normalize_scopes(pick("scopes", "HERMES_WEBUI_OIDC_SCOPES"))
-    allow_values = _normalize_allow_values(
-        pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES")
-    )
+    raw_allow = pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES")
+    allow_values = _normalize_allow_values(raw_allow)
+    if (
+        raw_allow is not None
+        and not isinstance(raw_allow, (list, tuple, set))
+        and any(any(ch.isspace() for ch in v) for v in allow_values)
+    ):
+        key = str(raw_allow)
+        if key not in _warned_allow_values:
+            _warned_allow_values.add(key)
+            logger.warning(_ALLOW_VALUES_WHITESPACE_WARNING)
     return {
         "issuer": str(pick("issuer", "HERMES_WEBUI_OIDC_ISSUER") or "").strip(),
         "client_id": str(pick("client_id", "HERMES_WEBUI_OIDC_CLIENT_ID") or "").strip(),
@@ -207,7 +225,22 @@ def _normalize_scopes(raw: Any) -> list[str]:
 
 
 def _normalize_allow_values(raw: Any) -> list[str]:
-    return _normalize_text_list(raw)
+    """Normalize allowlist values, splitting only on commas/newlines.
+
+    Unlike ``_normalize_text_list`` (which also splits on whitespace), this
+    preserves multi-word values such as OIDC group names containing spaces
+    (e.g. ``"Hermes Users"`` stays as one entry).
+
+    RFC 6749 §3.3 requires space-delimited scope strings, so
+    ``_normalize_scopes`` must keep using ``_normalize_text_list`` -- this
+    function is for allow-values only.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        return [value for value in (str(item).strip() for item in raw) if value]
+    text = str(raw).replace("\n", ",")
+    return [part.strip() for part in text.split(",") if part.strip()]
 
 
 def _normalize_text_list(raw: Any) -> list[str]:

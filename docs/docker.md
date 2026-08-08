@@ -11,6 +11,27 @@ This is the comprehensive Docker reference. For a 5-minute quickstart, see the [
 | **Three-container** | Two-container PLUS the dashboard for monitoring. | `docker-compose.three-container.yml` |
 | **All-in-one image** (community fork — third-party, not maintained by us) | Podman 3.4 / multi-arch / supervisord-style preference. | [sunnysktsang/hermes-suite](https://github.com/sunnysktsang/hermes-suite) — see [#1399](https://github.com/nesquena/hermes-webui/issues/1399) for the original discussion |
 
+### Available Docker tags
+
+The WebUI Docker image is published to `ghcr.io/nesquena/hermes-webui` with these tags:
+
+| Tag | Channel | Description |
+|---|---|---|
+| `:latest` | stable | The most recent stable release (from `v*` tags). Suitable for production. |
+| `:experimental` | experimental | The most recent experimental release (from `exp-v*` tags). For early testing; may include breaking changes or unfinished features. Do not run in production. |
+| `:X.Y` / `:X.Y.Z` | stable | Pinned stable releases (e.g., `:1.5`, `:1.5.0`). |
+| `:X.Y` / `:X.Y.Z` | experimental | Pinned experimental releases — same version numbers but pushed from `exp-v*` tags. The `:experimental` floating tag always points at the latest of these. |
+
+To track experimental builds in Docker Compose, use the `:experimental` tag:
+
+```yaml
+services:
+  hermes-webui:
+    image: ghcr.io/nesquena/hermes-webui:experimental
+```
+
+> **Note:** updating between `:experimental` builds requires `docker compose pull` followed by `docker compose up -d` — the floating tag is updated only when a new `exp-v*` release is pushed. Experimental builds are not pushed on every commit to the default branch.
+
 > **Note (v0.14+):** If you use `docker-compose.three-container.yml`, both
 > `hermes-agent` and `hermes-dashboard` initialise from the same image and write
 > to the same `hermes-home` volume simultaneously. This can cause overlapping lock

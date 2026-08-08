@@ -548,10 +548,14 @@ class TestDoneEventSmd:
             "Follow intent must be captured before renderMessages() replaces the "
             "live transcript DOM."
         )
-        after_render = fn[render_idx:render_idx + 500]
-        assert "if(shouldFollowOnDone" in after_render and "scrollToBottom()" in after_render, (
+        scroll_idx = fn.index("if(shouldFollowOnDone", render_idx)
+        assert "scrollToBottom()" in fn[scroll_idx:scroll_idx + 120], (
             "After final render, done handler must call scrollToBottom() when the "
             "user was pinned/near-bottom before DOM replacement."
+        )
+        assert render_idx < scroll_idx, (
+            "The done handler must only re-follow to bottom after the final render "
+            "and any settlement collapse handling."
         )
         assert "_isMessagePaneNearBottom" in fn, (
             "Done follow capture must include a near-bottom DOM check, not only "
@@ -727,8 +731,8 @@ class TestSmdUrlSchemeSanitization:
         assert "_SMD_SAFE_URL_RE" in safefn, (
             "_safeSmdRenderer set_attr must use _SMD_SAFE_URL_RE for href safety"
         )
-        assert "_SMD_SAFE_IMG_URL_RE" in safefn, (
-            "_safeSmdRenderer set_attr must use _SMD_SAFE_IMG_URL_RE for src safety"
+        assert "_smdImgSrcAllowed" in safefn, (
+            "_safeSmdRenderer set_attr must delegate src safety to the shared data-image policy"
         )
         assert "data-blocked-scheme" in safefn, (
             "_safeSmdRenderer set_attr must set data-blocked-scheme on unsafe URLs"
