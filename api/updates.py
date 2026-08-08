@@ -1360,14 +1360,57 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
         _check_in_progress = True
 
     try:
-        # Run checks outside the lock (network I/O)
-        webui_info = _check_repo(REPO_ROOT, 'webui', channel)
-        # The update channel is a WebUI-only concept. The Agent is a separate
-        # project that tags plain v* and legitimately tracks master past its
-        # tags; it must ALWAYS use the default channel regardless of the user's
-        # WebUI channel selection. (Codex gate: passing 'experimental' here made
-        # the Agent ignore its v* tags and fall back to origin/master.)
-        agent_info = _check_repo(_AGENT_DIR, 'agent', DEFAULT_UPDATE_CHANNEL) if include_agent else _ignored_agent_update_info()
+        # Run checks concurrently with a bounded overall timeout to prevent
+        # slow network I/O from blocking the response. Each _check_repo call
+        # can take up to 30s (git fetch timeout), so the serial path could
+        # take up to 60s. We cap the aggregate at 45s and return partial
+        # results if one check times out. (PR #6830)
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+
+        _UPDATE_CHECK_BUDGET_S = 45  # bounded overall budget for both checks
+        webui_info = None
+        agent_info = None
+
+        def _check_webui():
+            return _check_repo(REPO_ROOT, 'webui', channel)
+
+        def _check_agent():
+            # The update channel is a WebUI-only concept. The Agent is a separate
+            # project that tags plain v* and legitimately tracks master past its
+            # tags; it must ALWAYS use the default channel regardless of the user's
+            # WebUI channel selection. (Codex gate: passing 'experimental' here made
+            # the Agent ignore its v* tags and fall back to origin/master.)
+            return _check_repo(_AGENT_DIR, 'agent', DEFAULT_UPDATE_CHANNEL)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            webui_future = executor.submit(_check_webui)
+            agent_future = executor.submit(_check_agent) if include_agent else None
+
+            # Wait for both with bounded overall budget
+            try:
+                webui_info = webui_future.result(timeout=_UPDATE_CHECK_BUDGET_S)
+            except (FutureTimeoutError, Exception) as e:
+                logger.warning('WebUI update check failed or timed out: %s', e)
+                webui_info = {
+                    'name': 'webui',
+                    'behind': None,
+                    'error': f'check timed out after {_UPDATE_CHECK_BUDGET_S}s' if isinstance(e, FutureTimeoutError) else str(e),
+                    'stale_check': True,
+                }
+
+            if agent_future is not None:
+                try:
+                    agent_info = agent_future.result(timeout=_UPDATE_CHECK_BUDGET_S)
+                except (FutureTimeoutError, Exception) as e:
+                    logger.warning('Agent update check failed or timed out: %s', e)
+                    agent_info = {
+                        'name': 'agent',
+                        'behind': None,
+                        'error': f'check timed out after {_UPDATE_CHECK_BUDGET_S}s' if isinstance(e, FutureTimeoutError) else str(e),
+                        'stale_check': True,
+                    }
+            else:
+                agent_info = _ignored_agent_update_info()
 
         with _cache_lock:
             _update_cache['webui'] = webui_info

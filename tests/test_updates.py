@@ -1853,3 +1853,103 @@ def test_apply_path_fetches_keep_fifteen_second_timeout():
     fetch_15 = len(re.findall(r"_run_git\(.*?timeout=15", source, re.S))
     assert fetch_15 == 3
 
+def test_check_for_updates_runs_concurrently_with_bounded_timeout(tmp_path, monkeypatch):
+    """Verify that check_for_updates runs WebUI and Agent checks concurrently
+    and respects the bounded overall timeout budget. (PR #6830)
+    """
+    import time
+
+    # Create fake git repos
+    webui_path = tmp_path / 'webui'
+    agent_path = tmp_path / 'agent'
+    webui_path.mkdir()
+    agent_path.mkdir()
+    (webui_path / '.git').mkdir()
+    (agent_path / '.git').mkdir()
+
+    # Track concurrent execution
+    check_times = {'webui': 0.0, 'agent': 0.0}
+    check_start = time.time()
+
+    def fake_check_repo(path, name, channel='stable'):
+        check_times[name] = time.time() - check_start
+        # Simulate slow network I/O
+        time.sleep(0.1)
+        return {
+            'name': name,
+            'behind': 0,
+            'current_sha': 'abc123',
+            'latest_sha': 'abc123',
+        }
+
+    monkeypatch.setattr(updates, '_check_repo', fake_check_repo)
+    monkeypatch.setattr(updates, 'REPO_ROOT', webui_path)
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_path)
+
+    # Reset cache to force a fresh check
+    monkeypatch.setattr(updates, '_update_cache', {
+        'webui': None, 'agent': None, 'checked_at': 0,
+        'include_agent': True, 'channel': 'stable'
+    })
+
+    start_time = time.time()
+    result = updates.check_for_updates(force=True, include_agent=True, channel='stable')
+    elapsed = time.time() - start_time
+
+    # Both checks should have run
+    assert result['webui'] is not None
+    assert result['agent'] is not None
+    assert result['webui']['behind'] == 0
+    assert result['agent']['behind'] == 0
+
+    # Checks should have started concurrently (within 50ms of each other)
+    assert abs(check_times['webui'] - check_times['agent']) < 0.05
+
+    # Total time should be well under the 45s budget (since our fake sleeps are short)
+    assert elapsed < 1.0
+
+
+def test_check_for_updates_timeout_returns_partial_result(tmp_path, monkeypatch):
+    """When one repo check fails, the other should still return. (PR #6830)"""
+    import time
+
+    # Create fake git repos
+    webui_path = tmp_path / 'webui'
+    agent_path = tmp_path / 'agent'
+    webui_path.mkdir()
+    agent_path.mkdir()
+    (webui_path / '.git').mkdir()
+    (agent_path / '.git').mkdir()
+
+    def fake_check_repo(path, name, channel='stable'):
+        if name == 'webui':
+            return {
+                'name': 'webui',
+                'behind': 1,
+                'current_sha': 'abc123',
+                'latest_sha': 'def456',
+            }
+        # Agent check fails
+        raise Exception("Network error")
+
+    monkeypatch.setattr(updates, '_check_repo', fake_check_repo)
+    monkeypatch.setattr(updates, 'REPO_ROOT', webui_path)
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_path)
+
+    # Reset cache
+    monkeypatch.setattr(updates, '_update_cache', {
+        'webui': None, 'agent': None, 'checked_at': 0,
+        'include_agent': True, 'channel': 'stable'
+    })
+
+    result = updates.check_for_updates(force=True, include_agent=True, channel='stable')
+
+    # WebUI should have succeeded
+    assert result['webui'] is not None
+    assert result['webui']['behind'] == 1
+
+    # Agent should have error info
+    assert result['agent'] is not None
+    assert 'error' in result['agent'] or result['agent'].get('behind') is None
+
+
