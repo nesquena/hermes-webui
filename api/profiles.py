@@ -1394,6 +1394,111 @@ def profile_env_for_background_worker(
 
 
 @contextmanager
+def profile_env_for_background_worker_readonly(
+    session,
+    purpose: str = "background worker read",
+    logger_override: Optional[logging.Logger] = None,
+):
+    """Read-only explicit-profile scope that NEVER mirrors os.environ (#6327).
+
+    Variant of ``profile_env_for_background_worker`` for short worker bodies
+    that only need profile-aware config reads (e.g. ``Session.save``): it
+    installs the thread-local env, the secret scope, and the context-local
+    Hermes-home override — but does NOT snapshot or mutate ``os.environ``,
+    and therefore does NOT take ``_PROCESS_ENV_OWNERSHIP_LOCK`` or
+    ``_ENV_LOCK``.
+
+    This removes the ``AGENT -> PROCESS`` lock edge: a thread that already
+    holds the per-session agent lock (the streaming periodic checkpoint
+    thread) can enter this scope without waiting on the streaming turn's
+    full-body process-env ownership lock — which would deadlock the turn's
+    bounded join on the same session lock (stream holds PROCESS, checkpoint
+    holds AGENT; neither side releases).
+
+    Root/default profiles are a no-op (their env IS the process env).
+    """
+    log = logger_override or logger
+    raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
+    profile = str(raw_profile or "").strip()
+    if not profile or _is_root_profile(profile):
+        yield
+        return
+    try:
+        from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+    except Exception:
+        log.debug(
+            "Failed to import thread-env/home-override helpers for %s profile %s; "
+            "falling back to current env",
+            purpose,
+            profile,
+            exc_info=True,
+        )
+        yield
+        return
+    profile_home_path = Path(get_hermes_home_for_profile(profile))
+    runtime_env = get_profile_runtime_env(profile_home_path)
+    safe_runtime_env = filter_runtime_env_for_gateway_parity(runtime_env)
+    thread_env = dict(safe_runtime_env)
+    thread_env["HERMES_HOME"] = str(profile_home_path)
+    previous_thread_env = getattr(_thread_ctx, "env", {}).copy()
+    previous_block_process_env = bool(
+        getattr(_thread_ctx, "block_process_env_fallback", False)
+    )
+    _scope_token = None
+    _has_scope = False
+    _home_override_token = None
+    _home_override_installed = False
+    _secret_scope_mod = None
+    try:
+        _set_thread_env(**thread_env)
+        _thread_ctx.block_process_env_fallback = True
+        _secret_scope_mod = _resolve_secret_scope_module()
+        if _secret_scope_mod is not None:
+            try:
+                _scope_token = _secret_scope_mod.set_secret_scope(thread_env)
+                _has_scope = True
+            except Exception:
+                pass
+        if set_hermes_home_override is not None:
+            try:
+                _home_override_token = set_hermes_home_override(profile_home_path)
+                _home_override_installed = True
+            except Exception:
+                log.debug(
+                    "Failed to install Hermes-home override for %s profile %s",
+                    purpose,
+                    profile,
+                    exc_info=True,
+                )
+        yield
+    finally:
+        if _has_scope and _secret_scope_mod is not None:
+            try:
+                _secret_scope_mod.reset_secret_scope(_scope_token)
+            except Exception:
+                pass
+        if reset_hermes_home_override is not None and _home_override_installed:
+            try:
+                reset_hermes_home_override(_home_override_token)
+            except Exception:
+                log.debug(
+                    "Failed to reset Hermes-home override for %s profile %s",
+                    purpose,
+                    profile,
+                    exc_info=True,
+                )
+        _thread_ctx.block_process_env_fallback = previous_block_process_env
+        if previous_thread_env:
+            _set_thread_env(**previous_thread_env)
+        else:
+            _clear_thread_env()
+
+
+@contextmanager
 def profile_env_for_active_request_readonly(
     purpose: str = "provider/model read",
     logger_override: Optional[logging.Logger] = None,

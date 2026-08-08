@@ -2258,3 +2258,580 @@ def test_streaming_legacy_skill_lock_order_no_deadlock_with_direct_named(
     assert out["direct_tls"] == "alpha-value"
     # Exact ambient restoration.
     assert os.environ.get("OPENROUTER_API_KEY") == "ambient-value"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Facet F — production-composed streaming ownership (#6327, round 2)
+#
+# The Facet E lock-order tests compose the REAL locks by hand but never run
+# _run_agent_streaming(), the checkpoint thread, the bounded joins, or the
+# unwind paths — so they cannot see the two remaining concurrency schedules:
+#
+#   B1 — the streaming turn snapshots/mutates raw os.environ UNCONDITIONALLY
+#        but, on the dynamic/nonlegacy branch, used to take the shared
+#        _PROCESS_ENV_OWNERSHIP_LOCK only for the legacy skill-module block.
+#        A direct named profile scope could then run concurrently while the
+#        turn's env was installed (both observe the wrong profile; reversed
+#        restoration leaves stale values).  Fix: the turn now acquires
+#        PROCESS before ANY raw-env snapshot/mutation, in every mode.
+#
+#   B2 — the periodic checkpoint thread holds the per-session agent lock and
+#        used to enter profile_env_for_background_worker(), which blocks on
+#        the turn's full-body PROCESS ownership; the turn's bounded join then
+#        blocks on the same agent lock → AGENT↔PROCESS deadlock.  Fix:
+#        _save_streaming_checkpoint() uses a READ-ONLY explicit-profile scope
+#        (thread/context-local only, never mirrors os.environ) so the
+#        AGENT → PROCESS edge is gone.
+#
+# These tests drive the REAL _run_agent_streaming() with a fake session/agent
+# and assert both schedules on real unlock paths (normal completion, cancel,
+# exception).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _StreamingFakeHomeOverride:
+    """Minimal hermes_constants stand-in for the context-local home override."""
+
+    def set_hermes_home_override(self, home):
+        return ("override-token",)
+
+    def reset_hermes_home_override(self, token):
+        return None
+
+
+class _StreamingFakeSession:
+    """Minimal Session stand-in (mirrors test_issue2965's shape)."""
+
+    def __init__(self, session_id, profile, workspace, stream_id):
+        self.session_id = session_id
+        self.title = "Streaming ownership"
+        self.workspace = str(workspace)
+        self.model = "test-model"
+        self.model_provider = None
+        self.profile = profile
+        self.personality = None
+        self.messages = []
+        self.context_messages = []
+        self.tool_calls = []
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.estimated_cost = None
+        self.context_length = 0
+        self.threshold_tokens = 0
+        self.last_prompt_tokens = 0
+        self.active_stream_id = stream_id
+        self.pending_user_message = None
+        self.pending_attachments = []
+        self.pending_started_at = None
+        self.llm_title_generated = True
+
+    def save(self, *args, **kwargs):
+        return None
+
+    def compact(self):
+        return {
+            "session_id": self.session_id,
+            "title": self.title,
+            "workspace": self.workspace,
+            "model": self.model,
+            "created_at": 0,
+            "updated_at": 0,
+            "pinned": False,
+            "archived": False,
+            "project_id": None,
+            "profile": self.profile,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "estimated_cost": self.estimated_cost,
+            "personality": self.personality,
+        }
+
+
+def _install_streaming_profile_env(monkeypatch, tmp_path, profile_values):
+    """Wire fake profile homes + streaming deps; return (session, stream_id)."""
+    import queue
+
+    import api.config as cfg
+    import api.oauth as oauth
+    import api.profiles as profiles
+    import api.streaming as streaming
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    homes = {}
+    for prof, val in profile_values.items():
+        home = base / "profiles" / prof
+        home.mkdir(parents=True)
+        (home / ".env").write_text(f"OPENROUTER_API_KEY={val}\n", encoding="utf-8")
+        homes[prof] = home
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+
+    def fake_get_home(profile_name):
+        name = str(profile_name or "").strip() or "default"
+        if name == "default":
+            return base
+        return homes.get(name, base / "profiles" / name)
+
+    def fake_runtime_env(home):
+        home_str = str(Path(home))
+        for prof, val in profile_values.items():
+            if home_str == str(homes[prof]):
+                return {"OPENROUTER_API_KEY": val}
+        if home_str == str(base):
+            return {"OPENROUTER_API_KEY": "root-value"}
+        return {}
+
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", fake_get_home)
+    monkeypatch.setattr(profiles, "get_profile_runtime_env", fake_runtime_env)
+
+    session = _StreamingFakeSession(
+        session_id="issue6327-stream-session",
+        profile="alpha",
+        workspace=tmp_path,
+        stream_id="issue6327-stream",
+    )
+    stream_id = session.active_stream_id
+
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: session)
+    monkeypatch.setattr(
+        streaming, "_maybe_schedule_title_refresh", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        streaming,
+        "resolve_model_provider",
+        lambda _model, **_kw: ("test-model", "test-provider", None),
+    )
+    monkeypatch.setattr("api.config.get_config", lambda: {})
+    monkeypatch.setattr("api.config._resolve_cli_toolsets", lambda _cfg: [])
+    monkeypatch.setattr("api.config.load_settings", lambda: {})
+    monkeypatch.setattr(
+        oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda _resolver, requested=None: {
+            "provider": requested or "test-provider",
+            "api_key": "synthetic-key",
+            "base_url": None,
+        },
+    )
+
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    fake_runtime_module.resolve_runtime_provider = lambda requested=None: {
+        "provider": requested or "test-provider",
+        "api_key": "synthetic-key",
+        "base_url": None,
+    }
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.runtime_provider = fake_runtime_module
+    fake_hermes_state = types.ModuleType("hermes_state")
+
+    class _FakeSessionDB:
+        def __init__(self, db_path=None):
+            self.db_path = db_path
+
+        def close(self):
+            return None
+
+    fake_hermes_state.SessionDB = _FakeSessionDB
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+    monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
+
+    with cfg.SESSION_AGENT_CACHE_LOCK:
+        cfg.SESSION_AGENT_CACHE.clear()
+    streaming.STREAMS.clear()
+    streaming.CANCEL_FLAGS.clear()
+    streaming.AGENT_INSTANCES.clear()
+    streaming.STREAM_PARTIAL_TEXT.clear()
+    streaming.STREAM_REASONING_TEXT.clear()
+    streaming.STREAM_LIVE_TOOL_CALLS.clear()
+    streaming.STREAMS[stream_id] = queue.Queue()
+
+    return session, stream_id
+
+
+class _StreamingFakeAgent:
+    """Agent stand-in: subclasses implement run_conversation()."""
+
+    def __init__(self, **kwargs):
+        self.session_db = kwargs.get("session_db")
+        self._session_db = self.session_db
+        self.session_prompt_tokens = 0
+        self.session_completion_tokens = 0
+        self.session_estimated_cost_usd = None
+        self.context_compressor = None
+        self._last_error = None
+        self.ephemeral_system_prompt = None
+
+    def run_conversation(self, **kwargs):
+        raise NotImplementedError
+
+    def interrupt(self, _message):
+        return None
+
+
+def _streaming_env_keys():
+    return (
+        "OPENROUTER_API_KEY",
+        "TERMINAL_CWD",
+        "HERMES_EXEC_ASK",
+        "HERMES_SESSION_KEY",
+        "HERMES_SESSION_ID",
+        "HERMES_SESSION_PLATFORM",
+        "HERMES_SESSION_CHAT_ID",
+        "HERMES_HOME",
+    )
+
+
+def _snapshot_streaming_env():
+    return {k: os.environ.get(k) for k in _streaming_env_keys()}
+
+
+def test_streaming_dynamic_env_ownership_blocks_direct_profile_overlap(
+    monkeypatch, tmp_path
+):
+    """DYNAMIC/nonlegacy streaming holds PROCESS for the whole turn (#6327 B1).
+
+    Drives the REAL ``_run_agent_streaming()`` with the context-local
+    override installed and skill modules reporting profile-home support — the
+    branch where the old code skipped ``_PROCESS_ENV_OWNERSHIP_LOCK`` while
+    still installing raw ``os.environ`` for the entire turn.  A direct named
+    background scope started mid-turn must attempt the ownership lock and be
+    blocked until the turn releases it (recording-proxy barrier, no sleeps);
+    raw + TLS resolve the STREAM's alpha profile during the turn; after both
+    scopes complete, the ambient env is restored exactly.
+    """
+    import api.profiles as profiles
+    import api.streaming as streaming
+
+    session, stream_id = _install_streaming_profile_env(
+        monkeypatch, tmp_path, {"alpha": "alpha-value", "beta": "beta-value"}
+    )
+    monkeypatch.setattr(
+        streaming,
+        "_set_streaming_hermes_home_override",
+        lambda home: (_StreamingFakeHomeOverride(), "tok", True),
+    )
+    monkeypatch.setattr(profiles, "_skill_modules_support_profile_home", lambda home: True)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ambient-value")
+
+    entered = threading.Event()
+    release_agent = threading.Event()
+    stream_done = threading.Event()
+    stream_out: dict = {}
+    stream_exc: list[BaseException] = []
+
+    class _Agent(_StreamingFakeAgent):
+        def run_conversation(self, **kwargs):
+            try:
+                stream_out["raw"] = os.environ.get("OPENROUTER_API_KEY")
+                stream_out["tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                entered.set()
+                assert release_agent.wait(10)
+                history = list(kwargs.get("conversation_history") or [])
+                return {
+                    "messages": history
+                    + [
+                        {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                        {"role": "assistant", "content": "ok"},
+                    ]
+                }
+            except BaseException as exc:
+                stream_exc.append(exc)
+                raise
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: _Agent)
+
+    proxy = _AttemptRecordingOwnershipLock(profiles._PROCESS_ENV_OWNERSHIP_LOCK)
+    monkeypatch.setattr(profiles, "_PROCESS_ENV_OWNERSHIP_LOCK", proxy)
+    env_before = _snapshot_streaming_env()
+
+    def stream_runner():
+        try:
+            streaming._run_agent_streaming(
+                session_id=session.session_id,
+                msg_text="hello",
+                model="test-model",
+                model_provider="test-provider",
+                workspace=str(tmp_path),
+                stream_id=stream_id,
+            )
+        except BaseException as exc:
+            stream_exc.append(exc)
+        finally:
+            stream_done.set()
+
+    t_stream = threading.Thread(target=stream_runner)
+    t_stream.start()
+    direct_done = threading.Event()
+    direct_out: dict = {}
+    direct_exc: list[BaseException] = []
+    try:
+        assert entered.wait(15), "streaming turn never entered run_conversation"
+        proxy.arm()
+
+        def direct_worker():
+            try:
+                with profiles.profile_env_for_background_worker("beta", "test"):
+                    direct_out["raw"] = os.environ.get("OPENROUTER_API_KEY")
+                    direct_out["tls"] = config._thread_local_env_value(
+                        "OPENROUTER_API_KEY"
+                    )
+            except BaseException as exc:
+                direct_exc.append(exc)
+            finally:
+                direct_done.set()
+
+        t_direct = threading.Thread(target=direct_worker)
+        t_direct.start()
+        assert proxy.attempted.wait(10), (
+            "direct scope never attempted the ownership lock while streaming ran"
+        )
+        assert not direct_done.is_set(), (
+            "direct profile scope entered while the dynamic streaming turn held the env"
+        )
+        # During the turn both channels resolve the STREAM's alpha profile and
+        # the direct scope could not corrupt the raw channel.
+        assert stream_out["raw"] == "alpha-value"
+        assert stream_out["tls"] == "alpha-value"
+        assert os.environ.get("OPENROUTER_API_KEY") == "alpha-value"
+    finally:
+        release_agent.set()
+    t_stream.join(30)
+    assert not t_stream.is_alive(), "streaming thread deadlocked"
+    t_direct.join(30)
+    assert not t_direct.is_alive(), "direct background thread deadlocked"
+    if stream_exc:
+        raise stream_exc[0]
+    if direct_exc:
+        raise direct_exc[0]
+
+    # After the turn released, the direct scope resolved BETA on both channels.
+    assert direct_out["raw"] == "beta-value"
+    assert direct_out["tls"] == "beta-value"
+    # Ownership lock is free and the ambient env is restored exactly.
+    assert proxy.acquire(blocking=False), "streaming turn leaked the ownership lock"
+    proxy.release()
+    assert _snapshot_streaming_env() == env_before, (
+        "streaming turn left stale raw env behind after teardown"
+    )
+
+
+def test_streaming_checkpoint_no_agent_process_deadlock_normal(
+    monkeypatch, tmp_path
+):
+    """LEGACY streaming + forced checkpoint: no AGENT↔PROCESS deadlock (#6327 B2).
+
+    Real ``_run_agent_streaming()`` on the legacy/static branch (holds
+    PROCESS + SKILL for the whole turn).  While the turn is live, a checkpoint
+    action runs EXACTLY as ``_periodic_checkpoint()`` does — acquire the
+    per-session agent lock, then call the real ``_save_streaming_checkpoint()``.
+    The read-only explicit-profile scope must complete while the turn holds
+    PROCESS (no AGENT → PROCESS edge), then the turn's bounded join and
+    ``with _agent_lock`` finalize must not deadlock; ambient env is restored
+    exactly and no lock is left held.
+    """
+    import api.profiles as profiles
+    import api.streaming as streaming
+
+    session, stream_id = _install_streaming_profile_env(
+        monkeypatch, tmp_path, {"alpha": "alpha-value", "beta": "beta-value"}
+    )
+    # Force the LEGACY/static branch: override installed but skill modules do
+    # not support profile-home resolution (real snapshot/patch run — they are
+    # tolerant of missing modules).
+    monkeypatch.setattr(
+        streaming,
+        "_set_streaming_hermes_home_override",
+        lambda home: (_StreamingFakeHomeOverride(), "tok", True),
+    )
+    monkeypatch.setattr(profiles, "_skill_modules_support_profile_home", lambda home: False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ambient-value")
+
+    entered = threading.Event()
+    release_agent = threading.Event()
+    stream_done = threading.Event()
+    ckpt_done = threading.Event()
+    ckpt_out: dict = {}
+    ckpt_exc: list[BaseException] = []
+    stream_exc: list[BaseException] = []
+
+    class _Agent(_StreamingFakeAgent):
+        def run_conversation(self, **kwargs):
+            entered.set()
+
+            def checkpoint_action():
+                try:
+                    # Identical schedule to _periodic_checkpoint(): hold the
+                    # per-session agent lock, then save the checkpoint.  The
+                    # save must NOT wait on the turn's PROCESS ownership.
+                    with streaming._get_session_agent_lock(session.session_id):
+                        ckpt_out["raw_before"] = os.environ.get("OPENROUTER_API_KEY")
+                        streaming._save_streaming_checkpoint(session)
+                        # The read-only scope restored this fresh thread's
+                        # thread-local env on exit (no TLS residue).
+                        ckpt_out["thread_env_after"] = getattr(
+                            config._thread_ctx, "env", None
+                        )
+                except BaseException as exc:
+                    ckpt_exc.append(exc)
+                finally:
+                    ckpt_done.set()
+
+            threading.Thread(target=checkpoint_action, daemon=True).start()
+            assert ckpt_done.wait(10), (
+                "checkpoint save deadlocked on the streaming turn's PROCESS lock"
+            )
+            assert ckpt_out["raw_before"] == "alpha-value"
+            assert release_agent.wait(10)
+            history = list(kwargs.get("conversation_history") or [])
+            return {
+                "messages": history
+                + [
+                    {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                    {"role": "assistant", "content": "ok"},
+                ]
+            }
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: _Agent)
+    env_before = _snapshot_streaming_env()
+
+    def stream_runner():
+        try:
+            streaming._run_agent_streaming(
+                session_id=session.session_id,
+                msg_text="hello",
+                model="test-model",
+                model_provider="test-provider",
+                workspace=str(tmp_path),
+                stream_id=stream_id,
+            )
+        except BaseException as exc:
+            stream_exc.append(exc)
+        finally:
+            stream_done.set()
+
+    t_stream = threading.Thread(target=stream_runner)
+    t_stream.start()
+    assert entered.wait(15), "streaming turn never entered run_conversation"
+    release_agent.set()
+    t_stream.join(30)
+    assert not t_stream.is_alive(), (
+        "streaming thread deadlocked on the checkpoint join / session lock"
+    )
+    if stream_exc:
+        raise stream_exc[0]
+    if ckpt_exc:
+        raise ckpt_exc[0]
+    assert ckpt_done.is_set(), "checkpoint never completed"
+    # The read-only scope restored the (empty) thread env on the ckpt thread.
+    assert ckpt_out["thread_env_after"] == {}
+    # No lock left held; ambient env restored exactly.
+    assert profiles._PROCESS_ENV_OWNERSHIP_LOCK.acquire(blocking=False), (
+        "streaming turn leaked the ownership lock"
+    )
+    profiles._PROCESS_ENV_OWNERSHIP_LOCK.release()
+    assert _snapshot_streaming_env() == env_before, (
+        "streaming turn left stale raw env behind after teardown"
+    )
+
+
+def test_streaming_checkpoint_no_agent_process_deadlock_cancel_exception(
+    monkeypatch, tmp_path
+):
+    """LEGACY streaming + forced checkpoint on the cancel/exception path (#6327 B2).
+
+    Same real-turn composition as the normal-path test, but the agent sets the
+    stream's cancel event and RAISES mid-turn (with a checkpoint already
+    completed under the session agent lock).  The exception handler's bounded
+    join + ``with _agent_lock`` finalize must settle without deadlock, and the
+    ambient env must be restored exactly.
+    """
+    import api.profiles as profiles
+    import api.streaming as streaming
+
+    session, stream_id = _install_streaming_profile_env(
+        monkeypatch, tmp_path, {"alpha": "alpha-value", "beta": "beta-value"}
+    )
+    monkeypatch.setattr(
+        streaming,
+        "_set_streaming_hermes_home_override",
+        lambda home: (_StreamingFakeHomeOverride(), "tok", True),
+    )
+    monkeypatch.setattr(profiles, "_skill_modules_support_profile_home", lambda home: False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ambient-value")
+    # The cancel/exception unwind appends journal events + persists the
+    # cancelled turn; those are orthogonal to the lock schedule under test.
+    monkeypatch.setattr(streaming, "append_turn_journal_event_for_stream", lambda *a, **k: None)
+    monkeypatch.setattr(streaming, "_finalize_cancelled_turn", lambda *a, **k: None)
+
+    entered = threading.Event()
+    stream_done = threading.Event()
+    ckpt_done = threading.Event()
+    ckpt_exc: list[BaseException] = []
+    stream_exc: list[BaseException] = []
+
+    class _Agent(_StreamingFakeAgent):
+        def run_conversation(self, **kwargs):
+            entered.set()
+
+            def checkpoint_action():
+                try:
+                    with streaming._get_session_agent_lock(session.session_id):
+                        streaming._save_streaming_checkpoint(session)
+                except BaseException as exc:
+                    ckpt_exc.append(exc)
+                finally:
+                    ckpt_done.set()
+
+            threading.Thread(target=checkpoint_action, daemon=True).start()
+            assert ckpt_done.wait(10), (
+                "checkpoint save deadlocked on the streaming turn's PROCESS lock"
+            )
+            # Cancel + raise mid-turn: the exception handler must join the
+            # (already finished) checkpoint thread and take the session lock.
+            cancel_event = streaming.CANCEL_FLAGS.get(stream_id)
+            assert cancel_event is not None
+            cancel_event.set()
+            raise RuntimeError("simulated provider failure")
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: _Agent)
+    env_before = _snapshot_streaming_env()
+
+    def stream_runner():
+        try:
+            streaming._run_agent_streaming(
+                session_id=session.session_id,
+                msg_text="hello",
+                model="test-model",
+                model_provider="test-provider",
+                workspace=str(tmp_path),
+                stream_id=stream_id,
+            )
+        except BaseException as exc:
+            stream_exc.append(exc)
+        finally:
+            stream_done.set()
+
+    t_stream = threading.Thread(target=stream_runner)
+    t_stream.start()
+    assert entered.wait(15), "streaming turn never entered run_conversation"
+    t_stream.join(30)
+    assert not t_stream.is_alive(), (
+        "streaming thread deadlocked on the cancel/exception unwind"
+    )
+    if stream_exc:
+        raise stream_exc[0]
+    if ckpt_exc:
+        raise ckpt_exc[0]
+    assert ckpt_done.is_set(), "checkpoint never completed"
+    # No lock left held; ambient env restored exactly.
+    assert profiles._PROCESS_ENV_OWNERSHIP_LOCK.acquire(blocking=False), (
+        "streaming turn leaked the ownership lock"
+    )
+    profiles._PROCESS_ENV_OWNERSHIP_LOCK.release()
+    assert _snapshot_streaming_env() == env_before, (
+        "streaming turn left stale raw env behind after teardown"
+    )

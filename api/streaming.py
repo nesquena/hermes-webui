@@ -5470,14 +5470,22 @@ def _strip_stale_user_merge_from_messages(
 
 
 def _save_streaming_checkpoint(session):
-    """Persist a streaming checkpoint under the session's profile context."""
+    """Persist a streaming checkpoint under the session's profile context.
+
+    #6327: uses the READ-ONLY explicit-profile scope (thread/context-local
+    only — it never mirrors ``os.environ``, so it never takes the shared
+    ``_PROCESS_ENV_OWNERSHIP_LOCK``).  The periodic checkpoint thread runs
+    under the per-session agent lock; entering the process-env ownership
+    protocol here would invert the global lock order (AGENT -> PROCESS) and
+    deadlock against the streaming turn's bounded join, which holds PROCESS
+    for the whole turn and needs the same session lock to finalize.
+    """
     from api import profiles as profiles_api
 
-    with profiles_api.profile_env_for_background_worker(
+    with profiles_api.profile_env_for_background_worker_readonly(
         session,
         "streaming checkpoint",
         logger_override=logger,
-        scope_skill_modules=False,
     ):
         session.save(skip_index=True)
 
@@ -7558,11 +7566,13 @@ def _run_agent_streaming(
     _streaming_skill_home_snapshot = None
     _restore_streaming_skill_home_modules = False
     _acquired_streaming_skill_home_patch_lock = False
-    # #6327: the legacy/static full-turn block also holds the shared
-    # process-env ownership lock (acquired BEFORE the skill-module patch lock
-    # per the single global lock order) so the mid-turn detached/profile scope
-    # re-enters it on the same thread and background scopes can never form an
-    # AB/BA cycle with this turn.
+    # #6327: the streaming turn holds the shared process-env ownership lock
+    # for the ENTIRE turn — it mirrors raw os.environ unconditionally, and
+    # the lock is acquired BEFORE any snapshot/mutation (and before the
+    # legacy/static skill-module patch lock per the single global lock
+    # order) so concurrent direct/active/detached profile scopes can never
+    # observe a half-installed env, and the mid-turn detached/profile scope
+    # re-enters it on the same thread without an AB/BA cycle.
     _acquired_streaming_process_env_lock = False
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
@@ -7739,21 +7749,30 @@ def _run_agent_streaming(
                     )
                     _streaming_modules_are_dynamic = False
 
+            # #6327: enforce ONE global lock order
+            # (_PROCESS_ENV_OWNERSHIP_LOCK -> optional _SKILL_HOME_MODULE_PATCH_LOCK
+            # -> _ENV_LOCK) across every process-env-mirroring entrypoint.
+            # This turn snapshots and mutates raw os.environ UNCONDITIONALLY
+            # (snapshot below, restore in the outer finally), so the shared
+            # process-env ownership lock is taken BEFORE any snapshot or
+            # mutation of the raw env — not only in the legacy/static
+            # skill-module block.  Otherwise, on the dynamic/nonlegacy branch,
+            # a direct named/root profile scope could run concurrently while
+            # this turn's env is installed: both threads would observe the
+            # wrong profile on the raw channel, and the reversed restoration
+            # order would leave stale values behind.
+            if _PROCESS_ENV_OWNERSHIP_LOCK is not None:
+                _PROCESS_ENV_OWNERSHIP_LOCK.acquire()
+                _acquired_streaming_process_env_lock = True
             if not (_streaming_override_installed and _streaming_modules_are_dynamic):
                 _restore_streaming_skill_home_modules = True
-                # #6327: enforce ONE global lock order
-                # (_PROCESS_ENV_OWNERSHIP_LOCK -> _SKILL_HOME_MODULE_PATCH_LOCK
-                # -> _ENV_LOCK) across every process-env-mirroring entrypoint.
-                # This full-turn legacy/static block must take the shared
-                # process-env ownership lock BEFORE the skill-module patch
-                # lock: the turn later re-enters profile_scope_for_detached_worker()
-                # (a full-body PROCESS holder) for model resolution, and direct
+                # The legacy/static full-turn block takes the skill-module
+                # patch lock BELOW the ownership lock (global order): the turn
+                # later re-enters profile_scope_for_detached_worker() (a
+                # full-body PROCESS holder) for model resolution, and direct
                 # background scopes hold PROCESS while waiting for SKILL —
                 # acquiring SKILL first would create the cross-thread AB/BA
                 # cycle the ownership protocol exists to rule out.
-                if _PROCESS_ENV_OWNERSHIP_LOCK is not None:
-                    _PROCESS_ENV_OWNERSHIP_LOCK.acquire()
-                    _acquired_streaming_process_env_lock = True
                 _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
                 _acquired_streaming_skill_home_patch_lock = True
 
