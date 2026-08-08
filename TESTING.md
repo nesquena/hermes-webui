@@ -91,6 +91,23 @@ environment before launching the server, needs no secrets, and does not drive a
 real model (it verifies the app *loads and initializes* cleanly — the brick class
 that breaks the page for everyone).
 
+## Repeat notification ownership gate (#6673)
+
+`tests/browser_issue6673_service_worker.py` serves the real build, waits for the
+service worker to activate, and uses two controlled pages. Submit one
+`(streamId, lastEventId)` concurrently from both pages, then submit the next
+distinct identity. Reload one page and replay the first identity; the first two
+identities must each have one owner, the replay must be a duplicate, and the
+notification data URL must remain same-origin and in scope.
+
+```bash
+python tests/browser_issue6673_service_worker.py
+```
+
+The test requires Playwright and Chromium. An unavailable browser environment is
+an un-reached proof gate, not a passing result. The visible Windows toast and
+Action Center presentation remain manual browser-owner checks.
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic

@@ -39,10 +39,18 @@ def test_notification_payload_uses_completion_session_when_provided():
     assert "tag:sid?`hermes-${sid}`" in MESSAGES_JS
     assert "function _completionNotificationPreviewText" in MESSAGES_JS
     assert "_completionNotificationPreviewText(lastAsst," in MESSAGES_JS
-    assert "sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid})" in MESSAGES_JS
+    assert "function _captureNotificationEventIdentity(streamId,event)" in MESSAGES_JS
+    assert "function _sendStreamNotification(title,body,eventIdentity,options={})" in MESSAGES_JS
+    approval = _source_between("source.addEventListener('approval'", "source.addEventListener('clarify'")
+    clarify = _source_between("source.addEventListener('clarify'", "source.addEventListener('state_saved'")
+    done = _source_between("source.addEventListener('done'", "source.addEventListener('stream_end'")
+    assert "_captureNotificationEventIdentity(streamId,e)" in approval
+    assert "_captureNotificationEventIdentity(streamId,e)" in clarify
+    assert "const _doneNotificationIdentity=_captureNotificationEventIdentity(streamId,_doneEvent);" in done
+    assert "_sendStreamNotification(" in done
+    assert "_doneNotificationIdentity" in done
     assert "assistantText?assistantText.slice(0,100)" not in MESSAGES_JS
-    assert "sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid})" in MESSAGES_JS
-    assert "sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid})" in MESSAGES_JS
+    assert "eventIdentity" in MESSAGES_JS
 
 
 def test_completion_notification_preview_uses_settled_message_not_live_prefix():
@@ -115,6 +123,15 @@ def test_service_worker_handles_notification_clicks_without_hijacking_other_sess
     open_idx = SW_JS.index("self.clients.openWindow(targetUrl)")
     navigate_idx = SW_JS.index("focusableClient.navigate(targetUrl)")
     assert exact_idx < open_idx < navigate_idx
+
+
+def test_claim_options_are_same_origin_and_in_scope_without_changing_click_routing():
+    assert "function normalizeClaimUrl(value)" in SW_JS
+    assert "targetUrl.origin !== self.location.origin" in SW_JS
+    assert "!targetUrl.pathname.startsWith(scopePath)" in SW_JS
+    assert "data: {url}" in SW_JS
+    assert "self.addEventListener('notificationclick'" in SW_JS
+    assert "samePath(client.url)" in SW_JS
 
 
 def test_settings_expose_permission_and_test_controls():

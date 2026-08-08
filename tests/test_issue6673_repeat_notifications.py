@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,12 @@ FIXTURE = json.loads(
     ),
 )
 NODE = shutil.which("node")
+
+
+def _notification_helper_source() -> str:
+    start = MESSAGES_JS.index("function _notificationOptions")
+    end = MESSAGES_JS.index("function requestNotificationPermission", start)
+    return MESSAGES_JS[start:end]
 
 
 def _run_node(script: str) -> dict:
@@ -58,7 +65,7 @@ def _driver(
     permission: str = "granted",
     via_public_sender: bool = False,
 ) -> dict:
-    notification_options = extract_function(MESSAGES_JS, "_notificationOptions")
+    notification_options = _notification_helper_source()
     show_notification = extract_function(MESSAGES_JS, "_showPwaNotification")
     request_permission = extract_function(MESSAGES_JS, "requestNotificationPermission")
     send_notification = extract_function(MESSAGES_JS, "sendBrowserNotification")
@@ -177,6 +184,323 @@ globalThis.t = key => key;
 def _send(title: str, body: str, *, sid: str | None = FIXTURE["sid"]) -> dict:
     options = {} if sid is None else {"sid": sid}
     return {"title": title, "body": body, "options": options}
+
+
+def _two_subscriber_driver(*, worker_response: str = "shown") -> dict:
+    notification_options = _notification_helper_source()
+    show_notification = extract_function(MESSAGES_JS, "_showPwaNotification")
+    request_permission = extract_function(MESSAGES_JS, "requestNotificationPermission")
+    send_notification = extract_function(MESSAGES_JS, "sendBrowserNotification")
+    page_source = json.dumps(
+        "\n".join(
+            [notification_options, show_notification, request_permission, send_notification],
+        ),
+    )
+    script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+        const attempts = [];
+        const claims = new Set();
+        const entries = new Map();
+        let directFallbacks = 0;
+        const workerResponse = {json.dumps(worker_response)};
+
+        function recordNative(title, options, identity) {{
+          attempts.push({{title, options, identity}});
+          const existing = entries.has(options.tag);
+          entries.set(options.tag, {{title, options}});
+          return {{existing, renotify: options.renotify}};
+        }}
+
+        const worker = {{
+          showNotification(title, options) {{
+            recordNative(title, options, null);
+            return Promise.resolve();
+          }},
+          postMessage(message, transfer) {{
+            const port = transfer && transfer[0];
+            if (!port || message.type !== 'hermes.notification.claim') return;
+            const identity = message.identity;
+            const key = JSON.stringify([identity.streamId, identity.lastEventId]);
+            if (claims.has(key)) {{
+              port.postMessage({{status: 'duplicate'}});
+              return;
+            }}
+            claims.add(key);
+            if (workerResponse === 'fallback-owner') {{
+              port.postMessage({{status: 'fallback-owner'}});
+              return;
+            }}
+            if (workerResponse === 'ambiguous') {{
+              port.postMessage({{status: 'ambiguous'}});
+              return;
+            }}
+            recordNative(message.title, message.options, identity);
+            port.postMessage({{status: 'shown'}});
+          }},
+        }};
+
+        class Port {{
+          constructor() {{ this.peer = null; this.onmessage = null; }}
+          postMessage(data) {{
+            const peer = this.peer;
+            queueMicrotask(() => {{
+              if (peer && typeof peer.onmessage === 'function') peer.onmessage({{data}});
+            }});
+          }}
+          close() {{}}
+          start() {{}}
+        }}
+        class MessageChannel {{
+          constructor() {{
+            this.port1 = new Port();
+            this.port2 = new Port();
+            this.port1.peer = this.port2;
+            this.port2.peer = this.port1;
+          }}
+        }}
+
+        function makePage() {{
+          const registration = {{
+            active: worker,
+            showNotification: (title, options) => worker.showNotification(title, options),
+          }};
+          const context = {{
+            Promise, MessageChannel, queueMicrotask, setTimeout, clearTimeout,
+            navigator: {{serviceWorker: {{getRegistration: () => Promise.resolve(registration)}}}},
+            location: {{origin: 'https://webui.test', href: 'https://webui.test/'}},
+            S: {{session: {{}}}},
+            _sessionUrlForSid: sid => '/?session=' + encodeURIComponent(sid),
+            assistantDisplayName: () => 'Hermes',
+            window: {{_notificationsEnabled: true}},
+            _isBackgroundedForBrowserNotification: () => true,
+            showToast: () => {{}},
+            t: key => key,
+            Notification: function(title, options) {{
+              directFallbacks += 1;
+              recordNative(title, options, null);
+              return {{}};
+            }},
+          }};
+          context.Notification.permission = 'granted';
+          context.window.Notification = context.Notification;
+          vm.runInNewContext({page_source}, context);
+          return async function send(identity) {{
+            await context.sendBrowserNotification(
+              'Response complete',
+              'The task finished.',
+              {{sid: '{FIXTURE['sid']}', forceHidden: true, eventIdentity: identity}},
+            );
+          }};
+        }}
+
+        (async () => {{
+          const pageA = makePage();
+          const pageB = makePage();
+          const first = {{streamId: 'stream-6673', lastEventId: 'stream-6673:1'}};
+          const second = {{streamId: 'stream-6673', lastEventId: 'stream-6673:2'}};
+          await Promise.all([pageA(first), pageB(first)]);
+          await Promise.all([pageA(second), pageB(second)]);
+          console.log(JSON.stringify({{
+            attempts: attempts.length,
+            attemptsByIdentity: attempts.map(item => item.identity),
+            directFallbacks,
+            tags: [...entries.keys()],
+            claims: [...claims],
+          }}));
+        }})().catch(error => {{
+          console.error(error.stack || error);
+          process.exitCode = 1;
+        }});
+        """,
+    )
+    return _run_node(script)
+
+
+def _keyed_edge_driver(
+    *,
+    worker_response: str = "shown",
+    permission: str = "granted",
+    backgrounded: bool = True,
+) -> dict:
+    notification_options = _notification_helper_source()
+    show_notification = extract_function(MESSAGES_JS, "_showPwaNotification")
+    request_permission = extract_function(MESSAGES_JS, "requestNotificationPermission")
+    send_notification = extract_function(MESSAGES_JS, "sendBrowserNotification")
+    script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+        const workerResponse = {json.dumps(worker_response)};
+        const permission = {json.dumps(permission)};
+        const permissionResult = permission === 'default' ? 'granted' : permission;
+        const trace = [];
+        let claimAttempts = 0;
+        let directFallbacks = 0;
+
+        class Port {{
+          constructor() {{ this.peer = null; this.onmessage = null; }}
+          postMessage(data) {{
+            const peer = this.peer;
+            queueMicrotask(() => peer?.onmessage?.({{data}}));
+          }}
+          close() {{}}
+          start() {{}}
+        }}
+        class MessageChannel {{
+          constructor() {{
+            this.port1 = new Port();
+            this.port2 = new Port();
+            this.port1.peer = this.port2;
+            this.port2.peer = this.port1;
+          }}
+        }}
+
+        const worker = {{
+          postMessage(message, transfer) {{
+            claimAttempts += 1;
+            trace.push('claim');
+            const port = transfer && transfer[0];
+            if (!port || workerResponse === 'timeout') return;
+            const status = workerResponse === 'unknown' ? 'mystery' : workerResponse;
+            port.postMessage({{status}});
+          }},
+        }};
+        let navigator;
+        if (workerResponse === 'missing') {{
+          navigator = {{}};
+        }} else {{
+          navigator = {{
+            serviceWorker: {{
+              getRegistration: () => Promise.resolve({{
+                active: workerResponse === 'inactive' ? null : worker,
+              }}),
+            }},
+          }};
+        }}
+
+        const context = {{
+          Promise, MessageChannel, queueMicrotask, setTimeout, clearTimeout,
+          navigator,
+          location: {{origin: 'https://webui.test', href: 'https://webui.test/'}},
+          S: {{session: {{}}}},
+          _sessionUrlForSid: sid => '/?session=' + encodeURIComponent(sid),
+          assistantDisplayName: () => 'Hermes',
+          window: {{_notificationsEnabled: true}},
+          _isBackgroundedForBrowserNotification: () => {json.dumps(backgrounded)},
+          showToast: () => {{}},
+          t: key => key,
+          Notification: function() {{ directFallbacks += 1; return {{}}; }},
+        }};
+        context.Notification.permission = permission;
+        context.Notification.requestPermission = () => {{
+          trace.push('permission');
+          return Promise.resolve(permissionResult);
+        }};
+        context.window.Notification = context.Notification;
+        vm.runInNewContext(
+          {json.dumps(notification_options + show_notification + request_permission + send_notification)},
+          context,
+        );
+
+        (async () => {{
+          const result = await context.sendBrowserNotification(
+            'Response complete',
+            'The task finished.',
+            {{sid: '{FIXTURE['sid']}', forceHidden: {json.dumps(backgrounded)}, eventIdentity: {{streamId: 'stream-6673', lastEventId: 'stream-6673:edge'}}}},
+          );
+          console.log(JSON.stringify({{
+            result: result === undefined ? 'undefined' : result,
+            claimAttempts,
+            directFallbacks,
+            trace,
+          }}));
+        }})().catch(error => {{
+          console.error(error.stack || error);
+          process.exitCode = 1;
+        }});
+        """,
+    )
+    return _run_node(script)
+
+
+def test_one_event_alerts_once_across_two_background_subscribers():
+    result = _two_subscriber_driver()
+
+    assert result["attempts"] == 2, (
+        "one owner per distinct SSE identity is required across two subscribers; "
+        f"observed {result}"
+    )
+    assert [item["lastEventId"] for item in result["attemptsByIdentity"]] == [
+        "stream-6673:1",
+        "stream-6673:2",
+    ]
+    assert result["tags"] == [FIXTURE["expected_tag"]]
+
+
+def test_next_distinct_event_alerts_again_across_two_subscribers():
+    result = _two_subscriber_driver()
+
+    assert [item["lastEventId"] for item in result["attemptsByIdentity"]] == [
+        "stream-6673:1",
+        "stream-6673:2",
+    ]
+    assert result["claims"] == [
+        '["stream-6673","stream-6673:1"]',
+        '["stream-6673","stream-6673:2"]',
+    ]
+    assert result["tags"] == [FIXTURE["expected_tag"]]
+
+
+def test_claim_owner_alone_uses_direct_fallback_after_worker_rejection():
+    result = _two_subscriber_driver(worker_response="fallback-owner")
+
+    assert result["directFallbacks"] == 2
+
+
+def test_ambiguous_keyed_delivery_fails_closed_without_direct_fallback():
+    result = _two_subscriber_driver(worker_response="ambiguous")
+
+    assert result["directFallbacks"] == 0
+
+
+def test_visible_tab_does_not_claim_an_ineligible_keyed_event():
+    result = _keyed_edge_driver(backgrounded=False)
+
+    assert result == {
+        "result": "undefined",
+        "claimAttempts": 0,
+        "directFallbacks": 0,
+        "trace": [],
+    }
+
+
+@pytest.mark.parametrize("worker_response", ["inactive", "missing"])
+def test_keyed_delivery_fails_closed_without_a_worker(worker_response: str):
+    result = _keyed_edge_driver(worker_response=worker_response)
+
+    assert result["result"] == "unavailable"
+    assert result["claimAttempts"] == 0
+    assert result["directFallbacks"] == 0
+
+
+@pytest.mark.parametrize("worker_response", ["timeout", "unknown"])
+def test_keyed_delivery_fails_closed_on_lost_or_unknown_worker_response(worker_response: str):
+    result = _keyed_edge_driver(worker_response=worker_response)
+
+    assert result["result"] == "ambiguous"
+    assert result["claimAttempts"] == 1
+    assert result["directFallbacks"] == 0
+
+
+def test_keyed_permission_is_resolved_before_claim_and_denial_blocks_claim():
+    granted = _keyed_edge_driver(permission="default")
+    denied = _keyed_edge_driver(permission="denied")
+
+    assert granted["trace"] == ["permission", "claim"]
+    assert granted["result"] == "shown"
+    assert denied["trace"] == []
+    assert denied["result"] == "undefined"
+    assert denied["claimAttempts"] == 0
 
 
 def test_public_sender_repeats_same_session_toast_with_stable_tag():

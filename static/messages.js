@@ -5920,7 +5920,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('approval',d,e);
       showApprovalForSession(activeSid, d, d.pending_count || 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
-      sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid});
+      _sendStreamNotification(
+        'Approval required',
+        d.description||'Tool approval needed',
+        _captureNotificationEventIdentity(streamId,e),
+        {sid:activeSid},
+      );
     });
 
     source.addEventListener('clarify',e=>{
@@ -5928,7 +5933,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
-      sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid});
+      _sendStreamNotification(
+        'Clarification needed',
+        d.question||'Tool clarification needed',
+        _captureNotificationEventIdentity(streamId,e),
+        {sid:activeSid},
+      );
     });
 
     source.addEventListener('state_saved',e=>{
@@ -6066,6 +6076,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _cancelThrottledSnapshotTimer();
       const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
+      const _doneNotificationIdentity=_captureNotificationEventIdentity(streamId,_doneEvent);
       const _finishDone=()=>{
         // Bug A fix: cancel any pending rAF and mark stream finalized before
         // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
@@ -6357,7 +6368,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           sessionId:completedSid,
           liveDisplayText:typeof _streamDisplay==='function'?_streamDisplay():assistantText,
         });
-        sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
+        _sendStreamNotification(
+          'Response complete',
+          _completionPreview||'Task finished',
+          _doneNotificationIdentity,
+          {forceHidden:_wasEverBackgrounded,sid:activeSid},
+        );
       };
       if(_shouldUseLiveProseFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
@@ -9100,10 +9116,74 @@ function _notificationOptions(body,options={}){
   const url=sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href;
   return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
 }
+const _NOTIFICATION_IDENTITY_MAX_LENGTH=512;
+function _captureNotificationEventIdentity(streamId,event){
+  return {streamId,lastEventId:event&&event.lastEventId};
+}
+function _sendStreamNotification(title,body,eventIdentity,options={}){
+  return sendBrowserNotification(title,body,{...options,eventIdentity});
+}
+function _hasNotificationIdentity(options){
+  return !!options&&Object.prototype.hasOwnProperty.call(options,'eventIdentity');
+}
+function _isValidNotificationIdentity(identity){
+  return !!identity&&typeof identity==='object'&&!Array.isArray(identity)&&
+    typeof identity.streamId==='string'&&identity.streamId.length>0&&
+    identity.streamId.length<=_NOTIFICATION_IDENTITY_MAX_LENGTH&&
+    typeof identity.lastEventId==='string'&&identity.lastEventId.length>0&&
+    identity.lastEventId.length<=_NOTIFICATION_IDENTITY_MAX_LENGTH;
+}
+function _claimAndShowNotification(active,title,opts,identity,direct){
+  if(typeof MessageChannel!=='function') return Promise.resolve('unavailable');
+  return new Promise(resolve=>{
+    let settled=false;
+    let timer=null;
+    let channel;
+    const finish=status=>{
+      if(settled)return;
+      settled=true;
+      if(timer)clearTimeout(timer);
+      try{if(channel&&channel.port1)channel.port1.close();}catch(_){ }
+      resolve(status);
+    };
+    try{
+      channel=new MessageChannel();
+      if(!channel.port1||!channel.port2||typeof active.postMessage!=='function'){
+        finish('unavailable');
+        return;
+      }
+      channel.port1.onmessage=event=>{
+        const status=event&&event.data&&event.data.status;
+        if(status==='shown'||status==='duplicate'){
+          finish(status);
+          return;
+        }
+        if(status==='fallback-owner'){
+          try{direct();finish(status);}catch(_){finish('ambiguous');}
+          return;
+        }
+        finish('ambiguous');
+      };
+      if(typeof channel.port1.start==='function')channel.port1.start();
+      timer=setTimeout(()=>finish('ambiguous'),2000);
+      active.postMessage({
+        type:'hermes.notification.claim',
+        title,
+        options:opts,
+        identity,
+      },[channel.port2]);
+    }catch(_){
+      finish('ambiguous');
+    }
+  });
+}
 function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();
   const opts=_notificationOptions(body,options);
   const direct=()=>new Notification(title||botName,opts);
+  const identityBearing=_hasNotificationIdentity(options);
+  const identity=options&&options.eventIdentity;
+  if(identityBearing&&!_isValidNotificationIdentity(identity)) return Promise.resolve('invalid');
   // Prefer the service worker (the only path that works in a standalone PWA,
   // notably iOS). Use getRegistration() + a short timeout race rather than
   // navigator.serviceWorker.ready, because `.ready` NEVER settles when no
@@ -9115,11 +9195,17 @@ function _showPwaNotification(title,body,options={}){
       navigator.serviceWorker.getRegistration().catch(()=>null),
       new Promise(res=>setTimeout(()=>res(null),2000))
     ]);
-    return reg$.then(reg=>(reg&&reg.active&&reg.showNotification)
-      ? reg.showNotification(title||botName,opts)
-      : direct());
+    return reg$.then(reg=>{
+      if(identityBearing){
+        if(!reg||!reg.active)return 'unavailable';
+        return _claimAndShowNotification(reg.active,title||botName,opts,identity,direct);
+      }
+      return (reg&&reg.active&&reg.showNotification)
+        ? reg.showNotification(title||botName,opts)
+        : direct();
+    }).catch(()=>identityBearing?'ambiguous':direct());
   }
-  return Promise.resolve(direct());
+  return identityBearing?Promise.resolve('unavailable'):Promise.resolve(direct());
 }
 function requestNotificationPermission(){
   if(!('Notification' in window)){
@@ -9145,6 +9231,7 @@ function requestNotificationPermission(){
 }
 function sendBrowserNotification(title,body,options={}){
   const force=!!(options&&options.force);
+  const identityBearing=!!options&&Object.prototype.hasOwnProperty.call(options,'eventIdentity');
   // #4416: `forceHidden` means the caller already determined the tab was hidden
   // during the relevant window (e.g. a stream that ran while backgrounded), so
   // the live `document.hidden` visibility gate — which a late, throttled SSE
@@ -9156,12 +9243,21 @@ function sendBrowserNotification(title,body,options={}){
   if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return;
   if(!('Notification' in window)) return;
   if(Notification.permission==='granted'){
-    return _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
+    const delivery=_showPwaNotification(title,body,options);
+    return identityBearing
+      ? Promise.resolve(delivery).catch(()=> 'ambiguous')
+      : delivery.catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
   }else if(Notification.permission==='denied'){
     // Explicit "Send test" (force) deserves feedback instead of a silent no-op.
     if(force&&typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
   }else{
-    return requestNotificationPermission().then(p=>{if(p==='granted') return _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});});
+    return requestNotificationPermission().then(p=>{
+      if(p!=='granted')return;
+      const delivery=_showPwaNotification(title,body,options);
+      return identityBearing
+        ? Promise.resolve(delivery).catch(()=> 'ambiguous')
+        : delivery.catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
+    });
   }
 }
 
