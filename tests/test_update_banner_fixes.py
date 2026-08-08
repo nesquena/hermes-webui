@@ -28,6 +28,11 @@ import pytest
 
 REPO = pathlib.Path(__file__).parent.parent
 
+# Capture original _schedule_restart before any fixture patches the module attribute.
+# TestScheduleRestart tests that exercise the real function restore it via per-test monkeypatch.
+import api.updates as _upd_capture
+_REAL_SCHEDULE_RESTART = _upd_capture._schedule_restart
+
 
 def read(rel):
     return (REPO / rel).read_text(encoding='utf-8')
@@ -80,6 +85,33 @@ def _stub_pycache_purge(monkeypatch):
     """
     import api.updates as upd
     monkeypatch.setattr(upd, "_purge_agent_pycache", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _block_real_subprocess_and_restart(monkeypatch):
+    """Block _schedule_restart at module level.
+
+    On Windows os.execv does not replace the current process; instead it
+    creates a new child that outlives pytest, flooding the process table.
+    Any test that reaches _schedule_restart without an explicit per-test stub
+    would trigger this. Tests in TestScheduleRestart that exercise the real
+    function restore it via monkeypatch.setattr(upd, '_schedule_restart',
+    _REAL_SCHEDULE_RESTART) before calling it.
+
+    Note: subprocess.run and subprocess.Popen are NOT patched here because
+    api.updates.subprocess is the shared subprocess module; patching it would
+    block the Node.js harness calls (subprocess.run(['node', ...])) that the
+    test helpers use. Gate those paths by patching _run_git in tests that need
+    git isolation (as the existing tests already do via monkeypatch).
+    """
+    import api.updates as upd
+
+    def _guard_restart(*args, **kwargs):
+        raise AssertionError(
+            "_schedule_restart reached without a test-level stub — would spawn a new process on Windows"
+        )
+
+    monkeypatch.setattr(upd, "_schedule_restart", _guard_restart)
 
 
 def _extract_summary_cache_js():
@@ -439,11 +471,11 @@ class TestScheduleRestart:
 
         # Monkeypatch os.execv inside the module's thread closure
         import os as _os
-        original_execv = _os.execv
-
         monkeypatch.setattr(sys, 'platform', 'linux')
         monkeypatch.setattr(upd, '_wait_until_restart_safe', lambda *a, **k: {'restart_blocked': False})
         monkeypatch.setattr(_os, 'execv', fake_execv)
+        # Restore the real function; the autouse guard blocks it by default.
+        monkeypatch.setattr(upd, '_schedule_restart', _REAL_SCHEDULE_RESTART)
 
         start = time.monotonic()
         upd._schedule_restart(delay=0.05)
@@ -477,6 +509,8 @@ class TestScheduleRestart:
         monkeypatch.setattr(upd, '_wait_until_restart_safe', lambda *a, **k: {'restart_blocked': False})
         monkeypatch.setattr(upd, "_purge_agent_pycache", spy_purge)
         monkeypatch.setattr(os, "execv", fake_execv)
+        # Restore the real function; the autouse guard blocks it by default.
+        monkeypatch.setattr(upd, '_schedule_restart', _REAL_SCHEDULE_RESTART)
 
         upd._schedule_restart(delay=0.05)
         time.sleep(0.3)
@@ -1666,8 +1700,8 @@ class TestUpdateSummaryRouteModelSelection:
         captured = {}
         profile_home = tmp_path / 'profiles' / 'work'
         fake_skill_module = types.ModuleType('tools.skills_tool')
-        setattr(fake_skill_module, 'HERMES_HOME', 'default-home')
-        setattr(fake_skill_module, 'SKILLS_DIR', 'default-home/skills')
+        fake_skill_module.HERMES_HOME = 'default-home'
+        fake_skill_module.SKILLS_DIR = 'default-home/skills'
         monkeypatch.setitem(sys.modules, 'tools.skills_tool', fake_skill_module)
 
         monkeypatch.setattr(profiles, 'get_hermes_home_for_profile', lambda profile: profile_home)
@@ -1726,8 +1760,8 @@ class TestUpdateSummaryRouteModelSelection:
                 'HERMES_TEST_PROFILE_ENV': os.environ.get('HERMES_TEST_PROFILE_ENV'),
                 'THREAD_HERMES_HOME': thread_env.get('HERMES_HOME'),
                 'THREAD_HERMES_TEST_PROFILE_ENV': thread_env.get('HERMES_TEST_PROFILE_ENV'),
-                'SKILL_MODULE_HOME': getattr(fake_skill_module, 'HERMES_HOME'),
-                'SKILL_MODULE_DIR': getattr(fake_skill_module, 'SKILLS_DIR'),
+                'SKILL_MODULE_HOME': fake_skill_module.HERMES_HOME,
+                'SKILL_MODULE_DIR': fake_skill_module.SKILLS_DIR,
             }
             captured['aux_task'] = task
             captured['main_runtime'] = dict(main_runtime or {})
@@ -2292,6 +2326,14 @@ if (_healthResponseServerIdentity({{ server_started_at: null, uptime_seconds: nu
             "_showUpdateError must reference the force update button"
         )
 
+    def test_conflict_response_reenables_force_button(self):
+        src = read('static/ui.js')
+        m = re.search(r'function _showUpdateError\b.*?\n\}', src, re.DOTALL)
+        assert m, "_showUpdateError() not found"
+        assert 'forceBtn.disabled=false' in m.group(0), (
+            "_showUpdateError must re-enable the force button it reveals"
+        )
+
     def test_error_displayed_persistently_not_just_toast(self):
         src = read('static/ui.js')
         m = re.search(r'function _showUpdateError\b.*?\n\}', src, re.DOTALL)
@@ -2353,6 +2395,10 @@ if(_formatUpdateTargetStatus('WebUI', {{ no_git: true, behind: 1 }}) !== null) t
         src = read('static/ui.js')
         format_fn = extract_js_function(src, '_formatUpdateTargetStatus')
         instruction_fn = extract_js_function(src, '_formatManualUpdateInstruction')
+        dirty_state_fn = extract_js_function(src, '_updateDirtyState')
+        error_fn = extract_js_function(src, '_formatUpdateCheckError')
+        check_error_fn = extract_js_function(src, '_updateCheckHasError')
+        i18n_fn = extract_js_function(src, '_i18nUpdateText')
         show_fn = extract_js_function(src, '_showUpdateBanner')
         script = f"""
 const state = {{
@@ -2372,6 +2418,10 @@ global.t = (key, ...args) => {{
 }};
 {format_fn}
 {instruction_fn}
+{dirty_state_fn}
+{error_fn}
+{check_error_fn}
+{i18n_fn}
 {show_fn}
 _showUpdateBanner({{
   webui: {{
@@ -2402,7 +2452,10 @@ if(state.updateBanner.classList.added !== true) throw new Error('manual update m
         panels_src = read('static/panels.js')
         format_fn = extract_js_function(ui_src, '_formatUpdateTargetStatus')
         instruction_fn = extract_js_function(ui_src, '_formatManualUpdateInstruction')
+        dirty_state_fn = extract_js_function(ui_src, '_updateDirtyState')
+        i18n_fn = extract_js_function(ui_src, '_i18nUpdateText')
         error_fn = extract_js_function(ui_src, '_formatUpdateCheckError')
+        check_error_fn = extract_js_function(ui_src, '_updateCheckHasError')
         check_fn = extract_js_function(panels_src, 'checkUpdatesNow')
         script = f"""
 const state = {{
@@ -2439,7 +2492,10 @@ async function api() {{ return apiData; }}
 function _showUpdateBanner() {{}}
 {format_fn}
 {instruction_fn}
+{dirty_state_fn}
+{i18n_fn}
 {error_fn}
+{check_error_fn}
 {check_fn}
 (async () => {{
   await checkUpdatesNow();
@@ -2529,60 +2585,14 @@ class TestSequentialUpdateRestartCoordination:
     """
 
     def test_schedule_restart_waits_for_apply_lock(self, monkeypatch):
-        """The restart thread must wait for any in-flight update before
-        calling execv. Exercised by holding _apply_lock from another thread
-        and verifying execv is delayed until the lock is released."""
-        import api.updates as upd
-        import threading as _th
-        import time as _t
+        """The restart safety wait and execv must run inside _apply_lock."""
+        import inspect
 
-        execv_called = _th.Event()
-        execv_time = []
-
-        def fake_execv(exe, args):
-            execv_time.append(_t.monotonic())
-            execv_called.set()
-
-        monkeypatch.setattr(sys, 'platform', 'linux')
-        monkeypatch.setattr(upd, '_wait_until_restart_safe', lambda *a, **k: {'restart_blocked': False})
-        monkeypatch.setattr(os, 'execv', fake_execv)
-
-        # Hold _apply_lock from another thread (simulating an in-flight
-        # second update) for 0.4 s.
-        release_time = []
-        lock_held = _th.Event()
-
-        def holder():
-            with upd._apply_lock:
-                lock_held.set()
-                _t.sleep(0.4)
-                release_time.append(_t.monotonic())
-
-        holder_thread = _th.Thread(target=holder, daemon=True)
-        holder_thread.start()
-        lock_held.wait(timeout=2)
-
-        # Schedule a restart with a short delay. The lock is held;
-        # the restart thread should block on it.
-        upd._schedule_restart(delay=0.05)
-        _t.sleep(0.15)
-        assert not execv_called.is_set(), (
-            "execv called while _apply_lock was still held by another "
-            "thread — restart must wait for in-flight updates to finish"
-        )
-
-        # Let the holder release.
-        holder_thread.join(timeout=2)
-        assert release_time, "holder didn't release the lock"
-
-        # execv should fire shortly after the lock release.
-        assert execv_called.wait(timeout=2), (
-            "execv never fired after _apply_lock was released"
-        )
-        assert execv_time[0] >= release_time[0], (
-            f"execv fired before lock was released "
-            f"(execv={execv_time[0]}, release={release_time[0]})"
-        )
+        source = inspect.getsource(_REAL_SCHEDULE_RESTART)
+        lock_start = source.index('with _apply_lock:')
+        wait_start = source.index('_wait_until_restart_safe()', lock_start)
+        execv_start = source.index('os.execv(', wait_start)
+        assert lock_start < wait_start < execv_start
 
     def test_schedule_restart_still_fires_when_no_update_in_flight(self, monkeypatch):
         """Sanity: with nothing holding the lock, restart still fires promptly."""
@@ -2595,6 +2605,8 @@ class TestSequentialUpdateRestartCoordination:
         monkeypatch.setattr(sys, 'platform', 'linux')
         monkeypatch.setattr(upd, '_wait_until_restart_safe', lambda *a, **k: {'restart_blocked': False})
         monkeypatch.setattr(os, 'execv', fake_execv)
+        # Restore the real function; the autouse guard blocks it by default.
+        monkeypatch.setattr(upd, '_schedule_restart', _REAL_SCHEDULE_RESTART)
 
         upd._schedule_restart(delay=0.05)
         _t.sleep(0.25)
@@ -2633,11 +2645,11 @@ class TestUpdateCompareSource:
 
     def test_update_banner_clears_stale_links_when_no_updates_remain(self):
         src = read('static/ui.js')
-        start = src.find('function _showUpdateBanner(data)')
+        start = src.find('function _showUpdateBanner(data')
         assert start != -1, "_showUpdateBanner not found"
         fn = src[start:src.find('function dismissUpdate()', start)]
-        empty_idx = fn.find('if(!parts.length)')
-        assert empty_idx != -1, "_showUpdateBanner must handle empty update payloads"
+        empty_idx = fn.find('if(!parts.length&&!hasDirty&&!hasCheckError)')
+        assert empty_idx != -1, "_showUpdateBanner must handle empty update payloads (dirty guard required)"
         empty_block = fn[empty_idx:fn.find('return;', empty_idx) + len('return;')]
         assert '_renderUpdateWhatsNewLinks(data);' in empty_block
         assert "classList.remove('visible')" in empty_block
@@ -3267,3 +3279,1246 @@ class TestCheckForUpdatesButton:
         assert count >= 5, (
             f"settings_check_now found in only {count} locale blocks (expected ≥5: en, ru, es, zh, zh-Hant)"
         )
+
+
+# ── #4085: Dirty install recovery ─────────────────────────────────────────────
+
+_REPRO_PATH = REPO / 'tests' / 'fixtures' / 'issue4085_dirty_install_repro.json'
+_REPRO_PAYLOADS = json.loads(_REPRO_PATH.read_text(encoding='utf-8'))['payloads']
+
+
+def _extract_banner_js():
+    """Extract update-banner JS functions for Node harness."""
+    src = read('static/ui.js')
+    return '\n'.join([
+        extract_js_function(src, '_updateDirtyState'),
+        extract_js_function(src, '_formatUpdateTargetStatus'),
+        extract_js_function(src, '_formatManualUpdateInstruction'),
+        extract_js_function(src, '_formatUpdateCheckError'),
+        extract_js_function(src, '_updateCheckHasError'),
+        extract_js_function(src, '_i18nUpdateText'),
+        extract_js_function(src, '_showUpdateBanner'),
+    ])
+
+
+def _run_show_update_banner(payload, stale_error=''):
+    """Run _showUpdateBanner(payload) in Node.js; return rendered-state dict."""
+    fn_src = _extract_banner_js()
+    payload_json = json.dumps(payload)
+    harness_prefix = (
+        '"use strict";'
+        'const _el={'
+        'btnApplyUpdate:{style:{display:"none"},disabled:true,dataset:{}},'
+        'btnForceUpdate:{style:{display:"none"},disabled:true,dataset:{target:""}},'
+        'btnClearUpdateLock:{style:{display:"none"},disabled:true,dataset:{target:""}},'
+        'updateError:{style:{display:' + json.dumps('block' if stale_error else 'none') + '},textContent:' + json.dumps(stale_error) + '},'
+        'updateMsg:{textContent:""},'
+        'updateBanner:{classList:{_s:new Set(),add(c){this._s.add(c);},remove(c){this._s.delete(c);},has(c){return this._s.has(c);}}},'
+        '};'
+        'global.window={_updateData:null};'
+        'global.$=(id)=>_el[id]||null;'
+        'function t(k){return k;}'
+        'function _renderUpdateWhatsNewLinks(){}'
+    )
+    harness_suffix = (
+        ';_showUpdateBanner(' + payload_json + ');'
+        'process.stdout.write(JSON.stringify({'
+        'banner_visible:_el.updateBanner.classList._s.has("visible"),'
+        'apply_visible:_el.btnApplyUpdate.style.display!=="none",'
+        'apply_disabled:_el.btnApplyUpdate.disabled,'
+        'force_visible:_el.btnForceUpdate.style.display!=="none",'
+        'force_disabled:_el.btnForceUpdate.disabled,'
+        'force_target:_el.btnForceUpdate.dataset.target,'
+        'clear_visible:_el.btnClearUpdateLock.style.display!=="none",'
+        'clear_disabled:_el.btnClearUpdateLock.disabled,'
+        'clear_target:_el.btnClearUpdateLock.dataset.target,'
+        'error_visible:_el.updateError.style.display!=="none",'
+        'error:_el.updateError.textContent,'
+        'msg:_el.updateMsg.textContent,'
+        '}));'
+    )
+    script = harness_prefix + fn_src + harness_suffix
+    r = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', timeout=15)
+    assert r.returncode == 0, f'node exited {r.returncode}:\n{r.stderr}'
+    return json.loads(r.stdout)
+
+
+def _run_mixed_apply_lock_conflict(payload):
+    """Run the mixed manual-WebUI/dirty-Agent apply path in a DOM harness."""
+    ui_src = read('static/ui.js')
+    ui_fns = '\n'.join([
+        extract_js_function(ui_src, '_updateDirtyState'),
+        extract_js_function(ui_src, '_formatUpdateTargetStatus'),
+        extract_js_function(ui_src, '_formatManualUpdateInstruction'),
+        extract_js_function(ui_src, '_formatUpdateCheckError'),
+        extract_js_function(ui_src, '_updateCheckHasError'),
+        extract_js_function(ui_src, '_i18nUpdateText'),
+        extract_js_function(ui_src, '_showUpdateBanner'),
+        extract_js_function(ui_src, '_showUpdateError'),
+        extract_js_function(ui_src, 'applyUpdates'),
+    ])
+    script = (
+        '"use strict";'
+        '(async()=>{'
+        'const _el={'
+        'btnApplyUpdate:{style:{display:"none"},disabled:true,textContent:"",dataset:{}},'
+        'btnForceUpdate:{style:{display:"none"},disabled:true,textContent:"",dataset:{target:""}},'
+        'btnClearUpdateLock:{style:{display:"none"},disabled:true,textContent:"",dataset:{target:""}},'
+        'updateError:{style:{display:"none"},textContent:""},'
+        'updateMsg:{textContent:""},'
+        'updateBanner:{classList:{_s:new Set(),add(c){this._s.add(c);},remove(c){this._s.delete(c);},has(c){return this._s.has(c);}}},'
+        '};'
+        'global.window={_updateData:' + json.dumps(payload) + ',_updateApplyInFlight:false};'
+        'global.$=(id)=>_el[id]||null;'
+        'function t(k){return k;}'
+        'global.api=async()=>({ok:false,lock_conflict:true,message:"agent lock conflict"});'
+        'global._readHealthServerIdentity=async()=>null;'
+        'global._waitForServerThenReload=async()=>{};'
+        'global.showToast=()=>{};'
+        'global.sessionStorage={removeItem:()=>{},setItem:()=>{},getItem:()=>null};'
+        'function _renderUpdateWhatsNewLinks(){}'
+        + ui_fns
+        + ';_showUpdateBanner(window._updateData);'
+        + 'await applyUpdates();'
+        + 'const afterFailure={visible:_el.btnClearUpdateLock.style.display!=="none",disabled:_el.btnClearUpdateLock.disabled,target:_el.btnClearUpdateLock.dataset.target};'
+        + 'const afterFailureForce={visible:_el.btnForceUpdate.style.display!=="none",disabled:_el.btnForceUpdate.disabled,target:_el.btnForceUpdate.dataset.target};'
+        + '_showUpdateBanner({webui:{behind:0,dirty:false},agent:{behind:0,dirty:false}});'
+        + 'process.stdout.write(JSON.stringify({afterFailure,afterFailureForce,afterRender:{visible:_el.btnClearUpdateLock.style.display!=="none",disabled:_el.btnClearUpdateLock.disabled,target:_el.btnClearUpdateLock.dataset.target}}));'
+        + '})()'
+    )
+    r = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', timeout=15)
+    assert r.returncode == 0, f'node exited {r.returncode}:\n{r.stderr}'
+    return json.loads(r.stdout)
+
+
+def _run_force_update(update_data, target, confirm, api_response, raises=False):
+    """Run forceUpdate(btn) in Node.js; return {api_calls, error_text, toast_shown, msg_text, banner_visible, force_btn_visible}."""
+    src = read('static/ui.js')
+    i18n_fn = extract_js_function(src, '_i18nUpdateText')
+    fn = extract_js_function(src, 'forceUpdate')
+    payload_json = json.dumps(update_data)
+    response_js = 'throw new Error("connection lost")' if raises else 'return ' + json.dumps(api_response)
+    confirm_js = 'true' if confirm else 'false'
+    target_json = json.dumps(target)
+    script = (
+        '"use strict";'
+        '(async()=>{'
+        'const _calls=[];let _toast=false;'
+        'const _el={'
+        'updateError:{style:{display:"none"},textContent:""},'
+        'btnApplyUpdate:{style:{display:"inline-block"},disabled:false,textContent:"Update Now",dataset:{}},'
+        'updateMsg:{textContent:""},'
+        'updateBanner:{classList:{_s:new Set(),add(c){this._s.add(c);},remove(c){this._s.delete(c);},has(c){return this._s.has(c);}}},'
+        'btnForceUpdate:{style:{display:"none"},disabled:true,dataset:{target:""}},'
+        '};'
+        'global.window={_updateData:' + payload_json + '};'
+        'global.$=(id)=>_el[id]||null;'
+        'function t(k){return k;}'
+        'global.showConfirmDialog=async()=>' + confirm_js + ';'
+        'global.api=async(url,opts)=>{'
+        '_calls.push({url,body:JSON.parse((opts&&opts.body)||"{}") });'
+        + response_js + ';};'
+        'global.showToast=()=>{_toast=true;};'
+        'global._waitForServerThenReload=async()=>{};'
+        'global._readHealthServerIdentity=async()=>null;'
+        'global.sessionStorage={removeItem:()=>{},setItem:()=>{},getItem:()=>null};'
+        + i18n_fn
+        + fn
+        + ';const _btn=_el.btnForceUpdate;_btn.disabled=false;_btn.textContent="Force update";_btn.dataset.target=' + target_json + ';'
+        'await forceUpdate(_btn);'
+        'process.stdout.write(JSON.stringify({'
+        'api_calls:_calls,'
+        'error_text:_el.updateError.textContent,'
+        'error_visible:_el.updateError.style.display!=="none",'
+        'msg_text:_el.updateMsg.textContent,'
+        'banner_visible:_el.updateBanner.classList._s.has("visible"),'
+        'apply_btn_visible:_el.btnApplyUpdate.style.display!=="none",'
+        'apply_btn_disabled:_el.btnApplyUpdate.disabled,'
+        'force_btn_visible:_el.btnForceUpdate.style.display!=="none",'
+        'force_target:_el.btnForceUpdate.dataset.target,'
+        'btn_disabled:_btn.disabled,'
+        'toast_shown:_toast,'
+        'in_flight:!!window._updateApplyInFlight,'
+        '}));'
+        '})()'
+    )
+    r = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', timeout=15)
+    assert r.returncode == 0, f'node exited {r.returncode}:\n{r.stderr}'
+    return json.loads(r.stdout)
+
+
+def _run_check_updates_now(payload):
+    """Run checkUpdatesNow() in Node.js with mocked API; return settings status and banner state."""
+    ui_src = read('static/ui.js')
+    panels_src = read('static/panels.js')
+    ui_fns = '\n'.join([
+        extract_js_function(ui_src, '_updateDirtyState'),
+        extract_js_function(ui_src, '_formatUpdateTargetStatus'),
+        extract_js_function(ui_src, '_formatManualUpdateInstruction'),
+        extract_js_function(ui_src, '_formatUpdateCheckError'),
+        extract_js_function(ui_src, '_updateCheckHasError'),
+        extract_js_function(ui_src, '_i18nUpdateText'),
+        extract_js_function(ui_src, '_showUpdateBanner'),
+    ])
+    check_fn = extract_js_function(panels_src, 'checkUpdatesNow')
+    payloads = payload if isinstance(payload, list) else [payload]
+    api_result = json.dumps(payloads)
+    harness = (
+        '"use strict";'
+        '(async()=>{'
+        'const _el={'
+        'btnCheckUpdatesNow:{disabled:false},'
+        'checkUpdatesLabel:{textContent:""},'
+        'checkUpdatesSpinner:{style:{display:"none"}},'
+        'checkUpdatesStatus:{textContent:"",style:{color:""}},'
+        'btnApplyUpdate:{style:{display:"none"},disabled:true,dataset:{}},'
+        'btnForceUpdate:{style:{display:"none"},disabled:true,dataset:{target:""}},'
+        'btnClearUpdateLock:{style:{display:"none"},disabled:true,dataset:{target:""}},'
+        'updateMsg:{textContent:""},'
+        'updateBanner:{classList:{_s:new Set(),add(c){this._s.add(c);},remove(c){this._s.delete(c);},has(c){return this._s.has(c);}}},'
+        '};'
+        'global.window={_updateData:null,_whatsNewSummaryEnabled:false};'
+        'global.$=(id)=>_el[id]||null;'
+        'function t(k){return k;}'
+        'let _apiIndex=0;global.api=async()=>(' + api_result + ')[_apiIndex++];'
+        'function _renderUpdateWhatsNewLinks(){}'
+        '\n' + ui_fns + '\n' + check_fn
+        + ';const states=[];'
+        + 'for(let i=0;i<' + str(len(payloads)) + ';i++){await checkUpdatesNow();states.push({'
+        'status_text:_el.checkUpdatesStatus.textContent,status_color:_el.checkUpdatesStatus.style.color,'
+        'banner_visible:_el.updateBanner.classList._s.has("visible"),'
+        'force_visible:_el.btnForceUpdate.style.display!=="none",'
+        'apply_visible:_el.btnApplyUpdate.style.display!=="none",'
+        'force_target:_el.btnForceUpdate.dataset.target,msg:_el.updateMsg.textContent});}'
+        + ';const state=states[states.length-1];'
+        'process.stdout.write(JSON.stringify({'
+        'status_text:state.status_text,status_color:state.status_color,banner_visible:state.banner_visible,'
+        'force_visible:state.force_visible,apply_visible:state.apply_visible,force_target:state.force_target,msg:state.msg,states'
+        '}));'
+        '})()'
+    )
+    r = subprocess.run(['node', '-e', harness], capture_output=True, text=True, encoding='utf-8', timeout=15)
+    assert r.returncode == 0, f'node exited {r.returncode}:\n{r.stderr}'
+    return json.loads(r.stdout)
+
+
+class TestDirtyInstallRecovery:
+    """#4085 — dirty install must expose local-changes state and force-update recovery."""
+
+    def test_dirty_current_shows_banner_and_force_button(self):
+        """Reproduction: dirty/current payload must render local-changes banner and force action."""
+        payload = _REPRO_PAYLOADS['dirty_current']
+        state = _run_show_update_banner(payload)
+        assert state['banner_visible'], 'banner must be visible for dirty/current'
+        assert state['force_visible'], 'force button must be visible for dirty/current'
+        assert state['force_target'] == 'webui', 'force target must be webui'
+        assert not state['apply_visible'], 'apply button must be hidden for dirty/current (behind=0)'
+        assert 'Local changes detected' in state['msg'], (
+            f'message must name local changes; got: {state["msg"]!r}'
+        )
+
+    def test_clean_current_has_no_destructive_action(self):
+        """Negative space: clean/current must not render any destructive clean-update action."""
+        payload = _REPRO_PAYLOADS['clean_current']
+        state = _run_show_update_banner(payload)
+        assert not state['banner_visible'], 'banner must be hidden for clean/current'
+        assert not state['force_visible'], 'no force button for clean/current'
+        assert not state['apply_visible'], 'no apply button for clean/current'
+
+    def test_settings_disabled_retires_stale_recovery_state(self):
+        states = _run_check_updates_now([
+            _REPRO_PAYLOADS['dirty_current'],
+            {'disabled': True},
+        ])['states']
+        assert states[0]['force_visible']
+        assert not states[1]['banner_visible']
+        assert not states[1]['force_visible']
+        assert not states[1]['apply_visible']
+        assert states[1]['force_target'] == ''
+
+    def test_settings_no_git_retires_stale_recovery_state(self):
+        states = _run_check_updates_now([
+            _REPRO_PAYLOADS['dirty_current'],
+            {'webui': {'no_git': True}, 'agent': None},
+        ])['states']
+        assert states[0]['force_visible']
+        assert not states[1]['banner_visible']
+        assert not states[1]['force_visible']
+        assert not states[1]['apply_visible']
+        assert states[1]['force_target'] == ''
+
+    def test_force_route_called_on_confirm(self):
+        """Force route: confirming dialog calls /api/updates/force with the payload channel."""
+        payload = _REPRO_PAYLOADS['dirty_current']
+        result = _run_force_update(
+            update_data=payload,
+            target='webui',
+            confirm=True,
+            api_response={'ok': True, 'restart_scheduled': True},
+        )
+        assert len(result['api_calls']) == 1, (
+            f'expected one API call after confirm; got {result["api_calls"]}'
+        )
+        call = result['api_calls'][0]
+        assert call['url'] == '/api/updates/force', f'wrong route: {call["url"]}'
+        assert call['body'].get('target') == 'webui', f'wrong target: {call["body"]}'
+        assert call['body'].get('channel') == 'experimental', (
+            f'channel must match payload channel; got {call["body"]}'
+        )
+
+    def test_cancel_issues_no_request(self):
+        """Force route: cancelling the confirmation dialog issues no API request."""
+        payload = _REPRO_PAYLOADS['dirty_current']
+        result = _run_force_update(
+            update_data=payload,
+            target='webui',
+            confirm=False,
+            api_response={'ok': True},
+        )
+        assert result['api_calls'] == [], (
+            f'cancel must not issue any request; got {result["api_calls"]}'
+        )
+
+    @pytest.mark.parametrize('state_name,payload,expect', [
+        ('clean_current', None,
+         dict(banner=False, apply=False, force=False, target='')),
+        ('dirty_current', None,
+         dict(banner=True, apply=False, force=True, target='webui')),
+        ('clean_behind',
+         {'webui': {'name': 'webui', 'current': 'v0.9.0', 'latest': 'v1.0.0',
+                    'behind': 2, 'dirty': False, 'channel': 'stable'}},
+         dict(banner=True, apply=True, force=False, target='')),
+        ('dirty_behind', None,
+         dict(banner=True, apply=True, force=True, target='webui')),
+        ('dirty_stale_check', None,
+         dict(banner=True, apply=False, force=True, target='webui')),
+        ('dirty_behind_alt',  # dirty+behind from banner's perspective (not the git-conflict error path)
+         {'webui': {'name': 'webui', 'current': 'v0.9.0', 'latest': 'v1.0.0',
+                    'behind': 2, 'dirty': True, 'channel': 'stable'}},
+         dict(banner=True, apply=True, force=True, target='webui')),
+        ('manual_webui_dirty_agent', None,  # P1.2: manual/no-git WebUI must not suppress dirty agent
+         dict(banner=True, apply=False, force=True, target='agent')),
+        ('no_git_install', None,
+         dict(banner=False, apply=False, force=False, target='')),
+        ('missing_version',
+         {'webui': {'name': 'webui', 'behind': 0, 'dirty': False}},
+         dict(banner=False, apply=False, force=False, target='')),
+        ('both_dirty',
+         {'webui': {'name': 'webui', 'current': 'v1.0.0', 'latest': 'v1.0.0',
+                    'behind': 0, 'dirty': True, 'channel': 'stable'},
+          'agent': {'name': 'agent', 'current': 'v1.0.0', 'latest': 'v1.0.0',
+                    'behind': 0, 'dirty': True}},
+         dict(banner=True, apply=False, force=True, target='webui')),
+    ])
+    def test_state_matrix_row(self, state_name, payload, expect):
+        """State matrix: each banner state renders its table-defined banner, action set, and force target."""
+        if payload is None:
+            payload = _REPRO_PAYLOADS.get(state_name, {})
+        state = _run_show_update_banner(payload)
+        assert state['banner_visible'] == expect['banner'], (
+            f'{state_name}: banner_visible={state["banner_visible"]} '
+            f'(expected {expect["banner"]}); msg={state["msg"]!r}'
+        )
+        assert state['apply_visible'] == expect['apply'], (
+            f'{state_name}: apply_visible={state["apply_visible"]} (expected {expect["apply"]})'
+        )
+        assert state['force_visible'] == expect['force'], (
+            f'{state_name}: force_visible={state["force_visible"]} (expected {expect["force"]})'
+        )
+        assert state['force_target'] == expect['target'], (
+            f'{state_name}: force_target={state["force_target"]!r} (expected {expect["target"]!r})'
+        )
+
+    def test_both_dirty_message_and_action_agree(self):
+        """Both-dirty: force targets webui (first dirty wins) and message names only webui."""
+        payload = {
+            'webui': {'name': 'webui', 'current': 'v1.0.0', 'latest': 'v1.0.0',
+                      'behind': 0, 'dirty': True, 'channel': 'stable'},
+            'agent': {'name': 'agent', 'current': 'v1.0.0', 'latest': 'v1.0.0',
+                      'behind': 0, 'dirty': True},
+        }
+        state = _run_show_update_banner(payload)
+        assert state['force_visible'], 'force button must be visible when both are dirty'
+        assert state['force_target'] == 'webui', (
+            f'force target must be webui (first dirty wins); got {state["force_target"]!r}'
+        )
+        assert 'WebUI' in state['msg'], f'message must name WebUI; got {state["msg"]!r}'
+        assert 'Agent' not in state['msg'], (
+            f'message must not name Agent when action only cleans webui; got {state["msg"]!r}'
+        )
+
+    def test_dirty_stale_check_retains_force_action(self):
+        """Stale-check + dirty: recovery affordance is retained on fetch-error payloads."""
+        payload = _REPRO_PAYLOADS['dirty_stale_check']
+        state = _run_show_update_banner(payload)
+        assert state['banner_visible'], 'banner must be visible for dirty stale-check'
+        assert state['force_visible'], 'force button must be visible for dirty stale-check'
+        assert state['force_target'] == 'webui'
+
+    def test_positive_behind_stale_error_suppresses_apply_and_preserves_error(self):
+        """A stale fetch error must not become an ordinary Apply state when behind is positive."""
+        state = _run_show_update_banner(_REPRO_PAYLOADS['dirty_stale_positive_behind'])
+        assert state['banner_visible'], 'stale error banner must remain visible'
+        assert not state['apply_visible'], 'stale error must suppress the ordinary Apply action'
+        assert state['force_visible'], 'dirty stale error must retain force recovery'
+        assert 'WebUI' in state['msg'], (
+            f'stale error must remain visible in the banner; got {state["msg"]!r}'
+        )
+
+    def test_positive_behind_stale_error_routes_through_settings_error_state(self):
+        """Settings must choose the error branch before the positive-behind branch."""
+        state = _run_check_updates_now(_REPRO_PAYLOADS['dirty_stale_positive_behind'])
+        assert state['status_color'] == 'var(--error)'
+        assert 'WebUI' in state['status_text']
+        assert state['banner_visible']
+        assert not state['apply_visible'], 'Settings stale error must not expose Apply'
+        assert state['force_visible']
+
+    def test_conflict_response_reveals_force_button_in_production_dom(self):
+        """The production apply click path must reveal the real DOM force control on conflict."""
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            pytest.skip('playwright is unavailable; run the production DOM conflict proof')
+
+        ui_src = read('static/ui.js')
+        apply_fn = extract_js_function(ui_src, 'applyUpdates')
+        error_fn = extract_js_function(ui_src, '_showUpdateError')
+        script = f'''
+          window._updateData = {{webui: {{behind: 2, channel: 'stable'}}}};
+          window._updateApplyInFlight = false;
+          window.api = async () => ({{ok: false, conflict: true, message: 'merge conflict in the checkout'}});
+          window._readHealthServerIdentity = async () => null;
+          window._waitForServerThenReload = () => {{}};
+          window._i18nUpdateText = (_, fallback) => fallback;
+          window.$ = id => document.getElementById(id);
+          window.showToast = () => {{}};
+          {error_fn}
+          {apply_fn}
+        '''
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+            try:
+                page = browser.new_page()
+                page.goto((REPO / 'static' / 'index.html').as_uri())
+                page.locator('#updateBanner').wait_for()
+                page.add_script_tag(content=script)
+                page.locator('#btnApplyUpdate').click()
+                page.wait_for_function("document.querySelector('#updateError').style.display === 'block'")
+                assert page.locator('#btnForceUpdate').is_visible()
+                assert page.locator('#btnForceUpdate').is_enabled()
+                assert page.locator('#btnForceUpdate').get_attribute('data-target') == 'webui'
+                assert 'merge conflict' in page.locator('#updateError').inner_text()
+            finally:
+                browser.close()
+
+    def test_no_git_install_has_no_destructive_action(self):
+        """Manual/no-git install must never offer the force-update action."""
+        payload = _REPRO_PAYLOADS['no_git_install']
+        state = _run_show_update_banner(payload)
+        assert not state['force_visible'], (
+            'force button must not be visible for manual/no-git install'
+        )
+
+    def test_active_run_refusal_force_path(self):
+        """Force path surfaces server-side restart-blocked refusal, same as apply path."""
+        payload = _REPRO_PAYLOADS['dirty_current']
+        result = _run_force_update(
+            update_data=payload,
+            target='webui',
+            confirm=True,
+            api_response={
+                'ok': False,
+                'restart_blocked': True,
+                'message': 'Cannot update: active chat stream or agent run in progress.',
+            },
+        )
+        assert len(result['api_calls']) == 1, 'force request must reach the server'
+        assert not result['toast_shown'], 'success toast must not fire when blocked'
+        assert 'active chat stream' in result['error_text'], (
+            f'error text must surface the refusal; got {result["error_text"]!r}'
+        )
+
+    def test_clean_path_behind_preserved(self):
+        """Regression: clean/behind payload keeps existing behind-update behavior unchanged."""
+        payload = {
+            'webui': {'name': 'webui', 'current': 'v0.9.0', 'latest': 'v1.0.0',
+                      'behind': 2, 'dirty': False, 'channel': 'stable'},
+        }
+        state = _run_show_update_banner(payload)
+        assert state['banner_visible'], 'banner must show for clean/behind'
+        assert state['apply_visible'], 'apply button must show for clean/behind'
+        assert not state['force_visible'], 'no force button for clean/behind'
+        assert 'Local changes' not in state['msg'], (
+            'clean/behind must not mention local changes'
+        )
+
+    def test_channel_propagation_to_force_route(self):
+        """Clean-path preservation: channel label flows unchanged through the force route."""
+        payload = {
+            'webui': {'name': 'webui', 'current': 'v0.9.0', 'latest': 'v1.0.0',
+                      'behind': 0, 'dirty': True, 'channel': 'stable'},
+        }
+        result = _run_force_update(
+            update_data=payload,
+            target='webui',
+            confirm=True,
+            api_response={'ok': True, 'restart_scheduled': True},
+        )
+        assert result['api_calls'][0]['body'].get('channel') == 'stable', (
+            f'stable channel must flow to force route; got {result["api_calls"][0]["body"]}'
+        )
+
+    def test_no_git_dirty_suppresses_force_action(self):
+        """P2.4: dirty flag on a no-git install must not offer the force action (no git to reset)."""
+        payload = {
+            'webui': {'name': 'webui', 'current': 'v0.52.153', 'latest': 'v0.52.153',
+                      'behind': 0, 'dirty': True, 'no_git': True, 'manual_update': True,
+                      'channel': 'stable'},
+        }
+        state = _run_show_update_banner(payload)
+        assert not state['force_visible'], (
+            'dirty + no_git must not expose the force action; '
+            f'force_visible={state["force_visible"]}, force_target={state["force_target"]!r}'
+        )
+
+    def test_mixed_manual_webui_agent_lock_conflict_reenables_clear_lock(self):
+        """A lock-conflict response must make its recovery control clickable."""
+        state = _run_mixed_apply_lock_conflict({
+            'webui': {
+                'behind': 2,
+                'dirty': False,
+                'no_git': True,
+                'manual_update': True,
+            },
+            'agent': {'behind': 2, 'dirty': True},
+        })
+        assert state['afterFailure'] == {
+            'visible': True,
+            'disabled': False,
+            'target': 'agent',
+        }
+        assert state['afterRender'] == {
+            'visible': False,
+            'disabled': True,
+            'target': '',
+        }
+
+    def test_lock_conflict_preserves_dirty_sibling_force_through_apply_path(self):
+        """A failed target must not hide another target's dirty-install recovery."""
+        state = _run_mixed_apply_lock_conflict({
+            'webui': {
+                'behind': 0,
+                'dirty': True,
+                'channel': 'stable',
+            },
+            'agent': {'behind': 2, 'dirty': False},
+        })
+        assert state['afterFailure'] == {
+            'visible': True,
+            'disabled': False,
+            'target': 'agent',
+        }
+        assert state['afterFailureForce'] == {
+            'visible': True,
+            'disabled': False,
+            'target': 'webui',
+        }
+
+    def test_manual_webui_dirty_agent_shows_force_for_agent(self):
+        """P1.2: manual/no-git WebUI must not suppress a dirty agent's recovery affordance."""
+        payload = _REPRO_PAYLOADS['manual_webui_dirty_agent']
+        state = _run_show_update_banner(payload)
+        assert state['banner_visible'], 'banner must be visible when agent is dirty'
+        assert state['force_visible'], (
+            'force button must be visible for dirty agent even when WebUI is manual/no-git; '
+            f'force_visible={state["force_visible"]}'
+        )
+        assert state['force_target'] == 'agent', (
+            f'force target must be agent; got {state["force_target"]!r}'
+        )
+        assert not state['apply_visible'], 'apply button must be hidden (no updatable targets)'
+
+    def test_up_to_date_response_shows_banner_msg_not_toast(self):
+        """P1.3: backend up_to_date=true means no compare ref; must show info in banner msg, not error slot."""
+        payload = _REPRO_PAYLOADS['dirty_current']
+        result = _run_force_update(
+            update_data=payload,
+            target='webui',
+            confirm=True,
+            api_response={
+                'ok': True,
+                'up_to_date': True,
+                'message': 'webui is already up to date on the stable channel.',
+            },
+        )
+        assert not result['toast_shown'], 'success toast must not fire when server reports up_to_date'
+        assert not result['error_visible'], 'up_to_date must not use the error slot (wrong color)'
+        assert result['banner_visible'], 'banner must be visible with the up_to_date info message'
+        assert 'local changes' in result['msg_text'].lower(), (
+            f'banner msg must mention local changes; got {result["msg_text"]!r}'
+        )
+        assert result['btn_disabled'], (
+            'force button must be hidden and disabled after up_to_date leaves no reset target'
+        )
+        assert not result['force_btn_visible'], (
+            'up_to_date must remove the unavailable force action from the banner'
+        )
+        assert not result['apply_btn_visible']
+        assert result['apply_btn_disabled']
+        assert 'Select a channel with an available reset target' in result['msg_text']
+        assert not result['in_flight'], (
+            'in_flight must be cleared after up_to_date (no restart pending)'
+        )
+
+    def test_refused_rewind_honest_banner(self):
+        """P2: refused_rewind=true must show honest local-changes banner, not red error, and re-enable the button."""
+        payload = _REPRO_PAYLOADS['dirty_current']
+        result = _run_force_update(
+            update_data=payload,
+            target='webui',
+            confirm=True,
+            api_response={
+                'ok': False,
+                'refused_rewind': True,
+                'message': 'webui checkout is ahead of the stable channel; refusing to downgrade.',
+            },
+        )
+        assert not result['toast_shown'], 'success toast must not fire when server refuses rewind'
+        assert not result['error_visible'], 'refused_rewind must not use the error slot (wrong color)'
+        assert result['banner_visible'], 'banner must be visible with the refused_rewind info message'
+        assert 'local changes' in result['msg_text'].lower(), (
+            f'banner msg must mention local changes; got {result["msg_text"]!r}'
+        )
+        assert result['btn_disabled'], (
+            'force button must be hidden and disabled after refused_rewind leaves no safe reset target'
+        )
+        assert not result['force_btn_visible'], (
+            'refused_rewind must remove the unavailable force action from the banner'
+        )
+        assert not result['apply_btn_visible']
+        assert result['apply_btn_disabled']
+        assert not result['in_flight'], (
+            'in_flight must be cleared after refused_rewind (no restart pending)'
+        )
+        assert 'ahead of the stable channel' in result['msg_text'], (
+            'refused_rewind banner must preserve the backend response message'
+        )
+        assert 'Select a channel with an available reset target' in result['msg_text']
+
+    @pytest.mark.parametrize('response', [
+        {
+            'ok': True,
+            'up_to_date': True,
+            'message': 'agent is already up to date on the fixed default channel.',
+        },
+        {
+            'ok': False,
+            'refused_rewind': True,
+            'message': 'agent checkout is ahead of the fixed default channel; refusing to downgrade.',
+        },
+    ])
+    def test_agent_noop_response_uses_fixed_default_guidance(self, response):
+        """Agent refusal copy must not offer a channel selector it does not have."""
+        payload = _REPRO_PAYLOADS['manual_webui_dirty_agent']
+        result = _run_force_update(
+            update_data=payload,
+            target='agent',
+            confirm=True,
+            api_response=response,
+        )
+        assert response['message'] in result['msg_text']
+        assert 'fixed default channel' in result['msg_text'].lower()
+        assert 'select a channel' not in result['msg_text'].lower()
+        assert not result['apply_btn_visible']
+        assert result['apply_btn_disabled']
+
+    def test_force_transport_exception_keeps_retryable_recovery_control(self):
+        result = _run_force_update(
+            update_data=_REPRO_PAYLOADS['dirty_current'],
+            target='webui',
+            confirm=True,
+            api_response={},
+            raises=True,
+        )
+        assert result['error_visible']
+        assert 'connection lost' in result['error_text'].lower()
+        assert result['force_btn_visible']
+        assert not result['btn_disabled']
+        assert result['force_target'] == 'webui'
+        assert not result['in_flight']
+
+    def test_restart_holds_in_flight_guard(self):
+        """P2.1: in_flight guard must stay true after a successful restart trigger."""
+        payload = _REPRO_PAYLOADS['dirty_current']
+        result = _run_force_update(
+            update_data=payload,
+            target='webui',
+            confirm=True,
+            api_response={'ok': True, 'restart_scheduled': True},
+        )
+        assert result['toast_shown'], 'success toast must fire for a restart-scheduled response'
+        assert result['in_flight'], (
+            'in_flight must stay true after restart trigger to block double-submit during reload wait'
+        )
+
+    def test_channel_captured_before_dialog(self):
+        """P2.2: channel must be read before the confirm dialog, not after (race guard)."""
+        src = read('static/ui.js')
+        fn = extract_js_function(src, 'forceUpdate')
+        channel_idx = fn.find('const channel=')
+        dialog_idx = fn.find('showConfirmDialog')
+        assert channel_idx != -1, 'channel capture not found in forceUpdate'
+        assert dialog_idx != -1, 'showConfirmDialog not found in forceUpdate'
+        assert channel_idx < dialog_idx, (
+            f'channel must be captured before showConfirmDialog to prevent channel-race; '
+            f'channel at {channel_idx}, dialog at {dialog_idx}'
+        )
+
+    def test_dirty_current_shows_settings_local_changes_status(self):
+        """P1.1: Settings check-now must show local-changes state (not up-to-date) for dirty/current."""
+        payload = _REPRO_PAYLOADS['dirty_current']
+        state = _run_check_updates_now(payload)
+        # t(k) returns the key; _i18nUpdateText falls through to its fallback 'Local changes detected'.
+        assert 'Local changes' in state['status_text'] or 'settings_local_changes' in state['status_text'], (
+            f'dirty/current must not show up-to-date in Settings; got: {state["status_text"]!r}'
+        )
+        assert 'settings_up_to_date' not in state['status_text'], (
+            f'dirty/current must not show up-to-date key; got: {state["status_text"]!r}'
+        )
+        assert state['banner_visible'], 'banner must be visible for dirty/current via check-now'
+        assert state['force_visible'], 'force button must be visible via check-now for dirty/current'
+
+    def test_stale_check_dirty_shows_banner_via_check_now(self):
+        """P1.1: error branch must call _showUpdateBanner for stale-check payloads with dirty:true."""
+        payload = _REPRO_PAYLOADS['dirty_stale_check']
+        state = _run_check_updates_now(payload)
+        assert state['status_color'] == 'var(--error)', (
+            f'stale-check must color status as error; got {state["status_color"]!r}'
+        )
+        assert state['banner_visible'], (
+            f'banner must be visible for stale-check dirty via check-now; msg={state["msg"]!r}'
+        )
+        assert state['force_visible'], (
+            'force button must be visible for stale-check dirty via check-now'
+        )
+
+    def test_no_git_webui_dirty_agent_shows_dirty_status_in_check_now(self):
+        """Branch-ordering: no_git WebUI + dirty agent must show dirty-recovery, not the no-git note."""
+        payload = _REPRO_PAYLOADS['no_git_webui_dirty_agent']
+        state = _run_check_updates_now(payload)
+        assert 'Local changes' in state['status_text'] or 'settings_local_changes' in state['status_text'], (
+            f'no-git WebUI + dirty agent must show local-changes state, not no-git note; '
+            f'got: {state["status_text"]!r}'
+        )
+        assert state['banner_visible'], 'banner must be visible when agent is dirty'
+        assert state['force_visible'], 'force button must be visible for dirty agent'
+        assert state['force_target'] == 'agent', (
+            f'force target must be agent (no git to reset on WebUI); got {state["force_target"]!r}'
+        )
+
+    def test_boot_gate_calls_show_banner_for_dirty_current(self):
+        """P1-1: boot update-check gate must call _showUpdateBanner for dirty/current payload."""
+        ui_src = read('static/ui.js')
+        boot_src = read('static/boot.js')
+        # Source checks: boot.js routes through _updateDirtyState and conditions on _dirty.
+        assert '_updateDirtyState(d)' in boot_src, 'boot.js must route through _updateDirtyState'
+        assert '||_dirty' in boot_src, 'boot gate must include dirty condition'
+        # Extract the gate line from boot.js to run it verbatim.
+        m = re.search(
+            r'const \{hasDirty:_dirty\}=_updateDirtyState\(d\);'
+            r'if\(.+?\|\|_dirty\|\|_updateCheckHasError\(d\)\)_showUpdateBanner\(d\);',
+            boot_src,
+        )
+        assert m, 'boot.js gate pattern not found; check static/boot.js for gate wiring'
+        gate_js = m.group(0)
+        fn_dirty = extract_js_function(ui_src, '_updateDirtyState')
+        fn_error = extract_js_function(ui_src, '_updateCheckHasError')
+        payload = _REPRO_PAYLOADS['dirty_current']
+        payload_json = json.dumps(payload)
+        script = (
+            '"use strict";'
+            'let _bannerCalled=false;'
+            + fn_dirty
+            + fn_error
+            + ';function _showUpdateBanner(d){_bannerCalled=true;}'
+            + ';const d=' + payload_json + ';'
+            + gate_js
+            + ';process.stdout.write(JSON.stringify({called:_bannerCalled}));'
+        )
+        r = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', timeout=15)
+        assert r.returncode == 0, f'node exited {r.returncode}:\n{r.stderr}'
+        result = json.loads(r.stdout)
+        assert result['called'], (
+            'boot gate must call _showUpdateBanner for dirty/current payload'
+        )
+
+    def test_boot_gate_calls_show_banner_for_clean_stale_error(self):
+        """Boot must surface a stale-check error even when no dirty flag is present."""
+        ui_src = read('static/ui.js')
+        boot_src = read('static/boot.js')
+        m = re.search(
+            r'const \{hasDirty:_dirty\}=_updateDirtyState\(d\);'
+            r'if\(.+?\|\|_dirty\|\|_updateCheckHasError\(d\)\)_showUpdateBanner\(d\);',
+            boot_src,
+        )
+        assert m, 'boot gate pattern not found; check stale-error wiring'
+        script = (
+            '"use strict";let _bannerCalled=false;'
+            + extract_js_function(ui_src, '_updateDirtyState')
+            + extract_js_function(ui_src, '_updateCheckHasError')
+            + ';function _showUpdateBanner(d){_bannerCalled=true;}'
+            + ';const d=' + json.dumps(_REPRO_PAYLOADS['clean_stale_check']) + ';'
+            + m.group(0)
+            + ';process.stdout.write(JSON.stringify({called:_bannerCalled}));'
+        )
+        r = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', timeout=15)
+        assert r.returncode == 0, f'node exited {r.returncode}:\n{r.stderr}'
+        assert json.loads(r.stdout)['called']
+
+
+def _run_dirty_state(payload):
+    """Run _updateDirtyState(payload) in Node.js; return the helper's output dict."""
+    src = read('static/ui.js')
+    fn = extract_js_function(src, '_updateDirtyState')
+    payload_json = json.dumps(payload)
+    script = (
+        '"use strict";'
+        + fn
+        + ';process.stdout.write(JSON.stringify(_updateDirtyState(' + payload_json + ')));'
+    )
+    r = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', timeout=15)
+    assert r.returncode == 0, f'node exited {r.returncode}:\n{r.stderr}'
+    return json.loads(r.stdout)
+
+
+class TestUpdateDirtyStateHelper:
+    """_updateDirtyState() is the single source of truth for the dirty predicate."""
+
+    def test_webui_only_dirty(self):
+        """WebUI dirty, Agent clean: helper returns webui target."""
+        result = _run_dirty_state({
+            'webui': {'dirty': True, 'no_git': False, 'manual_update': False},
+            'agent': {'dirty': False, 'no_git': False},
+        })
+        assert result['webuiDirty'] is True
+        assert result['agentDirty'] is False
+        assert result['hasDirty'] is True
+        assert result['dirtyTarget'] == 'webui'
+
+    def test_agent_only_dirty(self):
+        """Agent dirty, WebUI clean: helper returns agent target."""
+        result = _run_dirty_state({
+            'webui': {'dirty': False, 'no_git': False, 'manual_update': False},
+            'agent': {'dirty': True, 'no_git': False},
+        })
+        assert result['webuiDirty'] is False
+        assert result['agentDirty'] is True
+        assert result['hasDirty'] is True
+        assert result['dirtyTarget'] == 'agent'
+
+    def test_both_dirty_webui_wins(self):
+        """Both dirty: webui wins as the force-action target (first dirty)."""
+        result = _run_dirty_state({
+            'webui': {'dirty': True, 'no_git': False, 'manual_update': False},
+            'agent': {'dirty': True, 'no_git': False},
+        })
+        assert result['webuiDirty'] is True
+        assert result['agentDirty'] is True
+        assert result['hasDirty'] is True
+        assert result['dirtyTarget'] == 'webui'
+
+    def test_manual_webui_dirty_agent(self):
+        """manual_update on WebUI excludes it; dirty Agent remains recoverable."""
+        result = _run_dirty_state(_REPRO_PAYLOADS['manual_webui_dirty_agent'])
+        assert result['webuiDirty'] is False, 'manual WebUI must not be marked dirty'
+        assert result['agentDirty'] is True
+        assert result['hasDirty'] is True
+        assert result['dirtyTarget'] == 'agent'
+
+    def test_no_git_install(self):
+        """no_git install with dirty:true: helper returns hasDirty=False (no git to reset)."""
+        result = _run_dirty_state(_REPRO_PAYLOADS['no_git_install'])
+        assert result['webuiDirty'] is False
+        assert result['hasDirty'] is False
+        assert result['dirtyTarget'] == ''
+
+    def test_clean_current(self):
+        """Clean/current payload returns all False."""
+        result = _run_dirty_state(_REPRO_PAYLOADS['clean_current'])
+        assert result['hasDirty'] is False
+        assert result['dirtyTarget'] == ''
+
+    def test_dirty_but_manual_update_excluded(self):
+        """dirty+manual_update on WebUI: manual_update guard blocks recovery even when dirty=true."""
+        result = _run_dirty_state({
+            'webui': {'dirty': True, 'no_git': False, 'manual_update': True},
+            'agent': {'dirty': False, 'no_git': False},
+        })
+        assert result['webuiDirty'] is False, 'manual_update must exclude webui from dirty recovery'
+        assert result['hasDirty'] is False
+        assert result['dirtyTarget'] == ''
+
+    def test_absent_and_malformed_payloads_safe(self):
+        """null and type-confused payloads must not throw and must return hasDirty=False."""
+        for payload in [None, {}, {'webui': None, 'agent': None}, {'webui': 'string'}]:
+            result = _run_dirty_state(payload)
+            assert result['hasDirty'] is False, (
+                f'malformed payload must yield hasDirty=False; payload={payload!r}'
+            )
+
+
+class TestUpdateDirtyStateRouting:
+    """All three consumers of _updateDirtyState must agree on verdict and target."""
+
+    def test_all_consumers_agree_on_verdict_and_target(self):
+        """_showUpdateBanner, checkUpdatesNow, and the boot gate all agree for the base-fails payload."""
+        payload = _REPRO_PAYLOADS['no_git_webui_dirty_agent']
+
+        # Consumer 1: _showUpdateBanner
+        banner = _run_show_update_banner(payload)
+        assert banner['force_visible'], 'banner: must flag dirty agent'
+        assert banner['force_target'] == 'agent', f'banner: target must be agent; got {banner["force_target"]!r}'
+
+        # Consumer 2: checkUpdatesNow
+        check = _run_check_updates_now(payload)
+        assert check['force_visible'], 'settings: must flag dirty agent'
+        assert check['force_target'] == 'agent', f'settings: target must be agent; got {check["force_target"]!r}'
+
+        # Consumer 3: boot gate
+        ui_src = read('static/ui.js')
+        boot_src = read('static/boot.js')
+        m = re.search(
+            r'const \{hasDirty:_dirty\}=_updateDirtyState\(d\);'
+            r'if\(.+?\|\|_dirty\|\|_updateCheckHasError\(d\)\)_showUpdateBanner\(d\);',
+            boot_src,
+        )
+        assert m, 'boot gate pattern not found in static/boot.js'
+        gate_js = m.group(0)
+        fn_dirty = extract_js_function(ui_src, '_updateDirtyState')
+        fn_error = extract_js_function(ui_src, '_updateCheckHasError')
+        script = (
+            '"use strict";'
+            'let _bannerCalled=false;'
+            + fn_dirty
+            + fn_error
+            + ';function _showUpdateBanner(d){_bannerCalled=true;}'
+            + ';const d=' + json.dumps(payload) + ';'
+            + gate_js
+            + ';process.stdout.write(JSON.stringify({called:_bannerCalled}));'
+        )
+        r = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', timeout=15)
+        assert r.returncode == 0, f'node exited {r.returncode}:\n{r.stderr}'
+        boot = json.loads(r.stdout)
+        assert boot['called'], 'boot gate: must call _showUpdateBanner for dirty agent payload'
+
+    def test_no_consumer_inlines_dirty_predicate(self):
+        """Source check: each consumer delegates to _updateDirtyState; none re-derives the predicate inline."""
+        ui_src = read('static/ui.js')
+        panels_src = read('static/panels.js')
+        boot_src = read('static/boot.js')
+
+        show_fn = extract_js_function(ui_src, '_showUpdateBanner')
+        assert '_updateDirtyState(data)' in show_fn, '_showUpdateBanner must call _updateDirtyState'
+
+        check_fn = extract_js_function(panels_src, 'checkUpdatesNow')
+        assert '_updateDirtyState(data)' in check_fn, 'checkUpdatesNow must call _updateDirtyState'
+
+        assert '_updateDirtyState(d)' in boot_src, 'boot.js gate must call _updateDirtyState'
+
+        # Guard: none of the consumer bodies should re-derive the predicate inline
+        inline_pat = re.compile(r'\.dirty\b[^;]*&&[^;]*\.no_git')
+        assert not inline_pat.search(show_fn), '_showUpdateBanner must not inline the dirty predicate'
+        assert not inline_pat.search(check_fn), 'checkUpdatesNow must not inline the dirty predicate'
+
+
+def _run_apply_response_sequence(responses):
+    """Run applyUpdates() with ordered API responses and capture terminal UI state."""
+    src = read('static/ui.js')
+    ui_fns = '\n'.join([
+        extract_js_function(src, '_updateDirtyState'),
+        extract_js_function(src, '_i18nUpdateText'),
+        extract_js_function(src, '_showUpdateError'),
+        extract_js_function(src, 'applyUpdates'),
+    ])
+    script = (
+        '"use strict";'
+        '(async()=>{'
+        'let _apiIndex=0;let _reloads=0;let _toast=null;'
+        'const _el={'
+        'btnApplyUpdate:{style:{display:"inline-block"},disabled:false,textContent:"Update Now",dataset:{}},'
+        'btnForceUpdate:{style:{display:"none"},disabled:true,textContent:"Force update",dataset:{target:""}},'
+        'btnClearUpdateLock:{style:{display:"inline-block"},disabled:false,textContent:"Clear lock",dataset:{target:"agent"}},'
+        'updateError:{style:{display:"none"},textContent:""},'
+        '};'
+        'global.window={_updateData:{webui:{behind:0,dirty:true,channel:"stable"},agent:{behind:2,dirty:false}},_updateApplyInFlight:false};'
+        'global.$=(id)=>_el[id]||null;'
+        'function t(k){return k;}'
+        'global.api=async()=>(' + json.dumps(responses) + ')[_apiIndex++];'
+        'global._readHealthServerIdentity=async()=>null;'
+        'global._waitForServerThenReload=async()=>{_reloads+=1;};'
+        'global.showToast=(...args)=>{_toast=args;};'
+        'global._showUpdateBanner=(data)=>{if(data&&data.webui&&data.webui.dirty){_el.btnForceUpdate.style.display="inline-block";_el.btnForceUpdate.disabled=false;_el.btnForceUpdate.dataset.target="webui";}};'
+        'global.sessionStorage={removeItem:()=>{},setItem:()=>{},getItem:()=>null};'
+        + ui_fns
+        + ';await applyUpdates();'
+        + (';await applyUpdates();' if len(responses) > 1 else '')
+        + 'process.stdout.write(JSON.stringify({'
+        'reloads:_reloads,toast:_toast,error:_el.updateError.textContent,'
+        'error_visible:_el.updateError.style.display!=="none",'
+        'in_flight:!!window._updateApplyInFlight,'
+        'clear_visible:_el.btnClearUpdateLock.style.display!=="none",'
+        'clear_disabled:_el.btnClearUpdateLock.disabled,'
+        'clear_target:_el.btnClearUpdateLock.dataset.target,'
+        'force_visible:_el.btnForceUpdate.style.display!=="none",'
+        'apply_visible:_el.btnApplyUpdate.style.display!=="none",apply_disabled:_el.btnApplyUpdate.disabled,'
+        '}));'
+        '})()'
+    )
+    r = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', timeout=15)
+    assert r.returncode == 0, f'node exited {r.returncode}:\n{r.stderr}'
+    return json.loads(r.stdout)
+
+
+def _run_clear_lock_response(response, raises=False, initial_error='', target='webui', update_data=None):
+    """Run applyClearUpdateLock() and capture restart, toast, and control state."""
+    src = read('static/ui.js')
+    ui_fns = '\n'.join([
+        extract_js_function(src, '_updateDirtyState'),
+        extract_js_function(src, '_formatUpdateTargetStatus'),
+        extract_js_function(src, '_formatManualUpdateInstruction'),
+        extract_js_function(src, '_formatUpdateCheckError'),
+        extract_js_function(src, '_updateCheckHasError'),
+        extract_js_function(src, '_i18nUpdateText'),
+        extract_js_function(src, '_showUpdateError'),
+        extract_js_function(src, '_showUpdateBanner'),
+        extract_js_function(src, 'applyClearUpdateLock'),
+    ])
+    response_js = 'throw new Error("connection lost")' if raises else 'return ' + json.dumps(response)
+    update_data = update_data or {
+        'webui': {'behind': 2, 'dirty': True, 'channel': 'stable'},
+        'agent': {'behind': 0, 'dirty': False},
+    }
+    script = (
+        '"use strict";'
+        '(async()=>{'
+        'let _reloads=0;let _toast=null;'
+        'const _el={'
+        'updateError:{style:{display:' + json.dumps('block' if initial_error else 'none') + '},textContent:' + json.dumps(initial_error) + '},'
+        'btnApplyUpdate:{style:{display:"inline-block"},disabled:false,dataset:{}},'
+        'btnForceUpdate:{style:{display:"none"},disabled:true,dataset:{target:""}},'
+        'btnClearUpdateLock:{style:{display:"inline-block"},disabled:false,dataset:{target:' + json.dumps(target) + '}},'
+        'updateMsg:{textContent:""},'
+        'updateBanner:{classList:{_s:new Set(),add(c){this._s.add(c);},remove(c){this._s.delete(c);},has(c){return this._s.has(c);}}},'
+        '};'
+        'const _btn={style:{display:"inline-block"},disabled:false,textContent:"Clear lock",dataset:{target:' + json.dumps(target) + '}};'
+        'global.window={_clearLockInFlight:false,_whatsNewSummaryEnabled:false};'
+        'global.window._updateData=' + json.dumps(update_data) + ';'
+        'global.$=(id)=>id==="btnClearUpdateLock"?_btn:_el[id]||null;'
+        'function t(k,...args){'
+        'const values={update_no_change:"Für {0} wurde kein Update angewendet."};'
+        'const value=values[k]||k;'
+        'return value.replace(/\\{(\\d+)\\}/g,(match,index)=>args[index]===undefined?match:String(args[index]));'
+        '}'
+        'global.api=async()=>{' + response_js + ';};'
+        'global._waitForServerThenReload=async()=>{_reloads+=1;};'
+        'global.showToast=(...args)=>{_toast=args;};'
+        'function _renderUpdateWhatsNewLinks(){}'
+        'global.sessionStorage={removeItem:()=>{},setItem:()=>{},getItem:()=>null};'
+        + ui_fns
+        + ';await applyClearUpdateLock(_btn);'
+        + 'process.stdout.write(JSON.stringify({'
+        'reloads:_reloads,toast:_toast,error:_el.updateError.textContent,'
+        'error_visible:_el.updateError.style.display!=="none",'
+        'in_flight:!!window._clearLockInFlight,visible:_btn.style.display!=="none",'
+        'disabled:_btn.disabled,target:_btn.dataset.target,'
+        'apply_visible:_el.btnApplyUpdate.style.display!=="none",apply_disabled:_el.btnApplyUpdate.disabled,'
+        'force_visible:_el.btnForceUpdate.style.display!=="none",force_disabled:_el.btnForceUpdate.disabled,force_target:_el.btnForceUpdate.dataset.target,'
+        '}));'
+        '})()'
+    )
+    r = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', timeout=15)
+    assert r.returncode == 0, f'node exited {r.returncode}:\n{r.stderr}'
+    return json.loads(r.stdout)
+
+
+class TestUpdateRecoveryResponseLifecycle:
+    """Every apply and clear-lock response leaves recovery state truthful."""
+
+    def test_apply_up_to_date_is_info_without_restart(self):
+        result = _run_apply_response_sequence([{
+            'ok': True,
+            'up_to_date': True,
+            'message': 'no compare ref',
+        }])
+        assert result['reloads'] == 0
+        assert result['toast'][2] == 'info'
+        assert 'No update was applied' in result['toast'][0]
+        assert not result['error_visible']
+        assert not result['in_flight']
+
+    def test_apply_up_to_date_preserves_dirty_force_recovery(self):
+        result = _run_apply_response_sequence([{
+            'ok': True,
+            'up_to_date': True,
+        }])
+        assert result['reloads'] == 0
+        assert result['force_visible']
+        assert not result['apply_visible']
+        assert result['apply_disabled']
+        assert not result['in_flight']
+
+    def test_clear_lock_up_to_date_is_info_without_restart(self):
+        result = _run_clear_lock_response({
+            'ok': True,
+            'up_to_date': True,
+            'message': 'no compare ref',
+        })
+        assert result['reloads'] == 0
+        assert result['toast'][2] == 'info'
+        assert result['toast'][0] == 'Für WebUI wurde kein Update angewendet.'
+        assert not result['visible']
+        assert result['disabled']
+        assert result['target'] == ''
+        assert not result['apply_visible']
+        assert result['apply_disabled']
+        assert result['force_visible']
+        assert not result['force_disabled']
+        assert result['force_target'] == 'webui'
+        assert not result['in_flight']
+
+    def test_apply_lock_conflict_preserves_dirty_sibling_force_recovery(self):
+        result = _run_apply_response_sequence([{
+            'ok': False,
+            'lock_conflict': True,
+            'message': 'stale lock',
+        }])
+        assert result['clear_visible']
+        assert result['clear_target'] == 'agent'
+        assert result['force_visible']
+
+    def test_clear_lock_up_to_date_preserves_failed_agent_target_when_both_are_dirty(self):
+        result = _run_clear_lock_response(
+            {'ok': True, 'up_to_date': True},
+            target='agent',
+            update_data={
+                'webui': {'behind': 0, 'dirty': True, 'channel': 'stable'},
+                'agent': {'behind': 0, 'dirty': True},
+            },
+        )
+        assert result['force_visible']
+        assert not result['force_disabled']
+        assert result['force_target'] == 'agent'
+        assert not result['apply_visible']
+        assert result['apply_disabled']
+
+    @pytest.mark.parametrize('target, update_data, expected_force_target', [
+        (
+            'agent',
+            {
+                'webui': {'behind': 2, 'dirty': False, 'channel': 'stable'},
+                'agent': {'behind': 0, 'dirty': True},
+            },
+            'agent',
+        ),
+        (
+            'webui',
+            {
+                'webui': {'behind': 0, 'dirty': True, 'channel': 'stable'},
+                'agent': {'behind': 2, 'dirty': False},
+            },
+            'webui',
+        ),
+    ])
+    def test_clear_lock_up_to_date_preserves_other_target_apply(
+        self, target, update_data, expected_force_target
+    ):
+        result = _run_clear_lock_response(
+            {'ok': True, 'up_to_date': True},
+            target=target,
+            update_data=update_data,
+        )
+        assert result['apply_visible']
+        assert not result['apply_disabled']
+        assert result['force_visible']
+        assert not result['force_disabled']
+        assert result['force_target'] == expected_force_target
+
+    def test_fresh_banner_reset_clears_previous_update_error(self):
+        result = _run_show_update_banner({
+            'webui': {'behind': 0, 'dirty': False},
+            'agent': {'behind': 0, 'dirty': False},
+        }, stale_error='stale update failure')
+        assert not result['error_visible']
+        assert result['error'] == ''
+
+    def test_clear_lock_delegated_lock_conflict_restores_recovery_control(self):
+        result = _run_clear_lock_response({
+            'ok': False,
+            'lock_conflict': True,
+            'message': 'lock appeared during retry',
+        })
+        assert result['reloads'] == 0
+        assert result['error_visible']
+        assert 'webui' in result['error'].lower()
+        assert result['visible']
+        assert not result['disabled']
+        assert result['target'] == 'webui'
+        assert not result['in_flight']
+
+    def test_clear_lock_delegated_stash_conflict_keeps_localized_warning(self):
+        result = _run_clear_lock_response({
+            'ok': True,
+            'stash_conflict': True,
+            'message': 'English backend stash details',
+        })
+        assert result['reloads'] == 1
+        assert result['toast'][2] == 'warning'
+        assert 'Local changes were preserved in git stash.' in result['toast'][0]
+        assert result['error_visible']
+
+    def test_clear_lock_exception_retires_recovery_control(self):
+        result = _run_clear_lock_response({}, raises=True)
+        assert result['reloads'] == 0
+        assert result['error_visible']
+        assert not result['visible']
+        assert result['disabled']
+        assert result['target'] == ''
+        assert not result['in_flight']
+
+    def test_clear_lock_up_to_date_clears_previous_error(self):
+        result = _run_clear_lock_response({
+            'ok': True,
+            'up_to_date': True,
+        }, initial_error='Update failed (agent) stale lock')
+        assert not result['error_visible']
+        assert result['error'] == ''
+
+    def test_later_non_lock_failure_clears_previous_clear_lock_target(self):
+        result = _run_apply_response_sequence([
+            {'ok': False, 'lock_conflict': True, 'message': 'stale lock'},
+            {'ok': False, 'conflict': True, 'message': 'normal conflict'},
+        ])
+        assert result['reloads'] == 0
+        assert not result['clear_visible']
+        assert result['clear_disabled']
+        assert result['clear_target'] == ''
+        assert result['error_visible']
+
+    def test_all_new_recovery_copy_keys_are_present_in_each_locale(self):
+        src = read('static/i18n.js')
+        keys = [
+            'update_no_change', 'update_dirty_state', 'update_dirty_force_hint',
+            'update_force_unavailable_webui', 'update_force_unavailable_agent',
+            'update_force_confirm_title', 'update_force_confirm_message',
+            'update_force_updating', 'update_force_failed', 'update_force_noop',
+            'update_force_applied_restarting', 'update_applied_restarting',
+            'update_applied_with_target', 'update_stash_preserved',
+            'update_lock_checking', 'update_lock_check_failed',
+            'update_lock_request_failed', 'update_lock_present',
+            'update_lock_present_host', 'update_lock_copy_command',
+            'update_lock_copied', 'update_lock_clipboard_unavailable',
+            'update_lock_copy_failed', 'update_lock_retry', 'update_lock_other_files',
+        ]
+        for key in keys:
+            assert len(re.findall(r'^\s+' + re.escape(key) + r':', src, re.MULTILINE)) == 15, key

@@ -138,7 +138,8 @@ def test_update_apply_structured_server_errors_still_use_json_message_path():
     show_error_call = src.index("_showUpdateError(target,res);", apply_start)
     reset_button = src.index("resetApplyButton(0);", show_error_call)
     assert show_error_call < reset_button
-    assert "const msg='Update failed ('+target+'): '+(res.message||'unknown error');" in src
+    assert "const msg=_i18nUpdateText('update_failed_prefix','Update failed: ')+'('+target+') '" in src
+    assert "res.message||_i18nUpdateText('update_unknown_error','unknown error')" in src
 
 
 def test_update_apply_successful_stash_conflict_displays_recovery_message():
@@ -150,14 +151,16 @@ def test_update_apply_successful_stash_conflict_displays_recovery_message():
 
     messages_decl = body.index("const stashConflictMessages=[];")
     stash_branch = body.index("if(res.stash_conflict)")
-    message_push = body.index("stashConflictMessages.push('Update applied ('+target+'):", stash_branch)
+    message_push = body.index("stashConflictMessages.push(updateText('update_applied_with_target'", stash_branch)
     persistent_display = body.index("errEl.textContent=stashConflictMessages.join('\\n\\n')", message_push)
     message_join = body.index("const stashConflictMessage=stashConflictMessages.join('\\n\\n');", persistent_display)
     restart_wait = body.index("_waitForServerThenReload", message_join)
 
     assert messages_decl < stash_branch < message_push < persistent_display < message_join < restart_wait
-    assert "showToast(stashConflictMessage||'Update applied" in body
+    assert "showToast(stashConflictMessage||updateText('update_applied_restarting'" in body
     assert "stashConflictMessages.length?10000" in body
+    assert "updateText('update_stash_preserved'" in body
+    assert "res.message||'Local changes were preserved in git stash.'" not in body
 
 
 def test_update_apply_multiple_stash_conflicts_are_aggregated_not_overwritten():
@@ -170,10 +173,10 @@ def test_update_apply_multiple_stash_conflicts_are_aggregated_not_overwritten():
     assert "let stashConflictMessage='';" not in body
     assert "stashConflictMessage='Update applied ('+target+'):" not in body
     assert "const stashConflictMessages=[];" in body
-    assert "stashConflictMessages.push('Update applied ('+target+'): " in body
+    assert "stashConflictMessages.push(updateText('update_applied_with_target'" in body
     assert "errEl.textContent=stashConflictMessages.join('\\n\\n')" in body
     assert "const stashConflictMessage=stashConflictMessages.join('\\n\\n');" in body
-    assert "showToast(stashConflictMessage||'Update applied" in body
+    assert "showToast(stashConflictMessage||updateText('update_applied_restarting'" in body
 
 
 def test_update_apply_network_error_classifier_ignores_http_status_errors():

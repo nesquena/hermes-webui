@@ -1,0 +1,146 @@
+{
+  "source": "https://github.com/nesquena/hermes-webui/issues/4085#issuecomment-5124356236 and #issuecomment-5135788351",
+  "reporter": "b3nw via Discord #report-bugs, reconfirmed 2026-07-28 on WebUI exp-v0.52.153-dirty-a9b7cc19 Experimental",
+  "symptom": "check now shows 'up to date' with no option to force a clean update",
+  "probe_output": "is_dirty= True\ndirty_suffix= -dirty-b1ffe3f3",
+  "payloads": {
+    "dirty_current": {
+      "webui": {
+        "name": "webui",
+        "current_version": "exp-v0.52.153-dirty-a9b7cc19",
+        "latest_version": "exp-v0.52.153",
+        "release_based": true,
+        "behind": 0,
+        "dirty": true,
+        "channel": "experimental"
+      },
+      "agent": {
+        "name": "agent",
+        "current_version": "v0.9.4",
+        "latest_version": "v0.9.4",
+        "release_based": true,
+        "behind": 0,
+        "dirty": false,
+        "channel": "stable"
+      }
+    },
+    "clean_current": {
+      "webui": {
+        "name": "webui",
+        "current_version": "exp-v0.52.153",
+        "latest_version": "exp-v0.52.153",
+        "release_based": true,
+        "behind": 0,
+        "dirty": false,
+        "channel": "experimental"
+      },
+      "agent": {
+        "name": "agent",
+        "current_version": "v0.9.4",
+        "latest_version": "v0.9.4",
+        "release_based": true,
+        "behind": 0,
+        "dirty": false,
+        "channel": "stable"
+      }
+    },
+    "dirty_behind": {
+      "webui": {
+        "name": "webui",
+        "current_version": "exp-v0.52.150-dirty-a9b7cc19",
+        "latest_version": "exp-v0.52.153",
+        "release_based": true,
+        "behind": 3,
+        "dirty": true,
+        "channel": "experimental"
+      }
+    },
+    "dirty_stale_check": {
+      "webui": {
+        "name": "webui",
+        "current_version": "exp-v0.52.153-dirty-a9b7cc19",
+        "latest_version": null,
+        "behind": 0,
+        "dirty": true,
+        "stale_check": true,
+        "error": "fetch failed",
+        "channel": "experimental"
+      }
+    },
+    "dirty_stale_positive_behind": {
+      "webui": {
+        "name": "webui",
+        "current_version": "exp-v0.52.150-dirty-a9b7cc19",
+        "latest_version": "exp-v0.52.153",
+        "behind": 3,
+        "dirty": true,
+        "stale_check": true,
+        "error": "fetch failed",
+        "channel": "experimental"
+      }
+    },
+    "clean_stale_check": {
+      "webui": {
+        "name": "webui",
+        "current_version": "exp-v0.52.153",
+        "latest_version": null,
+        "behind": null,
+        "dirty": false,
+        "stale_check": true,
+        "error": "fetch failed",
+        "channel": "experimental"
+      }
+    },
+    "no_git_install": {
+      "webui": {
+        "name": "webui",
+        "behind": null,
+        "no_git": true
+      }
+    },
+    "no_git_webui_dirty_agent": {
+      "webui": {
+        "name": "webui",
+        "behind": null,
+        "no_git": true
+      },
+      "agent": {
+        "name": "agent",
+        "behind": 0,
+        "dirty": true
+      }
+    },
+    "manual_webui_dirty_agent": {
+      "webui": {
+        "name": "webui",
+        "current_version": "v0.52.151",
+        "latest_version": "v0.52.153",
+        "release_based": true,
+        "behind": 2,
+        "dirty": false,
+        "no_git": true,
+        "manual_update": true,
+        "channel": "stable"
+      },
+      "agent": {
+        "name": "agent",
+        "current_version": "v0.9.4",
+        "latest_version": "v0.9.4",
+        "release_based": true,
+        "behind": 0,
+        "dirty": true,
+        "channel": "stable"
+      }
+    }
+  },
+  "acceptance_criteria": [
+    "When dirty == true and behind == 0, Settings must show a distinct 'Local changes detected' state rather than 'Up to date'.",
+    "Offer a force-clean action targeting the currently selected WebUI channel.",
+    "The confirmation must state that uncommitted tracked changes will be discarded.",
+    "A clean up-to-date checkout must retain the existing 'Up to date' behavior.",
+    "Add a frontend regression proving a {behind: 0, dirty: true} payload cannot render as ordinary up-to-date state.",
+    "Preserve the recovery affordance on stale/fetch-error payloads that still carry dirty: true.",
+    "Never auto-run the destructive path.",
+    "Cover manual-update/no-git installs, channel propagation, cancel-at-confirm, and the active-stream/run refusal paths."
+  ]
+}

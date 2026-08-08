@@ -11958,6 +11958,7 @@ async function checkUpdatesNow(channelOverride){
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
     const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:60000});
     if(data.disabled){
+      if(typeof _showUpdateBanner==='function') _showUpdateBanner({});
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
       const errorParts=[];
@@ -11985,16 +11986,26 @@ async function checkUpdatesNow(channelOverride){
       const noGitParts=[];
       if(data.webui&&data.webui.no_git&&!data.webui.manual_update) noGitParts.push('WebUI');
       if(data.agent&&data.agent.no_git&&!data.agent.ignored) noGitParts.push('Agent');
-      if(parts.length){
+      const {hasDirty:_hasDirty}=(typeof _updateDirtyState==='function'?_updateDirtyState(data):{hasDirty:false,webuiDirty:false,agentDirty:false,dirtyTarget:''});
+      const _hasCheckError=(typeof _updateCheckHasError==='function')
+        ? _updateCheckHasError(data)
+        : errorParts.length>0;
+      if(_hasCheckError){
+        if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+      } else if(parts.length){
         let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
         if(manualInstruction) txt+=' · '+manualInstruction;
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
-      } else if(errorParts.length){
-        if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
+      } else if(_hasDirty){
+        // Dirty-recovery takes priority over the no-git informational note (#4085 branch ordering).
+        if(status){status.textContent=t('settings_local_changes_detected');status.style.color='var(--accent)';}
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
       } else if(noGitParts.length){
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner({});
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
       } else {
         if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}

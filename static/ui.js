@@ -9632,6 +9632,9 @@ function _formatUpdateCheckError(label,info){
   const detail=String(info.error).replace(/^fetch failed:?\s*/i,'').trim();
   return detail ? `${label}: ${detail}` : label;
 }
+function _updateCheckHasError(data){
+  return !!(data&&((data.webui&&data.webui.error)||(data.agent&&data.agent.error)));
+}
 function _isSafeUpdateCompareUrl(url){
   if(!url||!/^https?:\/\//i.test(url)) return false;
   try{
@@ -9926,50 +9929,91 @@ function _renderUpdateWhatsNewLinks(data){
   }
   _appendUpdateDiffLinks(container,targets,"What's new: ");
 }
-function _showUpdateBanner(data){
+// Single source of truth for recoverable-dirty detection.  A target is
+// "recoverably dirty" when it has local modifications that a force-reset can
+// clean: git checkouts only; manual/no-git installs are excluded because they
+// have no tracked history to reset to.  boot.js and panels.js call this
+// instead of repeating the predicate inline.
+function _updateDirtyState(data){
+  const webuiDirty=!!(data&&data.webui&&data.webui.dirty&&!data.webui.no_git&&!data.webui.manual_update);
+  const agentDirty=!!(data&&data.agent&&data.agent.dirty&&!data.agent.no_git);
+  return {webuiDirty,agentDirty,hasDirty:webuiDirty||agentDirty,dirtyTarget:webuiDirty?'webui':(agentDirty?'agent':'')};
+}
+function _showUpdateBanner(data,forceTargetOverride){
+  const staleError=$('updateError');
+  if(staleError){staleError.style.display='none';staleError.textContent='';}
   const parts=[];
+  const errorParts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
+  const webuiError=_formatUpdateCheckError('WebUI',data.webui);
+  const agentError=_formatUpdateCheckError('Agent',data.agent);
   if(webuiPart) parts.push(webuiPart);
   if(agentPart) parts.push(agentPart);
+  if(webuiError) errorParts.push(webuiError);
+  if(agentError) errorParts.push(agentError);
   window._updateData=data;
+  const {webuiDirty,agentDirty,hasDirty,dirtyTarget:detectedDirtyTarget}=_updateDirtyState(data);
+  const dirtyTarget=(forceTargetOverride==='webui'&&webuiDirty)||
+    (forceTargetOverride==='agent'&&agentDirty)?forceTargetOverride:detectedDirtyTarget;
+  const hasCheckError=_updateCheckHasError(data);
+  const clearLockBtn=$('btnClearUpdateLock');
+  if(clearLockBtn){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
   const btnApply=$('btnApplyUpdate');
   if(btnApply){
     const webuiManual=!!(data&&data.webui&&data.webui.manual_update&&data.webui.behind>0);
     const webuiUpdatable=!!(data&&data.webui&&data.webui.behind>0&&!webuiManual);
     const agentUpdatable=!!(data&&data.agent&&data.agent.behind>0);
-    const hasApplyTargets=webuiUpdatable||agentUpdatable;
+    const hasApplyTargets=!hasCheckError&&(webuiUpdatable||agentUpdatable);
     btnApply.disabled=!hasApplyTargets;
     btnApply.style.display=hasApplyTargets?'':'none';
     if(webuiManual){
+      // Manual WebUI blocks its own clean path but must not suppress a dirty agent.
+      const forceBtn=$('btnForceUpdate');
+      if(agentDirty){
+        if(forceBtn){forceBtn.style.display='inline-block';forceBtn.disabled=false;forceBtn.dataset.target='agent';}
+      } else {
+        if(forceBtn){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
+      }
+    } else if(hasDirty){
+      const forceBtn=$('btnForceUpdate');
+      if(forceBtn){forceBtn.style.display='inline-block';forceBtn.disabled=false;forceBtn.dataset.target=dirtyTarget;}
+    } else {
+      // Clean state (not manual, not dirty): reset any stale force affordance
       const forceBtn=$('btnForceUpdate');
       if(forceBtn){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
-      const clearLockBtn=$('btnClearUpdateLock');
-      if(clearLockBtn){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
     }
   }
-  if(!parts.length){
+  if(!parts.length&&!hasDirty&&!hasCheckError){
     _renderUpdateWhatsNewLinks(data);
     const staleBanner=$('updateBanner');
     if(staleBanner) staleBanner.classList.remove('visible');
+    const staleMessage=$('updateMsg');
+    if(staleMessage) staleMessage.textContent='';
     return;
   }
   const msg=$('updateMsg');
   if(msg){
     const manualInstruction=_formatManualUpdateInstruction(data&&data.webui);
-    msg.textContent='\u2B06 '+parts.join(', ')+' available'+(manualInstruction?' · '+manualInstruction:'');
+    let baseMsg=hasCheckError?('\u26A0\uFE0F '+errorParts.join(', ')):parts.length?('\u2B06 '+parts.join(', ')+' available'+(manualInstruction?' \u00B7 '+manualInstruction:'')):'';
+    if(hasDirty){
+      const dirtyLabel=dirtyTarget==='webui'?'WebUI':'Agent';
+      const dirtyNote=_i18nUpdateText('update_dirty_state','Local changes detected in {0}.',dirtyLabel)+(parts.length?'':' '+_i18nUpdateText('update_dirty_force_hint','Use "Force update" to restore a clean install.'));
+      baseMsg=baseMsg?(baseMsg+' \u00B7 '+dirtyNote):('\u26A0\uFE0F '+dirtyNote);
+    }
+    msg.textContent=baseMsg;
   }
   const banner=$('updateBanner');
   if(banner) banner.classList.add('visible');
   const summaryMode=window._whatsNewSummaryEnabled===true?'summary':'diff';
   _renderUpdateWhatsNewLinks(data,{mode:summaryMode});
 }
-function _i18nUpdateText(key, fallback){
+function _i18nUpdateText(key, fallback, ...args){
   if(typeof t==='function'){
-    const val=t(key);
+    const val=t(key,...args);
     if(val&&val!==key) return val;
   }
-  return fallback;
+  return String(fallback).replace(/\{(\d+)\}/g,(match,index)=>args[index]===undefined?match:String(args[index]));
 }
 function dismissUpdate(){
   const b=$('updateBanner');if(b)b.classList.remove('visible');
@@ -9990,7 +10034,7 @@ function _formatUpdateApplyExceptionMessage(error){
 async function applyUpdates(){
   if(window._updateApplyInFlight) return;
   window._updateApplyInFlight=true;
-  const updateText=(key,fallback)=>(typeof _i18nUpdateText==='function'?_i18nUpdateText(key,fallback):fallback);
+  const updateText=(key,fallback,...args)=>(typeof _i18nUpdateText==='function'?_i18nUpdateText(key,fallback,...args):String(fallback).replace(/\{(\d+)\}/g,(match,index)=>args[index]===undefined?match:String(args[index])));
   const btn=$('btnApplyUpdate');
   const resetApplyButton=(delayMs)=>{
     const reset=()=>{
@@ -10003,10 +10047,22 @@ async function applyUpdates(){
   if(btn){btn.disabled=true;btn.textContent=updateText('update_updating','Updating\u2026');}
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';errEl.textContent='';}
-  // Hide any leftover force-update button from a prior conflict so a fresh
-  // retry starts clean (otherwise stale state points at the wrong target).
+  // Reset stale force state, but retain recovery for a dirty sibling target.
+  // Apply can process multiple targets, and a lock conflict on one target must
+  // not remove the destructive recovery action for another target.
   const forceBtnReset=$('btnForceUpdate');
-  if(forceBtnReset){forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
+  const dirtyState=typeof _updateDirtyState==='function'?_updateDirtyState(window._updateData):null;
+  if(forceBtnReset&&dirtyState?.hasDirty){
+    forceBtnReset.disabled=false;
+    forceBtnReset.style.display='inline-block';
+    forceBtnReset.dataset.target=dirtyState.dirtyTarget;
+  } else if(forceBtnReset){
+    forceBtnReset.disabled=true;
+    forceBtnReset.style.display='none';
+    forceBtnReset.dataset.target='';
+  }
+  const clearLockBtnReset=$('btnClearUpdateLock');
+  if(clearLockBtnReset){clearLockBtnReset.disabled=true;clearLockBtnReset.style.display='none';clearLockBtnReset.dataset.target='';}
   const targets=[];
   if(window._updateData?.agent?.behind>0) targets.push('agent');
   if(window._updateData?.webui?.behind>0&&!window._updateData?.webui?.manual_update) targets.push('webui');
@@ -10019,6 +10075,8 @@ async function applyUpdates(){
   }
   try{
     const stashConflictMessages=[];
+    const noUpdateMessages=[];
+    let appliedTargetCount=0;
     const baselineServerIdentity = await _readHealthServerIdentity();
     for(const target of targets){
       // Send the channel the CHECK reported for this target (what was actually
@@ -10030,18 +10088,33 @@ async function applyUpdates(){
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000});
+      if(res.up_to_date){
+        const targetLabel=target==='webui'?'WebUI':'Agent';
+        noUpdateMessages.push(updateText('update_no_change','No update was applied for {0}.',targetLabel));
+        continue;
+      }
       if(!res.ok){
         _showUpdateError(target,res);
         resetApplyButton(0);
         return;
       }
+      appliedTargetCount+=1;
       if(res.stash_conflict){
-        stashConflictMessages.push('Update applied ('+target+'): '+(res.message||'Local changes were preserved in git stash.'));
+        const targetLabel=target==='webui'?'WebUI':'Agent';
+        stashConflictMessages.push(updateText('update_applied_with_target','Update applied ({0}): ',targetLabel)+updateText('update_stash_preserved','Local changes were preserved in git stash.'));
         if(errEl){errEl.textContent=stashConflictMessages.join('\n\n');errEl.style.display='block';}
       }
     }
+    if(!appliedTargetCount){
+      const noUpdateMessage=noUpdateMessages.join('\n\n')||updateText('update_no_change','No update was applied.');
+      showToast(noUpdateMessage,10000,'info');
+      if(typeof _showUpdateBanner==='function'&&window._updateData) _showUpdateBanner(window._updateData);
+      resetApplyButton(0);
+      if(btn){btn.disabled=true;btn.style.display='none';}
+      return;
+    }
     const stashConflictMessage=stashConflictMessages.join('\n\n');
-    showToast(stashConflictMessage||'Update applied — restarting…',stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
+    showToast(stashConflictMessage||updateText('update_applied_restarting','Update applied — restarting…'),stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
     _waitForServerThenReload({baselineServerIdentity});
@@ -10055,7 +10128,8 @@ async function applyUpdates(){
 function _showUpdateError(target,res){
   const errEl=$('updateError');
   const forceBtn=$('btnForceUpdate');
-  const msg='Update failed ('+target+'): '+(res.message||'unknown error');
+  const clearLockBtn=$('btnClearUpdateLock');
+  const msg=_i18nUpdateText('update_failed_prefix','Update failed: ')+'('+target+') '+(res.message||_i18nUpdateText('update_unknown_error','unknown error'));
   if(errEl){
     errEl.textContent=msg;
     errEl.style.display='block';
@@ -10069,14 +10143,25 @@ function _showUpdateError(target,res){
   // modifications).
   if(forceBtn&&(res.conflict||res.diverged)){
     forceBtn.dataset.target=target;
+    forceBtn.disabled=false;
     forceBtn.style.display='inline-block';
+  } else if(forceBtn&&res.lock_conflict&&window._updateData){
+    const siblingTarget=target==='webui'?'agent':'webui';
+    const {webuiDirty,agentDirty}=_updateDirtyState(window._updateData);
+    const siblingDirty=siblingTarget==='webui'?webuiDirty:agentDirty;
+    if(siblingDirty){
+      forceBtn.dataset.target=siblingTarget;
+      forceBtn.disabled=false;
+      forceBtn.style.display='inline-block';
+    }
   }
+  if(clearLockBtn){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
   // Show "Clear lock and retry update" when the only failure was a stale
   // git lock. This calls the new non-destructive /api/updates/clear_lock
   // endpoint, which probes the lock for a holder and refuses if held.
-  const clearLockBtn=$('btnClearUpdateLock');
   if(clearLockBtn&&res.lock_conflict){
     clearLockBtn.dataset.target=target;
+    clearLockBtn.disabled=false;
     clearLockBtn.style.display='inline-block';
   }
 }
@@ -10087,35 +10172,69 @@ async function applyClearUpdateLock(btn){
   window._clearLockInFlight=true;
   btn.disabled=true;
   const originalLabel=btn.textContent;
-  btn.textContent='Checking lock…';
+  const _lt=(key,fallback,...args)=>_i18nUpdateText(key,fallback,...args);
+  const errEl=$('updateError');
+  btn.textContent=_lt('update_lock_checking','Checking lock…');
   try{
     const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:60000});
-    if(res.ok){
+    if(res.up_to_date){
+      btn.disabled=true;
+      btn.style.display='none';
+      btn.dataset.target='';
+      if(errEl){errEl.style.display='none';errEl.textContent='';}
+      if(typeof _showUpdateBanner==='function'&&window._updateData) _showUpdateBanner(window._updateData,target);
+      const applyBtn=$('btnApplyUpdate');
+      const otherTarget=target==='webui'?'agent':'webui';
+      const otherInfo=window._updateData?.[otherTarget];
+      const otherTargetCanApply=!!(otherInfo&&otherInfo.behind>0&&!(otherTarget==='webui'&&otherInfo.manual_update));
+      if(applyBtn&&!otherTargetCanApply){applyBtn.disabled=true;applyBtn.style.display='none';}
+      const targetLabel=target==='webui'?'WebUI':'Agent';
+      const noUpdateMessage=_lt('update_no_change','No update was applied for {0}.',targetLabel);
+      showToast(noUpdateMessage,10000,'info');
+    } else if(res.ok){
+      btn.disabled=true;
+      btn.style.display='none';
+      btn.dataset.target='';
       sessionStorage.removeItem('hermes-update-checked');
       sessionStorage.removeItem('hermes-update-dismissed');
-      showToast('Update applied — restarting…');
+      if(res.stash_conflict){
+        const targetLabel=target==='webui'?'WebUI':'Agent';
+        const stashMessage=_lt('update_applied_with_target','Update applied ({0}): ',targetLabel)+_lt('update_stash_preserved','Local changes were preserved in git stash.');
+        if(errEl){errEl.textContent=stashMessage;errEl.style.display='block';}
+        showToast(stashMessage,10000,'warning');
+      } else {
+        showToast(_lt('update_applied_restarting','Update applied — restarting…'));
+      }
       _waitForServerThenReload({});
     } else if(res.lock_held){
+      btn.style.display='none';
+      btn.dataset.target='';
       // v2.2: server returns manual-instruction. Show the exact `rm`
       // command + a one-click "I've removed it, retry update" affordance
       // that POSTs the same endpoint a second time (now that the user
       // has presumably removed the lock, the server's success branch
       // runs the normal non-destructive apply).
       _renderLockManualInstruction(target, res);
+    } else if(res.lock_conflict){
+      _showUpdateError(target,res);
     } else {
-      const msg='Could not check the lock: '+(res.message||'unknown error');
-      const errEl=$('updateError');
+      btn.disabled=true;
+      btn.style.display='none';
+      btn.dataset.target='';
+      const msg=_lt('update_lock_check_failed','Could not check the lock: ')+(res.message||_lt('update_unknown_error','unknown error'));
       if(errEl){errEl.textContent=msg;errEl.style.display='block';}
       else showToast(msg);
     }
   }catch(e){
-    const msg='Lock-check request failed: '+((e&&e.message)||String(e));
-    const errEl=$('updateError');
+    btn.disabled=true;
+    btn.style.display='none';
+    btn.dataset.target='';
+    const msg=_lt('update_lock_request_failed','Lock-check request failed: ')+((e&&e.message)||String(e));
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
     else showToast(msg);
   }finally{
     window._clearLockInFlight=false;
-    btn.disabled=false;
+    btn.disabled=btn.style.display==='none'||!btn.dataset.target;
     btn.textContent=originalLabel;
   }
 }
@@ -10127,14 +10246,14 @@ function _renderLockManualInstruction(target, res){
   const cmd = res.manual_command || ('rm -f ' + (res.well_known_lock_path || '.git/index.lock'));
   const errEl=$('updateError');
   if(!errEl){
-    showToast('Lock present. Run: '+cmd);
+    showToast(_i18nUpdateText('update_lock_present','Lock present. Run: ')+cmd);
     return;
   }
   errEl.style.display='block';
   errEl.innerHTML='';
   const intro=document.createElement('div');
   intro.style.marginBottom='6px';
-  intro.textContent='A stale .git/index.lock is present. The server cannot remove it safely — please run this command on the host:';
+  intro.textContent=_i18nUpdateText('update_lock_present_host','A stale .git/index.lock is present. The server cannot remove it safely — please run this command on the host:');
   errEl.appendChild(intro);
   const code=document.createElement('pre');
   code.style.background='rgba(0,0,0,0.05)';
@@ -10153,25 +10272,25 @@ function _renderLockManualInstruction(target, res){
   const copyBtn=document.createElement('button');
   copyBtn.type='button';
   copyBtn.className='update-btn';
-  copyBtn.textContent='Copy command';
+  copyBtn.textContent=_i18nUpdateText('update_lock_copy_command','Copy command');
   copyBtn.onclick=async()=>{
     try{
       if(navigator.clipboard&&navigator.clipboard.writeText){
         await navigator.clipboard.writeText(cmd);
-        copyBtn.textContent='Copied';
-        setTimeout(()=>{ copyBtn.textContent='Copy command'; }, 1500);
+        copyBtn.textContent=_i18nUpdateText('update_lock_copied','Copied');
+        setTimeout(()=>{ copyBtn.textContent=_i18nUpdateText('update_lock_copy_command','Copy command'); }, 1500);
       } else {
-        copyBtn.textContent='Clipboard unavailable';
+        copyBtn.textContent=_i18nUpdateText('update_lock_clipboard_unavailable','Clipboard unavailable');
       }
     } catch(_){
-      copyBtn.textContent='Copy failed';
+      copyBtn.textContent=_i18nUpdateText('update_lock_copy_failed','Copy failed');
     }
   };
   actions.appendChild(copyBtn);
   const retryBtn=document.createElement('button');
   retryBtn.type='button';
   retryBtn.className='update-btn update-primary';
-  retryBtn.textContent="I've removed the lock — retry update";
+  retryBtn.textContent=_i18nUpdateText('update_lock_retry','I\'ve removed the lock — retry update');
   retryBtn.dataset.target=target;
   retryBtn.onclick=()=>{ applyClearUpdateLock(retryBtn); };
   actions.appendChild(retryBtn);
@@ -10181,7 +10300,7 @@ function _renderLockManualInstruction(target, res){
     other.style.marginTop='6px';
     other.style.fontSize='11px';
     other.style.opacity='0.85';
-    other.textContent='Other lock files also present: '+res.other_locks.join(', ');
+    other.textContent=_i18nUpdateText('update_lock_other_files','Other lock files also present: ')+res.other_locks.join(', ');
     errEl.appendChild(other);
   }
 }
@@ -10216,34 +10335,71 @@ async function _readHealthServerIdentity() {
   }
 }
 async function forceUpdate(btn){
+  if(window._updateApplyInFlight) return;
   const target=btn&&btn.dataset.target;
   if(!target) return;
+  const _lt=(key,fallback,...args)=>_i18nUpdateText(key,fallback,...args);
+  const targetLabel=target==='webui'?'WebUI':target==='agent'?'Agent':target;
+  const forceLabel=_lt('update_force','Force update');
+  // Capture channel before the dialog: a concurrent recheck can replace _updateData while the
+  // dialog is open, which would otherwise submit a different channel than the one the user saw.
+  const _ch=window._updateData?.[target]?.channel;
+  const channel=(_ch==='stable'||_ch==='experimental')?_ch:undefined;
   const confirmed=await showConfirmDialog({
-    title:'Force update '+target+'?',
-    message:'This will discard all local changes and delete untracked files in the '+target+' repo, then reset to the latest remote version. This cannot be undone.',
-    confirmLabel:'Force update',
+    title:_lt('update_force_confirm_title','Force update {0}?',targetLabel),
+    message:_lt('update_force_confirm_message','This will discard all local changes and delete untracked files in the {0} repo, then reset to the latest remote version. This cannot be undone.',targetLabel),
+    confirmLabel:forceLabel,
     danger:true,
     focusCancel:true,
   });
   if(!confirmed) return;
-  btn.disabled=true;btn.textContent='Force updating\u2026';
+  window._updateApplyInFlight=true;
+  btn.disabled=true;btn.textContent=_lt('update_force_updating','Force updating…');
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';}
   try{
     const baselineServerIdentity = await _readHealthServerIdentity();
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000});
-    if(!res.ok){
-      if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
-      btn.disabled=false;btn.textContent='Force update';
+    const body=channel?{target,channel}:{target};
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(body),timeoutMs:120000});
+    if(!res.ok&&!res.refused_rewind){
+      if(errEl){errEl.textContent=_lt('update_force_failed','Force update failed: ')+(res.message||_lt('update_unknown_error','unknown error'));errEl.style.display='block';}
+      btn.disabled=false;btn.textContent=forceLabel;
+      window._updateApplyInFlight=false;
       return;
     }
-    showToast('Force update applied — restarting…');
+    if(res.up_to_date||res.refused_rewind){
+      // No-op state: backend declined to reset the tree. Keep the local-changes sentence in
+      // the banner so the user knows the dirty install still exists, and add a channel note.
+      // Remove the unavailable action while preserving a truthful recovery path.
+      const bannerMsg=$('updateMsg');
+      if(bannerMsg){
+        const localNote=_lt('update_dirty_state','Local changes detected in {0}.',targetLabel);
+        const backendDetail=String(res.message||'').trim();
+        const channelNote=_lt('update_force_noop','The forced update did not reset this checkout.')+(backendDetail?' '+backendDetail:'');
+        const guidanceKey=target==='agent'?'update_force_unavailable_agent':'update_force_unavailable_webui';
+        const guidanceFallback=target==='agent'?'The Agent uses its fixed default channel; clean the Agent checkout manually.':'Select a channel with an available reset target or clean the WebUI checkout manually.';
+        bannerMsg.textContent='⚠️ '+localNote+' '+channelNote+' '+_lt(guidanceKey,guidanceFallback);
+      }
+      const bannerEl=$('updateBanner');
+      if(bannerEl) bannerEl.classList.add('visible');
+      btn.disabled=true;btn.style.display='none';btn.dataset.target='';btn.textContent=forceLabel;
+      const applyBtn=$('btnApplyUpdate');
+      if(applyBtn){applyBtn.disabled=true;applyBtn.style.display='none';}
+      window._updateApplyInFlight=false;
+      return;
+    }
+    showToast(_lt('update_force_applied_restarting','Force update applied — restarting…'));
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
     _waitForServerThenReload({baselineServerIdentity});
+    // _updateApplyInFlight intentionally stays true: the page will reload, and clearing
+    // it here would open a double-submit window while _waitForServerThenReload is pending.
   }catch(e){
-    if(errEl){errEl.textContent='Force update failed: '+e.message;errEl.style.display='block';}
-    btn.disabled=false;btn.textContent='Force update';
+    if(errEl){errEl.textContent=_lt('update_force_failed','Force update failed: ')+e.message;errEl.style.display='block';}
+    btn.disabled=false;btn.textContent=forceLabel;
+    btn.style.display='inline-block';
+    btn.dataset.target=target;
+    window._updateApplyInFlight=false;
   }
 }
 
