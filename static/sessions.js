@@ -1038,6 +1038,7 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
       role:'assistant',
       content:lastAssistantText,
       reasoning:lastReasoningText||undefined,
+      _ts:snapshot.last_message_ts??snapshot.lastMessageTs??undefined,
       _live:true,
       _journal_snapshot:true,
     });

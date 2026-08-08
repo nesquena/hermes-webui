@@ -440,7 +440,7 @@ def test_runtime_snapshot_transport_projection_dedupes_live_tool_payloads_withou
 
     repeated = "x" * 4000
     snapshot = {
-        "messages": [{"role": "assistant", "content": "progress", "_live": True}],
+        "messages": [{"role": "assistant", "content": "progress", "_live": True, "_ts": 1234.5}],
         "last_assistant_text": "progress",
         "last_reasoning_text": "",
         "tool_calls": [{
@@ -496,6 +496,7 @@ def test_runtime_snapshot_transport_projection_dedupes_live_tool_payloads_withou
     assert snapshot == original
     assert projected["messages"] == []
     assert projected["last_assistant_text"] == "progress"
+    assert projected["last_message_ts"] == 1234.5
     assert projected["tool_calls"] == [{
         "name": "terminal",
         "tid": "call-1",

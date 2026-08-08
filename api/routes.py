@@ -3772,7 +3772,17 @@ def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict
 
     projected = dict(snapshot)
     # The frontend reconstructs this single live assistant row from the
-    # authoritative last_* strings when messages is empty.
+    # authoritative last_* strings when messages is empty. Preserve the row's
+    # timestamp separately so the synthesized message keeps stable identity.
+    live_messages = [
+        message
+        for message in (projected.get("messages") or [])
+        if isinstance(message, dict) and message.get("role") == "assistant"
+    ]
+    if live_messages:
+        last_message_ts = live_messages[-1].get("_ts")
+        if last_message_ts is not None:
+            projected["last_message_ts"] = last_message_ts
     if projected.get("last_assistant_text") or projected.get("last_reasoning_text"):
         projected["messages"] = []
 
