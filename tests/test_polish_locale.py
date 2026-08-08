@@ -2,6 +2,7 @@ from collections import Counter
 from pathlib import Path
 import re
 from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
+from tests._i18n_bundles import read_i18n_bundles
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -81,7 +82,7 @@ def locale_keys(src: str, locale_key: str) -> list[str]:
 
 
 def test_polish_locale_block_exists():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     pl_block = extract_locale_block(src, "pl")
     assert pl_block
     assert "_lang: 'pl'" in pl_block
@@ -90,7 +91,7 @@ def test_polish_locale_block_exists():
 
 
 def test_polish_locale_includes_representative_translations():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     pl_block = extract_locale_block(src, "pl")
     expected = [
         "settings_title: 'Ustawienia'",
@@ -108,7 +109,7 @@ def test_polish_locale_includes_representative_translations():
 
 
 def test_polish_settings_detail_descriptions_are_translated():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     pl_block = extract_locale_block(src, "pl")
     expected = [
         "settings_desc_workspace_panel_open: 'Gdy ta opcja jest włączona, panel obszaru roboczego / przeglądarki plików otwiera się automatycznie przy każdej nowej sesji. Nadal możesz go zamknąć ręcznie w dowolnym momencie.'",
@@ -128,7 +129,7 @@ def test_polish_settings_detail_descriptions_are_translated():
 
 
 def test_polish_locale_matches_english_key_coverage():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     en_keys = set(locale_keys(src, "en"))
     pl_keys = set(locale_keys(src, "pl"))
     assert sorted((en_keys - pl_keys) - PROFILE_CONCEPT_FALLBACK_KEYS) == []
@@ -136,7 +137,7 @@ def test_polish_locale_matches_english_key_coverage():
 
 
 def test_polish_locale_has_no_duplicate_keys():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     keys = locale_keys(src, "pl")
 
     duplicates = sorted(k for k, count in Counter(keys).items() if count > 1)
@@ -144,7 +145,7 @@ def test_polish_locale_has_no_duplicate_keys():
 
 
 def test_polish_locale_keys_use_standard_indentation():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     pl_block = extract_locale_block(src, "pl")
 
     # Enforce strict 4-space indentation for keys.
@@ -157,7 +158,7 @@ def test_polish_locale_keys_use_standard_indentation():
 
 
 def test_polish_locale_arrow_function_values_mirror_english():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     en_block = extract_locale_block(src, "en")
     pl_block = extract_locale_block(src, "pl")
 
@@ -171,7 +172,7 @@ def test_polish_locale_arrow_function_values_mirror_english():
 
 
 def test_polish_locale_preserves_placeholder_patterns():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     en_block = extract_locale_block(src, "en")
     pl_block = extract_locale_block(src, "pl")
 
@@ -200,7 +201,7 @@ def test_polish_locale_preserves_placeholder_patterns():
 
 def test_polish_locale_has_no_double_escaped_unicode_sequences():
     """JSON-style double escapes (\\\\u2026) render literal backslash-u in the UI."""
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     pl_block = extract_locale_block(src, "pl")
     for bad in ("\\\\u2026", "\\\\u2192", "\\\\u2713"):
         assert bad not in pl_block, f"Polish locale must not contain {bad!r}"

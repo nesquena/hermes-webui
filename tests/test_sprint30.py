@@ -19,6 +19,7 @@ import urllib.error
 import urllib.parse
 
 from tests._pytest_port import BASE
+from tests._i18n_bundles import read_i18n_bundles
 
 
 def get(path):
@@ -200,7 +201,7 @@ class TestApprovalI18nKeys:
     ]
 
     def test_english_locale_has_all_approval_keys(self):
-        src = read(REPO / "static/i18n.js")
+        src = read_i18n_bundles(REPO)
         # Find en locale block (before the first closing };)
         en_block_end = src.find("\n};")
         en_block = src[:en_block_end]
@@ -209,7 +210,7 @@ class TestApprovalI18nKeys:
                 f"English locale missing i18n key: {key}"
 
     def test_chinese_locale_has_all_approval_keys(self):
-        src = read(REPO / "static/i18n.js")
+        src = read_i18n_bundles(REPO)
         # Find zh locale block (from `  zh: {` to the closing `  },` before `};`)
         zh_start = src.find("\n  zh: {")
         assert zh_start != -1, "zh locale block not found in i18n.js"
@@ -219,17 +220,17 @@ class TestApprovalI18nKeys:
                 f"Chinese locale missing i18n key: {key}"
 
     def test_approval_heading_english_value(self):
-        src = read(REPO / "static/i18n.js")
+        src = read_i18n_bundles(REPO)
         assert "approval_heading: 'Approval required'" in src, \
             "English approval_heading value incorrect"
 
     def test_approval_btn_once_english_value(self):
-        src = read(REPO / "static/i18n.js")
+        src = read_i18n_bundles(REPO)
         assert "approval_btn_once: 'Allow once'" in src, \
             "English approval_btn_once value incorrect"
 
     def test_approval_btn_deny_english_value(self):
-        src = read(REPO / "static/i18n.js")
+        src = read_i18n_bundles(REPO)
         assert "approval_btn_deny: 'Deny'" in src, \
             "English approval_btn_deny value incorrect"
 
@@ -246,14 +247,14 @@ class TestClarifyI18nKeys:
     ]
 
     def test_english_locale_has_all_clarify_keys(self):
-        src = read(REPO / "static/i18n.js")
+        src = read_i18n_bundles(REPO)
         en_block_end = src.find("\n};")
         en_block = src[:en_block_end]
         for key in self.REQUIRED_KEYS:
             assert f"{key}:" in en_block, f"English locale missing i18n key: {key}"
 
     def test_chinese_locale_has_all_clarify_keys(self):
-        src = read(REPO / "static/i18n.js")
+        src = read_i18n_bundles(REPO)
         zh_start = src.find("\n  zh: {")
         assert zh_start != -1, "zh locale block not found in i18n.js"
         zh_block = src[zh_start:]
@@ -261,7 +262,7 @@ class TestClarifyI18nKeys:
             assert f"{key}:" in zh_block, f"Chinese locale missing i18n key: {key}"
 
     def test_clarify_heading_english_value(self):
-        src = read(REPO / "static/i18n.js")
+        src = read_i18n_bundles(REPO)
         assert "clarify_heading: 'Clarification needed'" in src, \
             "English clarify_heading value incorrect"
 

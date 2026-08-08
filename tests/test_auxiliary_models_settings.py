@@ -12,12 +12,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests._i18n_bundles import read_i18n_bundles
 
 ROOT = Path(__file__).parent.parent
 PANELS_JS_PATH = ROOT / "static" / "panels.js"
 PANELS_JS = PANELS_JS_PATH.read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(ROOT)
 STREAMING_PY = (ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 

@@ -5,6 +5,7 @@ import json
 import pathlib
 import re
 import subprocess
+from tests._i18n_bundles import read_i18n_bundles
 
 
 REPO = pathlib.Path(__file__).parent.parent
@@ -13,7 +14,7 @@ UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 COMMANDS_JS = (REPO / "static" / "commands.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(REPO)
 
 
 def _extract_function(src: str, name: str) -> str:

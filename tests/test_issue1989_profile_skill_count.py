@@ -1,7 +1,8 @@
 from pathlib import Path
 import re
+from tests._i18n_bundles import read_i18n_bundles
 
-I18N_JS = (Path(__file__).resolve().parents[1] / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(Path(__file__).resolve().parents[1])
 
 
 def _extract_locale_block(locale: str, src: str) -> str:

@@ -24,10 +24,11 @@ import urllib.request
 
 from tests._pytest_port import BASE, TEST_STATE_DIR
 from tests.conftest import TEST_WORKSPACE
+from tests._i18n_bundles import read_i18n_bundles
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(REPO_ROOT)
 WORKSPACE_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 
 

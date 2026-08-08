@@ -1,4 +1,5 @@
 from pathlib import Path
+from tests._i18n_bundles import read_i18n_bundles
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,7 +41,7 @@ def test_session_sidebar_renders_worktree_indicator():
 
 def test_worktree_indicator_styles_and_i18n_exist():
     css = read("static/style.css")
-    i18n = read("static/i18n.js")
+    i18n = read_i18n_bundles(ROOT)
     assert ".session-worktree-indicator" in css
     assert "workspace_new_worktree_conversation" in i18n
     assert "session_worktree_badge" in i18n
