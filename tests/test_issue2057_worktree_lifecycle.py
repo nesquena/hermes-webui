@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import api.models as models
+import api.run_journal as run_journal
 import api.routes as routes
 from api.models import SESSIONS, Session
 
@@ -143,6 +144,30 @@ def test_delete_session_records_tombstone_when_state_db_delete_fails(tmp_path, m
     assert captured["payload"]["state_db_cleanup_failed"] is True
     assert not (session_dir / f"{sid}.json").exists()
     assert sid in models._load_webui_deleted_session_tombstone()
+
+
+def test_delete_session_reports_run_journal_cleanup_failure(tmp_path, monkeypatch):
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "runjournaldelete1"
+    session = Session(session_id=sid, title="Journal cleanup failure")
+    session.save()
+    captured = _capture_post(monkeypatch, {"session_id": sid})
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
+    monkeypatch.setattr(routes, "_is_messaging_session_id", lambda value: False)
+    monkeypatch.setattr(models, "delete_cli_session", lambda value: True)
+
+    def fail_delete(value):
+        raise OSError("run journal locked")
+
+    monkeypatch.setattr(run_journal, "delete_run_journal", fail_delete)
+
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+
+    assert captured["status"] == 200
+    assert captured["payload"]["ok"] is True
+    assert captured["payload"]["state_db_cleanup_failed"] is False
+    assert captured["payload"]["run_journal_cleanup_failed"] is True
+    assert not (session_dir / f"{sid}.json").exists()
 
 
 def test_delete_messaging_session_reopens_read_only_without_deleted_webui_tombstone(

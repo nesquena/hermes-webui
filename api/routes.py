@@ -15018,11 +15018,13 @@ def handle_post(handler, parsed) -> bool:
             delete_turn_journal(sid)
         except Exception:
             logger.debug("Failed to delete turn journal for deleted session %s", sid)
+        run_journal_cleanup_failed = False
         try:
             from api.run_journal import delete_run_journal
 
             delete_run_journal(sid)
         except Exception:
+            run_journal_cleanup_failed = True
             logger.debug("Failed to delete run journal for deleted session %s", sid)
         # The weak lock registry releases this entry automatically after all
         # holders and waiters drop their strong references.
@@ -15057,6 +15059,7 @@ def handle_post(handler, parsed) -> bool:
             {
                 "ok": True,
                 "state_db_cleanup_failed": state_db_cleanup_failed,
+                "run_journal_cleanup_failed": run_journal_cleanup_failed,
                 **worktree_retained,
             },
         )

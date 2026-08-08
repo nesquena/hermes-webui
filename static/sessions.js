@@ -4298,7 +4298,7 @@ function _renderBatchActionBar(){
         return {response,session:sessionsById.get(sid)||null};
       }));
       const retainedCount=_worktreeResponseCount(results);
-      const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
+      const cleanupFailedCount=results.filter(result=>result.response&&(result.response.state_db_cleanup_failed||result.response.run_journal_cleanup_failed)).length;
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
@@ -9037,7 +9037,7 @@ async function deleteSession(sid, beforeDelete=null){
     return false;
   }
   const response=deleteResult&&deleteResult.response;
-  const cleanupFailed=!!(response&&response.state_db_cleanup_failed);
+  const cleanupFailed=!!(response&&(response.state_db_cleanup_failed||response.run_journal_cleanup_failed));
   if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
     _pendingSessionReflowPositions=reflowPositions;

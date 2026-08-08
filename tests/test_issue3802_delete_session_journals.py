@@ -8,7 +8,12 @@ two cleanup helpers: every shard/dir for the deleted session is removed, and an
 unrelated session's journals are left untouched.
 """
 import os
+import shutil
+from pathlib import Path
 
+import pytest
+
+import api.run_journal as run_journal
 from api.run_journal import RunJournalWriter, delete_run_journal, read_run_events
 from api.turn_journal import (
     append_turn_journal_event,
@@ -93,6 +98,72 @@ def test_delete_run_journal_noop_on_missing_or_invalid(tmp_path):
     assert delete_run_journal("nope", session_dir=tmp_path) is False
     assert delete_run_journal("../escape", session_dir=tmp_path) is False
     assert delete_run_journal("", session_dir=tmp_path) is False
+
+
+def test_delete_run_journal_surfaces_rmtree_failure_without_evicting_caches(
+    tmp_path, monkeypatch
+):
+    writer = RunJournalWriter("sid-delete-failure", "run-1", session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "keep"})
+    run_path = tmp_path / "_run_journal" / "sid-delete-failure" / "run-1.jsonl"
+    dir_key = str(run_path.parent)
+    run_key = str(run_path)
+    run_journal.latest_run_summary(
+        "sid-delete-failure", "run-1", session_dir=tmp_path
+    )
+    with run_journal._WRITER_LOCKS_GUARD:
+        writer_locks_before = {
+            key: lock
+            for key, lock in run_journal._WRITER_LOCKS.items()
+            if key[0] == dir_key
+        }
+    with run_journal._SEQ_CACHE_LOCK:
+        seq_cache_before = {
+            key: value
+            for key, value in run_journal._SEQ_CACHE.items()
+            if str(Path(key).parent) == dir_key
+        }
+    with run_journal._SUMMARY_CACHE_LOCK:
+        summary_cache_before = {
+            key: value
+            for key, value in run_journal._SUMMARY_CACHE.items()
+            if str(Path(key).parent) == dir_key
+        }
+    assert writer_locks_before
+    assert run_key in seq_cache_before
+    assert run_key in summary_cache_before
+
+    def fail_rmtree(path, *, ignore_errors=False):
+        raise OSError("forced-rmtree-failure")
+
+    monkeypatch.setattr(shutil, "rmtree", fail_rmtree)
+    with pytest.raises(OSError, match="forced-rmtree-failure"):
+        delete_run_journal("sid-delete-failure", session_dir=tmp_path)
+
+    assert (tmp_path / "_run_journal" / "sid-delete-failure").exists()
+    with run_journal._WRITER_LOCKS_GUARD:
+        writer_locks_after = {
+            key: lock
+            for key, lock in run_journal._WRITER_LOCKS.items()
+            if key[0] == dir_key
+        }
+    with run_journal._SEQ_CACHE_LOCK:
+        seq_cache_after = {
+            key: value
+            for key, value in run_journal._SEQ_CACHE.items()
+            if str(Path(key).parent) == dir_key
+        }
+    with run_journal._SUMMARY_CACHE_LOCK:
+        summary_cache_after = {
+            key: value
+            for key, value in run_journal._SUMMARY_CACHE.items()
+            if str(Path(key).parent) == dir_key
+        }
+    assert writer_locks_after.keys() == writer_locks_before.keys()
+    for key, lock in writer_locks_before.items():
+        assert writer_locks_after[key] is lock
+    assert seq_cache_after == seq_cache_before
+    assert summary_cache_after == summary_cache_before
 
 
 def test_delete_journals_reject_dot_traversal_ids(tmp_path):
