@@ -20,6 +20,7 @@ import subprocess
 import threading
 import time
 import traceback
+import uuid
 import copy
 from pathlib import Path
 from typing import Optional
@@ -5113,6 +5114,14 @@ def _assign_stable_message_ids(result_messages, *existing_arrays):
         if isinstance(m, dict) and m.get('id') is None:
             seed += 1
             m['id'] = seed
+            # #6422: durable, collision-safe row lineage.  The integer id is
+            # ``max(existing id) + 1``, so two clients loaded from the same
+            # base can mint the SAME id for different rows; the uuid is minted
+            # once at row creation and persisted, giving the cross-client
+            # merge an authoritative identity that can never collide across
+            # processes (even for identical content).
+            if m.get('uuid') is None:
+                m['uuid'] = uuid.uuid4().hex
             stamped += 1
     return stamped
 
@@ -10652,6 +10661,14 @@ def _run_agent_streaming(
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                     put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
+                # ── #6422 cross-client append merge ───────────────────────
+                # Read the on-disk message list and merge any rows a *different*
+                # process/thread appended since we loaded this session.  Safe
+                # here because the caller KNOWS it is appending new messages
+                # (streaming completion), so any extra rows on disk belong in
+                # the transcript.  The outer with _agent_lock: (line ~9145)
+                # serializes this against concurrent process-local writers.
+                s._merge_concurrent_appends()
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
                 if cancel_event.is_set():
