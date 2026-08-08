@@ -10,6 +10,8 @@ from pathlib import Path
 
 import logging
 
+from api._subprocess_compat import windows_hide_flags
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,6 +23,7 @@ def _run_git(args: list[str], cwd: str | Path, timeout: float = 2) -> subprocess
         capture_output=True,
         timeout=timeout,
         check=False,
+        creationflags=windows_hide_flags(),
     )
 
 
@@ -326,6 +329,7 @@ def find_git_repo_root(workspace: str | Path) -> Path:
             capture_output=True,
             timeout=5,
             check=False,
+            creationflags=windows_hide_flags(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError("Workspace is not inside a git repository") from exc
