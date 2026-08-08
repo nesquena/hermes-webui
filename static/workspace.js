@@ -336,10 +336,11 @@ function scheduleRenderSessionArtifacts(){
   }, 100);
 }
 
-function _artifactsFullHistoryRequestFor(sid, generation){
+function _artifactsFullHistoryRequestFor(sid, generation, loadGeneration){
   const current = _artifactsFullHistoryRequest;
-  if(current && current.sessionId === sid && current.generation === generation) return current;
-  const record = {sessionId: sid, generation, settled: false, snapshot: null, promise: null};
+  if(current && current.sessionId === sid && current.generation === generation
+     && current.loadGeneration === loadGeneration) return current;
+  const record = {sessionId: sid, generation, loadGeneration, settled: false, snapshot: null, promise: null};
   record.promise = Promise.resolve(_readFullSessionSnapshot(sid)).then(snapshot => {
     if(_artifactsFullHistoryRequest !== record) return null;
     record.settled = true;
@@ -604,6 +605,7 @@ function renderSessionArtifacts(){
   if(!root) return;
   const sid = S.session && S.session.session_id;
   const startGeneration = typeof _messagesGeneration === 'number' ? _messagesGeneration : null;
+  const startLoadGeneration = typeof _loadSessionGeneration === 'number' ? _loadSessionGeneration : null;
   const artifactsVisible = typeof _workspaceArtifactsTabIsActive==='function' && _workspaceArtifactsTabIsActive();
   const hasTruncatedHistory = !!(
     sid &&
@@ -663,13 +665,15 @@ function renderSessionArtifacts(){
     _renderNow();
     return;
   }
-  const record = _artifactsFullHistoryRequestFor(sid, startGeneration);
+  const record = _artifactsFullHistoryRequestFor(sid, startGeneration, startLoadGeneration);
   if(record.settled && record.snapshot) _renderNow(record.snapshot.messages, record.snapshot.toolCalls);
   if(!record.renderPromise){
     record.renderPromise = record.promise.then(snapshot => {
       if(_artifactsFullHistoryRequest !== record) return;
       if(root.isConnected === false) return;
       if(!S.session || S.session.session_id !== sid || S.busy || S.activeStreamId) return;
+      if(startLoadGeneration !== null
+         && (typeof _loadSessionGeneration !== 'number' || _loadSessionGeneration !== startLoadGeneration)) return;
       if(!(typeof _workspaceArtifactsTabIsActive==='function'&&_workspaceArtifactsTabIsActive())) return;
       if(!snapshot || (startGeneration !== null && _messagesGeneration !== startGeneration)) return;
       _renderNow(snapshot.messages, snapshot.toolCalls);
