@@ -315,7 +315,7 @@ def test_branch_fork_sessions_do_not_collapse_into_parent_lineage():
     block = fn.group(0)
     assert "if(s.session_source==='fork') return null;" in block, \
         "Fork guard must remain in _sessionLineageKey to prevent compression-lineage merging"
-    assert block.index("if(s.session_source==='fork') return null;") < block.index('return s.parent_session_id || null')
+    assert "return raw&&scopedIdentity(s,raw);" in block
 
 
 def test_branch_fork_sessions_nest_under_parent():
@@ -338,8 +338,31 @@ def test_branch_fork_sessions_nest_under_parent():
     resolve_block = resolve_fn.group(0)
     assert "row.session_source==='fork'" not in resolve_block, \
         "_resolveSessionIdFromSidebarLineage must not skip fork rows; they may now be active nested children"
-    assert "!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsInList))" in block, \
+    assert "durableLineageIds instanceof Map" in block, \
+        "Fork resolution must accept a scope-keyed durable lineage authority"
+    assert "function _sessionProfileScope(session){" in src, \
+        "Fork resolution must use the shared canonical profile-scope helper"
+    assert "function _buildSidebarLineageIndex(sessions, referenceSessions){" in src, \
+        "Fork resolution must use the render-local lineage index"
+    assert "const scopeKeyForSession=(session)=>index.scopeKey(session);" in block, \
+        "Fork attachment identity maps must use scoped keys"
+    assert "const sessionIdsFor=(session)=>{" in block, \
+        "Fork resolution must resolve the durable lineage authority per row"
+    assert "visibleByLineageKey.get(scopedIdentityKey(child, childLineageKey||parentSid))" in block, \
+        "Filtered renders must resolve visible lineage rows in the child's own scope"
+    assert "!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsFor(s)))" in block, \
         "Only unpinned resolvable fork rows should be filtered out of the top-level rows array"
+    render_fn = re.search(r'function _renderSidebarRowsFromRawSessions\(.*?\n\}', src, re.DOTALL)
+    assert render_fn, "Could not find _renderSidebarRowsFromRawSessions"
+    render_block = render_fn.group(0)
+    assert "_allSessions" in render_block and "durableLineageIdsByScope" in render_block, \
+        "Sidebar render must build fork authority from the durable session cache"
+    assert "lineageIndex" in render_block, \
+        "Sidebar render must build durable scope from the shared lineage index"
+    assert "session.profile_scope" in src, \
+        "Sidebar scope must prefer the server-provided canonical profile identity"
+    assert "lineageScope&&lineageScope.profile&&session.profile&&session.profile!==lineageScope.profile" not in render_block, \
+        "Fork authority must not be filtered by the active profile for the whole render"
 
 
 def test_branch_nested_fork_rows_keep_session_actions():

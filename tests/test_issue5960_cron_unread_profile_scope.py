@@ -320,6 +320,9 @@ function _rememberSessionListSource(){{}}
 function _rememberObservedStreamingSession(){{}}
 function _forgetObservedStreamingSession(){{}}
 function _setSessionViewedCount(){{}}
+function _sidebarRuntimeIdentityKey(rowOrSid, sidOverride=null){{
+  return String(sidOverride || (rowOrSid && rowOrSid.session_id) || rowOrSid || '');
+}}
 function _markSessionCompletionUnread(sid, count, meta){{
   markCalls.push([sid, count, meta||null]);
 }}
@@ -702,6 +705,10 @@ function _syncSessionAttentionSoundState(){{}}
 function _pruneLineageReportCacheToVisibleSessions(){{}}
 function _requestedSessionSidebarSource(){{ return 'webui'; }}
 function _sessionListExcludeHiddenEnabled(){{ return false; }}
+function _buildSidebarLineageIndex(){{ return {{}}; }}
+function _sidebarRuntimeIdentityKey(rowOrSid, sidOverride=null){{
+  return String(sidOverride || (rowOrSid && rowOrSid.session_id) || rowOrSid || '');
+}}
 function startStreamingPoll(){{}}
 function stopStreamingPoll(){{}}
 function ensureSessionTimeRefreshPoll(){{}}
@@ -824,6 +831,10 @@ function _syncSessionAttentionSoundState(){{}}
 function _pruneLineageReportCacheToVisibleSessions(){{}}
 function _requestedSessionSidebarSource(){{ return 'webui'; }}
 function _sessionListExcludeHiddenEnabled(){{ return false; }}
+function _buildSidebarLineageIndex(){{ return {{}}; }}
+function _sidebarRuntimeIdentityKey(rowOrSid, sidOverride=null){{
+  return String(sidOverride || (rowOrSid && rowOrSid.session_id) || rowOrSid || '');
+}}
 function startStreamingPoll(){{}}
 function stopStreamingPoll(){{}}
 function ensureSessionTimeRefreshPoll(){{}}

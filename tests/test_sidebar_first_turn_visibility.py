@@ -93,7 +93,7 @@ class TestSidebarFirstTurnVisibility:
         clear_body = sessions[clear_start:clear_end]
         assert "is_streaming:false" in clear_body.replace(" ", "")
         assert "active_stream_id:null" in clear_body.replace(" ", "")
-        assert "_sessionStreamingById.set(sid,false)" in clear_body.replace(" ", "")
+        assert "_sessionStreamingById.set(typeof_sidebarRuntimeKey" in clear_body.replace(" ", "")
 
     def test_backend_compact_counts_pending_first_turn_as_visible(self):
         src = read("api/models.py")

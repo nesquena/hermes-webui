@@ -39,7 +39,7 @@ def test_deleted_sessions_prune_all_session_tracking_maps():
     assert "const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';" in SESSIONS_SRC
     assert "const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';" in SESSIONS_SRC
     assert "const SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming';" in SESSIONS_SRC
-    assert "function _clearSessionViewedCount(sid)" in SESSIONS_SRC
+    assert "function _clearSessionViewedCount(sid, row = null)" in SESSIONS_SRC
 
     clear_block = _function_block(SESSIONS_SRC, "_clearHandoffStorageForSession")
     assert "_clearSessionViewedCount(sid)" in clear_block
@@ -49,8 +49,8 @@ def test_deleted_sessions_prune_all_session_tracking_maps():
 
 def test_session_viewed_count_prune_is_best_effort_and_persists_when_changed():
     viewed_block = _function_block(SESSIONS_SRC, "_clearSessionViewedCount")
-    assert "Object.prototype.hasOwnProperty.call(counts, sid)" in viewed_block
-    assert "delete counts[sid]" in viewed_block
+    assert "Object.prototype.hasOwnProperty.call(counts, key)" in viewed_block
+    assert "delete counts[key]" in viewed_block
     assert "_saveSessionViewedCounts()" in viewed_block
 
     clear_block = _function_block(SESSIONS_SRC, "_clearHandoffStorageForSession")
