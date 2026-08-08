@@ -1,0 +1,9 @@
+{
+  "title": "Response complete",
+  "body": "The task finished.",
+  "sid": "session-6673",
+  "expected_tag": "hermes-session-6673",
+  "generic_tag": "hermes-webui",
+  "expected_url": "https://webui.test/?session=session-6673",
+  "generic_url": "https://webui.test/"
+}
