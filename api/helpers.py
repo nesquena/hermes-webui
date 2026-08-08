@@ -290,6 +290,8 @@ def t(
 
 
 MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
+MAX_CHUNKED_TRAILER_BYTES = 64 * 1024  # cap on the chunked trailer section (RFC 7230 §4.1.2)
+_CHUNK_SIZE_RE = _re.compile(rb'^[0-9a-fA-F]+$')  # chunk-size grammar is hex digits only (RFC 7230 §4.1)
 
 
 # ── Credential redaction ──────────────────────────────────────────────────────
@@ -1039,8 +1041,123 @@ def redact_session_data(session_dict: dict) -> dict:
     return result
 
 
+def _read_exact(rfile, n: int) -> bytes:
+    """Read exactly n bytes, tolerating short reads from the socket buffer.
+
+    Raises ValueError if the stream ends before n bytes arrive, so an
+    incomplete chunk is never treated as a complete body.
+    """
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = rfile.read(n - len(buf))
+        if not chunk:
+            raise ValueError(f'Incomplete chunk body: expected {n} bytes, got {len(buf)}')
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def _read_chunked_body(handler, max_bytes: int) -> bytes:
+    """Decode a Transfer-Encoding: chunked request body.
+
+    Python's http.server never populates Content-Length for chunked
+    requests and does not decode them, so rfile.read(Content-Length) reads
+    nothing. Reverse proxies that stream an HTTP/2 client request to an
+    HTTP/1.1 origin — notably Cloudflare Tunnel (cloudflared) — forward request
+    bodies this way, so without decoding here the server sees an empty body on
+    every proxied POST. See RFC 7230 section 4.1.
+
+    The decoder is fail-closed: chunk-size tokens must be pure hex digits,
+    every line (size line, chunk data delimiter, trailer lines) must use
+    CRLF framing per RFC 7230 — bare-LF endings are rejected — the trailer
+    section is bounded and must end with a real blank line (EOF is not a
+    terminator), and a body that never reaches its terminating 0-chunk is
+    rejected. A malformed or hostile client therefore cannot desynchronize
+    the framing or occupy a worker thread indefinitely.
+    """
+    rfile = handler.rfile
+    out = bytearray()
+    terminated = False
+    while True:
+        size_line = rfile.readline(65536)
+        if not size_line:
+            break
+        if not size_line.endswith(b'\r\n'):
+            handler.close_connection = True
+            raise ValueError(f'Malformed chunk size line: {size_line!r}')
+        size_token = size_line[:-2].split(b';', 1)[0]
+        if not _CHUNK_SIZE_RE.match(size_token):
+            handler.close_connection = True
+            raise ValueError(f'Malformed chunk size: {size_token!r}')
+        size = int(size_token, 16)
+        if size == 0:
+            terminated = True
+            trailer_bytes = 0
+            while True:
+                trailer = rfile.readline(65536)
+                trailer_bytes += len(trailer)
+                if trailer_bytes > MAX_CHUNKED_TRAILER_BYTES:
+                    handler.close_connection = True
+                    raise ValueError(f'Chunked trailers too large (> {MAX_CHUNKED_TRAILER_BYTES} bytes)')
+                if trailer.endswith(b'\n') and not trailer.endswith(b'\r\n'):
+                    handler.close_connection = True
+                    raise ValueError(f'Malformed trailer line: {trailer!r}')
+                if trailer == b'\r\n':
+                    break
+                if not trailer:
+                    handler.close_connection = True
+                    raise ValueError('Incomplete chunked body: EOF in trailer section')
+            break
+        if len(out) + size > max_bytes:
+            handler.close_connection = True
+            raise ValueError(f'Request body too large (> {max_bytes} bytes)')
+        try:
+            out.extend(_read_exact(rfile, size))
+        except ValueError:
+            handler.close_connection = True
+            raise
+        try:
+            delimiter = _read_exact(rfile, 2)
+        except ValueError as err:
+            handler.close_connection = True
+            raise ValueError('Incomplete chunked body: missing data delimiter') from err
+        if delimiter != b'\r\n':
+            handler.close_connection = True
+            raise ValueError(f'Invalid chunk data delimiter: {delimiter!r}')
+    if not terminated:
+        handler.close_connection = True
+        raise ValueError('Incomplete chunked body: missing terminating chunk')
+    return bytes(out)
+
+
 def read_body(handler) -> dict:
-    """Read and JSON-parse a POST request body (capped at 20MB)."""
+    """Read and JSON-parse a POST request body (capped at 20MB).
+
+    Handles both Content-Length and Transfer-Encoding: chunked framing.
+    The latter is required for bodies proxied by cloudflared / any HTTP/2 front
+    end, which forward to the HTTP/1.1 origin without a Content-Length header.
+
+    Transfer-Encoding is parsed as comma-separated codings. chunked must be
+    the only coding; any other coding (gzip, deflate, or a lookalike such as
+    "xchunked") is rejected, since the server cannot decode it.
+    """
+    transfer_encoding = handler.headers.get('Transfer-Encoding', '') or ''
+    if transfer_encoding:
+        codings = [token.strip().lower() for token in transfer_encoding.split(',') if token.strip()]
+        if not codings:
+            handler.close_connection = True
+            raise ValueError('Invalid Transfer-Encoding header')
+        if codings[-1] != 'chunked':
+            handler.close_connection = True
+            raise ValueError(f'Unsupported Transfer-Encoding: {transfer_encoding!r}')
+        if len(codings) > 1:
+            handler.close_connection = True
+            raise ValueError(f'Unsupported Transfer-Encoding codings: {transfer_encoding!r}')
+        raw = _read_chunked_body(handler, MAX_BODY_BYTES)
+        try:
+            return _json.loads(raw)
+        except Exception:
+            return {}
+
     raw_length = handler.headers.get('Content-Length', 0)
     try:
         length = int(raw_length)
