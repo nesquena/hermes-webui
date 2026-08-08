@@ -48,6 +48,7 @@ PAGES = [
     "/",
     "/#settings",
     "/#sessions",
+    "/#skills",
 ]
 
 # Known-benign console noise (extend deliberately, each with a reason). Every
@@ -105,6 +106,8 @@ def main():
         "HERMES_HOME": state_dir,
         "HERMES_BASE_HOME": state_dir,
         "HERMES_WEBUI_SKIP_ONBOARDING": "1",
+        # The smoke must exercise the app shell, not inherit a host login gate.
+        "HERMES_WEBUI_PASSWORD": "",
         # Point agent discovery at a path that doesn't exist — the server is
         # designed to boot and serve the UI even when the agent is absent.
         "HERMES_WEBUI_AGENT_DIR": os.path.join(state_dir, "no-agent"),
@@ -143,6 +146,24 @@ def main():
                     page.wait_for_selector("#msg, .app, body", timeout=10000)
                 except Exception:
                     pass
+                if path == "/#skills":
+                    page.locator('[data-panel="skills"]').first.click()
+                    page.locator('[data-skills-tab="hub"]').click()
+                    hub_search_button = page.locator(
+                        '#skillsHubSearch + button.panel-head-btn'
+                    )
+                    if hub_search_button.count() != 1:
+                        failures.append(
+                            "  [/#skills] tooltip contract: Hub search button missing"
+                        )
+                    else:
+                        classes = hub_search_button.get_attribute("class") or ""
+                        tooltip = hub_search_button.get_attribute("data-tooltip")
+                        if "has-tooltip" not in classes or not tooltip:
+                            failures.append(
+                                "  [/#skills] tooltip contract: Hub search button needs "
+                                "has-tooltip and data-tooltip"
+                            )
                 time.sleep(1.5)
 
                 meaningful = [(kind, txt) for (kind, txt) in errors if not _is_benign(txt)]

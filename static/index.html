@@ -253,8 +253,27 @@
           <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openSkillCreate()" data-tooltip="New skill" data-i18n-title="new_skill" aria-label="New skill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
       </div>
-      <div class="skills-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="skillsSearch" type="search" placeholder="Search skills..." data-i18n-placeholder="search_skills" oninput="filterSkills()" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"></div>
-      <div class="skills-list" id="skillsList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      <div class="skills-subtabs" role="tablist" style="display:flex;gap:6px;padding:8px 12px 0">
+        <button type="button" class="skills-subtab active" data-skills-tab="mine" onclick="switchSkillsTab('mine')" role="tab" aria-selected="true" data-i18n="skills_tab_mine" style="flex:1;padding:6px 10px;font-size:12px;font-weight:600;border-radius:6px;border:1px solid var(--border2);background:var(--accent);color:#fff;cursor:pointer">My Skills</button>
+        <button type="button" class="skills-subtab" data-skills-tab="hub" onclick="switchSkillsTab('hub')" role="tab" aria-selected="false" data-i18n="skills_tab_hub" style="flex:1;padding:6px 10px;font-size:12px;font-weight:600;border-radius:6px;border:1px solid var(--border2);background:transparent;color:var(--text);cursor:pointer">Hub</button>
+      </div>
+      <div id="skillsMineView">
+        <div class="skills-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="skillsSearch" type="search" placeholder="Search skills..." data-i18n-placeholder="search_skills" oninput="filterSkills()" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"></div>
+        <div class="skills-list" id="skillsList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      </div>
+      <div id="skillsHubView" style="display:none">
+        <div class="skills-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="skillsHubSearch" type="search" placeholder="Search the skill hub..." data-i18n-placeholder="skills_hub_search_placeholder" onkeydown="if(event.key==='Enter'){event.preventDefault();searchSkillsHub();}" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"><button type="button" class="panel-head-btn has-tooltip has-tooltip--bottom" style="margin-left:6px" onclick="searchSkillsHub()" data-tooltip="Search" data-i18n-title="search" aria-label="Search" data-i18n-aria-label="search"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg></button></div>
+        <div id="skillsHubGateNotice" style="display:none;margin:0 12px 8px;padding:8px 10px;border-radius:8px;border:1px solid rgba(232,160,48,.3);background:rgba(232,160,48,.08);font-size:11px;color:var(--muted)"></div>
+        <div id="skillsHubActionStatus" style="margin:0 12px 8px"></div>
+        <div class="skills-hub-section" style="padding:0 12px 4px">
+          <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;margin:8px 0 4px" data-i18n="skills_hub_installed_title">Installed from Hub</div>
+          <div id="skillsHubInstalledList"><div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+        </div>
+        <div class="skills-hub-section" style="padding:0 12px 12px">
+          <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;margin:8px 0 4px" data-i18n="skills_hub_results_title">Search results</div>
+          <div id="skillsHubResultsList"><div style="color:var(--muted);font-size:12px" data-i18n="skills_hub_search_hint">Search skills.sh, GitHub, and other registries above.</div></div>
+        </div>
+      </div>
     </div>
     <!-- Memory panel -->
     <div class="panel-view" id="panelMemory">
