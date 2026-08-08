@@ -75,6 +75,11 @@ def test_board_payload_validates_default_workdir_and_preserves_omission(monkeypa
 
 def test_board_modal_submit_includes_and_clears_default_workdir():
     assert 'id="kanbanBoardModalDefaultWorkdir"' in INDEX
+    default_workdir_input = re.search(
+        r'<input\b[^>]*\bid="kanbanBoardModalDefaultWorkdir"[^>]*>', INDEX
+    )
+    assert default_workdir_input
+    assert 'maxlength="255"' in default_workdir_input.group(0)
     assert 'id="kanbanBoardModalOriginalDefaultWorkdir"' in INDEX
     assert 'list="kanbanBoardModalWorkdirs"' in INDEX
     assert "if (defaultWorkdir) payload.default_workdir = defaultWorkdir;" in PANELS
