@@ -45,6 +45,58 @@ def _function_source(source: str, name: str) -> str:
     return source[start:idx]
 
 
+def _function_source_balanced(source: str, name: str) -> str:
+    anchor = f"function {name}("
+    start = source.index(anchor)
+    if source[max(0, start - 6):start] == "async ":
+        start -= 6
+
+    def matching(open_char: str, close_char: str, offset: int) -> int:
+        depth = 0
+        quote = None
+        escaped = False
+        line_comment = False
+        block_comment = False
+        regex = False
+        regex_class = False
+        previous = ""
+        idx = offset
+        while idx < len(source):
+            char = source[idx]
+            nxt = source[idx + 1] if idx + 1 < len(source) else ""
+            if line_comment:
+                if char in "\r\n": line_comment = False
+            elif block_comment:
+                if char == "*" and nxt == "/": block_comment = False; idx += 1
+            elif regex:
+                if escaped: escaped = False
+                elif char == "\\": escaped = True
+                elif char == "[": regex_class = True
+                elif char == "]": regex_class = False
+                elif char == "/" and not regex_class: regex = False
+            elif quote:
+                if escaped: escaped = False
+                elif char == "\\": escaped = True
+                elif char == quote: quote = None
+            elif char == "/" and nxt == "/": line_comment = True; idx += 1
+            elif char == "/" and nxt == "*": block_comment = True; idx += 1
+            elif char == "/" and previous in "=(,{[!&|?:;" : regex = True
+            elif char in "'\"`": quote = char
+            elif char == open_char: depth += 1
+            elif char == close_char:
+                depth -= 1
+                if depth == 0: return idx
+            if not char.isspace(): previous = char
+            idx += 1
+        raise ValueError(f"unbalanced JavaScript {open_char}{close_char} pair")
+
+    paren_start = source.index("(", start)
+    paren_end = matching("(", ")", paren_start)
+    body_start = source.index("{", paren_end)
+    body_end = matching("{", "}", body_start)
+    return source[start:body_end + 1]
+
+
 OWNER_SOURCE = _function_source(MESSAGES, "_setActivePaneIdleIfOwner")
 SEND_SOURCE = _function_source(MESSAGES, "send")
 ATTACH_SOURCE = _function_source(MESSAGES, "attachLiveStream")
@@ -137,9 +189,9 @@ owner({ success: false }, source, 1);
 const terminalOwnerEvents = ownerEvents.slice();
 ownerEvents.length = 0;
 const oldSource = {}, replacementSource = {};
-windowObj._liveStreamTransportAuthority = { s1: { streamId: 'stream-1', source: replacementSource, generation: 2 } };
-windowObj._liveStreamTransportSourceGeneration = new WeakMap();
-windowObj._liveStreamTransportSourceGeneration.set(replacementSource, 2);
+windowObj._liveStreamAttachOwners = { s1: { sid: 's1', streamId: 'stream-1', source: replacementSource, generation: 2, state: 'published' } };
+windowObj._liveStreamTransportAuthority = { s1: { streamId: 'stream-1', generation: 2 } };
+windowObj._liveStreamTransportSourceGeneration = { get: source => source === replacementSource ? 2 : undefined };
 api.activate(); api.prepare(); api.bind('stream-1', 's1');
 api.complete('s1', 'stream-1', oldSource, 1, { success: false });
 const staleSourceState = api.state();
@@ -192,10 +244,9 @@ const element = () => ({ value: '', style: {}, options: [], classList: { add(){}
 const $ = id => elements.get(id) || element();
 const noOp = () => {};
 const streamSource = {};
+windowObj._liveStreamAttachOwners = { s1: { sid: 's1', streamId: 'stream-1', source: streamSource, generation: 1, state: 'published' } };
 windowObj._liveStreamTransportAuthority = { s1: { streamId: 'stream-1', generation: 1 } };
-windowObj._liveStreamTransportSourceGeneration = new WeakMap();
-windowObj._liveStreamTransportSourceGeneration.set(streamSource, 1);
-windowObj._liveStreamTransportRelease = noOp;
+windowObj._liveStreamTransportSourceGeneration = { get: source => source === streamSource ? 1 : undefined };
 const ownerFactory = new Function('activeSid','streamId','source','window','_isActiveSession','S','INFLIGHT','setBusy','setComposerStatus','setStatus',
   'const _transportGeneration=1; return (' + ownerSource + ');');
 const owner = ownerFactory('s1', 'stream-1', streamSource, windowObj, () => true, S, INFLIGHT, value => { S.busy = value; }, noOp, noOp);
@@ -440,15 +491,16 @@ for (const match of attachSource.matchAll(/\b[A-Za-z_$][\w$]*\b/g)) {
 }
 const attachFactory = new Function('scope', `with(scope){
   const LIVE_STREAMS = {};
-  const LIVE_STREAM_TRANSPORT_AUTHORITY = Object.create(null);
-  const LIVE_STREAM_TRANSPORT_SOURCE_GENERATION = new WeakMap();
-  let LIVE_STREAM_TRANSPORT_GENERATION = 0;
+  const LIVE_STREAM_ATTACH_OWNERS = Object.create(null);
+  let LIVE_STREAM_ATTACH_SEQUENCE = 0;
+  let LIVE_STREAM_ATTACH_GENERATION = 0;
   function _releaseLiveStreamTransportAuthority(sid, generation) {
-    const authority = LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
-    if (authority && authority.generation === generation) delete LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
+    const owner = LIVE_STREAM_ATTACH_OWNERS[sid];
+    if (owner && owner.generation === generation) delete LIVE_STREAM_ATTACH_OWNERS[sid];
   }
-  window._liveStreamTransportAuthority = LIVE_STREAM_TRANSPORT_AUTHORITY;
-  window._liveStreamTransportSourceGeneration = LIVE_STREAM_TRANSPORT_SOURCE_GENERATION;
+  window._liveStreamAttachOwners = LIVE_STREAM_ATTACH_OWNERS;
+  window._liveStreamTransportAuthority = new Proxy({}, { get(_, sid) { const owner = LIVE_STREAM_ATTACH_OWNERS[sid]; return owner && owner.state === 'published' ? { streamId: owner.streamId, generation: owner.generation } : undefined; } });
+  window._liveStreamTransportSourceGeneration = { get(source) { for (const sid of Object.keys(LIVE_STREAM_ATTACH_OWNERS)) { const owner = LIVE_STREAM_ATTACH_OWNERS[sid]; if (owner && owner.source === source && owner.state === 'published') return owner.generation; } return undefined; }, set(source, generation) { for (const sid of Object.keys(LIVE_STREAM_ATTACH_OWNERS)) { const owner = LIVE_STREAM_ATTACH_OWNERS[sid]; if (owner && owner.source === source) owner.generation = generation; } return this; } };
   return (${attachSource});
 }`);
 const attach = attachFactory(scope);
@@ -491,7 +543,7 @@ class FakeEventSource {
   static OPEN = 1;
   constructor(url) { this.url = url; this.readyState = 0; this.handlers = {}; this.closed = false; this.closeCount = 0; state.sources.push(this); }
   addEventListener(name, handler) { (this.handlers[name] ||= []).push(handler); }
-  close() { this.closed = true; this.closeCount += 1; this.readyState = 2; }
+  close() { this.closed = true; this.closeCount += 1; this.readyState = 2; this.handlers = {}; }
   emit(name, event) { for (const handler of this.handlers[name] || []) handler(event); }
 }
 const noOp = () => {};
@@ -509,22 +561,23 @@ const documentObj = {
   createElement() { return { style: {}, dataset: {}, classList: { add() {}, remove() {} } }; },
 };
 const S = { session: { session_id: 's1', active_stream_id: null, pending_started_at: 1 }, messages: [], toolCalls: [], activeStreamId: null, busy: false };
+let currentPaneSid = 's1';
 const INFLIGHT = { s1: { streamId: 'stream-1', messages: [], uploaded: [], toolCalls: [] } };
 const localStorage = { getItem() { return null; }, setItem() {}, removeItem() {} };
 const voiceElement = () => ({ style: {}, classList: { add() {}, remove() {} }, textContent: '', className: '', value: '' });
 const modeBtn = voiceElement(), bar = voiceElement(), indicator = voiceElement(), label = voiceElement(), micBtn = voiceElement();
 const voiceApi = new Function('window','document','SpeechRecognition','localStorage','modeBtn','bar','indicator','label','micBtn','ta','S','t','autoResize','_micOriginNeedsSecureContext','_deactivate','showToast','_setButtonTooltip','stopTTS','_locale','send','setTimeout','clearTimeout','Date','_speakResponse', runtimeSource + `
-return { activate() { _voiceModeActive = true; _voiceContextId += 1; _voiceLease = _newVoiceLease(); }, start: () => _startListening(_voiceLease), adopt: window._voiceLeaseAdoptStream, state: () => _voiceModeState, lease: () => _voiceLease };`)(windowObj, documentObj, SpeechRecognition, localStorage, modeBtn, bar, indicator, label, micBtn, { value: '' }, S, key => key, noOp, () => false, noOp, noOp, noOp, noOp, { _speech: 'en-US' }, noOp, setTimeout, clearTimeout, Date, noOp);
+return { activate() { _voiceModeActive = true; _voiceContextId += 1; _voiceLease = _newVoiceLease(); }, start: () => _startListening(_voiceLease), adopt: window._voiceLeaseAdoptStream, complete: window._voiceModeOnResponseComplete, state: () => _voiceModeState, lease: () => _voiceLease };`)(windowObj, documentObj, SpeechRecognition, localStorage, modeBtn, bar, indicator, label, micBtn, { value: '' }, S, key => key, noOp, () => false, noOp, noOp, noOp, noOp, { _speech: 'en-US' }, noOp, setTimeout, clearTimeout, Date, noOp);
 const originalOwnerSettlement = windowObj._voiceLeaseSettleOwner;
 windowObj._voiceLeaseSettleOwner = (...args) => { state.ownerSettlements.push(args); return originalOwnerSettlement(...args); };
-windowObj._voiceModeOnResponseComplete = (...args) => { state.completionEvents.push(args); };
+windowObj._voiceModeOnResponseComplete = (...args) => { state.completionEvents.push(args); return voiceApi.complete(...args); };
 process.on('unhandledRejection', error => state.unhandled.push(String(error && error.stack || error)));
 const api = async () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
 const scope = {
   window: windowObj, document: documentObj, location: { href: 'http://localhost/' }, S, INFLIGHT, EventSource: FakeEventSource, localStorage,
   api, setTimeout, clearTimeout, requestAnimationFrame: callback => setTimeout(callback, 0), cancelAnimationFrame: clearTimeout,
   URL, encodeURIComponent, console, _desktopBackgroundedForNotifications: false, _sendInProgress: false, _sendInProgressSid: null,
-  setBusy: value => { S.busy = value; }, setComposerStatus: noOp, setStatus: noOp, _isActiveSession: () => true, _isSessionCurrentPane: () => true,
+  setBusy: value => { S.busy = value; }, setComposerStatus: noOp, setStatus: noOp, _isActiveSession: () => true, _isSessionCurrentPane: sid => currentPaneSid === sid,
   showLiveRunStatus: noOp, hideLiveRunStatus: noOp, _clearLiveRunStatusTimer: noOp, snapshotLiveTurnHtmlForSession: noOp,
   _resumeSessionStreamAfterLiveChat: noOp, _suspendSessionStreamForLiveChat: noOp, saveInflightState: noOp, renderSessionList: noOp,
   renderMessages: noOp, clearInflight: noOp, clearInflightState: noOp, resetTurnWorkspaceMutations: noOp, _resetStreamScrollFollow: noOp,
@@ -538,15 +591,16 @@ for (const match of attachSource.matchAll(/\b[A-Za-z_$][\w$]*\b/g)) {
 }
 const attachFactory = new Function('scope', `with(scope){
   const LIVE_STREAMS = {};
-  const LIVE_STREAM_TRANSPORT_AUTHORITY = Object.create(null);
-  const LIVE_STREAM_TRANSPORT_SOURCE_GENERATION = new WeakMap();
-  let LIVE_STREAM_TRANSPORT_GENERATION = 0;
+  const LIVE_STREAM_ATTACH_OWNERS = Object.create(null);
+  let LIVE_STREAM_ATTACH_SEQUENCE = 0;
+  let LIVE_STREAM_ATTACH_GENERATION = 0;
   function _releaseLiveStreamTransportAuthority(sid, generation) {
-    const authority = LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
-    if (authority && authority.generation === generation) delete LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
+    const owner = LIVE_STREAM_ATTACH_OWNERS[sid];
+    if (owner && owner.generation === generation) delete LIVE_STREAM_ATTACH_OWNERS[sid];
   }
-  window._liveStreamTransportAuthority = LIVE_STREAM_TRANSPORT_AUTHORITY;
-  window._liveStreamTransportSourceGeneration = LIVE_STREAM_TRANSPORT_SOURCE_GENERATION;
+  window._liveStreamAttachOwners = LIVE_STREAM_ATTACH_OWNERS;
+  window._liveStreamTransportAuthority = new Proxy({}, { get(_, sid) { const owner = LIVE_STREAM_ATTACH_OWNERS[sid]; return owner && owner.state === 'published' ? { streamId: owner.streamId, generation: owner.generation } : undefined; } });
+  window._liveStreamTransportSourceGeneration = { get(source) { for (const sid of Object.keys(LIVE_STREAM_ATTACH_OWNERS)) { const owner = LIVE_STREAM_ATTACH_OWNERS[sid]; if (owner && owner.source === source && owner.state === 'published') return owner.generation; } return undefined; }, set(source, generation) { for (const sid of Object.keys(LIVE_STREAM_ATTACH_OWNERS)) { const owner = LIVE_STREAM_ATTACH_OWNERS[sid]; if (owner && owner.source === source) owner.generation = generation; } return this; } };
   window._liveStreamRegistry = LIVE_STREAMS;
   return (${attachSource});
 }`);
@@ -556,7 +610,7 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0));
   voiceApi.activate(); voiceApi.start();
   S.activeStreamId = 'stream-1'; S.session.active_stream_id = 'stream-1'; S.busy = true;
   let replacementSource = null;
-  if (scenario.kind === 'rejected') {
+  if (scenario.kind === 'rejected' || scenario.kind === 'reproduction') {
     attach('s1', 'stream-1', [], { reconnecting: true });
     await flush();
     attach('s1', 'stream-1', [], { reconnecting: true });
@@ -565,6 +619,11 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0));
     await flush(); await flush();
     pending[0].reject(Error('stale status rejected'));
     await flush(); await flush();
+    if (scenario.kind === 'reproduction') {
+      const survivor = state.sources[state.sources.length - 1];
+      survivor.emit('apperror', { data: JSON.stringify({ session_id: 's1', type: 'error', message: 'failure' }) });
+      await flush(); await flush();
+    }
   } else if (scenario.kind === 'deferred-recovery') {
     attach('s1', 'stream-1');
     await flush();
@@ -574,13 +633,36 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0));
     documentObj.hidden = false; documentObj.visibilityState = 'visible';
     for (const handler of documentListeners.visibilitychange || []) handler();
     await flush();
-    replacementSource = { readyState: 1, closed: false, closeCount: 0, close() { this.closed = true; this.closeCount += 1; this.readyState = 2; } };
-    windowObj._liveStreamRegistry.s1 = { streamId: 'stream-B', source: replacementSource, generation: 2 };
-    windowObj._liveStreamTransportAuthority.s1 = { streamId: 'stream-B', generation: 2 };
-    windowObj._liveStreamTransportSourceGeneration.set(replacementSource, 2);
-    S.activeStreamId = 'stream-B'; S.session.active_stream_id = 'stream-B';
-    voiceApi.adopt('s1', 'stream-B');
+    // Publish B through a second production attach and _wireSSE call. This keeps
+    // the same session and stream tuple while the deferred A continuation waits.
+    first.readyState = 2;
+    attach('s1', 'stream-1');
+    await flush();
+    replacementSource = state.sources[state.sources.length - 1];
     pending[0].resolve({ active: true });
+    await flush(); await flush();
+  } else if (scenario.kind === 'null-mirror') {
+    S.session.active_stream_id = null;
+    attach('s1', 'stream-1');
+    await flush();
+    state.sources[0].emit('apperror', { data: JSON.stringify({ session_id: 's1', type: 'error', message: 'failure' }) });
+    await flush(); await flush();
+  } else if (scenario.kind === 'pane-loss' || scenario.kind === 'stream-loss') {
+    attach('s1', 'stream-1');
+    await flush();
+    if (scenario.kind === 'pane-loss') currentPaneSid = 'other';
+    else S.activeStreamId = 'stream-2';
+    state.sources[0].emit('apperror', { data: JSON.stringify({ session_id: 's1', type: 'error', message: 'failure' }) });
+    await flush(); await flush();
+  } else if (scenario.kind === 'source-loss') {
+    attach('s1', 'stream-1');
+    await flush();
+    const oldSource = state.sources[0];
+    const replacement = { readyState: 1, closed: false, closeCount: 0, close() { this.closed = true; this.closeCount += 1; this.readyState = 2; } };
+    const owner = windowObj._liveStreamAttachOwners.s1;
+    owner.source = replacement; owner.generation = 2;
+    windowObj._liveStreamRegistry.s1 = { streamId: 'stream-1', source: replacement, generation: 2 };
+    oldSource.emit('apperror', { data: JSON.stringify({ session_id: 's1', type: 'error', message: 'failure' }) });
     await flush(); await flush();
   } else {
     attach('s1', 'stream-1');
@@ -588,6 +670,7 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0));
     const first = state.sources[0];
     first.emit('error', {});
     await new Promise(resolve => setTimeout(resolve, 1600));
+    first.readyState = 2;
     attach('s1', 'stream-1', [], { reconnecting: true });
     await flush();
     pending[1].resolve(scenario.status);
@@ -596,10 +679,10 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0));
     await flush(); await flush();
   }
   const registry = windowObj._liveStreamRegistry.s1;
-  const authority = windowObj._liveStreamTransportAuthority.s1;
+  const ownerRecord = windowObj._liveStreamAttachOwners.s1;
   const result = {
     sources: state.sources.length, closed: state.sources.map(source => source.closed), closeCounts: state.sources.map(source => source.closeCount),
-    registrySource: registry && state.sources.indexOf(registry.source), authority: authority && { streamId: authority.streamId, generation: authority.generation },
+    registrySource: registry && state.sources.indexOf(registry.source), ownerRecord: ownerRecord && { streamId: ownerRecord.streamId, generation: ownerRecord.generation, state: ownerRecord.state },
     ownerSettlements: state.ownerSettlements.length, completionEvents: state.completionEvents.length, owner: voiceApi.lease().owner,
     state: voiceApi.state(), activeStreamId: S.activeStreamId, sessionActiveStreamId: S.session.active_stream_id, busy: S.busy,
     pending: pending.length, unhandled: state.unhandled,
@@ -614,9 +697,9 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 """
 
 
-def _run_attach_attempt_race(scenario: dict) -> dict:
+def _run_attach_attempt_race_from_source(source: str, scenario: dict) -> dict:
     script = ATTACH_ATTEMPT_RACE_HARNESS.replace(
-        "${ATTACH_B64}", base64.b64encode(ATTACH_SOURCE.encode()).decode()
+        "${ATTACH_B64}", base64.b64encode(source.encode()).decode()
     ).replace(
         "${RUNTIME_B64}", base64.b64encode((_voice_runtime() + "\n" + VOICE_COMPLETE_SOURCE).encode()).decode()
     ).replace(
@@ -626,6 +709,16 @@ def _run_attach_attempt_race(scenario: dict) -> dict:
     if result.returncode:
         raise AssertionError(result.stderr)
     return json.loads(result.stdout)
+
+
+def _run_attach_attempt_race(scenario: dict) -> dict:
+    return _run_attach_attempt_race_from_source(ATTACH_SOURCE, scenario)
+
+
+def _run_attach_mutation(fragment: str, replacement: str, scenario: dict) -> dict:
+    assert fragment in ATTACH_SOURCE
+    mutated = ATTACH_SOURCE.replace(fragment, replacement, 1)
+    return _run_attach_attempt_race_from_source(mutated, scenario)
 
 
 def _run_session_transition(source: str, setup: str, call: str) -> dict:
@@ -768,6 +861,15 @@ def test_production_send_and_stream_paths_share_the_lease_seams():
     assert "window._voiceModeOnResponseComplete(ownerSid,ownerStreamId,terminalSource,terminalGeneration,voiceOutcome);" in OWNER_SOURCE
 
 
+def test_live_attach_compatibility_views_read_the_single_owner_record():
+    assert "const LIVE_STREAM_ATTACH_OWNERS=Object.create(null);" in MESSAGES
+    assert "const LIVE_STREAM_TRANSPORT_AUTHORITY=Object.create(null);" not in MESSAGES
+    assert "const LIVE_STREAM_TRANSPORT_SOURCE_GENERATION=new WeakMap();" not in MESSAGES
+    assert "window._liveStreamAttachOwners=LIVE_STREAM_ATTACH_OWNERS;" in MESSAGES
+    assert "set(source,generation)" in MESSAGES
+    assert "_ownerStore[activeSid]!==_attachOwner" in ATTACH_SOURCE
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_reconnecting_dead_stream_settles_exact_voice_owner_without_event_source():
     result = _run_attach_transport_race()
@@ -825,7 +927,7 @@ def test_rejected_attach_status_cannot_close_or_replace_same_session_stream_b():
         "closed": [False],
         "closeCounts": [0],
         "registrySource": 0,
-        "authority": {"streamId": "stream-1", "generation": 1},
+        "ownerRecord": {"streamId": "stream-1", "generation": 1, "state": "published"},
         "ownerSettlements": 0,
         "completionEvents": 0,
         "owner": {"sid": "s1", "streamId": "stream-1"},
@@ -836,6 +938,70 @@ def test_rejected_attach_status_cannot_close_or_replace_same_session_stream_b():
         "pending": 2,
         "unhandled": [],
     }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_issue_symptom_base_fails_head_passes_with_real_attach_source():
+    base_source = subprocess.check_output(
+        ["git", "show", "origin/master:static/messages.js"], text=True, encoding="utf-8"
+    )
+    base_attach = _function_source_balanced(base_source, "attachLiveStream")
+    base = _run_attach_attempt_race_from_source(base_attach, {"kind": "reproduction"})
+    head = _run_attach_attempt_race({"kind": "reproduction"})
+    print(f"BASE_HEAD_REPRODUCTION base={base} head={head}")
+    assert base["completionEvents"] == 0
+    assert head["completionEvents"] == 1
+    assert base["ownerSettlements"] == 0
+    assert head["ownerSettlements"] == 1
+    assert base["state"] == "listening"
+    assert head["state"] == "listening"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_attach_owner_predicate_terms_are_load_bearing():
+    cases = [
+        (
+            "attempt",
+            "if(owner!==_attachOwner||owner.state==='released'||owner.streamId!==streamId) return false;",
+            "if(false) return false;",
+            {"kind": "rejected"},
+        ),
+        (
+            "pane",
+            "if(_isActiveSession()&&(!_isSessionCurrentPane(activeSid)||S.activeStreamId!==streamId)) return false;",
+            "if(false) return false;",
+            {"kind": "pane-loss"},
+        ),
+        (
+            "stream",
+            "if(_isActiveSession()&&(!_isSessionCurrentPane(activeSid)||S.activeStreamId!==streamId)) return false;",
+            "if(_isActiveSession()&&!_isSessionCurrentPane(activeSid)) return false;",
+            {"kind": "stream-loss"},
+        ),
+        (
+            "source-generation",
+            "return owner.state==='published'&&owner.source===source&&owner.generation===_transportGeneration\n        &&LIVE_STREAMS[activeSid]&&LIVE_STREAMS[activeSid].source===source;",
+            "return true;",
+            {"kind": "source-loss"},
+        ),
+    ]
+    for name, fragment, replacement, scenario in cases:
+        baseline = _run_attach_attempt_race(scenario)
+        mutated = _run_attach_mutation(fragment, replacement, scenario)
+        print(f"PREDICATE_MUTATION {name} baseline={baseline} mutated={mutated}")
+        assert baseline["completionEvents"] == 0
+        if name == "attempt":
+            assert mutated["sources"] == 2
+        else:
+            assert mutated["completionEvents"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_null_server_stream_mirror_does_not_block_browser_self_heal():
+    result = _run_attach_attempt_race({"kind": "null-mirror"})
+    assert result["sources"] == 1
+    assert result["completionEvents"] == 1
+    assert result["sessionActiveStreamId"] is None
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -847,7 +1013,7 @@ def test_source_error_recovery_attempt_a_cannot_replace_newer_attempt_b(status):
         "closed": [True, False],
         "closeCounts": [1, 0],
         "registrySource": 1,
-        "authority": {"streamId": "stream-1", "generation": 2},
+        "ownerRecord": {"streamId": "stream-1", "generation": 2, "state": "published"},
         "ownerSettlements": 0,
         "completionEvents": 0,
         "owner": {"sid": "s1", "streamId": "stream-1"},
@@ -861,24 +1027,24 @@ def test_source_error_recovery_attempt_a_cannot_replace_newer_attempt_b(status):
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_deferred_recovery_a_cannot_resurrect_after_pane_stream_owner_changes_to_b():
+def test_deferred_recovery_a_cannot_resurrect_after_real_same_stream_b_publication():
     result = _run_attach_attempt_race({"kind": "deferred-recovery"})
     assert result == {
-        "sources": 1,
-        "closed": [True],
-        "closeCounts": [1],
-        "registrySource": -1,
-        "authority": {"streamId": "stream-B", "generation": 2},
+        "sources": 2,
+        "closed": [True, False],
+        "closeCounts": [1, 0],
+        "registrySource": 1,
+        "ownerRecord": {"streamId": "stream-1", "generation": 2, "state": "published"},
         "ownerSettlements": 0,
         "completionEvents": 0,
-        "owner": {"sid": "s1", "streamId": "stream-B"},
+        "owner": {"sid": "s1", "streamId": "stream-1"},
         "state": "thinking",
-        "activeStreamId": "stream-B",
-        "sessionActiveStreamId": "stream-B",
+        "activeStreamId": "stream-1",
+        "sessionActiveStreamId": "stream-1",
         "busy": True,
         "pending": 1,
         "unhandled": [],
-        "registryStream": "stream-B",
+        "registryStream": "stream-1",
         "registryIsReplacement": True,
         "replacementClosed": False,
     }

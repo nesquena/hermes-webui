@@ -1561,7 +1561,6 @@ async function send(){
         }
       }
     }
-    // Directive ownership is cleared at its consume site: if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
     _voiceSlashFallsThrough=true;
     }finally{
       if(_voiceLocalLease&&!_voiceSlashFallsThrough&&!_voiceLocalDispatchSettled){
@@ -1627,8 +1626,7 @@ async function send(){
     if(!_pending.sessionId||_pending.sessionId===activeSid){
       const _directivePayload = await _pending.promise;
       if(_forcedSkillDirectivePending===_pending){
-        _forcedSkillDirectivePending =
-          null;
+        _forcedSkillDirectivePending = null;
       }
       if(_directivePayload){
         const _directive = typeof _directivePayload==='string'
@@ -1922,30 +1920,72 @@ async function send(){
 }
 
 const LIVE_STREAMS={};
-const LIVE_STREAM_TRANSPORT_AUTHORITY=Object.create(null);
-const LIVE_STREAM_TRANSPORT_SOURCE_GENERATION=new WeakMap();
-let LIVE_STREAM_TRANSPORT_GENERATION=0;
+const LIVE_STREAM_ATTACH_OWNERS=Object.create(null);
+let LIVE_STREAM_ATTACH_SEQUENCE=0;
+let LIVE_STREAM_ATTACH_GENERATION=0;
+const _LIVE_STREAM_TRANSPORT_AUTHORITY_VIEW=new Proxy(Object.create(null),{
+  get(_target,sid){
+    const owner=LIVE_STREAM_ATTACH_OWNERS[sid];
+    return owner&&owner.state==='published'
+      ? {streamId:owner.streamId,generation:owner.generation}
+      : undefined;
+  },
+  set(_target,sid,value){
+    const owner=LIVE_STREAM_ATTACH_OWNERS[sid];
+    if(owner&&value&&value.streamId===owner.streamId&&Number(value.generation)===owner.generation) return true;
+    return true;
+  },
+});
+const _LIVE_STREAM_SOURCE_GENERATION_VIEW={
+  get(source){
+    for(const sid of Object.keys(LIVE_STREAM_ATTACH_OWNERS)){
+      const owner=LIVE_STREAM_ATTACH_OWNERS[sid];
+      if(owner&&owner.state==='published'&&owner.source===source) return owner.generation;
+    }
+    return undefined;
+  },
+  set(source,generation){
+    for(const sid of Object.keys(LIVE_STREAM_ATTACH_OWNERS)){
+      const owner=LIVE_STREAM_ATTACH_OWNERS[sid];
+      if(owner&&owner.source===source){
+        owner.generation=generation;
+        if(LIVE_STREAMS[sid]&&LIVE_STREAMS[sid].source===source) LIVE_STREAMS[sid].generation=generation;
+        return this;
+      }
+    }
+    return this;
+  },
+};
 if(typeof window!=='undefined'){
-  window._liveStreamTransportAuthority=LIVE_STREAM_TRANSPORT_AUTHORITY;
-  window._liveStreamTransportSourceGeneration=LIVE_STREAM_TRANSPORT_SOURCE_GENERATION;
+  window._liveStreamAttachOwners=LIVE_STREAM_ATTACH_OWNERS;
+  // Compatibility views for the existing voice lease consumer; both read the owner record.
+  window._liveStreamTransportAuthority=_LIVE_STREAM_TRANSPORT_AUTHORITY_VIEW;
+  window._liveStreamTransportSourceGeneration=_LIVE_STREAM_SOURCE_GENERATION_VIEW;
   window._liveStreamTransportCapture=(sid,streamId)=>{
     const live=LIVE_STREAMS[sid];
-    const authority=LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
-    if(!live||!authority||live.streamId!==String(streamId||'')||authority.streamId!==String(streamId||'')) return null;
-    return {source:live.source,generation:authority.generation};
+    const owner=LIVE_STREAM_ATTACH_OWNERS[sid];
+    if(!live||!owner||owner.state!=='published'||live.streamId!==String(streamId||'')||owner.streamId!==String(streamId||'')||live.source!==owner.source) return null;
+    return {source:owner.source,generation:owner.generation};
   };
 }
 function _releaseLiveStreamTransportAuthority(sid, generation){
-  const authority=LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
-  if(authority&&authority.generation===generation){
-    delete LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
+  const owner=LIVE_STREAM_ATTACH_OWNERS[sid];
+  if(owner&&owner.generation===generation){
+    owner.state='released';
+    if(LIVE_STREAMS[sid]&&LIVE_STREAMS[sid].source===owner.source) delete LIVE_STREAMS[sid];
+    delete LIVE_STREAM_ATTACH_OWNERS[sid];
   }
 }
 function _retargetLiveStreamTransportAuthority(fromSid, toSid, streamId, generation){
-  const authority=LIVE_STREAM_TRANSPORT_AUTHORITY[fromSid];
-  if(!authority||authority.streamId!==String(streamId||'')||authority.generation!==generation) return false;
-  LIVE_STREAM_TRANSPORT_AUTHORITY[toSid]=authority;
-  delete LIVE_STREAM_TRANSPORT_AUTHORITY[fromSid];
+  const owner=LIVE_STREAM_ATTACH_OWNERS[fromSid];
+  if(!owner||owner.streamId!==String(streamId||'')||owner.generation!==generation) return false;
+  owner.sid=String(toSid);
+  LIVE_STREAM_ATTACH_OWNERS[toSid]=owner;
+  delete LIVE_STREAM_ATTACH_OWNERS[fromSid];
+  if(LIVE_STREAMS[fromSid]&&LIVE_STREAMS[fromSid].source===owner.source){
+    LIVE_STREAMS[toSid]=LIVE_STREAMS[fromSid];
+    delete LIVE_STREAMS[fromSid];
+  }
   return true;
 }
 if(typeof window!=='undefined'){
@@ -2066,31 +2106,6 @@ function closeOtherLiveStreams(activeSid){
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
-  const _attachAttemptStore=typeof window!=='undefined'
-    ? (window._liveStreamAttachAttempts||(window._liveStreamAttachAttempts={next:0,current:Object.create(null)}))
-    : {next:0,current:Object.create(null)};
-  if(!_attachAttemptStore.current) _attachAttemptStore.current=Object.create(null);
-  const _attachAttempt={id:++_attachAttemptStore.next,sid:String(activeSid),streamId:String(streamId)};
-  _attachAttemptStore.current[activeSid]=_attachAttempt;
-  const _isCurrentAttachAttempt=()=>_attachAttemptStore.current[activeSid]===_attachAttempt;
-  // Keep this production entry point self-contained for focused harnesses that
-  // extract attachLiveStream without evaluating the module declarations above.
-  const _transportAuthority=typeof LIVE_STREAM_TRANSPORT_AUTHORITY!=='undefined'
-    ? LIVE_STREAM_TRANSPORT_AUTHORITY
-    : (typeof window!=='undefined'
-      ? (window._liveStreamTransportAuthority||(window._liveStreamTransportAuthority=Object.create(null)))
-      : Object.create(null));
-  const _transportSourceGeneration=typeof LIVE_STREAM_TRANSPORT_SOURCE_GENERATION!=='undefined'
-    ? LIVE_STREAM_TRANSPORT_SOURCE_GENERATION
-    : (typeof window!=='undefined'
-      ? (window._liveStreamTransportSourceGeneration||(window._liveStreamTransportSourceGeneration=new WeakMap()))
-      : new WeakMap());
-  const _nextTransportGeneration=()=>{
-    if(typeof LIVE_STREAM_TRANSPORT_GENERATION!=='undefined') return ++LIVE_STREAM_TRANSPORT_GENERATION;
-    const next=Number(typeof window!=='undefined'&&window._liveStreamTransportGeneration||0)+1;
-    if(typeof window!=='undefined') window._liveStreamTransportGeneration=next;
-    return next;
-  };
   if(typeof window!=='undefined'&&typeof window._voiceLeaseAdoptStream==='function'){
     window._voiceLeaseAdoptStream(activeSid,streamId);
   }
@@ -2140,9 +2155,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       existingLive.source.readyState===EventSource.OPEN||
       (!reconnecting&&existingLive.source.readyState===EventSource.CONNECTING))
   ){
-    _transportGeneration=existingLive.generation
-      ||(_transportAuthority[activeSid]&&_transportAuthority[activeSid].generation)
-      ||0;
+    _transportGeneration=existingLive.generation||0;
     // Phase D: restore bottom run status on reattach after the Worklog shell
     // exists. There is no stale transport teardown in this branch.
     if(reconnecting && S.activeStreamId && typeof showLiveRunStatus==='function'){
@@ -2151,6 +2164,27 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return;
   }
+  // Claim the only browser attach owner after the open-transport reuse return.
+  // This separates same-session, same-stream continuations before any teardown or await.
+  const _ownerStore=typeof LIVE_STREAM_ATTACH_OWNERS!=='undefined'
+    ? LIVE_STREAM_ATTACH_OWNERS
+    : (typeof window!=='undefined'
+      ? (window._liveStreamAttachOwners||(window._liveStreamAttachOwners=Object.create(null)))
+      : Object.create(null));
+  const _nextAttachSequence=()=>{
+    if(typeof LIVE_STREAM_ATTACH_SEQUENCE!=='undefined') return ++LIVE_STREAM_ATTACH_SEQUENCE;
+    const next=Number(typeof window!=='undefined'&&window._liveStreamAttachSequence||0)+1;
+    if(typeof window!=='undefined') window._liveStreamAttachSequence=next;
+    return next;
+  };
+  const _attachOwner={sid:String(activeSid),streamId:String(streamId),attempt:_nextAttachSequence(),source:null,generation:0,state:'claimed'};
+  _ownerStore[activeSid]=_attachOwner;
+  const _nextTransportGeneration=()=>{
+    if(typeof LIVE_STREAM_ATTACH_GENERATION!=='undefined') return ++LIVE_STREAM_ATTACH_GENERATION;
+    const next=Number(typeof window!=='undefined'&&window._liveStreamAttachGeneration||0)+1;
+    if(typeof window!=='undefined') window._liveStreamAttachGeneration=next;
+    return next;
+  };
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
   if(!reconnecting&&typeof resetTurnWorkspaceMutations==='function') resetTurnWorkspaceMutations();
@@ -2231,29 +2265,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
-  function _ownsCurrentTransport(source){
-    const live=LIVE_STREAMS[activeSid];
-    const authority=_transportAuthority[activeSid];
-    const sourceGeneration=source&&_transportSourceGeneration.get(source);
-    return !!authority&&authority.streamId===streamId&&authority.generation===_transportGeneration
-      &&sourceGeneration===authority.generation&&(!live||live.source===source);
-  }
-  function _ownsActiveStreamOrBackground(source){
-    if(!_isActiveSession()) return _ownsCurrentTransport(source);
-    if(S.activeStreamId!==streamId) return false;
-    return _ownsCurrentTransport(source);
-  }
-  function _ownsCurrentAttachPane(){
-    return _isCurrentAttachAttempt()&&_isSessionCurrentPane(activeSid)
-      &&S.activeStreamId===streamId
-      &&S.session&&S.session.session_id===activeSid
-      &&S.session.active_stream_id===streamId;
-  }
-  function _ownsDeferredRecoveryOwner(source){
-    return _ownsCurrentAttachPane()&&_ownsCurrentTransport(source);
+  function _ownsAttachSeam(source=null){
+    const owner=_ownerStore[activeSid];
+    if(owner!==_attachOwner||owner.state==='released'||owner.streamId!==streamId) return false;
+    if(_isActiveSession()&&(!_isSessionCurrentPane(activeSid)||S.activeStreamId!==streamId)) return false;
+    if(source!==null){
+      return owner.state==='published'&&owner.source===source&&owner.generation===_transportGeneration
+        &&LIVE_STREAMS[activeSid]&&LIVE_STREAMS[activeSid].source===source;
+    }
+    return true;
   }
   function _bailOutOfTerminalEventsFromStaleStream(source){
-    if(_ownsActiveStreamOrBackground(source)) return false;
+    if(_ownsAttachSeam(source)) return false;
     // This stale stream no longer owns the session — schedule cleanup of ITS own
     // anchor registry (identity-guarded, so it can't clobber the newer stream's
     // registry for the same session) before closing. (Codex leak catch.)
@@ -2413,6 +2436,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _persistTimer=setTimeout(()=>{_persistTimer=null;persistInflightState();},2000);
   }
   function _closeSource(source){
+    if(source&&_ownerStore[activeSid]!==_attachOwner) return;
+    if(source&&_attachOwner.source&&_attachOwner.source!==source) return;
     closeLiveStream(activeSid, streamId, source);
   }
   function _clearStreamEndRecovery(){
@@ -2475,8 +2500,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearStreamEndRecovery();
       return;
     }
+    if(!_ownsAttachSeam(source)) return;
     _streamEndRecoveryTimer=null;
     const status=await _restoreSettledSession(source,{status:true});
+    if(!_ownsAttachSeam(source)) return;
     if(status==='restored'){
       _clearStreamEndRecovery();
       return;
@@ -2651,7 +2678,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _reattachOrRestoreAfterDeferredStreamError(source){
-    if(_terminalStateReached||_streamFinalized||!_ownsDeferredRecoveryOwner(source)) return;
+    if(_terminalStateReached||_streamFinalized||!_ownsAttachSeam(source)) return;
     (async()=>{
       let st=null;
       try{
@@ -2660,19 +2687,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }catch(_){
       }
-      if(!_ownsDeferredRecoveryOwner(source)) return;
-      if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
-      if(!_ownsDeferredRecoveryOwner(source)) return;
+      if(!_ownsAttachSeam(source)) return;
+      if(_deferStreamErrorIfOffline()||_deferStreamErrorIfPageHidden(source)) return;
+      if(!_ownsAttachSeam(source)) return;
       if(st&&st.active){
         setComposerStatus('Reconnected');
-        if(!_ownsDeferredRecoveryOwner(source)) return;
+        if(!_ownsAttachSeam(source)) return;
         _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
         return;
       }
       if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
-      if(!_ownsDeferredRecoveryOwner(source)) return;
-      if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
-      if(!_ownsDeferredRecoveryOwner(source)) return;
+      if(!_ownsAttachSeam(source)) return;
+      if(_deferStreamErrorIfOffline()||_deferStreamErrorIfPageHidden(source)) return;
+      if(!_ownsAttachSeam(source)) return;
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup(120000);
       _handleStreamError(source);
@@ -5552,19 +5579,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _wireSSE(source){
-    if(!_isCurrentAttachAttempt()) return false;
+    if(!_ownsAttachSeam()){
+      try{if(source&&source.readyState!==2)source.close();}catch(_){ }
+      return false;
+    }
     const existingLive=LIVE_STREAMS[activeSid];
     if(existingLive&&existingLive.source&&existingLive.source!==source){
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
     }
-    const generation=_nextTransportGeneration();
-    _transportGeneration=generation;
-    _transportSourceGeneration.set(source,generation);
-    const authority={streamId,generation};
-    if(typeof LIVE_STREAM_TRANSPORT_AUTHORITY!=='undefined') LIVE_STREAM_TRANSPORT_AUTHORITY[activeSid]=authority;
-    else _transportAuthority[activeSid]=authority;
+    // Publish the source before allocating its generation, so the owner record
+    // is the sole source of transport identity after this synchronous claim.
+    let generation;
     LIVE_STREAMS[activeSid]={streamId,source,generation};
-
+    generation=_nextTransportGeneration();
+    _transportGeneration=generation;
+    _attachOwner.source=source;
+    _attachOwner.generation=generation;
+    _attachOwner.state='published';
+    LIVE_STREAMS[activeSid].generation=generation;
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
     // the accumulators here so the re-sent tokens wouldn't double the prefix.
@@ -5583,7 +5615,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('token',e=>{
       if(_terminalStateReached||_streamFinalized) return;
       if(S.session&&S.session.session_id===activeSid&&S.activeStreamId!==streamId) return;
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsAttachSeam(source)) return;
       const d=JSON.parse(e.data);
       assistantText+=d.text;
       syncInflightAssistantMessage();
@@ -5608,7 +5640,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('interim_assistant',e=>{
       if(_terminalStateReached||_streamFinalized) return;
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsAttachSeam(source)) return;
       const d=JSON.parse(e.data);
       const visible=String(d&&d.text?d.text:'').trim();
       const alreadyStreamed=!!(d&&d.already_streamed);
@@ -5692,7 +5724,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('reasoning',e=>{
       if(_terminalStateReached||_streamFinalized) return;
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsAttachSeam(source)) return;
       const d=JSON.parse(e.data);
       const text=d.text||'';
       reasoningText += text;
@@ -6293,7 +6325,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // live DOM/inflight state remains projected and can duplicate Thinking or
       // assistant content until a later session switch. Settle from the persisted
       // session before closing so the pane converges on canonical state.
+      if(!_ownsAttachSeam(source)) return;
       const status=await _restoreSettledSession(source,{status:true});
+      if(!_ownsAttachSeam(source)) return;
       if(status==='restored'){
         return;
       }
@@ -6596,31 +6630,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _retryDelays=[1500,3000,5000,8000,12000,20000];
         setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`);
         const _probeReconnect=async(attempt=0)=>{
-          if(_terminalStateReached || _streamFinalized || !_isCurrentAttachAttempt()) return;
-          if(!_ownsCurrentTransport(source)) return;
-          if(!_isSessionCurrentPane(activeSid)) return;
+          if(_terminalStateReached || _streamFinalized || !_ownsAttachSeam(source)) return;
           let st=null;
           try{
             st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
           }catch(_){
             if(_deferStreamErrorIfOffline()) return;
           }
-          if(!_isCurrentAttachAttempt()||!_ownsCurrentTransport(source)||!_isSessionCurrentPane(activeSid)) return;
+          if(!_ownsAttachSeam(source)) return;
           if(st&&st.active){
-            if(!_isCurrentAttachAttempt()) return;
+            if(!_ownsAttachSeam(source)) return;
             setComposerStatus('Reconnected');
             _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
             return;
           }
           if(st&&st.replay_available){
-            if(!_isCurrentAttachAttempt()) return;
+            if(!_ownsAttachSeam(source)) return;
             setComposerStatus('Restoring stream…');
             _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
             return;
           }
-          if(!_isCurrentAttachAttempt()) return;
+          if(!_ownsAttachSeam(source)) return;
           if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
-          if(!_isCurrentAttachAttempt()) return;
+          if(!_ownsAttachSeam(source)) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
           const nextDelay=_retryDelays[attempt+1];
@@ -6642,7 +6674,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             // _handleStreamError after 8s.
             _restoreTimedOut=true;
             if(!_terminalStateReached&&!_streamFinalized){
-              if(!_ownsCurrentTransport(source)) return;
+              if(!_ownsAttachSeam(source)) return;
               if(_deferStreamErrorIfOffline()) return;
               if(_deferStreamErrorIfPageHidden(source)) return;
               _flushReasoningToAnchor();
@@ -6664,7 +6696,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(_restoreTimedOut) return; // timer already fired _handleStreamError
           clearTimeout(_restoreTimer);
           if(_terminalStateReached||_streamFinalized) return;
-          if(!_ownsCurrentTransport(source)) return;
+          if(!_ownsAttachSeam(source)) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
           _flushReasoningToAnchor();
@@ -6674,7 +6706,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         setTimeout(()=>{void _probeReconnect(0);},_retryDelays[0]);
         return;
       }
+      if(!_ownsAttachSeam(source)) return;
       if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+      if(!_ownsAttachSeam(source)) return;
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden(source)) return;
       _flushReasoningToAnchor();
@@ -6834,7 +6868,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   async function _restoreSettledSession(source, options=null){
     const returnStatus=!!(options&&options.status);
     const preserveVisibleOnShorterTerminalSnapshot=!!(options&&options.preserveVisibleOnShorterTerminalSnapshot);
-    if(_isActiveSession() && S.activeStreamId!==streamId){
+    if(!_ownsAttachSeam(source)){
       _closeSource(source);
       return returnStatus?'stale':false;
     }
@@ -6843,7 +6877,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
-      if(typeof _ownsCurrentTransport==='function'&&!_ownsCurrentTransport(source)){
+      if(!_ownsAttachSeam(source)){
         _closeSource(source);
         return returnStatus?'stale':false;
       }
@@ -6940,7 +6974,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _handleStreamError(source){
-    if(!_ownsCurrentTransport(source)){
+    if(!_ownsAttachSeam(source)){
       _closeSource(source);
       return;
     }
@@ -7025,7 +7059,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){
         st=null;
       }
-      if(!_ownsCurrentAttachPane()) return;
+      if(!_ownsAttachSeam()) return;
       if(st&&!st.active&&st.replay_available){
         replayOnly=true;
       }else if(st&&!st.active){
@@ -7056,7 +7090,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         return;
       }
     }
-    if(!_isCurrentAttachAttempt()) return;
+    if(!_ownsAttachSeam()) return;
     const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
     _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();

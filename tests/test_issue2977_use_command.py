@@ -64,15 +64,15 @@ def test_use_entry_has_subArgs_skills():
 def test_directive_consumed_at_injection_site():
     """_forcedSkillDirectivePending is cleared at the consume site, not in finally."""
     src = read("static/messages.js")
-    finally_part = src.split("finally")[1] if "finally" in src else ""
-    assert "_forcedSkillDirectivePending = null;" not in finally_part, \
-        "_forcedSkillDirectivePending must NOT be cleared in the finally block"
+    consume_start = src.index("const _directivePayload = await _pending.promise;")
+    assert "_forcedSkillDirectivePending = null;" not in src[:consume_start], \
+        "_forcedSkillDirectivePending must not be cleared before the consume site"
     assert "const _directivePayload = await _pending.promise;" in src, \
         "consume site must await the pending promise"
     block = directive_consume_block(src)
     assert "if(_forcedSkillDirectivePending===_pending)" in block, \
         "consume block must compare the pending directive before clearing it"
-    assert "_forcedSkillDirectivePending =" in block, \
+    assert "_forcedSkillDirectivePending = null;" in block, \
         "consume block must clear the pending directive"
 
 
