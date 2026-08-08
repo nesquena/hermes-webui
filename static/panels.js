@@ -11934,7 +11934,7 @@ async function checkUpdatesNow(channelOverride){
         let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
         if(manualInstruction) txt+=' · '+manualInstruction;
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
-        if(tagInfo) txt += t('settings_latest_tag_suffix').replace('{0}', tagInfo);
+        if(tagInfo) txt += ' ' + t('settings_latest_tag_suffix').replace('{0}', tagInfo);
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
@@ -11944,7 +11944,7 @@ async function checkUpdatesNow(channelOverride){
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
       } else {
         let txt=t('settings_up_to_date');
-        if(tagInfo) txt += t('settings_latest_tag_suffix').replace('{0}', tagInfo);
+        if(tagInfo) txt += ' ' + t('settings_latest_tag_suffix').replace('{0}', tagInfo);
         if(status){status.textContent=txt;status.style.color='var(--success)';}
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
       }
