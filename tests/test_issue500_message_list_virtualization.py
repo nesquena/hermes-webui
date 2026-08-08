@@ -1111,8 +1111,9 @@ let _messageVirtualHeightCacheSrc = {};
 let _messageVirtualEstimatedRowHeight = 200;
 let _messageVirtualWindowKey = 'old-key';
 let _messageVirtualMeasurementCycleKey = 'old-cycle';
-let _messageVirtualMeasurementRetryCount = 3;
-let _messageVirtualMeasurementBurstActive = false;
+let _messageVirtualMeasurementSeenKeys = ['stale-key'];
+let _messageVirtualMeasurementBurstActive = true;
+let _messageVirtualMeasurementRenderPending = true;
 const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT = 140;
 // #4367 introduced per-role default heights; the combined _clearMessageVirtualHeightCache
 // resets the estimate via _messageVirtualDefaultHeightForRole('default'), so the harness
@@ -1120,6 +1121,7 @@ const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT = 140;
 const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS = {user:120, assistant:160, tool_call:400, default:140};
 function clearTimeout(id){ timerCleared = (id === 99); }
 eval(extractFunc('_messageVirtualDefaultHeightForRole'));
+eval(extractFunc('_resetMessageVirtualMeasurementBurst'));
 eval(extractFunc('_clearMessageVirtualHeightCache'));
 _clearMessageVirtualHeightCache();
 console.log(JSON.stringify({
@@ -1127,6 +1129,9 @@ console.log(JSON.stringify({
   settleTimer: _messageVirtualScrollSettleTimer,
   deferred: _messageVirtualDeferredMeasurement,
   timerCleared: timerCleared,
+  seenKeys: _messageVirtualMeasurementSeenKeys,
+  burstActive: _messageVirtualMeasurementBurstActive,
+  renderPending: _messageVirtualMeasurementRenderPending,
 }));
 """
     metrics = json.loads(_run_node(source))
@@ -1142,121 +1147,245 @@ console.log(JSON.stringify({
     assert metrics["timerCleared"] is True, (
         "_clearMessageVirtualHeightCache must call clearTimeout on the pending settle timer"
     )
-
-
-def test_measurement_retry_budget_is_global_across_cycle_key_oscillation():
-    """#6654: _scheduleMessageVirtualMeasurementRefresh must NOT reset
-    _messageVirtualMeasurementRetryCount when _messageVirtualMeasurementCycleKey
-    changes INSIDE one measurement burst. If WebKit alternates between two
-    measured window-metric sets (A -> B -> A -> B), each key transition used to
-    reset the two-render budget, so the rAF/geometry-measurement loop never
-    terminated (~30% WebContent CPU). The MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS
-    budget must cap the whole convergence burst; the burst ends at the cap (or
-    when measurement settles), so the NEXT externally initiated cycle gets a
-    fresh budget. The harness drives the thrash causally through the internal
-    chain (each scheduled render re-measures the next oscillating key)."""
-    js = UI_JS_PATH.read_text(encoding="utf-8")
-    source = _extract_func_script(js) + """
-let scheduled = 0;
-let _messageVirtualMeasurementCycleKey = '';
-let _messageVirtualMeasurementRetryCount = 0;
-let _messageVirtualMeasurementBurstActive = false;
-let _messageVirtualScrollActive = false;
-let _messageVirtualDeferredMeasurement = null;
-const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS = 2;
-function _messageVirtualMeasurementCycleKeyFor(w) { return w.key; }
-// Drive the burst causally: each internally scheduled render re-measures and
-// re-enters the scheduler with the next WebKit-oscillated key.
-let keys = ['B','A','B','A'];
-let idx = 0;
-function _scheduleMessageVirtualizedRender(force){
-  scheduled++;
-  if(idx<keys.length){
-    _scheduleMessageVirtualMeasurementRefresh({ key: keys[idx++] });
-  }
-}
-function requestAnimationFrame(cb){ cb(); }
-eval(extractFunc('_scheduleMessageVirtualMeasurementRefresh'));
-// External trigger measures key A; the internal chain then oscillates A->B->A->B.
-_scheduleMessageVirtualMeasurementRefresh({ key: 'A' });
-console.log(JSON.stringify({
-  scheduled: scheduled,
-  retries: _messageVirtualMeasurementRetryCount,
-  burstActive: _messageVirtualMeasurementBurstActive,
-}));
-"""
-    metrics = json.loads(_run_node(source))
-    assert metrics["scheduled"] == 2, (
-        "cycle-key oscillation must not reset the retry budget within a burst: "
-        f"scheduled {metrics['scheduled']} re-renders (expected 2, the "
-        "MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS cap for the whole burst)"
-    )
-    assert metrics["retries"] == 2, (
-        "retry count must keep accumulating across key changes within the burst: "
-        f"ended at {metrics['retries']} (expected 2)"
+    assert metrics["seenKeys"] == [], (
+        "_clearMessageVirtualHeightCache must clear the measurement-burst seen-key "
+        f"memory: seenKeys {metrics['seenKeys']}"
     )
     assert metrics["burstActive"] is False, (
-        "the burst must end once the budget is exhausted so the next externally "
-        f"initiated cycle can reset it: burstActive {metrics['burstActive']}"
+        "_clearMessageVirtualHeightCache must end any active measurement burst: "
+        f"burstActive {metrics['burstActive']}"
+    )
+    assert metrics["renderPending"] is False, (
+        "_clearMessageVirtualHeightCache must clear the internal-measurement "
+        f"provenance marker: renderPending {metrics['renderPending']}"
     )
 
 
-def test_external_measurement_after_thrash_gets_fresh_retry_budget():
-    """#6717 re-gate: exhausting the budget with the WebKit A/B thrash must NOT
-    starve a genuinely new externally initiated measurement cycle. Drive the
-    A/B oscillation causally until the per-burst budget is exhausted, then start
-    an independent changed-C measurement WITHOUT touching private state:
-    (a) C must still receive its own retries, and (b) C's own internal
-    oscillation must remain capped at MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS."""
+def _measurement_burst_harness(scenario_js: str) -> str:
+    """Shared queued-rAF harness for the measurement-burst chain (#6654/#6717).
+
+    Drives the REAL production chain: the cycle-aware scheduler queues a first
+    rAF, _scheduleMessageVirtualizedRender queues a second rAF (the
+    internal-measurement provenance marker is threaded through BOTH layers),
+    and the renderMessages stub applies the production burst-reset contract for
+    every unmarked (external) render, then simulates the measure pass from the
+    caller-provided plan (measurePlan). Unlike the earlier synchronous-rAF
+    harnesses, external renders can land BETWEEN queued rAF callbacks — exactly
+    where the overlap/convergence regressions lived.
+    """
     js = UI_JS_PATH.read_text(encoding="utf-8")
-    source = _extract_func_script(js) + """
-let scheduled = 0;
+    return _extract_func_script(js) + """
+// ── queued-rAF harness ────────────────────────────────────────────────────────
+let renderLog = [];                 // every renderMessages call: {internal, preserveScroll}
+let rafQueue = [];
+function requestAnimationFrame(cb){ rafQueue.push(cb); return rafQueue.length; }
+function flushRaf(){ const q = rafQueue; rafQueue = []; for (const cb of q) cb(); }
+let _messageVirtualScrollRaf = 0;
+let _messageVirtualWindowKey = '';
 let _messageVirtualMeasurementCycleKey = '';
-let _messageVirtualMeasurementRetryCount = 0;
+let _messageVirtualMeasurementSeenKeys = [];
 let _messageVirtualMeasurementBurstActive = false;
+let _messageVirtualMeasurementRenderPending = false;
 let _messageVirtualScrollActive = false;
 let _messageVirtualDeferredMeasurement = null;
-const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS = 2;
-function _messageVirtualMeasurementCycleKeyFor(w) { return w.key; }
-let keys = [];
-let idx = 0;
-function _scheduleMessageVirtualizedRender(force){
-  scheduled++;
-  if(idx<keys.length){
-    _scheduleMessageVirtualMeasurementRefresh({ key: keys[idx++] });
+let _scrollbarDragActive = false;
+let _msgNodeRecycleEnabled = false;
+let _programmaticScroll = false;
+let _programmaticScrollSetAt = 0;
+function _deferClearProgrammaticScroll(){}
+function $(id){ return {}; }
+function _getVisibleMessagesWithIdx(){ return []; }
+function _messageVirtualKeepTailCount(){ return 0; }
+function _currentMessageVirtualWindow(){
+  return { virtualized:true, start:0, end:10, topPad:0, bottomPad:0, tailStart:10, total:20 };
+}
+function _messageVirtualMeasurementCycleKeyFor(w){ return (w && w.key) || ''; }
+function _compensateScrollForMeasurementDelta(fn){ return fn(); }
+// Simulated measure pass: after each render, the plan yields the next measured
+// window cycle key; undefined means the measurements settled (unchanged).
+let measurePlan = [];
+let measureIdx = 0;
+function renderMessages(options){
+  const internal = !!(options && options._internalMeasurement);
+  renderLog.push({ internal: internal, preserveScroll: !!(options && options.preserveScroll) });
+  // Contract of production renderMessages(): every UNMARKED (external) render
+  // trigger starts a fresh measurement burst, overriding any pending internal
+  // callback.
+  if(!internal) _resetMessageVirtualMeasurementBurst();
+  const next = measurePlan[measureIdx++];
+  if(next === undefined){
+    _markMessageVirtualMeasurementsSettled({ key: 'settled' });
+  }else{
+    _scheduleMessageVirtualMeasurementRefresh({ key: next });
   }
 }
-function requestAnimationFrame(cb){ cb(); }
+// Production functions under test.
+eval(extractFunc('_resetMessageVirtualMeasurementBurst'));
+eval(extractFunc('_messageVirtualWindowKeyFor'));
 eval(extractFunc('_scheduleMessageVirtualMeasurementRefresh'));
-// Phase 1 — drive the A/B thrash causally until the burst budget is exhausted.
-keys = ['B','A','B','A'];
-idx = 0;
-_scheduleMessageVirtualMeasurementRefresh({ key: 'A' });
-const afterThrash = scheduled;
-// Phase 2 — an independent genuine content change C arrives. It must NOT be
-// starved: it gets a fresh per-burst budget, and its own oscillation is capped.
-keys = ['D','C','D','C'];
-idx = 0;
-_scheduleMessageVirtualMeasurementRefresh({ key: 'C' });
+eval(extractFunc('_scheduleMessageVirtualizedRender'));
+eval(extractFunc('_markMessageVirtualMeasurementsSettled'));
+""" + scenario_js
+
+
+def test_oscillating_cycle_keys_terminate_burst_with_queued_raf():
+    """#6654/#6717 re-gate (c): a repeated oscillating window key (A->B->A->B)
+    must terminate the measurement burst even though every key was unseen on
+    first sight — the burst tracks SEEN keys, so geometry that flaps between
+    two states can never renew the chain and keep the rAF/measure loop alive
+    (~30% WebContent CPU, issue #6654). The queued-rAF harness drives the
+    oscillation through the real two-rAF-layer chain."""
+    source = _measurement_burst_harness("""
+measurePlan = ['B','A','B','A','B','A'];
+renderMessages({});           // external trigger: measures B -> burst starts
+flushRaf(); flushRaf();       // layer-1 then layer-2 rAF -> internal render (A)
+flushRaf(); flushRaf();       // next cycle -> internal render (B repeats) -> burst ends
+flushRaf(); flushRaf();       // nothing left queued
 console.log(JSON.stringify({
-  afterThrash: afterThrash,
-  scheduled: scheduled,
-  retries: _messageVirtualMeasurementRetryCount,
+  renders: renderLog.length,
+  internal: renderLog.filter(r => r.internal).length,
   burstActive: _messageVirtualMeasurementBurstActive,
+  seenKeys: _messageVirtualMeasurementSeenKeys,
+  renderPending: _messageVirtualMeasurementRenderPending,
 }));
-"""
+""")
     metrics = json.loads(_run_node(source))
-    assert metrics["afterThrash"] == 2, (
-        "the A/B thrash burst must stop at MESSAGE_VIRTUAL_MEASUREMENT_"
-        f"MAX_RERENDERS: scheduled {metrics['afterThrash']} (expected 2)"
+    assert metrics["internal"] == 2, (
+        "A->B->A->B oscillation must stay bounded: a repeated key ends the burst. "
+        f"scheduled {metrics['internal']} internal re-renders (expected 2, then termination)"
     )
-    assert metrics["scheduled"] == 4, (
-        "a genuinely new external measurement cycle C must still receive its "
-        "own retries after the thrash exhausted the budget: "
-        f"scheduled {metrics['scheduled']} (expected 4 = 2 thrash + 2 for C)"
+    assert metrics["renders"] == 3, (
+        "oscillation must not keep scheduling renders: "
+        f"{metrics['renders']} renders (expected 3 = 1 external + 2 internal)"
     )
-    assert metrics["retries"] == 2, (
-        "C's own internal oscillation must remain capped at "
-        f"MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS: retries "
-        f"{metrics['retries']} (expected 2)"
+    assert metrics["burstActive"] is False, (
+        "the burst must end once the repeated key is detected so the next "
+        f"externally initiated cycle starts fresh: burstActive {metrics['burstActive']}"
+    )
+    assert metrics["seenKeys"] == [], (
+        "termination must clear the seen-key memory: "
+        f"seenKeys {metrics['seenKeys']}"
+    )
+    assert metrics["renderPending"] is False, (
+        "no internal render may remain pending after termination: "
+        f"renderPending {metrics['renderPending']}"
+    )
+
+
+def test_genuine_convergence_exceeding_two_renders_completes():
+    """#6717 re-gate (b): a legitimate forward convergence A->B->C->settled
+    (content reflow, fonts/images loading late, dynamic height) must be allowed
+    MORE than two measurement passes. The old flat two-render burst cap left
+    the geometry mis-measured (wrong row heights / clipped content); cycle-aware
+    tracking lets every UNSEEN key proceed until the measurements settle."""
+    source = _measurement_burst_harness("""
+measurePlan = ['B','C','D'];   // three distinct forward keys, then settled
+renderMessages({});            // external trigger: measures B
+flushRaf(); flushRaf();        // internal render: measures C
+flushRaf(); flushRaf();        // internal render: measures D
+flushRaf(); flushRaf();        // internal render: measurements settle
+console.log(JSON.stringify({
+  renders: renderLog.length,
+  internal: renderLog.filter(r => r.internal).length,
+  lastInternal: renderLog[renderLog.length - 1].internal,
+  burstActive: _messageVirtualMeasurementBurstActive,
+  seenKeys: _messageVirtualMeasurementSeenKeys,
+  renderPending: _messageVirtualMeasurementRenderPending,
+}));
+""")
+    metrics = json.loads(_run_node(source))
+    assert metrics["internal"] == 3, (
+        "genuine A->B->C->settled convergence must complete with MORE than the "
+        "old two-render cap: "
+        f"{metrics['internal']} internal re-renders (expected 3)"
+    )
+    assert metrics["renders"] == 4, (
+        "the convergence chain must run to completion: "
+        f"{metrics['renders']} renders (expected 4 = 1 external + 3 internal)"
+    )
+    assert metrics["lastInternal"] is True, (
+        "the final render of the convergence chain must still be part of the "
+        "internal measurement chain (settled via _markMessageVirtualMeasurementsSettled)"
+    )
+    assert metrics["burstActive"] is False, (
+        "settlement must end the burst: "
+        f"burstActive {metrics['burstActive']}"
+    )
+    assert metrics["seenKeys"] == [] and metrics["renderPending"] is False, (
+        "settlement must clear the seen-key memory and any pending marker: "
+        f"seenKeys {metrics['seenKeys']}, renderPending {metrics['renderPending']}"
+    )
+
+
+def test_overlapping_external_append_receives_fresh_budget():
+    """#6717 re-gate (a): an externally initiated render (message append,
+    scroll-settle, genuine content change) that lands while an internal
+    measurement callback is still PENDING in the rAF queue must reset the burst
+    — external provenance overrides a pending internal callback — so the new
+    cycle receives a fresh budget instead of being starved by the stale burst's
+    seen-key memory (0 retries).
+
+    Phase 1: the append lands between the two rAF layers and measures key B
+    (already seen in the stale burst). Only the external reset lets B proceed;
+    without it the repeated key would terminate the append's cycle immediately.
+    Phase 2: an external render that measures SETTLED lands while a layer-2
+    callback is pending; the stale callback must then degrade to an UNMARKED
+    render (the external reset consumed its provenance), and the fresh cycle it
+    starts must complete with its own internal render."""
+    source = _measurement_burst_harness("""
+measurePlan = ['B','B','C', undefined, 'E', undefined, 'F', undefined];
+renderMessages({});            // R0 external: burst starts, seen=[B], L1 queued
+flushRaf();                    // L1 fires -> L2 (internal callback) now pending
+renderMessages({});            // R1 EXTERNAL APPEND lands before L2 fires:
+                               // resets the burst -> fresh cycle, seen=[B] again
+flushRaf(); flushRaf();        // stale L2 joins the fresh cycle (R2), then R3 settles
+renderMessages({});            // R4 external: new cycle, L1 queued
+flushRaf();                    // L1 fires -> L2 (internal callback) now pending
+renderMessages({});            // R5 external scroll-settle: resets the burst,
+                               // measures SETTLED (no new schedule)
+flushRaf();                    // stale L2 fires -> marker consumed as FALSE ->
+                               // R6 UNMARKED render (external provenance won)
+flushRaf(); flushRaf();        // R6's fresh cycle completes (R7 internal) -> settles
+console.log(JSON.stringify({
+  renders: renderLog.length,
+  internal: renderLog.filter(r => r.internal).length,
+  appendExternal: renderLog[1].internal,
+  appendCycleInternal: renderLog[2].internal && renderLog[3].internal,
+  staleCallbackUnmarked: renderLog[6].internal,
+  postResetCycleInternal: renderLog[7].internal,
+  burstActive: _messageVirtualMeasurementBurstActive,
+  seenKeys: _messageVirtualMeasurementSeenKeys,
+  renderPending: _messageVirtualMeasurementRenderPending,
+}));
+""")
+    metrics = json.loads(_run_node(source))
+    assert metrics["renders"] == 8, (
+        "the overlapping append must NOT starve the new cycle: the chain must "
+        "continue past the append to completion "
+        f"({metrics['renders']} renders; expected 8)"
+    )
+    assert metrics["appendExternal"] is False, (
+        "the append is an unmarked external render"
+    )
+    assert metrics["appendCycleInternal"] is True, (
+        "the append's cycle must proceed with its own internal renders "
+        "(fresh budget — the repeated key B was not treated as oscillation "
+        "because the external render reset the burst)"
+    )
+    assert metrics["staleCallbackUnmarked"] is False, (
+        "external provenance must override the pending internal callback: the "
+        "stale internal rAF callback must degrade to an unmarked render after "
+        "the external render reset the burst"
+    )
+    assert metrics["postResetCycleInternal"] is True, (
+        "the cycle started by the degraded stale callback must complete with "
+        "its own internal render (retries were not starved)"
+    )
+    assert metrics["burstActive"] is False, (
+        "the fresh cycles must end settled: "
+        f"burstActive {metrics['burstActive']}"
+    )
+    assert metrics["seenKeys"] == [] and metrics["renderPending"] is False, (
+        "settlement must clear the seen-key memory and any pending marker: "
+        f"seenKeys {metrics['seenKeys']}, renderPending {metrics['renderPending']}"
     )

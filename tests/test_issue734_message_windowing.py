@@ -52,23 +52,25 @@ def test_virtualization_affordances_have_styling_hooks():
     assert "border-radius:999px" in CSS
 
 
-def test_measurement_rerenders_are_bounded_per_virtual_window_cycle():
-    assert "const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=2;" in UI_JS
+def test_measurement_rerenders_are_cycle_aware_per_virtual_window_burst():
     assert "function _messageVirtualMeasurementCycleKeyFor(windowMetrics)" in UI_JS
     assert "function _scheduleMessageVirtualMeasurementRefresh(windowMetrics)" in UI_JS
-    assert "if(_messageVirtualMeasurementRetryCount>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS){" in UI_JS
     assert "_scheduleMessageVirtualMeasurementRefresh(virtualWindow);" in UI_JS
     assert "_markMessageVirtualMeasurementsSettled(virtualWindow);" in UI_JS
+    # Cycle-aware burst tracking: unseen keys proceed, repeated keys terminate,
+    # and the seen-key memory lives in _messageVirtualMeasurementSeenKeys.
+    assert "_messageVirtualMeasurementSeenKeys.includes(cycleKey)" in UI_JS
+    assert "_messageVirtualMeasurementSeenKeys.push(cycleKey)" in UI_JS
+    assert "function _resetMessageVirtualMeasurementBurst()" in UI_JS
 
 
-def test_measurement_retry_budget_not_reset_by_cycle_key_change():
+def test_measurement_burst_not_reset_by_cycle_key_change():
     """#6654/#6717: the cycle-key branch of _scheduleMessageVirtualMeasurementRefresh
-    must record the new key but never reset _messageVirtualMeasurementRetryCount.
-    Resetting on key change lets WebKit's A->B->A->B metric oscillation renew
-    the two-render budget forever, keeping the rAF/measure loop alive. The ONLY
-    reset allowed inside the scheduler is the per-burst one: when a NEW
-    externally initiated cycle begins (no burst active), guarded by
-    if(!_messageVirtualMeasurementBurstActive)."""
+    must record the new key but never reset the burst state. Resetting on key
+    change lets WebKit's A->B->A->B metric oscillation renew the chain forever,
+    keeping the rAF/measure loop alive. The ONLY resets allowed inside the
+    scheduler are: the repeated-key termination (oscillation) and the fresh-burst
+    start (when no burst is active), guarded by if(!_messageVirtualMeasurementBurstActive)."""
     idx = UI_JS.index("function _scheduleMessageVirtualMeasurementRefresh(windowMetrics)")
     end = UI_JS.index("function _markMessageVirtualMeasurementsSettled", idx)
     body = UI_JS[idx:end]
@@ -77,17 +79,21 @@ def test_measurement_retry_budget_not_reset_by_cycle_key_change():
     key_branch_start = body.index("if(_messageVirtualMeasurementCycleKey!==cycleKey){")
     key_branch_end = body.index("}", key_branch_start)
     key_branch = body[key_branch_start:key_branch_end]
-    assert "_messageVirtualMeasurementRetryCount=0;" not in key_branch, (
-        "cycle-key change must not reset the retry budget (issue #6654)"
+    assert "_messageVirtualMeasurementSeenKeys" not in key_branch, (
+        "cycle-key change must not reset the burst's seen-key memory (issue #6654)"
     )
-    # The per-burst reset is allowed only at the start of a new external cycle.
+    assert "_messageVirtualMeasurementBurstActive=false" not in key_branch, (
+        "cycle-key change must not end the burst (issue #6654)"
+    )
+    # The fresh-burst reset is allowed only at the start of a new external cycle.
     assert "if(!_messageVirtualMeasurementBurstActive){" in body
     guard_pos = body.index("if(!_messageVirtualMeasurementBurstActive){")
-    reset_pos = body.index("_messageVirtualMeasurementRetryCount=0;")
-    assert guard_pos < reset_pos, (
-        "the budget reset must be guarded by the burst-active check "
+    seen_reset_pos = body.index("_messageVirtualMeasurementSeenKeys=[];")
+    assert guard_pos < seen_reset_pos, (
+        "the seen-key reset must be guarded by the burst-active check "
         "(per-burst lifecycle, issue #6717)"
     )
-    # The budget guard and increment must still be present.
-    assert "if(_messageVirtualMeasurementRetryCount>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS){" in body
-    assert "_messageVirtualMeasurementRetryCount++;" in body
+    # Repeated keys terminate the burst; unseen keys proceed.
+    assert "if(_messageVirtualMeasurementSeenKeys.includes(cycleKey)){" in body
+    assert "_messageVirtualMeasurementSeenKeys.push(cycleKey);" in body
+    assert "_messageVirtualMeasurementRenderPending=true;" in body

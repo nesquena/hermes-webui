@@ -536,7 +536,14 @@ function _messageVirtualDefaultHeightForRole(role){
     role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role)?role:'default'
   ];
 }
-const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=2;
+// Cycle-aware measurement burst tracking (#6654/#6717): instead of a flat
+// render cap, the burst remembers every window cycle key it has already seen.
+// An UNSEEN key means the window is still converging forward (A->B->C->settled
+// — content reflow, late fonts/images, dynamic height) and may proceed; a key
+// that REPEATS means the browser is oscillating (A->B->A->B) and the burst
+// terminates. Keys repeat only when geometry flaps, so legitimate convergence
+// is never capped while oscillation is always bounded.
+let _messageVirtualMeasurementSeenKeys=[];
 let _messageRenderWindowSid=null;
 let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
 let _messageVirtualHeightCache=[];
@@ -547,8 +554,13 @@ let _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('defau
 let _messageVirtualScrollRaf=0;
 let _messageVirtualWindowKey='';
 let _messageVirtualMeasurementCycleKey='';
-let _messageVirtualMeasurementRetryCount=0;
 let _messageVirtualMeasurementBurstActive=false;
+// Provenance marker: true while an internally measurement-scheduled render is
+// queued in the rAF layers. renderMessages() resets the burst on every
+// UNMARKED (externally initiated) render trigger, so a message append /
+// scroll-settle / other overlapping external render always starts a fresh
+// cycle even when an internal measurement callback is still pending.
+let _messageVirtualMeasurementRenderPending=false;
 let _messageVirtualScrollActive=false;
 let _messageVirtualScrollSettleTimer=0;
 let _messageVirtualDeferredMeasurement=null;
@@ -595,8 +607,7 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
   _messageVirtualWindowKey='';
   _messageVirtualMeasurementCycleKey='';
-  _messageVirtualMeasurementRetryCount=0;
-  _messageVirtualMeasurementBurstActive=false;
+  _resetMessageVirtualMeasurementBurst();
   _messageVirtualScrollActive=false;
   clearTimeout(_messageVirtualScrollSettleTimer);
   _messageVirtualScrollSettleTimer=0;
@@ -721,6 +732,11 @@ function _messageVirtualMeasurementCycleKeyFor(windowMetrics){
     windowMetrics.tailStart||0,
   ].join(':');
 }
+function _resetMessageVirtualMeasurementBurst(){
+  _messageVirtualMeasurementSeenKeys=[];
+  _messageVirtualMeasurementBurstActive=false;
+  _messageVirtualMeasurementRenderPending=false;
+}
 function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
   if(_messageVirtualScrollActive){
     _messageVirtualDeferredMeasurement=windowMetrics;
@@ -730,32 +746,39 @@ function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
   if(_messageVirtualMeasurementCycleKey!==cycleKey){
     _messageVirtualMeasurementCycleKey=cycleKey;
   }
-  // Per-burst retry budget (#6717): the counter is preserved across ONLY the
+  // Cycle-aware burst tracking (#6717 re-gate): the burst follows ONLY the
   // internally measurement-scheduled chain (requestAnimationFrame ->
-  // _scheduleMessageVirtualizedRender -> renderMessages -> re-measure -> here),
-  // so WebKit's A/B window-metric oscillation can never renew the budget and
-  // keep the rAF/measure loop alive (#6654). It is reset exactly once when a
-  // later EXTERNALLY initiated render begins a genuinely new measurement cycle
-  // (session load, message append, real content change) — never on cycle-key
-  // changes. A cycle-key change alone just records the new key above.
+  // _scheduleMessageVirtualizedRender -> renderMessages -> re-measure -> here).
+  // Within one burst we remember every cycle key already seen. An UNSEEN key
+  // (genuine forward convergence A->B->C->settled — content reflow, late
+  // fonts/images, dynamic height) may proceed, so convergence is never capped
+  // at a flat render count; a key that REPEATS (WebKit's A->B->A->B window
+  // oscillation) ends the burst, so the rAF/measure loop can never run forever
+  // (#6654). The burst starts fresh on every EXTERNALLY initiated render
+  // (session load, message append, real content change — see renderMessages)
+  // and on measurement settlement — never on a cycle-key change alone.
   if(!_messageVirtualMeasurementBurstActive){
-    _messageVirtualMeasurementRetryCount=0;
+    _messageVirtualMeasurementSeenKeys=[];
     _messageVirtualMeasurementBurstActive=true;
   }
-  if(_messageVirtualMeasurementRetryCount>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS){
-    // Budget exhausted: this burst is over (no further internal re-render is
-    // scheduled), so the next externally initiated cycle starts fresh instead
-    // of being starved of its own retries.
-    _messageVirtualMeasurementBurstActive=false;
+  if(_messageVirtualMeasurementSeenKeys.includes(cycleKey)){
+    // Repeated key: the window is oscillating, not converging. End the burst
+    // (no further internal re-render is scheduled), so the next externally
+    // initiated cycle starts fresh instead of being starved of retries.
+    _resetMessageVirtualMeasurementBurst();
     return;
   }
-  _messageVirtualMeasurementRetryCount++;
+  _messageVirtualMeasurementSeenKeys.push(cycleKey);
+  // Provenance marker for the internal measurement chain: the render we are
+  // scheduling must reach renderMessages() marked as internal (threaded
+  // through BOTH rAF layers via _scheduleMessageVirtualizedRender) so it
+  // preserves the burst instead of resetting it.
+  _messageVirtualMeasurementRenderPending=true;
   requestAnimationFrame(()=>{ _scheduleMessageVirtualizedRender(true); });
 }
 function _markMessageVirtualMeasurementsSettled(windowMetrics){
   _messageVirtualMeasurementCycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
-  _messageVirtualMeasurementRetryCount=0;
-  _messageVirtualMeasurementBurstActive=false;
+  _resetMessageVirtualMeasurementBurst();
 }
 function _messageVirtualHeightEntryMatches(previousEntry, nextEntry){
   return !!(
@@ -1486,6 +1509,13 @@ function _scheduleMessageVirtualizedRender(force){
   if(_messageVirtualScrollRaf) return;
   _messageVirtualScrollRaf=requestAnimationFrame(()=>{
     _messageVirtualScrollRaf=0;
+    // Consume the internal-measurement provenance marker (set by
+    // _scheduleMessageVirtualMeasurementRefresh before the first rAF layer and
+    // threaded through it into this second rAF layer). If an EXTERNAL render
+    // reset the burst meanwhile, this callback degrades to an unmarked render
+    // and starts a fresh measurement cycle instead of continuing a stale one.
+    const internalMeasurement=_messageVirtualMeasurementRenderPending;
+    _messageVirtualMeasurementRenderPending=false;
     const liveVisWithIdx=_getVisibleMessagesWithIdx();
     const liveWindow=_currentMessageVirtualWindow(liveVisWithIdx,_messageVirtualKeepTailCount());
     const liveKey=_messageVirtualWindowKeyFor(liveWindow);
@@ -1493,14 +1523,14 @@ function _scheduleMessageVirtualizedRender(force){
     if(_scrollbarDragActive){
       _programmaticScroll=true;
       _programmaticScrollSetAt=performance.now();
-      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true }); });
+      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true, _internalMeasurement: internalMeasurement }); });
       _deferClearProgrammaticScroll();
       _messageVirtualWindowKey=liveKey;
       return;
     }
     _msgNodeRecycleEnabled=true;
     try{
-      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true }); });
+      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true, _internalMeasurement: internalMeasurement }); });
     }
     finally{ _msgNodeRecycleEnabled=false; }
   });
@@ -16524,6 +16554,18 @@ function _processWakeupCardHtml(info, rawText, extras){
 
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
+  // Measurement-burst lifecycle (#6654/#6717): every UNMARKED (externally
+  // initiated) render — session load, message append, scroll-settle, genuine
+  // content change — starts a fresh measurement burst HERE, before any rAF
+  // coalescing or early return, so a pending internal measurement callback can
+  // never carry a stale burst into the new cycle (external provenance
+  // overrides a pending internal callback). Only the internally
+  // measurement-scheduled chain (options._internalMeasurement, threaded through
+  // both rAF layers by _scheduleMessageVirtualMeasurementRefresh and
+  // _scheduleMessageVirtualizedRender) preserves the burst across renders.
+  if(!(options&&options._internalMeasurement)){
+    _resetMessageVirtualMeasurementBurst();
+  }
   const preserveScroll=!!(options&&options.preserveScroll);
   const virtualFallback=!!(options&&options._virtualFallback);
   // Capture the pre-wipe scroll position when preserving OR when the reader has
