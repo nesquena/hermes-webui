@@ -13,11 +13,10 @@ The v0.50.255 batch (#1390 + #1405) had four Opus advisor findings:
    session that's hundreds of disk reads per `/api/session?session_id=X`. Fix:
    thread `_enabled` once through `redact_session_data()`.
 
-3. SHOULD-FIX — `static/boot.js` voice mode: the patched `autoReadLastAssistant`
-   fires globally; if the user navigates to a different session between send
-   and stream completion, TTS would speak the wrong session's last assistant
-   message. Fix: capture the active session id in `_voiceModeSend` and bail
-   out in `_speakResponse` if it doesn't match.
+3. SHOULD-FIX — `static/boot.js` voice mode: completion must use the submitted
+   lease owner; if the user navigates to a different session between send and
+   stream completion, TTS must not speak the wrong session's last assistant
+   message. Fix: settle the lease only for its exact session and stream owner.
 
 4. NIT — `api/rollback.py::_inspect_checkpoint` had a bare `Exception` in the
    except tuple alongside specific catches, swallowing everything (incl.
@@ -161,43 +160,34 @@ def test_redact_session_data_threads_enabled_once_across_recursion():
     )
 
 
-# ── 3: voice mode session-id capture ─────────────────────────────────────────
+# ── 3: voice mode lease session ownership ────────────────────────────────────
 
 
 def test_voice_mode_speakresponse_guards_against_session_switch():
-    """The `_speakResponse` callback fires from a global override of
-    `autoReadLastAssistant`. If the user navigates to a different session
-    between sending and stream completion, the callback would TTS-read the
-    new session's last assistant message instead of the one they sent to.
-    Fix: capture session_id at thinking-time, bail in _speakResponse if it
-    doesn't match the current S.session.session_id."""
+    """The voice lease must bind TTS to the accepted stream's session owner."""
     src = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 
-    # Session-id capture state exists.
-    assert "let _voiceModeThinkingSid=" in src, (
-        "voice mode must declare _voiceModeThinkingSid to pin the active "
-        "session id at send-time"
+    assert "let _voiceLease=null;" in src, (
+        "voice mode must keep one lease as the session and stream owner"
     )
 
-    # _voiceModeSend captures current session_id at thinking transition.
+    # _voiceModeSend submits through the current lease.
     send_idx = src.find("function _voiceModeSend(")
     assert send_idx != -1
     send_body = src[send_idx : send_idx + 1200]
-    assert "_voiceModeThinkingSid=" in send_body, (
-        "_voiceModeSend must capture the current session_id at thinking-time"
+    assert "_voiceLeaseSubmit(lease)" in send_body, (
+        "_voiceModeSend must submit through the current lease"
     )
-    assert "S.session.session_id" in send_body, (
-        "_voiceModeSend must read S.session.session_id"
-    )
+    assert "_voiceLeaseCurrent(lease)" in send_body
 
-    # _speakResponse compares current sid to captured sid and bails on mismatch.
+    # _speakResponse compares the current session to the accepted lease owner.
     speak_idx = src.find("function _speakResponse(")
     assert speak_idx != -1
     speak_body = src[speak_idx : speak_idx + 1500]
-    assert "_voiceModeThinkingSid" in speak_body, (
-        "_speakResponse must consult _voiceModeThinkingSid"
+    assert "lease.owner.sid" in speak_body, (
+        "_speakResponse must consult the lease's accepted session owner"
     )
-    assert "_startListening()" in speak_body, (
+    assert "_scheduleVoiceRestart(lease,0)" in speak_body, (
         "_speakResponse mismatch path must drop back to listening, not silently exit"
     )
 

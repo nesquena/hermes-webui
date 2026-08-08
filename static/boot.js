@@ -18,6 +18,8 @@ async function cancelStream(reason){
   const sid = S.session && S.session.session_id;
   const streamId = S.activeStreamId;
   if(!streamId) return false;
+  let voiceTransport=typeof window!=='undefined'&&typeof window._liveStreamTransportCapture==='function'
+    ? window._liveStreamTransportCapture(sid,streamId) : null;
   // Interrupt provenance: log WHY the active run is being cancelled so operators
   // can tell an explicit Stop / interrupt from any other trigger when they see a
   // SIGINT/exit-code-130 in the backend logs. Only explicit user paths reach
@@ -40,6 +42,9 @@ async function cancelStream(reason){
       console.warn('cancelStream: /api/chat/cancel request failed', e);
     }
   }
+  const currentVoiceTransport=typeof window!=='undefined'&&typeof window._liveStreamTransportCapture==='function'
+    ? window._liveStreamTransportCapture(sid,streamId) : null;
+  if(currentVoiceTransport) voiceTransport=currentVoiceTransport;
   // Active-session cancel should not tear down the current SSE transport before
   // the backend emits its terminal event; do that only for stale owner paths
   // where the user moved on to a different stream before this request
@@ -54,7 +59,11 @@ async function cancelStream(reason){
   // stream left to settle.
   if(respOk && respBody && respBody.cancelled===false && S.activeStreamId===streamId){
     S.activeStreamId=null;
+    if(S.session&&S.session.session_id===sid&&S.session.active_stream_id===streamId) S.session.active_stream_id=null;
     setBusy(false);
+    if(typeof window!=='undefined'&&typeof window._voiceLeaseSettleOwner==='function'&&voiceTransport){
+      window._voiceLeaseSettleOwner(sid,streamId,{success:false},voiceTransport.source,voiceTransport.generation);
+    }
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
     // /api/chat/cancel only exposes `cancelled:bool`, so we cannot
@@ -68,6 +77,8 @@ async function cancelSessionStream(session){
   const streamId = session&&session.active_stream_id;
   const sid = session&&session.session_id;
   if(!streamId||!sid) return false;
+  let voiceTransport=typeof window!=='undefined'&&typeof window._liveStreamTransportCapture==='function'
+    ? window._liveStreamTransportCapture(sid,streamId) : null;
   // Explicit sidebar "Stop response" — log provenance for the same reason as
   // cancelStream(). (#5345)
   if(typeof console !== 'undefined' && console.info){
@@ -79,6 +90,17 @@ async function cancelSessionStream(session){
     respOk=!!(r&&r.ok);
   }catch(e){/* close local stream; keep UI state honest below */}
   if(!respOk) return false;
+  if(typeof _approvalSessionId!=='undefined' && _approvalSessionId===sid){
+    stopApprovalPolling();
+    hideApprovalCard(true);
+  }
+  if(typeof _clarifySessionId!=='undefined' && _clarifySessionId===sid){
+    stopClarifyPolling();
+    hideClarifyCard(true, 'cancelled');
+  }
+  const currentVoiceTransport=typeof window!=='undefined'&&typeof window._liveStreamTransportCapture==='function'
+    ? window._liveStreamTransportCapture(sid,streamId) : null;
+  if(currentVoiceTransport) voiceTransport=currentVoiceTransport;
   if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
   session.active_stream_id=null;
   delete INFLIGHT[sid];
@@ -88,16 +110,11 @@ async function cancelSessionStream(session){
     if(S.session) S.session.active_stream_id=null;
     clearInflight();
     setBusy(false);
+    if(typeof window!=='undefined'&&typeof window._voiceLeaseSettleOwner==='function'&&voiceTransport){
+      window._voiceLeaseSettleOwner(sid,streamId,{success:false},voiceTransport.source,voiceTransport.generation);
+    }
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
-  }
-  if(typeof _approvalSessionId!=='undefined' && _approvalSessionId===sid){
-    stopApprovalPolling();
-    hideApprovalCard(true);
-  }
-  if(typeof _clarifySessionId!=='undefined' && _clarifySessionId===sid){
-    stopClarifyPolling();
-    hideClarifyCard(true, 'cancelled');
   }
   if(typeof renderSessionList==='function') renderSessionList();
   return true;
@@ -1524,12 +1541,11 @@ window.renderTranscript=function(container, messages, opts){
   window._applyVoiceModePref = _applyVoiceModePref;
 
   let _voiceModeState='idle'; // idle | listening | thinking | speaking
+  let _voiceLease=null;
+  let _voiceLeaseId=0;
+  let _voiceContextId=0;
+  let _voiceManualPending=null;
   let _recognition=null;
-  let _silenceTimer=null;
-  // Capture the session id at thinking-time so the TTS callback won't read
-  // a different session's last assistant reply if the user navigated away
-  // between send and stream completion. (Opus pre-release advisor.)
-  let _voiceModeThinkingSid=null;
   let _browserTtsKeepAlive=null;
   let _browserTtsWatchdog=null;
   let _browserTtsSuppressNextErrorRearm=false;
@@ -1540,6 +1556,271 @@ window.renderTranscript=function(container, messages, opts){
     const _silenceMsRaw=parseInt(localStorage.getItem('hermes-voice-silence-ms'),10);
     return (Number.isFinite(_silenceMsRaw)&&_silenceMsRaw>0)?Math.max(200,_silenceMsRaw):1800;
   }
+
+  function _voiceBusy(){
+    return typeof S!=='undefined'&&!!(S.busy||S.activeStreamId
+      ||(S.session&&S.session.active_stream_id));
+  }
+
+  function _newVoiceLease(){
+    return {id:++_voiceLeaseId,contextId:_voiceContextId,recognition:null,
+      finalText:'',interimText:'',silenceTimer:null,restartTimer:null,deadlineAt:0,
+      submitted:false,settled:false,owner:null,ttsUrls:[]};
+  }
+
+  function _resumeVoiceLease(){
+    if(!_voiceModeActive) return;
+    if(!_voiceLease) _voiceLease=_newVoiceLease();
+    if(_voiceBusy()){
+      const sid=typeof S!=='undefined'&&S.session&&S.session.session_id;
+      const streamId=typeof S!=='undefined'&&(S.activeStreamId||(S.session&&S.session.active_stream_id));
+      if(sid&&streamId) _voiceLeaseAdoptStream(sid,streamId);
+      _setState('thinking');
+      return;
+    }
+    _startListening(_voiceLease);
+  }
+
+  function _voiceLeaseCaptureContext(){
+    return {sid:String((typeof S!=='undefined'&&S.session&&S.session.session_id)||''),contextId:_voiceContextId};
+  }
+
+  function _voiceLeaseContextCurrent(context){
+    return !!context&&context.contextId===_voiceContextId
+      &&String((typeof S!=='undefined'&&S.session&&S.session.session_id)||'')===String(context.sid||'');
+  }
+
+  function _voiceLeaseCurrent(lease, recognizer){
+    return _voiceModeActive&&_voiceLease===lease&&lease.contextId===_voiceContextId
+      &&(!recognizer||lease.recognition===recognizer);
+  }
+
+  function _clearVoiceLeaseTimers(lease){
+    if(!lease) return;
+    if(lease.silenceTimer){clearTimeout(lease.silenceTimer);lease.silenceTimer=null;}
+    if(lease.restartTimer){clearTimeout(lease.restartTimer);lease.restartTimer=null;}
+    lease.deadlineAt=0;
+  }
+
+  function _releaseVoiceRecognition(lease){
+    if(!lease||!lease.recognition) return;
+    const recognition=lease.recognition;
+    lease.recognition=null;
+    try{recognition.abort();}catch(_){ }
+  }
+
+  function _revokeVoiceTtsUrls(lease){
+    if(!lease||!Array.isArray(lease.ttsUrls)) return;
+    for(const url of lease.ttsUrls){
+      try{if(typeof URL!=='undefined'&&typeof URL.revokeObjectURL==='function') URL.revokeObjectURL(url);}catch(_){ }
+    }
+    lease.ttsUrls=[];
+  }
+
+  function _invalidateVoiceLease(options={}){
+    const lease=_voiceLease;
+    const wasActive=_voiceModeActive;
+    _voiceContextId+=1;
+    _clearVoiceLeaseTimers(lease);
+    _releaseVoiceRecognition(lease);
+    _clearBrowserTtsRecovery();
+    _revokeVoiceTtsUrls(lease);
+    if(wasActive){
+      if(typeof stopTTS==='function') stopTTS();
+      else try{speechSynthesis.cancel();}catch(_){ }
+    }
+    _browserTtsSuppressNextErrorRearm=false;
+    if(options.preserveSubmission&&lease&&lease.submitted&&_voiceManualPending===lease){
+      lease.contextId=_voiceContextId;
+      lease.owner=null;
+      lease.settled=false;
+      lease.manual=true;
+      _voiceLease=lease;
+      _voiceModeState='thinking';
+      return;
+    }
+    _voiceLease=null;
+    _voiceManualPending=null;
+    _voiceModeState='idle';
+  }
+
+  function _scheduleVoiceRestart(lease, delay){
+    if(!_voiceLeaseCurrent(lease)||_voiceBusy()) return;
+    if(lease.restartTimer) clearTimeout(lease.restartTimer);
+    lease.restartTimer=setTimeout(()=>{
+      lease.restartTimer=null;
+      if(!_voiceLeaseCurrent(lease)||_voiceBusy()) return;
+      if(lease.submitted||lease.settled){
+        _voiceLease=_newVoiceLease();
+        _startListening(_voiceLease);
+      }else{
+        _startListening(lease);
+      }
+    },Math.max(0,delay||0));
+  }
+
+  function _armVoiceSilence(lease){
+    if(!_voiceLeaseCurrent(lease)||!lease.finalText) return;
+    if(lease.silenceTimer) clearTimeout(lease.silenceTimer);
+    const delay=_voiceSilenceMs();
+    lease.deadlineAt=Date.now()+delay;
+    lease.silenceTimer=setTimeout(()=>{
+      lease.silenceTimer=null;
+      if(!_voiceLeaseCurrent(lease)||_voiceBusy()) return;
+      _voiceLeaseSubmit(lease);
+    },delay);
+  }
+
+  function _clearVoiceInterim(lease){
+    if(!lease||!lease.interimText) return;
+    const interim=lease.interimText;
+    lease.interimText='';
+    if(ta.value===interim){ta.value='';autoResize();}
+  }
+
+  function _voiceLeaseSubmit(lease){
+    if(!_voiceLeaseCurrent(lease)||lease.submitted) return;
+    const text=String(lease.finalText||'').trim();
+    if(!text){_scheduleVoiceRestart(lease,300);return;}
+    lease.submitted=true;
+    _clearVoiceLeaseTimers(lease);
+    _releaseVoiceRecognition(lease);
+    _voiceModeState='thinking';
+    _voiceManualPending=lease;
+    if(typeof send==='function') send();
+  }
+
+  function _voiceLeasePrepareSubmission(options={}){
+    let lease=_voiceLease;
+    if(!_voiceModeActive) return null;
+    if(!lease){
+      lease=_newVoiceLease();
+      _voiceLease=lease;
+    }
+    if(lease&&lease.owner&&!lease.settled&&!options.replaceOwner) return null;
+    if(lease&&(lease.submitted||lease.settled||options.replaceOwner)){
+      if(lease.submitted&&!lease.settled&&!options.replaceOwner) return null;
+      _clearVoiceLeaseTimers(lease);
+      _clearBrowserTtsRecovery();
+      _revokeVoiceTtsUrls(lease);
+      if(typeof stopTTS==='function') stopTTS();
+      lease=_newVoiceLease();
+      _voiceLease=lease;
+    }
+    if(!_voiceLeaseCurrent(lease)) return null;
+    _clearVoiceLeaseTimers(lease);
+    _releaseVoiceRecognition(lease);
+    lease.submitted=true;
+    lease.manual=true;
+    _voiceModeState='thinking';
+    _voiceManualPending=lease;
+    return lease;
+  }
+
+  function _voiceLeaseBind(streamId, sid){
+    const lease=_voiceManualPending;
+    if(!lease||!_voiceLeaseCurrent(lease)||!lease.submitted) return;
+    lease.owner={sid:String(sid||''),streamId:String(streamId||'')};
+    _voiceManualPending=null;
+  }
+
+  function _voiceLeaseAdoptStream(sid, streamId){
+    if(!_voiceModeActive||!sid||!streamId||!S.session||String(S.session.session_id)!==String(sid)) return false;
+    const current=_voiceLease;
+    if(current&&_voiceLeaseCurrent(current)&&current.owner
+      &&current.owner.sid===String(sid)&&current.owner.streamId===String(streamId)) return !current.settled;
+    if(current){
+      _clearVoiceLeaseTimers(current);
+      _releaseVoiceRecognition(current);
+      _clearBrowserTtsRecovery();
+      _revokeVoiceTtsUrls(current);
+      if(typeof stopTTS==='function') stopTTS();
+    }
+    const lease=_newVoiceLease();
+    lease.submitted=true;
+    lease.manual=true;
+    lease.owner={sid:String(sid),streamId:String(streamId)};
+    _voiceLease=lease;
+    _voiceManualPending=null;
+    _voiceModeState='thinking';
+    return true;
+  }
+
+  function _voiceLeaseSettleLocal(expectedLease=null){
+    const lease=_voiceManualPending;
+    if(expectedLease&&lease!==expectedLease) return false;
+    if(!lease||!_voiceLeaseCurrent(lease)) return;
+    if(_voiceBusy()){
+      lease.submitted=false;
+      lease.manual=false;
+      lease.finalText='';
+      lease.interimText='';
+      _voiceManualPending=null;
+      _voiceModeState='thinking';
+      return;
+    }
+    _voiceManualPending=null;
+    lease.owner={sid:'',streamId:''};
+    _voiceLeaseSettle(lease,{success:false,local:true});
+  }
+
+  function _voiceLeaseSettle(lease, outcome){
+    if(!lease||lease.settled||!_voiceLeaseCurrent(lease)) return false;
+    lease.settled=true;
+    if(outcome&&outcome.success){
+      _speakResponse(lease);
+    }else if(_voiceModeActive&&!_voiceBusy()){
+      lease.finalText='';
+      _voiceModeState='listening';
+      _scheduleVoiceRestart(lease,300);
+    }
+    return true;
+  }
+
+  window._voiceLeasePrepareSubmission=_voiceLeasePrepareSubmission;
+  window._voiceLeaseBind=_voiceLeaseBind;
+  window._voiceLeaseAdoptStream=_voiceLeaseAdoptStream;
+  window._voiceLeaseCaptureContext=_voiceLeaseCaptureContext;
+  window._voiceLeaseContextCurrent=_voiceLeaseContextCurrent;
+  window._voiceLeaseRetargetOwner=(fromSid,toSid,streamId)=>{
+    const lease=_voiceLease;
+    if(!lease||!lease.owner||lease.owner.sid!==String(fromSid||'')
+      ||lease.owner.streamId!==String(streamId||'')) return false;
+    lease.owner.sid=String(toSid||'');
+    return true;
+  };
+  window._voiceLeaseSettleLocal=_voiceLeaseSettleLocal;
+  window._voiceLeaseSettleOwner=(sid,streamId,outcome,source,generation)=>{
+    if(source){
+      const authority=typeof window!=='undefined'&&window._liveStreamTransportAuthority
+        ? window._liveStreamTransportAuthority[sid] : null;
+      const sourceGenerations=typeof window!=='undefined'&&window._liveStreamTransportSourceGeneration;
+      if(!authority||authority.streamId!==String(streamId||'')||authority.generation!==generation
+        ||!sourceGenerations||sourceGenerations.get(source)!==generation) return false;
+    }
+    const lease=_voiceLease;
+    if(!lease||!lease.owner||lease.owner.sid!==String(sid||'')||lease.owner.streamId!==String(streamId||'')){
+      if(source&&typeof window!=='undefined'&&typeof window._liveStreamTransportRelease==='function'){
+        window._liveStreamTransportRelease(sid,generation);
+      }
+      return false;
+    }
+    _voiceManualPending=null;
+    const settled=_voiceLeaseSettle(lease,outcome||{success:false});
+    if(settled&&!source&&!lease.restartTimer&&!_voiceBusy()){
+      _voiceLease=_newVoiceLease();
+      _startListening(_voiceLease);
+    }
+    if(source&&typeof window!=='undefined'&&typeof window._liveStreamTransportRelease==='function'){
+      window._liveStreamTransportRelease(sid,generation);
+    }
+    return settled;
+  };
+  window._voiceLeaseInvalidate=(options={})=>{
+    _invalidateVoiceLease(options);
+    if(options.rearm!==false) _resumeVoiceLease();
+  };
+  window._voiceLeaseResume=_resumeVoiceLease;
 
   function _clearBrowserTtsRecovery(){
     if(_browserTtsKeepAlive){
@@ -1552,20 +1833,21 @@ window.renderTranscript=function(container, messages, opts){
     }
   }
 
-  function _armBrowserTtsRecovery(clean, rate){
+  function _armBrowserTtsRecovery(clean, rate, lease){
     _clearBrowserTtsRecovery();
     _browserTtsSuppressNextErrorRearm=false;
     const safeRate=(Number.isFinite(rate)&&rate>0)?rate:1;
     // Chromium can drop utter.onend on later turns, so force a recovery path.
     const watchdogMs=Math.max(4000,Math.round((String(clean||'').length/(12*safeRate))*1000)+10000);
     _browserTtsWatchdog=setTimeout(()=>{
-      if(!_voiceModeActive||_voiceModeState!=='speaking') return;
+      if(!_voiceLeaseCurrent(lease)||_voiceModeState!=='speaking') return;
       _browserTtsSuppressNextErrorRearm=true;
       try{ speechSynthesis.cancel(); }catch(_){}
       _clearBrowserTtsRecovery();
-      _startListening();
+      _scheduleVoiceRestart(lease,0);
     },watchdogMs);
     _browserTtsKeepAlive=setInterval(()=>{
+      if(!_voiceLeaseCurrent(lease)) return;
       if(!_voiceModeActive||_voiceModeState!=='speaking'){
         _clearBrowserTtsRecovery();
         return;
@@ -1589,7 +1871,11 @@ window.renderTranscript=function(container, messages, opts){
   }
 
   function _startListening(){
-    if(!_voiceModeActive) return;
+    let lease=arguments[0]||_voiceLease;
+    if(!_voiceModeActive||_voiceBusy()) return;
+    lease=lease||_voiceLease;
+    if(!_voiceLeaseCurrent(lease)) return;
+    if(lease.recognition) return;
     if(_micOriginNeedsSecureContext()){
       _deactivate();
       showToast(t('mic_insecure_origin'));
@@ -1598,54 +1884,47 @@ window.renderTranscript=function(container, messages, opts){
     _clearBrowserTtsRecovery();
     _setState('listening');
 
-    _recognition=new SpeechRecognition();
-    _recognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true';
-    _recognition.interimResults=true;
-    _recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
+    const recognition=new SpeechRecognition();
+    _recognition=recognition;
+    lease.recognition=recognition;
+    recognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true';
+    recognition.interimResults=true;
+    recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
 
-    let _finalText='';
-
-    _recognition.onstart=()=>{ _finalText=''; };
-
-    _recognition.onresult=(event)=>{
-      // Reset silence timer on any result
-      clearTimeout(_silenceTimer);
+    recognition.onresult=(event)=>{
+      if(!_voiceLeaseCurrent(lease,recognition)) return;
       let interim='';
-      let final=_finalText;
+      let final=lease.finalText;
       for(let i=event.resultIndex;i<event.results.length;i++){
         const txt=event.results[i][0].transcript;
-        if(event.results[i].isFinal){ final+=txt; _finalText=final; }
+        if(event.results[i].isFinal){ final+=txt; lease.finalText=final; }
         else{ interim+=txt; }
       }
-      ta.value=final||interim;
+      lease.interimText=interim;
+      ta.value=lease.finalText||interim;
       autoResize();
+      if(lease.finalText) _armVoiceSilence(lease);
+    };
 
-      // Auto-send on silence after final result
-      if(_finalText){
-        _silenceTimer=setTimeout(()=>{
-          _voiceModeSend();
-        },_voiceSilenceMs());
+    recognition.onend=()=>{
+      if(!_voiceLeaseCurrent(lease,recognition)) return;
+      _clearVoiceInterim(lease);
+      lease.recognition=null;
+      if(lease.finalText&&lease.deadlineAt){
+        const remaining=Math.max(0,lease.deadlineAt-Date.now());
+        if(remaining===0) _voiceLeaseSubmit(lease);
+        else _scheduleVoiceRestart(lease,0);
+      }else{
+        _scheduleVoiceRestart(lease,500);
       }
     };
 
-    _recognition.onend=()=>{
-      clearTimeout(_silenceTimer);
-      // If we have text and haven't sent yet, send it
-      if(_finalText&&_voiceModeActive&&_voiceModeState==='listening'){
-        _voiceModeSend();
-      } else if(_voiceModeActive&&_voiceModeState==='listening'){
-        // No speech detected — restart listening
-        setTimeout(()=>{ if(_voiceModeActive) _startListening(); },500);
-      }
-    };
-
-    _recognition.onerror=(event)=>{
-      clearTimeout(_silenceTimer);
+    recognition.onerror=(event)=>{
+      if(!_voiceLeaseCurrent(lease,recognition)) return;
+      _clearVoiceInterim(lease);
+      lease.recognition=null;
       if(event.error==='no-speech'||event.error==='aborted'){
-        // Restart if still active
-        if(_voiceModeActive){
-          setTimeout(()=>{ if(_voiceModeActive) _startListening(); },800);
-        }
+        _scheduleVoiceRestart(lease,800);
         return;
       }
       if(event.error==='not-allowed'||event.error==='service-not-allowed'||event.error==='audio-capture'){
@@ -1655,56 +1934,43 @@ window.renderTranscript=function(container, messages, opts){
         return;
       }
       // Other errors — try to restart
-      if(_voiceModeActive){
-        setTimeout(()=>{ if(_voiceModeActive) _startListening(); },1500);
-      }
+      _scheduleVoiceRestart(lease,1500);
     };
 
-    try{ _recognition.start(); }catch(e){
-      // Already started or other error — retry shortly
-      setTimeout(()=>{ if(_voiceModeActive) _startListening(); },1000);
+    try{ recognition.start(); }catch(e){
+      try{recognition.abort();}catch(_){ }
+      lease.recognition=null;
+      if(_recognition===recognition) _recognition=null;
+      _scheduleVoiceRestart(lease,1000);
     }
   }
 
   function _voiceModeSend(){
-    if(!_voiceModeActive) return;
-    const text=(ta.value||'').trim();
-    if(!text){
-      ta.value='';
-      setTimeout(()=>{ if(_voiceModeActive) _startListening(); },300);
-      return;
-    }
-    _setState('thinking');
-    // Pin the active session id so the TTS callback won't speak a different
-    // session's reply if the user navigates away mid-stream.
-    _voiceModeThinkingSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
-    try{ if(_recognition) _recognition.abort(); }catch(_){}
-    _recognition=null;
-    // send() is global from boot.js
-    if(typeof send==='function') send();
+    const lease=_voiceLease;
+    if(!_voiceLeaseCurrent(lease)) return;
+    _voiceLeaseSubmit(lease);
   }
 
-  function _speakResponse(){
-    if(!_voiceModeActive) return;
+  function _speakResponse(lease){
+    lease=lease||_voiceLease;
+    if(!_voiceLeaseCurrent(lease)) return;
     // Bail out if the user navigated to a different session between send and
-    // stream completion. The patched autoReadLastAssistant fires globally;
-    // without this guard it would TTS-read the wrong session's last assistant
-    // message. Drop back to listening on the new session instead.
+    // stream completion. Drop back to listening on the new session instead.
     const currentSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
-    if(_voiceModeThinkingSid && currentSid && currentSid!==_voiceModeThinkingSid){
-      _voiceModeThinkingSid=null;
-      _startListening();
+    if(lease.owner&&lease.owner.sid && currentSid && currentSid!==lease.owner.sid){
+      lease.finalText='';
+      _voiceModeState='listening';
+      _scheduleVoiceRestart(lease,300);
       return;
     }
-    _voiceModeThinkingSid=null;
     _setState('speaking');
 
     // Find last assistant message
     const rows=document.querySelectorAll('.msg-row[data-role="assistant"], .assistant-segment[data-raw-text]');
-    if(!rows.length){ _startListening(); return; }
+    if(!rows.length){ _scheduleVoiceRestart(lease,0); return; }
     const last=rows[rows.length-1];
     const rawText=last.dataset.rawText||'';
-    if(!rawText.trim()){ _startListening(); return; }
+    if(!rawText.trim()){ _scheduleVoiceRestart(lease,0); return; }
 
     // Strip for TTS (reuse existing helper if available)
     let clean=rawText;
@@ -1721,7 +1987,7 @@ window.renderTranscript=function(container, messages, opts){
         .replace(/\n/g,' ')
         .trim();
     }
-    if(!clean){ _startListening(); return; }
+    if(!clean){ _scheduleVoiceRestart(lease,0); return; }
     const engine=localStorage.getItem("hermes-tts-engine")||"browser";
     // Extension-registered TTS engine (window.registerHermesTtsEngine): synth
     // via the extension, then play through the same Audio lifecycle as edge.
@@ -1734,32 +2000,38 @@ window.renderTranscript=function(container, messages, opts){
       };
       Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
         .then(function(buf){
+          if(!_voiceLeaseCurrent(lease)) return;
           const blob=new Blob([buf]);
           const url=URL.createObjectURL(blob);
+          lease.ttsUrls.push(url);
           const audio=new Audio(url);
           _playingEdgeAudio=audio;
           audio.onended=function(){
+            if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
             _ttsSpeaking=false;
             if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
             URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},500);
+            if(_voiceModeActive) _scheduleVoiceRestart(lease,500);
           };
           audio.onerror=function(){
+            if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
             _ttsSpeaking=false;
             if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
             URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
+            if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
           };
           audio.play().catch(function(){
+            if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
             _ttsSpeaking=false;
             if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
             URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
+            if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
           });
         })
         .catch(function(){
+          if(!_voiceLeaseCurrent(lease)) return;
           _ttsSpeaking=false;
-          if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
+          if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
         });
       return;
     }
@@ -1775,31 +2047,37 @@ window.renderTranscript=function(container, messages, opts){
         return r.blob();
       })
       .then(blob => {
+        if(!_voiceLeaseCurrent(lease)) return;
         const url = URL.createObjectURL(blob);
+        lease.ttsUrls.push(url);
         const audio = new Audio(url);
         _playingEdgeAudio=audio;
         audio.onended = () => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+          if(_voiceModeActive) _scheduleVoiceRestart(lease,500);
         };
         audio.onerror = () => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
         };
         audio.play().catch(e => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
         });
       })
       .catch(() => {
+        if(!_voiceLeaseCurrent(lease)) return;
         _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
       });
       return;
     }
@@ -1815,31 +2093,37 @@ window.renderTranscript=function(container, messages, opts){
         return r.blob();
       })
       .then(blob => {
+        if(!_voiceLeaseCurrent(lease)) return;
         const url = URL.createObjectURL(blob);
+        lease.ttsUrls.push(url);
         const audio = new Audio(url);
         _playingEdgeAudio=audio;
         audio.onended = () => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+          if(_voiceModeActive) _scheduleVoiceRestart(lease,500);
         };
         audio.onerror = () => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
         };
         audio.play().catch(() => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
         });
       })
       .catch(() => {
+        if(!_voiceLeaseCurrent(lease)) return;
         _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
       });
       return;
     }
@@ -1861,7 +2145,9 @@ window.renderTranscript=function(container, messages, opts){
         return r.blob();
       })
       .then(blob => {
+        if(!_voiceLeaseCurrent(lease)) return;
         const url = URL.createObjectURL(blob);
+        lease.ttsUrls.push(url);
         const audio = new Audio(url);
         // Register with the shared handle (declared in ui.js, same global scope;
         // both scripts are fully evaluated before any voice interaction) so
@@ -1869,26 +2155,31 @@ window.renderTranscript=function(container, messages, opts){
         // Edge playback. Without this the audio is local here and unstoppable.
         _playingEdgeAudio=audio;
         audio.onended = () => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+          if(_voiceModeActive) _scheduleVoiceRestart(lease,500);
         };
         audio.onerror = () => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
         };
         audio.play().catch(e => {
+          if(!_voiceLeaseCurrent(lease)){ URL.revokeObjectURL(url); return; }
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          URL.revokeObjectURL(url);
+          if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
         });
       })
       .catch(() => {
+        if(!_voiceLeaseCurrent(lease)) return;
         _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
       });
       return;
     }
@@ -1907,63 +2198,38 @@ window.renderTranscript=function(container, messages, opts){
     if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
 
     utter.onend=()=>{
+      if(!_voiceLeaseCurrent(lease)) return;
       _browserTtsSuppressNextErrorRearm=false;
       _clearBrowserTtsRecovery();
       // After speaking, go back to listening
-      if(_voiceModeActive&&_voiceModeState==='speaking') setTimeout(()=>_startListening(),500);
+      if(_voiceModeActive&&_voiceModeState==='speaking') _scheduleVoiceRestart(lease,500);
     };
     utter.onerror=()=>{
+      if(!_voiceLeaseCurrent(lease)) return;
       _clearBrowserTtsRecovery();
       if(_browserTtsSuppressNextErrorRearm){
         _browserTtsSuppressNextErrorRearm=false;
         return;
       }
-      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
     };
 
-    _armBrowserTtsRecovery(clean, utter.rate);
+    _armBrowserTtsRecovery(clean, utter.rate, lease);
     try{
       speechSynthesis.speak(utter);
     }catch(_){
       _clearBrowserTtsRecovery();
-      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      if(_voiceModeActive) _scheduleVoiceRestart(lease,1000);
     }
   }
 
-  // Hook into response completion — observe when the agent finishes
-  // We patch setComposerStatus to detect when a response completes
-  const _origSetComposerStatus=(typeof setComposerStatus==='function')?setComposerStatus.bind(window):null;
-
-  window._voiceModeOnResponseComplete=function(){
-    if(_voiceModeActive&&_voiceModeState==='thinking'){
-      // Small delay to let DOM render the final message
-      setTimeout(()=>{
-        if(_voiceModeActive&&_voiceModeState==='thinking'){
-          _speakResponse();
-        }
-      },400);
+  window._voiceModeOnResponseComplete=function(activeSid,streamId,source,generation,outcome){
+    if(typeof window._voiceLeaseSettleOwner==='function'){
+      window._voiceLeaseSettleOwner(activeSid,streamId,outcome||{success:false},source,generation);
     }
   };
-
-  // Observe S.busy changes to detect response completion
-  // The existing code calls setBusy(false) when response completes
-  const _origSetBusy=(typeof setBusy==='function')?setBusy.bind(window):null;
-  if(_origSetBusy){
-    // We use a MutationObserver-style approach via polling S.busy
-    // Actually, we'll use a simpler approach: hook into the message stream completion
-  }
-
-  // Most reliable hook: use the existing autoReadLastAssistant call site.
-  // We override autoReadLastAssistant so that if voice mode is active, we use our
-  // own speak-and-resume flow instead of the default auto-read.
-  const _origAutoRead=(typeof autoReadLastAssistant==='function')?autoReadLastAssistant:null;
-  window.autoReadLastAssistant=function(){
-    if(_voiceModeActive&&_voiceModeState==='thinking'){
-      _speakResponse();
-      return;
-    }
-    if(_origAutoRead) _origAutoRead.apply(this,arguments);
-  };
+  // ordinary autoReadLastAssistant remains owned by the normal done path;
+  // voice completion enters through the exact terminal owner instead.
 
   function _activate(){
     if(_micOriginNeedsSecureContext()){
@@ -1971,34 +2237,34 @@ window.renderTranscript=function(container, messages, opts){
       return;
     }
     _voiceModeActive=true;
+    _voiceContextId+=1;
+    _voiceLease=_newVoiceLease();
     modeBtn.classList.add('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle_active'));
     showToast(t('voice_mode_active'),1500);
     // If the agent is busy, wait — state will be 'thinking' and we'll detect completion
-    if(typeof S!=='undefined'&&S.busy){
+    if(typeof S!=='undefined'&&_voiceBusy()){
+      const activeSid=S.session&&S.session.session_id;
+      const activeStreamId=S.activeStreamId||(S.session&&S.session.active_stream_id);
+      if(activeSid&&activeStreamId) _voiceLease.owner={sid:String(activeSid),streamId:String(activeStreamId)};
       _setState('thinking');
       return;
     }
     // Cancel any existing TTS
     if(typeof stopTTS==='function') stopTTS();
-    _startListening();
+    _startListening(_voiceLease);
   }
 
   function _deactivate(){
     _voiceModeActive=false;
     _voiceModeState='idle';
-    _voiceModeThinkingSid=null;
+    _invalidateVoiceLease();
     _browserTtsSuppressNextErrorRearm=false;
     modeBtn.classList.remove('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle'));
     bar.style.display='none';
-    clearTimeout(_silenceTimer);
     _clearBrowserTtsRecovery();
-    try{ if(_recognition) _recognition.abort(); }catch(_){}
-    _recognition=null;
     if(typeof stopTTS==='function') stopTTS();
-    // Restore original autoReadLastAssistant
-    if(_origAutoRead) window.autoReadLastAssistant=_origAutoRead;
     // Clear textarea if it was only voice input
     ta.value='';
     autoResize();
@@ -2204,9 +2470,13 @@ function _applySessionContextMetadataUpdate(data){
 
 $('modelSelect').onchange=async()=>{
   const selectedModel=$('modelSelect').value;
+  const contextSid=S.session&&S.session.session_id||null;
   const modelState=(typeof _modelStateForSelect==='function')
     ? _modelStateForSelect($('modelSelect'),selectedModel)
     : {model:selectedModel,model_provider:null};
+  if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
+  const voiceContext=typeof window._voiceLeaseCaptureContext==='function'
+    ? window._voiceLeaseCaptureContext() : null;
   if(typeof clearProfileTransitionReasoningContext==='function') clearProfileTransitionReasoningContext();
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
@@ -2215,6 +2485,7 @@ $('modelSelect').onchange=async()=>{
     if(typeof _rememberEmptyComposerModelOverride==='function') _rememberEmptyComposerModelOverride(modelState.model,modelState.model_provider);
     if(typeof syncModelChip==='function') syncModelChip();
     if(typeof syncReasoningChip==='function') syncReasoningChip();
+    if(typeof window._voiceLeaseResume==='function') window._voiceLeaseResume();
     return;
   }
   if(typeof _rememberPendingSessionModel==='function') _rememberPendingSessionModel(S.session.session_id,modelState.model,modelState.model_provider);
@@ -2227,18 +2498,35 @@ $('modelSelect').onchange=async()=>{
   if(typeof showToast==='function'){
     showToast(t('model_scope_toast')||'Applies to this conversation from your next message.', 3000);
   }
-  const data=await api('/api/session/update',{method:'POST',body:JSON.stringify({
-    session_id:S.session.session_id,
-    workspace:S.session.workspace,
-    model:modelState.model,
-    model_provider:modelState.model_provider||null,
-  })});
+  let data;
+  try{
+    data=await api('/api/session/update',{method:'POST',body:JSON.stringify({
+      session_id:S.session.session_id,
+      workspace:S.session.workspace,
+      model:modelState.model,
+      model_provider:modelState.model_provider||null,
+    })});
+  }catch(e){
+    if((!contextSid&&(!S.session||!S.session.session_id))
+      ||(S.session&&S.session.session_id===contextSid)){
+      if(typeof window._voiceLeaseResume==='function'
+        &&(!voiceContext||typeof window._voiceLeaseContextCurrent!=='function'
+          ||window._voiceLeaseContextCurrent(voiceContext))) window._voiceLeaseResume();
+    }
+    throw e;
+  }
+  if(!S.session||S.session.session_id!==contextSid
+    ||(voiceContext&&typeof window._voiceLeaseContextCurrent==='function'
+      &&!window._voiceLeaseContextCurrent(voiceContext))) return;
   // NOTE: do NOT clear the pending explicit-pick marker here. It must survive until
   // the NEXT send() consumes it, otherwise the normal "pick → session-update → send"
   // flow loses the explicit-pick signal before /api/chat/start runs and the server
   // re-reverts a cross-family pick (the #3737 bug, Codex catch). send() clears it
   // after reading a matching pending pick. (#3739/#3737)
   _applySessionContextMetadataUpdate(data);
+  if(typeof window._voiceLeaseResume==='function'
+    &&(!voiceContext||typeof window._voiceLeaseContextCurrent!=='function'
+      ||window._voiceLeaseContextCurrent(voiceContext))) window._voiceLeaseResume();
   // Warn if selected model belongs to a different provider than what Hermes is configured for
   if(typeof _checkProviderMismatch==='function'){
     const warn=_checkProviderMismatch(selectedModel);

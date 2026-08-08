@@ -131,7 +131,7 @@ class TestCancelStreamErrorPath:
         idx = m.start()
         # Widen the window: the provenance log + comments added for #5345 sit
         # before the try/catch, so 400 chars no longer reaches the catch block.
-        block = src[idx:idx + 1200]
+        block = src[idx:idx + 1800]
         # The old pattern was setStatus inside catch; new pattern has it outside
         # Look for the catch block specifically
         catch_idx = block.find("}catch(")
@@ -176,11 +176,11 @@ def test_sse_cancel_handler_calls_set_busy():
     block = src[idx:next_handler] if next_handler != -1 else src[idx:idx + 3000]
     assert (
         "setBusy(false)" in block
-        or "_setActivePaneIdleIfOwner()" in block
+        or "_setActivePaneIdleIfOwner(" in block
     ), (
         "SSE cancel handler no longer idles the owning active pane"
     )
-    if "_setActivePaneIdleIfOwner()" in block:
+    if "_setActivePaneIdleIfOwner(" in block:
         helper_idx = src.find("function _setActivePaneIdleIfOwner")
         assert helper_idx != -1
         next_function = src.find("\n  function ", helper_idx + 1)

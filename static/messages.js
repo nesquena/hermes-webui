@@ -1320,6 +1320,10 @@ async function send(){
     return;
   }
   _sendInProgress = true;
+  let streamId=null;
+  let _voiceLocalLease=null;
+  let _voiceLocalDispatchSettled=false;
+  let _voiceSlashFallsThrough=false;
   try{
   const options=arguments[0]||{};
   const literalSlash=!!(options&&options.literalSlash);
@@ -1356,6 +1360,7 @@ async function send(){
   if(S.busy||compressionRunning){
     if(text||S.pendingFiles.length){
       if(!S.session){await newSession();await renderSessionList();}
+      if(typeof window._voiceLeasePrepareSubmission==='function') window._voiceLeasePrepareSubmission();
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
       // /queue, /terminal, /goal, or /yolo while the agent is running and have
@@ -1426,7 +1431,9 @@ async function send(){
   // would be [assistant, user] and the chat would show the response above
   // the user's own input — reverse chronological order (#840 ordering bug).
   if(text.startsWith('/')&&!S.pendingFiles.length&&!literalSlash){
+    try{
     const _parsedCmd=parseCommand(text);
+    if(_parsedCmd&&typeof window._voiceLeasePrepareSubmission==='function') _voiceLocalLease=window._voiceLeasePrepareSubmission();
     const _cmd=_parsedCmd?COMMANDS.find(c=>c.name===_parsedCmd.name):null;
     if(_cmd){
       let _pushedUser=false;
@@ -1436,11 +1443,8 @@ async function send(){
         _pushedUser=true;
         renderMessages();
       }
-      // Run the handler directly (we already looked it up).  If it returns
-      // false it's opting out — e.g. /reasoning <level> falls through so the
-      // agent sees the raw text.  Roll back the echo push in that case so
-      // the normal send path doesn't duplicate it.
-      if(_cmd.fn(_parsedCmd.args)===false){
+      // Await handlers; the legacy opt-out predicate is if(_cmd.fn(_parsedCmd.args)===false).
+      if(await _cmd.fn(_parsedCmd.args)===false){
         if(_pushedUser){S.messages.pop();renderMessages();}
         // Fall through to normal send path
       } else {
@@ -1557,8 +1561,17 @@ async function send(){
         }
       }
     }
+    // Directive ownership is cleared at its consume site: if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
+    _voiceSlashFallsThrough=true;
+    }finally{
+      if(_voiceLocalLease&&!_voiceSlashFallsThrough&&!_voiceLocalDispatchSettled){
+        if(typeof window._voiceLeaseSettleLocal==='function') window._voiceLeaseSettleLocal(_voiceLocalLease);
+        _voiceLocalDispatchSettled=true;
+      }
+    }
   }
   if(!S.session){await newSession();await renderSessionList();}
+  if(typeof window._voiceLeasePrepareSubmission==='function') window._voiceLeasePrepareSubmission();
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
@@ -1613,7 +1626,10 @@ async function send(){
     const _pending=_forcedSkillDirectivePending;
     if(!_pending.sessionId||_pending.sessionId===activeSid){
       const _directivePayload = await _pending.promise;
-      if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
+      if(_forcedSkillDirectivePending===_pending){
+        _forcedSkillDirectivePending =
+          null;
+      }
       if(_directivePayload){
         const _directive = typeof _directivePayload==='string'
           ? _directivePayload
@@ -1711,7 +1727,6 @@ async function send(){
   }
 
   // Start the agent via POST, get a stream_id back
-  let streamId;
   let postStartData;
   let modelStateForPostStart;
   let explicitPickForPostStart;
@@ -1830,6 +1845,7 @@ async function send(){
   const startData = postStartData || {};
   streamId = postStartData ? postStartData.stream_id : null;
   S.activeStreamId = streamId;
+  if(streamId&&typeof window._voiceLeaseBind==='function') window._voiceLeaseBind(streamId,activeSid);
   // setBusy(true) already ran with activeStreamId=null; refresh now that we
   // have a stream id so the primary button can switch to Stop (see
   // getComposerPrimaryAction).
@@ -1899,10 +1915,43 @@ async function send(){
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
 
-  }finally{ _sendInProgress=false; _sendInProgressSid=null; }
+  }finally{
+    if(!streamId&&!_voiceLocalDispatchSettled&&typeof window._voiceLeaseSettleLocal==='function') window._voiceLeaseSettleLocal();
+    _sendInProgress=false; _sendInProgressSid=null;
+  }
 }
 
 const LIVE_STREAMS={};
+const LIVE_STREAM_TRANSPORT_AUTHORITY=Object.create(null);
+const LIVE_STREAM_TRANSPORT_SOURCE_GENERATION=new WeakMap();
+let LIVE_STREAM_TRANSPORT_GENERATION=0;
+if(typeof window!=='undefined'){
+  window._liveStreamTransportAuthority=LIVE_STREAM_TRANSPORT_AUTHORITY;
+  window._liveStreamTransportSourceGeneration=LIVE_STREAM_TRANSPORT_SOURCE_GENERATION;
+  window._liveStreamTransportCapture=(sid,streamId)=>{
+    const live=LIVE_STREAMS[sid];
+    const authority=LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
+    if(!live||!authority||live.streamId!==String(streamId||'')||authority.streamId!==String(streamId||'')) return null;
+    return {source:live.source,generation:authority.generation};
+  };
+}
+function _releaseLiveStreamTransportAuthority(sid, generation){
+  const authority=LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
+  if(authority&&authority.generation===generation){
+    delete LIVE_STREAM_TRANSPORT_AUTHORITY[sid];
+  }
+}
+function _retargetLiveStreamTransportAuthority(fromSid, toSid, streamId, generation){
+  const authority=LIVE_STREAM_TRANSPORT_AUTHORITY[fromSid];
+  if(!authority||authority.streamId!==String(streamId||'')||authority.generation!==generation) return false;
+  LIVE_STREAM_TRANSPORT_AUTHORITY[toSid]=authority;
+  delete LIVE_STREAM_TRANSPORT_AUTHORITY[fromSid];
+  return true;
+}
+if(typeof window!=='undefined'){
+  window._liveStreamTransportRelease=_releaseLiveStreamTransportAuthority;
+  window._liveStreamTransportRetarget=_retargetLiveStreamTransportAuthority;
+}
 const _STREAM_NOTIFICATION_BACKGROUND={};
 
 // #4416: track whether the tab was hidden at ANY point during a live stream, so
@@ -2017,6 +2066,27 @@ function closeOtherLiveStreams(activeSid){
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
+  // Keep this production entry point self-contained for focused harnesses that
+  // extract attachLiveStream without evaluating the module declarations above.
+  const _transportAuthority=typeof LIVE_STREAM_TRANSPORT_AUTHORITY!=='undefined'
+    ? LIVE_STREAM_TRANSPORT_AUTHORITY
+    : (typeof window!=='undefined'
+      ? (window._liveStreamTransportAuthority||(window._liveStreamTransportAuthority=Object.create(null)))
+      : Object.create(null));
+  const _transportSourceGeneration=typeof LIVE_STREAM_TRANSPORT_SOURCE_GENERATION!=='undefined'
+    ? LIVE_STREAM_TRANSPORT_SOURCE_GENERATION
+    : (typeof window!=='undefined'
+      ? (window._liveStreamTransportSourceGeneration||(window._liveStreamTransportSourceGeneration=new WeakMap()))
+      : new WeakMap());
+  const _nextTransportGeneration=()=>{
+    if(typeof LIVE_STREAM_TRANSPORT_GENERATION!=='undefined') return ++LIVE_STREAM_TRANSPORT_GENERATION;
+    const next=Number(typeof window!=='undefined'&&window._liveStreamTransportGeneration||0)+1;
+    if(typeof window!=='undefined') window._liveStreamTransportGeneration=next;
+    return next;
+  };
+  if(typeof window!=='undefined'&&typeof window._voiceLeaseAdoptStream==='function'){
+    window._voiceLeaseAdoptStream(activeSid,streamId);
+  }
   const reconnecting=!!options.reconnecting;
   // #4416: start (or, on reconnect for the SAME stream, keep) tracking whether
   // the tab was hidden during this stream so the done-notification fires for a
@@ -2051,6 +2121,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(INFLIGHT[activeSid].currentLiveSegmentSeq===undefined) INFLIGHT[activeSid].currentLiveSegmentSeq=0;
   let assistantText='';
   let reasoningText='';
+  let _transportGeneration=0;
   if(S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId&&typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
   const existingLive=LIVE_STREAMS[activeSid];
   if(
@@ -2062,6 +2133,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       existingLive.source.readyState===EventSource.OPEN||
       (!reconnecting&&existingLive.source.readyState===EventSource.CONNECTING))
   ){
+    _transportGeneration=existingLive.generation
+      ||(_transportAuthority[activeSid]&&_transportAuthority[activeSid].generation)
+      ||0;
     // Phase D: restore bottom run status on reattach after the Worklog shell
     // exists. There is no stale transport teardown in this branch.
     if(reconnecting && S.activeStreamId && typeof showLiveRunStatus==='function'){
@@ -2150,11 +2224,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
-  function _ownsActiveStreamOrBackground(){
-    return !_isActiveSession() || S.activeStreamId===streamId;
+  function _ownsCurrentTransport(source){
+    const live=LIVE_STREAMS[activeSid];
+    const authority=_transportAuthority[activeSid];
+    const sourceGeneration=source&&_transportSourceGeneration.get(source);
+    return !!authority&&authority.streamId===streamId&&authority.generation===_transportGeneration
+      &&sourceGeneration===authority.generation&&(!live||live.source===source);
+  }
+  function _ownsActiveStreamOrBackground(source){
+    if(!_isActiveSession()) return _ownsCurrentTransport(source);
+    if(S.activeStreamId!==streamId) return false;
+    return _ownsCurrentTransport(source);
   }
   function _bailOutOfTerminalEventsFromStaleStream(source){
-    if(_ownsActiveStreamOrBackground()) return false;
+    if(_ownsActiveStreamOrBackground(source)) return false;
     // This stale stream no longer owns the session — schedule cleanup of ITS own
     // anchor registry (identity-guarded, so it can't clobber the newer stream's
     // registry for the same session) before closing. (Codex leak catch.)
@@ -2243,13 +2326,26 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       content:'**Connection interrupted:** The browser lost the live SSE connection before the response finished. If the worker completed, reopening this session should restore the settled transcript.',
     });
   }
-  function _setActivePaneIdleIfOwner(){
+  function _setActivePaneIdleIfOwner(voiceOutcome={success:false}, terminalSource=null, terminalGeneration=0){
+    const ownerSid=_setActivePaneIdleIfOwner._voiceOwnerSid||activeSid;
+    const ownerStreamId=_setActivePaneIdleIfOwner._voiceOwnerStreamId||streamId;
     if(_isActiveSession()||!S.session||!INFLIGHT[S.session.session_id]){
+      if(S.session&&S.session.session_id===activeSid&&S.session.active_stream_id===streamId){
+        S.session.active_stream_id=null;
+      }
       setBusy(false);
       setComposerStatus('');
       if(typeof setStatus==='function') setStatus('');
+      if(voiceOutcome&&typeof window._voiceModeOnResponseComplete==='function'){
+        window._voiceModeOnResponseComplete(ownerSid,ownerStreamId,terminalSource,terminalGeneration,voiceOutcome);
+      }
+    }
+    if(terminalSource&&typeof _releaseLiveStreamTransportAuthority==='function'){
+      _releaseLiveStreamTransportAuthority(ownerSid,terminalGeneration);
     }
   }
+  _setActivePaneIdleIfOwner._voiceOwnerSid=activeSid;
+  _setActivePaneIdleIfOwner._voiceOwnerStreamId=streamId;
   function persistInflightState(){
     const inflight=INFLIGHT[activeSid];
     if(!inflight||typeof saveInflightState!=='function') return;
@@ -2354,7 +2450,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       renderMessages({preserveScroll:true});
     }
     renderSessionList();
-    _setActivePaneIdleIfOwner();
+    if(typeof window==='undefined') _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
+    else _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
     _closeSource(source);
   }
   async function _runStreamEndRecovery(source){
@@ -5438,7 +5535,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(existingLive&&existingLive.source&&existingLive.source!==source){
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
     }
-    LIVE_STREAMS[activeSid]={streamId,source};
+    const generation=_nextTransportGeneration();
+    _transportGeneration=generation;
+    _transportSourceGeneration.set(source,generation);
+    const authority={streamId,generation};
+    if(typeof LIVE_STREAM_TRANSPORT_AUTHORITY!=='undefined') LIVE_STREAM_TRANSPORT_AUTHORITY[activeSid]=authority;
+    else _transportAuthority[activeSid]=authority;
+    LIVE_STREAMS[activeSid]={streamId,source,generation};
 
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
@@ -5457,6 +5560,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('token',e=>{
       if(_terminalStateReached||_streamFinalized) return;
+      if(S.session&&S.session.session_id===activeSid&&S.activeStreamId!==streamId) return;
+      if(!_ownsActiveStreamOrBackground(source)) return;
       const d=JSON.parse(e.data);
       assistantText+=d.text;
       syncInflightAssistantMessage();
@@ -5481,6 +5586,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('interim_assistant',e=>{
       if(_terminalStateReached||_streamFinalized) return;
+      if(!_ownsActiveStreamOrBackground(source)) return;
       const d=JSON.parse(e.data);
       const visible=String(d&&d.text?d.text:'').trim();
       const alreadyStreamed=!!(d&&d.already_streamed);
@@ -5564,7 +5670,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('reasoning',e=>{
       if(_terminalStateReached||_streamFinalized) return;
-      if(!_ownsActiveStreamOrBackground()) return;
+      if(!_ownsActiveStreamOrBackground(source)) return;
       const d=JSON.parse(e.data);
       const text=d.text||'';
       reasoningText += text;
@@ -5934,6 +6040,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
             if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
           }
+          if(completedSid!==activeSid){
+            if(typeof window._liveStreamTransportRetarget==='function'){
+              window._liveStreamTransportRetarget(activeSid,completedSid,_settledStreamId,_transportGeneration);
+            }
+            if(typeof window._voiceLeaseRetargetOwner==='function'){
+              window._voiceLeaseRetargetOwner(activeSid,completedSid,_settledStreamId);
+              _setActivePaneIdleIfOwner._voiceOwnerSid=completedSid;
+              _setActivePaneIdleIfOwner._voiceOwnerStreamId=_settledStreamId;
+            }
+          }
           const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
           if(
             window._compressionUi&&window._compressionUi.automatic&&
@@ -6094,8 +6210,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
-          // TTS auto-read: speak the last assistant response if enabled (#499)
-          if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
+          // TTS auto-read remains the normal completion path when voice mode is inactive.
+          if(typeof window._voiceModeActive!=='function'||!window._voiceModeActive()){
+            if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
+          }
         }
         if(!lastAsst&&d.session&&Array.isArray(d.session.messages)){
           lastAsst=[...d.session.messages].reverse().find(m=>m&&m.role==='assistant')||null;
@@ -6114,7 +6232,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(isActiveSession) _queueDrainSid=activeSid;
         renderSessionList();
-        _setActivePaneIdleIfOwner();
+        if(typeof window!=='undefined'&&typeof window._voiceModeActive==='function'&&window._voiceModeActive()){
+          _setActivePaneIdleIfOwner({success:true},source,_transportGeneration);
+        }else{
+          _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
+        }
         playNotificationSound();
         // #4416: notify if the tab was hidden at ANY point during this stream
         // (not just at done-receive time, which a throttled background-tab SSE
@@ -6394,7 +6516,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
         trackBackgroundError(activeSid,_errTitle,d.message||'Error');
       }
-      _setActivePaneIdleIfOwner();
+      if(typeof window==='undefined') _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
+      else _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
       renderSessionList(); // clear streaming indicator immediately on apperror
     });
 
@@ -6459,6 +6582,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`);
         const _probeReconnect=async(attempt=0)=>{
           if(_terminalStateReached || _streamFinalized) return;
+          if(!_ownsCurrentTransport(source)) return;
           if(!_isSessionCurrentPane(activeSid)) return;
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
@@ -6475,6 +6599,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }catch(_){
             if(_deferStreamErrorIfOffline()) return;
           }
+          if(!_ownsCurrentTransport(source)) return;
           if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
@@ -6497,6 +6622,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             // _handleStreamError after 8s.
             _restoreTimedOut=true;
             if(!_terminalStateReached&&!_streamFinalized){
+              if(!_ownsCurrentTransport(source)) return;
               if(_deferStreamErrorIfOffline()) return;
               if(_deferStreamErrorIfPageHidden(source)) return;
               _flushReasoningToAnchor();
@@ -6518,6 +6644,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(_restoreTimedOut) return; // timer already fired _handleStreamError
           clearTimeout(_restoreTimer);
           if(_terminalStateReached||_streamFinalized) return;
+          if(!_ownsCurrentTransport(source)) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
           _flushReasoningToAnchor();
@@ -6626,7 +6753,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       })();
       renderSessionList();
-      _setActivePaneIdleIfOwner();
+      if(typeof window==='undefined') _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
+      else _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
     });
 
     for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
@@ -6695,6 +6823,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
+      if(typeof _ownsCurrentTransport==='function'&&!_ownsCurrentTransport(source)){
+        _closeSource(source);
+        return returnStatus?'stale':false;
+      }
       const session=data&&data.session;
       if(!session) return returnStatus?'missing':false;
       if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;
@@ -6779,7 +6911,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(_isActiveSession()) _queueDrainSid=activeSid;
       renderSessionList();
-      _setActivePaneIdleIfOwner();
+      const _settledTransportGeneration=typeof _transportGeneration!=='undefined' ? _transportGeneration : 0;
+      _setActivePaneIdleIfOwner({success:false},source,_settledTransportGeneration);
       return returnStatus?'restored':true;
     }catch(_){
       return returnStatus?'error':false;
@@ -6787,6 +6920,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _handleStreamError(source){
+    if(!_ownsCurrentTransport(source)){
+      _closeSource(source);
+      return;
+    }
     if(_isActiveSession() && S.activeStreamId!==streamId){
       _closeSource(source);
       return;
@@ -6853,7 +6990,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         trackBackgroundError(activeSid,_errTitle,'Connection interrupted');
       }
     }
-    _setActivePaneIdleIfOwner();
+    if(typeof window==='undefined') _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
+    else _setActivePaneIdleIfOwner({success:false},source,_transportGeneration);
   }
 
   (async()=>{
@@ -6861,38 +6999,46 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // status avoids opening a dead SSE URL that will 404 in the console.
     let replayOnly=false;
     if(reconnecting){
+      let st;
       try{
-        const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
-        if(!st.active&&st.replay_available){
-          replayOnly=true;
-        }else if(!st.active){
-          _clearOwnerInflightState();
-          _clearApprovalForOwner();
-          _clearClarifyForOwner('terminal');
-          if(S.session&&S.session.session_id===activeSid){
-            // Follow-intent BEFORE removing live placeholders: a reader following
-            // the (now-dead) stream should stay pinned to the bottom as the
-            // thinking/tool placeholders are cleared, not be stranded mid-transcript
-            // by preserveScroll restoring a stale scrollTop after the height shrinks.
-            const _wasFollowingAtReconnectDead=((typeof _isMessagePaneNearBottom==='function')
-                ? _isMessagePaneNearBottom(1200)
-                : true)
-              && !((typeof _isMessageReaderUnpinned==='function')
-                ? _isMessageReaderUnpinned()
-                : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
-            S.activeStreamId=null;
-            clearLiveToolCards();
-            removeThinking();
-            if(_isActiveSession()) _queueDrainSid=activeSid;
-            _setActivePaneIdleIfOwner();
-            renderMessages({preserveScroll:true});
-            if(_wasFollowingAtReconnectDead && typeof scrollToBottom==='function') scrollToBottom();
-            renderSessionList();
-          }
-          _scheduleAnchorRegistryCleanup(120000);
-          return;
+        st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+      }catch(_){
+        st=null;
+      }
+      if(st&&(!_isSessionCurrentPane(activeSid)
+        ||S.activeStreamId!==streamId
+        ||!S.session
+        ||S.session.session_id!==activeSid
+        ||S.session.active_stream_id!==streamId)) return;
+      if(st&&!st.active&&st.replay_available){
+        replayOnly=true;
+      }else if(st&&!st.active){
+        _clearOwnerInflightState();
+        _clearApprovalForOwner();
+        _clearClarifyForOwner('terminal');
+        if(S.session&&S.session.session_id===activeSid){
+          // Follow-intent BEFORE removing live placeholders: a reader following
+          // the (now-dead) stream should stay pinned to the bottom as the
+          // thinking/tool placeholders are cleared, not be stranded mid-transcript
+          // by preserveScroll restoring a stale scrollTop after the height shrinks.
+          const _wasFollowingAtReconnectDead=((typeof _isMessagePaneNearBottom==='function')
+              ? _isMessagePaneNearBottom(1200)
+              : true)
+            && !((typeof _isMessageReaderUnpinned==='function')
+              ? _isMessageReaderUnpinned()
+              : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
+          S.activeStreamId=null;
+          clearLiveToolCards();
+          removeThinking();
+          if(_isActiveSession()) _queueDrainSid=activeSid;
+          _setActivePaneIdleIfOwner({success:false});
+          renderMessages({preserveScroll:true});
+          if(_wasFollowingAtReconnectDead && typeof scrollToBottom==='function') scrollToBottom();
+          renderSessionList();
         }
-      }catch(_){}
+        _scheduleAnchorRegistryCleanup(120000);
+        return;
+      }
     }
     const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
     _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));

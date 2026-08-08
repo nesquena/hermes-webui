@@ -92,7 +92,7 @@ def test_stream_end_fallback_helper_clears_owner_state_before_closing():
     assert "_clearApprovalForOwner();" in fn
     assert "_clearClarifyForOwner('terminal');" in fn
     assert "renderMessages({preserveScroll:true});" in fn
-    assert "_setActivePaneIdleIfOwner();" in fn
+    assert "_setActivePaneIdleIfOwner(" in fn
     assert "_closeSource(source)" in fn
 
 

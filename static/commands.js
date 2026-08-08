@@ -718,6 +718,10 @@ async function cmdModel(args){
     // different provider not in the dropdown. Call /api/session/update directly.
     if(!match && !versionedNoSnap && S&&S.session&&S.session.session_id){
       const provider=q.slice(0,q.indexOf('/'));
+      const contextSid=S.session.session_id;
+      if(typeof window._voiceLeaseInvalidate==='function') window._voiceLeaseInvalidate({rearm:false});
+      const voiceContext=typeof window._voiceLeaseCaptureContext==='function'
+        ? window._voiceLeaseCaptureContext() : null;
       try{
         const resp=await fetch(new URL('api/session/update',document.baseURI||location.href).href,{
           method:'POST',
@@ -729,13 +733,27 @@ async function cmdModel(args){
           }),
         });
         if(resp.ok){
+          if(!S.session||S.session.session_id!==contextSid
+            ||(voiceContext&&typeof window._voiceLeaseContextCurrent==='function'
+              &&!window._voiceLeaseContextCurrent(voiceContext))) return;
           S.session.model=q;
           S.session.model_provider=provider;
+          if(typeof window._voiceLeaseResume==='function'
+            &&(!voiceContext||typeof window._voiceLeaseContextCurrent!=='function'
+              ||window._voiceLeaseContextCurrent(voiceContext))) window._voiceLeaseResume();
           if(typeof syncTopbar==='function') syncTopbar();
           showToast(t('switched_to')+q);
           return;
         }
-      }catch(_){/* fall through to "no model match" */}
+        if(S.session&&S.session.session_id===contextSid&&typeof window._voiceLeaseResume==='function'
+          &&(!voiceContext||typeof window._voiceLeaseContextCurrent!=='function'
+            ||window._voiceLeaseContextCurrent(voiceContext))) window._voiceLeaseResume();
+      }catch(_){
+        if(S.session&&S.session.session_id===contextSid&&typeof window._voiceLeaseResume==='function'
+          &&(!voiceContext||typeof window._voiceLeaseContextCurrent!=='function'
+            ||window._voiceLeaseContextCurrent(voiceContext))) window._voiceLeaseResume();
+        /* fall through to "no model match" */
+      }
     }
   }
   if(!match){
@@ -1255,6 +1273,8 @@ async function cmdGoal(args){
     appendThinking();setBusy(true);
     setComposerStatus(t('goal_working_toward'));
     S.activeStreamId=r.stream_id;
+    if(typeof window._voiceLeasePrepareSubmission==='function') window._voiceLeasePrepareSubmission({replaceOwner:true});
+    if(typeof window._voiceLeaseBind==='function') window._voiceLeaseBind(r.stream_id,activeSid);
     if(S.session&&S.session.session_id===activeSid){
       S.session.active_stream_id=r.stream_id;
       if(typeof r.pending_started_at==='number')S.session.pending_started_at=r.pending_started_at;
@@ -1462,10 +1482,15 @@ function _steerOwnerStreamIsCurrent(ownerSid, ownerStreamId){
 
 function _steerClearCurrentOwnerDeadRun(ownerSid, ownerStreamId){
   if(!_steerOwnerStreamIsCurrent(ownerSid,ownerStreamId))return false;
+  const voiceTransport=typeof window!=='undefined'&&typeof window._liveStreamTransportCapture==='function'
+    ? window._liveStreamTransportCapture(ownerSid,ownerStreamId) : null;
   let changed=false;
   if(S.busy){S.busy=false;changed=true;}
   if(S.activeStreamId){S.activeStreamId=null;changed=true;}
   if(S.session&&S.session.active_stream_id){S.session.active_stream_id=null;changed=true;}
+  if(changed&&typeof window!=='undefined'&&typeof window._voiceLeaseSettleOwner==='function'&&voiceTransport){
+    window._voiceLeaseSettleOwner(ownerSid,ownerStreamId,{success:false},voiceTransport.source,voiceTransport.generation);
+  }
   if(typeof INFLIGHT!=='undefined'&&INFLIGHT&&INFLIGHT[ownerSid]){
     delete INFLIGHT[ownerSid];
     changed=true;
