@@ -43,7 +43,10 @@ def test_reasoning_chip_html_starts_hidden():
     )
     assert m, "composerReasoningWrap must start with style='display:none'"
     assert 'data-effort="max"' in src, (
-        "composer reasoning dropdown must include Max option"
+        "composer reasoning dropdown must include Max"
+    )
+    assert 'data-effort="ultra"' in src, (
+        "composer reasoning dropdown must include Ultra for capable models"
     )
 
 
