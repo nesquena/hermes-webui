@@ -1541,14 +1541,14 @@ async function send(){
         if(typeof renderSessionList==='function') await renderSessionList();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
-      const _metadataSid=S.session&&S.session.session_id;
+      const _metadataSid=await _ensureSlashOwner();
+      if(!_metadataSid)return;
       const _agentCmd=typeof getAgentCommandMetadata==='function'
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
-      if(_metadataSid&&!_slashOwnerIsCurrent(_metadataSid))return;
+      if(!_slashOwnerIsCurrent(_metadataSid))return;
       if(_agentCmd&&_agentCmd.cli_only){
-        const _cliOnlySid=await _ensureSlashOwner();
-        if(!_cliOnlySid)return;
+        const _cliOnlySid=_metadataSid;
         if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
@@ -1558,8 +1558,7 @@ async function send(){
       }
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
-        const _agentCommandSid=await _ensureSlashOwner();
-        if(!_agentCommandSid)return;
+        const _agentCommandSid=_metadataSid;
         if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _agentOutput='(no output)';
@@ -1577,8 +1576,7 @@ async function send(){
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
-        const _pluginCommandSid=await _ensureSlashOwner();
-        if(!_pluginCommandSid)return;
+        const _pluginCommandSid=_metadataSid;
         if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _pluginOutput='(no output)';
@@ -1597,8 +1595,7 @@ async function send(){
       }
       if(_agentCmdName==='moa'){
         const _moaArgs=(text.split(/\s+/).slice(1).join(' ')||'').trim();
-        const _moaCommandSid=await _ensureSlashOwner();
-        if(!_moaCommandSid)return;
+        const _moaCommandSid=_metadataSid;
         if(!_moaArgs){
           let _moaUsage='/moa <prompt>';
           try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
@@ -1624,11 +1621,11 @@ async function send(){
           renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
         }
       }
+      const _bundleMetadataSid=_metadataSid;
       const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'
         ? await getBundleCommandMetadata(_parsedCmd.name)
         : null;
-      const _bundleMetadataSid=_metadataSid||S.session&&S.session.session_id;
-      if(_bundleMetadataSid&&!_slashOwnerIsCurrent(_bundleMetadataSid))return;
+      if(!_slashOwnerIsCurrent(_bundleMetadataSid))return;
       if(_bundleCmd){
         try{
           const _bundleResolved=typeof resolveBundleCommand==='function'
@@ -1641,8 +1638,7 @@ async function send(){
           text=_bundleMessage;
         }catch(e){
           if(_bundleMetadataSid&&!_slashOwnerIsCurrent(_bundleMetadataSid))return;
-          const _bundleErrorSid=await _ensureSlashOwner();
-          if(!_bundleErrorSid)return;
+          const _bundleErrorSid=_bundleMetadataSid;
           if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
@@ -1651,6 +1647,7 @@ async function send(){
           $('msg').value='';autoResize();hideCmdDropdown();return;
         }
       }
+      if(!_slashOwnerIsCurrent(_metadataSid))return;
     }
   }
   if(!S.session){await newSession();await renderSessionList();}

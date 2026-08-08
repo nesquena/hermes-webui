@@ -921,8 +921,32 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
   if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
 }
 
+let _manualCompressionOperation = null;
+let _manualCompressionOperationSerial = 0;
+function _beginManualCompressionOperation(sid){
+  if(!sid) return null;
+  if(_manualCompressionOperation&&_manualCompressionOperation.sid===sid) return null;
+  const operation={sid,id:++_manualCompressionOperationSerial,uiFinalized:false};
+  _manualCompressionOperation=operation;
+  return operation;
+}
+function _settleManualCompressionOperation(operation){
+  if(!operation||_manualCompressionOperation!==operation)return;
+  const sameSession=!!(S.session&&S.session.session_id===operation.sid);
+  const newerStream=!!(sameSession&&(S.activeStreamId||S.session.active_stream_id));
+  if(sameSession&&!operation.uiFinalized&&typeof clearCompressionUi==='function') clearCompressionUi();
+  if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
+  if(sameSession&&!newerStream){
+    if(typeof setBusy==='function') setBusy(false);
+    if(typeof setComposerStatus==='function') setComposerStatus('');
+  }
+  _manualCompressionOperation=null;
+}
+
 async function resumeManualCompressionForSession(sid){
   if(!sid) return;
+  const operation=_beginManualCompressionOperation(sid);
+  if(!operation)return;
   let ownerGeneration=null;
   const ownerStateIsCurrent=()=>!!(
     S.session&&S.session.session_id===sid
@@ -958,7 +982,8 @@ async function resumeManualCompressionForSession(sid){
       : {sessionId:sid,generation:typeof _messagesGeneration==='number'?_messagesGeneration:0,used:false};
     const done=await _pollManualCompressionResult(sid);
     if(!S.session||S.session.session_id!==sid||!_transcriptReplacementIsCurrent(pollTicket)) return;
-    await _applyManualCompressionResult(done, status.focus_topic||'', visibleCount, status.focus_topic?`/compress ${status.focus_topic}`:'/compress', pollTicket);
+    const applied=await _applyManualCompressionResult(done, status.focus_topic||'', visibleCount, status.focus_topic?`/compress ${status.focus_topic}`:'/compress', pollTicket);
+    if(applied!==false) operation.uiFinalized=true;
     if(pollTicket.committedGeneration!==undefined) ownerGeneration=pollTicket.committedGeneration;
   }catch(e){
     // No active compression job or transient server error — not a real failure.
@@ -976,14 +1001,11 @@ async function resumeManualCompressionForSession(sid){
         anchorVisibleIdx:Math.max(0, visibleMessages.length-1),
         anchorMessageKey:null,
       });
+      operation.uiFinalized=true;
       renderMessages();
     }
   }finally{
-    if(ownerStateIsCurrent()){
-      if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
-      if(typeof setBusy==='function') setBusy(false);
-      if(typeof setComposerStatus==='function') setComposerStatus('');
-    }
+    _settleManualCompressionOperation(operation);
   }
 }
 
@@ -992,6 +1014,8 @@ async function _runManualCompression(focusTopic){
   let visibleCount=0;
   let ownerGeneration=null;
   const ownerSid=S.session.session_id;
+  const operation=_beginManualCompressionOperation(ownerSid);
+  if(!operation)return;
   const ownerStateIsCurrent=()=>!!(
     S.session&&S.session.session_id===ownerSid
     && (ownerGeneration===null||_messagesGeneration===ownerGeneration)
@@ -1063,7 +1087,8 @@ async function _runManualCompression(focusTopic){
     }
     const data=(started&&started.status==='done')?started:await _pollManualCompressionResult(sid);
     if(!S.session||S.session.session_id!==sid||!_transcriptReplacementIsCurrent(runTicket)) return;
-    await _applyManualCompressionResult(data, focusTopic, visibleCount, commandText, runTicket);
+    const applied=await _applyManualCompressionResult(data, focusTopic, visibleCount, commandText, runTicket);
+    if(applied!==false) operation.uiFinalized=true;
     if(runTicket.committedGeneration!==undefined) ownerGeneration=runTicket.committedGeneration;
   }catch(e){
     if(!ownerStateIsCurrent()) return;
@@ -1079,6 +1104,7 @@ async function _runManualCompression(focusTopic){
         anchorVisibleIdx: Math.max(0, visibleCount - 1),
         anchorMessageKey:null,
       });
+      operation.uiFinalized=true;
     }
     if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
     if(typeof setBusy==='function') setBusy(false);
@@ -1086,8 +1112,9 @@ async function _runManualCompression(focusTopic){
     renderMessages();
     showToast('Compression failed: '+e.message);
     return;
+  }finally{
+    _settleManualCompressionOperation(operation);
   }
-  if(ownerStateIsCurrent()&&typeof setBusy==='function') setBusy(false);
 }
 
 async function cmdCompress(args){
