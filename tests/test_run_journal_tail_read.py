@@ -1476,8 +1476,11 @@ def test_read_jsonl_tail_boundary_scan_uses_shared_budget_no_read_after_exhausti
     )
     # (b) The SAME shared _ReadBudget threads through find + extract + valid.
     # (The predecessor scan only runs on rejection; here the valid done is
-    # accepted so the predecessor helper is not reached — that path is covered
-    # by test_backward_scan_budget_bounds_physical_descriptor_reads.)
+    # accepted so the predecessor helper is not reached. r11: the predecessor
+    # scan now gets its OWN reserve budget separate from this shared meter, so
+    # a >=budget invalid oversized record can't starve it — that is covered by
+    # test_predecessor_recovery_not_starved_by_validity_proof_budget and
+    # test_backward_scan_budget_bounds_physical_descriptor_reads.)
     assert budget_ids_seen["find"], "boundary lookup received no budget (budget=None) — not shared"
     assert budget_ids_seen["extract"], "prefix extraction received no budget (budget=None) — not shared"
     assert budget_ids_seen["valid"], "validity proof received no budget (budget=None) — not shared"
@@ -1604,3 +1607,190 @@ def test_balanced_invalid_oversized_boundary_record_malformed_nested_value(tmp_p
         f"(malformed-nested-value) oversized boundary record"
     )
     assert summary["terminal_state"] != "completed"
+
+
+def test_latest_run_summary_physical_read_bounded_constant_across_file_size(tmp_path, monkeypatch):
+    """Regression (reviewer round 11, blocker): ``latest_run_summary`` must read
+    at most ~1.5x the tail window of physical descriptor bytes REGARDLESS of file
+    size. The r10 production path did an O(file-size) ``fh.seek(0)`` head scan in
+    64 KiB chunks just to count newlines for line attribution in ``malformed``
+    entries — which ``latest_run_summary`` DISCARDS (``events, _malformed = ...``).
+    That scan was NOT charged to the budget, so physical reads scaled with file
+    size: a 72 MiB journal read 79.7 MiB physically (19x the 4 MiB tail cap).
+
+    The fix threads ``attribute_lines=False`` from both summary readers, skipping
+    the head scan. This test instruments ``fh.read`` to sum physical descriptor
+    bytes returned and asserts the read stays CONSTANT (within a small margin)
+    as the journal grows from 8x to 16x the tail window — proving the read is
+    bounded by the tail window, not the file size. A regression that re-enables
+    the head scan (or any unattributed O(file-size) read) fails: physical bytes
+    grow ~linearly with file size, far exceeding the 1.5x cap threshold."""
+    from pathlib import Path
+    from api import run_journal
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, latest_run_summary
+
+    cap = _SESSION_REPLAY_MAX_BYTES
+
+    # A counting file handle that sums bytes returned by read().
+    class _CountingHandle:
+        def __init__(self, real):
+            self._real = real
+            self.total_returned = 0
+        def fileno(self): return self._real.fileno()
+        def seek(self, *a, **kw): return self._real.seek(*a, **kw)
+        def read(self, n=-1):
+            data = self._real.read(n)
+            self.total_returned += len(data)
+            return data
+        def write(self, b):
+            return self._real.write(b)
+        def close(self): return self._real.close()
+        def __enter__(self): return self
+        def __exit__(self, *a): return self._real.__exit__(*a)
+
+    real_open = Path.open
+    captured = {}
+
+    def patched_open(self, *args, **kwargs):
+        real = real_open(self, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if "b" in mode:
+            h = _CountingHandle(real)
+            captured["handle"] = h
+            return h
+        return real
+
+    def make_journal(target_bytes, session_id, run_id):
+        path = tmp_path / "_run_journal" / session_id / f"{run_id}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line_tmpl = '{"seq":%d,"event":"token","payload":{"t":"%s"}}\n'
+        seq = 0
+        written = 0
+        with path.open("wb") as fh:
+            while written < target_bytes:
+                chunk = line_tmpl % (seq, "x" * 40)
+                b = chunk.encode("utf-8")
+                fh.write(b)
+                written += len(b)
+                seq += 1
+            done = ('{"seq":%d,"event":"done","terminal":true,'
+                    '"terminal_state":"completed","payload":{"ok":1}}\n' % seq)
+            fh.write(done.encode("utf-8"))
+        return path
+
+    monkeypatch.setattr(Path, "open", patched_open)
+    measured = []
+    for multiple in (8, 12, 16):
+        target = multiple * cap
+        captured.clear()
+        # Each session/run pair is distinct so the summary cache can't short-circuit.
+        sid = f"sess_scale_{multiple}"
+        rid = f"run_scale_{multiple}"
+        make_journal(target, sid, rid)
+        summary = latest_run_summary(sid, rid, session_dir=tmp_path)
+        assert summary["terminal_state"] == "completed", (
+            f"sanity: the run must be completed (got {summary['terminal_state']!r}); "
+            f"if not, the scale test's fixture is broken, not the bound"
+        )
+        handle = captured.get("handle")
+        assert handle is not None, "patched Path.open never returned a binary handle"
+        measured.append(handle.total_returned)
+
+    # The headline assertion: physical read must NOT grow with file size. The
+    # journal grows 8x -> 16x cap (doubling), so physical reads must stay roughly
+    # constant. We assert (a) every measurement is <= 1.5x cap, and (b) the
+    # largest is not meaningfully larger than the smallest (no O(file-size) leak).
+    for i, phys in enumerate(measured):
+        multiple = (8, 12, 16)[i]
+        assert phys <= int(1.5 * cap), (
+            f"latest_run_summary read {phys} bytes ({phys/cap:.2f}x cap) for a "
+            f"{multiple}x-cap journal — exceeds the 1.5x cap bound. Physical reads "
+            f"are NOT bounded by the tail window (#6139 r11 blocker: the discarded "
+            f"head is being scanned for line attribution that summary readers discard)"
+        )
+    # (b) The read must be CONSTANT, not scaling: the 16x journal must not read
+    # meaningfully more than the 8x journal. Allow a small margin (one extra chunk
+    # boundary) for the boundary-record validity proof landing at a slightly
+    # different chunk offset. A mutation that re-adds the head scan makes the
+    # largest ~2x the smallest.
+    assert measured[2] <= measured[0] + 2 * run_journal._SESSION_REPLAY_READ_CHUNK_BYTES, (
+        f"physical reads grew with file size: 8x-cap={measured[0]}, 12x-cap="
+        f"{measured[1]}, 16x-cap={measured[2]} — the read is O(file-size), not "
+        f"bounded by the tail window (#6139 r11 blocker)"
+    )
+
+
+def test_predecessor_recovery_not_starved_by_validity_proof_budget(tmp_path):
+    """Regression (reviewer round 11, secondary): a >=budget invalid oversized
+    boundary record must NOT starve predecessor recovery. Under r10 the boundary
+    lookup, prefix extraction, validity proof, AND the backward predecessor scan
+    shared ONE ``_ReadBudget(2*cap)``. An invalid oversized record ~= the full
+    budget (e.g. an 8 MiB balanced-invalid record against an 8 MiB budget) let
+    the validity proof charge the record's full length, exhausting the meter
+    before the backward predecessor scan could recover the preceding valid
+    terminal ``done`` — so a legitimately COMPLETED run was misreported
+    non-terminal (master ``completed``/last_seq 3 -> candidate ``running``/
+    last_seq 3, because the preceding ``done`` (seq=1) was lost).
+
+    The fix gives predecessor recovery its OWN reserved allowance separate from
+    the validity-proof budget, so a large validity charge can't starve it. This
+    test reproduces the layout: a valid ``done`` (seq=1) followed by an invalid
+    oversized boundary record ~= the full 2*cap budget, followed by a trailing
+    valid token (seq=3) that forces the boundary into the oversized record. The
+    preceding terminal must be recovered (terminal_state == completed)."""
+    from api.run_journal import (
+        _SESSION_REPLAY_MAX_BYTES,
+        _read_jsonl,
+        _read_jsonl_tail,
+        latest_run_summary,
+    )
+
+    cap = _SESSION_REPLAY_MAX_BYTES
+    budget = 2 * cap  # the shared boundary-recovery budget (r10 size)
+    # A valid terminal done that MUST survive predecessor recovery.
+    valid_done = ('{"seq":1,"event":"done","terminal":true,'
+                  '"terminal_state":"completed","payload":{"ok":1}}\n')
+    # An INVALID oversized record ~= the full budget. Brace-balanced + newline-
+    # terminated but with a trailing comma -> invalid JSON. The validity proof
+    # reads the record's full length, which under r10 exhausted the shared budget.
+    big = "Q" * (budget - 500)
+    invalid_oversized = (
+        '{"seq":2,"event":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"t":"' + big + '"},}\n'
+    )
+    # A trailing valid token so the tail window's boundary lands inside seq=2.
+    trailing = '{"seq":3,"event":"token","payload":{"t":"z"}}\n'
+    path = tmp_path / "_run_journal" / "s1" / "r1.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as fh:
+        fh.write(valid_done.encode("utf-8"))
+        fh.write(invalid_oversized.encode("utf-8"))
+        fh.write(trailing.encode("utf-8"))
+    assert path.stat().st_size > cap, "sanity: the journal must exceed the tail window"
+
+    # Ground truth: the full reader keeps the valid done (seq=1) + trailing token.
+    full_events, _ = _read_jsonl(path)
+    full_seqs = {e.get("seq") for e in full_events if isinstance(e, dict)}
+    assert 1 in full_seqs and 2 not in full_seqs and 3 in full_seqs, (
+        f"baseline: full reader keeps seq=1 (valid done) + seq=3 (token), rejects "
+        f"seq=2 (invalid); got {full_seqs}"
+    )
+
+    tail_events, _ = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
+    tail_seqs = {e.get("seq") for e in tail_events if isinstance(e, dict)}
+    assert 1 in tail_seqs, (
+        f"the preceding valid terminal (seq=1) was NOT recovered under a "
+        f">=budget invalid oversized boundary record (tail_seqs={tail_seqs}); the "
+        f"validity-proof budget exhausted the predecessor-recovery allowance "
+        f"(#6139 r11 secondary: budget starvation misreports a completed run)"
+    )
+    # The completed run must be reported completed, matching master.
+    summary = latest_run_summary("s1", "r1", session_dir=tmp_path)
+    assert summary["terminal_state"] == "completed", (
+        f"a completed run with a >=budget invalid oversized tail was misreported "
+        f"as {summary['terminal_state']!r} (expected 'completed'); the preceding "
+        f"terminal done was starved by the validity-proof budget (#6139 r11 secondary)"
+    )
+    assert summary["terminal"] is True, (
+        f"a completed run was misreported non-terminal (terminal={summary['terminal']})"
+    )
