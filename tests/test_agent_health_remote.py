@@ -293,3 +293,24 @@ def test_oversized_remote_body_does_not_hang_and_skips_parse(monkeypatch):
     assert captured_amt and all(a is not None for a in captured_amt)
     assert payload["alive"] is True
     assert "gateway_state" not in payload["details"]
+
+
+def test_remote_probe_timeout_absorbes_slow_health_answer(monkeypatch):
+    """#6730: the per-path probe timeout must be long enough that a slow
+    (/health > 2s on NAS-class hardware) but healthy gateway is not declared
+    remote_gateway_unreachable, while still being the exact value the probe
+    hands to the HTTP client."""
+    monkeypatch.setenv("HERMES_API_URL", "http://gateway:8080")
+    captured_timeouts: list[float | None] = []
+
+    def fake_urlopen(req, timeout=None):
+        captured_timeouts.append(timeout)
+        return _FakeResp(200)
+
+    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+        payload = agent_health.build_agent_health_payload()
+
+    assert payload["alive"] is True
+    assert captured_timeouts and captured_timeouts[0] == agent_health._REMOTE_PROBE_TIMEOUT_S
+    # Regression floor: 2.0s produced false-positive "not responding" banners.
+    assert captured_timeouts[0] >= 5.0
