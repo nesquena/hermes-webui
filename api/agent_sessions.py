@@ -569,6 +569,10 @@ def read_importable_agent_session_rows(
         origin_chat_id_expr = _optional_col('origin_chat_id', session_cols)
         origin_user_id_expr = _optional_col('origin_user_id', session_cols)
         platform_expr = _optional_col('platform', session_cols)
+        # #6843: imported/read-only rows (e.g. api_server) are archived by the
+        # WebUI directly in state.db (no sidecar); surface the flag so the
+        # sidebar can drop them from the default visible list.
+        archived_expr = _optional_col('archived', session_cols, '0')
         # Older/minimal state.db schemas can have NO ``messages`` table at all,
         # or a ``messages`` table without a ``session_id`` / ``timestamp`` column.
         # The projection SQL below joins ``messages`` and aggregates
@@ -679,6 +683,7 @@ def read_importable_agent_session_rows(
         select_sql = f"""
             SELECT s.id, s.title, s.model, s.message_count,
                    s.started_at, s.source,
+                   {archived_expr} AS archived,
                    {session_source_expr},
                    {user_id_expr},
                    {chat_id_expr},

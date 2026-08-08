@@ -7586,6 +7586,13 @@ def _load_cli_sessions_uncached(
         if _sidecar_meta.get('title'):
             _title = _sidecar_meta['title']
         _archived = bool(_sidecar_meta.get('archived'))
+        # #6843: imported/read-only rows (e.g. api_server) have no WebUI
+        # sidecar and are archived by the WebUI directly in state.db. When no
+        # sidecar exists, honor the state.db `archived` flag so archived
+        # foreign rows stop flooding the default sidebar; a WebUI sidecar (if
+        # present) still wins.
+        if not _archived and not (SESSION_DIR / f"{sid}.json").exists():
+            _archived = bool(row.get('archived'))
         _display_title = _title or f'{_source.title()} Session'
         cli_sessions.append({
             'session_id': sid,
@@ -9802,7 +9809,12 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
                 Returns True when every artifact is gone (or was absent).
                 """
                 if not is_safe_session_id(removed_id):
-                    return False
+                    # Non-path-safe ids (e.g. imported api_server rows like
+                    # ``miloco:...``) never have sidecar/artifact files on
+                    # disk — they are state.db-only rows. The DB row was
+                    # already deleted in the transaction above, so there is
+                    # nothing to clean and this is NOT a failure (#6843).
+                    return True
                 ok = True
                 for suffix in (".json", ".jsonl"):
                     artifact = sessions_dir / f"{removed_id}{suffix}"
