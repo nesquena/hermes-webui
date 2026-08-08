@@ -1347,30 +1347,22 @@ const _DEFAULT_MESSAGE_MODE_KEY='hermes-default-message-mode';
 //   PROFILE-NAMESPACED — `{ "<profile>": 0|1 }`. Values are written ONLY when
 //   a settings response (or the boot settings path) actually resolves the
 //   setting for the CURRENT profile; the fallback path never writes.
-// * Profile key resolution order (must be stable across the whole boot):
-//   1. `hermes_profile` cookie — set per-client by `/api/profile/switch`
-//      (api/helpers.py PROFILE_COOKIE_NAME), available synchronously at page
-//      load, BEFORE boot resolves S.activeProfile (which happens later in the
-//      async boot IIFE). This is what keeps a non-default profile's failed
-//      settings fetch from reading the `default` mirror entry.
-//   2. `S.activeProfile` — fallback for the default profile (no cookie set).
-//   3. `'default'` — final fallback; matches the server's default profile.
+// * Profile key resolution: `S.activeProfile` (initialized to 'default' at
+//   ui.js load, set to the real profile asynchronously via
+//   /api/profile/active during boot). The mirror is therefore only read once
+//   the profile is known — the settings-fetch-failure path defers its read
+//   until after _resolveActiveProfileBootstrapState() resolves (the
+//   hermes_profile cookie is HttpOnly and cannot be read from JS; see the
+//   deferred re-apply in the boot IIFE).
 // * Read semantics: `_readPersistedAutoScrollFollow()` returns the mirror
 //   entry for the CURRENT profile if present, else `true` (the config.py
-//   default). The boot fallback reads it; fresh users (no mirror) get ON.
+//   default). The deferred boot-failure re-apply reads it once the profile
+//   is known; fresh users (no mirror) get ON.
 // * Upgrade: there is no legacy global key; the mirror is created on first
 //   settings resolve, so older sessions simply default to ON until the next
 //   settings round-trip writes their profile entry.
 const _AUTO_SCROLL_FOLLOW_KEY='hermes-auto-scroll-follow';
-const _PROFILE_COOKIE_NAME='hermes_profile';
 function _autoScrollFollowProfileKey(){
-  // Cookie first: it is the per-client profile identity and is readable
-  // before S.activeProfile is initialized (boot resolves it later, after the
-  // settings fetch — see P1 review on #6856).
-  try{
-    const m=document.cookie.match(new RegExp('(?:^|;\\s*)'+_PROFILE_COOKIE_NAME+'=([^;]*)'));
-    if(m&&m[1]) return decodeURIComponent(m[1]);
-  }catch(_){}
   return (typeof S!=='undefined'&&S&&S.activeProfile)||'default';
 }
 function _persistAutoScrollFollow(enabled){
@@ -3491,7 +3483,14 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     // #6819: honor the persisted auto-follow preference on settings-fetch
     // failure instead of hardcoding ON (which silently clobbered an explicit
     // OFF and caused post-turn scroll yanks until the next refresh).
-    window._autoScrollFollow=_readPersistedAutoScrollFollow();
+    // NOTE: the mirror read is DEFERRED until after the active profile
+    // resolves (see the deferred re-apply below) — S.activeProfile is still
+    // 'default' here and the hermes_profile cookie is HttpOnly (unreadable
+    // from JS), so reading now would pick the wrong profile namespace.
+    // Set a safe default now; the profile-correct value lands right after
+    // _resolveActiveProfileBootstrapState() resolves.
+    window._autoScrollFollow=true;
+    window._autoScrollFollowDeferredReapply=true;
     window._composerControlVisibility=_composerControlVisibilityFromSettings(null);
     window._composerControlOrder=[];
     _applyComposerControlOrder(window._composerControlOrder);
@@ -3613,6 +3612,16 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if (activeProfileState.status === 'recovery-redirect') return;
   S.activeProfile = activeProfileState.profile;
   S.activeProfileIsDefault = activeProfileState.isDefault;
+  // #6819: settings-fetch-failure fallback deferred its auto-follow mirror
+  // read until the active profile resolved (S.activeProfile is only known
+  // asynchronously via /api/profile/active; the hermes_profile cookie is
+  // HttpOnly so document.cookie cannot read it). Apply the profile-correct
+  // mirror value now — and only if the settings fetch actually failed (the
+  // success path already applied+persisted the authoritative value above).
+  if(window._autoScrollFollowDeferredReapply){
+    window._autoScrollFollow=_readPersistedAutoScrollFollow();
+    window._autoScrollFollowDeferredReapply=false;
+  }
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
