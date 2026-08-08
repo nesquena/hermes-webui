@@ -481,7 +481,8 @@ long-term model themselves.
 | `interim_assistant` | `process_prose` activity event, often with an activity boundary. |
 | `reasoning` | `reasoning` activity event. |
 | `tool` with `event_type=tool.started` | `tool_started` activity event. |
-| `tool_complete` | `tool_completed` activity event. |
+| `tool_complete` | `tool_completed` activity event. A successful canonical workspace mutation causes the producer to emit a separate `artifact_reference` event. |
+| `artifact_reference` | Path-only produced-file or workspace-mutation reference owned by the same Anchor; not a Worklog row by default. |
 | future partial tool output | `tool_updated` activity event when a stable source exists. |
 | `compressing` | `lifecycle_status` activity event while live. |
 | `compressed` | `lifecycle_status` activity event while live; settled rendering may drop or fold it. |

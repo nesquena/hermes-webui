@@ -334,7 +334,9 @@ def test_session_payload_exposes_runtime_journal_for_stale_streams():
     assert "original_stream_id = getattr(s, \"active_stream_id\", None)" in ROUTES_SRC
     assert '"runtime_journal"' in ROUTES_SRC
     assert '"runtime_journal_snapshot"' in ROUTES_SRC
-    assert "_run_journal_live_snapshot(original_stream_id, handler=handler)" in ROUTES_SRC
+    assert "_run_journal_live_snapshot(" in ROUTES_SRC
+    assert "session_id=sid" in ROUTES_SRC
+    assert "workspace_id=canonical_workspace_identity" in ROUTES_SRC
     assert 'terminal_state = "lost-worker-bookkeeping"' in ROUTES_SRC
     assert "active=journal_active" in ROUTES_SRC
     assert "journal_active = bool(original_stream_id in active_stream_ids)" in ROUTES_SRC
@@ -638,6 +640,125 @@ def test_live_journal_snapshot_bounds_pathological_tool_args(monkeypatch):
     assert tool["args"]["command"] == long_command
     assert len(tool["args"]["items"]) <= 64
     assert len(json.dumps(snapshot, sort_keys=True)) < 200_000
+
+
+def test_live_journal_snapshot_uses_session_scoped_bounded_read(monkeypatch):
+    import api.routes as routes
+
+    captured = {}
+
+    def bounded_read(session_id, run_id, **kwargs):
+        captured["session_id"] = session_id
+        captured["run_id"] = run_id
+        captured["kwargs"] = kwargs
+        return {
+            "events": [
+                {
+                    "seq": 1,
+                    "event": "token",
+                    "event_id": f"{run_id}:1",
+                    "payload": {"text": "bounded"},
+                }
+            ]
+        }
+
+    monkeypatch.setattr(routes, "read_run_events", bounded_read)
+
+    snapshot = routes._run_journal_live_snapshot("run_scoped", session_id="session_scoped")
+
+    assert snapshot["session_id"] == "session_scoped"
+    assert captured["session_id"] == "session_scoped"
+    assert captured["run_id"] == "run_scoped"
+    assert captured["kwargs"]["max_bytes"] == routes._ANCHOR_JOURNAL_SNAPSHOT_MAX_BYTES
+    assert captured["kwargs"]["max_rows"] == routes._ANCHOR_JOURNAL_SNAPSHOT_MAX_ROWS
+
+
+def test_live_journal_snapshot_fails_closed_on_truncated_evidence(monkeypatch):
+    import api.routes as routes
+
+    workspace_id = "a" * 64
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, **kwargs: {
+            "truncated": True,
+            "events": [
+                {
+                    "seq": 1,
+                    "event": "artifact_reference",
+                    "event_id": f"{run_id}:1",
+                    "payload": {
+                        "kind": "workspace_file",
+                        "path": "reports/partial.md",
+                        "source_tool": "write_file",
+                        "workspace_id": workspace_id,
+                    },
+                }
+            ],
+        },
+    )
+
+    snapshot = routes._run_journal_live_snapshot(
+        "run_partial",
+        session_id="session_partial",
+        workspace_id=workspace_id,
+    )
+
+    assert snapshot["journal_truncated"] is True
+    assert snapshot["anchor_activity_scene"]["artifacts"] == []
+
+
+def test_live_journal_snapshot_drops_foreign_workspace_artifact_but_keeps_prose(
+    monkeypatch,
+    tmp_path,
+):
+    import api.routes as routes
+    from api.artifact_references import canonical_workspace_identity
+
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    workspace_a_id = canonical_workspace_identity(workspace_a)
+    workspace_b_id = canonical_workspace_identity(workspace_b)
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, **kwargs: {
+            "events": [
+                {
+                    "seq": 1,
+                    "event": "token",
+                    "event_id": f"{run_id}:1",
+                    "payload": {"text": "prose from session B"},
+                },
+                {
+                    "seq": 2,
+                    "event": "artifact_reference",
+                    "event_id": f"{run_id}:2",
+                    "payload": {
+                        "kind": "workspace_file",
+                        "path": "reports/from-a.md",
+                        "source_tool": "write_file",
+                        "workspace_id": workspace_a_id,
+                    },
+                },
+            ]
+        },
+    )
+
+    snapshot = routes._run_journal_live_snapshot(
+        "run-session-b",
+        session_id="session-b",
+        workspace_id=workspace_b_id,
+    )
+
+    assert snapshot["last_assistant_text"] == "prose from session B"
+    assert snapshot["anchor_activity_scene"]["artifacts"] == []
+    assert any(
+        row.get("role") == "prose" and row.get("text") == "prose from session B"
+        for row in snapshot["anchor_activity_scene"]["activity_rows"]
+    )
 
 
 def test_status_payload_marks_non_terminal_dead_journal_as_stale():
