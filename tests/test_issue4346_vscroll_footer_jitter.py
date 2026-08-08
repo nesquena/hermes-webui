@@ -439,34 +439,49 @@ console.log(JSON.stringify({
         assert out["flag_cleared"] is True
 
     def test_scroll_handler_safety_valve_in_source(self):
-        """The scroll handler contains a 150ms safety net that force-clears
-        _programmaticScroll if it's been set too long ago."""
-        assert '(performance.now()-_programmaticScrollSetAt)>150' in JS, \
-            "150ms safety valve not found in scroll handler"
+        """The scroll handler shares the 150ms programmatic-scroll freshness
+        contract instead of testing the latch boolean directly."""
+        assert 'const PROGRAMMATIC_SCROLL_VALID_MS=150;' in JS, \
+            "150ms programmatic-scroll freshness window not found"
+        assert 'function _freshProgrammaticScrollActive()' in JS, \
+            "programmatic-scroll freshness helper not found"
+        assert 'if(_freshProgrammaticScrollActive()) return;' in JS, \
+            "scroll handler does not use the freshness helper"
 
     def test_safety_valve_clears_stale_flag(self):
-        """Replicate the exact guard from the scroll handler, verify it clears
-        a 200ms-old flag and keeps a 50ms-old one."""
-        source = r"""
-function applyScrollGuard(flagValue, ageMs) {
-  let _programmaticScroll = flagValue;
-  const _programmaticScrollSetAt = Date.now() - ageMs;
-  const now = Date.now();
-  if (_programmaticScroll && (now - _programmaticScrollSetAt) > 150) _programmaticScroll = false;
-  return _programmaticScroll;
-}
+        """Run the production helper and verify it clears a 200ms-old flag and
+        keeps a 50ms-old one."""
+        source = f"""
+{_extract_func_script(JS)}
+const PROGRAMMATIC_SCROLL_VALID_MS = 150;
+let now = 1000;
+const performance = {{ now() {{ return now; }} }};
+let _programmaticScroll = false;
+let _programmaticScrollSetAt = 0;
+
+eval(extractFunc('_freshProgrammaticScrollActive'));
+
+function applyScrollGuard(flagValue, ageMs) {{
+  _programmaticScroll = flagValue;
+  _programmaticScrollSetAt = now - ageMs;
+  return _freshProgrammaticScrollActive();
+}}
 
 const staleResult = applyScrollGuard(true, 200);
+const staleFlagCleared = _programmaticScroll === false;
 const freshResult = applyScrollGuard(true,  50);
 
-console.log(JSON.stringify({
+console.log(JSON.stringify({{
   cleared_when_stale: staleResult === false,
+  flag_cleared_when_stale: staleFlagCleared,
   kept_when_fresh: freshResult === true,
-}));
+}}));
 """
         out = json.loads(_run_node(source))
         assert out["cleared_when_stale"] is True, \
             "safety valve did not clear a 200ms-stale flag"
+        assert out["flag_cleared_when_stale"] is True, \
+            "safety valve did not clear the stale latch"
         assert out["kept_when_fresh"] is True, \
             "safety valve incorrectly cleared a fresh flag"
 

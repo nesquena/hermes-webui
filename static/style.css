@@ -3718,6 +3718,18 @@ body.resizing .sidebar{transition:none!important;}
   border-radius:0;
   background:transparent;
 }
+/* #6454: on touch devices, grow the collapsed Worklog rail's tap target to clear the
+   44px minimum without changing the desktop look. The summary is the tap surface that
+   expands/collapses the settled Worklog, so it needs a comfortable touch height. */
+@media (hover:none) and (pointer:coarse){
+  .tool-worklog-summary{padding-top:8px;padding-bottom:8px;min-height:44px;}
+  .tool-worklog-group[data-tool-worklog-group="1"]:not([data-run-activity-group="1"]) .tool-worklog-summary{
+    padding-top:11px;
+    padding-bottom:11px;
+    min-height:44px;
+    box-sizing:border-box;
+  }
+}
 .tool-worklog-group[data-tool-worklog-group="1"]:not([data-run-activity-group="1"]) .tool-worklog-label{
   color:color-mix(in srgb,var(--muted) 74%,var(--bg));
   font-size:calc(var(--message-body-font-size) * .9);
