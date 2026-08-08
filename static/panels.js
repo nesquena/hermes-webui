@@ -8671,6 +8671,8 @@ function _preferencesPayloadFromUi(){
   if(showCliCb) payload.show_cli_sessions=showCliCb.checked;
   const showClaudeCodeCb=$('settingsShowClaudeCodeSessions');
   if(showClaudeCodeCb) payload.show_claude_code_sessions=showClaudeCodeCb.checked;
+  const showCodexCb=$('settingsShowCodexSessions');
+  if(showCodexCb) payload.show_codex_sessions=showCodexCb.checked;
   const showCronCb=$('settingsShowCronSessions');
   // Gate cron sessions on CLI sessions (the server short-circuits otherwise),
   // identically to the explicit saveSettings() path, so neither save route can
@@ -9290,10 +9292,17 @@ async function loadSettingsPanel(){
       showClaudeCodeCb.disabled=showCliCb?!showCliCb.checked:true;
       showClaudeCodeCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
+    const showCodexCb=$('settingsShowCodexSessions');
+    if(showCodexCb){
+      showCodexCb.checked=!!settings.show_codex_sessions;
+      showCodexCb.disabled=showCliCb?!showCliCb.checked:true;
+      showCodexCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
     if(showCliCb){showCliCb.addEventListener('change',function(){
       const enabled=!!showCliCb.checked;
       if(showCronCb) showCronCb.disabled=!enabled;
       if(showClaudeCodeCb) showClaudeCodeCb.disabled=!enabled;
+      if(showCodexCb) showCodexCb.disabled=!enabled;
       _schedulePreferencesAutosave();
     },{once:false});}
     const showCronCb=$('settingsShowCronSessions');
@@ -12476,6 +12485,7 @@ async function saveSettings(andClose){
   const fadeTextEffect=!!($('settingsFadeTextEffect')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
   const showClaudeCodeSessions=!!($('settingsShowClaudeCodeSessions')||{}).checked;
+  const showCodexSessions=!!($('settingsShowCodexSessions')||{}).checked;
   const showCronSessions=!!($('settingsShowCronSessions')||{}).checked;
   const showWebhookSessions=!!($('settingsShowWebhookSessions')||{}).checked;
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
@@ -12530,6 +12540,7 @@ async function saveSettings(andClose){
   body.show_cli_sessions=showCliSessions;
   // Persist the opt-out child independently; the read path applies the parent gate.
   body.show_claude_code_sessions=showClaudeCodeSessions;
+  body.show_codex_sessions=showCodexSessions;
   // Cron and webhook sessions are gated on CLI sessions (server short-circuits otherwise);
   // mirror the autosave path so the explicit Save Settings button persists them too. (#3514)
   body.show_cron_sessions=showCliSessions&&showCronSessions;
