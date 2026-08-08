@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in strict workspace registration for Add Space (#6424).** Deployments that must keep the agent/file-API trust boundary narrow can set `HERMES_WEBUI_STRICT_WORKSPACE_REGISTRATION=1` so `/api/workspaces/add` only accepts paths under the home directory, the default workspace, or roots listed in `HERMES_WEBUI_ALLOWED_WORKSPACE_ROOTS`. The default remains the existing external-mount registration contract (#953/#991); remote-terminal target paths are unchanged.
+
 ### Changed
 
 - **Active in-flight recovery snapshots are now sent in a compact transport form.** When you reload or reattach to a session with a run in progress, the `/api/session` payload no longer carries multiple redundant copies of each tool result and row value — it projects the live run-journal snapshot into a smaller, display-equivalent form (one authoritative source per value) while preserving the live message's timestamp so the reconstructed turn keeps stable identity. The durable journal and the canonical in-process snapshot are unchanged, so recovery renders identically with less payload. Thanks @allenliang2022. (#6858)
