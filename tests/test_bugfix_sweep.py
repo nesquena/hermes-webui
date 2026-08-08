@@ -166,3 +166,28 @@ def test_cancel_session_stream_closes_local_eventsource_on_failure_path():
 
     assert "closeLiveStream(sid,streamId" in helper or "closeLiveStream(sid, streamId" in helper
     assert "catch(e){/* cancel request failed - cleanup below still runs */}" not in helper
+
+
+def test_sessions_resume_handler_cleans_up_in_finally_and_returns_before_agent_lookup():
+    """#6224 regression: the /sessions & /resume slash handlers must clear the
+    composer/dropdown in a finally block — so when the browser opener or
+    renderSessionList() rejects, cleanup still runs and the rejection
+    propagates out of send() (send() still rejects). The success path must
+    return before the agent-command lookup."""
+    messages = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+
+    start = messages.index("_parsedCmd.name==='sessions'")
+    end = messages.index("const _agentCmd=")
+    block = messages[start:end]
+
+    # The handler is wrapped in try/finally; composer + dropdown cleanup
+    # live inside the finally block.
+    assert "try {" in block
+    assert "} finally {" in block
+    assert "$('msg').value='';autoResize();hideCmdDropdown();" in block
+    # The return sits AFTER the finally closes, so an exception from the
+    # browser opener / renderSessionList() runs the cleanup and then keeps
+    # propagating (send() rejects) — the finally must not swallow it.
+    assert "finally {\n          $('msg').value='';autoResize();hideCmdDropdown();\n        }\n        return;" in block
+    # Success path returns before the agent-command lookup below.
+    assert "getAgentCommandMetadata" not in block
