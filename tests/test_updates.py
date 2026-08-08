@@ -2013,3 +2013,55 @@ def test_check_for_updates_does_not_wait_for_straggler_threads(tmp_path, monkeyp
     assert 'error' in result['webui']
 
 
+def test_check_for_updates_aggregate_timeout_never_exceeds_budget(tmp_path, monkeypatch):
+    """When the first check consumes the full budget, the second future must
+    get only the remaining time, not a fresh timeout. (PR #6830, Greptile:
+    per-future waits exceed aggregate budget)"""
+    import threading
+    import time
+
+    webui_path = tmp_path / 'webui'
+    agent_path = tmp_path / 'agent'
+    webui_path.mkdir()
+    agent_path.mkdir()
+    (webui_path / '.git').mkdir()
+    (agent_path / '.git').mkdir()
+
+    agent_timeout_seen = []
+
+    # Real ThreadPoolExecutor, but we spy on future.result() to record
+    # the timeout the agent future receives.
+    _orig_result = type(threading.Thread()).result if False else None
+
+    def fake_check_repo(path, name, channel='stable'):
+        if name == 'webui':
+            time.sleep(2.0)  # consumes the budget
+            return {'name': 'webui', 'behind': 0, 'current_sha': 'x', 'latest_sha': 'x'}
+        return {'name': 'agent', 'behind': 0, 'current_sha': 'abc', 'latest_sha': 'abc'}
+
+    monkeypatch.setattr(updates, '_check_repo', fake_check_repo)
+    monkeypatch.setattr(updates, 'REPO_ROOT', webui_path)
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_path)
+    # Budget: 1s. WebUI sleeps 2s, so agent gets at most 1 - 2 = negative → floor 0.5s.
+    monkeypatch.setattr(updates, '_UPDATE_CHECK_BUDGET_S', 1, raising=False)
+
+    monkeypatch.setattr(updates, '_update_cache', {
+        'webui': None, 'agent': None, 'checked_at': 0,
+        'include_agent': True, 'channel': 'stable'
+    })
+
+    start = time.time()
+    result = updates.check_for_updates(force=True, include_agent=True, channel='stable')
+    elapsed = time.time() - start
+
+    # Total must be well under 2x budget — if the agent got a fresh 1s timeout
+    # this would take >3s (2s sleep + 1s agent timeout).
+    assert elapsed < 2.5, f'took {elapsed:.1f}s — likely gave agent a fresh budget'
+
+    # WebUI should have timed out (2s sleep > 1s budget)
+    assert result['webui'] is not None
+    assert 'error' in result['webui']
+    assert 'timed out' in result['webui']['error']
+
+    # Agent should have completed or timed out with the short remaining budget
+    assert result['agent'] is not None

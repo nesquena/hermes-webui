@@ -1387,9 +1387,12 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
             webui_future = executor.submit(_check_webui)
             agent_future = executor.submit(_check_agent) if include_agent else None
 
-            # Wait for both with bounded overall budget
+            budget_start = time.time()
+            remaining = _UPDATE_CHECK_BUDGET_S
+
+            # Wait for WebUI with the full remaining budget
             try:
-                webui_info = webui_future.result(timeout=_UPDATE_CHECK_BUDGET_S)
+                webui_info = webui_future.result(timeout=remaining)
             except (FutureTimeoutError, Exception) as e:
                 webui_future.cancel()
                 logger.warning('WebUI update check failed or timed out: %s', e)
@@ -1401,8 +1404,13 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
                 }
 
             if agent_future is not None:
+                # Give the second future only the remaining budget so the
+                # aggregate wait never exceeds _UPDATE_CHECK_BUDGET_S.
+                # (PR #6830, Greptile: per-future waits exceed aggregate)
+                elapsed = time.time() - budget_start
+                remaining = max(0.5, _UPDATE_CHECK_BUDGET_S - elapsed)
                 try:
-                    agent_info = agent_future.result(timeout=_UPDATE_CHECK_BUDGET_S)
+                    agent_info = agent_future.result(timeout=remaining)
                 except (FutureTimeoutError, Exception) as e:
                     agent_future.cancel()
                     logger.warning('Agent update check failed or timed out: %s', e)
