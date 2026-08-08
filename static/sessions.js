@@ -7643,12 +7643,18 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
 
 function _projectBindingsForNewSession(project){
   // Assemble the newSession options that carry a project's pinned context:
-  // workspace / model / model_provider / reasoning_effort. Only fields that
-  // are actually bound are forwarded — an unbound project creates sessions
-  // with the usual defaults.
+  // default workspace / model / model_provider / reasoning_effort. Only
+  // fields that are actually bound are forwarded — an unbound project
+  // creates sessions with the usual defaults.
   const o={};
   if(project){
-    if(project.workspace) o.workspace=project.workspace;
+    // Multi-workspace projects use the marked default (falls back to the
+    // first bound workspace; legacy single `workspace` field still works).
+    const ws=project.default_workspace
+      ||(Array.isArray(project.workspaces)&&project.workspaces[0])
+      ||project.workspace
+      ||null;
+    if(ws) o.workspace=ws;
     if(project.model) o.model=project.model;
     if(project.model_provider) o.model_provider=project.model_provider;
     if(project.reasoning_effort) o.reasoning_effort=project.reasoning_effort;
@@ -9471,7 +9477,7 @@ function _makeBindingsCombo(o){
   wrap.appendChild(trigger);
   wrap.appendChild(menu);
 
-  const state={value:(o&&o.value)||'', options:Array.isArray(o&&o.options)?o.options:[]};
+  const state={value:(o&&o.value)||'', options:Array.isArray(o&&o.options)?o.options:[], onChange:(o&&typeof o.onChange==='function')?o.onChange:null};
 
   function _currentOption(){
     return state.options.find(opt=>opt.value===state.value)||null;
@@ -9518,7 +9524,7 @@ function _makeBindingsCombo(o){
           state.value=opt.value;
           _renderTrigger();
           _close();
-          if(o&&typeof o.onChange==='function') o.onChange(opt);
+          if(typeof state.onChange==='function') state.onChange(opt);
         };
         menu.appendChild(row);
       });
@@ -9561,6 +9567,7 @@ function _makeBindingsCombo(o){
     getValue:()=>state.value,
     setValue:(v)=>{state.value=v||'';_renderTrigger();},
     setOptions:(opts)=>{state.options=Array.isArray(opts)?opts:[];_renderTrigger();},
+    setOnChange:(fn)=>{state.onChange=typeof fn==='function'?fn:null;},
   };
 }
 
@@ -9571,7 +9578,9 @@ function _makeBindingsCombo(o){
 function _showProjectBindingsDialog(proj){
   const overlay=document.createElement('div');
   overlay.className='project-bindings-overlay';
-  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9998;display:flex;align-items:center;justify-content:center;';
+  // z-index below the app dialog (1100) so showPromptDialog / confirm
+  // dialogs opened from inside the bindings dialog stay on top.
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1050;display:flex;align-items:center;justify-content:center;';
   const dialog=document.createElement('div');
   dialog.className='project-bindings-dialog';
   dialog.style.cssText='background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 20px;width:min(520px,92vw);max-height:80vh;overflow:auto;box-shadow:0 8px 32px rgba(0,0,0,.45);color:var(--text);font-size:13px;';
@@ -9591,29 +9600,163 @@ function _showProjectBindingsDialog(proj){
     return wrap;
   };
 
-  // ── Workspace: name-first combobox backed by the saved workspace list ──
-  const wsCombo=_makeBindingsCombo({
-    placeholder:'(none) — inherit default',
-    value:proj.workspace||'',
-    options:[{value:'',name:'(none) — inherit default'}],
+  // ── Workspace: multi-value list with default marking + add control ──
+  // Bound workspaces render as rows (name-first with path subtitle). One
+  // row can be marked default (used when the + button starts a session);
+  // the add combobox below pulls from saved workspaces or accepts a fresh
+  // path (server auto-registers it).
+  const wsList=[];   // [{value,name,sub}]
+  const wsListEl=document.createElement('div');
+  wsListEl.className='project-bindings-ws-list';
+  const _wsDefault=()=>wsList.find(x=>x.isDefault)||wsList[0]||null;
+
+  const _wsNameFromPath=(p)=>String(p||'').split(/[\\/]/).pop()||'';
+  function _seedWsList(){
+    const seeded=(Array.isArray(proj.workspaces)&&proj.workspaces.length)
+      ? proj.workspaces.map(p=>({value:p,name:_wsNameFromPath(p),sub:p}))
+      : (proj.workspace?[{value:proj.workspace,name:_wsNameFromPath(proj.workspace),sub:proj.workspace}]:[]);
+    wsList.length=0;
+    seeded.forEach(x=>wsList.push(x));
+    const def=proj.default_workspace||null;
+    if(def){
+      const hit=wsList.find(x=>x.value===def);
+      if(hit) hit.isDefault=true;
+      else if(wsList.length) wsList[0].isDefault=true;
+    }else if(wsList.length){
+      wsList[0].isDefault=true;
+    }
+    _renderWsList();
+  }
+  function _renderWsList(){
+    wsListEl.innerHTML='';
+    if(!wsList.length){
+      const empty=document.createElement('div');
+      empty.className='project-bindings-combo-empty';
+      empty.textContent='No workspaces bound';
+      wsListEl.appendChild(empty);
+      return;
+    }
+    wsList.forEach((item,idx)=>{
+      const row=document.createElement('div');
+      row.className='project-bindings-ws-row';
+      const info=document.createElement('div');
+      info.className='ws-row-info';
+      const n=document.createElement('div');
+      n.className='ws-row-name';
+      n.textContent=item.name||item.value;
+      info.appendChild(n);
+      const p=document.createElement('div');
+      p.className='ws-row-path';
+      p.textContent=item.sub||item.value;
+      info.appendChild(p);
+      row.appendChild(info);
+      const defBtn=document.createElement('button');
+      defBtn.type='button';
+      defBtn.className='ws-row-default'+(item.isDefault?' is-default':'');
+      defBtn.textContent=item.isDefault?'★ Default':'Set default';
+      defBtn.title='Use this workspace for new sessions from the + button';
+      defBtn.onclick=(e)=>{
+        e.stopPropagation();
+        wsList.forEach(x=>x.isDefault=false);
+        item.isDefault=true;
+        _renderWsList();
+      };
+      row.appendChild(defBtn);
+      const rm=document.createElement('button');
+      rm.type='button';
+      rm.className='ws-row-remove';
+      rm.textContent='×';
+      rm.title='Unbind this workspace';
+      rm.onclick=(e)=>{
+        e.stopPropagation();
+        wsList.splice(idx,1);
+        if(!_wsDefault()&&wsList.length) wsList[0].isDefault=true;
+        _renderWsList();
+      };
+      row.appendChild(rm);
+      wsListEl.appendChild(row);
+    });
+  }
+
+  // Add-workspace combobox: saved workspaces not yet bound + a "type a path"
+  // entry that opens a prompt (the server auto-registers fresh paths).
+  const addCombo=_makeBindingsCombo({
+    placeholder:'Add workspace…',
+    value:'',
+    options:[],
   });
-  dialog.appendChild(_field('Workspace',wsCombo.el));
-  // Fill options from /api/workspaces ({name, path}). Current binding is
-  // always present even if it was never added through Settings.
+  addCombo._customOption={value:'__custom_path__',name:'Type a path…',sub:'Enter a new workspace path'};
+  const addRow=document.createElement('div');
+  addRow.className='project-bindings-ws-add';
+  addRow.appendChild(addCombo.el);
+  const addBtn=document.createElement('button');
+  addBtn.type='button';
+  addBtn.className='ws-add-btn';
+  addBtn.textContent='Add';
+  const _applyAdd=(val)=>{
+    val=String(val||'').trim();
+    if(!val) return;
+    if(wsList.some(x=>x.value===val)){ showToast('Workspace already bound'); return; }
+    wsList.push({value:val,name:_wsNameFromPath(val),sub:val});
+    if(!_wsDefault()) wsList[0].isDefault=true;
+    addCombo.setValue('');
+    _renderWsList();
+  };
+  addCombo.setOnChange((opt)=>{
+    if(opt&&opt.value==='__custom_path__'){
+      // The combo selected the custom entry — clear it and prompt instead.
+      addCombo.setValue('');
+      showPromptDialog({
+        title:'Add workspace',
+        message:'Workspace path to bind to this project (auto-registered in the saved list):',
+        value:'',
+        placeholder:'D:\\projects\\…',
+        confirmLabel:'Add',
+      }).then(inp=>{
+        if(inp===null||inp===undefined) return;
+        _applyAdd(inp);
+      });
+    }
+  });
+  addBtn.onclick=()=>{ _applyAdd(addCombo.getValue()); };
+  addRow.appendChild(addBtn);
+  // Fill the add list with saved workspaces NOT already bound + custom entry.
   (async()=>{
     try{
       const wsRes=await api('/api/workspaces');
       const rows=(wsRes&&wsRes.workspaces||[]).map(w=>({
         value:w&&w.path||'',
-        name:(w&&w.name)||((w&&w.path)?String(w.path).split(/[\\/]/).pop():'')||'',
+        name:(w&&w.name)||_wsNameFromPath(w&&w.path)||'',
         sub:w&&w.path||'',
       })).filter(x=>x.value);
-      if(proj.workspace&&!rows.some(r=>r.value===proj.workspace)){
-        rows.unshift({value:proj.workspace,name:String(proj.workspace).split(/[\\/]/).pop(),sub:proj.workspace});
-      }
-      wsCombo.setOptions([{value:'',name:'(none) — inherit default'},...rows]);
-    }catch(_){ /* keep the (none) fallback */ }
+      addCombo.setOptions([addCombo._customOption,...rows]);
+    }catch(_){ addCombo.setOptions([addCombo._customOption]); }
   })();
+
+  const wsWrap=_field('Workspaces',wsListEl);
+  dialog.appendChild(wsWrap);
+  dialog.appendChild(addRow);
+
+  // ── Auto-assign checkbox: file every session in bound workspaces ──
+  const aaRow=document.createElement('label');
+  aaRow.className='project-bindings-auto-assign';
+  const aaCb=document.createElement('input');
+  aaCb.type='checkbox';
+  aaCb.checked=!!proj.auto_assign;
+  aaRow.appendChild(aaCb);
+  const aaText=document.createElement('span');
+  const aaTitle=document.createElement('div');
+  aaTitle.className='aa-label';
+  aaTitle.textContent='Auto-assign sessions by workspace';
+  const aaHint=document.createElement('div');
+  aaHint.className='aa-hint';
+  aaHint.textContent='All existing and future sessions in the bound workspaces are filed under this project.';
+  aaText.appendChild(aaTitle);
+  aaText.appendChild(aaHint);
+  aaRow.appendChild(aaText);
+  dialog.appendChild(aaRow);
+
+  _seedWsList();
 
   // ── Model: name-first combobox cloned from the composer modelSelect ──
   const modelOptions=[{value:'',name:'(none) — inherit default'}];
@@ -9661,12 +9804,16 @@ function _showProjectBindingsDialog(proj){
   };
   btnRow.appendChild(_btn('Cancel','background:transparent;color:var(--muted);',()=>{overlay.remove();}));
   btnRow.appendChild(_btn('Save','background:var(--accent,#6366f1);color:#fff;border-color:transparent;',async()=>{
-    const wsVal=wsCombo.getValue();
     const modelVal=modelCombo.getValue();
     const effortVal=effortCombo.getValue();
     const fields={};
-    // Workspace: empty → unbind; non-empty → bind (server validates + auto-registers).
-    fields.workspace=wsVal||null;
+    // Workspaces: the current list (empty → unbind all). Send the array so
+    // the server replaces the full binding; null clears.
+    const wsPaths=wsList.map(x=>x.value).filter(Boolean);
+    fields.workspaces=wsPaths.length?wsPaths:null;
+    const def=_wsDefault();
+    fields.default_workspace=(def&&def.value)||null;
+    fields.auto_assign=!!aaCb.checked;
     // Model: empty → unbind; else bind model (+ provider from the option).
     if(modelVal){
       fields.model=modelVal;
@@ -9771,15 +9918,18 @@ function _showProjectContextMenu(e, proj, chip){
   bindSep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
   menu.appendChild(bindSep);
 
-  // ── Project bindings: workspace / model / reasoning effort ──────────────
-  // One entry opens a modal dialog where all three fields are comboboxes
-  // (workspace: input+datalist of saved paths; model: dropdown cloned from
-  // the composer modelSelect; effort: the standard effort ladder). Each
-  // field has a "(none)" option to unbind it individually.
+  // ── Project bindings: workspaces / model / reasoning effort ─────────────
+  // One entry opens a modal dialog with a multi-workspace list (default
+  // marked, add/remove), an auto-assign toggle, and single-value model +
+  // effort dropdowns. Each field keeps its unbind affordance.
   const boundParts=[];
-  if(proj.workspace) boundParts.push('ws');
+  const boundWsCount=(Array.isArray(proj.workspaces)&&proj.workspaces.length)
+    ? proj.workspaces.length
+    : (proj.workspace?1:0);
+  if(boundWsCount) boundParts.push('ws×'+boundWsCount);
   if(proj.model) boundParts.push('model');
   if(proj.reasoning_effort) boundParts.push('effort:'+proj.reasoning_effort);
+  if(proj.auto_assign) boundParts.push('auto');
   const bindItem=document.createElement('div');
   bindItem.textContent=boundParts.length
     ? 'Bindings… ('+boundParts.join(' · ')+')'

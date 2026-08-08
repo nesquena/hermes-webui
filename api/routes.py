@@ -534,6 +534,125 @@ def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
     return _profiles_match(session_profile, active_profile)
 
 
+def _project_workspaces(proj) -> list:
+    """Return a project's bound workspace paths (multi-value canonical form).
+
+    Prefers the ``workspaces`` list; falls back to the legacy single
+    ``workspace`` field so pre-migration projects keep working.
+    """
+    if not isinstance(proj, dict):
+        return []
+    ws = proj.get("workspaces")
+    if isinstance(ws, list):
+        return [str(p) for p in ws if p]
+    legacy = proj.get("workspace")
+    return [str(legacy)] if legacy else []
+
+
+def _project_default_workspace(proj) -> str | None:
+    """Return the workspace used for new sessions (default → first bound)."""
+    if not isinstance(proj, dict):
+        return None
+    dw = proj.get("default_workspace")
+    if dw:
+        return str(dw)
+    ws = _project_workspaces(proj)
+    return ws[0] if ws else None
+
+
+def _apply_project_auto_assign(proj) -> int:
+    """File every existing session whose workspace is bound to ``proj`` under it.
+
+    Iterates the session index (metadata rows only — cheap), and for each
+    session whose workspace matches one of the project's bound workspaces,
+    sets ``project_id`` on the session and saves it. Actively-streaming
+    sessions are updated on the live cached object (the streaming thread's
+    own save persists it), mirroring the projects/delete unlink path.
+
+    Returns the number of sessions reassigned. Runs in a background thread
+    from /api/projects/bind so a large index never stalls the response.
+    """
+    if not SESSION_INDEX_FILE.exists():
+        return 0
+    bound = set(_project_workspaces(proj))
+    if not bound:
+        return 0
+    pid = proj.get("project_id")
+    profile = proj.get("profile") or "default"
+    try:
+        index = json.loads(SESSION_INDEX_FILE.read_bytes())
+    except Exception:
+        return 0
+    active_ids = set(_active_stream_ids())
+    changed = 0
+    deferred_to_stream = 0
+    for entry in index:
+        if entry.get("profile") not in (None, profile, "default"):
+            # Cross-profile sessions are never touched by another profile's
+            # project (mirrors the profile-scoping rule on the bind route).
+            continue
+        ws = entry.get("workspace")
+        if not ws or str(ws) not in bound:
+            continue
+        sid = entry.get("session_id")
+        if not sid or entry.get("project_id"):
+            # Already filed somewhere (this project or another) — never steal
+            # a session the user (or another auto-assign) has placed. Auto-
+            # assign only sweeps up unowned sessions in the bound workspace.
+            continue
+        try:
+            if entry.get("active_stream_id") in active_ids:
+                with LOCK:
+                    cached = SESSIONS.get(sid)
+                    if cached is not None:
+                        cached.project_id = pid
+                        changed += 1
+                        deferred_to_stream += 1
+                        continue
+            s = get_session(sid)
+            if s is None:
+                continue
+            s.project_id = pid
+            s.save()
+            changed += 1
+        except Exception:
+            logger.debug("auto-assign: failed to update session %s", sid)
+    if deferred_to_stream:
+        logger.info(
+            "auto-assign %s: %d session(s) updated in-cache; streaming thread will persist",
+            pid, deferred_to_stream,
+        )
+    logger.info("auto-assign %s: filed %d session(s) by workspace", pid, changed)
+    return changed
+
+
+def _auto_assign_project_for_workspace(workspace, profile=None) -> str | None:
+    """Return the project_id that should own a NEW session in ``workspace``.
+
+    Scans projects with ``auto_assign`` enabled whose bound workspace list
+    contains ``workspace``. First match in the on-disk list order wins (the
+    same ordering /api/projects returns). Returns None when no project
+    claims the workspace.
+    """
+    if not workspace:
+        return None
+    try:
+        projects = load_projects()
+    except Exception:
+        return None
+    ws_str = str(workspace)
+    for p in projects:
+        if not p.get("auto_assign"):
+            continue
+        if p.get("profile") and profile and not _profiles_match(
+            p.get("profile"), profile
+        ):
+            continue
+        if ws_str in _project_workspaces(p):
+            return p.get("project_id")
+    return None
+
+
 def _is_profile_agnostic_foreign_session(cli_meta) -> bool:
     """Return whether a foreign-session row lives outside the Hermes profile tree.
 
@@ -14667,12 +14786,20 @@ def handle_post(handler, parsed) -> bool:
                 # thread the drain snapshot already missed).
                 if _register_background_commit_thread(t):
                     t.start()
+        # Project assignment: explicit project_id wins; otherwise, if an
+        # auto-assign project claims this workspace, the session is filed
+        # under it automatically (multi-workspace auto-classification).
+        project_id = body.get("project_id") or None
+        if not project_id and workspace:
+            project_id = _auto_assign_project_for_workspace(
+                workspace, profile=body.get("profile") or None
+            )
         s = new_session(
             workspace=workspace,
             model=model,
             model_provider=model_provider,
             profile=body.get("profile") or None,
-            project_id=body.get("project_id") or None,
+            project_id=project_id,
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,
         )
@@ -16548,10 +16675,20 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, {"ok": True, "project": proj})
 
     if parsed.path == "/api/projects/bind":
-        # Project bindings: attach a workspace / model / reasoning effort to a
+        # Project bindings: attach workspaces (multi-value, with one marked
+        # default), a model, a reasoning effort, and an auto-assign flag to a
         # project so the quick-create (+) button opens a new session already
-        # configured for that project's context. Each binding field is
-        # OPTIONAL in the body; passing null or '' unbinds that field.
+        # configured for that project's context, and (with auto_assign) every
+        # session in a bound workspace is filed under this project.
+        #
+        # Body fields (all optional):
+        #   workspaces: [str]        — replace the full workspace list
+        #   default_workspace: str   — must be in workspaces (auto-added if not)
+        #   auto_assign: bool        — auto-file sessions by workspace
+        #   workspace: str           — legacy single-workspace binding (kept for
+        #                              compat; maps to workspaces=[w])
+        #   model / model_provider   — single-value model binding (null clears)
+        #   reasoning_effort         — single-value effort binding (null clears)
         try:
             require(body, "project_id")
         except ValueError as e:
@@ -16568,29 +16705,98 @@ def handle_post(handler, parsed) -> bool:
         if not _profiles_match(proj.get("profile"), active_profile):
             return bad(handler, "Project not found", 404)
 
-        # workspace: null/'' clears the binding; a non-empty value must pass
-        # the same trusted-path validation as /api/session/new so a project
-        # can never pin a session to an untrusted or non-existent directory.
-        # The path is ALSO auto-registered in the saved workspace list so an
-        # admin-style path outside home (e.g. D:\projects\...) can be bound in
-        # one step instead of requiring a separate add-workspace round-trip.
-        if "workspace" in body:
-            ws = body.get("workspace")
-            if ws is None or str(ws).strip() == "":
-                proj.pop("workspace", None)
-            else:
-                ws_str = str(ws).strip()
+        def _resolve_ws_list(raw_list):
+            """Validate + canonicalize a list of workspace paths. Each entry
+            must pass the same trusted-path check as /api/session/new; paths
+            are ALSO auto-registered in the saved workspace list so an
+            admin-style path outside home can be bound in one step."""
+            out = []
+            for entry in raw_list or []:
+                if entry is None or str(entry).strip() == "":
+                    continue
+                ws_str = str(entry).strip()
                 try:
                     registered = validate_workspace_to_add(ws_str)
                     wss = load_workspaces()
                     if not any(w["path"] == str(registered) for w in wss):
                         wss.append({"path": str(registered), "name": registered.name})
                         save_workspaces(wss)
-                    proj["workspace"] = str(
-                        resolve_trusted_workspace(registered)
+                    out.append(str(resolve_trusted_workspace(registered)))
+                except (TypeError, ValueError) as e:
+                    raise ValueError(str(e)) from e
+            # Dedupe, keep order.
+            seen = set()
+            return [p for p in out if not (p in seen or seen.add(p))]
+
+        # ── Workspaces (multi-value) ──
+        if "workspaces" in body:
+            raw = body.get("workspaces")
+            if raw is None:
+                proj.pop("workspaces", None)
+                proj.pop("default_workspace", None)
+            else:
+                try:
+                    resolved = _resolve_ws_list(raw)
+                except ValueError as e:
+                    return bad(handler, str(e))
+                proj["workspaces"] = resolved
+                # Keep the default valid: drop a default no longer in the list.
+                if proj.get("default_workspace") not in resolved:
+                    proj.pop("default_workspace", None)
+
+        # ── Legacy single-workspace field (compat) ──
+        if "workspace" in body and "workspaces" not in body:
+            ws = body.get("workspace")
+            if ws is None or str(ws).strip() == "":
+                proj.pop("workspace", None)
+                proj.pop("workspaces", None)
+                proj.pop("default_workspace", None)
+            else:
+                try:
+                    resolved = _resolve_ws_list([ws])
+                except ValueError as e:
+                    return bad(handler, str(e))
+                if not resolved:
+                    proj.pop("workspace", None)
+                    proj.pop("workspaces", None)
+                    proj.pop("default_workspace", None)
+                else:
+                    proj["workspace"] = resolved[0]  # legacy alias
+                    proj["workspaces"] = resolved
+                    proj.setdefault("default_workspace", resolved[0])
+
+        # ── default_workspace ──
+        if "default_workspace" in body:
+            dw = body.get("default_workspace")
+            if dw is None or str(dw).strip() == "":
+                proj.pop("default_workspace", None)
+            else:
+                try:
+                    dw_resolved = str(
+                        resolve_trusted_workspace(str(dw).strip())
                     )
                 except (TypeError, ValueError) as e:
                     return bad(handler, str(e))
+                # Must be one of the bound workspaces — auto-add if needed so
+                # the invariant "default ∈ workspaces" always holds.
+                ws_list = proj.get("workspaces") or []
+                if dw_resolved not in ws_list:
+                    try:
+                        ws_list = _resolve_ws_list([*ws_list, dw_resolved])
+                    except ValueError as e:
+                        return bad(handler, str(e))
+                    proj["workspaces"] = ws_list
+                proj["default_workspace"] = dw_resolved
+                # Keep the legacy alias in sync.
+                if ws_list:
+                    proj["workspace"] = ws_list[0]
+
+        # ── auto_assign flag ──
+        if "auto_assign" in body:
+            if bool(body.get("auto_assign")):
+                proj["auto_assign"] = True
+            else:
+                proj.pop("auto_assign", None)
 
         # model / model_provider: pair stored verbatim; null/'' clears.
         if "model" in body:
@@ -16624,6 +16830,28 @@ def handle_post(handler, parsed) -> bool:
                 proj["reasoning_effort"] = effort
 
         save_projects(projects)
+
+        # When auto_assign is (now) enabled, file every existing session whose
+        # workspace is in this project's bound list under this project. Runs in
+        # a background thread so a large index doesn't stall the response.
+        if proj.get("auto_assign") and proj.get("workspaces"):
+            from api.session_lifecycle import _register_background_commit_thread
+
+            def _file_existing_sessions(_proj=dict(proj)):
+                try:
+                    _apply_project_auto_assign(_proj)
+                except Exception as exc:
+                    logger.warning("auto-assign for project %s failed: %s",
+                                   _proj.get("project_id"), exc)
+
+            t = threading.Thread(
+                target=_file_existing_sessions,
+                daemon=True,
+                name=f"auto-assign-{proj['project_id']}",
+            )
+            _register_background_commit_thread(t)
+            t.start()
+
         return j(handler, {"ok": True, "project": proj})
 
     if parsed.path == "/api/projects/delete":
