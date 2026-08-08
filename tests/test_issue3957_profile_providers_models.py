@@ -2835,3 +2835,247 @@ def test_streaming_checkpoint_no_agent_process_deadlock_cancel_exception(
     assert _snapshot_streaming_env() == env_before, (
         "streaming turn left stale raw env behind after teardown"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #6327 — B3: process-wakeup credential revalidation OUTSIDE the AGENT lock
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _run_process_wakeup_vs_streaming_deadlock(
+    monkeypatch, tmp_path, *, settlement, credential_recovered
+):
+    """Production-composed two-thread regression for the #6327 AB/BA cycle.
+
+    A REAL named-profile ``start_session_turn(source="process_wakeup")``
+    contender races a REAL ``_run_agent_streaming()`` turn on the
+    DYNAMIC/nonlegacy branch — the branch where full-turn
+    ``_PROCESS_ENV_OWNERSHIP_LOCK`` (PROCESS) ownership is UNCONDITIONAL
+    since #6327.  The streaming turn holds PROCESS for its whole lifetime and
+    waits for the per-session agent lock (AGENT) at writeback.  The wakeup
+    contender must therefore revalidate the paused credential pool OUTSIDE
+    AGENT: while it is blocked on PROCESS, AGENT must remain free — otherwise
+    the AB/BA cycle (streaming: PROCESS -> AGENT; wakeup: AGENT -> PROCESS)
+    deadlocks both threads.
+
+    ``settlement`` drives how the streaming turn ends: "normal" returns a
+    result, "cancel" sets the stream cancel event, "exception" raises a
+    simulated provider failure.  ``credential_recovered`` drives the (stubbed)
+    credential-pool leaf outcome: True clears the pause and starts a run,
+    False keeps the pause and returns the 409 suppressed-wakeup response.
+    """
+    import api.models as models
+    import api.routes as routes
+    import api.streaming as streaming
+
+    session, stream_id = _install_streaming_profile_env(
+        monkeypatch, tmp_path, {"alpha": "alpha-value", "beta": "beta-value"}
+    )
+    # DYNAMIC/nonlegacy branch: the unconditional full-turn PROCESS owner.
+    monkeypatch.setattr(
+        streaming,
+        "_set_streaming_hermes_home_override",
+        lambda home: (_StreamingFakeHomeOverride(), "tok", True),
+    )
+    monkeypatch.setattr(profiles, "_skill_modules_support_profile_home", lambda home: True)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ambient-value")
+
+    # The paused credential-pool wakeup lane the contender will revalidate.
+    pause = models.record_process_wakeup_provider_unavailable_pause(
+        session,
+        classification="credential_pool_empty",
+        model="test-model",
+        provider="test-provider",
+    )
+    assert pause and pause.get("paused")
+    assert models.process_wakeup_pause_matches(
+        session,
+        model="test-model",
+        provider="test-provider",
+        classification="credential_pool_empty",
+    )
+
+    # Production routes stubs that are orthogonal to the lock schedule: the
+    # REAL start_session_turn + REAL _process_wakeup_provider_has_recovery_credential
+    # (which enters the named detached profile scope and takes PROCESS) are
+    # exercised; only leaf resolution/run-dispatch are stubbed.
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
+    monkeypatch.setattr(
+        routes, "_resolve_chat_workspace_with_recovery", lambda s, w: str(tmp_path)
+    )
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda s, p: (None, None, None))
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda *a, **k: ("test-model", "test-provider", False),
+    )
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **k: None)
+    monkeypatch.setattr(
+        routes, "canonical_model_provider_lane", lambda m, p: ("test-model", "test-provider")
+    )
+    monkeypatch.setattr(
+        routes,
+        "provider_has_process_wakeup_recovery_credential",
+        lambda provider_id, refresh=False: credential_recovered,
+    )
+    start_run_calls = []
+    monkeypatch.setattr(
+        routes,
+        "_start_run",
+        lambda *a, **k: start_run_calls.append(k)
+        or {"_status": 200, "stream_id": "stub-stream", "session_id": session.session_id},
+    )
+
+    entered = threading.Event()
+    release_agent = threading.Event()
+    stream_done = threading.Event()
+    stream_exc: list[BaseException] = []
+
+    class _Agent(_StreamingFakeAgent):
+        def run_conversation(self, **kwargs):
+            entered.set()
+            if settlement == "cancel":
+                cancel_event = streaming.CANCEL_FLAGS.get(stream_id)
+                assert cancel_event is not None
+                cancel_event.set()
+            assert release_agent.wait(10)
+            if settlement == "exception":
+                raise RuntimeError("simulated provider failure")
+            history = list(kwargs.get("conversation_history") or [])
+            return {
+                "messages": history
+                + [
+                    {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                    {"role": "assistant", "content": "ok"},
+                ]
+            }
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: _Agent)
+    if settlement in ("cancel", "exception"):
+        monkeypatch.setattr(
+            streaming, "append_turn_journal_event_for_stream", lambda *a, **k: None
+        )
+        monkeypatch.setattr(streaming, "_finalize_cancelled_turn", lambda *a, **k: None)
+
+    proxy = _AttemptRecordingOwnershipLock(profiles._PROCESS_ENV_OWNERSHIP_LOCK)
+    monkeypatch.setattr(profiles, "_PROCESS_ENV_OWNERSHIP_LOCK", proxy)
+    env_before = _snapshot_streaming_env()
+
+    def stream_runner():
+        try:
+            streaming._run_agent_streaming(
+                session_id=session.session_id,
+                msg_text="hello",
+                model="test-model",
+                model_provider="test-provider",
+                workspace=str(tmp_path),
+                stream_id=stream_id,
+            )
+        except BaseException as exc:
+            stream_exc.append(exc)
+        finally:
+            stream_done.set()
+
+    t_stream = threading.Thread(target=stream_runner)
+    t_stream.start()
+    contender_done = threading.Event()
+    contender_exc: list[BaseException] = []
+    contender_out: dict = {}
+
+    def contender():
+        try:
+            contender_out["resp"] = routes.start_session_turn(
+                session.session_id, "wakeup", source="process_wakeup"
+            )
+        except BaseException as exc:
+            contender_exc.append(exc)
+        finally:
+            contender_done.set()
+
+    t_contender = threading.Thread(target=contender)
+    try:
+        assert entered.wait(15), "streaming turn never entered run_conversation"
+        # Streaming now holds PROCESS for the whole turn.  Arm the recording
+        # proxy and start the wakeup contender: its out-of-AGENT revalidation
+        # must attempt PROCESS and block on the streaming turn.
+        proxy.arm()
+        t_contender.start()
+        assert proxy.attempted.wait(10), (
+            "wakeup contender never attempted the ownership lock while streaming ran"
+        )
+        assert not contender_done.is_set(), (
+            "wakeup contender completed while streaming still held PROCESS"
+        )
+        # Deterministic barrier assertion: while the contender is BLOCKED on
+        # PROCESS, the per-session AGENT lock must be free.  Holding AGENT here
+        # would be the AB/BA half (streaming owns PROCESS and waits for AGENT).
+        agent_lock = config._get_session_agent_lock(session.session_id)
+        assert agent_lock.acquire(blocking=False), (
+            "wakeup contender held AGENT while blocked on PROCESS (AB/BA cycle)"
+        )
+        agent_lock.release()
+    finally:
+        release_agent.set()
+    t_stream.join(30)
+    assert not t_stream.is_alive(), "streaming thread deadlocked"
+    t_contender.join(30)
+    assert not t_contender.is_alive(), "wakeup contender thread deadlocked"
+    if stream_exc:
+        raise stream_exc[0]
+    if contender_exc:
+        raise contender_exc[0]
+
+    # Bounded settlement: no lock left held, ambient env restored exactly.
+    assert contender_done.is_set(), "wakeup contender never settled"
+    assert proxy.acquire(blocking=False), "a thread leaked the ownership lock"
+    proxy.release()
+    assert _snapshot_streaming_env() == env_before, (
+        "threads left stale raw env behind after settlement"
+    )
+
+    if credential_recovered:
+        assert start_run_calls, (
+            "recovered wakeup did not start a run after clearing the pause"
+        )
+        assert contender_out["resp"]["_status"] == 200
+        live_pause = getattr(session, "process_wakeup_pause", None)
+        assert not (isinstance(live_pause, dict) and live_pause.get("paused")), (
+            "recovered wakeup left the pause in place"
+        )
+    else:
+        assert not start_run_calls, "unrecovered wakeup must not start a run"
+        resp = contender_out["resp"]
+        assert resp["_status"] == 409, resp
+        live_pause = getattr(session, "process_wakeup_pause", None)
+        assert isinstance(live_pause, dict) and live_pause.get("paused") is True
+        assert int(live_pause.get("suppressed_count") or 0) >= 1, (
+            "suppressed wakeup did not record suppression metadata"
+        )
+    return contender_out["resp"]
+
+
+def test_process_wakeup_revalidation_outside_agent_lock_normal(
+    monkeypatch, tmp_path
+):
+    """Wakeup revalidation vs streaming normal settlement: no AB/BA (#6327 B3)."""
+    _run_process_wakeup_vs_streaming_deadlock(
+        monkeypatch, tmp_path, settlement="normal", credential_recovered=True
+    )
+
+
+def test_process_wakeup_revalidation_outside_agent_lock_cancel(
+    monkeypatch, tmp_path
+):
+    """Wakeup revalidation vs streaming cancel settlement: no AB/BA (#6327 B3)."""
+    _run_process_wakeup_vs_streaming_deadlock(
+        monkeypatch, tmp_path, settlement="cancel", credential_recovered=False
+    )
+
+
+def test_process_wakeup_revalidation_outside_agent_lock_exception(
+    monkeypatch, tmp_path
+):
+    """Wakeup revalidation vs streaming provider-exception settlement (#6327 B3)."""
+    _run_process_wakeup_vs_streaming_deadlock(
+        monkeypatch, tmp_path, settlement="exception", credential_recovered=False
+    )
