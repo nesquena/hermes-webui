@@ -3540,7 +3540,7 @@ def _filter_reasoning_efforts_for_provider(
     # ``ultra`` to the Responses API wire value ``max``. (#6018)
     if bare.startswith(("o1", "o3", "o4")):
         return [eff for eff in normalized if eff in {"low", "medium", "high"}]
-    if bare.startswith("gpt-5") and "gpt-5.6" not in bare:
+    if bare.startswith("gpt-5") and not _is_gpt_5_6_family(bare):
         return [eff for eff in normalized if eff not in {"max", "ultra"}]
 
     # Generic top tiers must not be advertised to providers whose native ladder
@@ -3967,8 +3967,16 @@ def _resolve_reasoning_context(
             if resolved_base_url is None:
                 resolved_base_url = str(inferred_base_url or "").strip() or None
         except Exception:
-            provider = str((cfg.get("model") or {}).get("provider") or "").strip().lower()
+            model_cfg = cfg.get("model")
+            if isinstance(model_cfg, dict):
+                provider = str(model_cfg.get("provider") or "").strip().lower()
     return model, _resolve_provider_alias(provider), resolved_base_url
+
+
+def _is_gpt_5_6_family(model_id: str | None) -> bool:
+    """Match GPT-5.6 and its variants without accepting lookalike versions."""
+    bare = str(model_id or "").strip().lower().rsplit("/", 1)[-1]
+    return re.match(r"^gpt-5\.6(?:$|[-_:])", bare) is not None
 
 
 def resolve_model_reasoning_efforts(
@@ -4051,7 +4059,9 @@ def _resolve_model_reasoning_efforts_impl(
         try:
             _, provider, resolved_base_url = resolve_model_provider(model)
         except Exception:
-            provider = str((cfg.get("model") or {}).get("provider") or "").strip().lower()
+            model_cfg = cfg.get("model")
+            if isinstance(model_cfg, dict):
+                provider = str(model_cfg.get("provider") or "").strip().lower()
 
     provider = _resolve_provider_alias(provider)
 
@@ -4156,9 +4166,11 @@ def _resolve_model_reasoning_efforts_impl(
     # GPT-5.6 top-tier support is a first-party transport contract. A stale or
     # negative registry answer must not erase it after explicit config has had
     # its higher precedence above.
-    if provider in {"openai-codex", "openai", "openai-api", "azure", "azure-openai"}:
-        bare_model = hinted_model.lower().rsplit("/", 1)[-1]
-        if "gpt-5.6" in bare_model:
+    if provider in {
+        "openai-codex", "openai", "openai-api", "azure", "azure-openai",
+        "azure-foundry",
+    }:
+        if _is_gpt_5_6_family(hinted_model):
             return _filter_reasoning_efforts_for_provider(
                 list(VALID_REASONING_EFFORTS), hinted_model, provider
             )
@@ -4248,9 +4260,9 @@ def coerce_reasoning_effort_for_model(
     # verbatim, which Z.AI would silently ignore. This keeps the value actually
     # sent in agreement with the UI (which offers no options for these models).
     if not supported:
-        if _zai_glm_reasoning_efforts_supported(model_id, provider_id) is False:
+        if _zai_glm_reasoning_efforts_supported(model, provider) is False:
             return ""
-        if raw in {"max", "ultra"} and not _provider_known_reasoning_capable(provider_id):
+        if raw in {"max", "ultra"} and not _provider_known_reasoning_capable(provider):
             return "xhigh"
         return raw
     if raw in supported:
@@ -4303,6 +4315,9 @@ def get_reasoning_status(
             if not resolve_base_url and model_cfg.get("base_url"):
                 resolve_base_url = str(model_cfg["base_url"]).strip()
 
+    resolve_model, resolve_provider, resolve_base_url = _resolve_reasoning_context(
+        resolve_model, resolve_provider, resolve_base_url
+    )
     supported_efforts = resolve_model_reasoning_efforts(
         resolve_model,
         provider_id=resolve_provider,
