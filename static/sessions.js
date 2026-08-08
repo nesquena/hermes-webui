@@ -4797,17 +4797,48 @@ function _playSessionActionMenuEntrance(menu){
   menu.classList.add('open-animated');
 }
 
+function _sessionArchiveTargets(session){
+  if(!session||!session.session_id) return [];
+  const representativeProfile=session.profile||null;
+  const lineageKey=_sidebarLineageKeyForRow(session);
+  const cachedReport=_lineageReportCache.get(_lineageReportCacheKey(session,lineageKey));
+  const reportSegments=cachedReport&&Array.isArray(cachedReport.segments)?cachedReport.segments:[];
+  const candidates=[session,...(Array.isArray(session._lineage_segments)?session._lineage_segments:[]),...reportSegments];
+  const seen=new Set();
+  const targets=[];
+  for(const candidate of candidates){
+    if(!candidate||!candidate.session_id||seen.has(candidate.session_id)) continue;
+    const isRepresentative=candidate.session_id===session.session_id;
+    if(!isRepresentative&&(candidate.relationship_type==='child_session'||candidate.session_source==='fork')) continue;
+    if(!isRepresentative&&representativeProfile&&candidate.profile&&candidate.profile!==representativeProfile) continue;
+    seen.add(candidate.session_id);
+    targets.push(candidate);
+  }
+  return targets;
+}
+
 async function _archiveSession(session, archived=true, beforeListRender=null){
   if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return false; }
   const reflowPositions=_captureSessionReflowPositions();
   const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;
   try{
-    const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived})});
+    const lineageKey=_sidebarLineageKeyForRow(session);
+    const expectedCount=_sessionSegmentCount(session);
+    if(_lineageReportNeedsFetch(session,lineageKey,expectedCount)) await _fetchLineageReportForRow(session,lineageKey);
+    const targets=_sessionArchiveTargets(session);
+    if(expectedCount>targets.length) throw new Error('Incomplete session lineage');
+    const results=await Promise.all(targets.map(target=>api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:target.session_id,archived})})));
+    const response=results[0];
+    const targetIds=new Set(targets.map(target=>target.session_id));
     session.archived=archived;
     const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);
     if(cached) cached.archived=archived;
-    if(S.session&&S.session.session_id===session.session_id) S.session.archived=archived;
+    for(const related of (_allSessions||[])){
+      if(related&&targetIds.has(related.session_id)) related.archived=archived;
+    }
+    if(S.session&&targetIds.has(S.session.session_id)) S.session.archived=archived;
     try{ if(archived&&session.session_id&&localStorage.getItem('hermes-webui-session')===session.session_id) localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+    try{ if(archived&&targetIds.has(localStorage.getItem('hermes-webui-session'))) localStorage.removeItem('hermes-webui-session'); }catch(_){ }
     showToast(session.archived?_sessionArchiveToast(response,session):t('session_restored'));
     if(renderHold) await renderHold;
     if(_showArchived&&!_sessionPrefersReducedMotion()) _sessionSwipeReturnOffsets.set(session.session_id,'0px');
