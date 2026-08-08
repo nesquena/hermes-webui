@@ -176,11 +176,11 @@ def test_sse_cancel_handler_calls_set_busy():
     block = src[idx:next_handler] if next_handler != -1 else src[idx:idx + 3000]
     assert (
         "setBusy(false)" in block
-        or "_setActivePaneIdleIfOwner()" in block
+        or "_setActivePaneIdleIfOwner(source)" in block
     ), (
         "SSE cancel handler no longer idles the owning active pane"
     )
-    if "_setActivePaneIdleIfOwner()" in block:
+    if "_setActivePaneIdleIfOwner(source)" in block:
         helper_idx = src.find("function _setActivePaneIdleIfOwner")
         assert helper_idx != -1
         next_function = src.find("\n  function ", helper_idx + 1)

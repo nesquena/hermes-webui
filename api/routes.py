@@ -4694,18 +4694,19 @@ def _anchor_scene_row_has_live_identity(row) -> bool:
     return has_stream_owner and not has_assistant_message_index
 
 
-def _anchor_scene_settle_live_running_row(row, *, has_settled_thinking: bool):
+def _anchor_scene_settle_live_running_row(row, *, drop_live_thinking: bool = False):
     if not isinstance(row, dict):
         return row
     role = row.get("role")
     if role not in ("thinking", "prose", "tool"):
         return row
+    has_live_identity = _anchor_scene_row_has_live_identity(row)
+    if role == "thinking" and drop_live_thinking and has_live_identity:
+        return None
     if str(row.get("status") or "").lower() != "running":
         return row
-    if not _anchor_scene_row_has_live_identity(row):
+    if not has_live_identity:
         return row
-    if role == "thinking" and has_settled_thinking:
-        return None
     next_row = copy.deepcopy(row)
     next_row["status"] = "completed"
     payload = next_row.get("payload")
@@ -4740,6 +4741,34 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
     final_key = _anchor_scene_text_key(final_answer)
     rows = []
     seen = {}
+    scene_thinking_rows = [
+        row
+        for row in scene.get("activity_rows") or []
+        if isinstance(row, dict)
+        and row.get("role") == "thinking"
+        and _anchor_scene_clean_text(row.get("text"))
+    ]
+    scene_reasoning_key = _anchor_scene_text_key(
+        "".join(str(row.get("text") or "") for row in scene_thinking_rows)
+    )
+    transcript_reasoning_key = _anchor_scene_text_key(
+        "".join(
+            (
+                "".join(
+                    _anchor_scene_content_text(part)
+                    for part in (message.get("content") or [])
+                    if isinstance(part, dict) and part.get("type") in ("thinking", "reasoning")
+                )
+                or _anchor_scene_message_reasoning_text(message)
+            )
+            for message in messages[turn_start + 1 : local_final_idx + 1]
+            if isinstance(message, dict) and message.get("role") == "assistant"
+        )
+    )
+    scene_has_authoritative_thinking = bool(scene_thinking_rows) and (
+        not transcript_reasoning_key or scene_reasoning_key == transcript_reasoning_key
+    )
+    drop_live_thinking = bool(transcript_reasoning_key) and not scene_has_authoritative_thinking
 
     def merge_duplicate_tool_row(existing, incoming, *, prefer_incoming_body=False):
         if not isinstance(existing, dict) or not isinstance(incoming, dict):
@@ -4808,7 +4837,7 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             return
         row = _anchor_scene_settle_live_running_row(
             row,
-            has_settled_thinking=any(existing.get("role") == "thinking" for existing in rows),
+            drop_live_thinking=drop_live_thinking,
         )
         if row is None or not isinstance(row, dict):
             return
@@ -4841,6 +4870,11 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         next_row["seq"] = len(rows)
         rows.append(next_row)
 
+    if scene_has_authoritative_thinking:
+        for row in scene.get("activity_rows") or []:
+            if isinstance(row, dict) and row.get("role") != "terminal":
+                push(row)
+
     order = 0
     content_tool_indexes_by_idx = {}
     used_content_tool_indexes_by_idx = {}
@@ -4863,6 +4897,8 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         id_flexible_content_tool_indexes = set()
         if content_rows:
             for row in content_rows:
+                if scene_has_authoritative_thinking and row.get("role") == "thinking":
+                    continue
                 previous_len = len(rows)
                 push(row)
                 if row.get("role") == "tool" and len(rows) > previous_len:
@@ -4876,7 +4912,11 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             push(_anchor_scene_prose_row(text, order, absolute_idx, stream_id))
             order += 1
         reasoning = _anchor_scene_message_reasoning_text(message)
-        if _anchor_scene_clean_text(reasoning) and _anchor_scene_text_key(reasoning) != _anchor_scene_text_key(text):
+        if (
+            not scene_has_authoritative_thinking
+            and _anchor_scene_clean_text(reasoning)
+            and _anchor_scene_text_key(reasoning) != _anchor_scene_text_key(text)
+        ):
             push(_anchor_scene_thinking_row(reasoning, order, absolute_idx, stream_id))
             order += 1
         for key in ("tool_calls", "_partial_tool_calls"):
@@ -4956,9 +4996,10 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             continue
         push(row, prefer_incoming_tool_body=True)
         order += 1
-    for row in scene.get("activity_rows") or []:
-        if isinstance(row, dict) and row.get("role") != "terminal":
-            push(row)
+    if not scene_has_authoritative_thinking:
+        for row in scene.get("activity_rows") or []:
+            if isinstance(row, dict) and row.get("role") != "terminal":
+                push(row)
     for row in scene.get("activity_rows") or []:
         if isinstance(row, dict) and row.get("role") == "terminal":
             push(row)

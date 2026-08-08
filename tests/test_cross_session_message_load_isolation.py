@@ -128,6 +128,62 @@ def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded
     ), "loadSession() should preserve toast-based failure paths"
 
 
+def test_new_session_does_not_reclaim_newer_navigation_owner():
+    start = SESSIONS_SRC.index("async function newSession(")
+    end = SESSIONS_SRC.index("\nasync function ", start + 1)
+    body = SESSIONS_SRC[start:end]
+    assert "_loadSessionGeneration += 1" in body, (
+        "New Chat must invalidate an older load before its POST begins"
+    )
+    assert "const _newSessionGeneration=typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null" in body
+    assert "if(_newSessionGeneration!==null && _loadSessionGeneration!==_newSessionGeneration) return;" in body, (
+        "a New Chat response must yield when a newer sidebar load owns the pane"
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for New Chat ownership regression")
+def test_new_session_response_yields_to_a_newer_sidebar_navigation():
+    """Exercise the actual async ordering, not merely the source guard text."""
+    start = SESSIONS_SRC.index("async function newSession(")
+    end = SESSIONS_SRC.index("\nasync function ", start + 1)
+    new_session_source = SESSIONS_SRC[start:end]
+    script = f"""
+const newSession = {json.dumps(new_session_source)};
+let resolveNewSession;
+globalThis._newSessionInFlight = null;
+globalThis._loadSessionGeneration = 41;
+globalThis._loadingSessionId = 'sid-seed';
+globalThis._activeProject = null;
+globalThis.NO_PROJECT_FILTER = '__all_projects__';
+globalThis._sessionSourceFilter = 'webui';
+globalThis._messagesTruncated = false;
+globalThis._oldestIdx = 0;
+globalThis.S = {{ session: {{session_id: 'sid-seed'}}, messages: [{{role: 'assistant', content: 'seed'}}], toolCalls: [], activeProfile: 'default' }};
+globalThis.window = {{ _clearPendingSelections() {{}} }};
+globalThis._setNewSessionPending = () => {{}};
+globalThis.updateQueueBadge = () => {{}};
+globalThis.clearLiveToolCards = () => {{}};
+globalThis.$ = () => null;
+globalThis.api = () => new Promise(resolve => {{ resolveNewSession = resolve; }});
+globalThis.newSession = undefined;
+eval('globalThis.newSession = ' + newSession);
+const pending = globalThis.newSession(false, {{}});
+Promise.resolve().then(() => {{
+  // This models a newer sidebar load taking ownership while POST is pending.
+  globalThis._loadSessionGeneration += 1;
+  globalThis._loadingSessionId = 'sid-atlas';
+  globalThis.S.session = {{session_id: 'sid-atlas'}};
+  globalThis.S.messages = [{{role: 'assistant', content: 'atlas'}}];
+  resolveNewSession({{session: {{session_id: 'sid-new', messages: []}}}});
+}}).then(() => pending).then(() => {{
+  if (globalThis.S.session.session_id !== 'sid-atlas') throw new Error('stale New Chat response replaced newer sidebar navigation');
+  if (globalThis.S.messages[0].content !== 'atlas') throw new Error('stale New Chat response replaced newer transcript');
+}}).catch(error => {{ console.error(error.stack || error); process.exitCode = 1; }});
+"""
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
 def test_ensure_messages_loaded_ownership_guard_pre_and_post_await():
     body = ENSURE_MESSAGES_LOADED_SRC
     assert "_loadSessionGeneration" in body, "_ensureMessagesLoaded should read generation"

@@ -505,6 +505,7 @@ const S=global.S={
 };
 const INFLIGHT=global.INFLIGHT={};
 const LIVE_STREAMS=global.LIVE_STREAMS={};
+const _LIVE_STREAM_ATTACHMENT_GENERATIONS=global._LIVE_STREAM_ATTACHMENT_GENERATIONS={};
 const _STREAM_WAS_HIDDEN=global._STREAM_WAS_HIDDEN={};
 const _STREAM_NOTIFICATION_BACKGROUND=global._STREAM_NOTIFICATION_BACKGROUND={};
 const _desktopBackgroundedForNotifications=false;
