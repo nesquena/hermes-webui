@@ -7933,6 +7933,20 @@ def _state_db_session_source(sid: str) -> str:
     return str(row[0] or "").strip().lower()
 
 
+def _is_api_server_class_state_db_source(source: str) -> bool:
+    """Return True when a state.db ``sessions.source`` is the imported/read-only
+    ``api_server`` class (#6843).
+
+    Mirrors the archive handler's read_only/source condition: ONLY these rows
+    may carry ids that are not path-safe as sidecar filenames (colons, ...),
+    because the WebUI archives/deletes them directly in state.db. Any other
+    real state.db row (messaging, gateway, cron, subagent, ...) keeps the
+    path-safe id requirement.
+    """
+    marker = str(source or "").strip().lower().replace("-", "_")
+    return marker in {"api", "api_server"}
+
+
 def _set_state_db_session_archived(sid: str, archived: bool) -> bool:
     """Flip the ``archived`` flag on a state.db-only session row.
 
@@ -14986,13 +15000,16 @@ def handle_post(handler, parsed) -> bool:
         if not sid:
             return bad(handler, "session_id is required")
         if not is_safe_session_id(sid):
-            # #6843: imported external rows (e.g. api_server) can carry ids
-            # that are not path-safe as sidecar filenames (colons, ...). They
-            # are still genuine local state.db rows, so allow the delete when
-            # the row exists there; the sidecar-unlink below is a safe no-op
-            # and delete_cli_session() removes the state.db row with a
-            # parameterized query.
-            if not _state_db_session_source(sid):
+            # #6843: imported api_server-class rows (e.g. ``miloco:...``) can
+            # carry ids that are not path-safe as sidecar filenames (colons,
+            # ...). They are still genuine local state.db rows, so allow the
+            # delete when the row's source is the imported/read-only
+            # api_server class; the sidecar-unlink below is a safe no-op and
+            # delete_cli_session() removes the state.db row with a
+            # parameterized query. ANY other real state.db row (messaging,
+            # gateway, cron, subagent, ...) must keep the path-safe id
+            # requirement so an unsafe id can't bypass the guard.
+            if not _is_api_server_class_state_db_source(_state_db_session_source(sid)):
                 return bad(handler, "Invalid session_id", 400)
         cli_meta_for_delete = _lookup_cli_session_metadata(sid)
         if cli_meta_for_delete.get("read_only"):
