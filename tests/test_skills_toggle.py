@@ -1,9 +1,10 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for skill toggle (enable/disable) API and frontend."""
 from pathlib import Path
 
 
 PANELS_JS = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text("utf-8")
-I18N_JS = (Path(__file__).resolve().parent.parent / "static" / "i18n.js").read_text("utf-8")
+I18N_SOURCE = locale_source_text()
 STYLE_CSS = (Path(__file__).resolve().parent.parent / "static" / "style.css").read_text("utf-8")
 
 
@@ -27,9 +28,9 @@ def test_skills_list_includes_disabled_flag():
 
 def test_i18n_keys_added():
     """The three new i18n keys must exist in the English locale."""
-    assert "skill_enabled" in I18N_JS
-    assert "skill_disabled" in I18N_JS
-    assert "skill_toggle_failed" in I18N_JS
+    assert "skill_enabled" in I18N_SOURCE
+    assert "skill_disabled" in I18N_SOURCE
+    assert "skill_toggle_failed" in I18N_SOURCE
 
 
 def test_toggle_css_classes_exist():

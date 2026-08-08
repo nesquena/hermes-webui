@@ -1,4 +1,5 @@
-"""Tests for auxiliary models settings UI — panels.js + index.html + i18n.js.
+from tests.i18n_locale_loader import locale_source_text
+"""Tests for auxiliary models settings UI — panels.js + index.html + split locale bundles.
 
 Verifies that the auxiliary models card is present in the settings HTML,
 that the JS loading/saving logic is wired up, and that all locales have the
@@ -17,7 +18,7 @@ ROOT = Path(__file__).parent.parent
 PANELS_JS_PATH = ROOT / "static" / "panels.js"
 PANELS_JS = PANELS_JS_PATH.read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 STREAMING_PY = (ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
@@ -424,24 +425,24 @@ class TestAuxiliaryModelsI18n:
     ]
 
     def test_all_i18n_keys_present(self):
-        """Every required key must exist in i18n.js at least once."""
+        """Every required key must exist in split locale bundles at least once."""
         for key in self.REQUIRED_KEYS:
-            assert key in I18N_JS, (
-                f"Missing i18n key '{key}' in i18n.js"
+            assert key in I18N_SOURCE, (
+                f"Missing i18n key '{key}' in split locale bundles"
             )
 
     def test_all_locales_have_auxiliary_keys(self):
         """Count of each key should equal the number of supported locales."""
         for key in self.REQUIRED_KEYS:
-            count = I18N_JS.count(f"{key}:")
+            count = I18N_SOURCE.count(f"{key}:")
             assert count == 15, (
                 f"i18n key '{key}' found {count} times — expected 15 (one per locale)"
             )
 
     def test_session_search_aux_task_i18n_keys_removed(self):
         """session_search auxiliary labels were retired from the canonical set."""
-        assert "settings_aux_task_session_search" not in I18N_JS
-        assert "settings_aux_task_session_search_desc" not in I18N_JS
+        assert "settings_aux_task_session_search" not in I18N_SOURCE
+        assert "settings_aux_task_session_search_desc" not in I18N_SOURCE
 
 
 class TestAuxiliaryModelsBackend:

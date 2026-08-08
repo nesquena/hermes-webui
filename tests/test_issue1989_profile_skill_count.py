@@ -1,7 +1,8 @@
+from tests.i18n_locale_loader import locale_source_text
 from pathlib import Path
 import re
 
-I18N_JS = (Path(__file__).resolve().parents[1] / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def _extract_locale_block(locale: str, src: str) -> str:
@@ -9,7 +10,7 @@ def _extract_locale_block(locale: str, src: str) -> str:
         rf"(?m)^[ \t]{{2}}(?:'{re.escape(locale)}'|\"{re.escape(locale)}\"|{re.escape(locale)})\s*:\s*\{{"
     )
     start_match = locale_key_re.search(src)
-    assert start_match is not None, f"Locale {locale!r} not found in i18n.js"
+    assert start_match is not None, f"Locale {locale!r} not found in split locale bundles"
 
     brace_start = start_match.end() - 1
     assert brace_start != -1, f"Locale {locale!r} block has no opening brace"
@@ -33,7 +34,7 @@ def _extract_locale_block(locale: str, src: str) -> str:
 
 
 def test_german_profile_skill_count_is_function():
-    de_block = _extract_locale_block("de", I18N_JS)
+    de_block = _extract_locale_block("de", I18N_SOURCE)
     # German locale should pass count as an interpolation arg, not expose {count} verbatim.
     assert "profile_skill_count:" in de_block
     assert "{count} Fähigkeiten" not in de_block

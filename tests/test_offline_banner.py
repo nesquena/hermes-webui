@@ -1,6 +1,7 @@
 """Regression coverage for the browser-offline banner and auto-refresh loop."""
 
 from __future__ import annotations
+from tests.i18n_locale_loader import locale_source_text
 
 import pathlib
 
@@ -10,7 +11,7 @@ UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def test_offline_banner_markup_styles_and_copy_exist():
@@ -30,7 +31,7 @@ def test_offline_banner_markup_styles_and_copy_exist():
         "offline_checking",
         "offline_stream_waiting",
     ):
-        assert key in I18N_JS
+        assert key in I18N_SOURCE
 
 
 def test_offline_monitor_patches_fetch_and_auto_reloads_after_health_probe():

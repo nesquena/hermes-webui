@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 from pathlib import Path
 
 
@@ -5,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 SHARE_HTML = (ROOT / "static" / "share.html").read_text(encoding="utf-8")
 SHARE_JS = (ROOT / "static" / "share.js").read_text(encoding="utf-8")
@@ -51,7 +52,7 @@ def test_share_i18n_keys_exist_in_english_locale():
         "share_session_revoked",
         "share_session_revoke_failed",
     ]:
-        assert f"{key}:" in I18N_JS
+        assert f"{key}:" in I18N_SOURCE
 
 
 def test_public_share_page_assets_exist():

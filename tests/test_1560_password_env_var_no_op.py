@@ -25,6 +25,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
+from tests.i18n_locale_loader import locale_block, locale_codes
 
 
 # ── Settings-file isolation ──────────────────────────────────────────────────
@@ -259,12 +260,11 @@ def test_post_set_password_succeeds_when_env_var_unset(monkeypatch):
     )
 
 
-# ── Frontend: index.html, panels.js, i18n.js wiring ──────────────────────────
+# ── Frontend: index.html, panels.js, split locale bundles wiring ──────────────────────────
 
 REPO_ROOT = Path(__file__).parent.parent
 INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 
 
 def test_index_html_has_password_lock_banner_div():
@@ -329,34 +329,15 @@ def test_panels_js_uses_locked_placeholder_i18n_key():
 
 # ── i18n keys present in all 9 locales ───────────────────────────────────────
 
-# All locales currently shipped in static/i18n.js. Issue #1560 lists 9 locales
+# All locales currently shipped in static/split locale bundles. Issue #1560 lists 9 locales
 # (en/es/de/zh/zh-Hant/ru/ja/fr/pt). The repo currently ships 9 locales but
 # substitutes 'ko' for 'fr' — we test what the repo actually has, not what the
 # issue body lists, so a future addition of fr won't fail the suite either.
-EXPECTED_LOCALES = ("en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "tr")
+EXPECTED_LOCALES = tuple(locale_codes())
 
 
 def _locale_block(locale_key: str) -> str:
-    """Return the slice of i18n.js between `<key>: {` and the next top-level
-    locale opener (or end-of-file). Good enough for substring assertions."""
-    # Locale openers look like `  en: {` or `  'zh-Hant': {` (two-space indent).
-    if "-" in locale_key:
-        opener = f"  '{locale_key}':"
-    else:
-        opener = f"  {locale_key}:"
-    start = I18N_JS.index(opener)
-    # Find the next locale opener, scanning all known locales.
-    rest = I18N_JS[start + len(opener):]
-    next_starts = []
-    for other in EXPECTED_LOCALES:
-        if other == locale_key:
-            continue
-        cand_opener = f"  '{other}':" if "-" in other else f"  {other}:"
-        idx = rest.find(cand_opener)
-        if idx >= 0:
-            next_starts.append(idx)
-    end = min(next_starts) if next_starts else len(rest)
-    return rest[:end]
+    return locale_block(locale_key)
 
 
 def test_password_env_var_locked_key_present_in_all_locales():

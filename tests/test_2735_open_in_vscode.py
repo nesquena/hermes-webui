@@ -26,10 +26,11 @@ import sys
 import urllib.error
 import urllib.request
 
+from tests.i18n_locale_loader import locale_block, locale_codes
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ROUTES = ROOT / "api" / "routes.py"
 UI = ROOT / "static" / "ui.js"
-I18N = ROOT / "static" / "i18n.js"
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from conftest import TEST_BASE  # noqa: E402
@@ -212,44 +213,27 @@ class TestOpenInVsCodeFrontendWiring:
 class TestOpenInVsCodeI18n:
     """Both new translation keys must be present in every locale block."""
 
-    LOCALES = [
-        # (locale tag, sample anchor key: value)
-        ("en",    "reveal_in_finder: 'Reveal in File Manager'"),
-        ("it",    "reveal_in_finder: 'Mostra nel File Manager'"),
-        ("ja",    "reveal_in_finder: 'ファイルマネージャーで表示'"),
-        ("ru",    "reveal_in_finder: 'Показать в файловом менеджере'"),
-        ("es",    "reveal_in_finder: 'Mostrar en el gestor de archivos'"),
-        ("de",    "reveal_in_finder: 'Im Dateimanager anzeigen'"),
-        ("zh-CN", "reveal_in_finder: '在文件管理器中显示'"),
-        ("pt",    "reveal_in_finder: 'Mostrar no gerenciador de arquivos'"),
-        ("ko",    "reveal_in_finder: '파일 관리자에서 열기'"),
-    ]
+    LOCALES = tuple(locale_codes())
 
     def test_open_in_vscode_key_count(self):
         """open_in_vscode key must appear exactly once per locale (14 total)."""
-        src = I18N.read_text(encoding="utf-8")
-        count = src.count("open_in_vscode:")
-        assert count == 15, (
-            f"Expected 14 open_in_vscode: entries (one per locale), found {count}"
-        )
+        missing = [locale for locale in self.LOCALES if "open_in_vscode:" not in locale_block(locale)]
+        assert not missing, f"open_in_vscode is missing from locales: {missing}"
 
     def test_open_in_vscode_failed_key_count(self):
         """open_in_vscode_failed key must appear exactly once per locale (14 total)."""
-        src = I18N.read_text(encoding="utf-8")
-        count = src.count("open_in_vscode_failed:")
-        assert count == 15, (
-            f"Expected 14 open_in_vscode_failed: entries (one per locale), found {count}"
-        )
+        missing = [locale for locale in self.LOCALES if "open_in_vscode_failed:" not in locale_block(locale)]
+        assert not missing, f"open_in_vscode_failed is missing from locales: {missing}"
 
     def test_english_translation_not_a_placeholder(self):
         """English locale must have a human-readable string, not a TODO."""
-        src = I18N.read_text(encoding="utf-8")
+        src = locale_block("en")
         assert "open_in_vscode: 'Open in VS Code'" in src
         assert "open_in_vscode_failed: 'Failed to open in VS Code: '" in src
 
     def test_non_english_locales_translated(self):
         """Non-English locales must have real translations, not TODO stubs."""
-        src = I18N.read_text(encoding="utf-8")
+        src = "\n".join(locale_block(locale) for locale in self.LOCALES)
         # Spot-check a selection of locales — none of these should be TODO stubs.
         assert "open_in_vscode: 'Apri in VS Code'" in src       # it
         assert "open_in_vscode: 'VS Codeで開く'" in src          # ja
@@ -261,7 +245,7 @@ class TestOpenInVsCodeI18n:
     def test_keys_adjacent_to_reveal_block(self):
         """New keys must appear near the reveal/copy block so locale coverage
         is easy to spot in code review."""
-        src = I18N.read_text(encoding="utf-8")
+        src = locale_block("en")
         # In the English block, open_in_vscode must appear between
         # copy_file_path and download_folder.
         copy_idx = src.index("copy_file_path: 'Copy file path'")

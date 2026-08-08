@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for YOLO mode toggle in Web UI (Issue #467).
 
 Covers:
@@ -47,8 +48,8 @@ def style_css():
 
 
 @pytest.fixture(scope="module")
-def i18n_js():
-    return _read_static_file("i18n.js")
+def I18N_SOURCE():
+    return locale_source_text()
 
 
 def _get(path, expect_ok=True):
@@ -252,16 +253,16 @@ class TestYoloI18n:
     LOCALES = ["en", "ru", "es", "de", "zh", "ko"]
 
     @pytest.mark.parametrize("locale", LOCALES)
-    def test_locale_has_all_yolo_keys(self, i18n_js, locale):
+    def test_locale_has_all_yolo_keys(self, I18N_SOURCE, locale):
         pattern = rf"\s{locale}:\s*\{{"
-        match = re.search(pattern, i18n_js)
-        assert match, f"Locale '{locale}' not found in i18n.js"
+        match = re.search(pattern, I18N_SOURCE)
+        assert match, f"Locale '{locale}' not found in split locale bundles"
         start = match.end()
-        next_locale = re.search(r"\n  \w{2}:\s*\{", i18n_js[start:])
+        next_locale = re.search(r"\n  \w{2}:\s*\{", I18N_SOURCE[start:])
         if next_locale:
-            block = i18n_js[start:start + next_locale.start()]
+            block = I18N_SOURCE[start:start + next_locale.start()]
         else:
-            block = i18n_js[start:]
+            block = I18N_SOURCE[start:]
 
         for key in self.REQUIRED_KEYS:
             assert key in block, f"Key '{key}' missing in locale '{locale}'"

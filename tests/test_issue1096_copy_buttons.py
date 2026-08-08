@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for #1096 — copy buttons work via Permissions-Policy + fallback."""
 import re
 
@@ -114,6 +115,6 @@ class TestCopyFailedI18n:
 
     def test_copy_failed_in_all_locales(self):
         """copy_failed key must exist in all locale blocks (currently 7 with Korean)."""
-        i18n = _src('i18n.js')
+        i18n = locale_source_text()
         count = i18n.count('copy_failed')
         assert count >= 6, f'Expected copy_failed in at least 6 locale blocks, found {count}'

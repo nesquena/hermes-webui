@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """
 Tests for SOUL.md support in the memory API (GET /api/memory, POST /api/memory/write).
 
@@ -112,8 +113,8 @@ def test_agent_soul_i18n_key_present_in_all_locales():
     the entire module, which silently disables i18n for every language. The
     PR's initial commit failed CI for exactly this reason (it / fr).
     """
-    i18n = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
-    # i18n.js currently exposes 11 locales (en, it, ja, ru, es, de, zh-CN,
+    i18n = locale_source_text()
+    # split locale bundles currently exposes 11 locales (en, it, ja, ru, es, de, zh-CN,
     # zh-TW, pt, ko, fr). Lock that both new keys are present at least 10
     # times — that's enough to catch a missing locale without coupling the
     # test to the exact locale count, which shifts as new ones land.

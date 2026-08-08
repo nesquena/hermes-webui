@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """
 Sprint 33 Tests: Shared app dialogs replace native confirm/prompt usage.
 
@@ -94,11 +95,11 @@ def test_save_settings_password_change_preflights_current_password_before_api():
     body = match.group(1)
     assert "currentPwField=$('settingsCurrentPassword')" in body
     assert "showToast(t('current_password_required'))" in body
-    assert body.index("showToast(t('current_password_required'))") < body.index("api('/api/settings'")
+    assert body.index("showToast(t('current_password_required'))") < body.index("_postSettingsAtLocaleCommit(payload)")
 
 
 def test_disable_auth_typed_confirm_locales_show_literal_phrase():
-    src = read("static/i18n.js")
+    src = locale_source_text()
     values = re.findall(r"disable_auth_typed_confirm:\s*'([^']*)'", src)
     assert values, "disable_auth_typed_confirm keys missing"
     assert len(values) == len(_i18n_locale_blocks(src)), (
@@ -139,7 +140,7 @@ def _i18n_locale_blocks(src):
 
 
 def test_auth_safety_keys_exist_once_per_locale():
-    src = read("static/i18n.js")
+    src = locale_source_text()
     blocks = _i18n_locale_blocks(src)
     assert "pt" in blocks
     assert "zh-Hant" in blocks
@@ -154,7 +155,7 @@ def test_auth_safety_keys_exist_once_per_locale():
 
 
 def test_auth_safety_pt_and_zh_hant_strings_stay_in_correct_locale_blocks():
-    src = read("static/i18n.js")
+    src = locale_source_text()
     blocks = _i18n_locale_blocks(src)
     zh_hant = blocks["zh-Hant"]
     pt = blocks["pt"]

@@ -7480,6 +7480,7 @@ let _settingsAppearanceAutosaveTimer = null;
 let _settingsAppearanceAutosaveRetryPayload = null;
 let _settingsPreferencesAutosaveTimer = null;
 let _settingsPreferencesAutosaveRetryPayload = null;
+let _settingsLocalePostInFlight = null;
 
 // ── Sidebar tab visibility/order ────────────────────────────────────────────
 const _ALWAYS_VISIBLE_TABS = new Set(['chat','settings']);
@@ -8637,7 +8638,7 @@ function _preferencesPayloadFromUi(){
   const sendKeySel=$('settingsSendKey');
   if(sendKeySel) payload.send_key=sendKeySel.value;
   const langSel=$('settingsLanguage');
-  if(langSel) payload.language=langSel.value;
+  if(langSel) payload.language=(typeof getActiveLocale==='function')?getActiveLocale():langSel.value;
   const showUsageCb=$('settingsShowTokenUsage');
   if(showUsageCb) payload.show_token_usage=showUsageCb.checked;
   const showQuotaChipCb=$('settingsShowQuotaChip');
@@ -8782,7 +8783,14 @@ function _schedulePreferencesAutosave(){
 
 async function _autosavePreferencesSettings(payload){
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const selector=$('settingsLanguage');
+    const requestedLanguage=(selector&&selector.value)||((typeof getActiveLocale==='function')?getActiveLocale():(payload&&payload.language));
+    const localeCommit=await _commitSettingsLocale(requestedLanguage,selector,payload);
+    if(!localeCommit) return;
+    if(payload) payload={...payload,language:localeCommit.active};
+    const settingsLocaleGeneration=localeCommit.generation;
+    const saved=await _postSettingsAtLocaleCommit(payload);
+    if(!_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)) return;
     if(payload&&payload.terminal_auto_expand_on_output!==undefined){
       window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
     }
@@ -8861,6 +8869,54 @@ async function _autosavePreferencesSettings(payload){
     console.warn('[settings] preferences autosave failed', e);
     _setPreferencesAutosaveStatus('failed');
   }
+}
+
+async function _settleSettingsLocale(requested,selector){
+  if(_settingsLocalePostInFlight) await _settingsLocalePostInFlight;
+  if(typeof activateLocale!=='function') return {status:'applied',requested,active:requested||'en',fallback:false};
+  const result=await activateLocale(requested||'en');
+  if(result&&result.status==='superseded') return result;
+  const settled={...(result||{}),active:(typeof getActiveLocale==='function')?getActiveLocale():(result&&result.active)||'en'};
+  _reconcileSettingsLocaleSelector(selector,settled);
+  return settled;
+}
+
+function _reconcileSettingsLocaleSelector(selector,result){
+  if(!selector||!_settingsLocaleSettlementIsCurrent(result)) return false;
+  selector.value=result.active||((typeof getActiveLocale==='function')?getActiveLocale():'en');
+  return true;
+}
+
+async function _commitSettingsLocale(requested,selector,payload){
+  const result=await _settleSettingsLocale(requested,selector);
+  if(result&&result.status==='superseded') return null;
+  const generation=result&&result.generation;
+  if(!_settingsLocaleCommitIsCurrent(generation)) return null;
+  const active=(typeof getActiveLocale==='function')?getActiveLocale():(result&&result.active)||'en';
+  _reconcileSettingsLocaleSelector(selector,{...result,active});
+  if(payload) payload.language=active;
+  return {active,generation};
+}
+
+function _settingsLocaleCommitIsCurrent(generation){
+  return typeof getLocaleActivationGeneration!=='function' || generation===undefined || generation===getLocaleActivationGeneration();
+}
+
+function _postSettingsAtLocaleCommit(payload){
+  const request=api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+  const barrier=request.catch(()=>undefined);
+  _settingsLocalePostInFlight=barrier;
+  return request.finally(()=>{
+    if(_settingsLocalePostInFlight===barrier) _settingsLocalePostInFlight=null;
+  });
+}
+
+function _settingsLocaleSettlementIsCurrent(result){
+  return !!result && result.status!=='superseded' && (
+    typeof getLocaleActivationGeneration!=='function' ||
+    result.generation===undefined ||
+    result.generation===getLocaleActivationGeneration()
+  );
 }
 
 function _retryPreferencesAutosave(){
@@ -9097,10 +9153,9 @@ async function loadSettingsPanel(){
       ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'))
       : (settings.language || localStorage.getItem('hermes-lang') || 'en');
     // Keep settings modal and current page strings in sync with the resolved locale.
-    if(typeof setLocale==='function'){
-      setLocale(resolvedLanguage);
-      if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
-    }
+    const settingsLanguageSelector=document.getElementById('settingsLanguage');
+    const localeResult=await _settleSettingsLocale(resolvedLanguage,settingsLanguageSelector);
+    const localeSettlementCurrent=_settingsLocaleSettlementIsCurrent(localeResult);
     // Populate model dropdown from /api/models + live model fetch (#872)
     const modelSel=$('settingsModel');
     if(modelSel){
@@ -9156,20 +9211,20 @@ async function loadSettingsPanel(){
     // Send key preference
     const sendKeySel=$('settingsSendKey');
     if(sendKeySel){sendKeySel.value=settings.send_key||'enter';sendKeySel.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    // Language preference — populate from LOCALES bundle
+    // Language preference — metadata is eager, translation data is not.
     const langSel=$('settingsLanguage');
     if(langSel){
-      langSel.innerHTML='';
-      if(typeof LOCALES!=='undefined'){
-        for(const [code,bundle] of Object.entries(LOCALES)){
+      const pendingLanguage=langSel.value;langSel.innerHTML='';
+      if(typeof LOCALE_REGISTRY!=='undefined'){
+        for(const [code,metadata] of Object.entries(LOCALE_REGISTRY)){
           const opt=document.createElement('option');
-          opt.value=code;opt.textContent=bundle._label||code;
+          opt.value=code;opt.textContent=metadata._label||code;
           langSel.appendChild(opt);
         }
       }
-      langSel.value=resolvedLanguage;
-      langSel.addEventListener('change',function(){
-        if(typeof setLocale==='function'){setLocale(this.value);if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();}
+      if(localeSettlementCurrent) langSel.value=pendingLanguage||getActiveLocale();
+      langSel.addEventListener('change',async function(){
+        await _settleSettingsLocale(this.value,this);
         _schedulePreferencesAutosave();
       },{once:false});
     }
@@ -11837,7 +11892,7 @@ async function deletePasskey(id){
   catch(e){showToast('Failed to remove passkey: '+e.message);}
 }
 
-function _applySavedSettingsUi(saved, body, opts){
+async function _applySavedSettingsUi(saved, body, opts){
   const {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize}=opts;
   window._sendKey=sendKey||'enter';
   window._showTokenUsage=showTokenUsage;
@@ -11878,8 +11933,13 @@ function _applySavedSettingsUi(saved, body, opts){
   window._botName=body.bot_name||'Hermes';
   if(typeof applyBotName==='function') applyBotName();
   else if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
-  if(typeof setLocale==='function') setLocale(language);
-  if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
+  const localeResult=await _settleSettingsLocale(
+    (($('settingsLanguage')||{}).value)||((typeof getActiveLocale==='function')?getActiveLocale():language),
+    $('settingsLanguage')
+  );
+  if(localeResult&&localeResult.status==='superseded') return;
+  if(!_settingsLocaleSettlementIsCurrent(localeResult)) return;
+  if(localeResult) body.language=localeResult.active;
   _ensureComposerControlVisibilityState(saved||body||{});
   const composerOrderSource=(saved&&Array.isArray(saved.composer_control_order))
     ? saved.composer_control_order
@@ -12509,7 +12569,13 @@ async function saveSettings(andClose){
   Object.assign(body,_structuredCodeViewFromUi());
   Object.assign(body,_composerControlVisibilityPayload());
   body.composer_control_order=_getComposerControlOrder();
-  body.language=language;
+  const localeCommit=await _commitSettingsLocale(
+    (($('settingsLanguage')||{}).value)||((typeof getActiveLocale==='function')?getActiveLocale():language),
+    $('settingsLanguage'),
+    body
+  );
+  if(!localeCommit) return;
+  const settingsLocaleGeneration=localeCommit.generation;
   body.show_token_usage=showTokenUsage;
   const maxTokensField=$('settingsMaxTokens');
   if(maxTokensField){
@@ -12562,7 +12628,8 @@ async function saveSettings(andClose){
     const payload={...body,_set_password:pw.trim()};
     if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
     try{
-      const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+      const saved=await _postSettingsAtLocaleCommit(payload);
+      if(!_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)) return;
       if(modelChanged && model){
         try{
           await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
@@ -12572,7 +12639,7 @@ async function saveSettings(andClose){
           if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
         }
       }
-      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+      await _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       const cpField=$('settingsCurrentPassword'); if(cpField) cpField.value='';
       const pwField=$('settingsPassword'); if(pwField) pwField.value='';
@@ -12592,7 +12659,8 @@ async function saveSettings(andClose){
     }catch(e){showToast(t('settings_save_failed')+e.message);return;}
   }
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+    const saved=await _postSettingsAtLocaleCommit(body);
+    if(!_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)) return;
     if(modelChanged && model){
       try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
@@ -12602,7 +12670,7 @@ async function saveSettings(andClose){
         if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
       }
     }
-    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+    await _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
     showToast(t('settings_saved'));
     _settingsDirty=false;
     _resetSettingsPanelState();

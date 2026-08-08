@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 from pathlib import Path
 
 from api.compression_anchor import visible_messages_for_anchor
@@ -1134,7 +1135,7 @@ def test_reference_message_inserted_before_future_assistant_anchor():
 
 def test_frontend_uses_context_engine_metadata_for_indexed_context_copy():
     src = _read("static/ui.js")
-    i18n = _read("static/i18n.js")
+    i18n = locale_source_text()
 
     assert "function _compressionEngineForSession" in src
     assert "S.session.compression_anchor_engine" in src

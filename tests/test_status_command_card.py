@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression tests for issue #463: WebUI /status info card.
 
 /status should be a client-handled slash command that renders a safe,
@@ -18,7 +19,7 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent
 COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
@@ -226,7 +227,7 @@ def test_status_command_is_registered_with_help_text():
     assert "{name:'status'" in COMMANDS_JS
     assert "desc:t('cmd_status')" in COMMANDS_JS
     assert "fn:cmdStatus" in COMMANDS_JS
-    assert "cmd_status:'Show session info'" in I18N_JS
+    assert "cmd_status:'Show session info'" in I18N_SOURCE
 
 
 def test_status_command_uses_client_state_not_status_endpoint():

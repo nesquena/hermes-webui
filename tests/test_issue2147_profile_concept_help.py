@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_CORE_JS = (ROOT / "static" / "i18n-core.js").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 
 PROFILE_CONCEPT_KEYS = [
@@ -20,13 +20,11 @@ PROFILE_CONCEPT_KEYS = [
 
 
 def _locale_blocks():
-    """Extract every top-level locale block from static/i18n.js."""
-    matches = list(re.finditer(r"^  ('[^']+'|[A-Za-z][A-Za-z0-9-]*): \{$", I18N_JS, re.MULTILINE))
-    end = I18N_JS.index("\n};", matches[-1].start())
-    return {
-        match.group(1).strip("'"): I18N_JS[match.start() : (matches[index + 1].start() if index + 1 < len(matches) else end)]
-        for index, match in enumerate(matches)
-    }
+    """Read the English core and each independent locale bundle."""
+    blocks = {"en": I18N_CORE_JS}
+    for path in sorted((ROOT / "static" / "locales").glob("*.js")):
+        blocks[path.stem] = path.read_text(encoding="utf-8")
+    return blocks
 
 
 def _render_profiles_panel_body():
@@ -56,7 +54,7 @@ def test_i18n_keys_are_english_fallback_owned():
             assert not re.search(rf"\b{re.escape(key)}:\s*'", block), (
                 f"key {key!r} must be absent from non-English locale {locale!r}"
             )
-    assert "_locale[key] ?? LOCALES.en[key]" in I18N_JS
+    assert "_locale[key] ?? LOCALES.en[key]" in I18N_CORE_JS
 
 
 def test_help_card_uses_i18n_keys():

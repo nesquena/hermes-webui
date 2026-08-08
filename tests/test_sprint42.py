@@ -16,6 +16,7 @@ import queue
 import sys
 import types
 import unittest
+from tests.i18n_locale_loader import locale_source_text
 from unittest import mock
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
@@ -660,7 +661,7 @@ class TestModelCustomInput(unittest.TestCase):
                       '.model-custom-input must be defined in style.css')
 
     def test_model_custom_i18n_keys(self):
-        i18n = self._read('i18n.js')
+        i18n = locale_source_text()
         # Find en locale block (appears first before es)
         en_block_start = i18n.find("'en'")
         es_block_start = i18n.find("'es'")

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Zeus skin registration and dark-surface affordances."""
 
 from pathlib import Path
@@ -7,7 +8,7 @@ CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 CONFIG_PY = (REPO / "api" / "config.py").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def test_zeus_skin_is_registered_in_all_files():
@@ -45,4 +46,4 @@ def test_zeus_modals_are_not_navy():
 
 def test_zeus_i18n_lists_skin_in_all_locales():
     # There are 12 locales; each should include zeus in the skin list.
-    assert I18N_JS.count("/zeus/") == 15
+    assert I18N_SOURCE.count("/zeus/") == 15
