@@ -2015,6 +2015,15 @@ function closeOtherLiveStreams(activeSid){
   }
 }
 
+// #6267: provider-fallback indicator dedup state, kept at MODULE scope so an
+// SSE reconnect / snapshot replay of the SAME transition_id cannot double-render
+// (the server queue can re-deliver recent events to a fresh subscriber).
+// transition_id embeds session_id + a per-request occurrence counter, so the
+// same from→to route in two different turns never collides.
+const _providerFallbackRenderedMap={};   // transition_id -> record
+const _providerFallbackReassertedMap={}; // session_id -> transition_id
+let _providerFallbackRenderCount=0;
+
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
@@ -5433,6 +5442,58 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return true;
   }
 
+  // ── Provider fallback indicator (#6267) ─────────────────────────────────
+  // Renders a visible composer/turn indicator when the server emits the typed
+  // provider_fallback event.  Guarded by session/stream ownership, deduplicated
+  // by transition_id (module-scope map, so SSE snapshot replay cannot re-render
+  // the same transition), and re-asserted once at `done` so the settled render
+  // cannot wipe a just-shown notice.  The indicator is transient (live turn +
+  // short toast) and intentionally NOT persisted: reload/replay re-shows it only
+  // when the live event is delivered again.
+  function _providerFallbackLabel(d){
+    const toModel=String(d.to_model||'').trim();
+    const toProvider=String(d.to_provider||'').trim();
+    if(toModel&&toProvider) return toModel+' via '+toProvider;
+    return toModel||toProvider||'';
+  }
+
+  function _renderProviderFallbackIndicator(d){
+    if(!d||typeof d!=='object') return;
+    const sid=String(d.session_id||'');
+    if(!sid||sid!==activeSid) return;                        // session/stream ownership
+    if(!S.session||S.session.session_id!==activeSid) return;
+    const tid=String(d.transition_id||'');
+    if(!tid) return;
+    if(_providerFallbackRenderedMap[tid]) return;            // exactly-once per transition
+    const label=_providerFallbackLabel(d);
+    if(!label) return;                                       // provider OR model accepted
+    const statusText=(typeof t==='function')?t('provider_fallback_status',label):('⚠️ Fell back to '+label);
+    _providerFallbackRenderedMap[tid]={sid:sid,text:statusText,label:label};
+    _providerFallbackReassertedMap[sid]=tid;
+    if(typeof setComposerStatus==='function') setComposerStatus(statusText);
+    const reason=String(d.reason||'').trim();
+    if(reason&&typeof showToast==='function') showToast(reason,8000,'warning');
+    _providerFallbackRenderCount++;
+    // Bound the dedup map so long-lived tabs don't grow it unboundedly.
+    if(_providerFallbackRenderCount>200){
+      const keys=Object.keys(_providerFallbackRenderedMap);
+      for(let i=0;i<keys.length-200;i++) delete _providerFallbackRenderedMap[keys[i]];
+      _providerFallbackRenderCount=200;
+    }
+  }
+
+  function _reassertProviderFallbackIndicator(sid){
+    // Called at `done` settlement: if this session recorded a fallback
+    // transition this stream, re-assert the composer indicator (dedup by
+    // transition_id keeps it exactly-once per transition).
+    const key=String(sid||'');
+    const tid=_providerFallbackReassertedMap[key];
+    if(!tid) return;
+    const rec=_providerFallbackRenderedMap[tid];
+    if(!rec) return;
+    if(typeof setComposerStatus==='function') setComposerStatus(rec.text);
+  }
+
   function _wireSSE(source){
     const existingLive=LIVE_STREAMS[activeSid];
     if(existingLive&&existingLive.source&&existingLive.source!==source){
@@ -5745,6 +5806,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           session_id:String(d.session_id||activeSid)
         });
       }catch(_){}
+    });
+
+    source.addEventListener('provider_fallback',e=>{
+      let d={};
+      try{ d=JSON.parse(e.data||'{}'); }catch(_){}
+      _renderProviderFallbackIndicator(d);
     });
 
     source.addEventListener('context_status',e=>{
@@ -6092,6 +6159,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             _restoreMessageScrollSnapshotSameFrame(_doneLiveScrollSnapshot);
           }
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
+          // #6267: re-assert the provider-fallback composer indicator after the
+          // settled render so `done` settlement cannot wipe a just-shown notice
+          // (dedup by transition_id keeps it exactly-once per transition).
+          if(typeof _reassertProviderFallbackIndicator==='function') _reassertProviderFallbackIndicator(completedSid);
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
           // TTS auto-read: speak the last assistant response if enabled (#499)
