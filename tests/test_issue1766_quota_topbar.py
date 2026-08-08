@@ -23,21 +23,27 @@ def test_quota_indicator_is_near_model_picker_in_composer_chrome():
     assert 'hidden' in INDEX[quota_idx - 200 : quota_idx + 400]
 
 
-def test_quota_indicator_fetches_provider_quota_on_boot():
+def test_quota_indicator_fetches_provider_quota_after_provider_state_is_known():
     assert "function refreshProviderQuotaIndicator" in UI_JS
-    assert "api('/api/provider/quota')" in UI_JS
-    assert "refreshProviderQuotaIndicator" in BOOT_JS
+    assert "'/api/provider/quota'+query" in UI_JS
+    assert "encodeURIComponent(provider)" in UI_JS
+    assert "refreshProviderQuotaIndicator(S.session.model_provider||null)" in BOOT_JS
 
 
 def test_quota_indicator_hides_unsupported_or_failed_statuses():
+    clear_idx = UI_JS.find("function clearProviderQuotaIndicator")
     render_idx = UI_JS.find("function renderProviderQuotaIndicator")
+    assert clear_idx != -1, "quota clearing helper must exist"
     assert render_idx != -1, "renderProviderQuotaIndicator helper must exist"
-    render_block = UI_JS[render_idx : UI_JS.find("function ", render_idx + 1)]
+    clear_block = UI_JS[clear_idx:render_idx]
+    render_block = UI_JS[render_idx : UI_JS.find("async function", render_idx + 1)]
 
-    assert "providerQuotaChip" in render_block
-    assert "chip.hidden=true" in render_block
+    assert "providerQuotaChip" in clear_block
+    assert "chip.hidden=true" in clear_block
+    assert "mobileAction.hidden=true" in clear_block
     assert "status.status!=='available'" in render_block
     assert "!status.quota" in render_block
+    assert "clearProviderQuotaIndicator()" in render_block
     assert "unsupported" not in render_block.lower(), "ambient chip should disappear instead of showing noisy unsupported text"
 
 

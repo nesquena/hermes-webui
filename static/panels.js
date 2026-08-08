@@ -9195,7 +9195,12 @@ async function loadSettingsPanel(){
       window._showQuotaChip=showQuotaChipCb.checked;
       showQuotaChipCb.addEventListener('change',()=>{
         window._showQuotaChip=showQuotaChipCb.checked;
-        if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+        if(typeof refreshProviderQuotaIndicator==='function'){
+          const provider=(typeof _currentQuotaProvider==='function')
+            ? _currentQuotaProvider()
+            : ((typeof S!=='undefined'&&S&&S.session&&S.session.model_provider)||null);
+          void refreshProviderQuotaIndicator(provider);
+        }
         _schedulePreferencesAutosave();
       },{once:false});
     }
