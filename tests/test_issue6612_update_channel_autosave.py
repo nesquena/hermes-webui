@@ -319,8 +319,10 @@ def test_dedicated_channel_writer_exists():
 def test_settings_panel_posts_use_shared_queue_and_channel_is_single_owner():
     """Every settings-panel writer shares the queue and Save Settings carries no channel."""
     assert PANELS_JS.count("_enqueueSettingsPost({") == 10
-    direct_post_sites = re.findall(r"api\('/api/settings',\{method:'POST'", PANELS_JS)
-    assert direct_post_sites == [], f"direct settings POST bypasses queue: {direct_post_sites!r}"
+    direct_settings_calls = re.findall(r"api\(\s*'/api/settings'\s*,", PANELS_JS)
+    assert direct_settings_calls == ["api('/api/settings',"], (
+        f"only the queue helper may call settings POST/GET with options; got {direct_settings_calls!r}"
+    )
     assert "body.update_channel=" not in _function_block(PANELS_JS, "saveSettings")
     assert "_settingsPanelPostQueue=Promise.resolve()" in PANELS_JS
     producer_blocks = (
