@@ -11676,6 +11676,57 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                        "stream_id": active_stream_id})
 
 
+def _handle_chat_interrupt(handler, body: dict) -> bool:
+    """Request active-turn redirect for a busy input on the exact active stream.
+
+    Returns ``{accepted: bool, fallback: str|None, stream_id: str}`` for caller-side
+    fallback routing. `accepted` mirrors ``agent.redirect(text)``; false means fallback.
+    """
+    from api.helpers import j, bad
+
+    sid = str((body or {}).get("session_id", "") or "").strip()
+    stream_id = str((body or {}).get("stream_id", "") or "").strip()
+    text = str((body or {}).get("text", "") or "").strip()
+    if not sid:
+        return bad(handler, "session_id required")
+    if not stream_id:
+        return bad(handler, "stream_id required")
+    if not text:
+        return bad(handler, "text required")
+
+    try:
+        s = get_session(sid)
+    except KeyError:
+        return j(handler, {"accepted": False, "fallback": "session_not_found", "stream_id": stream_id})
+
+    if str(getattr(s, "active_stream_id", "") or "") != stream_id:
+        return j(handler, {"accepted": False, "fallback": "stream_mismatch", "stream_id": stream_id})
+
+    with STREAMS_LOCK:
+        if stream_id not in STREAMS:
+            return j(handler, {"accepted": False, "fallback": "stream_dead", "stream_id": stream_id})
+        agent = AGENT_INSTANCES.get(stream_id)
+
+    if agent is None:
+        return j(handler, {"accepted": False, "fallback": "no_agent", "stream_id": stream_id})
+
+    if getattr(agent, "_supports_active_turn_redirect", False) is not True:
+        return j(handler, {"accepted": False, "fallback": "unsupported_redirect", "stream_id": stream_id})
+
+    redirect_fn = getattr(agent, "redirect", None)
+    if not callable(redirect_fn):
+        return j(handler, {"accepted": False, "fallback": "unsupported_redirect", "stream_id": stream_id})
+
+    try:
+        accepted = bool(redirect_fn(text))
+    except Exception as exc:
+        logger.debug("agent.redirect() raised for session=%s stream=%s: %s", sid, stream_id, exc)
+        return j(handler, {"accepted": False, "fallback": "redirect_error", "stream_id": stream_id})
+
+    return j(handler, {"accepted": bool(accepted), "fallback": None if accepted else "redirect_rejected",
+                       "stream_id": stream_id})
+
+
 def cancel_stream(stream_id: str) -> bool:
     """Signal an in-flight stream to cancel. Returns True if work was found.
 
