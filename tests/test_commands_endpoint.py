@@ -552,6 +552,521 @@ def test_concurrent_reload_mcp_calls_are_serialized(monkeypatch):
     assert not errors
 
 
+def test_learn_command_returns_agent_message_payload(monkeypatch):
+    """`/learn` resolves to a normal agent-turn message instead of a fake output-only command."""
+    import sys
+
+    agent_pkg = sys.modules.get("agent") or ModuleType("agent")
+    agent_pkg.__path__ = []
+    learn_prompt = ModuleType("agent.learn_prompt")
+    cast(Any, learn_prompt).build_learn_prompt = lambda req: f"LEARN PROMPT: {req or '<conversation>'}"
+    monkeypatch.setitem(sys.modules, "agent", agent_pkg)
+    monkeypatch.setitem(sys.modules, "agent.learn_prompt", learn_prompt)
+
+    from api.commands import execute_agent_command
+
+    result = execute_agent_command('/learn what we just fixed')
+    assert result == {
+        "output": "⚡ Learning a skill from what you described.",
+        "message": "LEARN PROMPT: what we just fixed",
+    }
+
+
+def test_blueprint_command_can_return_agent_seed(monkeypatch):
+    """Blueprint commands with missing slots should seed the agent turn in WebUI."""
+    import sys
+
+    hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
+    hermes_cli_pkg.__path__ = []
+    blueprint_cmd = ModuleType("hermes_cli.blueprint_cmd")
+    cast(Any, blueprint_cmd).handle_blueprint_command = lambda args: SimpleNamespace(
+        text=f"Blueprint: {args}",
+        agent_seed=f"ASK FOR SLOTS: {args}",
+    )
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.blueprint_cmd", blueprint_cmd)
+
+    from api.commands import execute_agent_command
+
+    assert execute_agent_command('/blueprint morning') == {
+        "output": "Blueprint: morning",
+        "message": "ASK FOR SLOTS: morning",
+    }
+
+
+def test_curator_command_uses_subprocess_capture(monkeypatch):
+    """Curator command capture must not mutate process-global stdout/stderr."""
+    from api import commands
+
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((list(cmd), kwargs))
+        return commands.subprocess.CompletedProcess(cmd, 0, "curator ok\n", "")
+
+    monkeypatch.setattr(commands.sys, "executable", "/python")
+    monkeypatch.setattr(commands.subprocess, "run", fake_run)
+
+    assert commands._run_curator_command("/curator status") == "curator ok"
+    assert calls == [(
+        ["/python", "-m", "hermes_cli.main", "curator", "status"],
+        {"capture_output": True, "text": True, "timeout": 30},
+    )]
+
+
+def test_curator_command_blocks_state_changing_subcommands(monkeypatch):
+    """WebUI-safe: only read-only curator subcommands run; destructive ones (which
+    archive/consolidate skills on disk) are rejected without spawning a process."""
+    import pytest
+
+    from api import commands
+
+    ran: list = []
+    monkeypatch.setattr(commands.subprocess, "run", lambda *a, **k: ran.append(a))
+
+    for destructive in ("run", "prune", "archive", "restore", "pin", "unpin",
+                        "pause", "resume", "backup", "prune --yes"):
+        with pytest.raises(RuntimeError, match="not available from the WebUI"):
+            commands._run_curator_command(f"/curator {destructive}")
+    assert ran == [], "a blocked curator subcommand must not spawn a subprocess"
+
+    # Read-only subcommands (and their flags) are still allowed.
+    def _ok(cmd, **kw):
+        return commands.subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+
+    monkeypatch.setattr(commands.subprocess, "run", _ok)
+    for allowed in ("status", "usage", "usage --json", "list-archived", ""):
+        assert commands._run_curator_command(f"/curator {allowed}".strip()) == "ok"
+
+
+def _fake_cli_module(monkeypatch, name, attr, fn):
+    import sys
+    import types
+
+    if "hermes_cli" not in sys.modules:
+        pkg = types.ModuleType("hermes_cli")
+        pkg.__path__ = []  # mark as package
+        monkeypatch.setitem(sys.modules, "hermes_cli", pkg)
+    mod = types.ModuleType(name)
+    setattr(mod, attr, fn)
+    monkeypatch.setitem(sys.modules, name, mod)
+
+
+def test_kanban_command_blocks_mutations_and_worker_spawns(monkeypatch):
+    """WebUI-safe: only read-only kanban subcommands run; mutations, dispatch/swarm
+    (spawn workers) and tail/daemon (block the request thread) are rejected."""
+    from api import commands
+
+    ran = []
+    _fake_cli_module(monkeypatch, "hermes_cli.kanban", "run_slash",
+                     lambda a: ran.append(a) or f"kb:{a}")
+    for blocked in ("create x", "assign 1 me", "complete 1", "archive 1", "edit 1",
+                    "block 1", "swarm", "dispatch", "daemon --force", "tail 1",
+                    "boards create b", "boards rm b"):
+        with pytest.raises(RuntimeError, match="not available from the WebUI"):
+            commands._run_kanban_command(blocked)
+    assert ran == [], "a blocked kanban subcommand reached run_slash"
+    for allowed in ("", "list", "ls", "show 1", "boards list"):
+        assert commands._run_kanban_command(allowed) == f"kb:{allowed}"
+
+
+def test_blueprint_command_blocks_direct_create(monkeypatch):
+    """WebUI-safe: `/blueprint <name> slot=value` (direct create_job) is rejected;
+    catalog listing and the agent-seed path stay allowed."""
+    import types
+
+    from api import commands
+
+    for blocked in ("morning slot=x", "daily hour=9 minute=0", "x a=b"):
+        with pytest.raises(RuntimeError, match="not available from the WebUI"):
+            commands._run_blueprint_command(blocked)
+
+    seen = []
+
+    def _fake_handle(arg):
+        seen.append(arg)
+        return types.SimpleNamespace(text="ok", agent_seed=None)
+
+    _fake_cli_module(monkeypatch, "hermes_cli.blueprint_cmd",
+                     "handle_blueprint_command", _fake_handle)
+    for allowed in ("", "morning", "list"):
+        commands._run_blueprint_command(allowed)
+    assert seen == ["", "morning", "list"]
+
+
+def test_suggestions_command_blocks_subcommands(monkeypatch):
+    """WebUI-safe: only the bare `/suggestions` listing runs; state-changing
+    subcommands (accept/add/schedule/dismiss/reject/clear) are rejected."""
+    from api import commands
+
+    seen = []
+    _fake_cli_module(monkeypatch, "hermes_cli.suggestions_cmd",
+                     "handle_suggestions_command",
+                     lambda a, origin=None: seen.append(a) or "sg")
+    for blocked in ("accept 1", "add foo", "schedule 2", "dismiss 1", "reject 1", "clear"):
+        with pytest.raises(RuntimeError, match="not available from the WebUI"):
+            commands._run_suggestions_command(blocked)
+    assert seen == [], "a blocked suggestions subcommand reached the handler"
+    assert commands._run_suggestions_command("") == "sg"
+
+
+def test_memory_command_blocks_shared_config_approval_toggle(monkeypatch):
+    """WebUI-safe: `/memory approval|mode on|off` writes memory.write_approval to the
+    shared Hermes config (cross-session) and is blocked; pending/approve/reject
+    (in-session) and bare `approval`/`mode` (status) pass through."""
+    import sys
+    import types
+
+    from api import commands
+
+    for blocked in (
+        "/memory approval on",
+        "/memory approval off",
+        "/memory mode on",
+        "/memory mode off",
+    ):
+        with pytest.raises(RuntimeError, match="not available from the WebUI"):
+            commands._run_memory_command(blocked)
+
+    seen = []
+    wac = types.ModuleType("hermes_cli.write_approval_commands")
+    wac.handle_pending_subcommand = (
+        lambda mem, args, memory_store=None, set_mode_fn=None: seen.append(list(args)) or "mem-ok"
+    )
+    monkeypatch.setitem(sys.modules, "hermes_cli.write_approval_commands", wac)
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    wa = types.ModuleType("tools.write_approval")
+    wa.MEMORY = "MEMORY"
+    monkeypatch.setitem(sys.modules, "tools.write_approval", wa)
+    mt = types.ModuleType("tools.memory_tool")
+    mt.load_on_disk_store = lambda: {}
+    monkeypatch.setitem(sys.modules, "tools.memory_tool", mt)
+
+    for allowed in (
+        "/memory pending",
+        "/memory approve 1",
+        "/memory reject 1",
+        "/memory approval",
+        "/memory mode",
+    ):
+        assert commands._run_memory_command(allowed) == "mem-ok"
+    assert ["pending"] in seen and ["approval"] in seen and ["mode"] in seen
+
+
+def _install_case_folding_write_approval(monkeypatch, writes):
+    """Install a `handle_pending_subcommand` with the REAL dispatch semantics.
+
+    `hermes_cli/write_approval_commands.handle_pending_subcommand` does
+    ``sub = args[0].lower()`` before matching ``{"approval", "mode"}``, so a
+    case-sensitive guard in the WebUI lets mixed case through to `set_mode_fn`,
+    which writes ``memory.write_approval`` into the SHARED Hermes config.
+    """
+    import sys
+    import types
+
+    def handle_pending_subcommand(mem, args, memory_store=None, set_mode_fn=None):
+        if not args:
+            return "state"
+        sub = args[0].lower()
+        rest = args[1:]
+        if sub in {"approval", "mode"}:
+            if not rest:
+                return "state"
+            arg = rest[0].strip().lower()
+            if arg in {"on", "true", "yes", "1", "enable", "enabled"}:
+                set_mode_fn(True)
+                return "enabled"
+            if arg in {"off", "false", "no", "0", "disable", "disabled"}:
+                set_mode_fn(False)
+                return "disabled"
+            return "usage"
+        return "mem-ok"
+
+    wac = types.ModuleType("hermes_cli.write_approval_commands")
+    wac.handle_pending_subcommand = handle_pending_subcommand
+    monkeypatch.setitem(sys.modules, "hermes_cli.write_approval_commands", wac)
+
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    wa = types.ModuleType("tools.write_approval")
+    wa.MEMORY = "MEMORY"
+    monkeypatch.setitem(sys.modules, "tools.write_approval", wa)
+    mt = types.ModuleType("tools.memory_tool")
+    mt.load_on_disk_store = lambda: {}
+    monkeypatch.setitem(sys.modules, "tools.memory_tool", mt)
+
+    cfg = types.ModuleType("hermes_cli.config")
+    cfg.set_config_value = lambda key, value: writes.append((key, value))
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", cfg)
+
+
+@pytest.mark.parametrize(
+    "blocked",
+    [
+        "/memory approval on",
+        "/memory approval off",
+        "/memory mode on",
+        "/memory mode off",
+        # The downstream handler lowercases args[0]; a case-sensitive guard in
+        # the WebUI would let every row below reach `set_config_value`.
+        "/memory Mode on",
+        "/memory MODE off",
+        "/memory Approval on",
+        "/memory APPROVAL off",
+        "/memory ApPrOvAl enable",
+        "/memory MoDe disabled",
+    ],
+)
+def test_memory_approval_toggle_is_blocked_case_insensitively(monkeypatch, blocked):
+    """No casing of `/memory approval|mode <value>` may write the shared config."""
+    from api import commands
+
+    writes: list[tuple[str, str]] = []
+    _install_case_folding_write_approval(monkeypatch, writes)
+
+    with pytest.raises(RuntimeError, match="not available from the WebUI"):
+        commands._run_memory_command(blocked)
+
+    assert writes == [], f"{blocked!r} reached the shared-config writer: {writes}"
+
+
+def test_memory_status_and_pending_still_pass_through_in_any_case(monkeypatch):
+    """Read-only subcommands must stay usable, including mixed case."""
+    from api import commands
+
+    writes: list[tuple[str, str]] = []
+    _install_case_folding_write_approval(monkeypatch, writes)
+
+    # Bare approval/mode report status; they carry no value token to apply.
+    assert commands._run_memory_command("/memory Approval") == "state"
+    assert commands._run_memory_command("/memory MODE") == "state"
+    assert commands._run_memory_command("/memory Pending") == "mem-ok"
+    assert commands._run_memory_command("/memory Approve 1") == "mem-ok"
+    assert writes == []
+
+
+def test_commands_exec_runs_under_the_requesting_profile(monkeypatch):
+    """`/api/commands/exec` handlers must see the requesting browser's profile.
+
+    The handlers delegate into Hermes helpers that resolve state from process
+    env / `get_hermes_home()`. Without the active-request profile scope,
+    `/memory pending|approve|reject` acts on the process-default profile's
+    store instead of the requesting profile's.
+    """
+    import contextlib
+    import os
+    import sys
+    import types
+
+    from api import commands
+
+    active = {"profile": "default"}
+    homes = {
+        "default": "/home/u/.hermes",
+        "research": "/home/u/.hermes/profiles/research",
+        "work": "/home/u/.hermes/profiles/work",
+    }
+    purposes: list[str] = []
+
+    @contextlib.contextmanager
+    def fake_scope(purpose="active request", logger_override=None):
+        purposes.append(purpose)
+        previous = os.environ.get("HERMES_HOME")
+        os.environ["HERMES_HOME"] = homes[active["profile"]]
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = previous
+
+    profiles_mod = types.ModuleType("api.profiles")
+    profiles_mod.profile_env_for_active_request = fake_scope
+    monkeypatch.setitem(sys.modules, "api.profiles", profiles_mod)
+
+    seen: list[str | None] = []
+    monkeypatch.setattr(
+        commands,
+        "_run_memory_command",
+        lambda command: seen.append(os.environ.get("HERMES_HOME")) or "ok",
+    )
+
+    outside = os.environ.get("HERMES_HOME")
+
+    active["profile"] = "research"
+    assert commands.execute_agent_command("/memory pending") == "ok"
+    active["profile"] = "work"
+    assert commands.execute_agent_command("/memory pending") == "ok"
+
+    assert seen == [homes["research"], homes["work"]], (
+        "handlers did not observe the requesting profile's Hermes home"
+    )
+    assert purposes == ["/api/commands/exec", "/api/commands/exec"]
+    assert os.environ.get("HERMES_HOME") == outside, "profile scope leaked past the call"
+
+
+def test_commands_exec_scope_is_released_when_a_handler_raises(monkeypatch):
+    """A failing handler must not strand the profile env of the failed request."""
+    import contextlib
+    import os
+    import sys
+    import types
+
+    from api import commands
+
+    @contextlib.contextmanager
+    def fake_scope(purpose="active request", logger_override=None):
+        previous = os.environ.get("HERMES_HOME")
+        os.environ["HERMES_HOME"] = "/scoped/home"
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = previous
+
+    profiles_mod = types.ModuleType("api.profiles")
+    profiles_mod.profile_env_for_active_request = fake_scope
+    monkeypatch.setitem(sys.modules, "api.profiles", profiles_mod)
+
+    def boom(_command):
+        raise RuntimeError("Memory command failed")
+
+    monkeypatch.setattr(commands, "_run_memory_command", boom)
+
+    outside = os.environ.get("HERMES_HOME")
+    with pytest.raises(RuntimeError, match="Memory command failed"):
+        commands.execute_agent_command("/memory pending")
+    assert os.environ.get("HERMES_HOME") == outside
+
+
+def test_agents_command_renders_the_real_process_registry(monkeypatch):
+    """`/agents` (and its `/tasks` alias) must read `list_sessions()`.
+
+    The registry has no `list_processes()`; calling it raised an AttributeError
+    that the handler's `except Exception` swallowed, so the command always
+    rendered the "nothing running" fallback even with live processes.
+    """
+    import sys
+    import types
+
+    from api import commands
+
+    registry = types.SimpleNamespace(
+        list_sessions=lambda: [
+            {
+                "session_id": "s-1",
+                "command": "npm run dev",
+                "pid": 4242,
+                "status": "running",
+                "uptime_seconds": 12,
+                "profile": "alpha",
+                "principal": "alice",
+            },
+            {
+                "session_id": "s-2",
+                "command": "pytest -q",
+                "pid": 4243,
+                "status": "exited",
+                "exit_code": 1,
+                "profile": "alpha",
+                "principal": "alice",
+            },
+        ]
+    )
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    pr = types.ModuleType("tools.process_registry")
+    pr.process_registry = registry
+    monkeypatch.setitem(sys.modules, "tools.process_registry", pr)
+
+    out = commands._run_agents_command(profile="alpha", principal="alice")
+
+    assert "Tracked processes (2):" in out
+    assert "npm run dev — running (pid 4242)" in out
+    assert "pytest -q — exited (1) (pid 4243)" in out
+    assert "currently running" not in out
+
+
+def test_agents_command_reports_an_empty_registry_as_nothing_running(monkeypatch):
+    import sys
+    import types
+
+    from api import commands
+
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    pr = types.ModuleType("tools.process_registry")
+    pr.process_registry = types.SimpleNamespace(list_sessions=lambda: [])
+    monkeypatch.setitem(sys.modules, "tools.process_registry", pr)
+
+    assert commands._run_agents_command(profile="alpha", principal="alice") == (
+        "No background agents or tracked processes are currently running."
+    )
+
+
+def test_agents_command_does_not_call_the_nonexistent_list_processes(monkeypatch):
+    """Guard against regressing to an API the Agent registry never exposed."""
+    import sys
+    import types
+
+    from api import commands
+
+    class Registry:
+        def list_sessions(self):
+            return [{
+                "session_id": "s-1", "command": "sleep 1", "pid": 7, "status": "running",
+                "profile": "alpha", "principal": "alice",
+            }]
+
+        def __getattr__(self, name):  # pragma: no cover - only hit on regression
+            raise AssertionError(f"handler reached for absent registry attribute {name!r}")
+
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    pr = types.ModuleType("tools.process_registry")
+    pr.process_registry = Registry()
+    monkeypatch.setitem(sys.modules, "tools.process_registry", pr)
+
+    assert "sleep 1 — running (pid 7)" in commands._run_agents_command(
+        profile="alpha", principal="alice"
+    )
+
+
+def test_webui_safe_agent_commands_are_allowlisted(monkeypatch):
+    """Safe non-CLI agent commands should be accepted by the executor allowlist."""
+    from api import commands
+
+    monkeypatch.setattr(commands, "_run_kanban_command", lambda arg: f"kanban {arg}")
+    monkeypatch.setattr(commands, "_run_profile_command", lambda: "profile ok")
+
+    assert commands.execute_agent_command('/kanban list') == "kanban list"
+    assert commands.execute_agent_command('/whoami') == "profile ok"
+
+
+def test_webui_safe_agent_command_aliases_resolve_to_allowlisted_handlers(monkeypatch):
+    """Registry aliases must not be intercepted by the frontend then rejected by the API."""
+    from api import commands
+
+    monkeypatch.setattr(commands, "_run_agents_command", lambda **_kw: "agents ok")
+    monkeypatch.setattr(commands, "_run_suggestions_command", lambda arg: f"suggestions {arg}")
+    monkeypatch.setattr(commands, "_run_blueprint_command", lambda arg: f"blueprint {arg}")
+    monkeypatch.setattr(commands, "_run_version_command", lambda: "version ok")
+
+    assert commands.execute_agent_command('/tasks') == "agents ok"
+    assert commands.execute_agent_command('/suggest') == "suggestions "
+    assert commands.execute_agent_command('/bp morning') == "blueprint morning"
+    assert commands.execute_agent_command('/v') == "version ok"
+
+
 @requires_agent_modules
 def test_commands_exec_cli_only_command_returns_404():
     """CLI-only commands should stay blocked from the generic execution endpoint."""
@@ -561,8 +1076,8 @@ def test_commands_exec_cli_only_command_returns_404():
 
 
 @requires_agent_modules
-def test_commands_exec_regular_agent_command_returns_404():
-    """Non-allowlisted agent commands must not become generic WebUI exec targets."""
+def test_commands_exec_regular_unallowlisted_agent_command_returns_404():
+    """Unallowlisted agent commands must not become generic WebUI exec targets."""
     status, body = _post('/api/commands/exec', {'command': '/help'})
     assert status == 404
     assert isinstance(body, dict)
@@ -586,3 +1101,106 @@ def test_list_commands_degrades_when_agent_missing(monkeypatch):
     # the stubbed-None module, raising ImportError, taking the fallback path.
     from api.commands import list_commands
     assert list_commands() == []
+
+
+# ── Re-gate 2026-07-25: the process registry is process-global ──────────────
+
+
+def _registry_with(rows):
+    """Build a fake tools.process_registry returning *rows*."""
+    import types
+
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.__path__ = []
+    pr = types.ModuleType("tools.process_registry")
+    pr.process_registry = types.SimpleNamespace(list_sessions=lambda: rows)
+    return tools_pkg, pr
+
+
+_TWO_PROFILE_ROWS = [
+    {"session_id": "a-run", "command": "alpha-secret --token=A", "pid": 11,
+     "status": "running", "profile": "alpha", "principal": "alice"},
+    {"session_id": "a-done", "command": "alpha-finished", "pid": 12,
+     "status": "exited", "exit_code": 0, "profile": "alpha", "principal": "alice"},
+    {"session_id": "b-run", "command": "beta-secret --token=B", "pid": 21,
+     "status": "running", "profile": "beta", "principal": "bob"},
+    {"session_id": "b-done", "command": "beta-finished", "pid": 22,
+     "status": "exited", "exit_code": 2, "profile": "beta", "principal": "bob"},
+    # Same profile, different principal — a profile-only filter would leak this.
+    {"session_id": "a2-run", "command": "alpha-other-user", "pid": 31,
+     "status": "running", "profile": "alpha", "principal": "carol"},
+    # Pre-ownership row: unattributable, therefore nobody's.
+    {"session_id": "legacy", "command": "legacy-no-owner", "pid": 41,
+     "status": "running"},
+]
+
+
+def _agents_for(monkeypatch, *, profile, principal, rows=None):
+    import sys
+
+    from api import commands
+
+    tools_pkg, pr = _registry_with(_TWO_PROFILE_ROWS if rows is None else rows)
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    monkeypatch.setitem(sys.modules, "tools.process_registry", pr)
+    return commands._run_agents_command(profile=profile, principal=principal)
+
+
+def test_one_profile_never_sees_another_profiles_processes(monkeypatch):
+    """`tools.process_registry` is ONE registry for every profile served.
+
+    Projecting it unfiltered handed profile A the command lines, PIDs and
+    statuses of profile B. Command lines routinely carry paths, hostnames and
+    sometimes credentials, so this is disclosure rather than noise.
+    """
+    out = _agents_for(monkeypatch, profile="alpha", principal="alice")
+
+    assert "alpha-secret --token=A" in out
+    assert "alpha-finished" in out
+    for foreign in ("beta-secret --token=B", "beta-finished", "21", "22"):
+        assert foreign not in out, f"another profile's data leaked: {foreign}"
+
+
+def test_one_principal_never_sees_another_principal_in_the_same_profile(monkeypatch):
+    """A profile-only filter would still show every user inside that profile."""
+    out = _agents_for(monkeypatch, profile="alpha", principal="alice")
+    assert "alpha-other-user" not in out, "a second principal's process was shown"
+
+
+def test_both_running_and_finished_rows_are_filtered(monkeypatch):
+    """Status must not decide visibility — ownership does."""
+    out = _agents_for(monkeypatch, profile="beta", principal="bob")
+    assert "beta-secret --token=B — running (pid 21)" in out
+    assert "beta-finished — exited (2) (pid 22)" in out
+    assert "alpha" not in out
+
+
+def test_a_row_without_an_owner_is_shown_to_nobody(monkeypatch):
+    """Unattributable rows fail CLOSED.
+
+    "We cannot tell whose this is" must not resolve to "yours" for whichever
+    profile happens to ask first.
+    """
+    for profile, principal in (("alpha", "alice"), ("beta", "bob"), ("gamma", "dave")):
+        out = _agents_for(monkeypatch, profile=profile, principal=principal)
+        assert "legacy-no-owner" not in out, (
+            f"an ownerless row was shown to {profile}/{principal}"
+        )
+
+
+def test_a_missing_request_identity_shows_nothing(monkeypatch):
+    """Without a server-derived identity there is nothing to filter against."""
+    for profile, principal in ((None, "alice"), ("alpha", None), (None, None)):
+        out = _agents_for(monkeypatch, profile=profile, principal=principal)
+        assert "alpha-secret" not in out and "beta-secret" not in out
+        assert "currently visible" in out
+
+
+def test_the_identity_is_never_taken_from_the_row_being_filtered(monkeypatch):
+    """A row must not be able to name itself into the caller's view."""
+    rows = [{
+        "session_id": "forged", "command": "forged-row", "pid": 99, "status": "running",
+        "profile": "alpha", "principal": "alice", "owner": "alice",
+    }]
+    out = _agents_for(monkeypatch, profile="beta", principal="bob", rows=rows)
+    assert "forged-row" not in out
