@@ -517,33 +517,29 @@ def test_focus_visibility_return_marks_active_session_viewed_and_clears_marker()
     assert "window.addEventListener('focus', _markActiveSessionViewedOnReturn);" in MESSAGES_JS
 
 
-def test_completion_unread_clears_only_when_session_is_opened():
+def test_completion_unread_clears_only_after_selected_session_load_succeeds():
     load_idx = SESSIONS_JS.find("async function loadSession(sid")
     assert load_idx != -1, "loadSession not found"
     load_block = SESSIONS_JS[load_idx:SESSIONS_JS.find("function _resolveSessionModelForDisplaySoon", load_idx)]
 
-    # The metadata-arrival "mark viewed + clear stale completion unread" pair now
-    # flows through _acknowledgeSessionVisit(S.session.session_id, ...), which
-    # calls _setSessionViewedCount() internally (and _setSessionViewedCount clears
-    # any stale completion-unread marker, #3020) (#4946).
     assign_idx = load_block.find("S.session=data.session;")
-    acknowledge_idx = load_block.find("_acknowledgeSessionVisit(\n    S.session.session_id,", assign_idx)
-    # The last stale-response ownership guard before the visit is acknowledged:
-    # stale loadSession responses must not clear unread markers for sessions the
-    # user did not actually open.
-    stale_guard_idx = load_block.rfind("if (!_isCurrentLoad())", 0, acknowledge_idx)
+    success_idx = load_block.find("if (_isCurrentLoad()) _loadingSessionId = null;\n\n  // Re-acknowledge")
+    acknowledge_idx = load_block.find("_acknowledgeSessionVisit(\n      sid,", success_idx)
+    last_stale_guard_idx = load_block.rfind("if (!_isCurrentLoad())", 0, success_idx)
+    failed_messages_return_idx = load_block.find("return;", load_block.find("Failed to load conversation messages"))
 
-    assert assign_idx != -1, "loadSession must assign S.session before acknowledging the visit"
-    assert acknowledge_idx != -1 and assign_idx < acknowledge_idx, (
-        "loadSession must acknowledge the visit only after the session metadata "
-        "response is accepted for the in-flight load"
+    assert assign_idx != -1 and assign_idx < success_idx
+    assert failed_messages_return_idx != -1 and failed_messages_return_idx < success_idx, (
+        "failed transcript loads must exit before unread is acknowledged"
     )
-    assert stale_guard_idx != -1 and stale_guard_idx < acknowledge_idx, (
-        "stale loadSession responses must be guarded out before the visit-ack "
-        "clears unread markers for sessions the user did not actually open"
+    assert last_stale_guard_idx != -1 and last_stale_guard_idx < success_idx, (
+        "superseded transcript loads must exit before unread is acknowledged"
     )
-    # The acknowledge helper is what clears completion unread on visit, via
-    # _setSessionViewedCount (#3020 stale-marker clear).
+    assert acknowledge_idx > success_idx, (
+        "completion unread must clear only after the selected transcript has loaded successfully"
+    )
+    # The acknowledge helper clears completion unread via _setSessionViewedCount
+    # (#3020 stale-marker clear).
     assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0)" in SESSIONS_JS
     ack_body_start = SESSIONS_JS.find("function _acknowledgeSessionVisit(")
     ack_body = SESSIONS_JS[ack_body_start:SESSIONS_JS.find("function _sessionVisitHasUnreadState", ack_body_start)]
