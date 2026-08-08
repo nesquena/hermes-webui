@@ -71,6 +71,7 @@ function extractFunc(name) {
 }
 eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
+eval(extractFunc('_normalizeMarkdownLinkDestination'));
 eval(extractFunc('renderMd'));
 
 let buf = '';
@@ -123,6 +124,67 @@ class TestSessionInternalLinks:
         out = _render(driver_path, '<a class="session-link" href="/anything/foo/session/abc">bad</a>')
         assert 'href="/anything/foo/session/abc"' not in out
         assert '<a>bad</a>' in out
+
+
+class TestLabeledLinkDestinations:
+    def test_final_answer_keeps_unencoded_file_download_destination(self, driver_path):
+        url = "https://gw.example/api/files/download?path=/tmp/report final.pdf"
+        out = _render(driver_path, f"[Download]({url})")
+        assert f'href="{url}"' in out
+        assert ">Download</a>" in out
+
+    def test_final_answer_keeps_encoded_parentheses(self, driver_path):
+        url = "https://gw.example/api/files/download?path=%2Ftmp%2Freport%20final%20%28review%29.pdf"
+        out = _render(driver_path, f"[Download]({url})")
+        assert f'href="{url}"' in out
+
+    def test_table_link_keeps_unencoded_file_download_destination(self, driver_path):
+        url = "https://gw.example/api/files/download?path=/tmp/report final.pdf"
+        markdown = f"| File |\n| --- |\n| [Download]({url}) |"
+        out = _render(driver_path, markdown)
+        assert f'href="{url}"' in out
+        assert ">Download</a>" in out
+
+    def test_empty_label_stays_visible_instead_of_becoming_an_empty_anchor(self, driver_path):
+        url = "https://example.com/path"
+        out = _render(driver_path, f"[]({url})")
+        assert "[](" in out
+        assert f">{url}</a>" in out
+        assert f'href="{url}" target="_blank" rel="noopener"></a>' not in out
+
+    def test_spaced_labeled_link_inside_inline_code_stays_literal(self, driver_path):
+        literal = "[Literal](https://gw.example/a b.pdf)"
+        out = _render(driver_path, f"`{literal}`")
+        assert f"<code>{literal}</code>" in out
+        assert "<code><a " not in out
+
+    def test_spaced_labeled_link_inside_raw_image_alt_stays_in_the_tag(self, driver_path):
+        literal = "[Download](https://example.com/report final.pdf)"
+        markdown = (
+            f'<img alt="{literal}" '
+            'src="https://img.example/p.png">'
+        )
+        out = _render(driver_path, markdown)
+        assert '<img src="https://img.example/p.png"' in out
+        assert f'alt="{literal}"' in out
+        assert "<a " not in out
+
+    @pytest.mark.parametrize(
+        "title",
+        ['"Documentation"', "'Documentation'", "(Documentation)"],
+    )
+    def test_optional_markdown_title_is_not_part_of_the_destination(
+        self,
+        driver_path,
+        title,
+    ):
+        out = _render(
+            driver_path,
+            f"[Docs](https://example.com/path {title})",
+        )
+        assert 'href="https://example.com/path"' in out
+        assert "Documentation" not in out
+        assert ">Docs</a>" in out
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Blockquote prefix strip — the bug commit 04e7b53 introduced was a one-char
