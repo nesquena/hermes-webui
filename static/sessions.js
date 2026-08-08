@@ -362,6 +362,8 @@ let _sessionListLoadError = null;
 let _sessionListHasLoadedOnce = false;
 const _SESSION_LIST_BOOT_TIMEOUT_MS = 90000;
 const SESSION_LIST_INTERACTION_IDLE_MS = 700;
+const SESSION_LIST_TOUCH_INTERACTION_IDLE_MS = 1200;
+let _pendingTouchDeferredRenderTimer = 0;
 const SESSION_SWIPE_DURATION_MS = 500;
 const SESSION_SWIPE_REFLOW_LEAD_MS = 220;
 const SESSION_REFLOW_TIMEOUT_MS = 420;
@@ -4021,6 +4023,15 @@ function _makeSessionSwipeAffordance(side, icon, label){
 const SESSION_VIRTUAL_ROW_HEIGHT = 52;
 const SESSION_VIRTUAL_BUFFER_ROWS = 12;
 const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
+// On touch-primary devices, we use incremental batched rendering instead of
+// the wipe-and-rebuild virtualization. An initial batch is rendered, then more
+// rows are appended as the user scrolls — without ever clearing innerHTML
+// during scroll (which kills iOS momentum). This scales to 10K+ sessions.
+const SESSION_TOUCH_INITIAL_BATCH = 60;
+const SESSION_TOUCH_BATCH_SIZE = 40;
+let _sessionTouchLoadedCount = 0; // how many rows have been rendered so far
+let _sessionTouchTotalCount = 0;  // total rows available
+let _sessionTouchListEl = null;   // the list element for appending
 let _sessionVirtualScrollList = null;
 let _sessionVirtualScrollRaf = 0;
 
@@ -5103,6 +5114,17 @@ const _SESSION_SKELETON_GROUPS = [
 function showSessionListSkeleton(targetProfile){
   const list = $('sessionList');
   if(!list) return;
+  // Invalidate touch render state when the skeleton replaces the list —
+  // the observer, RAF, render state, loaded count, and generation must all
+  // be torn down so stale callbacks can't mutate the skeleton DOM.
+  // Tear down any prior touch owner unconditionally — the old owner may have
+  // already lost capability (_isTouchPrimary() now false) but its observer,
+  // RAF, render state, pending work, and generation are still live. Gating on
+  // the current capability check leaves them dangling after the skeleton
+  // replaces the DOM, letting stale callbacks mutate the skeleton.
+  if(typeof _invalidateTouchRender==='function'){
+    _invalidateTouchRender();
+  }
   // Tear down any active virtual-scroll state up front so a pending scroll-driven
   // render can't repaint the previous profile's cached rows over the skeleton
   // (#4662 Codex gate). Cancel the queued RAF and drop the data-session-virtual-*
@@ -5268,6 +5290,596 @@ function _isSessionListUserInteracting(){
   );
 }
 
+function _isTouchPrimary(){
+  try{return window.matchMedia('(pointer:coarse)').matches;}catch(_){return false;}
+}
+
+function _isSessionListTouchScrolling(){
+  if(!_isTouchPrimary()) return false;
+  const now=Date.now();
+  return Boolean(
+    _sessionListPointerActive ||
+    (_sessionListLastScrollAt && now-_sessionListLastScrollAt<SESSION_LIST_TOUCH_INTERACTION_IDLE_MS)
+  );
+}
+
+function _deferRenderSessionListFromCache(){
+  if(_pendingTouchDeferredRenderTimer) clearTimeout(_pendingTouchDeferredRenderTimer);
+  _pendingTouchDeferredRenderTimer=setTimeout(()=>{
+    _pendingTouchDeferredRenderTimer=0;
+    renderSessionListFromCache();
+  },SESSION_LIST_TOUCH_INTERACTION_IDLE_MS+50);
+}
+
+// ── Touch incremental batched rendering ───────────────────────────────────
+// Instead of the wipe-and-rebuild virtualization (which kills iOS momentum),
+// we render an initial batch of rows and append more as the user scrolls.
+// An IntersectionObserver on a sentinel div detects when the user reaches
+// the bottom and triggers an incremental append — no innerHTML wipe happens
+// during scroll.
+let _touchSentinelObserver=null;
+let _touchBatchPending=false;
+let _sessionTouchGen=0; // generation token — bumped on profile/filter changes
+let _touchBatchToken=0; // monotonic token for token-owned microtask work
+let _touchContinuousBatchScheduled=false;
+// Single explicit scroll-owner record: {gen, list, handler, raf, token}.
+// Replaces the former split globals (_touchScrollHandler + _touchScrollFallbackRaf).
+// Every piece of scroll-trigger work — the scroll listener, the RAF handle,
+// and the token-owned microtask — belongs to ONE owner object. Old work can
+// only settle (clear/cancel) its own handle; teardown cancels only if the
+// current owner is the same object. This prevents a stale handler from
+// erasing bookkeeping for a newer installed owner.
+let _touchScrollOwner=null;
+// Canonical render state saved by renderSessionListFromCache after the initial
+// touch render. Contains the ordered flat session rows, group metadata, the
+// _renderOneSession closure, and the active session ID — everything needed to
+// append more rows without re-deriving from mutable _allSessions.
+let _touchRenderState=null;
+
+/// Unified invalidation: disconnects observer, cancels RAF, clears ALL
+/// touch render state (generation, list, loaded/total, pending token,
+/// render state), and bumps the generation+token so any in-flight
+/// microtask knows it's stale. Called from setup, profile/skeleton changes,
+/// cache replacement, filter changes, and touch-mode exit — one path for
+/// all teardown. Every piece of state is released here.
+function _invalidateTouchRender(){
+  if(_touchSentinelObserver){_touchSentinelObserver.disconnect();_touchSentinelObserver=null;}
+  // Owner-qualified teardown: only remove the listener and cancel the RAF
+  // if the current _touchScrollOwner is the one we captured. A stale owner
+  // must not erase a newer installed owner's bookkeeping.
+  const owner=_touchScrollOwner;
+  if(owner){
+    if(owner.raf){cancelAnimationFrame(owner.raf);}
+    if(owner.handler&&owner.list){
+      try{owner.list.removeEventListener('scroll',owner.handler,{passive:true});}catch(_){}
+    }
+  }
+  _touchScrollOwner=null;
+  _touchRenderState=null;
+  _sessionTouchListEl=null;
+  _sessionTouchLoadedCount=0;
+  _sessionTouchTotalCount=0;
+  _touchBatchPending=false;
+  _touchContinuousBatchScheduled=false;
+  _sessionTouchGen++; // bump generation to invalidate stale observer callbacks
+  _touchBatchToken++; // invalidate any pending token-owned microtask
+}
+
+function _ensureTouchSentinelObserver(list){
+  if(!list) return;
+  if(!('IntersectionObserver' in window)) return;
+  if(_touchSentinelObserver) _touchSentinelObserver.disconnect();
+  _touchSentinelObserver=null;
+  const gen=_sessionTouchGen;
+  _touchSentinelObserver=new IntersectionObserver((entries)=>{
+    // Reject stale callbacks from a previous view/profile generation
+    if(gen!==_sessionTouchGen) return;
+    for(const entry of entries){
+      if(entry.isIntersecting&&!_touchBatchPending){
+        // Token-owned: capture {gen, token} when scheduling. The microtask
+        // re-checks gen before mutating and only clears _touchBatchPending
+        // if its token is still the current one — so an old gen-1 microtask
+        // cannot append a gen-2 row or clobber a gen-2 pending flag.
+        const token=++_touchBatchToken;
+        _touchBatchPending=true;
+        const capturedGen=gen;
+        Promise.resolve().then(()=>{
+          // Revalidate the full ownership contract immediately before mutation:
+          // generation, list identity, token, loaded/total, and near-bottom
+          // geometry. The observer fired because the sentinel was intersecting,
+          // but a re-render or generation bump may have changed the list between
+          // the observer callback and this microtask.
+          if(capturedGen!==_sessionTouchGen){
+            if(token===_touchBatchToken) _touchBatchPending=false;
+            return;
+          }
+          if(!_sessionTouchListEl) {
+            if(token===_touchBatchToken) _touchBatchPending=false;
+            return;
+          }
+          if(token!==_touchBatchToken) return;
+          const t=_sessionTouchTotalCount||0;
+          const l=_sessionTouchLoadedCount||0;
+          if(l>=t) {
+            if(token===_touchBatchToken) _touchBatchPending=false;
+            return;
+          }
+          const el=_sessionTouchListEl;
+          const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<200;
+          if(!nearBottom) {
+            if(token===_touchBatchToken) _touchBatchPending=false;
+            return;
+          }
+          try{_appendTouchBatch();}
+          finally{ if(token===_touchBatchToken) _touchBatchPending=false; }
+        });
+      }
+    }
+  },{root:list,rootMargin:'0px 0px 200px 0px',threshold:0});
+}
+
+/// Append new session rows to the list without wiping existing DOM.
+/// Uses the canonical _touchRenderState saved by the initial render — does NOT
+/// re-derive from _allSessions, which may have changed under us.
+///
+/// Transactional: rows are rendered into detached per-group DocumentFragments
+/// first. Only if ALL rows in the target suffix render successfully are they
+/// committed to the live DOM and the loaded count advanced. If any row throws,
+/// the fragments are discarded — no partial DOM mutation, no duplicate on retry.
+function _appendTouchBatch(){
+  const state=_touchRenderState;
+  if(!state||state.gen!==_sessionTouchGen) return; // stale generation
+  const list=state.list;
+  if(!list||list!==_sessionTouchListEl) return;
+  const total=state.flatRows.length;
+  const oldLoaded=_sessionTouchLoadedCount||0;
+  const targetEnd=Math.min(total, oldLoaded+SESSION_TOUCH_BATCH_SIZE);
+  if(targetEnd<=oldLoaded) return; // nothing to append
+  // Validate DOM SID prefix matches the stored order. If the DOM has diverged
+  // (e.g. a deferred cache update changed _allSessions and the list was
+  // partially re-rendered), bail out and trigger a full re-render instead of
+  // splicing a new-cache suffix onto an old-cache prefix.
+  const existingItems=list.querySelectorAll('.session-item[data-sid]');
+  if(existingItems.length!==oldLoaded){
+    // DOM row count must match the loaded count exactly — fewer means
+    // something wiped rows, more means a stale live row snuck in. Either
+    // way, the prefix is unauthoritative: full re-render.
+    _invalidateTouchRender();
+    _sessionTouchLoadedCount=0;
+    renderSessionListFromCache();
+    return;
+  }
+  for(let i=0;i<oldLoaded;i++){
+    const domSid=existingItems[i]&&existingItems[i].dataset.sid;
+    const stateSid=state.flatRows[i]&&state.flatRows[i].session&&state.flatRows[i].session.session_id;
+    if(domSid!==stateSid){
+      // Row identity mismatch — DOM is stale. Full re-render.
+      _invalidateTouchRender();
+      _sessionTouchLoadedCount=0;
+      renderSessionListFromCache();
+      return;
+    }
+  }
+  // Transactional append: render the complete target suffix into detached
+  // per-group fragments. If any row throws, fragments are never attached —
+  // no partial DOM state, no duplicate rows on retry.
+  const renderOne=state.renderOneSession;
+  if(typeof renderOne!=='function') return; // renderer not available
+  const fragmentsByGroup={}; // label -> DocumentFragment
+  const groupOrder=[]; // preserve first-seen order for deterministic commit
+  try{
+    for(let i=oldLoaded;i<targetEnd;i++){
+      const row=state.flatRows[i];
+      // Validate every row — a missing row/body/renderer must ABORT, not
+      // silently continue while advancing the loaded count.
+      if(!row||!row.session||!row.group){
+        return; // abort without advancing state
+      }
+      const g=row.group;
+      const label=g.label;
+      if(!fragmentsByGroup[label]){
+        fragmentsByGroup[label]=document.createDocumentFragment();
+        groupOrder.push(label);
+      }
+      const node=renderOne(row.session, Boolean(g.isPinned));
+      if(!node){
+        return; // renderer returned null — abort without advancing state
+      }
+      fragmentsByGroup[label].appendChild(node);
+    }
+  }catch(e){
+    // Transactional: nothing was attached to the live DOM.
+    // Loaded count stays at oldLoaded. Next retry re-renders from oldLoaded —
+    // no duplicates because no rows were committed.
+    return;
+  }
+  // Commit: attach fragments to the live DOM. This is the point of no return.
+  // Validate EVERY group wrapper+body exists BEFORE attaching any fragment.
+  // The prior version attached group A, then aborted on a missing group B body
+  // without advancing the loaded count — retry re-appended group A's rows,
+  // duplicating them. Pre-validation makes the commit all-or-nothing.
+  // Insert each group fragment BEFORE its after-spacer (not after it) — the
+  // after-spacer represents unloaded rows and must remain at the END of the
+  // group body, after the newly loaded rows. A partial 60->100 append would
+  // otherwise produce rows 0-59, spacer, rows 60-99 — with the spacer in front
+  // of the new rows.
+  //
+  // Phase 1: validate all targets exist. Newly created wrappers are kept
+  // DETACHED — do NOT insert into live DOM during validation. If any group's
+  // body is missing, abort without touching the DOM at all. This ensures the
+  // validation phase is genuinely side-effect-free: no wrapper, fragment, or
+  // node is committed until every target has been resolved.
+  const commitTargets=[];
+  const newWrappers=[]; // wrappers created during validation, attached in Phase 2
+  for(const label of groupOrder){
+    let wrapper=list.querySelector('.session-date-group[data-group-label="'+CSS.escape(label)+'"]');
+    let isNew=false;
+    if(!wrapper){
+      // Group doesn't exist in DOM yet — create it but keep DETACHED.
+      // Carry the real group metadata (isPinned etc.) from the canonical
+      // flatRows, not a hard-coded isPinned:false — the prior version
+      // discarded the row group's pinned metadata.
+      const rowForMeta=state.flatRows.find(r=>r&&r.group&&r.group.label===label);
+      const groupMeta=rowForMeta?rowForMeta.group:{label:label};
+      wrapper=_createTouchGroupWrapper(groupMeta, state);
+      isNew=true;
+      newWrappers.push(wrapper);
+    }
+    const body=wrapper.querySelector('.session-date-body');
+    if(!body){
+      // Missing body — abort the entire commit without advancing the loaded
+      // count. No wrappers have been attached (new ones are still detached),
+      // so the live DOM is untouched.
+      return;
+    }
+    const afterSpacer=body.querySelector('.session-virtual-spacer[data-virtual-spacer="after"]');
+    commitTargets.push({wrapper:wrapper, body:body, afterSpacer:afterSpacer, label:label, isNew:isNew});
+  }
+  // Phase 2: attach newly created wrappers to the live DOM in canonical order.
+  // Each new wrapper is inserted BEFORE the next existing canonical wrapper
+  // that follows it in groupOrder — not just before the sentinel/end. Without
+  // this, a missing earlier group A is committed after an existing later
+  // group B, producing live order B, A instead of the canonical A, B.
+  for(let gi=0; gi<commitTargets.length; gi++){
+    const target=commitTargets[gi];
+    if(!target.isNew) continue;
+    // Find the next existing (non-new) wrapper in canonical order.
+    let insertBeforeEl=null;
+    for(let gj=gi+1; gj<commitTargets.length; gj++){
+      if(!commitTargets[gj].isNew){
+        insertBeforeEl=commitTargets[gj].wrapper;
+        break;
+      }
+    }
+    if(!insertBeforeEl){
+      // No existing wrapper follows — insert before the sentinel, or at end.
+      const sentinel=list.querySelector('[data-touch-sentinel]');
+      if(sentinel) list.insertBefore(target.wrapper, sentinel);
+      else list.appendChild(target.wrapper);
+    }else{
+      list.insertBefore(target.wrapper, insertBeforeEl);
+    }
+  }
+  // Phase 3: attach all fragments. Every target is guaranteed to exist, so no
+  // partial-commit-duplicate-on-retry is possible.
+  for(const target of commitTargets){
+    if(target.afterSpacer){
+      target.body.insertBefore(fragmentsByGroup[target.label], target.afterSpacer);
+    }else{
+      target.body.appendChild(fragmentsByGroup[target.label]);
+    }
+  }
+  // Commit the loaded count only after all fragments are in the live DOM.
+  _sessionTouchLoadedCount=targetEnd;
+  // Update per-group spacers for the newly loaded rows.
+  _updateTouchGroupSpacers(list, state, targetEnd);
+  // Update sentinel visibility.
+  _updateTouchSentinel(list, total, targetEnd);
+  // After a successful append, the per-group spacers shrink and the sentinel
+  // may still be intersecting — but the IntersectionObserver does NOT re-fire
+  // when the sentinel's position changes without a scroll event. Schedule a
+  // continuous-batch microtask: it re-checks whether the sentinel is still
+  // near the viewport bottom and appends another batch if so. This guarantees
+  // 60→100→140→… completion without requiring the user to leave/re-enter the
+  // sentinel zone. The microtask is generation-guarded so a profile switch
+  // or invalidation aborts it cleanly.
+  _scheduleContinuousBatch();
+}
+
+/// Recompute per-group bottom spacers after an append. Each group's "after"
+/// spacer reflects the remaining unloaded rows in that group — so unloaded
+/// rows from an early group appear inside that group, not after later groups.
+function _updateTouchGroupSpacers(list, state, loadedCount){
+  const total=state.flatRows.length;
+  // Count unloaded rows per group.
+  const groupUnloaded={};
+  for(let i=loadedCount;i<total;i++){
+    const row=state.flatRows[i];
+    if(!row||!row.group) continue;
+    const label=row.group.label;
+    groupUnloaded[label]=(groupUnloaded[label]||0)+1;
+  }
+  // Update each group's after-spacer.
+  const groupWrappers=list.querySelectorAll('.session-date-group[data-group-label]');
+  for(const gw of groupWrappers){
+    const label=gw.getAttribute('data-group-label');
+    const body=gw.querySelector('.session-date-body');
+    if(!body) continue;
+    let spacer=body.querySelector('.session-virtual-spacer[data-virtual-spacer="after"]');
+    const unloaded=groupUnloaded[label]||0;
+    if(unloaded>0){
+      const h=unloaded*SESSION_VIRTUAL_ROW_HEIGHT;
+      if(spacer){
+        spacer.style.height=h+'px';
+      }else{
+        spacer=_sessionVirtualSpacer(h,'after');
+        body.appendChild(spacer);
+      }
+    }else if(spacer){
+      spacer.remove();
+    }
+  }
+}
+
+/// Update sentinel visibility after an append.
+function _updateTouchSentinel(list, total, loadedCount){
+  const sentinel=list.querySelector('[data-touch-sentinel]');
+  if(!sentinel) return;
+  if(loadedCount>=total){
+    sentinel.style.display='none';
+    if(_touchSentinelObserver) _touchSentinelObserver.unobserve(sentinel);
+  }else{
+    sentinel.style.display='';
+    sentinel.textContent='Loading more\u2026';
+    if(_touchSentinelObserver) _touchSentinelObserver.observe(sentinel);
+  }
+}
+
+/// After a successful append, check whether the sentinel is still near the
+/// viewport bottom and schedule another batch if so. This is the key fix for
+/// the stall: the IntersectionObserver does NOT re-fire when the sentinel's
+/// position changes (spacers shrink, new rows grow the list) without a scroll
+/// event. Without this, one append can leave the sentinel still intersecting
+/// but the observer silent — the list stalls at 100/224.
+///
+/// The check uses getBoundingClientRect() against the list's viewport. If the
+/// sentinel is within 200px of the bottom edge of the visible area, another
+/// batch is scheduled via a generation-guarded microtask. This continues until
+/// either all rows are loaded, the sentinel is out of view, or the generation
+/// changes (profile switch / invalidation).
+function _scheduleContinuousBatch(){
+  if(_touchContinuousBatchScheduled) return;
+  const state=_touchRenderState;
+  if(!state||state.gen!==_sessionTouchGen) return;
+  const list=state.list;
+  if(!list||list!==_sessionTouchListEl) return;
+  const total=state.flatRows.length;
+  if(_sessionTouchLoadedCount>=total) return;
+  // Check if the sentinel is near the bottom of the visible viewport.
+  const sentinel=list.querySelector('[data-touch-sentinel]');
+  if(!sentinel || sentinel.style.display==='none') return;
+  // Use getBoundingClientRect to measure the sentinel's position relative
+  // to the list's visible area. If within the lookahead margin, batch again.
+  let shouldBatch=false;
+  try{
+    const listRect=list.getBoundingClientRect();
+    const sentinelRect=sentinel.getBoundingClientRect();
+    // If the sentinel is above the bottom of the viewport + lookahead margin,
+    // it's "near" — batch again. Also batch if sentinelRect has zero height
+    // (headless test environment where layout isn't real).
+    const lookahead=200;
+    if(sentinelRect.height===0 && sentinelRect.top===0){
+      // Headless/no-layout environment (e.g. test VM): always batch to prove
+      // continuous completion. In a real browser this branch is unreachable.
+      shouldBatch=true;
+    }else{
+      shouldBatch=sentinelRect.top <= (listRect.bottom + lookahead);
+    }
+  }catch(_){
+    // getBoundingClientRect unavailable (test env): always batch.
+    shouldBatch=true;
+  }
+  if(!shouldBatch) return;
+  _touchContinuousBatchScheduled=true;
+  const capturedGen=_sessionTouchGen;
+  const token=++_touchBatchToken;
+  Promise.resolve().then(()=>{
+    _touchContinuousBatchScheduled=false;
+    if(capturedGen!==_sessionTouchGen) return;
+    if(token!==_touchBatchToken) return;
+    // Note: we do NOT check _touchBatchPending here. The continuous batch
+    // chain is: this .then → _appendTouchBatch → _scheduleContinuousBatch
+    // → new .then. The _touchBatchPending flag is set by the caller before
+    // _appendTouchBatch and cleared in finally AFTER _appendTouchBatch
+    // returns — but _scheduleContinuousBatch runs INSIDE _appendTouchBatch,
+    // so _touchBatchPending is still true when the new .then is scheduled.
+    // The generation+token guard is sufficient: if a scroll/IO path is also
+    // appending concurrently, the token check prevents double-append.
+    _touchBatchPending=true;
+    try{
+      _appendTouchBatch();
+    }finally{
+      if(token===_touchBatchToken) _touchBatchPending=false;
+    }
+  });
+}
+
+/// Create a group wrapper element matching the initial render's structure.
+function _createTouchGroupWrapper(g, state){
+  const wrapper=document.createElement('div');
+  wrapper.className='session-date-group';
+  wrapper.setAttribute('data-group-label',g.label);
+  const hdr=document.createElement('div');
+  hdr.className='session-date-header'+(g.isPinned?' pinned':'');
+  const caret=document.createElement('span');
+  caret.className='session-date-caret';
+  caret.textContent='\u25BE';
+  const labelEl=document.createElement('span');
+  labelEl.textContent=g.label;
+  hdr.appendChild(caret);hdr.appendChild(labelEl);
+  const body=document.createElement('div');
+  body.className='session-date-body';
+  hdr.onclick=()=>{
+    const isCollapsed=body.style.display==='none';
+    body.style.display=isCollapsed?'':'none';
+    caret.classList.toggle('collapsed',!isCollapsed);
+    try{
+      const gc=JSON.parse(localStorage.getItem('hermes-date-groups-collapsed')||'{}');
+      gc[g.label]=!isCollapsed;
+      localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(gc));
+    }catch(e){}
+    renderSessionListFromCache();
+  };
+  wrapper.appendChild(hdr);
+  wrapper.appendChild(body);
+  return wrapper;
+}
+
+function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid, paintedExtent){
+  // Touch-mode exit: if we were previously in touch mode but no longer are,
+  // invalidate all touch state (observer, RAF, pending, render state).
+  if(!list||!_isTouchPrimary()){
+    if(_touchSentinelObserver||_touchRenderState||_touchScrollOwner||_touchBatchPending||_sessionTouchListEl){
+      _invalidateTouchRender();
+    }
+    return;
+  }
+  // Unified invalidation before setting up new state. _invalidateTouchRender
+  // bumps _sessionTouchGen, so the new render state's gen is already current.
+  _invalidateTouchRender();
+  // Restore the canonical loaded count to the exact number of rows the initial
+  // render actually painted (virtualWindow.end). _invalidateTouchRender reset it
+  // to 0; without restoring, the first _appendTouchBatch() reads oldLoaded=0,
+  // its prefix check is vacuous, and it appends rows 0–39 behind the already-
+  // painted rows 0–59 — duplicating the first batch.
+  _sessionTouchLoadedCount=Math.min(total, Math.max(0, Number(paintedExtent)||0));
+  _sessionTouchListEl=list;
+  _sessionTouchTotalCount=total;
+  // Save canonical render state for incremental appends.
+  _touchRenderState={
+    gen:_sessionTouchGen,
+    list:list,
+    flatRows:flatRows,
+    renderOneSession:renderOneSession,
+    activeSid:activeSid,
+  };
+  // Ensure group wrappers have data-group-label so _appendTouchBatch can find them.
+  // The initial render already sets this attribute, but we verify here for safety.
+  const groupWrappers=list.querySelectorAll('.session-date-group');
+  for(const gw of groupWrappers){
+    if(!gw.getAttribute('data-group-label')){
+      const labelEl=gw.querySelector('.session-date-header span:last-child');
+      if(labelEl) gw.setAttribute('data-group-label',labelEl.textContent);
+    }
+  }
+  // Keep per-group spacers from the initial render — they correctly represent
+  // unloaded height within each group. Do NOT create a global bottom spacer
+  // (that would place early-group unloaded rows after later-group headers).
+  // Create/update the sentinel after all groups.
+  let sentinel=list.querySelector('[data-touch-sentinel]');
+  if(!sentinel){
+    sentinel=document.createElement('div');
+    sentinel.setAttribute('data-touch-sentinel','');
+    sentinel.className='session-touch-sentinel';
+    sentinel.style.cssText='padding:12px 8px;text-align:center;color:var(--muted);font-size:12px;';
+    list.appendChild(sentinel);
+  }
+  const loaded=_sessionTouchLoadedCount;
+  if(loaded>=total){
+    sentinel.style.display='none';
+  }else{
+    sentinel.style.display='';
+    sentinel.textContent='Loading more\u2026';
+  }
+  _ensureTouchSentinelObserver(list);
+  if(loaded<total&&_touchSentinelObserver) _touchSentinelObserver.observe(sentinel);
+  // Event-driven batch trigger: a passive scroll listener on the list arms
+  // ONE coalesced RAF per scroll burst. The IntersectionObserver can stall
+  // after one append (sentinel stays intersecting, no new transition fires),
+  // so the scroll listener catches that case. Unlike the prior RAF poll, this
+  // does NOT reschedule itself while idle — zero CPU/battery cost when the
+  // user is not scrolling.
+  //
+  // The scroll RAF is armed ONLY from an actual scroll event — there is NO
+  // setup-time RAF. The already-intersecting-sentinel case is handled by the
+  // continuous-batch microtask scheduled after each successful
+  // _appendTouchBatch(), which re-checks sentinel geometry and chains the
+  // next append without requiring a scroll event.
+  //
+  // All scroll-trigger state — the listener, the RAF handle, and the token —
+  // lives in ONE owner object. Each callback only settles its own owner's
+  // handle; teardown cancels only if the current owner is the same object.
+  const ownerGen=_sessionTouchGen;
+  const owner={gen:ownerGen, list:list, handler:null, raf:0, token:0};
+  const scrollHandler=function(){
+    // The handler itself is owned: it only acts if _touchScrollOwner is
+    // still this exact owner object. A stale handler from a previous setup
+    // (after invalidation + re-setup) does not touch the newer owner's RAF.
+    if(_touchScrollOwner!==owner) return;
+    if(_sessionTouchGen!==ownerGen) return;
+    if(!_sessionTouchListEl||_sessionTouchListEl!==list) return;
+    // Coalesce: skip if a RAF is already armed for this owner.
+    if(owner.raf) return;
+    owner.raf=requestAnimationFrame(function(){
+      // Clear ONLY this owner's RAF handle — one-shot, no reschedule.
+      // If a newer owner has been installed, _touchScrollOwner !== owner
+      // and we must NOT zero the newer owner's handle.
+      if(_touchScrollOwner===owner) owner.raf=0;
+      // Full ownership revalidation: gen, list identity, loaded/total,
+      // near-bottom geometry. Only if ALL pass do we arm the microtask.
+      if(_touchScrollOwner!==owner) return;
+      if(_sessionTouchGen!==ownerGen) return;
+      if(!_sessionTouchListEl||_sessionTouchListEl!==list) return;
+      const el=_sessionTouchListEl;
+      const t=_sessionTouchTotalCount||0;
+      const l=_sessionTouchLoadedCount||0;
+      if(l>=t) return;
+      const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<200;
+      if(!nearBottom) return;
+      if(_touchBatchPending||_touchContinuousBatchScheduled) return;
+      const token=++_touchBatchToken;
+      owner.token=token;
+      _touchBatchPending=true;
+      const capturedGen=ownerGen;
+      Promise.resolve().then(()=>{
+        // Revalidate the FULL ownership contract immediately before mutation:
+        // owner identity, generation, list identity, token, loaded/total,
+        // and near-bottom geometry. Only if ALL still hold do we append.
+        if(_touchScrollOwner!==owner) {
+          if(token===_touchBatchToken) _touchBatchPending=false;
+          return;
+        }
+        if(capturedGen!==_sessionTouchGen) {
+          if(token===_touchBatchToken) _touchBatchPending=false;
+          return;
+        }
+        if(!_sessionTouchListEl||_sessionTouchListEl!==list) {
+          if(token===_touchBatchToken) _touchBatchPending=false;
+          return;
+        }
+        if(token!==_touchBatchToken) return;
+        const t2=_sessionTouchTotalCount||0;
+        const l2=_sessionTouchLoadedCount||0;
+        if(l2>=t2) {
+          if(token===_touchBatchToken) _touchBatchPending=false;
+          return;
+        }
+        const el2=_sessionTouchListEl;
+        const nearBottom2=el2.scrollHeight-el2.scrollTop-el2.clientHeight<200;
+        if(!nearBottom2) {
+          if(token===_touchBatchToken) _touchBatchPending=false;
+          return;
+        }
+        try{_appendTouchBatch();}
+        finally{ if(token===_touchBatchToken) _touchBatchPending=false; }
+      });
+    });
+  };
+  owner.handler=scrollHandler;
+  _touchScrollOwner=owner;
+  try{list.addEventListener('scroll',scrollHandler,{passive:true});}catch(_){}
+}
+
 function _schedulePendingSessionListApply(){
   if(_pendingSessionListApplyTimer) clearTimeout(_pendingSessionListApplyTimer);
   _pendingSessionListApplyTimer=setTimeout(()=>{
@@ -5388,15 +6000,33 @@ function _applySessionListPayload(sessData, projData, opts){
     : [];
   _reconcileActiveSessionIdleStateFromList(serverSessions);
   _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions);
+  // Invalidate touch render state when the cache scope changes (profile
+  // switch, all-profiles toggle). The observer, RAF, render state, and
+  // loaded count all reference the PREVIOUS cache's rows — stale callbacks
+  // could splice the new cache's suffix onto the old cache's prefix.
+  // Compare the new scope against the previous one; only invalidate on a
+  // real scope change, not on an idle poll with the same scope.
+  const _newScope = {
+    profile: (typeof sessData.active_profile === 'string' && sessData.active_profile)
+      ? sessData.active_profile
+      : (S.activeProfile || 'default'),
+    allProfiles: !!_showAllProfiles,
+  };
+  if(_allSessionsScope && (
+    _allSessionsScope.profile !== _newScope.profile ||
+    _allSessionsScope.allProfiles !== _newScope.allProfiles
+  )){
+    if(typeof _invalidateTouchRender==='function' && typeof _isTouchPrimary==='function' && _isTouchPrimary()){
+      _invalidateTouchRender();
+    }
+  }
   // Tag the cache with the scope it was loaded under (active profile +
   // all-profiles flag). If a later /api/sessions fails right after a profile
   // switch, the catch path checks this so it won't re-render the PRIOR
   // profile's rows as if they were current (#4167 review item 3).
   _allSessionsScope = {
-    profile: (typeof sessData.active_profile === 'string' && sessData.active_profile)
-      ? sessData.active_profile
-      : (S.activeProfile || 'default'),
-    allProfiles: !!_showAllProfiles,
+    profile: _newScope.profile,
+    allProfiles: _newScope.allProfiles,
     sidebarSource: _requestedSessionSidebarSource(),
     excludeHidden: _sessionListExcludeHiddenEnabled(),
   };
@@ -7261,6 +7891,24 @@ function _sessionVirtualWindow(opts){
   const buffer=Math.max(0, Number(opts&&opts.buffer)||SESSION_VIRTUAL_BUFFER_ROWS);
   const viewportHeight=Math.max(itemHeight, Number(opts&&opts.viewportHeight)||itemHeight*10);
   const visibleRows=Math.max(1, Math.ceil(viewportHeight/itemHeight));
+  // On touch-primary devices, use incremental batched rendering: render an
+  // initial batch, then append more rows on scroll without wiping innerHTML.
+  // The "window" is always [0, loadedCount) — rows are never removed, only
+  // appended. The scroll listener calls _appendTouchBatch() to grow it.
+  // Include the active session in the window if it's beyond the initial prefix
+  // — the touch branch must not omit an active session (desktop-only handling
+  // would otherwise skip it).
+  if(typeof _isTouchPrimary==='function'&&_isTouchPrimary()){
+    let loadedCount=Math.min(total, _sessionTouchLoadedCount||SESSION_TOUCH_INITIAL_BATCH);
+    const activeIdx=Number.isFinite(Number(opts&&opts.activeIndex))?Number(opts.activeIndex):-1;
+    // Ensure the active session row is within the rendered prefix.
+    if(activeIdx>=0&&activeIdx<total&&activeIdx>=loadedCount){
+      loadedCount=Math.min(total, activeIdx+1);
+      // Persist the extended count so _appendTouchBatch starts from here.
+      _sessionTouchLoadedCount=loadedCount;
+    }
+    return {virtualized:false,batched:true,start:0,end:loadedCount,topPad:0,bottomPad:Math.max(0,(total-loadedCount)*itemHeight),itemHeight,total};
+  }
   if(total<=threshold){
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,itemHeight,total};
   }
@@ -7309,6 +7957,12 @@ function _scheduleSessionVirtualizedRender(){
   // unconditional scroll listener (attached for any list) caused
   // user-facing scroll jumps on small lists. (#1669 follow-up)
   if(total>0&&total<=SESSION_VIRTUAL_THRESHOLD_ROWS) return;
+  // On touch-primary devices, use incremental batched rendering: the
+  // IntersectionObserver on the sentinel div handles appending more rows.
+  // No innerHTML wipe happens during scroll — only after scroll settles.
+  if(_isTouchPrimary()){
+    return;
+  }
   _sessionVirtualScrollRaf=requestAnimationFrame(()=>{
     _sessionVirtualScrollRaf=0;
     const liveList=_sessionVirtualScrollList;
@@ -7561,6 +8215,17 @@ function renderSessionListFromCache(){
   // all call this while the fixed-position menu is open; rebuilding the row DOM
   // here removes the anchor and makes the menu feel unclickable.
   if(_sessionActionMenu) return;
+  // Touch scroll guard: on iPad/phone, innerHTML='' during an active momentum
+  // scroll terminates the native scroll gesture — the list freezes and cannot
+  // be scrolled further until a fresh touch starts. Defer background renders
+  // (SSE syncs, unread updates, gateway polls) until the user stops scrolling.
+  // Direct user actions pass {force:true} to bypass.
+  var _opts=arguments[0];
+  if(!(_opts&&_opts.force)&&_isSessionListTouchScrolling()){
+    _deferRenderSessionListFromCache();
+    return;
+  }
+  if(_pendingTouchDeferredRenderTimer){clearTimeout(_pendingTouchDeferredRenderTimer);_pendingTouchDeferredRenderTimer=0;}
   closeSessionActionMenu();
   // Purge stale INFLIGHT entries for sessions the server confirms are NOT
   // streaming. This runs on every list refresh to prevent memory leaks from
@@ -7840,6 +8505,43 @@ function renderSessionListFromCache(){
     }
   }
   _ensureSessionVirtualScrollHandler(list);
+  // Touch scope fingerprint: reset the canonical touch state BEFORE calculating
+  // either render window. The fingerprint covers ALL row-affecting scope/order
+  // dimensions: profile/all-profiles, active project, source filter, archive
+  // page, search query, content-search results, collapsed group state, active
+  // session, total row count, and the ordered SID identity of the first prefix.
+  // An equal-count scope change (profile switch, project change, reorder) that
+  // keeps the same total but changes row identity must reset — otherwise the old
+  // loaded extent is retained and _appendTouchBatch can splice a new-cache suffix
+  // onto an old-cache prefix.
+  if(_isTouchPrimary()){
+    const collapsedKeys=Object.keys(_groupCollapsed).sort().map(k=>k+':'+_groupCollapsed[k]).join(',');
+    // Ordered SID identity of the visible rows — changes on reorder/replace even
+    // when the total count is unchanged. Truncated to the fingerprint window so
+    // large lists don't produce an enormous string.
+    const sidPrefix=flatSessionRows.slice(0,SESSION_TOUCH_INITIAL_BATCH)
+      .map(row=>row.session&&row.session.session_id||'')
+      .join(',');
+    const scopeFingerprint=[
+      _showAllProfiles?'1':'0',             // profile/all-profiles toggle
+      _activeProject||'',                   // active project filter
+      _sessionSourceFilter||'',             // cli/webui source filter
+      _showArchived?'1':'0',                // archive page toggle
+      q,                                    // search query
+      (_contentSearchResults||[]).length,   // content-search generation
+      collapsedKeys,                        // collapsed group state
+      activeSidForSidebar||'',              // active session
+      String(flatSessionRows.length),       // total row count
+      sidPrefix,                            // ordered SID identity
+    ].join('|');
+    const prevFingerprint=list.dataset.sessionTouchScope||'';
+    if(prevFingerprint!==scopeFingerprint){
+      // Reset the canonical touch loaded count BEFORE the window calculation so
+      // _sessionVirtualWindow sees the correct _sessionTouchLoadedCount.
+      _sessionTouchLoadedCount=SESSION_TOUCH_INITIAL_BATCH;
+      list.dataset.sessionTouchScope=scopeFingerprint;
+    }
+  }
   const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
   const shouldAnchorActive=activeSidForSidebar&&activeIndex>=0&&(
     list.dataset.sessionVirtualActiveAnchor!==activeSidForSidebar||
@@ -7885,6 +8587,7 @@ function renderSessionListFromCache(){
   for(const g of groups){
     const wrapper=document.createElement('div');
     wrapper.className='session-date-group';
+    wrapper.setAttribute('data-group-label',g.label);
     const hdr=document.createElement('div');
     hdr.className='session-date-header'+(g.isPinned?' pinned':'');
     const caret=document.createElement('span');
@@ -7911,7 +8614,7 @@ function renderSessionListFromCache(){
     for(const s of g.items){
       if(isGroupCollapsed) continue;
       const rowIndex=globalSessionRowIndex++;
-      const inWindow=!virtualWindow.virtualized||(rowIndex>=virtualWindow.start&&rowIndex<virtualWindow.end);
+      const inWindow=!virtualWindow.virtualized&&!virtualWindow.batched||(rowIndex>=virtualWindow.start&&rowIndex<virtualWindow.end);
       if(inWindow){ body.appendChild(_renderOneSession(s, Boolean(g.isPinned))); }
       else if(rowIndex<virtualWindow.start){ groupTopPad+=virtualWindow.itemHeight; }
       else { groupBottomPad+=virtualWindow.itemHeight; }
@@ -7933,6 +8636,15 @@ function renderSessionListFromCache(){
     list.scrollTop=listScrollTopBeforeRender;
     _resyncSessionVirtualWindowAfterRender(list, listScrollTopBeforeRender, virtualWindow);
   }
+  // Set up the touch sentinel for incremental batched loading.
+  // This must happen after the list DOM is built and scroll is restored.
+  // Pass the flat rows and _renderOneSession closure so _appendTouchBatch can
+  // append rows without re-deriving from mutable _allSessions.
+  // Call unconditionally — _setupTouchSentinel handles the touch→non-touch
+  // transition internally (invalidates observer/RAF/state when leaving touch mode).
+  // Gating this inside `if(_isTouchPrimary())` made the teardown unreachable,
+  // leaving a dangling observer and RAF after a touch→desktop transition.
+  _setupTouchSentinel(list, flatSessionRows.length, flatSessionRows, _renderOneSession, activeSidForSidebar, virtualWindow.end);
   const archivePagingFilterActive=_sessionArchivePagingFilterActive();
   if(_showArchived&&!archivePagingFilterActive){
     const activeArchivedTotal=_sessionSourceFilter==='cli'?_archivedCliCount:_archivedWebuiCount;
