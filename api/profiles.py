@@ -2114,7 +2114,7 @@ def list_profiles_api() -> list:
         else:
             rows = _build_profile_rows_fast()
             if rows is not None:
-                _LIST_PROFILES_CACHE = (rows, now)
+                _LIST_PROFILES_CACHE = (rows, time.time())
 
     if rows is None:
         # Fallback: cheap helpers unavailable — use the original (slow) path,
