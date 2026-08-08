@@ -8425,6 +8425,7 @@ function _appearancePayloadFromUi(){
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
     auto_scroll_follow: !!($('settingsAutoScrollFollow')||{}).checked,
+    show_background_wakeups: (($('settingsShowBackgroundWakeups')||{}).checked)!==false,
     render_user_markdown: !!($('settingsRenderUserMarkdown')||{}).checked,
     large_text_paste_as_attachment: !!($('settingsLargeTextPasteAsAttachment')||{}).checked,
     project_quick_create_buttons: !!($('settingsProjectQuickCreate')||{}).checked,
@@ -8507,6 +8508,19 @@ function _rememberAppearanceSaved(payload){
   _settingsFontSizeOnOpen=payload.font_size||localStorage.getItem('hermes-font-size')||'default';
 }
 
+function _applyShowBackgroundWakeupsSetting(value,opts={}){
+  const enabled=value!==false;
+  const changed=(window._showBackgroundWakeups!==false)!==enabled;
+  window._showBackgroundWakeups=enabled;
+  const control=$('settingsShowBackgroundWakeups');
+  if(control) control.checked=enabled;
+  if(changed&&opts.rerender!==false){
+    if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+    if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+  }
+  return changed;
+}
+
 function _scheduleAppearanceAutosave(){
   const payload=_appearancePayloadFromUi();
   // Keep discard/close behavior aligned with the new mental model: appearance
@@ -8527,6 +8541,7 @@ async function _autosaveAppearanceSettings(payload){
       localStorage.setItem('hermes-font-size',saved.font_size);
     }
     if(saved){
+      _applyShowBackgroundWakeupsSetting(saved.show_background_wakeups);
       window._sessionJumpButtonsEnabled=!!saved.session_jump_buttons;
       if(Object.prototype.hasOwnProperty.call(saved,'chat_activity_display_mode')){
         const beforeMode=window._chatActivityDisplayMode;
@@ -8935,6 +8950,14 @@ async function loadSettingsPanel(){
       };
     }
     if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+    _applyShowBackgroundWakeupsSetting(settings.show_background_wakeups);
+    const showBackgroundWakeupsCb=$('settingsShowBackgroundWakeups');
+    if(showBackgroundWakeupsCb){
+      showBackgroundWakeupsCb.onchange=function(){
+        _applyShowBackgroundWakeupsSetting(this.checked);
+        _scheduleAppearanceAutosave();
+      };
+    }
     // Workspace panel default-open toggle (localStorage-backed)
     // Uses a separate key (hermes-webui-workspace-panel-pref) so that
     // closing the panel via toolbar X does not clear the user's preference.
@@ -11854,6 +11877,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._notificationsEnabled=body.notifications_enabled;
   window._whatsNewSummaryEnabled=!!body.whats_new_summary_enabled;
   window._showThinking=body.show_thinking!==false;
+  _applyShowBackgroundWakeupsSetting(body.show_background_wakeups,{rerender:false});
   window._simplifiedToolCalling=true;
   _syncChatActivityDisplayModeControl(body.chat_activity_display_mode);
   _syncTransparentEventTimestampsControl(body.transparent_stream_event_timestamps, body.chat_activity_display_mode);
@@ -12503,6 +12527,7 @@ async function saveSettings(andClose){
     : 'compact_worklog';
   body.transparent_stream_event_timestamps=(($('settingsTransparentEventTimestamps')||{}).checked)!==false;
   body.auto_scroll_follow=!!($('settingsAutoScrollFollow')||{}).checked;
+  body.show_background_wakeups=(($('settingsShowBackgroundWakeups')||{}).checked)!==false;
   body.render_user_markdown=!!($('settingsRenderUserMarkdown')||{}).checked;
   body.large_text_paste_as_attachment=!!($('settingsLargeTextPasteAsAttachment')||{}).checked;
   body.project_quick_create_buttons=!!($('settingsProjectQuickCreate')||{}).checked;
