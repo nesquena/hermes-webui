@@ -8,10 +8,12 @@ whole session (post-turn scroll yanks until refresh), and
 unconditionally — a partial body without the key evaluates `undefined!==false`
 → `true`, re-enabling follow mid-session.
 
-The fix mirrors the resolved value into PROFILE-NAMESPACED localStorage
-(one JSON map keyed by profile name), makes the boot fallback read the mirror
-instead of hardcoding ON, and only overrides the runtime flag when a settings
-body actually owns the key.
+The fix mirrors the resolved value into GLOBAL localStorage (the backend
+setting is one global settings.json — a profile-keyed map would leave a
+freshly-opened profile with no entry and wrongly restore ON, per maintainer
+review on #6856), makes the boot fallback read the mirror instead of
+hardcoding ON, and only overrides the runtime flag when a settings body
+actually owns the key.
 """
 import json
 import pathlib
@@ -26,78 +28,44 @@ def _read(rel):
 
 # ── Source-shape guards (what the code must contain) ────────────────────────
 
-def test_boot_has_profile_namespaced_mirror_helpers():
+def test_boot_has_global_mirror_helpers():
     src = _read("static/boot.js")
     assert "_persistAutoScrollFollow" in src, "persist helper must exist"
     assert "_readPersistedAutoScrollFollow" in src, "read helper must exist"
-    assert "_autoScrollFollowProfileKey" in src, (
-        "mirror must be profile-namespaced (maintainer review requirement)"
-    )
-    assert "S.activeProfile" in src or "activeProfile" in src, (
-        "profile key must derive from the active profile"
-    )
     assert "_AUTO_SCROLL_FOLLOW_KEY" in src, "storage key constant must exist"
-    # P1 follow-up (#6856 review): the hermes_profile cookie is HttpOnly so
-    # document.cookie can NEVER read it — the profile key must rely on
-    # S.activeProfile, and the boot-failure path must DEFER its mirror read
-    # until after the profile resolves asynchronously (/api/profile/active).
-    assert "_autoScrollFollowDeferredReapply" in src, (
-        "boot fallback must defer the mirror read (HttpOnly cookie, P1)"
+    # Maintainer review (#6856): the backend setting is GLOBAL (one
+    # settings.json), so the mirror must NOT be profile-keyed — a profile map
+    # would leave a freshly-opened profile with no entry and wrongly restore
+    # ON. The helper must be a single global scalar, read synchronously in
+    # the boot fallback (no profile resolution, no deferral).
+    assert "_autoScrollFollowProfileKey" not in src, (
+        "mirror must NOT be profile-keyed (maintainer review, #6856)"
     )
-    # The helper must NOT attempt a document.cookie read (dead code — cookie
-    # is HttpOnly; a cookie-based key would silently select 'default').
-    m = re.search(
-        r"function _autoScrollFollowProfileKey\(\)\{.*?\n\}",
-        src,
-        re.S,
+    assert "_autoScrollFollowDeferredReapply" not in src, (
+        "no deferred re-apply needed — global mirror is read synchronously"
     )
-    assert m, "_autoScrollFollowProfileKey not found"
-    assert "document.cookie" not in m.group(0), (
-        "profile key must not read document.cookie (HttpOnly, P1 follow-up)"
+    assert "_autoScrollFollowDeferredPersist" not in src, (
+        "no deferred persist needed — global mirror is written synchronously"
     )
 
 
 def test_boot_success_path_persists_mirror():
     src = _read("static/boot.js")
-    # Success path must NOT persist synchronously (S.activeProfile is still
-    # 'default' there — P1 round 3 review) — it defers the mirror write.
-    m = re.search(
-        r"window\._autoScrollFollow=s\.auto_scroll_follow!==false;\n(.*?)window\._largeTextPasteAsAttachment",
-        src,
-        re.S,
-    )
-    assert m, "success path block not found"
-    block = m.group(1)
-    assert "_persistAutoScrollFollow(" not in block, (
-        "success path must not persist before the profile resolves (P1 round 3)"
-    )
-    assert "window._autoScrollFollowDeferredPersist=window._autoScrollFollow;" in block, (
-        "success path must defer the mirror write via _autoScrollFollowDeferredPersist"
+    assert "window._autoScrollFollow=_persistAutoScrollFollow(" in src, (
+        "boot settings path must persist the resolved value into the mirror"
     )
 
 
 def test_boot_fallback_reads_mirror_not_hardcoded_true():
     src = _read("static/boot.js")
     assert "window._autoScrollFollow=_readPersistedAutoScrollFollow()" in src, (
-        "the deferred re-apply (after profile resolution) must read the mirror"
+        "the boot-failure fallback must read the mirror synchronously"
     )
-    assert "window._autoScrollFollowDeferredReapply" in src, (
-        "boot fallback must set the deferred re-apply flag"
-    )
-    # The deferred read must run after S.activeProfile resolves, never in the
-    # synchronous fallback (where the profile is still 'default').
-    fallback_idx = src.find("_sessionEndlessScrollEnabled=false;")
-    profile_idx = src.find("S.activeProfile = activeProfileState.profile;")
-    reapply_idx = src.find("_autoScrollFollowDeferredReapply){")
-    persist_idx = src.find("_autoScrollFollowDeferredPersist!==undefined")
-    assert fallback_idx != -1 and profile_idx != -1 and reapply_idx != -1, (
-        "deferred re-apply anchors missing"
-    )
-    assert fallback_idx < profile_idx < reapply_idx, (
-        "deferred re-apply must run AFTER S.activeProfile resolves (P1 follow-up)"
-    )
-    assert persist_idx != -1 and profile_idx < persist_idx, (
-        "deferred persist must also run AFTER S.activeProfile resolves (P1 round 3)"
+    # The old hardcoded fallback must be gone (ui.js keeps its own
+    # undefined-before-init default at _autoScrollFollow===undefined, #6614 —
+    # a different, legitimate case not touched by #6819).
+    assert "_sessionEndlessScrollEnabled=false;" in src, (
+        "fallback anchor missing"
     )
 
 
@@ -146,55 +114,25 @@ const localStorage = {
   setItem(k,v){ store[k] = v; }
 };
 const window = {};
-const document = { cookie: '' };  // hermes_profile is HttpOnly — never readable
-let S = { activeProfile: 'default' };
 """ + block + r"""
-// 0. P1 follow-up: profile key comes from S.activeProfile (cookie is HttpOnly
-//    and unusable — a cookie-based key would silently select 'default').
-if (_autoScrollFollowProfileKey() !== 'default') throw new Error('profile key must use S.activeProfile');
 // 1. fresh user: default ON
 if (_readPersistedAutoScrollFollow() !== true) throw new Error('fresh default must be ON');
-// 2. user turns OFF -> persisted (under maintainer)
-S = { activeProfile: 'maintainer' };
+// 2. user turns OFF -> persisted (global)
 if (_persistAutoScrollFollow(false) !== false) throw new Error('persist OFF failed');
 if (_readPersistedAutoScrollFollow() !== false) throw new Error('persisted OFF must be honored');
-// 3. deferred re-apply semantics: boot failure sets safe ON + flag, then the
-//    profile resolves and the mirror is read with the CORRECT profile.
-S = { activeProfile: 'default' };   // boot-failure fallback state
-window._autoScrollFollow = true;    // safe default set by the fallback
-window._autoScrollFollowDeferredReapply = true;
-S = { activeProfile: 'maintainer' };  // profile resolves asynchronously
-if (window._autoScrollFollowDeferredReapply) {
-  window._autoScrollFollow = _readPersistedAutoScrollFollow();
-  window._autoScrollFollowDeferredReapply = false;
-}
-if (window._autoScrollFollow !== false) throw new Error('deferred re-apply must read the maintainer OFF entry');
-if (window._autoScrollFollowDeferredReapply !== false) throw new Error('deferred flag must clear');
-// 3b. P1 round 3: SUCCESS path must also defer its mirror WRITE until the
-//     profile resolves — a non-default profile's successful boot must store
-//     its value under ITS OWN namespace, not 'default'.
-S = { activeProfile: 'default' };   // boot success-path state (profile unknown)
-window._autoScrollFollow = false;   // server said OFF
-window._autoScrollFollowDeferredPersist = window._autoScrollFollow;  // deferred write
-S = { activeProfile: 'maintainer' };  // profile resolves
-if (window._autoScrollFollowDeferredPersist !== undefined) {
-  _persistAutoScrollFollow(window._autoScrollFollowDeferredPersist);
-  window._autoScrollFollowDeferredPersist = undefined;
-}
-S = { activeProfile: 'maintainer' };
-if (_readPersistedAutoScrollFollow() !== false) throw new Error('deferred persist must write under the resolved profile (P1 round 3)');
-S = { activeProfile: 'default' };
-if (_readPersistedAutoScrollFollow() !== true) throw new Error('deferred persist must NOT write under default namespace');
-// 4. per-profile isolation via S.activeProfile
-S = { activeProfile: 'default' };
-if (_readPersistedAutoScrollFollow() !== true) throw new Error('default profile must keep default ON');
-if (_persistAutoScrollFollow(true) !== true) throw new Error('persist default ON failed');
-S = { activeProfile: 'maintainer' };
-if (_readPersistedAutoScrollFollow() !== false) throw new Error('maintainer OFF must survive switch back');
-// 5. storage is one JSON map keyed by profile
-const parsed = JSON.parse(store['hermes-auto-scroll-follow']);
-if (JSON.stringify(Object.keys(parsed).sort()) !== JSON.stringify(['default','maintainer'])) throw new Error('keys mismatch: '+JSON.stringify(parsed));
-if (parsed['default'] !== 1 || parsed['maintainer'] !== 0) throw new Error('values mismatch: '+JSON.stringify(parsed));
+// 3. MAINTAINER-REVIEW REGRESSION (#6856): the backend setting is GLOBAL
+//    (one settings.json), so the mirror must be too. Saving OFF under one
+//    profile, then a failed settings fetch on ANY other profile, must still
+//    restore OFF — a profile-keyed map would find no entry and wrongly
+//    return ON. With the global mirror there is no profile dimension at all:
+//    simulate the boot-failure path directly.
+const bootFailureFallbackValue = _readPersistedAutoScrollFollow();
+if (bootFailureFallbackValue !== false) throw new Error('global mirror must survive profile change + failed fetch (maintainer review)');
+// 4. ON round-trip
+if (_persistAutoScrollFollow(true) !== true) throw new Error('persist ON failed');
+if (_readPersistedAutoScrollFollow() !== true) throw new Error('persisted ON must be honored');
+// 5. storage is a single global scalar, not a profile map
+if (store['hermes-auto-scroll-follow'] !== '1') throw new Error('storage must be a single scalar value: '+store['hermes-auto-scroll-follow']);
 console.log('MIRROR-HELPERS-OK');
 """
     proc = subprocess.run(
