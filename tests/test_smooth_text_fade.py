@@ -203,8 +203,9 @@ def test_stream_fade_uses_incremental_renderer_without_changing_default_path():
     )
     assert_contains_all(
         cleanup_block,
-        ["animationend", "span.replaceWith(document.createTextNode"],
+        ["animationend", "span.classList.remove('is-new')"],
     )
+    assert "span.replaceWith" not in cleanup_block
     assert "_wrapStreamingFadeWords" not in MESSAGES_JS
     assert "animationDelay" not in renderer_block
     assert "_STREAM_FADE_STAGGER_MS" not in MESSAGES_JS
@@ -325,6 +326,48 @@ window._fadeTextEffect=true;
 if(!_shouldUseLiveProseFade()) throw new Error('regular fade preference should work when motion is allowed');
 """
     )
+    run_node(script)
+
+
+def test_fade_cleanup_preserves_the_animated_node_as_the_scroll_anchor():
+    """Animation cleanup must not replace inline nodes during a live stream.
+
+    Replacing every word node on animationend makes the browser choose a new
+    native scroll anchor while the transcript is still growing.  The opacity
+    animation can finish by removing its transient class; final settlement will
+    rebuild the persisted answer as plain text.
+    """
+    cleanup = function_block(MESSAGES_JS, "_streamFadeBindCleanup")
+    script = r"""
+class FakeClassList {
+  constructor(names){ this.names=new Set(names); }
+  contains(name){ return this.names.has(name); }
+  remove(name){ this.names.delete(name); }
+}
+const listeners={};
+const document={createTextNode(text){ return {textContent:String(text)}; }};
+const body={
+  _streamFadeCleanupBound:false,
+  addEventListener(name,fn){ listeners[name]=fn; },
+};
+""" + cleanup + r"""
+_streamFadeBindCleanup(body);
+const span={
+  textContent:'stable anchor',
+  classList:new FakeClassList(['stream-fade-word','is-new']),
+  style:{
+    removed:[],
+    removeProperty(name){ this.removed.push(name); },
+  },
+  replacements:0,
+  replaceWith(){ this.replacements += 1; },
+};
+listeners.animationend({target:span});
+if(span.replacements!==0) throw new Error('fade cleanup replaced the active scroll-anchor node');
+if(span.classList.contains('is-new')) throw new Error('fade animation class was not cleared');
+if(!span.classList.contains('stream-fade-word')) throw new Error('stable fade node lost its identity');
+if(span.style.removed.join('|')!=='--stream-fade-ms') throw new Error('fade timing override was not cleared');
+"""
     run_node(script)
 
 
