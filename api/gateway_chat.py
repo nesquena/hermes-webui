@@ -36,6 +36,7 @@ from api.config import (
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
 from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
+from api.turn_journal import append_turn_journal_event_for_stream
 
 logger = logging.getLogger(__name__)
 
@@ -832,6 +833,8 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    acceptance_gate=None,
+    acceptance_state=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -849,6 +852,15 @@ def _run_gateway_chat_streaming(
         # layer registered so STREAM_SESSION_OWNERS does not leak (no teardown finally runs).
         unregister_stream_owner(stream_id)
         return
+    if acceptance_gate is not None:
+        acceptance_gate.wait()
+        if not bool((acceptance_state or {}).get("accepted")):
+            _finish_gateway_run_starting(stream_id, result="fallback")
+            _clear_gateway_run_starting(stream_id)
+            with STREAMS_LOCK:
+                STREAMS.pop(stream_id, None)
+            unregister_stream_owner(stream_id)
+            return
     register_active_run(
         stream_id,
         session_id=session_id,
@@ -864,6 +876,15 @@ def _run_gateway_chat_streaming(
     except Exception:
         run_journal = None
         logger.debug("Failed to initialize gateway run journal for stream %s", stream_id, exc_info=True)
+    if acceptance_gate is None:
+        try:
+            append_turn_journal_event_for_stream(
+                session_id,
+                stream_id,
+                {"event": "worker_started", "created_at": time.time()},
+            )
+        except Exception:
+            logger.debug("Failed to append gateway worker_started turn journal event", exc_info=True)
     cancel_event = threading.Event()
     with STREAMS_LOCK:
         CANCEL_FLAGS[stream_id] = cancel_event

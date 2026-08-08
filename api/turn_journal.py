@@ -191,6 +191,68 @@ def derive_turn_journal_states(events: Iterable[dict]) -> tuple[dict[str, dict],
     ]
     return states, collisions
 
+
+def find_active_idempotent_turn(
+    session_id: str,
+    idempotency_key: str,
+    *,
+    active_stream_id: str | None = None,
+    session_dir: Path | None = None,
+) -> dict | None:
+    """Return a completed or still-running turn for a durable submission key.
+
+    A lone ``submitted`` row is not sufficient: the worker may have failed before
+    its compensating ``interrupted`` row could be written. Submitted and
+    ``worker_started`` rows are replayable only while their stream is actually
+    live. Completed rows remain replayable after the session becomes idle.
+    """
+
+    key = str(idempotency_key or "").strip()
+    if not key:
+        return None
+    journal = read_turn_journal(session_id, session_dir=session_dir)
+    events = list(journal.get("events") or [])
+    keyed_turn_ids = {
+        str(event.get("turn_id") or "").strip()
+        for event in events
+        if isinstance(event, dict)
+        and event.get("event") == "submitted"
+        and str(event.get("idempotency_key") or "").strip() == key
+    }
+    keyed_turn_ids.discard("")
+    if not keyed_turn_ids:
+        return None
+    states, _collisions = derive_turn_journal_states(events)
+    histories: dict[str, list[dict]] = {}
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        turn_id = str(event.get("turn_id") or "").strip()
+        if turn_id in keyed_turn_ids:
+            histories.setdefault(turn_id, []).append(event)
+    active_stream = str(active_stream_id or "").strip()
+    candidates = []
+    for turn_id, state in states.items():
+        if turn_id not in keyed_turn_ids:
+            continue
+        history = histories.get(turn_id, [])
+        completed = [event for event in history if event.get("event") == "completed"]
+        if completed:
+            candidates.append(
+                max(
+                    completed,
+                    key=lambda event: float(event.get("created_at") or 0),
+                )
+            )
+            continue
+        if state.get("event") == "interrupted":
+            continue
+        if active_stream and str(state.get("stream_id") or "").strip() == active_stream:
+            candidates.append(state)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda event: float(event.get("created_at") or 0))
+
 def _latest_turn_id_for_stream(events: Iterable[dict], stream_id: str) -> str | None:
     stream = str(stream_id or "").strip()
     if not stream:

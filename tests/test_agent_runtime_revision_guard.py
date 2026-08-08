@@ -441,6 +441,43 @@ def test_runner_owned_start_run_does_not_enter_local_stream_barrier(monkeypatch)
     assert len(calls) == 1
 
 
+def test_runner_owned_idempotent_wakeup_fails_before_external_start(monkeypatch):
+    """Kanban delivery must not cross a runner boundary without an idempotency contract."""
+    from api import routes
+
+    calls = []
+
+    class RunnerClient:
+        def start_run(self, request):
+            calls.append(request)
+            return {"run_id": "must-not-start"}
+
+    session = types.SimpleNamespace(session_id="session-1", profile=None)
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: True)
+    monkeypatch.setattr(routes, "_runtime_runner_client_factory", lambda: RunnerClient())
+
+    response = routes._start_run(
+        session,
+        msg="kanban wakeup",
+        attachments=[],
+        workspace="/tmp/workspace",
+        model="test-model",
+        model_provider="test-provider",
+        normalized_model=False,
+        source="process_wakeup",
+        route="start_session_turn",
+        idempotency_key="kanban:default:t_1:4",
+    )
+
+    assert response == {
+        "error": "runner-local does not support durable idempotent wakeups",
+        "_status": 501,
+    }
+    assert calls == []
+
+
 @pytest.mark.parametrize("gateway_owned", [False, True])
 def test_stream_admission_uses_one_gateway_ownership_snapshot(monkeypatch, gateway_owned):
     """The barrier and worker must share one immutable backend decision."""
@@ -451,6 +488,7 @@ def test_stream_admission_uses_one_gateway_ownership_snapshot(monkeypatch, gatew
     gateway_reads = []
     revision_checks = []
     worker_targets = []
+    journal_events = []
     session = types.SimpleNamespace(
         session_id="gateway-snapshot",
         profile=None,
@@ -488,7 +526,16 @@ def test_stream_admission_uses_one_gateway_ownership_snapshot(monkeypatch, gatew
     monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", prepare)
     monkeypatch.setattr(routes, "set_last_workspace", lambda _workspace: None)
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
-    monkeypatch.setattr(turn_journal, "append_turn_journal_event", lambda *_args, **_kwargs: {})
+    def append_journal(_session_id, event):
+        journal_events.append(dict(event))
+        return {"turn_id": "turn-1", **event}
+
+    monkeypatch.setattr(turn_journal, "append_turn_journal_event", append_journal)
+    monkeypatch.setattr(
+        turn_journal,
+        "append_turn_journal_event_for_stream",
+        lambda _sid, _stream, event: journal_events.append(dict(event)) or event,
+    )
 
     response = routes._start_chat_stream_for_session(
         session,
@@ -497,6 +544,7 @@ def test_stream_admission_uses_one_gateway_ownership_snapshot(monkeypatch, gatew
         workspace="/tmp/workspace",
         model="test-model",
         goal_related=True,
+        idempotency_key="kanban:default:t_1:4",
     )
 
     try:
@@ -509,12 +557,374 @@ def test_stream_admission_uses_one_gateway_ownership_snapshot(monkeypatch, gatew
             else routes._run_agent_streaming
         )
         assert worker_targets == [expected_worker]
+        assert journal_events[0]["idempotency_key"] == "kanban:default:t_1:4"
     finally:
         stream_id = str(response.get("stream_id") or "")
         with routes.STREAMS_LOCK:
             routes.STREAMS.pop(stream_id, None)
         unregister_stream_owner(stream_id)
         routes.STREAM_GOAL_RELATED.pop(stream_id, None)
+
+
+@pytest.mark.parametrize("gateway_owned", [False, True])
+def test_idempotent_start_fails_closed_when_acceptance_journal_fails(
+    monkeypatch, gateway_owned
+):
+    from api import routes, turn_journal
+
+    session = types.SimpleNamespace(
+        session_id="gateway-journal-failure",
+        profile=None,
+        title="Gateway journal failure",
+        workspace="/old/workspace",
+        model="old-model",
+        model_provider="old-provider",
+        active_stream_id=None,
+        post_compression_context_tokens_estimate=321,
+        pending_user_message=None,
+        pending_attachments=[],
+        pending_started_at=None,
+        pending_user_source=None,
+        truncation_watermark=10.0,
+        updated_at=7.25,
+        messages=[],
+        save=lambda **_kwargs: None,
+    )
+    workers = []
+
+    def prepare(current, **kwargs):
+        current.title = "Wake up"
+        current.workspace = kwargs["workspace"]
+        current.model = kwargs["model"]
+        current.model_provider = "new-provider"
+        current.active_stream_id = kwargs["stream_id"]
+        current.post_compression_context_tokens_estimate = None
+        current.pending_user_message = kwargs["msg"]
+        current.pending_attachments = kwargs["attachments"]
+        current.pending_started_at = 123.0
+        current.pending_user_source = kwargs["source"]
+        current.truncation_watermark = None
+        current.updated_at = 99.0
+
+    class FakeThread:
+        def __init__(self, *, target, args, kwargs, daemon):
+            expected = (
+                routes._run_gateway_chat_streaming
+                if gateway_owned
+                else routes._run_agent_streaming
+            )
+            assert target is expected
+            workers.append((args, kwargs))
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(
+        routes, "webui_gateway_chat_enabled", lambda _cfg: gateway_owned
+    )
+    monkeypatch.setattr(routes, "ensure_agent_runtime_current", lambda: None)
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda _sid: None)
+    monkeypatch.setattr(routes, "_is_hidden_empty_session", lambda _session: False)
+    monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", prepare)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda _workspace: None)
+    monkeypatch.setattr(routes.threading, "Thread", FakeThread)
+    monkeypatch.setattr(
+        turn_journal,
+        "append_turn_journal_event",
+        lambda _sid, event: {"turn_id": "turn-1", **event},
+    )
+    monkeypatch.setattr(
+        turn_journal,
+        "append_turn_journal_event_for_stream",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("journal unavailable")),
+    )
+
+    response = routes._start_chat_stream_for_session(
+        session,
+        msg="wake up",
+        attachments=[],
+        workspace="/tmp/workspace",
+        model="test-model",
+        idempotency_key="kanban:default:t_1:4",
+    )
+
+    assert response == {
+        "error": "failed to persist worker acceptance",
+        "_status": 500,
+    }
+    worker_args, worker_kwargs = workers[0]
+    stream_id = worker_args[4]
+    assert worker_kwargs["acceptance_state"] == {"accepted": False}
+    assert worker_kwargs["acceptance_gate"].is_set()
+    assert session.active_stream_id is None
+    assert session.pending_user_message is None
+    assert session.title == "Gateway journal failure"
+    assert session.workspace == "/old/workspace"
+    assert session.model == "old-model"
+    assert session.model_provider == "old-provider"
+    assert session.post_compression_context_tokens_estimate == 321
+    assert session.truncation_watermark == 10.0
+    assert session.updated_at == 7.25
+    with routes.STREAMS_LOCK:
+        assert stream_id not in routes.STREAMS
+
+
+@pytest.mark.parametrize("save_mode", ["deferred", "eager"])
+def test_idempotent_submitted_journal_failure_restores_session_state(
+    monkeypatch, save_mode
+):
+    from api import routes, turn_journal
+
+    original_messages = [
+        {"role": "assistant", "content": "existing answer", "timestamp": 10.0}
+    ]
+
+    class FakeSession:
+        session_id = f"submitted-journal-failure-{save_mode}"
+        profile = "developer"
+        title = "Untitled"
+        workspace = "/old/workspace"
+        model = "old-model"
+        model_provider = "old-provider"
+        active_stream_id = None
+        post_compression_context_tokens_estimate = 321
+        pending_user_message = None
+        pending_attachments = []
+        pending_started_at = None
+        pending_user_source = None
+        truncation_watermark = 10.0
+        updated_at = 7.25
+
+        def __init__(self):
+            self.messages = [dict(message) for message in original_messages]
+            self.saved = []
+
+        def save(self, **kwargs):
+            if kwargs.get("touch_updated_at", True):
+                self.updated_at = 99.0
+            self.saved.append(
+                {
+                    "kwargs": dict(kwargs),
+                    "title": self.title,
+                    "workspace": self.workspace,
+                    "model": self.model,
+                    "model_provider": self.model_provider,
+                    "active_stream_id": self.active_stream_id,
+                    "post_compression_context_tokens_estimate": (
+                        self.post_compression_context_tokens_estimate
+                    ),
+                    "pending_user_message": self.pending_user_message,
+                    "pending_attachments": list(self.pending_attachments),
+                    "pending_started_at": self.pending_started_at,
+                    "pending_user_source": self.pending_user_source,
+                    "truncation_watermark": self.truncation_watermark,
+                    "updated_at": self.updated_at,
+                    "messages": [dict(message) for message in self.messages],
+                }
+            )
+
+    session = FakeSession()
+    monkeypatch.setattr(routes, "get_webui_session_save_mode", lambda: save_mode)
+    monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda _sid: None)
+    monkeypatch.setattr(routes, "_is_hidden_empty_session", lambda _session: False)
+    monkeypatch.setattr(
+        turn_journal,
+        "append_turn_journal_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("journal unavailable")),
+    )
+
+    response = routes._start_chat_stream_for_session(
+        session,
+        msg="Kanban wakeup",
+        attachments=[{"name": "context.txt"}],
+        workspace="/new/workspace",
+        model="new-model",
+        model_provider="new-provider",
+        source="kanban",
+        external_runtime_owned=True,
+        idempotency_key="kanban:default:t_1:4",
+    )
+
+    assert response == {
+        "error": "failed to persist idempotent turn journal",
+        "_status": 500,
+    }
+    assert session.title == "Untitled"
+    assert session.workspace == "/old/workspace"
+    assert session.model == "old-model"
+    assert session.model_provider == "old-provider"
+    assert session.active_stream_id is None
+    assert session.post_compression_context_tokens_estimate == 321
+    assert session.pending_user_message is None
+    assert session.pending_attachments == []
+    assert session.pending_started_at is None
+    assert session.pending_user_source is None
+    assert session.truncation_watermark == 10.0
+    assert session.updated_at == 7.25
+    assert session.messages == original_messages
+    assert all("_active_turn_token" not in message for message in session.messages)
+    assert session.saved[-1]["messages"] == original_messages
+
+
+def test_idempotent_stream_start_failure_is_marked_interrupted(monkeypatch):
+    from api import routes, turn_journal
+
+    journal_events = []
+    session = types.SimpleNamespace(
+        session_id="failed-start",
+        profile=None,
+        title="Failed start",
+        active_stream_id=None,
+        pending_user_message=None,
+        pending_attachments=[],
+        pending_started_at=None,
+        pending_user_source=None,
+        messages=[],
+        save=lambda **_kwargs: None,
+    )
+
+    def prepare(current, **kwargs):
+        current.active_stream_id = kwargs["stream_id"]
+        current.pending_user_message = kwargs["msg"]
+        current.pending_attachments = kwargs["attachments"]
+        current.pending_started_at = 123.0
+        current.pending_user_source = kwargs["source"]
+
+    class FailingThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread unavailable")
+
+    def append_submitted(_session_id, event):
+        journal_events.append(dict(event))
+        return {"turn_id": "turn-failed", **event}
+
+    def append_for_stream(_session_id, stream_id, event):
+        journal_events.append({"stream_id": stream_id, **event})
+        return event
+
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(routes, "ensure_agent_runtime_current", lambda: None)
+    monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda _sid: None)
+    monkeypatch.setattr(routes, "_is_hidden_empty_session", lambda _session: False)
+    monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", prepare)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda _workspace: None)
+    monkeypatch.setattr(routes.threading, "Thread", FailingThread)
+    monkeypatch.setattr(turn_journal, "append_turn_journal_event", append_submitted)
+    monkeypatch.setattr(
+        turn_journal, "append_turn_journal_event_for_stream", append_for_stream
+    )
+
+    with pytest.raises(RuntimeError, match="thread unavailable"):
+        routes._start_chat_stream_for_session(
+            session,
+            msg="wake up",
+            attachments=[],
+            workspace="/tmp/workspace",
+            model="test-model",
+            idempotency_key="kanban:default:t_1:4",
+        )
+
+    assert journal_events[-1]["event"] == "interrupted"
+    assert journal_events[-1]["reason"] == "worker_start_failed"
+    assert session.active_stream_id is None
+    assert session.pending_user_message is None
+
+
+def test_idempotent_stream_start_failure_stays_retryable_when_interrupt_journal_fails(
+    monkeypatch, tmp_path
+):
+    from api import routes, turn_journal
+
+    session = types.SimpleNamespace(
+        session_id="failed-start-journal",
+        profile=None,
+        title="Failed start journal",
+        active_stream_id=None,
+        pending_user_message=None,
+        pending_attachments=[],
+        pending_started_at=None,
+        pending_user_source=None,
+        messages=[],
+        save=lambda **_kwargs: None,
+    )
+
+    def prepare(current, **kwargs):
+        current.active_stream_id = kwargs["stream_id"]
+        current.pending_user_message = kwargs["msg"]
+        current.pending_attachments = kwargs["attachments"]
+        current.pending_started_at = 123.0
+        current.pending_user_source = kwargs["source"]
+
+    class FailingThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread unavailable")
+
+    monkeypatch.setattr(turn_journal, "_default_session_dir", lambda: tmp_path)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(routes, "ensure_agent_runtime_current", lambda: None)
+    monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda _sid: None)
+    monkeypatch.setattr(routes, "_is_hidden_empty_session", lambda _session: False)
+    monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", prepare)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda _workspace: None)
+    monkeypatch.setattr(routes.threading, "Thread", FailingThread)
+    monkeypatch.setattr(
+        turn_journal,
+        "append_turn_journal_event_for_stream",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("journal unavailable")),
+    )
+
+    delivery_key = "kanban:default:t_1:4"
+    with pytest.raises(RuntimeError, match="thread unavailable"):
+        routes._start_chat_stream_for_session(
+            session,
+            msg="wake up",
+            attachments=[],
+            workspace="/tmp/workspace",
+            model="test-model",
+            idempotency_key=delivery_key,
+        )
+
+    assert session.active_stream_id is None
+    assert (
+        turn_journal.find_active_idempotent_turn(
+            session.session_id,
+            delivery_key,
+            active_stream_id=session.active_stream_id,
+            session_dir=tmp_path,
+        )
+        is None
+    )
+
+
+def test_live_idempotent_stream_ignores_stale_persisted_pointer(monkeypatch):
+    from api import routes
+
+    session = types.SimpleNamespace(
+        session_id="stale-session",
+        active_stream_id="stale-stream",
+    )
+    monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda _sid: None)
+    with routes.STREAMS_LOCK:
+        routes.STREAMS.pop("stale-stream", None)
+
+    assert routes._live_idempotent_stream_for_session(session) is None
+
+    with routes.STREAMS_LOCK:
+        routes.STREAMS["stale-stream"] = object()
+    try:
+        assert routes._live_idempotent_stream_for_session(session) == "stale-stream"
+    finally:
+        with routes.STREAMS_LOCK:
+            routes.STREAMS.pop("stale-stream", None)
 
 
 @pytest.mark.parametrize(

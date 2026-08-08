@@ -69,6 +69,7 @@ const okBody = '[IMPORTANT: Background process proc_1 completed (exit_code=0).\n
 const failBody = '[IMPORTANT: Background process proc_2 completed (exit_code=3).\nCommand: pytest -q\nOutput:\n1 failed]';
 const signalBody = '[IMPORTANT: Background process proc_3 completed (exit_code=-9).\nCommand: sleep 999\nOutput:\n]';
 const watchBody = '[IMPORTANT: Background process w1 matched watch pattern "ERROR.*timeout".\nCommand: tail -f app.log\nMatched output:\nERROR request timeout\n(3 earlier matches were suppressed by rate limit)]';
+const kanbanBody = '[kanban] Task t_42 needs attention.\nTitle: Needs review\nAssignee: @reviewer\nBoard: project-a\nEvent cursor: 8\nEvents:\n- blocked: decision needed\n\nCheck the card, its comments, and its result. Decide the next step.';
 const htmlBody = '[IMPORTANT: Background process p completed (exit_code=0).\nCommand: echo "<script>alert(1)</script>"\nOutput:\n<b>bold</b>]';
 // Finding 1: leading indentation + trailing blank lines must survive.
 const wsBody = '[IMPORTANT: Background process p completed (exit_code=0).\nCommand: build\nOutput:\n    indented line\n\n]';
@@ -80,6 +81,7 @@ const okInfo = _processWakeupInfo({}, okBody);
 const failInfo = _processWakeupInfo({}, failBody);
 const signalInfo = _processWakeupInfo({}, signalBody);
 const watchInfo = _processWakeupInfo({}, watchBody);
+const kanbanInfo = _processWakeupInfo({}, kanbanBody);
 const htmlInfo = _processWakeupInfo({}, htmlBody);
 const wsInfo = _processWakeupInfo({}, wsBody);
 const supLikeInfo = _processWakeupInfo({}, supLikeBody);
@@ -95,7 +97,7 @@ const metaOverParse = _processWakeupInfo(
 const extras = {timeHtml: '<span class="msg-time">14:32</span>', filesHtml: '', footHtml: '<div class="msg-foot"></div>'};
 
 process.stdout.write(JSON.stringify({
-  okInfo, failInfo, watchInfo, metaOnlyInfo,
+  okInfo, failInfo, watchInfo, kanbanInfo, metaOnlyInfo,
   metaOverParseTaskId: metaOverParse.taskId,
   unparseableIsNull: _processWakeupInfo({}, 'plain text') === null,
   emptyIsNull: _processWakeupInfo({content: ''}, '') === null,
@@ -105,6 +107,7 @@ process.stdout.write(JSON.stringify({
   failCard: _processWakeupCardHtml(failInfo, failBody, extras),
   signalCard: _processWakeupCardHtml(signalInfo, signalBody, extras),
   watchCard: _processWakeupCardHtml(watchInfo, watchBody, extras),
+  kanbanCard: _processWakeupCardHtml(kanbanInfo, kanbanBody, extras),
   htmlCard: _processWakeupCardHtml(htmlInfo, htmlBody, extras),
   wsCard: _processWakeupCardHtml(wsInfo, wsBody, extras),
   supLikeCard: _processWakeupCardHtml(supLikeInfo, supLikeBody, extras),
@@ -126,7 +129,7 @@ def _run_driver():
     return json.loads(proc.stdout)
 
 
-def test_client_parser_mirrors_the_two_structured_wakeup_shapes():
+def test_client_parser_mirrors_the_structured_wakeup_shapes():
     result = _run_driver()
 
     ok = result["okInfo"]
@@ -143,6 +146,15 @@ def test_client_parser_mirrors_the_two_structured_wakeup_shapes():
     # The suppression note is part of the output tail, never a separate field.
     assert watch["output"] == "ERROR request timeout\n(3 earlier matches were suppressed by rate limit)"
     assert "suppressed" not in watch
+
+    kanban = result["kanbanInfo"]
+    assert kanban["type"] == "kanban"
+    assert kanban["taskId"] == "t_42"
+    assert kanban["title"] == "Needs review"
+    assert kanban["assignee"] == "@reviewer"
+    assert kanban["board"] == "project-a"
+    assert kanban["eventCursor"] == "8"
+    assert kanban["output"] == "- blocked: decision needed"
 
     assert result["unparseableIsNull"] is True
     assert result["emptyIsNull"] is True
@@ -216,6 +228,13 @@ def test_card_markup_collapsed_by_default_with_exit_chip():
     assert "process-wakeup-pattern-row" in watch_card
     # Pattern appears twice: once in the collapsed chip, once in the detail row.
     assert watch_card.count("ERROR.*timeout") >= 2
+
+    kanban_card = result["kanbanCard"]
+    assert 'data-icon="list-todo"' in kanban_card
+    assert "Kanban" in kanban_card
+    assert "t_42" in kanban_card
+    assert "project-a" in kanban_card
+    assert "exit ?" not in kanban_card
 
 
 def test_card_escapes_command_and_output():

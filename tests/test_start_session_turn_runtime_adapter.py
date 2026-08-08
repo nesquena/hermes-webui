@@ -128,3 +128,40 @@ def test_start_session_turn_routes_through_adapter_when_enabled(
     assert resp["_status"] == 200
     assert resp["stream_id"] == "stream-via-adapter"
     assert invoked == {"adapter": 1, "start_run": 1}
+
+
+def test_start_session_turn_returns_existing_idempotent_delivery(
+    _stub_routes, monkeypatch
+):
+    from api import turn_journal
+
+    monkeypatch.setattr(
+        turn_journal,
+        "find_active_idempotent_turn",
+        lambda _sid, key, *, active_stream_id=None: {
+            "event": "worker_started",
+            "stream_id": active_stream_id or "existing-stream",
+            "idempotency_key": key,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        _stub_routes,
+        "_start_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("duplicate delivery started a second run")
+        ),
+    )
+
+    response = _stub_routes.start_session_turn(
+        "sess-test",
+        "wakeup msg",
+        idempotency_key="kanban:default:t_1:4",
+    )
+
+    assert response == {
+        "_status": 200,
+        "stream_id": "existing-stream",
+        "session_id": "sess-test",
+        "idempotent_replay": True,
+    }
