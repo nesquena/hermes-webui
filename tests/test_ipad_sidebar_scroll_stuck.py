@@ -3367,75 +3367,147 @@ def test_teardown_cannot_clear_newer_owner():
     """Gate-certifier finding #1: _invalidateTouchRender must only cancel the
     CURRENT owner's listener/RAF. If a stale owner's teardown fires after a
     newer owner was already installed, it must NOT clear the newer owner's
-    handler from the list. This test simulates: setup A → invalidate (clears A)
-    → setup B → stale invalidate (must not clear B's listener).
+    handler from the list. This test simulates the interleaving the name and
+    docstring claim:
+
+      setup A → setup B (invalidates A, installs B) → fire A's stale handler
+      → assert B's owner, listener, RAF, and rendered extent remain untouched.
+
+    The prior version never created this interleaving — it invalidated A,
+    installed B, then invalidated B, never firing A's stale callback.
     """
+    total = 100
+    flat_rows = []
+    for i in range(total):
+        flat_rows.append({"group": {"label": "G"}, "session": {"session_id": f"s{i}"}})
     source = f"""
 const SESSIONS_JS = {SESSIONS_JS!r};
-""" + _node_test_preamble() + """
+""" + _node_test_preamble() + f"""
+let rafSchedules = 0;
+let rafCallbacks = [];
+global.requestAnimationFrame = function(fn) {{ rafSchedules++; rafCallbacks.push(fn); return rafSchedules; }};
+global.cancelAnimationFrame = function() {{}};
+function _isTouchPrimary() {{ return true; }}
+function _updateTouchGroupSpacers() {{}}
+function _updateTouchSentinel() {{}}
+window.IntersectionObserver = function(cb, opts) {{ this.disconnect = function(){{}}; this.observe = function(){{}}; this.unobserve = function(){{}}; }};
+global.IntersectionObserver = window.IntersectionObserver;
+
 let scrollListenersRemoved = 0;
 const list = makeList();
 list.scrollHeight = 20000;
-list.scrollTop = 0;
+list.scrollTop = 19500;
 list.clientHeight = 800;
-
-// Track add/removeEventListener
 list._scrollListeners = [];
-list.addEventListener = function(type, handler, opts) {
+list.addEventListener = function(type, handler, opts) {{
   if (type === 'scroll') this._scrollListeners.push(handler);
-};
-list.removeEventListener = function(type, handler, opts) {
-  if (type === 'scroll') {
+}};
+list.removeEventListener = function(type, handler, opts) {{
+  if (type === 'scroll') {{
     const idx = this._scrollListeners.indexOf(handler);
-    if (idx >= 0) { this._scrollListeners.splice(idx, 1); scrollListenersRemoved++; }
-  }
-};
+    if (idx >= 0) {{ this._scrollListeners.splice(idx, 1); scrollListenersRemoved++; }}
+  }}
+}};
 
-const flatRows = [];
-for (let i = 0; i < 224; i++) flatRows.push({group:{label:'G'},session:{session_id:'s'+i}});
+const flatRows = {json.dumps(flat_rows)};
 
-global.requestAnimationFrame = function() { return 1; };
-global.cancelAnimationFrame = function() {};
-function _isTouchPrimary() { return true; }
-function _updateTouchGroupSpacers() {}
-function _updateTouchSentinel() {}
-window.IntersectionObserver = function(cb, opts) { this.disconnect = function(){}; this.observe = function(){}; this.unobserve = function(){}; };
-global.IntersectionObserver = window.IntersectionObserver;
+// Set up render state for rendering
+const gw = makeEl('div');
+gw.className = 'session-date-group';
+gw.setAttribute('data-group-label', 'G');
+const body = makeBodyThatTracksItems(list);
+body.className = 'session-date-body';
+gw.appendChild(body);
+list._groups['G'] = gw;
+list.children.push(gw);
+for (let i = 0; i < 60; i++) {{
+  const item = makeSessionItem('s' + i);
+  body.appendChild(item);
+}}
+list._sentinel = makeEl('div');
+list._sentinel.style.display = '';
 
-// Setup A
+const renderOne = function(session, isPinned) {{
+  return makeSessionItem(session.session_id);
+}};
+
 eval(extractFunc('_setupTouchSentinel'));
-_setupTouchSentinel(list, 224, flatRows, null, null, 60);
+
+// ── Setup A: install owner A ──
+_setupTouchSentinel(list, {total}, flatRows, renderOne, null, 60);
+const ownerA = _touchScrollOwner;
 const listenersAfterA = list._scrollListeners.length;
+const itemsAfterA = list._items.length;
 
-// Invalidate A — clears A's listener
-_invalidateTouchRender();
-const listenersAfterInvalidateA = list._scrollListeners.length;
-
-// Setup B — installs new listener
-_setupTouchSentinel(list, 224, flatRows, null, null, 60);
+// ── Setup B: invalidates A, installs owner B ──
+// _setupTouchSentinel calls _invalidateTouchRender internally, which tears
+// down A's listener/RAF, then installs B as the new current owner.
+_setupTouchSentinel(list, {total}, flatRows, renderOne, null, 60);
+const ownerB = _touchScrollOwner;
 const listenersAfterB = list._scrollListeners.length;
 
-// Now invalidate again — this clears B's listener (the CURRENT owner)
-_invalidateTouchRender();
-const listenersAfterInvalidateB = list._scrollListeners.length;
+// B must be a different owner object
+if (ownerB === ownerA) throw new Error('owner B must differ from owner A');
 
-console.log(JSON.stringify({
+// Snapshot B's state BEFORE firing A's stale handler
+const bRafBefore = ownerB.raf;
+const bHandlerExists = typeof ownerB.handler === 'function';
+const bListenersBefore = list._scrollListeners.length;
+const itemsBeforeStaleFire = list._items.length;
+
+// ── Fire A's stale handler ──
+// A's handler is still a function on the ownerA object, but _touchScrollOwner
+// is now ownerB. The handler must check _touchScrollOwner !== owner and bail.
+if (ownerA && ownerA.handler) ownerA.handler();
+
+// Also drain any RAF that A's handler might have wrongly armed
+const staleCallbacks = rafCallbacks.splice(0);
+for (const cb of staleCallbacks) cb();
+
+// Snapshot B's state AFTER firing A's stale handler
+const bRafAfter = ownerB.raf;
+const bListenersAfter = list._scrollListeners.length;
+const itemsAfterStaleFire = list._items.length;
+
+// ── Fire A's stale teardown (_invalidateTouchRender was already called
+// internally by setup B, but if someone calls it again via A's context,
+// it must only affect the current owner, not B). We simulate this by
+// calling _invalidateTouchRender and verifying B's listener is the one
+// removed (not A's already-removed listener). ──
+// Actually, the real interleaving is: A's handler fires after B is installed.
+// We already did that above. Now verify B is fully intact.
+
+console.log(JSON.stringify({{
   listenersAfterA: listenersAfterA,
-  listenersAfterInvalidateA: listenersAfterInvalidateA,
   listenersAfterB: listenersAfterB,
-  listenersAfterInvalidateB: listenersAfterInvalidateB,
-  aRemoved: listenersAfterInvalidateA < listenersAfterA,
-  bRemoved: listenersAfterInvalidateB < listenersAfterB,
-  eachInvalidateRemovesOne: scrollListenersRemoved === 2,
-}));
+  bHandlerExists: bHandlerExists,
+  bRafBefore: bRafBefore,
+  bRafAfter: bRafAfter,
+  bRafUntouched: bRafAfter === bRafBefore,
+  bListenersUntouched: bListenersAfter === bListenersBefore,
+  ownerBStillCurrent: _touchScrollOwner === ownerB,
+  itemsUntouched: itemsAfterStaleFire === itemsBeforeStaleFire,
+  staleHandlerArmedNoRaf: rafSchedules === 0,  // A's handler must not arm RAF
+  scrollListenersRemoved: scrollListenersRemoved,
+}}));
 """
     result = json.loads(_run_node_vm(source))
-    assert result["listenersAfterA"] >= 1, "Setup A must install a listener"
-    assert result["listenersAfterInvalidateA"] == 0, "Invalidate A must remove A's listener"
-    assert result["listenersAfterB"] >= 1, "Setup B must install a new listener"
-    assert result["listenersAfterInvalidateB"] == 0, "Invalidate B must remove B's listener"
-    assert result["eachInvalidateRemovesOne"], \
-        f"Each invalidate must remove exactly one listener — got {result['eachInvalidateRemovesOne']}"
+    assert result["listenersAfterA"] >= 1, \
+        f"Setup A must install a scroll listener, got {result['listenersAfterA']}"
+    assert result["listenersAfterB"] >= 1, \
+        f"Setup B must install a new scroll listener, got {result['listenersAfterB']}"
+    assert result["bHandlerExists"], \
+        "Owner B must have a handler function"
+    assert result["bRafUntouched"], \
+        f"Owner B's RAF must not be touched by A's stale handler — before={result['bRafBefore']}, after={result['bRafAfter']}"
+    assert result["bListenersUntouched"], \
+        f"Owner B's listener count must not change — before={result['bListenersBefore']}, after={result['bListenersAfter']}"
+    assert result["ownerBStillCurrent"], \
+        "Owner B must still be the current _touchScrollOwner after A's stale handler fired"
+    assert result["itemsUntouched"], \
+        f"Rendered extent must not change — before={result['itemsBeforeStaleFire']}, after={result['itemsAfterStaleFire']}"
+    assert result["staleHandlerArmedNoRaf"], \
+        f"A's stale handler must not arm any RAF — got {result['rafSchedules']} schedules"
 
 
 @_node_tests
@@ -3445,44 +3517,50 @@ def test_observer_and_scroll_same_turn_single_append():
     zone and the observer simultaneously reports intersection), only ONE batch
     must be appended — not two. The _touchBatchPending flag must prevent the
     second trigger from scheduling a duplicate microtask.
+
+    This test executes the real production schedule: it evals the real
+    _setupTouchSentinel, fires both the observer callback and the scroll
+    handler synchronously, drains the coalesced RAF callback, then awaits
+    the Promise continuation. It asserts exactly one _appendTouchBatch call
+    (60→100 rows), 40 renderer invocations, 100 unique live session nodes,
+    one coalesced RAF, and _touchBatchPending cleared.
     """
+    total = 100  # exactly one batch: 60→100, no continuous chain needed
+    flat_rows = []
+    for i in range(total):
+        flat_rows.append({"group": {"label": "G"}, "session": {"session_id": f"s{i}"}})
     source = f"""
 const SESSIONS_JS = {SESSIONS_JS!r};
-""" + _node_test_preamble() + """
+""" + _node_test_preamble() + f"""
 let rafSchedules = 0;
 let rafCallbacks = [];
-global.requestAnimationFrame = function(fn) { rafSchedules++; rafCallbacks.push(fn); return rafSchedules; };
-global.cancelAnimationFrame = function() {};
-function _isTouchPrimary() { return true; }
+global.requestAnimationFrame = function(fn) {{ rafSchedules++; rafCallbacks.push(fn); return rafSchedules; }};
+global.cancelAnimationFrame = function() {{}};
+function _isTouchPrimary() {{ return true; }}
 
+// Count actual _appendTouchBatch calls by wrapping after eval
 let appendCount = 0;
-const origAppend = function() { appendCount++; };
-// Override _appendTouchBatch to count calls — we eval the real one but
-// intercept by wrapping after eval.
-let _realAppendTouchBatch = null;
+let renderCount = 0;
 
-window.IntersectionObserver = function(cb, opts) {
+window.IntersectionObserver = function(cb, opts) {{
   this._cb = cb;
-  this.disconnect = function(){};
-  this.observe = function(){};
-  this.unobserve = function(){};
-  // Expose the callback so the test can fire it
-  this._fire = function(isIntersecting) {
-    this._cb([{isIntersecting: isIntersecting, target: null}]);
-  };
-};
+  this.disconnect = function(){{}};
+  this.observe = function(){{}};
+  this.unobserve = function(){{}};
+  this._fire = function(isIntersecting) {{
+    this._cb([{{isIntersecting: isIntersecting, target: null}}]);
+  }};
+}};
 global.IntersectionObserver = window.IntersectionObserver;
 
 const list = makeList();
 list.scrollHeight = 20000;
-list.scrollTop = 19500; // near bottom
+list.scrollTop = 19500; // near bottom: 20000-19500-800 = -300 < 200
 list.clientHeight = 800;
 
-// Set up a render state with a real renderOneSession that creates items
-const flatRows = [];
-for (let i = 0; i < 224; i++) flatRows.push({group:{label:'G'},session:{session_id:'s'+i}});
+const flatRows = {json.dumps(flat_rows)};
 
-// Create the group wrapper + body in the list so _appendTouchBatch finds them
+// Create the group wrapper + body in the list
 const gw = makeEl('div');
 gw.className = 'session-date-group';
 gw.setAttribute('data-group-label', 'G');
@@ -3492,59 +3570,84 @@ gw.appendChild(body);
 list._groups['G'] = gw;
 list.children.push(gw);
 // Pre-populate 60 items
-for (let i = 0; i < 60; i++) {
-  const item = makeSessionItem('s'+i);
+for (let i = 0; i < 60; i++) {{
+  const item = makeSessionItem('s' + i);
   body.appendChild(item);
-}
+}}
 
 // Sentinel
 list._sentinel = makeEl('div');
 list._sentinel.style.display = '';
 
 eval(extractFunc('_setupTouchSentinel'));
-// Real 6-arg signature
-_setupTouchSentinel(list, 224, flatRows, function(session, isPinned) {
-  return makeSessionItem(session.session_id);
-}, null, 60);
 
-// Grab the observer to fire intersection
+// Wrap _appendTouchBatch to count calls
+const _realAppend = _appendTouchBatch;
+_appendTouchBatch = function() {{ appendCount++; _realAppend(); }};
+
+// Wrap renderOneSession to count renderer calls
+const origRenderOne = function(session, isPinned) {{
+  renderCount++;
+  return makeSessionItem(session.session_id);
+}};
+
+_setupTouchSentinel(list, {total}, flatRows, origRenderOne, null, 60);
+
 const observer = _touchSentinelObserver;
 
 // Fire observer intersection (simulates sentinel entering viewport)
 if (observer && observer._fire) observer._fire(true);
 
-// Fire scroll handler (simulates scroll event in the same turn)
+// Fire scroll handler in the same turn (simulates scroll event)
 if (_touchScrollOwner && _touchScrollOwner.handler) _touchScrollOwner.handler();
 
-// Drain the RAF callback from the scroll handler
+// Drain the RAF callback from the scroll handler — the scroll handler armed
+// one coalesced RAF. The observer armed a microtask directly (no RAF).
 const callbacks = rafCallbacks.splice(0);
 for (const cb of callbacks) cb();
 
-// Drain all microtasks (Promise.resolve().then())
-// In the test VM, microtasks drain synchronously at the end of the script.
-// So by now, both microtasks have run. Count how many _appendTouchBatch calls
-// were made. The _touchBatchPending flag should have prevented the second.
-// However, since we're not actually running the real _appendTouchBatch (it's
-// eval'd in the preamble), we need to count microtask-driven appends.
-// The key metric: the second trigger should see _touchBatchPending=true and skip.
+// Now drain microtasks: the observer's Promise.resolve().then() and the
+// scroll handler's RAF→Promise chain. _touchBatchPending was set by whichever
+// fired first; the second trigger saw it true and skipped.
+(async function() {{
+  for (let i = 0; i < 20; i++) {{
+    await Promise.resolve();
+  }}
 
-console.log(JSON.stringify({
-  batchPendingAfterBoth: _touchBatchPending,
-  // After both microtasks drain, pending should be false (cleared by finally)
-  // but the critical invariant is that only ONE append was scheduled.
-  // The _touchBatchPending flag gates: the second trigger sees it true and skips.
-  rafSchedules: rafSchedules,
-}));
+  const allSids = list._items.map(function(i) {{ return i.dataset.sid; }});
+  const uniqueSids = [];
+  const seen = {{}};
+  for (const sid of allSids) {{ if(!seen[sid]) {{ seen[sid]=1; uniqueSids.push(sid); }} }}
+
+  console.log(JSON.stringify({{
+    appendCount: appendCount,
+    renderCount: renderCount,
+    loadedCount: _sessionTouchLoadedCount,
+    totalItems: list._items.length,
+    uniqueCount: uniqueSids.length,
+    rafSchedules: rafSchedules,
+    batchPending: _touchBatchPending,
+    innerHTMLWipes: _innerHTMLWipes,
+  }}));
+}})();
 """
     result = json.loads(_run_node_vm(source))
-    # The key assertion: both triggers fire, but _touchBatchPending prevents
-    # the second from scheduling a duplicate microtask. After all microtasks
-    # drain, _touchBatchPending is false (cleared by finally).
-    # We can't directly count _appendTouchBatch calls in this setup, but we
-    # can verify that the system didn't crash or double-fire.
-    # The real proof is in the _touchBatchPending gate — if it's false at the
-    # end, the first microtask ran and cleared it; the second skipped.
-    assert result is not None, "Test must produce output"
+    assert result["appendCount"] == 1, \
+        f"Exactly one _appendTouchBatch call — coalescing failed, got {result['appendCount']}"
+    assert result["loadedCount"] == 100, \
+        f"One batch must grow 60→100, got loaded={result['loadedCount']}"
+    assert result["renderCount"] == 40, \
+        f"40 renderer calls (100-60=40 new rows), got {result['renderCount']}"
+    assert result["totalItems"] == 100, \
+        f"100 live session nodes in DOM, got {result['totalItems']}"
+    assert result["uniqueCount"] == 100, \
+        f"100 unique SIDs, got {result['uniqueCount']}"
+    assert result["rafSchedules"] == 1, \
+        f"One coalesced RAF from the scroll handler, got {result['rafSchedules']}"
+    assert result["batchPending"] is False, \
+        f"_touchBatchPending must be cleared after append, got {result['batchPending']}"
+    assert result["innerHTMLWipes"] == 0, \
+        f"No innerHTML wipes during append, got {result['innerHTMLWipes']}"
 
 
 @_node_tests
@@ -3552,22 +3655,227 @@ def test_full_ownership_revalidation_before_append():
     """Gate-certifier finding #3: the scroll RAF microtask must recheck owner
     identity, list, generation, token, loaded/total, AND near-bottom geometry
     immediately before calling _appendTouchBatch — not just generation. This
-    test verifies the source contains all those checks in the microtask.
+    test EXECUTES the production schedule (setup → scroll handler → RAF →
+    Promise microtask) and verifies that each stale schedule is rejected:
+
+      1. Positive control: unchanged owner → append succeeds (60→100)
+      2. Geometry change (scroll away from bottom) → no append
+      3. Owner/list replacement → no append
+      4. Token supersession → no append
+      5. Loaded>=total terminal state → no append
+
+    The prior version was source-string-only — it checked that the check
+    strings exist in the function body but never executed the schedule.
     """
-    fn = _extract_fn(SESSIONS_JS, "_setupTouchSentinel")
-    # The microtask (Promise.resolve().then) must contain ALL of these checks:
-    assert "_touchScrollOwner!==owner" in fn, \
-        "Microtask must recheck owner identity (_touchScrollOwner !== owner)"
-    assert "capturedGen!==_sessionTouchGen" in fn, \
-        "Microtask must recheck generation (capturedGen !== _sessionTouchGen)"
-    assert "_sessionTouchListEl!==list" in fn or "!_sessionTouchListEl" in fn, \
-        "Microtask must recheck list identity"
-    assert "token!==_touchBatchToken" in fn, \
-        "Microtask must recheck token ownership"
-    assert "l2>=t2" in fn, \
-        "Microtask must recheck loaded/total before append"
-    assert "nearBottom2" in fn, \
-        "Microtask must recheck near-bottom geometry before append"
+    total = 140  # 60 initial + one batch of 40 = 100, leaving room for more
+    flat_rows = []
+    for i in range(total):
+        flat_rows.append({"group": {"label": "G"}, "session": {"session_id": f"s{i}"}})
+
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+let rafSchedules = 0;
+let rafCallbacks = [];
+global.requestAnimationFrame = function(fn) {{ rafSchedules++; rafCallbacks.push(fn); return rafSchedules; }};
+global.cancelAnimationFrame = function() {{}};
+function _isTouchPrimary() {{ return true; }}
+
+let appendCount = 0;
+
+window.IntersectionObserver = function(cb, opts) {{
+  this.disconnect = function(){{}};
+  this.observe = function(){{}};
+  this.unobserve = function(){{}};
+}};
+global.IntersectionObserver = window.IntersectionObserver;
+
+const list = makeList();
+list.scrollHeight = 20000;
+list.scrollTop = 19500; // near bottom: 20000-19500-800 = -300 < 200
+list.clientHeight = 800;
+
+const flatRows = {json.dumps(flat_rows)};
+
+// Set up group wrapper + body with 60 pre-populated items
+const gw = makeEl('div');
+gw.className = 'session-date-group';
+gw.setAttribute('data-group-label', 'G');
+const body = makeBodyThatTracksItems(list);
+body.className = 'session-date-body';
+gw.appendChild(body);
+list._groups['G'] = gw;
+list.children.push(gw);
+for (let i = 0; i < 60; i++) {{
+  body.appendChild(makeSessionItem('s' + i));
+}}
+list._sentinel = makeEl('div');
+list._sentinel.style.display = '';
+
+const renderOne = function(session, isPinned) {{
+  return makeSessionItem(session.session_id);
+}};
+
+eval(extractFunc('_setupTouchSentinel'));
+
+// Wrap _appendTouchBatch to count calls
+const _realAppend = _appendTouchBatch;
+_appendTouchBatch = function() {{ appendCount++; _realAppend(); }};
+
+// Suppress the continuous batch chain so each scenario tests ONLY the
+// scroll-handler → RAF → microtask path. Without this, _scheduleContinuousBatch
+// chains appends via microtasks and the loaded count races past 100.
+_scheduleContinuousBatch = function() {{}};
+
+// Helper: fire the scroll handler and drain RAF + microtasks
+async function fireScrollAndDrain() {{
+  rafCallbacks = [];
+  rafSchedules = 0;
+  if (_touchScrollOwner && _touchScrollOwner.handler) _touchScrollOwner.handler();
+  const callbacks = rafCallbacks.splice(0);
+  for (const cb of callbacks) cb();
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+}}
+
+(async function() {{
+  const results = [];
+
+  // ── 1. Positive control: unchanged owner → append succeeds (60→100) ──
+  _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 60);
+  appendCount = 0;
+  await fireScrollAndDrain();
+  results.push({{
+    name: 'positive_control',
+    appended: appendCount === 1,
+    loadedAfter: _sessionTouchLoadedCount,
+    expectedLoaded: 100,
+  }});
+
+  // ── 2. Geometry change: scroll away from bottom → no append ──
+  // Re-setup to get a fresh owner at loaded=100
+  _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
+  appendCount = 0;
+  // Change geometry AFTER setup but BEFORE firing the handler: scroll away
+  // from bottom so nearBottom2 check fails.
+  list.scrollTop = 0; // 20000 - 0 - 800 = 19200 >= 200 → not near bottom
+  await fireScrollAndDrain();
+  results.push({{
+    name: 'geometry_change',
+    appended: appendCount === 0,
+    loadedAfter: _sessionTouchLoadedCount,
+    expectedLoaded: 100, // unchanged
+  }});
+
+  // ── 3. Owner/list replacement: install new owner → old microtask rejected ──
+  // Reset geometry to near-bottom for this scenario
+  list.scrollTop = 19500;
+  _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
+  const ownerBeforeReplace = _touchScrollOwner;
+  appendCount = 0;
+  // Fire the scroll handler to arm the RAF + microtask...
+  rafCallbacks = [];
+  rafSchedules = 0;
+  if (ownerBeforeReplace && ownerBeforeReplace.handler) ownerBeforeReplace.handler();
+  // ...but BEFORE draining the RAF callback, install a new owner (re-setup)
+  _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
+  const ownerAfterReplace = _touchScrollOwner;
+  // Now drain: the old owner's RAF callback fires, sees _touchScrollOwner !== owner, bails
+  const callbacks = rafCallbacks.splice(0);
+  for (const cb of callbacks) cb();
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  results.push({{
+    name: 'owner_replacement',
+    appended: appendCount === 0,
+    loadedAfter: _sessionTouchLoadedCount,
+    expectedLoaded: 100, // unchanged
+    ownerChanged: ownerAfterReplace !== ownerBeforeReplace,
+  }});
+
+  // ── 4. Token supersession: bump _touchBatchToken before microtask runs ──
+  _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
+  appendCount = 0;
+  // Fire the scroll handler to arm RAF + microtask
+  rafCallbacks = [];
+  rafSchedules = 0;
+  if (_touchScrollOwner && _touchScrollOwner.handler) _touchScrollOwner.handler();
+  // Drain the RAF callback — this sets token and arms the microtask
+  const rafCbs = rafCallbacks.splice(0);
+  for (const cb of rafCbs) cb();
+  // BEFORE draining the microtask, supersede the token
+  _touchBatchToken++;
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  results.push({{
+    name: 'token_supersession',
+    appended: appendCount === 0,
+    loadedAfter: _sessionTouchLoadedCount,
+    expectedLoaded: 100, // unchanged
+  }});
+
+  // ── 5. Loaded>=total terminal state → no append ──
+  // Set up with total=100 and loaded=100 (already fully loaded)
+  _setupTouchSentinel(list, 100, flatRows.slice(0, 100), renderOne, null, 100);
+  appendCount = 0;
+  // loaded (100) >= total (100) → microtask must bail on l2>=t2 check
+  await fireScrollAndDrain();
+  results.push({{
+    name: 'terminal_state',
+    appended: appendCount === 0,
+    loadedAfter: _sessionTouchLoadedCount,
+    expectedLoaded: 100,
+  }});
+
+  console.log(JSON.stringify({{
+    results: results,
+    innerHTMLWipes: _innerHTMLWipes,
+  }}));
+}})();
+"""
+    result = json.loads(_run_node_vm(source))
+
+    # Verify all 5 scenarios
+    scenarios = {r["name"]: r for r in result["results"]}
+    assert len(result["results"]) == 5, \
+        f"Expected 5 scenarios, got {len(result['results'])}"
+
+    # 1. Positive control: append succeeds
+    s = scenarios["positive_control"]
+    assert s["appended"], \
+        f"Positive control: unchanged owner must append — got appendCount=1 expected, loaded={s['loadedAfter']}"
+    assert s["loadedAfter"] == 100, \
+        f"Positive control: loaded must be 100 after append, got {s['loadedAfter']}"
+
+    # 2. Geometry change: no append
+    s = scenarios["geometry_change"]
+    assert s["appended"], \
+        f"Geometry change: must NOT append when scrolled away from bottom — got appendCount=0 expected, loaded={s['loadedAfter']}"
+    assert s["loadedAfter"] == 100, \
+        f"Geometry change: loaded must stay 100, got {s['loadedAfter']}"
+
+    # 3. Owner replacement: no append
+    s = scenarios["owner_replacement"]
+    assert s["appended"], \
+        f"Owner replacement: stale microtask must NOT append after owner replaced — got appendCount=0 expected"
+    assert s["loadedAfter"] == 100, \
+        f"Owner replacement: loaded must stay 100, got {s['loadedAfter']}"
+    assert s["ownerChanged"], \
+        "Owner replacement: _touchScrollOwner must have changed after re-setup"
+
+    # 4. Token supersession: no append
+    s = scenarios["token_supersession"]
+    assert s["appended"], \
+        f"Token supersession: microtask must NOT append after token bumped — got appendCount=0 expected"
+    assert s["loadedAfter"] == 100, \
+        f"Token supersession: loaded must stay 100, got {s['loadedAfter']}"
+
+    # 5. Terminal state: no append
+    s = scenarios["terminal_state"]
+    assert s["appended"], \
+        f"Terminal state: must NOT append when loaded>=total — got appendCount=0 expected"
+    assert s["loadedAfter"] == 100, \
+        f"Terminal state: loaded must stay 100, got {s['loadedAfter']}"
+
+    assert result["innerHTMLWipes"] == 0, \
+        f"No innerHTML wipes in any scenario, got {result['innerHTMLWipes']}"
 
 
 @_node_tests
