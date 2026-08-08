@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from api import run_journal
+
 
 @pytest.fixture
 def isolated_steer_state():
@@ -171,3 +173,59 @@ def test_journal_failure_does_not_turn_runtime_acceptance_into_http_failure(
         "fallback": None,
         "stream_id": stream_id,
     }
+
+
+def test_terminal_journal_wins_race_without_late_delivery_event(
+    isolated_steer_state,
+    tmp_path,
+    monkeypatch,
+):
+    from api import streaming
+    from api.config import SESSION_AGENT_CACHE_LOCK, STREAMS_LOCK, create_stream_channel
+
+    cache, streams = isolated_steer_state
+    sid = "steer_terminal_race_sid"
+    stream_id = "steer_terminal_race_run"
+    stream = create_stream_channel()
+
+    class FinishingAgent:
+        def steer(self, _text):
+            run_journal.append_run_event(
+                sid,
+                stream_id,
+                "done",
+                {"session": {}},
+                session_dir=tmp_path,
+            )
+            return True
+
+    with SESSION_AGENT_CACHE_LOCK:
+        cache[sid] = (FinishingAgent(), "sig")
+    with STREAMS_LOCK:
+        streams[stream_id] = stream
+
+    def append_in_test_dir(session_id, run_id, event_name, payload, **kwargs):
+        return run_journal.append_run_event(
+            session_id,
+            run_id,
+            event_name,
+            payload,
+            session_dir=tmp_path,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(streaming, "append_run_event", append_in_test_dir)
+    with patch.object(
+        streaming,
+        "get_session",
+        return_value=MagicMock(active_stream_id=stream_id),
+    ):
+        handler = _handler()
+        streaming._handle_chat_steer(handler, {"session_id": sid, "text": "too late"})
+
+    journal = run_journal.read_run_events(sid, stream_id, session_dir=tmp_path)
+    assert [event["event"] for event in journal["events"]] == ["done"]
+    subscriber, snapshot = stream.subscribe_with_snapshot()
+    assert subscriber.empty()
+    assert snapshot["offline_buffered_events"] == 0
+    assert _response(handler)["accepted"] is True

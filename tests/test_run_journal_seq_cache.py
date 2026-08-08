@@ -119,6 +119,27 @@ def test_explicit_seq_keeps_cache_from_reissuing(tmp_path):
     assert nxt["seq"] == 6
 
 
+def test_conditional_append_rejects_events_after_terminal(tmp_path):
+    terminal = run_journal.append_run_event(
+        "sess_terminal", "run_terminal", "done", {"session": {}}, session_dir=tmp_path
+    )
+    rejected = run_journal.append_run_event(
+        "sess_terminal",
+        "run_terminal",
+        "steer_delivered",
+        {"text": "too late"},
+        session_dir=tmp_path,
+        reject_after_terminal=True,
+    )
+
+    assert terminal is not None
+    assert rejected is None
+    journal = run_journal.read_run_events(
+        "sess_terminal", "run_terminal", session_dir=tmp_path
+    )
+    assert [event["event"] for event in journal["events"]] == ["done"]
+
+
 def test_delete_evicts_seq_cache_so_recreated_run_restarts(tmp_path):
     run_journal.append_run_event(
         "sess_del", "run_del", "token", {"text": "one"}, session_dir=tmp_path

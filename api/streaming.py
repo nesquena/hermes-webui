@@ -11581,6 +11581,7 @@ def _publish_accepted_steer_event(session_id: str, stream_id: str, text: str) ->
             str(stream_id),
             "steer_delivered",
             payload,
+            reject_after_terminal=True,
         )
     except Exception:
         logger.warning(
@@ -11591,7 +11592,9 @@ def _publish_accepted_steer_event(session_id: str, stream_id: str, text: str) ->
         )
         return
 
-    event_id = journaled.get("event_id") if isinstance(journaled, dict) else None
+    if not isinstance(journaled, dict):
+        return
+    event_id = journaled.get("event_id")
     if isinstance(journaled, dict):
         payload["created_at"] = journaled.get("created_at", created_at)
     with STREAMS_LOCK:

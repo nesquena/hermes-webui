@@ -361,6 +361,23 @@ Delivered vs Applied:
 WebUI may claim delivered. WebUI must not claim applied without Agent/TUI
 Gateway evidence.
 
+### Durable delivered event
+
+After the active runtime accepts a Steer, WebUI records a `steer_delivered`
+event in that run's append-only journal. The journal envelope owns the event's
+`event_id`, `run_id`, and `seq`; live SSE broadcast and reconnect replay must
+carry that same `event_id` rather than minting a browser-local identity. The
+payload records `session_id`, `stream_id`, `text`, `status: delivered`, and
+`created_at`. It remains presentation/replay metadata and must not be appended
+as a normal next-turn user message or treated as proof of application.
+
+The terminal check and conditional append occur under the run journal's same
+per-path lock. If a terminal event wins that race, WebUI does not append a late
+`steer_delivered` row after the terminal boundary; the existing leftover-Steer
+path remains responsible for preserving unconsumed text. If journal persistence
+fails after runtime acceptance, WebUI logs the durability failure and does not
+broadcast a non-replayable delivery event.
+
 ## Implementation Slices
 
 Each slice must satisfy this RFC and the Live-to-Final parent requirements

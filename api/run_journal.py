@@ -394,7 +394,8 @@ def append_run_event(
     session_dir: Path | None = None,
     seq: int | None = None,
     created_at: float | None = None,
-) -> dict:
+    reject_after_terminal: bool = False,
+) -> dict | None:
     """Append one durable run event and fsync it according to the journal policy."""
     path = _run_path(session_id, run_id, session_dir=session_dir)
     payload = payload if payload is not None else {}
@@ -402,6 +403,10 @@ def append_run_event(
     if not event_name:
         raise ValueError("event_name is required")
     with _lock_for(path):
+        if reject_after_terminal:
+            existing, malformed = _read_jsonl(path)
+            if malformed or any(event.get("terminal") for event in existing):
+                return None
         if seq is not None:
             assigned_seq = int(seq)
             _note_assigned_seq(path, assigned_seq)
