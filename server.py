@@ -378,6 +378,9 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
+            # Normalize API paths to lowercase for case-insensitive routing (#3943)
+            if parsed.path.startswith('/api/'):
+                parsed = parsed._replace(path=parsed.path.lower())
             if not check_auth(self, parsed): return
             result = handle_get(self, parsed)
             if result is False:
@@ -403,6 +406,9 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
+            # Normalize API paths to lowercase for case-insensitive routing (#3943)
+            if parsed.path.startswith('/api/'):
+                parsed = parsed._replace(path=parsed.path.lower())
             _is_csp_report_post = (
                 parsed.path == "/api/csp-report" and self.command == "POST"
             )

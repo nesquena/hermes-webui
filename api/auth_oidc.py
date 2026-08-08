@@ -433,6 +433,13 @@ def _validate_outbound_oidc_url(url: str) -> None:
     hostname = str(parsed.hostname or "").strip()
     if not hostname:
         raise OIDCAuthError("OIDC endpoint URL was missing a hostname", status_code=502)
+    # The user-configured issuer is explicitly trusted by the admin.  Skip the
+    # private-IP check when the target hostname matches the configured issuer's
+    # hostname so that self-hosted providers (Authentik, Keycloak, etc.) behind
+    # private addresses work without enabling the OIDC issuer config becoming an
+    # SSRF vector for arbitrary targets.
+    if _is_exempt_issuer_host(hostname):
+        return
     if _is_disallowed_oidc_host(hostname):
         raise OIDCAuthError(
             "OIDC endpoint URLs must not target private or local addresses",
@@ -473,6 +480,29 @@ def _is_disallowed_oidc_ip(address) -> bool:
         or candidate.is_unspecified
         or candidate.is_reserved
     )
+
+
+def _is_exempt_issuer_host(hostname: str) -> bool:
+    """Return True when *hostname* matches the user-configured OIDC issuer.
+
+    The issuer is explicitly configured by the admin (via
+    ``webui_oidc.issuer`` or the ``HERMES_WEBUI_OIDC_ISSUER`` env var), so
+    skipping the private-IP check for that host is safe: the admin is
+    already trusting this endpoint with authentication tokens.  All
+    sub-resources fetched during the OIDC flow (token endpoint, JWKS URI)
+    live on the same host as the issuer, so a single host-level exemption
+    covers the entire flow without allowing arbitrary private targets.
+    """
+    try:
+        cfg = _resolve_oidc_config()
+        issuer = str(cfg.get("issuer") or "").strip()
+        if not issuer:
+            return False
+        issuer_host = urllib.parse.urlparse(issuer).hostname or ""
+        return issuer_host.lower() == hostname.lower()
+    except Exception:
+        logger.debug("Failed to resolve OIDC config for issuer host exemption", exc_info=True)
+        return False
 
 
 def _reject_non_finite_json_constant(value: str):
