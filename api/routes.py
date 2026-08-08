@@ -21089,6 +21089,37 @@ def _prepare_chat_start_session_for_stream(
     s.save()
 
 
+_CHAT_START_MUTATED_SESSION_FIELDS = (
+    "title",
+    "updated_at",
+    "workspace",
+    "model",
+    "model_provider",
+    "active_stream_id",
+    "post_compression_context_tokens_estimate",
+    "pending_user_message",
+    "pending_attachments",
+    "pending_started_at",
+    "pending_user_source",
+    "truncation_watermark",
+    "messages",
+)
+
+
+def _snapshot_chat_start_session_state(s) -> dict:
+    """Capture every field mutated before an idempotent turn is journaled."""
+    return {
+        name: copy.deepcopy(getattr(s, name, None))
+        for name in _CHAT_START_MUTATED_SESSION_FIELDS
+    }
+
+
+def _restore_chat_start_session_state(s, snapshot: dict) -> None:
+    """Restore a rejected idempotent turn without leaving eager transcript state."""
+    for name in _CHAT_START_MUTATED_SESSION_FIELDS:
+        setattr(s, name, copy.deepcopy(snapshot.get(name)))
+
+
 def _is_hidden_empty_session(s) -> bool:
     return (
         getattr(s, "title", "Untitled") == "Untitled"
@@ -21201,6 +21232,17 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
     return None
 
 
+def _live_idempotent_stream_for_session(session) -> str | None:
+    """Return a runtime-confirmed stream, never a stale persisted pointer."""
+
+    persisted_stream = str(getattr(session, "active_stream_id", None) or "").strip()
+    if persisted_stream:
+        with STREAMS_LOCK:
+            if persisted_stream in STREAMS:
+                return persisted_stream
+    return _active_run_stream_for_session(getattr(session, "session_id", None))
+
+
 def _agent_runtime_barrier_response(
     *,
     runner_local_owned: bool = False,
@@ -21240,6 +21282,7 @@ def _start_chat_stream_for_session(
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
+    idempotency_key: str | None = None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -21311,6 +21354,9 @@ def _start_chat_stream_for_session(
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)
+                pre_start_session_state = (
+                    _snapshot_chat_start_session_state(s) if idempotency_key else None
+                )
                 _prepare_chat_start_session_for_stream(
                     s,
                     msg=msg,
@@ -21332,32 +21378,42 @@ def _start_chat_stream_for_session(
                     "active_stream_id": getattr(s, "active_stream_id", None),
                     "_status": 409,
                 }
+    diag.stage("turn_journal_submitted") if diag else None
+    journal_event = {}
+    try:
+        from api.turn_journal import append_turn_journal_event
+        journal_payload = {
+            "event": "submitted",
+            "stream_id": stream_id,
+            "role": "user",
+            "content": msg,
+            "attachments": attachments,
+            "workspace": workspace,
+            "model": model,
+            "model_provider": model_provider,
+            "created_at": s.pending_started_at,
+        }
+        if idempotency_key:
+            journal_payload["idempotency_key"] = idempotency_key
+        journal_event = append_turn_journal_event(s.session_id, journal_payload)
+    except Exception:
+        logger.warning("Failed to append submitted turn journal event", exc_info=True)
+        if idempotency_key:
+            _restore_chat_start_session_state(s, pre_start_session_state or {})
+            try:
+                s.save(touch_updated_at=False)
+            except Exception:
+                logger.exception("Failed to roll back unjournaled idempotent turn")
+            return {
+                "error": "failed to persist idempotent turn journal",
+                "_status": 500,
+            }
     if was_hidden_empty_session:
         publish_session_list_changed(
             "session_new",
             profile=getattr(s, "profile", None),
             session_id=getattr(s, "session_id", None),
         )
-    diag.stage("turn_journal_submitted") if diag else None
-    journal_event = {}
-    try:
-        from api.turn_journal import append_turn_journal_event
-        journal_event = append_turn_journal_event(
-            s.session_id,
-            {
-                "event": "submitted",
-                "stream_id": stream_id,
-                "role": "user",
-                "content": msg,
-                "attachments": attachments,
-                "workspace": workspace,
-                "model": model,
-                "model_provider": model_provider,
-                "created_at": s.pending_started_at,
-            },
-        )
-    except Exception:
-        logger.warning("Failed to append submitted turn journal event", exc_info=True)
     diag.stage("set_last_workspace") if diag else None
     set_last_workspace(workspace)
     diag.stage("stream_registration") if diag else None
@@ -21371,6 +21427,13 @@ def _start_chat_stream_for_session(
     diag.stage("worker_thread_start") if diag else None
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    worker_acceptance_gate = None
+    worker_acceptance_state = None
+    if idempotency_key:
+        worker_acceptance_gate = threading.Event()
+        worker_acceptance_state = {"accepted": False}
+        worker_kwargs["acceptance_gate"] = worker_acceptance_gate
+        worker_kwargs["acceptance_state"] = worker_acceptance_state
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     if backend_is_gateway:
@@ -21385,6 +21448,8 @@ def _start_chat_stream_for_session(
     try:
         thr.start()
     except Exception:
+        if worker_acceptance_gate is not None:
+            worker_acceptance_gate.set()
         if backend_is_gateway:
             try:
                 from api.gateway_chat import _finish_gateway_run_starting
@@ -21393,7 +21458,93 @@ def _start_chat_stream_for_session(
                 _clear_gateway_run_starting(stream_id)
             except Exception:
                 logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+        try:
+            from api.turn_journal import append_turn_journal_event_for_stream
+
+            append_turn_journal_event_for_stream(
+                s.session_id,
+                stream_id,
+                {
+                    "event": "interrupted",
+                    "created_at": time.time(),
+                    "reason": "worker_start_failed",
+                },
+            )
+        except Exception:
+            logger.exception("Failed to journal worker-start failure for stream %s", stream_id)
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+        unregister_stream_owner(stream_id)
+        STREAM_GOAL_RELATED.pop(stream_id, None)
+        try:
+            from api.process_event_utils import build_active_turn_token
+
+            eager_token = build_active_turn_token(stream_id, s.pending_started_at)
+            if (
+                eager_token
+                and getattr(s, "messages", None)
+                and s.messages[-1].get("_active_turn_token") == eager_token
+            ):
+                s.messages.pop()
+        except Exception:
+            logger.debug("Failed to roll back eager worker-start row", exc_info=True)
+        s.active_stream_id = None
+        s.pending_user_message = None
+        s.pending_attachments = []
+        s.pending_started_at = None
+        s.pending_user_source = None
+        try:
+            s.save(touch_updated_at=False)
+        except Exception:
+            logger.exception("Failed to roll back worker-start state for stream %s", stream_id)
         raise
+    if worker_acceptance_gate is not None:
+        try:
+            from api.turn_journal import append_turn_journal_event_for_stream
+
+            append_turn_journal_event_for_stream(
+                s.session_id,
+                stream_id,
+                {"event": "worker_started", "created_at": time.time()},
+            )
+        except Exception:
+            logger.exception(
+                "Failed to persist worker acceptance for stream %s", stream_id
+            )
+            if backend_is_gateway:
+                try:
+                    from api.gateway_chat import _finish_gateway_run_starting
+
+                    _finish_gateway_run_starting(stream_id, result="fallback")
+                    from api.gateway_chat import _clear_gateway_run_starting
+
+                    _clear_gateway_run_starting(stream_id)
+                except Exception:
+                    logger.debug(
+                        "Failed to record rejected gateway start for stream %s",
+                        stream_id,
+                        exc_info=True,
+                    )
+            with STREAMS_LOCK:
+                STREAMS.pop(stream_id, None)
+            unregister_stream_owner(stream_id)
+            STREAM_GOAL_RELATED.pop(stream_id, None)
+            assert pre_start_session_state is not None
+            _restore_chat_start_session_state(s, pre_start_session_state)
+            try:
+                s.save(touch_updated_at=False)
+            except Exception:
+                logger.exception(
+                    "Failed to roll back rejected worker state for stream %s", stream_id
+                )
+            worker_acceptance_gate.set()
+            return {
+                "error": "failed to persist worker acceptance",
+                "_status": 500,
+            }
+        assert worker_acceptance_state is not None
+        worker_acceptance_state["accepted"] = True
+        worker_acceptance_gate.set()
     response = {
         "stream_id": stream_id,
         "session_id": s.session_id,
@@ -21474,6 +21625,7 @@ def _start_run(
     diag=None,
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
+    idempotency_key: str | None = None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -21502,6 +21654,12 @@ def _start_run(
     )
 
     if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
+        if idempotency_key and runtime_adapter_runner_enabled():
+            return {
+                "error": "runner-local does not support durable idempotent wakeups",
+                "_status": 501,
+            }
+
         def _legacy_start_run(request: StartRunRequest) -> dict:
             return _start_chat_stream_for_session(
                 s,
@@ -21515,6 +21673,7 @@ def _start_run(
                 source=request.source or source,
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
+                idempotency_key=idempotency_key,
             )
 
         def _legacy_adapter_factory():
@@ -21527,6 +21686,9 @@ def _start_run(
             )
             if adapter is None:
                 raise NotImplementedError("runtime adapter selection returned no adapter")
+            metadata = {"route": route}
+            if idempotency_key:
+                metadata["idempotency_key"] = idempotency_key
             result = adapter.start_run(
                 StartRunRequest(
                     session_id=s.session_id,
@@ -21537,7 +21699,7 @@ def _start_run(
                     provider=model_provider,
                     model=model,
                     source=source,
-                    metadata={"route": route},
+                    metadata=metadata,
                 )
             )
         except NotImplementedError as exc:
@@ -21556,6 +21718,7 @@ def _start_run(
         source=source,
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
+        idempotency_key=idempotency_key,
     )
 
 
@@ -21615,6 +21778,7 @@ def start_session_turn(
     message: str,
     *,
     source: str = "process_wakeup",
+    idempotency_key: str | None = None,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
@@ -21796,6 +21960,22 @@ def start_session_turn(
                 }
     if _paused_wakeup_response is not None:
         return _paused_wakeup_response
+    delivery_key = str(idempotency_key or "").strip()
+    if delivery_key:
+        from api.turn_journal import find_active_idempotent_turn
+
+        existing_turn = find_active_idempotent_turn(
+            session_id,
+            delivery_key,
+            active_stream_id=_live_idempotent_stream_for_session(s),
+        )
+        if existing_turn is not None:
+            return {
+                "_status": 200,
+                "stream_id": existing_turn.get("stream_id"),
+                "session_id": str(session_id),
+                "idempotent_replay": True,
+            }
     resp = _start_run(
         s,
         msg=msg,
@@ -21806,6 +21986,7 @@ def start_session_turn(
         normalized_model=normalized_model,
         source=turn_source,
         route="start_session_turn",
+        idempotency_key=delivery_key or None,
     )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
