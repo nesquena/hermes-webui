@@ -17122,12 +17122,36 @@ def _handle_list_dir(handler, parsed):
                 )
                 workspace = Path(persisted.workspace)
         rel_path = qs.get("path", ["."])[0]
-        entries = list_dir(Path(workspace), rel_path)
+        # #6645: offset/limit query params drive listing pagination. The default
+        # page is capped at MAX_DIR_ENTRIES but the response reports total/has_more
+        # so the client can render a visible "load more" affordance instead of a
+        # silent 200-entry truncation.
+        try:
+            offset = int(qs.get("offset", ["0"])[0] or "0")
+        except (TypeError, ValueError):
+            offset = 0
+        if offset < 0:
+            offset = 0
+        list_kwargs = {"offset": offset}
+        try:
+            limit_raw = qs.get("limit", [""])[0] or ""
+        except TypeError:
+            limit_raw = ""
+        if limit_raw:
+            try:
+                list_kwargs["limit"] = min(max(int(limit_raw), 1), 5000)
+            except ValueError:
+                pass
+        result = list_dir(Path(workspace), rel_path, **list_kwargs)
         return j(
             handler,
             {
-                "entries": entries,
-                "signature": dir_signature(Path(workspace), rel_path, entries),
+                "entries": result["entries"],
+                "total": result["total"],
+                "has_more": result["has_more"],
+                "limit": result["limit"],
+                "offset": result["offset"],
+                "signature": dir_signature(Path(workspace), rel_path, result["entries"]),
                 "path": rel_path,
                 "workspace": str(workspace),
                 "workspace_recovered": recovered,
@@ -17199,7 +17223,15 @@ def _handle_escape_list_dir(handler, parsed):
         return bad(handler, "Session not found", 404)
     rel_path = qs.get("path", ["."])[0]
     try:
-        payload = list_authorized_escape_dir(Path(s.workspace), sid, token, rel_path)
+        offset = int(qs.get("offset", ["0"])[0] or "0")
+    except (TypeError, ValueError):
+        offset = 0
+    if offset < 0:
+        offset = 0
+    try:
+        payload = list_authorized_escape_dir(
+            Path(s.workspace), sid, token, rel_path, offset=offset
+        )
         return j(handler, payload)
     except FileNotFoundError as exc:
         return bad(handler, _sanitize_error(exc), 404)

@@ -68,6 +68,7 @@ function syncTerminalButton(){{events.push(['terminal',S.session.workspace]);}}
 function showToast(message,duration,kind){{events.push(['toast',message,duration,kind]);}}
 function t(key,path){{return key+':'+path;}}
 function _refreshGitBadge(){{}}
+function _wsStoreDirListing(){{return null;}}
 {load_dir}
 (async()=>{{
   await loadDir('.');
@@ -133,6 +134,7 @@ function syncTopbar(){{events.push(['topbar',S.session.workspace]);}}
 function setStatus(message){{events.push(['status',message]);}}
 function getWorkspaceFriendlyName(path){{return path;}}
 function $(id){{return null;}}
+function _wsStoreDirListing(){{return null;}}
 let _currentPanel='workspace';
 {load_dir}
 {switch_workspace}
