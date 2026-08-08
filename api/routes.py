@@ -8085,6 +8085,20 @@ def _is_api_server_class_state_db_source(source: str) -> bool:
     return marker in {"api", "api_server"}
 
 
+def _delete_unsafe_id_authorized(sid: str) -> bool:
+    """Return True when a non-path-safe session id may be deleted.
+
+    Only imported/read-only api_server-class state.db rows may carry ids that
+    are not path-safe as sidecar filenames (colons, ...) (#6843). The check
+    must run BEFORE any destructive cleanup (SESSIONS.pop, sidecar unlink,
+    index prune, .json.bak unlink): a rejected unsafe id must leave the
+    sidecar / backup / index / cache state intact (#6855).
+    """
+    if is_safe_session_id(sid):
+        return True
+    return _is_api_server_class_state_db_source(_state_db_session_source(sid))
+
+
 def _set_state_db_session_archived(sid: str, archived: bool) -> bool:
     """Flip the ``archived`` flag on a state.db-only session row.
 
@@ -15179,6 +15193,8 @@ def handle_post(handler, parsed) -> bool:
         sid = body.get("session_id", "")
         if not sid:
             return bad(handler, "session_id is required")
+        if not _delete_unsafe_id_authorized(sid):
+            return bad(handler, "Invalid session_id", 400)
         cli_meta_for_delete = _lookup_cli_session_metadata(sid)
         if cli_meta_for_delete.get("read_only"):
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
@@ -15230,20 +15246,9 @@ def handle_post(handler, parsed) -> bool:
                     logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
-        # #6843: imported api_server-class rows (e.g. ``miloco:...``) can carry
-        # ids that are not path-safe as sidecar filenames (colons, ...). They
-        # are still genuine local state.db rows, so allow the delete when the
-        # row's source is the imported/read-only api_server class. ANY other
-        # real state.db row (messaging, gateway, cron, subagent, ...) must keep
-        # the path-safe id requirement so an unsafe id can't bypass the guard.
-        # Checked AFTER the standard cleanup: for state.db-only rows the
-        # sidecar unlink / index prune / .json.bak unlink above are safe
-        # no-ops, and delete_cli_session() below removes the state.db row with
-        # a parameterized query.
-        if not is_safe_session_id(sid) and not _is_api_server_class_state_db_source(
-            _state_db_session_source(sid)
-        ):
-            return bad(handler, "Invalid session_id", 400)
+        # The api_server-class authorization for unsafe ids already ran at the
+        # top of this handler (before any destructive cleanup) — see
+        # _delete_unsafe_id_authorized (#6855).
         # Evict outside the mutation lock: lifecycle commit may perform provider
         # I/O and must not hold a per-session Session lock.
         from api.config import _evict_session_agent
@@ -16343,6 +16348,18 @@ def handle_post(handler, parsed) -> bool:
             # previously 400'd for read_only rows and crashed with an
             # unhandled ValueError -> HTTP 500 for unsafe ids).
             if cli_meta.get("read_only") or not is_safe_session_id(sid):
+                # #6855: the state.db `archived` flag is WebUI-local view
+                # state that the sidebar projection ONLY honors for the
+                # imported/read-only api_server class (api/models.py:7592
+                # is_api_server_class_row). Flipping it for any OTHER
+                # read-only source (telegram, ...) would return 200 yet leave
+                # the row visible — a silent no-op that misleads the user.
+                # Require api_server-class provenance here; other read-only
+                # sources keep the prior rejection.
+                if not _is_api_server_class_state_db_source(
+                    _state_db_session_source(sid) or _arch_source_tag
+                ):
+                    return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
                 if not _set_state_db_session_archived(sid, bool(body.get("archived", True))):
                     return bad(handler, "Session not found", 404)
                 publish_session_list_changed(

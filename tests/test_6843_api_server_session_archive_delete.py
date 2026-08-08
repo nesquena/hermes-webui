@@ -27,6 +27,7 @@ imported/read-only api_server class (a messaging row still 400s).
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -217,11 +218,54 @@ def test_archive_api_server_session_flips_state_db_instead_of_500(
     assert _read_archived(isolated_state_db["db"], sid) == 0
 
 
-def test_archive_read_only_imported_session_flips_state_db_instead_of_400(
+def test_archive_read_only_api_server_session_hides_from_listing(
     isolated_state_db, monkeypatch
 ):
-    """A read_only imported row is WebUI-local view state for archiving: flip
-    state.db instead of the previous blanket 400."""
+    """A read_only imported row of the api_server class is WebUI-local view
+    state for archiving: flip state.db instead of the previous blanket 400,
+    AND confirm end-to-end that the row actually disappears from the default
+    visible sidebar (review #6855) — the state.db flag alone is not proof of
+    visibility, since the sidebar only consumes `archived` for api_server
+    class rows.
+    """
+    sid = "ro-api-server-imported-1"
+    _make_state_db(isolated_state_db["db"], sid, source="api_server", title="API imported")
+    cli_meta = {
+        "session_id": sid,
+        "source_tag": "api_server",
+        "raw_source": "api_server",
+        "session_source": "api_server",
+        "read_only": True,
+        "profile": "default",
+    }
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda s: cli_meta)
+
+    before = _sidebar_sessions()
+    assert any(s.get("session_id") == sid for s in before["sessions"]), (
+        "read_only api_server row must appear in the default sidebar before archive"
+    )
+
+    captured = _capture_post(monkeypatch, {"session_id": sid, "archived": True})
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/archive")) is True
+
+    assert captured["status"] == 200
+    assert captured["payload"]["ok"] is True
+    assert _read_archived(isolated_state_db["db"], sid) == 1
+    after = _sidebar_sessions()
+    assert all(s.get("session_id") != sid for s in after["sessions"]), (
+        "archived read_only api_server row must leave the default visible sidebar (#6855)"
+    )
+
+
+def test_archive_read_only_telegram_session_still_400s(
+    isolated_state_db, monkeypatch
+):
+    """A read_only row from a NON-api_server source (telegram) must keep the
+    prior 400 rejection (review #6855): the sidebar only consumes the state.db
+    `archived` flag for api_server-class rows, so flipping it for a telegram
+    row would return 200 yet leave the session visible — a silent no-op. The
+    flag must stay untouched and the row must stay visible.
+    """
     sid = "ro-telegram-imported-1"
     _make_state_db(isolated_state_db["db"], sid, source="telegram", title="Telegram chat")
     cli_meta = {
@@ -237,9 +281,17 @@ def test_archive_read_only_imported_session_flips_state_db_instead_of_400(
     captured = _capture_post(monkeypatch, {"session_id": sid, "archived": True})
     assert routes.handle_post(object(), SimpleNamespace(path="/api/session/archive")) is True
 
-    assert captured["status"] == 200
-    assert captured["payload"]["ok"] is True
-    assert _read_archived(isolated_state_db["db"], sid) == 1
+    assert captured["status"] == 400
+    assert "Read-only imported sessions cannot be archived" in str(
+        captured["payload"].get("error", "")
+    )
+    assert _read_archived(isolated_state_db["db"], sid) == 0, (
+        "state.db archived flag must not be flipped for a rejected read-only telegram row"
+    )
+    sessions = _sidebar_sessions()
+    assert any(s.get("session_id") == sid for s in sessions["sessions"]), (
+        "rejected read-only telegram row must stay visible in the default sidebar"
+    )
 
 
 def test_archived_api_server_session_stops_flooding_sidebar(
@@ -373,4 +425,49 @@ def test_delete_unsafe_messaging_session_still_400s(isolated_state_db, monkeypat
     assert "Invalid session_id" in str(captured["payload"].get("error", ""))
     assert _row_exists(isolated_state_db["db"], sid) is True, (
         "messaging row must survive an unsafe-id delete attempt"
+    )
+
+
+def test_delete_rejected_unsafe_messaging_session_leaves_artifacts_intact(
+    isolated_state_db, monkeypatch
+):
+    """A rejected unsafe-id delete must leave ALL artifacts intact (review
+    #6855): the api_server-class authorization now runs BEFORE the destructive
+    cleanup, so the sidecar, the .json.bak snapshot, the session index entry
+    and the state.db row all survive the 400.
+    """
+    sid = "discord:guild:channel:msg:0a1b2c3d4e5f"
+    _make_state_db(isolated_state_db["db"], sid, source="discord",
+                   title="DC Chat", archived=0)
+
+    # Seed the artifacts the cleanup path would otherwise remove: a sidecar,
+    # its .json.bak snapshot and a session-index entry for the rejected id.
+    sessions_dir = isolated_state_db["sessions_dir"]
+    sidecar = sessions_dir / f"{sid}.json"
+    sidecar.write_text('{"session_id": "%s"}' % sid, encoding="utf-8")
+    (sessions_dir / f"{sid}.json.bak").write_text(
+        '{"session_id": "%s"}' % sid, encoding="utf-8"
+    )
+    index_path = isolated_state_db["index_path"]
+    index_path.write_text(
+        json.dumps([{"session_id": sid, "source_tag": "discord"}]), encoding="utf-8"
+    )
+
+    assert models.is_safe_session_id(sid) is False
+
+    captured = _capture_post(monkeypatch, {"session_id": sid})
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+
+    assert captured["status"] == 400, captured
+    assert "Invalid session_id" in str(captured["payload"].get("error", ""))
+    assert sidecar.exists(), "sidecar must survive a rejected unsafe-id delete"
+    assert (sessions_dir / f"{sid}.json.bak").exists(), (
+        ".json.bak snapshot must survive a rejected unsafe-id delete"
+    )
+    index_entries = json.loads(index_path.read_text(encoding="utf-8"))
+    assert any(e.get("session_id") == sid for e in index_entries), (
+        "session index entry must survive a rejected unsafe-id delete"
+    )
+    assert _row_exists(isolated_state_db["db"], sid) is True, (
+        "state.db row must survive a rejected unsafe-id delete"
     )
