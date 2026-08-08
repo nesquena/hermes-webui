@@ -1814,13 +1814,18 @@ async function loadSession(sid){
     const _msgInner = $('msgInner');
     if (_msgInner && currentSid !== sid) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
   }
-  // Phase 1: Load metadata only (~1KB) for fast session switching. Keep model
-  // resolution out of the first-paint path; old provider-shaped model IDs are
-  // repaired by the deferred resolver after S.session is assigned.
-  // Guard against network/server failures to prevent a permanently stuck loading state.
+  // Normal navigation uses one fresh response for metadata and the initial
+  // transcript tail. Forced reloads retain the metadata-first path because
+  // their message window can exceed the normal bounded first-paint request.
   let data;
   try {
-    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    const initialMessagesParam=forceReload
+      ? 'messages=0'
+      : `messages=1&msg_limit=${_INITIAL_TAIL_MSG_LIMIT}&expand_renderable=1`;
+    data = await api(
+      `/api/session?session_id=${encodeURIComponent(sid)}&${initialMessagesParam}&resolve_model=0`,
+      forceReload ? undefined : {timeoutMs:120000}
+    );
   } catch(e) {
     const profileMismatch=_sessionProfileMismatchFromError(e);
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
@@ -2102,7 +2107,7 @@ async function loadSession(sid){
     // this session's INFLIGHT snapshot, not leave prior-session rows in place.
     if(typeof clearLiveToolCards==='function') clearLiveToolCards();
     try {
-      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
+      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration, initialData:forceReload?null:data});
     } catch(e) {
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
@@ -2208,7 +2213,7 @@ async function loadSession(sid){
     // "messages already populated" early-return inside _ensureMessagesLoaded
     // does NOT skip the swap to the new transcript.
     try {
-      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
+      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration, initialData:forceReload?null:data});
     } catch (e) {
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
@@ -2994,6 +2999,14 @@ let _messagesTruncated = false;
 // server-bounded and do not consume the visible-message budget.
 // Older messages are loaded on-demand via _loadOlderMessages().
 const _INITIAL_MSG_LIMIT = 30;
+// First-paint tail window for a conversation click: intentionally smaller than
+// the older-rows page size above so the initial load renders the latest
+// conclusion + latest user message after a single short round-trip instead of
+// paying for ~30 visible rows (perf: session navigation latency, #fastnav).
+// This only sizes the messages=1 tail window used by
+// _messageReloadLimitForSession(); _loadOlderMessages() keeps paging with
+// _INITIAL_MSG_LIMIT, and scrolling up backfills history exactly as before.
+const _INITIAL_TAIL_MSG_LIMIT = _INITIAL_MSG_LIMIT;
 // ============================================================================
 // COUPLED CONSTANT — keep in sync with api/routes.py:_MAX_MSG_LIMIT.
 // ============================================================================
@@ -3061,7 +3074,9 @@ function _messageReloadLimitForSession(sid){
       return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);
     }
   }
-  return _INITIAL_MSG_LIMIT;
+  // Small first-paint tail (latest conclusion + latest user message); older
+  // rows backfill via _loadOlderMessages() at the _INITIAL_MSG_LIMIT page size.
+  return _INITIAL_TAIL_MSG_LIMIT;
 }
 
 function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
@@ -3091,6 +3106,10 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   }else{
     S.toolCalls=[];
   }
+}
+
+function _apiSessionNav(sid, url, apiOpts){
+  return api(url, apiOpts);
 }
 
 async function _ensureMessagesLoaded(sid, opts) {
@@ -3129,14 +3148,19 @@ async function _ensureMessagesLoaded(sid, opts) {
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
   const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
-  let data;
-  try {
-    data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
-      {timeoutMs:120000}
-    );
-  } finally {
-    if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
+  let data=opts.initialData;
+  if(!data){
+    try {
+      data = await _apiSessionNav(
+        sid,
+        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
+        {timeoutMs:120000}
+      );
+    } finally {
+      if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
+    }
+  }else if(_ownsLoad()){
+    _clearSameSessionForceReloadHint(sid);
   }
   if (!_ownsLoad()) return;
   // Guard: api() may have redirected (401) and returned undefined.
@@ -8848,6 +8872,8 @@ function renderSessionListFromCache(){
       // faded until the next sidebar rerender clears their DOM nodes.
       _updateSessionGesture(e.clientX,e.clientY);
     };
+    // Pointer handlers below only manage drag/cancel state; navigation data is
+    // fetched on click so hover cannot serve stale transcript content.
     el.onpointercancel=(e)=>{
       if(e.pointerType==='touch') return;
       _clearPointerDragState();

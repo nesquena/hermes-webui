@@ -224,12 +224,11 @@ def test_update_flows_keep_explicit_longer_timeouts():
 def test_session_message_loads_keep_explicit_longer_timeouts():
     """Large state.db installs can take longer than the generic 30s API timeout."""
     src = _source(SESSIONS_JS)
-    assert (
-        "api(\n"
-        "      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,\n"
-        "      {timeoutMs:120000}\n"
-        "    )"
-    ) in src
+    # Both the normal click-time tail and forced reload path retain the explicit
+    # 120s timeout for large state.db installs.
+    assert "forceReload ? undefined : {timeoutMs:120000}" in src
+    assert "`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`" in src
+    assert src.count("{timeoutMs:120000}") >= 2
     # _loadOlderMessages now picks between two strategies (tail-growth vs
     # msg_before paging) via a useBeforePaging ternary, but both keep the long
     # timeoutMs:120000. Assert each URL + timeout survives in the source.

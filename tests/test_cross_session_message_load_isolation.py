@@ -118,7 +118,7 @@ def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded
         "loadSession() should check ownership in multiple await/catch paths, "
         "including stale _ensureMessagesLoaded catch branches"
     )
-    ensure_call = _normalise_ws("await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});")
+    ensure_call = _normalise_ws("await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration, initialData:forceReload?null:data});")
     assert ensure_call in norm, (
         "loadSession() must pass generation into _ensureMessagesLoaded() for stale-owner checks"
     )
@@ -456,6 +456,10 @@ function runCrossSessionOrderingBase({seedBeaconInflight, resolveBeaconMsgsBefor
   const apiHost = makeHarness();
   globalThis.apiHost = apiHost;
   globalThis.api = apiHost.api;
+  // #fastnav: extracted loadSession/_ensureMessagesLoaded now share the
+  // prefetch-aware wrapper. This harness intentionally tests the underlying
+  // ordered api() contract, so preserve that behavior with a direct stub.
+  globalThis._apiSessionNav = (_sid, url, opts) => apiHost.api(url, opts);
 
   const calls = makeCrossSessionCalls(apiHost);
 
@@ -519,6 +523,10 @@ async function runStaleRejectedIdleCatch() {
   const apiHost = makeHarness();
   globalThis.apiHost = apiHost;
   globalThis.api = apiHost.api;
+  // #fastnav: extracted loadSession/_ensureMessagesLoaded now share the
+  // prefetch-aware wrapper. This harness intentionally tests the underlying
+  // ordered api() contract, so preserve that behavior with a direct stub.
+  globalThis._apiSessionNav = (_sid, url, opts) => apiHost.api(url, opts);
 
   S.session = { session_id: 'sid-atlas', message_count: 0 };
 
