@@ -32,7 +32,12 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 def _extract_function(source: str, name: str) -> str:
     start = source.index(f"async function {name}(" if f"async function {name}(" in source else f"function {name}(")
-    brace = source.index("{", start)
+    # The PR's owner-aware helper uses a default object (`opts={}`) in its
+    # signature. Find the function body brace after the closing `)` rather than
+    # the default-value brace so the extracted function remains syntactically
+    # complete when run in this focused Node harness.
+    signature_end = source.index(")", start)
+    brace = source.index("{", signature_end)
     depth = 0
     for pos in range(brace, len(source)):
         if source[pos] == "{":
@@ -68,8 +73,36 @@ async function api(url) {{
   calls.push({{api: dir}});
   return {{ entries: (ENTRIES_BY_DIR[dir] || []).map(name => ({{name, path: name}})) }};
 }}
-{path_exists}
-{open_artifact}
+    // Owner/path helpers are production dependencies of the PR's artifact
+    // opener; keep the harness focused on the real functions while supplying
+    // deterministic stubs for the surrounding app state and route builder.
+    function _artifactOwnerFromCurrentSession() {{
+      return {{session_id:String(S.session.session_id), workspace_root:String(S.session.workspace||'')}};
+    }}
+    function _artifactOwnerFromOptions(opts) {{ return (opts && opts.owner) || _artifactOwnerFromCurrentSession(); }}
+    function _artifactOwnerFromArtifactValue(value) {{
+      if(!value || typeof value !== 'object' || Array.isArray(value)) return null;
+      const owner=value.owner;
+      if(owner && typeof owner.session_id==='string') return {{session_id:owner.session_id,workspace_root:String(owner.workspace_root||'')}};
+      if(typeof value.session_id==='string' && typeof value.workspace_root==='string') return {{session_id:value.session_id,workspace_root:value.workspace_root}};
+      return null;
+    }}
+    function _artifactOwnerMatchesSession(owner) {{
+      const active=_artifactOwnerFromCurrentSession();
+      return !!owner && owner.session_id===active.session_id && (!owner.workspace_root || owner.workspace_root===active.workspace_root);
+    }}
+    function _normalizeTypedArtifactPath(value) {{
+      if(typeof value!=='string' || !value || value.length>512 || value.includes('://') || value.startsWith('/') || value.startsWith('~/') || /^[A-Za-z]:/.test(value)) return '';
+      const parts=value.split('/');
+      return parts.some(part=>!part || part==='.' || part==='..') ? '' : value;
+    }}
+    let _workspaceOpenGeneration=0;
+    function _nextWorkspaceOpenGeneration() {{ return ++_workspaceOpenGeneration; }}
+    function _workspaceRouteForPathRel(dir, kind, opts) {{
+      return `/api/list?session_id=${{encodeURIComponent(opts.owner.session_id)}}&path=${{encodeURIComponent(dir)}}`;
+    }}
+    {path_exists}
+    {open_artifact}
 (async () => {{
   await openArtifactPath({json.dumps(path)});
   process.stdout.write(JSON.stringify(calls));

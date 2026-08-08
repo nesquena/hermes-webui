@@ -3,6 +3,7 @@
 import time
 from pathlib import Path
 
+from api.background_process import format_wakeup_prompt
 from api.models import Session, _append_recovered_pending_turn, _apply_core_sync_or_error_marker
 from api.routes import _checkpoint_user_message_for_eager_session_save
 from api.streaming import _materialize_pending_user_turn_before_error, _merge_display_messages_after_agent_result
@@ -55,9 +56,18 @@ def test_checkpoint_user_message_stamps_process_wakeup_source():
     """Verify eager-path checkpoint stamps _source on message dict when source is process_wakeup."""
     s = Session(session_id="test-session-4")
     s.messages = []
+    body = format_wakeup_prompt(
+        {
+            "type": "completion",
+            "session_id": "proc_123",
+            "command": "npm run build",
+            "exit_code": 0,
+            "output": "done",
+        }
+    )
     _checkpoint_user_message_for_eager_session_save(
         s,
-        msg="[IMPORTANT: Wakeup prompt]",
+        msg=body,
         attachments=[],
         started_at=time.time(),
         source="process_wakeup",
@@ -65,8 +75,14 @@ def test_checkpoint_user_message_stamps_process_wakeup_source():
     assert len(s.messages) == 1
     user_msg = s.messages[0]
     assert user_msg["role"] == "user"
-    assert user_msg["content"] == "[IMPORTANT: Wakeup prompt]"
+    assert user_msg["content"] == body
     assert user_msg["_source"] == "process_wakeup"
+    assert user_msg["_wakeup_meta"] == {
+        "type": "completion",
+        "task_id": "proc_123",
+        "command": "npm run build",
+        "exit_code": 0,
+    }
 
 
 def test_checkpoint_user_message_skips_webui_source():

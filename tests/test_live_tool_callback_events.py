@@ -50,6 +50,9 @@ def test_tool_complete_callback_emits_existing_tool_complete_sse_event_with_tool
     )
     assert "result_snippet = _tool_result_snippet(function_result)" in block
     assert "_checkpoint_activity[0] += 1" in block
+    assert "landed_artifact_descriptors(" in block
+    assert "'artifacts': landed_artifacts" in block
+    assert "'is_error': tool_result_is_error(function_result)" in block
 
 
 def test_legacy_progress_events_are_suppressed_when_structured_callbacks_are_wired():

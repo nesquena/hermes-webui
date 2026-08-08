@@ -117,6 +117,12 @@ def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path,
             }
         ],
         "final_answer": "final answer",
+        "artifacts": [
+            {
+                "source_event_type": "artifact_reference",
+                "payload": {"path": "output/report.md"},
+            }
+        ],
     }
     request_body = {
         "session_id": "anchorpersist1",
@@ -162,6 +168,7 @@ def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path,
     assert hydrated[1]["_anchor_stream_id"] == "stream-1"
     assert hydrated[1]["_anchor_activity_scene"]["final_answer"] == "final answer"
     assert hydrated[1]["_anchor_activity_scene"]["activity_rows"][0]["tool_call_id"] == "call-1"
+    assert hydrated[1]["_anchor_activity_scene"]["artifacts"][0]["payload"]["path"] == "output/report.md"
 
 
 def test_anchor_scene_persistence_rejects_cross_profile_write(tmp_path, monkeypatch):
