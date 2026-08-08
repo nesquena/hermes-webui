@@ -7909,8 +7909,12 @@ def _state_db_session_source(sid: str) -> str:
     (which have a recoverable state.db transcript) from genuinely-deleted WebUI
     sessions.  Returns "" on any error / missing row so callers fall back to
     their existing behaviour.
+
+    The lookup is a parameterized SQL query, so it is safe for session ids that
+    are not path-safe (e.g. imported external rows like
+    ``miloco:agent:main:...`` whose ids contain colons) — see #6843.
     """
-    if not sid or not is_safe_session_id(sid):
+    if not sid:
         return ""
     try:
         from api.models import _active_state_db_path
@@ -7927,6 +7931,78 @@ def _state_db_session_source(sid: str) -> str:
     if not row:
         return ""
     return str(row[0] or "").strip().lower()
+
+
+def _is_api_server_class_state_db_source(source: str) -> bool:
+    """Return True when a state.db ``sessions.source`` is the imported/read-only
+    ``api_server`` class (#6843).
+
+    Mirrors the archive handler's read_only/source condition: ONLY these rows
+    may carry ids that are not path-safe as sidecar filenames (colons, ...),
+    because the WebUI archives/deletes them directly in state.db. Any other
+    real state.db row (messaging, gateway, cron, subagent, ...) keeps the
+    path-safe id requirement.
+    """
+    marker = str(source or "").strip().lower().replace("-", "_")
+    return marker in {"api", "api_server"}
+
+
+def _set_state_db_session_archived(sid: str, archived: bool) -> bool:
+    """Flip the ``archived`` flag on a state.db-only session row.
+
+    Imported/read-only rows (e.g. ``api_server``) are local ``state.db`` rows
+    without a WebUI sidecar, and some ids are not path-safe enough to
+    materialize as ``webui/sessions/*.json`` sidecars. Archiving them is
+    WebUI-local view state, so update the agent's ``sessions.archived`` column
+    in place rather than materializing a writable sidecar (which previously
+    raised an unhandled ``ValueError`` -> HTTP 500, #6843).
+
+    Returns True when the row was found and updated, False otherwise.
+    Older/minimal state.db schemas may not have the optional ``archived``
+    column at all; the sidebar projection already tolerates that via
+    ``_optional_col``, so the UPDATE must too — an unconditional UPDATE would
+    raise a suppressed SQLite "no such column" error that surfaces as a
+    misleading 404 and leaves the imported session visible and unarchivable
+    (review #6855).
+    """
+    if not sid:
+        return False
+    try:
+        from api.models import _active_state_db_path
+        db_path = _active_state_db_path()
+        if not db_path or not Path(db_path).exists():
+            return False
+        import sqlite3 as _sqlite
+        with closing(_sqlite.connect(str(db_path))) as _conn:
+            # Make the UPDATE conditional on the column's existence: add the
+            # WebUI-local view-state column first when the agent schema is too
+            # old to have it (same tolerance as the projection's _optional_col).
+            cols = {row[1] for row in _conn.execute("PRAGMA table_info(sessions)")}
+            if "archived" not in cols:
+                try:
+                    _conn.execute(
+                        "ALTER TABLE sessions ADD COLUMN archived INTEGER DEFAULT 0"
+                    )
+                except _sqlite.OperationalError:
+                    # Concurrent archive requests can both observe the column
+                    # missing and race the ALTER (review #6855); the second one
+                    # fails with "duplicate column name". Tolerate it — the
+                    # UPDATE below targets the column either way.
+                    pass
+            cur = _conn.execute(
+                "UPDATE sessions SET archived = ? WHERE id = ?",
+                (1 if archived else 0, sid),
+            )
+            _conn.commit()
+            return cur.rowcount > 0
+    except Exception:
+        logger.debug(
+            "Failed to set archived=%s for state.db session %s",
+            archived,
+            sid,
+            exc_info=True,
+        )
+        return False
 
 
 def _is_subagent_child_session_id(sid: str) -> bool:
@@ -14944,8 +15020,6 @@ def handle_post(handler, parsed) -> bool:
         sid = body.get("session_id", "")
         if not sid:
             return bad(handler, "session_id is required")
-        if not is_safe_session_id(sid):
-            return bad(handler, "Invalid session_id", 400)
         cli_meta_for_delete = _lookup_cli_session_metadata(sid)
         if cli_meta_for_delete.get("read_only"):
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
@@ -14997,6 +15071,20 @@ def handle_post(handler, parsed) -> bool:
                     logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
+        # #6843: imported api_server-class rows (e.g. ``miloco:...``) can carry
+        # ids that are not path-safe as sidecar filenames (colons, ...). They
+        # are still genuine local state.db rows, so allow the delete when the
+        # row's source is the imported/read-only api_server class. ANY other
+        # real state.db row (messaging, gateway, cron, subagent, ...) must keep
+        # the path-safe id requirement so an unsafe id can't bypass the guard.
+        # Checked AFTER the standard cleanup: for state.db-only rows the
+        # sidecar unlink / index prune / .json.bak unlink above are safe
+        # no-ops, and delete_cli_session() below removes the state.db row with
+        # a parameterized query.
+        if not is_safe_session_id(sid) and not _is_api_server_class_state_db_source(
+            _state_db_session_source(sid)
+        ):
+            return bad(handler, "Invalid session_id", 400)
         # Evict outside the mutation lock: lifecycle commit may perform provider
         # I/O and must not hold a per-session Session lock.
         from api.config import _evict_session_agent
@@ -16047,8 +16135,6 @@ def handle_post(handler, parsed) -> bool:
             cli_meta = _lookup_cli_session_metadata(sid)
             if not cli_meta:
                 return bad(handler, "Session not found", 404)
-            if cli_meta.get("read_only"):
-                return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
             # Delegated subagent children (#5307) are view-only and owned by the
             # delegate runner — never materialize one into a writable WebUI
             # sidecar via the archive fallback (the 3rd of the shared
@@ -16056,6 +16142,22 @@ def handle_post(handler, parsed) -> bool:
             _arch_source_tag = (cli_meta.get("source_tag") or cli_meta.get("raw_source") or "").strip().lower()
             if _arch_source_tag == "subagent" or _is_subagent_child_session_id(sid):
                 return bad(handler, "Subagent sessions cannot be archived from WebUI", 400)
+            # #6843: imported/read-only rows (e.g. api_server) are local
+            # state.db rows without a WebUI sidecar, and some ids are not
+            # path-safe enough to materialize as a sidecar (colons, ...).
+            # Archiving is WebUI-local view state: flip the state.db `archived`
+            # flag directly instead of materializing a writable sidecar (which
+            # previously 400'd for read_only rows and crashed with an
+            # unhandled ValueError -> HTTP 500 for unsafe ids).
+            if cli_meta.get("read_only") or not is_safe_session_id(sid):
+                if not _set_state_db_session_archived(sid, bool(body.get("archived", True))):
+                    return bad(handler, "Session not found", 404)
+                publish_session_list_changed(
+                    "session_archive",
+                    profile=cli_meta.get("profile"),
+                    session_id=sid,
+                )
+                return j(handler, {"ok": True, "session": None})
             if _is_messaging_session_record(cli_meta):
                 s = Session(
                     session_id=sid,

@@ -36,6 +36,7 @@ from api.workspace import get_last_workspace
 from api.usage import prompt_cache_hit_percent
 from api.agent_sessions import (
     _is_continuation_session,
+    is_api_server_class_row,
     is_cli_session_row,
     normalize_agent_session_source,
     open_state_db_readonly,
@@ -7579,6 +7580,21 @@ def _load_cli_sessions_uncached(
         if _sidecar_meta.get('title'):
             _title = _sidecar_meta['title']
         _archived = bool(_sidecar_meta.get('archived'))
+        # #6843: imported/read-only api_server-class rows have no WebUI
+        # sidecar and are archived by the WebUI directly in state.db. When no
+        # sidecar exists, honor the state.db `archived` flag so archived
+        # foreign rows stop flooding the default sidebar — but ONLY for the
+        # api_server class (the same source condition the archive handler
+        # uses). Gateway/messaging/cron/subagent rows are sidecar-less too,
+        # and their state.db `archived` value is owned by the agent, so
+        # honoring it here would hide legitimately-visible sessions. A WebUI
+        # sidecar (if present) still wins.
+        if (
+            not _archived
+            and not (SESSION_DIR / f"{sid}.json").exists()
+            and is_api_server_class_row(row)
+        ):
+            _archived = bool(row.get('archived'))
         _display_title = _title or f'{_source.title()} Session'
         cli_sessions.append({
             'session_id': sid,
@@ -9795,7 +9811,12 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
                 Returns True when every artifact is gone (or was absent).
                 """
                 if not is_safe_session_id(removed_id):
-                    return False
+                    # Non-path-safe ids (e.g. imported api_server rows like
+                    # ``miloco:...``) never have sidecar/artifact files on
+                    # disk — they are state.db-only rows. The DB row was
+                    # already deleted in the transaction above, so there is
+                    # nothing to clean and this is NOT a failure (#6843).
+                    return True
                 ok = True
                 for suffix in (".json", ".jsonl"):
                     artifact = sessions_dir / f"{removed_id}{suffix}"
