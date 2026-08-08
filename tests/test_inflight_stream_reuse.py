@@ -856,7 +856,7 @@ def test_load_session_rebuilds_live_tail_before_snapshot_fallback():
     body = _function_body(SESSIONS_JS, "loadSession")
     ensure_pos = body.find("_ensureInflightLiveAssistantMessage(INFLIGHT[sid]);")
     inflight_pos = body.find("const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);")
-    prepare_pos = body.find("const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);")
+    prepare_pos = body.find("_prepareRunningLiveTail(S.messages,inflightMessages);")
     drop_assistant_pos = body.find("S.messages=_dropCurrentTurnAssistantMessages(S.messages);")
     merge_pos = body.find("S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);")
     restore_pos = body.find("restoreLiveTurnHtmlForSession(sid)")
@@ -1522,3 +1522,207 @@ def test_reconnect_without_tail_forces_fresh_segment_after_activity():
     assert "reconnecting" in fresh_line
     assert "segmentStart>0" in fresh_line
     assert "segmentStart>=String(assistantText||'').length" in fresh_line
+
+
+def test_merge_inflight_dedup_skips_completed_assistant_to_find_last_user():
+    """When base ends with a completed assistant, the inflight user message
+    must dedup against the last real user message, not stop at the assistant.
+
+    Regression for #6649: the reverse scan in _mergeInflightTailMessages
+    previously returned false when it hit a non-live assistant, treating
+    the inflight user as a new turn. It should continue past the completed
+    assistant to find and dedup the real last user message.
+    """
+    assert NODE, "node not on PATH"
+    start = SESSIONS_JS.find("function _messageComparableText")
+    end = SESSIONS_JS.find("// Load older messages", start)
+    assert start != -1 and end != -1
+    helper_src = SESSIONS_JS[start:end]
+    script = f"""
+const assert = require('assert');
+{helper_src}
+
+// Case 1: INFLIGHT recovery path — base ends with completed assistant
+// loadSession calls _dropCurrentTurnAssistantMessages before _mergeInflightTailMessages
+// base = [user:q, assistant:ans] → after drop → [user:q]
+// inflight = [user:q, live assistant]
+// expected: 1 user row (deduped)
+let base = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', content:'answer'}},
+];
+let inflight = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', _live:true, content:'answer'}},
+];
+// Simulate loadSession: drop completed assistant, then merge
+base = _dropCurrentTurnAssistantMessages(base);
+let merged = _mergeInflightTailMessages(base, inflight);
+let users = merged.filter(m => m.role === 'user');
+assert.strictEqual(users.length, 1,
+  'After dropping completed assistant, dedup should work: expected 1 user, got ' + users.length);
+
+// Case 2: multi-turn base, INFLIGHT recovery path
+// base = [u1, a1, u2, a2] → after drop → [u1, a1, u2]
+// inflight = [u2, live assistant]
+// expected: 2 users (u2 deduped against base's last user)
+base = [
+  {{role:'user', content:'first'}},
+  {{role:'assistant', content:'first answer'}},
+  {{role:'user', content:'second'}},
+  {{role:'assistant', content:'second answer'}},
+];
+inflight = [
+  {{role:'user', content:'second'}},
+  {{role:'assistant', _live:true, content:'second answer live'}},
+];
+base = _dropCurrentTurnAssistantMessages(base);
+merged = _mergeInflightTailMessages(base, inflight);
+users = merged.filter(m => m.role === 'user');
+assert.strictEqual(users.length, 2,
+  'Multi-turn: should keep both user messages, got ' + users.length);
+let lastUser = users[users.length - 1];
+assert.strictEqual(lastUser.content, 'second',
+  'Last user should be "second", not "first"');
+
+// Case 3: genuinely new different prompt is preserved
+base = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', content:'answer'}},
+];
+inflight = [
+  {{role:'user', content:'hello again'}},
+  {{role:'assistant', _live:true, content:'new answer'}},
+];
+merged = _mergeInflightTailMessages(base, inflight);
+users = merged.filter(m => m.role === 'user');
+assert.strictEqual(users.length, 2,
+  'New different prompt should be preserved: expected 2 users, got ' + users.length);
+assert.strictEqual(users[1].content, 'hello again',
+  'Second user should be the new prompt');
+
+// Case 4: identical text but distinct turn identity must not dedup
+// This is the bug scenario from #6649 reviewer: same user text across
+// two real turns should remain as two user rows after drop+merge.
+let base4 = [
+  {{role:'user', content:'hello', timestamp:1000, id:'msg-1'}},
+  {{role:'assistant', content:'answer'}},
+];
+let inflight4 = [
+  {{role:'user', content:'hello', timestamp:2000, id:'msg-2'}},
+  {{role:'assistant', _live:true, content:'answer live'}},
+];
+base4 = _dropCurrentTurnAssistantMessages(base4);
+let merged4 = _mergeInflightTailMessages(base4, inflight4);
+let users4 = merged4.filter(m => m.role === 'user');
+assert.strictEqual(users4.length, 2,
+  'Distinct identical prompts must not dedup: expected 2 users, got ' + users4.length);
+assert.strictEqual(users4[1].id, 'msg-2',
+  'Second user should preserve its message id');
+assert.strictEqual(users4[1].timestamp, 2000,
+  'Second user should preserve its timestamp');
+
+// Case 5: identical text, no stable identity — fall back to text dedup.
+// Without id/timestamp the messages are indistinguishable, so one row is correct.
+let base5 = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', content:'answer'}},
+];
+let inflight5 = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', _live:true, content:'answer live'}},
+];
+base5 = _dropCurrentTurnAssistantMessages(base5);
+let merged5 = _mergeInflightTailMessages(base5, inflight5);
+let users5 = merged5.filter(m => m.role === 'user');
+assert.strictEqual(users5.length, 1,
+  'Text-only duplicate should still dedup when no identity is available: expected 1 user, got ' + users5.length);
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_timestamp_sync_after_start_dedupes_same_turn_user():
+    """When /api/chat/start returns pending_started_at, the optimistic user
+    row's _ts must be synchronised to that server stamp so that
+    _sameTranscriptMessage matches it against the persisted user row.
+
+    Regression for #6649 round 3: without sync, the optimistic _ts
+    (client Date.now) and persisted timestamp (server started_at) differ
+    by network delay, and the strict-timestamp branch prevents text
+    fallback, re-introducing the duplicate.
+    """
+    assert NODE, "node not on PATH"
+    start = SESSIONS_JS.find("function _messageComparableText")
+    end = SESSIONS_JS.find("// Load older messages", start)
+    assert start != -1 and end != -1
+    helper_src = SESSIONS_JS[start:end]
+    script = f"""
+const assert = require('assert');
+{helper_src}
+
+// Simulate the real send path:
+// 1. Client creates optimistic row with _ts = clientTime (e.g. 1000.0)
+// 2. Server returns pending_started_at = serverTime (e.g. 1000.2)
+// 3. After sync: userMsg._ts = 1000.2 (matches persisted timestamp)
+
+// Before sync: timestamps differ -> _sameTranscriptMessage returns false
+let persistedUser = {{role:'user', content:'hello', timestamp:1000.2}};
+let optimisticBefore = {{role:'user', content:'hello', _ts:1000.0}};
+let matchBefore = _sameTranscriptMessage(persistedUser, optimisticBefore);
+assert.strictEqual(matchBefore, false,
+  'Before sync: different timestamps should NOT match (strict branch)');
+
+// After sync: timestamps equal -> _sameTranscriptMessage returns true
+let optimisticAfter = {{role:'user', content:'hello', _ts:1000.2}};
+let matchAfter = _sameTranscriptMessage(persistedUser, optimisticAfter);
+assert.strictEqual(matchAfter, true,
+  'After sync: equal timestamps should match (same turn)');
+
+// Full merge scenario: base has [user, completed assistant],
+// inflight has [user (synced), live assistant] -> should dedup to 1 user
+let base = [
+  {{role:'user', content:'hello', timestamp:1000.2}},
+  {{role:'assistant', content:'answer'}},
+];
+let inflight = [
+  {{role:'user', content:'hello', _ts:1000.2}},
+  {{role:'assistant', _live:true, content:'answer live'}},
+];
+base = _dropCurrentTurnAssistantMessages(base);
+let merged = _mergeInflightTailMessages(base, inflight);
+let users = merged.filter(m => m.role === 'user');
+assert.strictEqual(users.length, 1,
+  'After sync+merge: expected 1 user (deduped), got ' + users.length);
+
+// Without sync: timestamps differ -> 2 users (bug scenario)
+let baseBug = [
+  {{role:'user', content:'hello', timestamp:1000.2}},
+  {{role:'assistant', content:'answer'}},
+];
+let inflightBug = [
+  {{role:'user', content:'hello', _ts:1000.0}},
+  {{role:'assistant', _live:true, content:'answer live'}},
+];
+baseBug = _dropCurrentTurnAssistantMessages(baseBug);
+let mergedBug = _mergeInflightTailMessages(baseBug, inflightBug);
+let usersBug = mergedBug.filter(m => m.role === 'user');
+assert.strictEqual(usersBug.length, 2,
+  'Without sync: expected 2 users (bug), got ' + usersBug.length);
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_message_js_syncs_user_msg_ts_to_server_stamp():
+    """Verify static/messages.js assigns the server-returned
+    pending_started_at to userMsg._ts in the /api/chat/start callback."""
+    src = MESSAGES_JS
+    pattern = r"pending_started_at\s*=\s*startData\.pending_started_at"
+    matches = list(re.finditer(pattern, src))
+    assert len(matches) >= 1, "Could not find pending_started_at assignment"
+    for m in matches:
+        window = src[m.start():m.start() + 600]
+        if "userMsg._ts" in window and "startData.pending_started_at" in window:
+            return
+    raise AssertionError("userMsg._ts not synced to startData.pending_started_at near assignment")

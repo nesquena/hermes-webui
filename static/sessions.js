@@ -2114,10 +2114,14 @@ async function loadSession(sid){
       _rearmActiveSessionStream();
       return;
     }
-    const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);
-    if(liveTailPrepared){
-      S.messages=_dropCurrentTurnAssistantMessages(S.messages);
-    }
+    _prepareRunningLiveTail(S.messages,inflightMessages);
+    // Always drop the completed assistant when recovering from an INFLIGHT
+    // snapshot.  If the live assistant has no text yet, the completed
+    // assistant is the authoritative response, but keeping it in the base
+    // prevents _hasCurrentTailUserDuplicate from matching the optimistic
+    // user message — causing a duplicate user row.  Dropping it lets the
+    // live assistant (even if empty) take over the current-turn slot.
+    S.messages=_dropCurrentTurnAssistantMessages(S.messages);
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
@@ -3260,6 +3264,15 @@ function _sameTranscriptMessage(a,b){
   if(!(a&&b)) return false;
   const role=String(a.role||'');
   if(role!==String(b.role||'')) return false;
+  const aId=a.id, bId=b.id;
+  if(aId && bId){
+    if(aId === bId) return true;
+    return false;
+  }
+  const aTs=(a.timestamp||a._ts||0), bTs=(b.timestamp||b._ts||0);
+  if(aTs && bTs && role==='user'){
+    return aTs === bTs;
+  }
   const aText=_messageComparableText(a);
   const bText=_messageComparableText(b);
   if(aText===bText) return true;
