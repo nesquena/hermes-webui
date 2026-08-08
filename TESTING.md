@@ -201,6 +201,19 @@ EXPECT:
   - After a few seconds, Hermes responds
 FAIL: Button does nothing, error appears, or page crashes.
 
+### T1.3: Automatic Mixed RTL/LTR Direction and Persian Typography Verification
+SETUP: Active session open.
+STEPS:
+  1. Send a mixed Persian/English prompt with headers, list items, blockquotes, inline identifiers (`message-prose-auto`), code blocks, and URLs.
+EXPECT:
+  - Persian headings, paragraphs, and list markers align to the right margin with Vazirmatn typography.
+  - English headings, paragraphs, and list markers remain left-aligned.
+  - Persian blockquote colored border resolves on the right edge (`blockquote:has(> :first-child:dir(rtl))`).
+  - English blockquote colored border resolves on the left edge.
+  - Inline machine tokens (`code`), URLs (`https://...`), paths (`/Users/...`), commands, tables, and KaTeX remain LTR.
+  - Short hyphenated inline code (`message-prose-auto`) remains unbroken on one line when space permits.
+FAIL: Machine tokens or code blocks flip to RTL, Persian text renders LTR/left-aligned, or blockquote borders render on the wrong edge.
+
 ---
 
 ## Section 2: Session Management

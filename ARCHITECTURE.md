@@ -35,6 +35,8 @@ frontend framework. The Python server is split into a routing shell (server.py) 
 business logic modules (api/). The frontend is seven vanilla JS modules loaded from static/.
 This makes the code easy to modify from a terminal or by an agent.
 
+Automatic mixed-direction chat rendering is applied per prose/block element (`p`, `h1-h6`, `ul`, `ol`, `li`, `blockquote`) via `_applyAutomaticMessageDirections()` and an incremental, lifecycle-safe `MutationObserver` (`_observeAutomaticMessageDirections()`), preserving isolated LTR rendering for machine content (`pre`, `code`, URLs, paths, identifiers, JSON, tables, KaTeX, tool cards) and self-hosted Vazirmatn typography.
+
 Hermes-level chrome is intentionally consolidated: the sidebar has no dedicated brand header.
 Instead, the footer exposes a single "Hermes WebUI" launch button that opens one tabbed
 control-center modal for global preferences, conversation import/export, and clear-conversation

@@ -23,6 +23,7 @@ const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';
 const VQ = '?v=__WEBUI_VERSION__';
 const SHELL_ASSETS = [
   './static/style.css' + VQ,
+  './static/fonts/Vazirmatn.woff2' + VQ,
   './static/pwa-startup.js' + VQ,
   './static/boot.js' + VQ,
   './static/assistant_turn_anchors.js' + VQ,
