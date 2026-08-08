@@ -13,6 +13,8 @@
 
 - **Internal: clarified the transcript-virtualization boot comment (opt-in default retained).** The comment above the boot-time `_virtualizeTranscript` apply now records that the #4346 Phase B footer-jitter fix resolved the original scroll-up flicker root cause, while virtualization stays opt-in (default OFF) until battle-tested further. Zero behavior change — the apply predicate, settings-load fallback, checkbox, and server default all remain opt-in/OFF and in agreement. Thanks @webtecnica. (#6318, #6155)
 
+- **Internal: added regression coverage for the empty-`tool_calls` drop on the metadata-restoration mirror path.** `_api_safe_message_positions()` must apply the same `tool_calls: []` drop as the main API sanitizer (#5737) so metadata restoration never treats a `tool_calls: []` row as a distinct message; a new test pins that empty arrays lose the key while populated tool-call chains (and their tool results) survive untouched. Test-only, no production change. Thanks @webtecnica. (#6803, #6796)
+
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Added
