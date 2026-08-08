@@ -632,6 +632,7 @@ const fullMessages = [
 let ensureCalls = 0;
 let pending = [];
 let _messagesGeneration = 1;
+let _loadSessionGeneration = 1;
 let _messagesTruncated = true;
 let _workspacePanelActiveTab = 'artifacts';
 const rightPanel = {{ dataset: {{ activeTab: 'artifacts' }} }};
@@ -697,7 +698,10 @@ async function _ensureAllMessagesLoaded() {{}}
 {WORKSPACE_CONSUMER_BLOCK}
 (async () => {{
   const oldRender = renderSessionArtifacts();
-  _messagesGeneration = 2;
+  S.session = {{ session_id: 'foreign-2', workspace: '/ws' }};
+  _loadSessionGeneration = 2;
+  S.session = {{ session_id: 'foreign-1', workspace: '/ws' }};
+  _loadSessionGeneration = 3;
   const newRender = renderSessionArtifacts();
   await new Promise((resolve) => setTimeout(resolve, 0));
   const oldResolve = pending.shift();
