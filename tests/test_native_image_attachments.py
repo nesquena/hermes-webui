@@ -17,6 +17,7 @@ from api.streaming import (
     _attachment_name,
     _build_native_multimodal_message,
     _NATIVE_IMAGE_MAX_BYTES,
+    _sanitize_messages_for_agent,
     _sanitize_messages_for_api,
 )
 from api.routes import _normalize_chat_attachments
@@ -355,17 +356,32 @@ class TestBuildNativeMultimodalMessage:
         assert sanitized == [{'role': 'user', 'content': content}]
 
     def test_sync_chat_history_sanitizer_receives_config(self):
-        """#2398: fallback POST /api/chat must use the text-mode history sanitizer too."""
-        src = Path('api/routes.py').read_text()
-        assert 'conversation_history=_sanitize_messages_for_api(' in src, (
-            'The legacy synchronous /api/chat endpoint must sanitize history through '
-            '_sanitize_messages_for_api.'
-        )
-        assert 'cfg=get_config(),' in src, (
-            'The legacy synchronous /api/chat endpoint must pass current config into '
-            '_sanitize_messages_for_api so historical image_url parts are stripped '
-            'for text-mode providers just like the streaming endpoint.'
-        )
+        """#2398/#6751: Agent history strips native images but keeps wire sidecars."""
+        original_user_wire = '[Workspace::v1: /original]\ndescribe this image'
+        original_assistant_wire = '[Workspace::v1: /original]\nIt is a chart.'
+        history = [
+            {
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': 'describe this image'},
+                    {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,AAA='}},
+                ],
+                'api_content': original_user_wire,
+            },
+            {
+                'role': 'assistant',
+                'content': 'It is a chart.',
+                'api_content': original_assistant_wire,
+            },
+        ]
+        cfg = {'agent': {'image_input_mode': 'text'}}
+
+        sanitized = _sanitize_messages_for_agent(history, cfg=cfg)
+
+        assert sanitized[0]['content'] == 'describe this image'
+        assert 'image_url' not in str(sanitized)
+        assert sanitized[0]['api_content'] == original_user_wire
+        assert sanitized[1]['api_content'] == original_assistant_wire
 
     def test_fake_png_rejected_by_magic_bytes(self):
         """A file named .png that is not actually an image must be rejected."""
