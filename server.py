@@ -99,7 +99,7 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-from api.auth import check_auth, reset_trusted_auth_request_state
+from api.auth import check_auth, check_auth_or_close, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
     j,
@@ -406,7 +406,7 @@ class Handler(BaseHTTPRequestHandler):
             _is_csp_report_post = (
                 parsed.path == "/api/csp-report" and self.command == "POST"
             )
-            if not _is_csp_report_post and not check_auth(self, parsed): return
+            if not _is_csp_report_post and not check_auth_or_close(self, parsed): return
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
