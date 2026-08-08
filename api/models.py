@@ -1185,6 +1185,85 @@ def model_explicit_pick_signature(model, model_provider) -> str:
     return f"{_m}\x1f{_p}"
 
 
+def _deduplicate_exact_stable_messages(messages):
+    """Drop only exact replay copies that carry stable event identity.
+
+    Repeated role/content without both an id and timestamp can be a legitimate
+    later turn, so those rows are deliberately preserved.  The complete
+    dictionary is canonicalized before hashing: same-event rows with enriched
+    metadata or changed content remain distinct.
+    """
+    if not isinstance(messages, list):
+        return [], 0
+    # Persist from a deep snapshot, not only a detached outer list. A retained
+    # message can contain nested dict/list values; if those remain aliased to the
+    # owner-visible transcript, a mutation after this scan can change the bytes
+    # serialized for a deletion decision that was made against older content.
+    messages_snapshot = copy.deepcopy(messages)
+    if len(messages_snapshot) < 2:
+        return messages_snapshot, 0
+
+    seen_by_identity = {}
+    guarded = []
+    removed = 0
+
+    def _stable_identity_component(value):
+        """Return a typed exact built-in scalar, or None when untrusted."""
+        # Numeric/string subclasses (for example an IntEnum) can compare and
+        # serialize exactly like their base scalar, so accepting them would let
+        # a distinct runtime value authorize deletion.
+        if type(value) is str:
+            return ("str", value) if value.strip() else None
+        if type(value) is int:
+            return ("int", value)
+        if type(value) is float:
+            return ("float", value) if math.isfinite(value) else None
+        return None
+
+    def _is_missing_or_blank(value):
+        return value is None or (type(value) is str and not value.strip())
+
+    for message in messages_snapshot:
+        if not isinstance(message, dict):
+            guarded.append(message)
+            continue
+        message_id = message.get("id")
+        message_id_component = _stable_identity_component(message_id)
+        timestamp_value = message.get("timestamp")
+        timestamp_component = _stable_identity_component(timestamp_value)
+        if timestamp_component is None and _is_missing_or_blank(timestamp_value):
+            timestamp_component = _stable_identity_component(message.get("_ts"))
+        if message_id_component is None or timestamp_component is None:
+            guarded.append(message)
+            continue
+        identity = (
+            "event",
+            message_id_component,
+            "timestamp",
+            timestamp_component,
+        )
+        try:
+            canonical = json.dumps(
+                message,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            guarded.append(message)
+            continue
+        fingerprint = hashlib.sha256(canonical).digest()
+        identity_variants = seen_by_identity.setdefault(identity, {})
+        prior_variants = identity_variants.setdefault(fingerprint, [])
+        if any(prior == message for prior in prior_variants):
+            removed += 1
+            continue
+        prior_variants.append(message)
+        guarded.append(message)
+    return guarded, removed
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -1266,7 +1345,9 @@ class Session:
         # so a stale first-party leftover (#433) is never wrongly preserved.
         # Restored from persisted metadata on load (arrives via **kwargs).
         self.model_explicit_pick_signature = kwargs.get('model_explicit_pick_signature') or None
-        self.messages = messages or []
+        # Preserve malformed persisted containers so save() can fail closed
+        # instead of silently normalizing a dict/string to an empty transcript.
+        self.messages = messages if messages is not None else []
         self.tool_calls = tool_calls or []
         self.created_at = created_at or time.time()
         self.updated_at = updated_at or time.time()
@@ -1379,6 +1460,11 @@ class Session:
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
             )
+        if not isinstance(self.messages, list):
+            raise ValueError(
+                f"Refusing to save session {self.session_id!r}: messages must be a list, "
+                f"got {type(self.messages).__name__}."
+            )
         if touch_updated_at:
             self.updated_at = time.time()
         # Write metadata fields first so load_metadata_only() can read them
@@ -1410,6 +1496,13 @@ class Session:
             'process_wakeup_pause',
             'share_token', 'share_created_at',
         ]
+        guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
+        if exact_replay_rows_removed:
+            logger.warning(
+                "Removed %d exact stable replay messages from persisted snapshot for session %s",
+                exact_replay_rows_removed,
+                self.session_id,
+            )
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
@@ -1417,7 +1510,7 @@ class Session:
         # scene bodies. message_count is placed BEFORE anchor_scene_index so a
         # legacy-format reader that stops at a scene key still finds the count.
         # The full anchor_activity_scenes bodies serialize AFTER messages.
-        meta['message_count'] = len(self.messages or [])
+        meta['message_count'] = len(guarded_messages or [])
         meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
         # Keep the in-memory fingerprint aligned with what we just persisted, so a
         # later metadata-only reload of THIS object (or any fingerprint reader)
@@ -1425,7 +1518,7 @@ class Session:
         # defense-in-depth; the cached-side freshness check reads real records,
         # not this, so this is belt-and-suspenders).
         self._anchor_scene_index = dict(meta['anchor_scene_index'])
-        meta['messages'] = self.messages
+        meta['messages'] = guarded_messages
         meta['tool_calls'] = self.tool_calls
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
@@ -1451,12 +1544,20 @@ class Session:
         try:
             if self.path.exists():
                 existing_text = self.path.read_text(encoding='utf-8')
+                existing = None
+                existing_guarded_messages = None
+                existing_exact_replay_rows_removed = 0
                 try:
                     existing = json.loads(existing_text)
-                    existing_msg_count = len(existing.get('messages') or [])
+                    existing_messages = existing.get('messages') or []
+                    existing_msg_count = len(existing_messages)
+                    (
+                        existing_guarded_messages,
+                        existing_exact_replay_rows_removed,
+                    ) = _deduplicate_exact_stable_messages(existing_messages)
                 except (json.JSONDecodeError, ValueError):
                     existing_msg_count = -1  # corrupt → always back up
-                incoming_msg_count = len(self.messages or [])
+                incoming_msg_count = len(guarded_messages or [])
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0
@@ -1482,11 +1583,26 @@ class Session:
                     # this fix the backup either lands cleanly or doesn't
                     # land at all.
                     try:
+                        backup_text = existing_text
+                        if (
+                            existing_exact_replay_rows_removed
+                            and isinstance(existing, dict)
+                            and isinstance(existing_guarded_messages, list)
+                        ):
+                            cleaned_existing = dict(existing)
+                            cleaned_existing['messages'] = existing_guarded_messages
+                            cleaned_existing['message_count'] = len(existing_guarded_messages)
+                            backup_text = json.dumps(cleaned_existing, ensure_ascii=False, indent=2)
+                            logger.warning(
+                                "Removed %d exact stable replay messages from backup for session %s",
+                                existing_exact_replay_rows_removed,
+                                self.session_id,
+                            )
                         bak_tmp = bak_path.with_suffix(
                             f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
                         )
                         with open(bak_tmp, 'w', encoding='utf-8') as bf:
-                            bf.write(existing_text)
+                            bf.write(backup_text)
                             bf.flush()
                             os.fsync(bf.fileno())
                         _safe_replace(bak_tmp, bak_path)
@@ -1512,8 +1628,16 @@ class Session:
             except Exception:
                 pass
             raise
+
         if not skip_index:
-            _write_session_index(updates=[self])
+            # Build the sidebar entry from the same guarded transcript snapshot as
+            # the JSON payload. A shallow copy avoids rebinding/mutating the live
+            # Session while keeping message_count, user count, and last-message
+            # time aligned with what this save actually persisted.
+            persisted_index_session = copy.copy(self)
+            persisted_index_session.messages = guarded_messages
+            persisted_index_session._metadata_message_count = len(guarded_messages)
+            _write_session_index(updates=[persisted_index_session])
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
