@@ -158,7 +158,7 @@ def test_classification_none_for_non_glm_on_zai():
 # ── supports_thinking_toggle: chip visibility contract ──────────────────────────
 
 
-def _reasoning_status(model_id, provider_id="zai"):
+def _reasoning_status(model_id, provider_id: str | None = "zai"):
     """Helper: call get_reasoning_status with a stub config so it does not depend
     on the active profile's config.yaml."""
     import unittest.mock as mock
@@ -226,6 +226,15 @@ def test_non_zai_status_toggle_defaults_to_effort_capability():
     st2 = _reasoning_status("gpt-4o", provider_id="openai")
     assert st2["supports_thinking_toggle"] is False
     assert st2["supports_reasoning_effort"] is False
+
+
+def test_qualified_zai_context_is_reused_for_coercion_and_status(monkeypatch):
+    monkeypatch.setattr(cfg, "_models_dev_reasoning_efforts", lambda *_args: [])
+    qualified = "@zai:glm-5.1"
+    assert cfg.coerce_reasoning_effort_for_model("high", qualified) == ""
+    status = _reasoning_status(qualified, provider_id=None)
+    assert status["supported_efforts"] == []
+    assert status["supports_thinking_toggle"] is True
 
 
 # ── Aliases resolve through the same gate ────────────────────────────────────────
