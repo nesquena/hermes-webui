@@ -26,6 +26,7 @@ except ImportError:  # pragma: no cover
     _msvcrt = None
 
 import api.config as _cfg
+from api.webui_session_sqlite import WebUISqliteSessionDB
 from api.compression_anchor import is_context_compression_marker
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
@@ -264,23 +265,40 @@ def _persisted_session_ids_snapshot() -> frozenset[str]:
     if cached_dir == SESSION_DIR and cached_mtime_ns == dir_mtime_ns:
         return cached_ids
     try:
-        ids = frozenset(
+        ids = {
             p.stem
             for p in SESSION_DIR.glob('*.json')
             if not p.name.startswith('_')
-        )
+        }
     except Exception:
-        ids = frozenset()
+        ids = set()
+    # Include SQLite-backed sessions so the sidebar does not prune them.
+    try:
+        store = _get_sqlite_session_store()
+        if store:
+            ids.update(s.get('session_id') for s in store.list_sessions() if s.get('session_id'))
+    except Exception:
+        pass
+    ids = frozenset(ids)
     _PERSISTED_SESSION_IDS_CACHE = (SESSION_DIR, dir_mtime_ns, ids)
     return ids
 
 
 def _session_dir_has_persisted_session_files() -> bool:
-    """Return True when the current session dir has at least one session JSON file."""
+    """Return True when the current session dir has at least one persisted session."""
     try:
-        return any(not p.name.startswith('_') for p in SESSION_DIR.glob('*.json'))
+        if any(not p.name.startswith('_') for p in SESSION_DIR.glob('*.json')):
+            return True
     except Exception:
-        return False
+        pass
+    # Also count SQLite-backed sessions.
+    try:
+        store = _get_sqlite_session_store()
+        if store and store.list_sessions():
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _rebuild_session_index_background(expected_session_dir: Path, expected_index_file: Path) -> None:
@@ -346,7 +364,16 @@ def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
     if session_id in in_memory_ids:
         return True
     p = SESSION_DIR / f'{session_id}.json'
-    return p.exists()
+    if p.exists():
+        return True
+    # SQLite-backed sessions have no JSON sidecar.
+    try:
+        store = _get_sqlite_session_store()
+        if store and store.read_session(session_id) is not None:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _write_session_index(updates=None, *, session_dir: Path | None = None, session_index_file: Path | None = None):
@@ -392,6 +419,22 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                                 entry_map[sid] = c
                 except Exception:
                     logger.debug("Failed to load session from %s", p)
+            # Include SQLite-backed sessions in full rebuilds.
+            try:
+                store = _get_sqlite_session_store()
+                if store:
+                    for meta in store.list_sessions():
+                        sid = meta.get('session_id')
+                        if not sid or sid in entry_map:
+                            continue
+                        try:
+                            s = Session.load(sid)
+                            if s:
+                                entry_map[sid] = s.compact()
+                        except Exception:
+                            logger.debug("Failed to load SQLite session %s", sid)
+            except Exception:
+                pass
             entries = list(entry_map.values())
 
             existing_ids = set(entry_map.keys())
@@ -1185,6 +1228,23 @@ def model_explicit_pick_signature(model, model_provider) -> str:
     return f"{_m}\x1f{_p}"
 
 
+
+# SQLite session store singleton. Activated when sessions.db exists in the
+# session directory, otherwise the code falls back to JSON sidecars.
+_sqlite_session_store_instance = None
+
+def _get_sqlite_session_store():
+    global _sqlite_session_store_instance
+    if _sqlite_session_store_instance is not None:
+        return _sqlite_session_store_instance
+    db_path = SESSION_DIR / "sessions.db"
+    if db_path.exists():
+        _sqlite_session_store_instance = WebUISqliteSessionDB(session_dir=SESSION_DIR)
+    else:
+        _sqlite_session_store_instance = False
+    return _sqlite_session_store_instance
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -1359,9 +1419,61 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
+    def save_metadata(self, fields: dict) -> None:
+        # Persist a subset of metadata fields without rewriting messages.
+        # Used by the draft auto-save path so a keystroke only touches the
+        # sessions table row, not the full message/tool history.
+        if not isinstance(fields, dict):
+            raise TypeError("fields must be a dict")
+        if not is_safe_session_id(self.session_id):
+            raise ValueError(f"Unsafe session_id {self.session_id!r}")
+        store = _get_sqlite_session_store()
+        # The store being active does not mean THIS session has a SQLite row:
+        # sessions.db can exist while an unmigrated session lives only in its
+        # JSON sidecar (Session.load() falls back to the sidecar). Routing
+        # such a session's draft autosave to SQLite updates zero rows and the
+        # follow-up lookup raises KeyError, losing the draft — so only take
+        # the SQLite path when the row is actually there.
+        if store and store.session_exists(self.session_id):
+            # Apply in-memory first so the object stays consistent.
+            for k, v in fields.items():
+                setattr(self, k, v)
+            store.update_metadata(self.session_id, fields)
+            return
+        # JSON fallback: read, update, write back.
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        data.update(fields)
+        tmp = self.path.with_suffix(f".tmp.{os.getpid()}.{threading.current_thread().ident}")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, ensure_ascii=False, indent=2))
+                f.flush()
+                os.fsync(f.fileno())
+            _safe_replace(tmp, self.path)
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
+        # ── SQLite fast path ─────────────────────────────────────────────
+        store = _get_sqlite_session_store()
+        if store:
+            if touch_updated_at:
+                self.updated_at = time.time()
+            payload = {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
+            payload.setdefault("messages", [])
+            payload.setdefault("tool_calls", [])
+            payload.setdefault("context_messages", [])
+            payload.setdefault("anchor_activity_scenes", {})
+            store.write_session(payload)
+            if not skip_index:
+                _write_session_index(updates=[self])
+            return
         # ── #1558 P0 guard ──────────────────────────────────────────────
         # Refuse to save a session that was loaded with metadata_only=True.
         # Such sessions have messages=[] (it's the whole point of the partial
@@ -1546,6 +1658,16 @@ class Session:
         # ``reachy-voice-*``); allow those but still reject dots/slashes.
         if not is_safe_session_id(sid):
             return None
+        # ── SQLite fast path ─────────────────────────────────────────────
+        store = _get_sqlite_session_store()
+        if store:
+            data = store.read_session(sid)
+            if data is not None:
+                data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+                return cls(**data)
+            # SQLite is active but this session has not been migrated yet;
+            # fall through to the JSON sidecar below.
+        # ── JSON sidecar fallback ────────────────────────────────────────
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
             return None
@@ -1600,6 +1722,20 @@ class Session:
         # path separators and traversal dots are not.
         if not is_safe_session_id(sid):
             return None
+        # SQLite fast path: metadata lives in the sessions table.
+        try:
+            store = _get_sqlite_session_store()
+            if store:
+                data = store.read_metadata_only(sid)
+                if data is not None:
+                    data['messages'] = []
+                    data['tool_calls'] = []
+                    session = cls(**data)
+                    session._metadata_message_count = _parse_nonnegative_int(data.get('message_count'))
+                    session._loaded_metadata_only = True
+                    return session
+        except Exception:
+            pass
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
             return None

@@ -14921,7 +14921,7 @@ def handle_post(handler, parsed) -> bool:
                 # current chat every few seconds while the user is typing, and that
                 # delayed reload can restore an older draft over newer local input.
                 _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
+                s.save_metadata({"composer_draft": next_draft})
                 _draft_mark("after_save")
                 saved_draft = s.composer_draft
         _draft_mark("released_lock")
@@ -17088,8 +17088,10 @@ def _handle_list_dir(handler, parsed):
         return bad(handler, "session_id is required")
     webui_session = None
     try:
-        s = get_session(sid)
-        webui_session = s
+        # Metadata-only load: /api/list only needs the workspace path. Loading
+        # the full transcript (e.g. a 23 MB session) adds hundreds of ms to
+        # every directory listing for no benefit.
+        s = get_session(sid, metadata_only=True)
         workspace = s.workspace
     except KeyError:
         # Fallback for CLI sessions not loaded in WebUI memory
@@ -17115,6 +17117,9 @@ def _handle_list_dir(handler, parsed):
                 get_last_workspace,
             )
             if recovered:
+                # Recovery is rare; load the full session object only when we
+                # actually need to persist a workspace binding change.
+                webui_session = get_session(sid)
                 persisted = persist_recovered_workspace_binding(
                     webui_session,
                     workspace,
