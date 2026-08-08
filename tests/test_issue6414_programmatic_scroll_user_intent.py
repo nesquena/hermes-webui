@@ -52,9 +52,11 @@ let _lastMessageScrollIntentMs = -Infinity;
 let _lastMessageWheelIntentMs = -Infinity;
 let _touchStartY = null;
 let _messageTouchScrollActive = false;
+let _messageScrollInputGeneration = 0;
 let writes = 0;
 let cancels = 0;
 const _autoScrollFollow = true;
+const window = {{ _autoScrollFollow: true }};
 const PROGRAMMATIC_SCROLL_VALID_MS = 150;
 function _cancelBottomSettle() {{ cancels += 1; }}
 function _markMessageTouchScrollIntent() {{}}
