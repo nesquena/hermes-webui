@@ -7102,6 +7102,21 @@ function _syncSidebarExpansionForActiveSession(rows, activeSid){
   }
 }
 
+// Server-side user_message_count (api/models.py:1664) is the only authority
+// for user turns; absent, null, non-numeric, or negative means unknown, while
+// 0 is a real count and still renders. Segment counts are not summable: a
+// compression continuation's sidecar sometimes replays its ancestors and
+// sometimes does not (api/routes.py:8848 returns the child as-is in the first
+// case and stitches the parent in the second) with no marker on the row to
+// tell them apart, so the tip's own count is used because it never exceeds
+// the true number of distinct user turns.
+function _sidebarUserTurnCount(row){
+  if(!row) return null;
+  const usable=(value)=>(typeof value==='number'&&Number.isFinite(value)&&value>=0)?value:null;
+  const lineage=usable(row._lineage_user_message_count);
+  return lineage!==null?lineage:usable(row.user_message_count);
+}
+
 function _collapseSessionLineageForSidebar(sessions){
   const result=[];
   const sessionIdsInList=new Set((sessions||[]).map(s=>s.session_id));
@@ -7134,7 +7149,14 @@ function _collapseSessionLineageForSidebar(sessions){
       ? _authoritativeLineageTipId(item)
       : item&&(item._lineage_tip_id||item._parent_lineage_tip_id)||null).filter(Boolean));
     const chosen=sorted.find(item=>tipIds.has(item&&item.session_id))||sorted[0];
-    result.push({...chosen,_lineage_key:key,_lineage_collapsed_count:items.length,_lineage_segments:sorted});
+    const collapsed={...chosen,_lineage_key:key,_lineage_collapsed_count:items.length,_lineage_segments:sorted};
+    // Inlined, not delegated: this projection is extracted and evaluated
+    // without its sibling helpers by tests/test_session_lineage_collapse.py.
+    const tipUserTurns=chosen&&chosen.user_message_count;
+    if(typeof tipUserTurns==='number'&&Number.isFinite(tipUserTurns)&&tipUserTurns>=0){
+      collapsed._lineage_user_message_count=tipUserTurns;
+    }
+    result.push(collapsed);
   }
   return result;
 }
@@ -8151,6 +8173,12 @@ function renderSessionListFromCache(){
         ? t('session_meta_messages', msgCount)
         : `${msgCount} msg${msgCount===1?'':'s'}`;
       metaBits.push(msgLabel);
+      const userTurns=_sidebarUserTurnCount(s);
+      if(userTurns!==null){
+        metaBits.push((typeof t==='function')
+          ? t('session_meta_user_turns', userTurns)
+          : `${userTurns} from you`);
+      }
       if(childCount>0) metaBits.push(t('session_meta_children', childCount));
       const modelMeta=_formatSessionModelWithGateway(s);
       if(modelMeta) metaBits.push(modelMeta);
