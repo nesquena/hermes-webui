@@ -56,7 +56,9 @@ from api.config import (
     STATE_DIR, SESSION_DIR, SESSION_INDEX_FILE, PROJECTS_FILE, HOME,
 )
 from api.models import load_projects, save_projects
+from api.models import _active_state_db_path
 from api.profiles import get_active_profile_name, _is_root_profile, _profiles_match
+from api.project_context import recent_project_messages
 
 # ── Apply --profile override before any module uses get_active_profile_name
 if _profile_arg is not None:
@@ -243,6 +245,32 @@ async def handle_list_sessions(arguments: dict) -> list[TextContent]:
 
     sessions = sessions[:limit]
     return [TextContent(type="text", text=json.dumps(sessions, ensure_ascii=False, indent=2))]
+
+
+async def handle_recent_project_messages(arguments: dict) -> list[TextContent]:
+    """Return a bounded global message tail for one active-profile project."""
+    active = _active_profile()
+    requested_profile = str(arguments.get("profile") or active).strip() or active
+    if not _profiles_match(requested_profile, active):
+        return [TextContent(type="text", text=json.dumps(
+            {"error": "Project not found"}, ensure_ascii=False))]
+    try:
+        result = recent_project_messages(
+            project_id=str(arguments.get("project_id") or ""),
+            profile=active,
+            projects_file=PROJECTS_FILE,
+            session_index_file=SESSION_INDEX_FILE,
+            session_dir=SESSION_DIR,
+            state_db_path=_active_state_db_path(),
+            roles=arguments.get("roles"),
+            limit=arguments.get("limit", 5),
+            before=arguments.get("before"),
+            include_archived=arguments.get("include_archived", False),
+        )
+    except (LookupError, ValueError) as exc:
+        return [TextContent(type="text", text=json.dumps(
+            {"error": str(exc)}, ensure_ascii=False))]
+    return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -530,6 +558,30 @@ TOOLS = [
             "required": [],
         },
     ),
+    Tool(
+        name="recent_project_messages",
+        description=(
+            "Read the latest genuine user/assistant messages globally across all sessions "
+            "assigned to one project in the active profile. Results are newest-first; "
+            "tool/system payloads and synthetic cron/delegation/compaction notices are excluded."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string", "description": "Project ID in the active profile"},
+                "profile": {"type": "string", "description": "Optional active-profile assertion"},
+                "roles": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["user", "assistant"]},
+                    "description": "Roles to include (default: user)",
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Max results (default: 5, max: 20)"},
+                "before": {"type": "string", "description": "Opaque next_before cursor from a prior response"},
+                "include_archived": {"type": "boolean", "description": "Include archived project sessions (default: false)"},
+            },
+            "required": ["project_id"],
+        },
+    ),
 ]
 
 HANDLERS = {
@@ -540,6 +592,7 @@ HANDLERS = {
     "rename_session": handle_rename_session,
     "move_session": handle_move_session,
     "list_sessions": handle_list_sessions,
+    "recent_project_messages": handle_recent_project_messages,
 }
 
 
