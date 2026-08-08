@@ -1,12 +1,16 @@
 """Regression coverage for compression-exhausted stream finalization."""
 
 import copy
+from collections import OrderedDict
 import json
 import queue
 import sys
 import types
 from pathlib import Path
 
+import pytest
+
+from api import config
 from api import models, streaming
 from api.models import Session
 from api.streaming import (
@@ -154,6 +158,120 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
     assert "Context compression exhausted" in new_payload["messages"][-1]["content"]
     assert old_sid not in streaming.SESSIONS
     assert streaming.SESSIONS[new_sid].session_id == new_sid
+
+
+@pytest.mark.parametrize("scenario", ["marker-failure", "cache-conflict", "publication-boundary"])
+def test_compression_rotation_publication_is_fail_closed(tmp_path, monkeypatch, scenario):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+
+    old_sid = f"old-{scenario}"
+    new_sid = f"new-{scenario}"
+    stream_id = f"stream-{scenario}"
+    session = Session(
+        session_id=old_sid,
+        title="Compression publication",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        messages=[],
+        context_messages=[],
+    )
+    session.active_stream_id = stream_id
+    session.pending_user_message = "Compress this turn."
+    session.pending_started_at = 1.0
+    session.save()
+
+    observed = {}
+
+    class ObservedSessions(OrderedDict):
+        def __setitem__(self, key, value):
+            if key == new_sid:
+                observed["lock_at_publish"] = streaming.SESSION_AGENT_LOCKS.get(new_sid)
+                observed["old_owner_at_publish"] = self.get(old_sid)
+            super().__setitem__(key, value)
+
+    sessions = ObservedSessions({old_sid: session})
+    models.SESSIONS.clear()
+    monkeypatch.setattr(streaming, "SESSIONS", sessions)
+    streaming.STREAMS.clear()
+    streaming.AGENT_INSTANCES.clear()
+    with streaming.SESSION_AGENT_LOCKS_LOCK:
+        streaming.SESSION_AGENT_LOCKS.clear()
+    with config.SESSION_AGENT_CACHE_LOCK:
+        config.SESSION_AGENT_CACHE.clear()
+    streaming.STREAMS[stream_id] = queue.Queue()
+
+    class FakeAgent:
+        def __init__(self, session_id=None, **kwargs):
+            self.session_id = session_id
+            self.stream_delta_callback = kwargs.get("stream_delta_callback")
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = None
+            self.session_cache_read_tokens = 0
+            self.session_cache_write_tokens = 0
+            self.reasoning_config = None
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+
+        def run_conversation(self, **kwargs):
+            if scenario == "cache-conflict":
+                with streaming.LOCK:
+                    sessions[old_sid] = Session(session_id=old_sid, title="Different owner")
+            self.session_id = new_sid
+            return {
+                "messages": [
+                    {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                    {"role": "assistant", "content": "Compressed answer."},
+                ],
+            }
+
+        def interrupt(self, _message):
+            return None
+
+    fake_hermes_state = types.ModuleType("hermes_state")
+    fake_hermes_state.SessionDB = lambda *_args, **_kwargs: object()
+
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(streaming, "get_session", lambda _sid: session)
+            m.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
+            m.setattr(streaming, "resolve_model_provider", lambda *_args, **_kwargs: ("gpt-4o", "openai", None))
+            m.setattr("api.config.get_config", lambda *_args, **_kwargs: {})
+            m.setattr("api.config._resolve_cli_toolsets", lambda *_args, **_kwargs: [])
+            m.setitem(sys.modules, "hermes_state", fake_hermes_state)
+            if scenario == "marker-failure":
+                m.setattr(streaming, "_preserve_pre_compression_snapshot", lambda *_args, **_kwargs: False)
+            streaming._run_agent_streaming(
+                session_id=old_sid,
+                msg_text="Compress this turn.",
+                model="gpt-4o",
+                workspace=str(tmp_path),
+                stream_id=stream_id,
+            )
+
+        if scenario == "publication-boundary":
+            assert sessions.get(new_sid) is session
+            assert observed["lock_at_publish"] is not None
+            assert observed["lock_at_publish"] is streaming.SESSION_AGENT_LOCKS.get(new_sid)
+            assert observed["old_owner_at_publish"] is session
+        else:
+            assert sessions.get(new_sid) is None
+            assert session.session_id == old_sid
+            assert new_sid not in streaming.SESSION_AGENT_LOCKS
+            assert new_sid not in config.SESSION_AGENT_CACHE
+    finally:
+        streaming.STREAMS.clear()
+        streaming.AGENT_INSTANCES.clear()
+        models.SESSIONS.clear()
+        with streaming.SESSION_AGENT_LOCKS_LOCK:
+            streaming.SESSION_AGENT_LOCKS.clear()
+        with config.SESSION_AGENT_CACHE_LOCK:
+            config.SESSION_AGENT_CACHE.clear()
 
 
 def test_compression_exhausted_result_is_terminal_failure_even_after_streamed_text():
