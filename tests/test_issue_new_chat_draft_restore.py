@@ -92,8 +92,9 @@ def test_restore_helper_validates_candidate_with_session_metadata():
 
 
 def test_session_switch_awaits_immediate_draft_flush_before_loading_target():
-    assert "return api('/api/session/draft'" in SESSIONS_JS, (
-        "_saveComposerDraftNow should return its POST promise so switch-away can await it"
+    assert "return enqueue(sid,()=>api('/api/session/draft'" in SESSIONS_JS, (
+        "_saveComposerDraftNow should return its queued POST promise so switch-away "
+        "can await it without allowing same-session writes to overtake each other"
     )
     assert "await _saveComposerDraftNow(currentSid" in SESSIONS_JS, (
         "loadSession must flush the current draft before fetching the next session"
@@ -161,8 +162,9 @@ def test_clear_composer_draft_forgets_same_new_chat_candidate():
     assert "_clearRememberedNewChatDraftSession(sid);" in body, (
         "sending a draft must stop New Chat from restoring that now-cleared candidate"
     )
-    assert "return api('/api/session/draft'" in body, (
-        "clear path should return its POST promise for callers/tests that need to await it"
+    assert "return enqueue(sid,()=>api('/api/session/draft'" in body, (
+        "clear path should return its queued POST promise for callers/tests that need "
+        "to await it while preserving same-session write order"
     )
     assert "_rememberComposerDraftPayloadState(sid, '', []);" in body, (
         "clear path must also clear local draft-payload tracking so send-then-switch can skip redundant empty flushes"

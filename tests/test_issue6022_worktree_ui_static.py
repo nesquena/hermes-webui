@@ -45,7 +45,7 @@ def test_onboarding_session_sends_explicit_worktree_false():
 def test_profile_switch_session_sends_explicit_worktree_false():
     src = read("static/panels.js")
     assert (
-        "await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});"
+        "await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false, contextTransition:intent});"
         in src
     )
 
@@ -54,22 +54,21 @@ def test_workspace_bind_prompts_send_explicit_worktree_false():
     # promptWorkspacePath + switchToWorkspace both auto-mint a session from a
     # blank page; each must opt out of the config default explicitly.
     src = read("static/panels.js")
-    assert (
-        src.count(
-            "body:JSON.stringify({workspace:ws,worktree:false})"
-        )
-        >= 2
-    ), "panels.js blank-page session mints must send worktree:false"
+    sessions = read("static/sessions.js")
+    assert src.count("_ensureBlankPageSession(ws,intent)") >= 2
+    assert "await newSession(false,{worktree:false,contextTransition:intent})" in sessions
     # No panels.js session/new call may omit the worktree key.
     assert "body:JSON.stringify({workspace:ws})" not in src
 
 
 def test_file_and_folder_creation_send_explicit_worktree_false():
     src = read("static/ui.js")
+    sessions = read("static/sessions.js")
     for fn in ("async function promptNewFile", "async function promptNewFolder"):
         block = src[src.index(fn) :]
         block = block[: block.index("\n}\n")]
-        assert "worktree:false" in block, f"{fn} must opt out of the config default"
+        assert "_ensureBlankPageSession(ws,intent)" in block
+    assert "await newSession(false,{worktree:false,contextTransition:intent})" in sessions
     assert "body:JSON.stringify({workspace:ws})" not in src
 
 

@@ -30,6 +30,10 @@ function extractNewSession(src) {
 }
 
 const src = fs.readFileSync(process.argv[2], 'utf8');
+const contextStart = src.indexOf('let _contextTransitionGeneration=0;');
+const contextEnd = src.indexOf('\nconst _newSessionPendingText', contextStart);
+if (contextStart < 0 || contextEnd < 0) throw new Error('context transition helpers not found');
+const contextTransitionSrc = src.slice(contextStart, contextEnd);
 const args = JSON.parse(process.argv[3]);
 const modelSelect = {
   value: args.currentModel || '',
@@ -156,7 +160,7 @@ globalThis.api = async (url, opts) => {
   };
 };
 
-eval(extractNewSession(src));
+eval(contextTransitionSrc + '\n' + extractNewSession(src) + '\n;globalThis.newSession=newSession;');
 
 (async () => {
   await newSession(false, {});

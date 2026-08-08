@@ -45,6 +45,7 @@ def test_load_dir_can_refresh_all_expanded_descendants_when_requested():
     block = _function_block(WORKSPACE_JS, "loadDir")
     compact = block.replace(" ", "")
     assert "constrefreshExpanded=!!(opts&&opts.refreshExpanded);" in compact
-    assert "if(!path||path==='.'||refreshExpanded){" in compact
+    assert "constrequestedPath=String(path||'.');" in compact
+    assert "if(requestedPath==='.'||refreshExpanded){" in compact
     assert "constexpanded=S._expandedDirs||newSet();" in compact
     assert "constpending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);" in compact
