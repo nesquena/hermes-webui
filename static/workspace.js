@@ -662,7 +662,7 @@ function renderSessionArtifacts(){
   );
   if(hasTruncatedHistory && artifactsVisible){
     _renderNow();
-    if(!needsFullLoad){
+    if(!needsFullLoad && !(S.busy || S.activeStreamId)){
       const loadingText = (typeof t==='function'&&t('workspace_artifact_loading_full_history')) || 'Loading full history…';
       root.innerHTML += `<div class="workspace-artifact-loading" data-i18n="workspace_artifact_loading_full_history" aria-live="polite">${esc(loadingText)}</div>`;
     }

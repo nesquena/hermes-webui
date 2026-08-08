@@ -87,6 +87,14 @@ COMMIT_SRC = _maybe_extract(SESSIONS_JS, "_commitTranscriptReplacement")
 APPLY_COMPRESSION_SRC = _maybe_extract(COMMANDS_JS, "_applyManualCompressionResult", "async function")
 REFRESH_SRC = _maybe_extract(UI_JS, "refreshSession", "async function")
 COMPRESSION_SRC = _maybe_extract(COMMANDS_JS, "_runManualCompression", "async function")
+POLL_COMPRESSION_SRC = _maybe_extract(COMMANDS_JS, "_pollManualCompressionResult", "async function")
+CLEAR_COMPRESSION_SRC = _maybe_extract(COMMANDS_JS, "resumeManualCompressionForSession", "async function")
+COMPRESSION_OPERATION_SRC = COMMANDS_JS[
+    COMMANDS_JS.index("let _manualCompressionOperation = null;") : COMMANDS_JS.index(
+        "async function resumeManualCompressionForSession"
+    )
+]
+CLEAR_SRC = _maybe_extract(PANELS_JS, "clearConversation", "async function")
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -784,6 +792,7 @@ function _bumpMessagesGeneration() {{ _messagesGeneration += 1; }}
 {CURRENT_SRC}
 {COMMIT_SRC}
 {REFRESH_SRC}
+{COMPRESSION_OPERATION_SRC}
 {COMPRESSION_SRC}
 const window = {{ _restartingForUpdate: false }};
 const S = {{
@@ -842,7 +851,13 @@ run().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); 
 """
 
 
-def _async_slash_owner_script(command: str, *, blank_page: bool = False, switch_on_completion: bool = False) -> str:
+def _async_slash_owner_script(
+    command: str,
+    *,
+    blank_page: bool = False,
+    switch_on_completion: bool = False,
+    metadata_delay: bool = False,
+) -> str:
     command_json = json.dumps(command)
     session_literal = "null" if blank_page else "{ session_id: 'session-a', message_count: 0 }"
     return f"""
@@ -857,6 +872,7 @@ const S = {{
 let generation = 0;
 let resolveCommand = null;
 let resolveMoa = null;
+let resolveMetadata = null;
 let renderCount = 0;
 const toasts = [];
 function _bumpMessagesGeneration() {{ generation += 1; return generation; }}
@@ -879,10 +895,11 @@ async function newSession() {{
 }}
 const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set(['agent']);
 function getAgentCommandMetadata(name) {{
-  if ({command_json} === '/agent') return Promise.resolve({{ name: 'agent' }});
-  if ({command_json} === '/plugin') return Promise.resolve({{ name: 'plugin', category: 'Plugin' }});
-  if ({command_json} === '/moa') return Promise.resolve({{ name: 'moa' }});
-  return Promise.resolve(null);
+  const result = {command_json} === '/agent' ? {{ name: 'agent' }}
+    : {command_json} === '/plugin' ? {{ name: 'plugin', category: 'Plugin' }}
+    : {command_json} === '/moa' ? {{ name: 'moa' }} : null;
+  if ({str(metadata_delay).lower()}) return new Promise(resolve => {{ resolveMetadata = () => resolve(result); }});
+  return Promise.resolve(result);
 }}
 function _deferredResult() {{ return new Promise(resolve => {{ resolveCommand = resolve; }}); }}
 function handlePetSlashCommand() {{ return _deferredResult().then(() => ({{ handled: true, message: 'pet result' }})); }}
@@ -909,6 +926,7 @@ function switchToOtherSession() {{
   await Promise.resolve();
   await new Promise(resolve => setTimeout(resolve, 0));
   if ({str(switch_on_completion).lower()}) switchToOtherSession();
+  if (resolveMetadata) resolveMetadata();
   if (resolveCommand) resolveCommand();
   if (resolveMoa) resolveMoa({{ usage: '/moa <prompt>' }});
   await pending;
@@ -1137,6 +1155,141 @@ const ticket = _captureTranscriptReplacement();
 """
 
 
+def _compression_cleanup_race_script(*, resumed: bool = False, newer_stream: bool = False) -> str:
+    compression_entry = "resumeManualCompressionForSession('same-session')" if resumed else "_runManualCompression('')"
+    return f"""
+let _messagesGeneration = 0;
+function _bumpMessagesGeneration() {{ _messagesGeneration += 1; return _messagesGeneration; }}
+{CAPTURE_SRC}
+{CURRENT_SRC}
+{COMMIT_SRC}
+{POLL_COMPRESSION_SRC}
+{CLEAR_COMPRESSION_SRC}
+{COMPRESSION_OPERATION_SRC}
+{COMPRESSION_SRC}
+const window = {{ _compressionUi: null }};
+const S = {{
+  session: {{ session_id: 'same-session', workspace: '/ws', messages: [] }},
+  messages: [{{ role: 'assistant', content: 'old' }}],
+  toolCalls: [],
+  busy: false,
+  activeStreamId: null,
+}};
+let compressionLock = null;
+let composerStatus = '';
+let statusCalls = 0;
+let resolveFirstStatus = null;
+let resolveStatus = null;
+function _manualCompressionSleep() {{ return Promise.resolve(); }}
+function _manualCompressionVisibleMessages() {{ return S.messages.filter(message => message && message.role !== 'tool'); }}
+function _compressionAnchorMessageKey() {{ return 'anchor'; }}
+function msgContent(message) {{ return message && message.content || ''; }}
+function _isContextCompactionMessage() {{ return false; }}
+function clearLiveToolCards() {{}}
+function renderMessages() {{}}
+function renderSessionList() {{}}
+function setBusy(value) {{ S.busy = value; }}
+function setComposerStatus(value) {{ composerStatus = value || ''; }}
+function setCompressionUi(state) {{ window._compressionUi = state; if (state && state.sessionId) compressionLock = state.sessionId; }}
+function clearCompressionUi() {{ window._compressionUi = null; compressionLock = null; }}
+function _setCompressionSessionLock(value) {{ compressionLock = value || null; }}
+function t(key) {{ return key; }}
+async function _applyManualCompressionResult() {{ return false; }}
+async function api(url) {{
+  if (String(url).includes('/api/session/compress/status')) {{
+    statusCalls += 1;
+    return await new Promise(resolve => {{
+      if ({str(resumed).lower()} && statusCalls === 1) resolveFirstStatus = resolve;
+      else resolveStatus = resolve;
+    }});
+  }}
+  if (String(url).startsWith('/api/session?')) return {{ session: {{ ...S.session, messages: S.messages }} }};
+  if (String(url) === '/api/session/compress/start') return {{ status: 'running' }};
+  throw new Error('unexpected API request: ' + url);
+}}
+(async () => {{
+  const operation = {compression_entry};
+  await new Promise(resolve => setTimeout(resolve, 0));
+  if (resolveFirstStatus) resolveFirstStatus({{ status: 'running' }});
+  for (let i = 0; i < 20 && !resolveStatus; i++) await new Promise(resolve => setTimeout(resolve, 0));
+  if (!resolveStatus) throw new Error('compression poll did not start');
+  _bumpMessagesGeneration();
+  S.messages.push({{ role: 'user', content: 'newer writer' }});
+  if ({str(newer_stream).lower()}) {{ S.busy = true; S.activeStreamId = 'stream-new'; composerStatus = 'streaming'; }}
+  resolveStatus({{ status: 'done', session: {{ ...S.session, messages: [{{ role: 'assistant', content: 'compressed' }}] }}, summary: {{}} }});
+  await operation;
+  await Promise.resolve();
+  console.log(JSON.stringify({{
+    busy: S.busy,
+    activeStreamId: S.activeStreamId,
+    compressionUi: window._compressionUi,
+    compressionLock: compressionLock,
+    composerStatus,
+  }}));
+}})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""
+
+
+def _clear_conversation_race_script(race_stage: str) -> str:
+    return f"""
+let _messagesGeneration = 0;
+function _bumpMessagesGeneration() {{ _messagesGeneration += 1; return _messagesGeneration; }}
+{CAPTURE_SRC}
+{CURRENT_SRC}
+{COMMIT_SRC}
+let _clearConversationOperation = null;
+let _clearConversationOperationSerial = 0;
+{CLEAR_SRC}
+const S = {{
+  session: {{ session_id: 'same-session', messages: [{{ role: 'assistant', content: 'old' }}] }},
+  messages: [{{ role: 'assistant', content: 'old' }}],
+  toolCalls: [],
+}};
+let resolveConfirm = null;
+let resolveClear = null;
+let reconcileCalls = 0;
+const toasts = [];
+function t(key) {{ return key; }}
+function showToast(message) {{ toasts.push(String(message)); }}
+function setStatus(message) {{ toasts.push(String(message)); }}
+function syncTopbar() {{}}
+function renderMessages() {{}}
+function showConfirmDialog() {{ return new Promise(resolve => {{ resolveConfirm = resolve; }}); }}
+async function loadSession() {{ reconcileCalls += 1; }}
+async function api(url) {{
+  if (String(url) === '/api/session/clear') return await new Promise(resolve => {{ resolveClear = resolve; }});
+  throw new Error('unexpected API request: ' + url);
+}}
+function _commitTranscriptReplacement(ticket, commit) {{
+  if (!_transcriptReplacementIsCurrent(ticket) || ticket.used) return false;
+  ticket.used = true;
+  _bumpMessagesGeneration();
+  commit();
+  return true;
+}}
+(async () => {{
+  const clearPromise = clearConversation();
+  await Promise.resolve();
+  if (!resolveConfirm) throw new Error('confirmation did not open');
+  if ({json.dumps(race_stage)} === 'confirm') {{
+    _bumpMessagesGeneration();
+    S.messages.push({{ role: 'user', content: 'newer writer' }});
+  }}
+  resolveConfirm(true);
+  for (let i = 0; i < 20 && !resolveClear; i++) await new Promise(resolve => setTimeout(resolve, 0));
+  if (!resolveClear) throw new Error('clear request did not start');
+  if ({json.dumps(race_stage)} === 'post') {{
+    _bumpMessagesGeneration();
+    S.messages.push({{ role: 'user', content: 'newer writer' }});
+  }}
+  resolveClear({{ session: {{ session_id: 'same-session', messages: [] }} }});
+  await clearPromise;
+  await new Promise(resolve => setTimeout(resolve, 0));
+  console.log(JSON.stringify({{ messages: S.messages, toasts, reconcileCalls }}));
+}})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""
+
+
 def test_download_handler_uses_localized_feedback_and_full_history_gate():
     if "_readFullSessionSnapshot(sid)" not in BOOT_JS:
         pytest.skip("respec-only download contract is absent on the base checkout")
@@ -1277,12 +1430,12 @@ def test_artifacts_renderer_falls_back_to_partial_list_after_failure():
     assert result["truncated"] is True
 
 
-def test_artifacts_renderer_keeps_placeholder_during_live_turn_on_truncated_session():
+def test_artifacts_renderer_keeps_live_content_during_live_turn_on_truncated_session():
     result = _run_node(_artifact_script(active_stream=True, seed_existing_dom=True))
 
     assert result["ensureCalls"] == 0
-    assert "Loading full history…" in result["htmlBeforeAwait"]
-    assert "Loading full history…" in result["html"]
+    assert "Loading full history…" not in result["htmlBeforeAwait"]
+    assert "Loading full history…" not in result["html"]
     assert 'data-artifact-path="new/live.txt"' in result["html"]
     assert result["countBeforeAwait"] == "1"
     assert result["count"] == "1"
@@ -1416,6 +1569,22 @@ def test_async_slash_completions_bind_blank_and_current_pane_owners(
         assert result["sessionId"] == "session-new"
 
 
+def test_blank_page_slash_metadata_claims_owner_before_session_switch():
+    result = _run_node(
+        _async_slash_owner_script(
+            "/plugin",
+            blank_page=True,
+            switch_on_completion=True,
+            metadata_delay=True,
+        )
+    )
+
+    assert result["sessionId"] == "session-b"
+    assert [message["content"] for message in result["messages"]] == [
+        "session b existing"
+    ]
+
+
 def test_background_polling_rejects_stale_owner_or_generation_and_keeps_retry():
     current = _run_node(_background_polling_script())
     assert current["hidden"] == ["task-1"]
@@ -1475,6 +1644,44 @@ def test_compression_stops_post_render_updates_when_generation_changes():
     assert result["renderCalls"] == 1
 
 
+@pytest.mark.parametrize("resumed", [False, True])
+def test_compression_operation_cleans_ui_after_newer_same_session_writer(resumed):
+    result = _run_node(_compression_cleanup_race_script(resumed=resumed))
+
+    assert result["busy"] is False
+    assert result["activeStreamId"] is None
+    assert result["compressionUi"] is None
+    assert result["compressionLock"] is None
+    assert result["composerStatus"] == ""
+
+
+def test_compression_operation_preserves_newer_stream_busy_state():
+    result = _run_node(_compression_cleanup_race_script(newer_stream=True))
+
+    assert result["busy"] is True
+    assert result["activeStreamId"] == "stream-new"
+    assert result["compressionUi"] is None
+    assert result["compressionLock"] is None
+    assert result["composerStatus"] == "streaming"
+
+
+@pytest.mark.parametrize("race_stage", ["confirm", "post"])
+def test_clear_conversation_keeps_server_and_local_settlement_visible(race_stage):
+    result = _run_node(_clear_conversation_race_script(race_stage))
+
+    if race_stage == "confirm":
+        assert result["messages"] == []
+        assert "conversation_cleared" in result["toasts"]
+        assert result["reconcileCalls"] == 0
+    else:
+        assert result["messages"] == [
+            {"role": "assistant", "content": "old"},
+            {"role": "user", "content": "newer writer"},
+        ]
+        assert any("changed" in toast.lower() for toast in result["toasts"])
+        assert result["reconcileCalls"] == 1
+
+
 def test_same_session_refresh_and_compression_reject_older_replacements():
     if "function _captureTranscriptReplacement()" not in SESSIONS_JS:
         pytest.skip("respec-only replacement seam is absent on the base checkout")
@@ -1511,7 +1718,10 @@ def test_messages_generation_wiring_covers_full_load_live_turn_claims_and_same_s
     assert "ticket.committedGeneration = _messagesGeneration;" in SESSIONS_JS
     assert "ticket.committedGeneration!==undefined" in COMMANDS_JS
     assert "const _ensureSlashOwner=async()=>" in MESSAGES_JS
-    assert "if(_metadataSid&&!_slashOwnerIsCurrent(_metadataSid))return;" in MESSAGES_JS
+    assert "if(!_slashOwnerIsCurrent(_metadataSid))return;" in MESSAGES_JS
+    assert "const _metadataSid=await _ensureSlashOwner();" in MESSAGES_JS
+    assert "_manualCompressionOperation" in COMMANDS_JS
+    assert "_clearConversationOperation" in PANELS_JS
     assert "_readFullSessionSnapshot(sid)" in BOOT_JS
     assert "_renderNow(snapshot.messages, snapshot.toolCalls);" in WORKSPACE_JS
     assert "_commitTranscriptReplacement(clearTicket, () =>" in PANELS_JS

@@ -4790,18 +4790,24 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
   `;
 }
 
+let _clearConversationOperation = null;
+let _clearConversationOperationSerial = 0;
+
 async function clearConversation() {
   if(!S.session) return;
   const clearSid=S.session.session_id;
-  const clearTicket=typeof _captureTranscriptReplacement==='function'
-    ? _captureTranscriptReplacement()
-    : null;
   const _clrMsg=await showConfirmDialog({title:t('clear_conversation_title'),message:t('clear_conversation_message'),confirmLabel:t('clear'),danger:true,focusCancel:true});
   if(!_clrMsg) return;
   if(!S.session||S.session.session_id!==clearSid)return;
+  const clearTicket=typeof _captureTranscriptReplacement==='function'
+    ? _captureTranscriptReplacement()
+    : null;
+  const operation={sid:clearSid,id:++_clearConversationOperationSerial};
+  _clearConversationOperation=operation;
   try {
     const data = await api('/api/session/clear', {method:'POST',
       body: JSON.stringify({session_id: clearSid})});
+    if(_clearConversationOperation!==operation)return;
     if(!S.session||S.session.session_id!==clearSid)return;
     const committed=typeof _commitTranscriptReplacement==='function'
       && _commitTranscriptReplacement(clearTicket, () => {
@@ -4811,9 +4817,18 @@ async function clearConversation() {
         syncTopbar();
         renderMessages();
       });
-    if(!committed)return;
+    if(!committed){
+      showToast('Conversation changed while clearing; refreshing.',4000,'warning');
+      if(typeof loadSession==='function'){
+        Promise.resolve(loadSession(clearSid,{force:true,externalRefreshReason:'clear-reconcile'})).catch(()=>{});
+      }
+      return;
+    }
     showToast(t('conversation_cleared'));
   } catch(e) { setStatus(t('clear_failed') + e.message); }
+  finally {
+    if(_clearConversationOperation===operation) _clearConversationOperation=null;
+  }
 }
 
 // ── Skills panel ──

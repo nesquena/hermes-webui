@@ -18,6 +18,14 @@ PROFILE_CONCEPT_KEYS = [
     "profile_concept_label_example",
 ]
 
+ENGLISH_ONLY_FALLBACK_KEYS = {
+    "download_transcript_preparing_full",
+    "download_transcript_busy_full",
+    "download_transcript_failed_full",
+    "download_transcript_changed_full",
+    "workspace_artifact_loading_full_history",
+}
+
 
 def _locale_blocks():
     """Extract every top-level locale block from static/i18n.js."""
