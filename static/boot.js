@@ -80,11 +80,17 @@ async function cancelSessionStream(session){
     console.info('[stream] cancel requested', {reason:'sidebar-stop', streamId, sessionId:sid});
   }
   let respOk=false;
+  let respBody=null;
   try{
     const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
     respOk=!!(r&&r.ok);
+    try{respBody=await r.json();}catch(_){}
   }catch(e){/* close local stream; keep UI state honest below */}
   if(!respOk) return false;
+  if(respBody&&respBody.persistence_failed){
+    if(typeof showToast==='function') showToast('Cancellation incomplete — response may not be fully saved',4000);
+    return false;
+  }
   if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
   session.active_stream_id=null;
   delete INFLIGHT[sid];

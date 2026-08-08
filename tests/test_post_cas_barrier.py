@@ -94,7 +94,7 @@ class TestPostCASBarrier:
         STREAM_PARTIAL_TEXT[stream_id] = "partial text"
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
-        _streaming_mod._STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice_a)
+        _streaming_mod._publish_fallback_notice(stream_id, _notice_a)
 
         _save_snapshots = []
         _b_published = [False]
@@ -146,7 +146,7 @@ class TestPostCASBarrier:
                    side_effect=_payload_hook):
             result = _streaming_mod.cancel_stream(stream_id)
 
-        assert result is True
+        assert result["cancelled"] is True
 
         # Exactly one save (A) — B was never persisted
         assert len(_save_snapshots) == 1, (
@@ -203,7 +203,7 @@ class TestPostCASBarrier:
         STREAM_PARTIAL_TEXT[stream_id] = "partial text"
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
-        _streaming_mod._STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice_a)
+        _streaming_mod._publish_fallback_notice(stream_id, _notice_a)
 
         # Use a real temp-file-backed session to prove disk durability
         tmpdir = tempfile.mkdtemp()
@@ -249,7 +249,7 @@ class TestPostCASBarrier:
                    side_effect=_payload_hook):
             result = _streaming_mod.cancel_stream(stream_id)
 
-        assert result is True
+        assert result["cancelled"] is True
 
         # Reload from disk and assert exactly one durable notice
         assert os.path.exists(session_path), "session was not saved to disk"
@@ -305,7 +305,7 @@ class TestPostCASBarrier:
         STREAM_PARTIAL_TEXT[stream_id] = "partial"
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
-        _streaming_mod._STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice)
+        _streaming_mod._publish_fallback_notice(stream_id, _notice)
 
         _prior = {"role": "assistant", "content": "Prior.", "timestamp": 1}
         cancel_session = Mock()
@@ -325,7 +325,7 @@ class TestPostCASBarrier:
             result = _streaming_mod.cancel_stream(stream_id)
 
         # Cancel save failed -> non-silent disposition
-        assert result is False
+        assert result["cancelled"] is False
         # Notice transferred to dead-letter (bounded owner — gate-certifier
         # blocker #3: failed persistence has a named owner, not an ownerless
         # residue in _STREAM_FALLBACK_NOTICES).
@@ -384,7 +384,7 @@ class TestPostCASBarrier:
         STREAM_PARTIAL_TEXT[stream_id] = "partial"
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
-        _streaming_mod._STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice)
+        _streaming_mod._publish_fallback_notice(stream_id, _notice)
 
         _prior = {"role": "assistant", "content": "Prior.", "timestamp": 1}
         cancel_session = Mock()
@@ -403,7 +403,7 @@ class TestPostCASBarrier:
         with patch("api.streaming.get_session", return_value=cancel_session):
             result = _streaming_mod.cancel_stream(stream_id)
 
-        assert result is False
+        assert result["cancelled"] is False
         assert stream_id in _streaming_mod._STREAM_FALLBACK_DEAD_LETTER, "notice dropped after cancel save failure"
 
         # Worker retry also fails
@@ -452,18 +452,17 @@ class TestPostCASBarrier:
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
         _streaming_mod._STREAM_SETTLEMENT_TERMINAL.clear()
-        _streaming_mod._STREAM_FALLBACK_NOTICES[stream_id] = dict(_notice)
+        _streaming_mod._publish_fallback_notice(stream_id, _notice)
 
         _save_count = [0]
 
         def _save_then_publish_next():
             _save_count[0] += 1
-            with _streaming_mod.STREAMS_LOCK:
-                _streaming_mod._STREAM_FALLBACK_NOTICES[stream_id] = {
-                    "message": f"gen{_save_count[0]}",
-                    "to_model": f"m{_save_count[0]}",
-                    "to_provider": f"p{_save_count[0]}",
-                }
+            _streaming_mod._publish_fallback_notice(stream_id, {
+                "message": f"gen{_save_count[0]}",
+                "to_model": f"m{_save_count[0]}",
+                "to_provider": f"p{_save_count[0]}",
+            })
 
         _prior = {"role": "assistant", "content": "Prior.", "timestamp": 1}
         mock_session = Mock()
@@ -483,7 +482,7 @@ class TestPostCASBarrier:
             result = _streaming_mod.cancel_stream(stream_id)
 
         # Exact disposition: False (not True, not raise)
-        assert result is False, (
+        assert result["cancelled"] is False, (
             f"settlement exhaustion must return False, got {result}"
         )
 
