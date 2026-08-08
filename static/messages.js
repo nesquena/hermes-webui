@@ -5440,6 +5440,37 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     LIVE_STREAMS[activeSid]={streamId,source};
 
+    // ── Renderer host seam ─────────────────────────────────────────────────────
+    // If an extension registered a renderer via window.registerHermesRenderer(),
+    // boot.js wires window._hermesRendererMount / window._hermesRendererUnmount.
+    // _wireSSE may be called more than once for the same stream (reconnect path).
+    // On reconnect we unmount the previous binding before mounting the new source
+    // so the renderer is never attached to a stale closed EventSource.
+    // On every terminal path (done / apperror / cancel / onerror) we call unmount
+    // so the renderer can clean up its listeners and timers.
+    // The seam is a pure no-op when no renderer is registered.
+    //
+    // root — the live assistant turn container (#liveAssistantTurn when present,
+    //         falling back to #messages so the renderer receives a stable element
+    //         even before the first token creates the turn row).  The renderer
+    //         owns ONLY this element; it must not mutate siblings or ancestors.
+    // ctx  — { sessionId: activeSid, streamId }
+    const _rendererRoot=(typeof $==='function'&&($('liveAssistantTurn')||$('messages')))||null;
+    // Unmount any prior mount on this root before (re-)mounting.  This handles the
+    // reconnect path where _wireSSE is entered a second time for the same stream.
+    if(typeof window._hermesRendererUnmount==='function' && _rendererRoot){
+      try{window._hermesRendererUnmount(_rendererRoot);}catch(_){}
+    }
+    if(typeof window._hermesRendererMount==='function' && _rendererRoot){
+      try{window._hermesRendererMount(_rendererRoot,source,{sessionId:activeSid,streamId});}catch(_){}
+    }
+    function _rendererUnmount(){
+      if(typeof window._hermesRendererUnmount==='function' && _rendererRoot){
+        try{window._hermesRendererUnmount(_rendererRoot);}catch(_){}
+      }
+    }
+    // ── End renderer host seam ─────────────────────────────────────────────────
+
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
     // the accumulators here so the re-sent tokens wouldn't double the prefix.
@@ -5858,6 +5889,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _streamFinalized=true;
         _cancelAnimationFramePendingStreamRender();
         _streamFadeCleanupReduceMotionListener();
+        _rendererUnmount();   // renderer host seam: notify extension stream is done
         if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
         // Finalize smd parser — flushes any remaining buffered markdown state
         // and runs Prism + copy buttons on the live segment before the DOM is replaced
@@ -6292,6 +6324,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Application-level error sent explicitly by the server (rate limit, crash, etc.)
       // This is distinct from the SSE network 'error' event below.
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
+      _rendererUnmount();   // renderer host seam: notify extension stream ended with error
       _clearOwnerInflightState();
       _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
       _clearStreamNotificationBackground(activeSid, streamId);
@@ -6548,6 +6581,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
+      _rendererUnmount();   // renderer host seam: notify extension stream was cancelled
       _clearOwnerInflightState();
       _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
       _clearStreamNotificationBackground(activeSid, streamId);
