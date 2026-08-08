@@ -664,8 +664,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Load older messages while scrolling up',
 
     settings_desc_session_endless_scroll: 'When enabled, older messages load automatically as you scroll upward. When disabled, use the older-messages button.',
-    settings_label_auto_scroll_follow: 'Auto-follow new content',
-    settings_desc_auto_scroll_follow: 'When enabled, the view scrolls to the bottom as new tokens stream in. When disabled, you control the scroll position manually.',
+    settings_label_auto_scroll_follow: 'Auto-scroll to new content',
+    settings_desc_auto_scroll_follow: 'When enabled, the view auto-scrolls to the bottom as new tokens stream in. Uncheck to disable auto-scrolling and control the scroll position manually.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
     settings_label_show_titlebar_profile: 'Show profile switcher in titlebar',
     settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.',
