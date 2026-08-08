@@ -25,6 +25,7 @@ The fix:
 
 import os
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -436,16 +437,51 @@ def test_thread_local_env_value_none_default_returns_empty_string(monkeypatch):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_detached_worker_scope_noop_for_default_profile(monkeypatch):
-    """profile_scope_for_detached_worker is a no-op for the default profile."""
+def test_detached_worker_scope_binds_tls_for_default_profile(monkeypatch):
+    """profile_scope_for_detached_worker binds TLS for the default profile (#6326).
+
+    For 'default', the scope must set the request-profile TLS so the worker
+    resolves the default profile's configuration even when the process-wide
+    active profile is a named profile, AND must install root-owned
+    thread/context credentials while blocking the process-env fallback so
+    _thread_local_env_value() callers resolve the root credential — never a
+    named-profile credential (#6327).  Raw os.getenv() readers must not see
+    named-profile .env values for the duration of the body; they are scrubbed
+    (values proven foreign to root) and restored afterwards.
+    """
     monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
     monkeypatch.delenv("ISSUE_3957_WPROBE", raising=False)
-    # Default/empty name → no TLS set, no env applied.
-    with profiles.profile_scope_for_detached_worker("default", "test"):
-        assert profiles.get_active_profile_name() in ("", "default")
-        assert os.environ.get("ISSUE_3957_WPROBE") is None
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    # Simulate a named profile having loaded its .env credentials (#6327):
+    # the registry must record those keys as owned by a NAMED profile so the
+    # root scope can prove they are foreign to root.
+    profiles._loaded_profile_env_keys.add("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner["OPENROUTER_API_KEY"] = "work"
+    os.environ["OPENROUTER_API_KEY"] = "named-profile-credential-leaked"
+
+    # Set process-wide active to a named profile to verify TLS overrides it.
+    profiles._active_profile = "work"
+    try:
+        # Default name → TLS bound, root thread env installed, raw channel
+        # scrubbed for the body.
+        with profiles.profile_scope_for_detached_worker("default", "test"):
+            assert profiles.get_active_profile_name() == "default"
+            assert os.environ.get("ISSUE_3957_WPROBE") is None
+            # Named profile credential is NOT visible inside default scope (#6327).
+            assert os.environ.get("OPENROUTER_API_KEY") is None
+        # Credential restored after scope exit.
+        assert os.environ.get("OPENROUTER_API_KEY") == "named-profile-credential-leaked"
+    finally:
+        profiles._active_profile = "default"
+        profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+        profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+        os.environ.pop("OPENROUTER_API_KEY", None)
+    # Empty name → still no-op.
     with profiles.profile_scope_for_detached_worker("", "test"):
         assert os.environ.get("ISSUE_3957_WPROBE") is None
+    # After the scope, TLS is cleared; falls back to process-wide active.
+    assert profiles.get_active_profile_name() in ("", "default")
 
 
 def test_detached_worker_scope_binds_profile_on_new_thread(monkeypatch, tmp_path):
@@ -874,6 +910,484 @@ def test_detached_worker_scope_scrubs_non_registry_agent_creds(monkeypatch, tmp_
     assert os.environ.get("MSI_ENDPOINT") == "http://169.254.169.254/msi"
 
 
+
+def test_default_detached_worker_isolates_from_named_active_profile(monkeypatch, tmp_path):
+    """Default-scoped detached worker must resolve default, not named active (#6326).
+
+    When the process-wide active profile is a named profile (e.g. 'work'),
+    a detached worker spawned for the 'default' profile must bind the
+    request-profile TLS so that get_active_profile_name() returns 'default',
+    not 'work', AND must install root-owned thread/context credentials while
+    closing the raw os.getenv() channel: the named profile's .env values
+    (proven foreign to root) are scrubbed from os.environ for the worker body
+    and restored afterwards (#6327).  Without this fix, the worker would
+    resolve 'work's provider/model/credentials — breaking profile isolation.
+    """
+    import threading
+
+    base = tmp_path / ".hermes"
+    (base / "profiles" / "work").mkdir(parents=True)
+    (base / "profiles" / "work" / ".env").write_text(
+        "ISSUE_3957_WPROBE=worker-env\nOPENROUTER_API_KEY=named-profile-credential-leaked\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.delenv("ISSUE_3957_WPROBE", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    # Load the named profile's .env into os.environ and record its ownership
+    # so the root scope can prove those values are foreign to root (#6327).
+    profiles._reload_dotenv(base / "profiles" / "work")
+
+    # Simulate process-wide active profile == 'work'
+    profiles._active_profile = "work"
+    try:
+        out: dict = {}
+        worker_exc: list[BaseException] = []
+
+        def worker():
+            try:
+                # On this fresh thread, get_active_profile_name() returns 'work'
+                # (process-wide active) because no TLS is set yet.
+                out["before"] = profiles.get_active_profile_name()
+                out["before_key"] = os.environ.get("OPENROUTER_API_KEY")
+                with profiles.profile_scope_for_detached_worker("default", "test"):
+                    out["inside"] = profiles.get_active_profile_name()
+                    out["inside_env"] = os.environ.get("ISSUE_3957_WPROBE")
+                    out["inside_key"] = os.environ.get("OPENROUTER_API_KEY")
+                out["after"] = profiles.get_active_profile_name()
+                out["after_key"] = os.environ.get("OPENROUTER_API_KEY")
+            except BaseException as exc:
+                worker_exc.append(exc)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        if worker_exc:
+            raise worker_exc[0]
+
+        # Before scope: process-wide active 'work' is visible on the new thread.
+        assert out["before"] == "work"
+        # Named profile credential IS visible before the scope (the leaked state).
+        assert out["before_key"] == "named-profile-credential-leaked"
+        # Inside scope: TLS bound to 'default' overrides process-wide 'work'.
+        assert out["inside"] == "default"
+        # Raw os.getenv() channel closed for the root worker body: the named
+        # profile's .env values (proven foreign to root) are scrubbed (#6327).
+        assert out["inside_env"] is None
+        assert out["inside_key"] is None
+        # After scope: TLS cleared, falls back to process-wide 'work', and the
+        # scrubbed named credential is restored (no stale reinsertion).
+        assert out["after"] == "work"
+        assert out["after_key"] == "named-profile-credential-leaked"
+    finally:
+        profiles._active_profile = "default"
+        # Clean up the .env state loaded by _reload_dotenv so it does not
+        # leak into subsequent tests.
+        profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+        profiles._loaded_profile_env_keys.discard("ISSUE_3957_WPROBE")
+        profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+        profiles._loaded_profile_env_owner.pop("ISSUE_3957_WPROBE", None)
+        os.environ.pop("OPENROUTER_API_KEY", None)
+        os.environ.pop("ISSUE_3957_WPROBE", None)
+
+def test_default_detached_worker_preserves_root_credentials_when_root_active(monkeypatch, tmp_path):
+    """Default-scoped worker preserves root's own credentials when root is active (#6327).
+
+    Loads a REAL root ``.env`` through ``_reload_dotenv()`` and asserts BOTH
+    the raw ``os.getenv()`` channel AND the TLS-aware
+    ``_thread_local_env_value()`` / provider behavior preserve the root
+    credential inside the default worker.  The root scope must install the
+    canonical root runtime/thread env BEFORE blocking process fallback, and
+    must NOT scrub root-owned keys (owner == "" in the ownership registry).
+    """
+    import threading
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text(
+        "OPENROUTER_API_KEY=root-own-key\nISSUE_3957_ROOT_PROBE=root-probe-value\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("ISSUE_3957_ROOT_PROBE", raising=False)
+
+    # Load the REAL root .env into os.environ; ownership registry must record
+    # these keys as root-owned (owner == "") so they are never scrubbed.
+    profiles._reload_dotenv(base)
+    assert profiles._loaded_profile_env_owner.get("OPENROUTER_API_KEY") == ""
+    assert profiles._loaded_profile_env_owner.get("ISSUE_3957_ROOT_PROBE") == ""
+    assert os.environ.get("OPENROUTER_API_KEY") == "root-own-key"
+
+    # Process-wide active profile is root (default state).
+    profiles._active_profile = "default"
+    try:
+        out: dict = {}
+        worker_exc: list[BaseException] = []
+
+        def worker():
+            try:
+                with profiles.profile_scope_for_detached_worker("default", "test"):
+                    out["name"] = profiles.get_active_profile_name()
+                    # Raw os.getenv() channel preserves the root credential.
+                    out["raw"] = os.environ.get("OPENROUTER_API_KEY")
+                    out["raw_probe"] = os.environ.get("ISSUE_3957_ROOT_PROBE")
+                    # TLS-aware channel resolves it from the installed root
+                    # thread env (not the empty default).
+                    out["tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                    out["tls_probe"] = config._thread_local_env_value(
+                        "ISSUE_3957_ROOT_PROBE"
+                    )
+                    out["blocked"] = getattr(
+                        config._thread_ctx, "block_process_env_fallback", False
+                    )
+                    # Provider behavior: ${VAR} expansion in a custom provider
+                    # config must resolve the root credential via the
+                    # TLS-aware path inside the worker.
+                    out["expanded"] = config._expand_env_vars(
+                        {"api_key": "${OPENROUTER_API_KEY}"}
+                    )
+                # Restored after scope exit: raw still present, TLS cleared.
+                out["after_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["after_blocked"] = getattr(
+                    config._thread_ctx, "block_process_env_fallback", False
+                )
+                out["after_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+            except BaseException as exc:
+                worker_exc.append(exc)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        if worker_exc:
+            raise worker_exc[0]
+
+        # Credential intact inside the default scope (raw + TLS + provider).
+        assert out["name"] == "default"
+        assert out["raw"] == "root-own-key"
+        assert out["raw_probe"] == "root-probe-value"
+        assert out["tls"] == "root-own-key"
+        assert out["tls_probe"] == "root-probe-value"
+        assert out["blocked"] is True
+        assert out["expanded"] == {"api_key": "root-own-key"}
+        # Credential intact after scope exit too; TLS + block flag restored.
+        assert out["after_raw"] == "root-own-key"
+        assert out["after_blocked"] is False
+        assert out["after_tls"] == "root-own-key"
+    finally:
+        profiles._active_profile = "default"
+        # Clean up the .env state loaded by _reload_dotenv so it does not
+        # leak into subsequent tests.
+        profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+        profiles._loaded_profile_env_keys.discard("ISSUE_3957_ROOT_PROBE")
+        profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+        profiles._loaded_profile_env_owner.pop("ISSUE_3957_ROOT_PROBE", None)
+        os.environ.pop("OPENROUTER_API_KEY", None)
+        os.environ.pop("ISSUE_3957_ROOT_PROBE", None)
+
+
+def test_detached_worker_named_root_overlap_named_first(monkeypatch, tmp_path):
+    """Barrier-controlled named→root overlap: same key, different values (#6327).
+
+    The named profile's .env carries OPENROUTER_API_KEY=named-value and the
+    root profile's .env carries OPENROUTER_API_KEY=root-value.  The named
+    scope enters FIRST; while it holds the scope, a root worker must NOT see
+    the named value through raw os.getenv() (the ownership protocol serializes
+    the process-env mutation + raw-read body), and after the named scope
+    exits the root worker must resolve the ROOT value — never the named one.
+    """
+    import threading
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    work_home = base / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    (work_home / ".env").write_text(
+        "OPENROUTER_API_KEY=named-value\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    # Load the NAMED profile's .env into os.environ (process-wide active =
+    # named profile), recording ownership so the root scope can prove the
+    # value is foreign.
+    profiles._reload_dotenv(work_home)
+    assert profiles._loaded_profile_env_owner.get("OPENROUTER_API_KEY") == "work"
+    assert os.environ.get("OPENROUTER_API_KEY") == "named-value"
+    profiles._active_profile = "work"
+
+    named_entered = threading.Event()
+    release_named = threading.Event()
+    root_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def named_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("work", "test"):
+                named_entered.set()
+                out["named_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["named_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                # Hold the scope until the main thread has started the root
+                # worker and confirmed it is blocked on the ownership lock.
+                assert release_named.wait(5)
+        except BaseException as exc:
+            worker_exc.append(exc)
+
+    def root_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("default", "test"):
+                out["root_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["root_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            root_done.set()
+
+    t_named = threading.Thread(target=named_worker)
+    t_root = threading.Thread(target=root_worker)
+    t_named.start()
+    assert named_entered.wait(5)
+    # Start the root worker while the named scope is active.  The ownership
+    # lock serializes the process-env mutation + raw-read body, so the root
+    # worker must NOT be able to enter (or see the named value) yet.
+    t_root.start()
+    import time as _time
+
+    _time.sleep(0.1)
+    assert not root_done.is_set()
+    release_named.set()
+    t_named.join(5)
+    t_root.join(5)
+    if worker_exc:
+        raise worker_exc[0]
+
+    # Named worker saw its own value on both channels.
+    assert out["named_raw"] == "named-value"
+    assert out["named_tls"] == "named-value"
+    # Root worker, after the named scope exited, resolved the ROOT value via
+    # the TLS-aware channel — never the named value.
+    assert out["root_tls"] == "root-value"
+    # Raw channel inside the root worker is scrubbed (named value proven
+    # foreign to root) — the raw read must NOT see the named credential.
+    assert out["root_raw"] is None
+    # Process env restored to the pre-scope named state (no stale values).
+    assert os.environ.get("OPENROUTER_API_KEY") == "named-value"
+    profiles._active_profile = "default"
+    profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
+
+
+def test_detached_worker_named_root_overlap_root_first(monkeypatch, tmp_path):
+    """Barrier-controlled root→named overlap: same key, different values (#6327).
+
+    Mirrors test_detached_worker_named_root_overlap_named_first but the ROOT
+    scope enters FIRST.  While the root worker is active (holding the
+    ownership lock), the named worker must not be able to enter or expose the
+    named value; after the root scope exits, the named worker resolves the
+    NAMED value on both channels.
+    """
+    import threading
+    import time as _time
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    work_home = base / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    (work_home / ".env").write_text(
+        "OPENROUTER_API_KEY=named-value\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    profiles._reload_dotenv(work_home)
+    assert os.environ.get("OPENROUTER_API_KEY") == "named-value"
+    profiles._active_profile = "work"
+
+    root_entered = threading.Event()
+    release_root = threading.Event()
+    named_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def root_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("default", "test"):
+                root_entered.set()
+                out["root_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["root_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                assert release_root.wait(5)
+        except BaseException as exc:
+            worker_exc.append(exc)
+
+    def named_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("work", "test"):
+                out["named_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["named_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            named_done.set()
+
+    t_root = threading.Thread(target=root_worker)
+    t_named = threading.Thread(target=named_worker)
+    t_root.start()
+    assert root_entered.wait(5)
+    # Start the named worker while the root scope is active.  The ownership
+    # lock serializes the process-env mutation + raw-read body, so the named
+    # worker must NOT enter while the root worker holds the scope.
+    t_named.start()
+    _time.sleep(0.1)
+    assert not named_done.is_set()
+    release_root.set()
+    t_root.join(5)
+    t_named.join(5)
+    if worker_exc:
+        raise worker_exc[0]
+
+    # Root worker resolved the root value (raw scrubbed of the named value).
+    assert out["root_tls"] == "root-value"
+    assert out["root_raw"] is None
+    # Named worker, after the root scope exited, resolved the NAMED value.
+    assert out["named_raw"] == "named-value"
+    assert out["named_tls"] == "named-value"
+    assert os.environ.get("OPENROUTER_API_KEY") == "named-value"
+    profiles._active_profile = "default"
+    profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
+
+
+def test_detached_worker_root_scope_restores_on_exception(monkeypatch, tmp_path):
+    """Root worker restores os.environ / TLS / fallback state on exception (#6327).
+
+    A real root .env is loaded through _reload_dotenv(); a named profile's
+    .env is loaded into os.environ as the foreign (leaked) state.  An
+    exception raised inside the default worker body must NOT leave the scrubbed
+    named value missing, must restore the root credential, and must restore the
+    thread env + block_process_env_fallback on the worker thread.
+    """
+    import threading
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    work_home = base / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    (work_home / ".env").write_text(
+        "OPENROUTER_API_KEY=named-value\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    profiles._reload_dotenv(work_home)
+    assert os.environ.get("OPENROUTER_API_KEY") == "named-value"
+    profiles._active_profile = "work"
+
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("default", "test"):
+                # Raw channel scrubbed while inside the body.
+                out["inside_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["inside_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass  # expected — restoration must still happen
+        except BaseException as exc:
+            worker_exc.append(exc)
+        # After the exception propagated through the scope's finally:
+        out["after_raw"] = os.environ.get("OPENROUTER_API_KEY")
+        out["after_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        out["after_blocked"] = getattr(
+            config._thread_ctx, "block_process_env_fallback", False
+        )
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    if worker_exc:
+        raise worker_exc[0]
+
+    assert out["inside_raw"] is None  # foreign value scrubbed during the body
+    assert out["inside_tls"] == "root-value"  # root thread env installed
+    # Exception restoration: named value reinserted, no stale overwrite.
+    assert out["after_raw"] == "named-value"
+    # TLS-aware read after restore: root credential preserved via process env.
+    assert out["after_tls"] == "named-value"
+    assert out["after_blocked"] is False
+    assert os.environ.get("OPENROUTER_API_KEY") == "named-value"
+    profiles._active_profile = "default"
+    profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
+
+
+def test_detached_worker_root_scope_no_stale_reinsertion(monkeypatch, tmp_path):
+    """Root worker restore never reinserts a value the body itself changed (#6327).
+
+    A named profile's .env (foreign to root) is scrubbed for the body, then
+    the body overwrites that key with its own value.  On exit the scope must
+    NOT reinsert the stale foreign value over the body's write — restoration
+    only reinserts keys that are still absent.
+    """
+    import threading
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    work_home = base / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    (work_home / ".env").write_text(
+        "OPENROUTER_API_KEY=named-value\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    profiles._reload_dotenv(work_home)
+    profiles._active_profile = "work"
+
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("default", "test"):
+                out["inside_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                # The worker body itself writes the key with a new value.
+                os.environ["OPENROUTER_API_KEY"] = "body-wrote-value"
+            out["after_raw"] = os.environ.get("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    if worker_exc:
+        raise worker_exc[0]
+
+    assert out["inside_raw"] is None
+    # No stale reinsertion/overwrite: the body's own value survives the exit.
+    assert out["after_raw"] == "body-wrote-value"
+    profiles._active_profile = "default"
+    profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
+
+
 def test_expand_env_vars_does_not_leak_process_env_under_block_scope(monkeypatch):
     """Config ${VAR} expansion must not reconstruct a server-process credential
     for a profile-scoped readonly/background read (#3961 config-template vector).
@@ -913,3 +1427,1411 @@ def test_expand_env_vars_does_not_leak_process_env_under_block_scope(monkeypatch
         else:
             config._thread_ctx.env = prev_env
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #6327 — ONE shared full-body process-env ownership lock across entrypoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_background_worker_direct_overlap_detached_direct_first(monkeypatch, tmp_path):
+    """Direct background-worker scope overlapping a detached named scope (#6327).
+
+    A DIRECT ``profile_env_for_background_worker`` scope (alpha) enters first
+    and holds the shared full-body ownership lock.  A detached
+    ``profile_scope_for_detached_worker`` (beta) started mid-body must NOT
+    enter early; after the direct scope exits the detached worker must resolve
+    ITS value on both the raw ``os.getenv()`` and TLS channels, and the
+    ambient process env must be restored exactly (no stale alpha/beta value).
+    """
+    import threading
+    import time as _time
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    for prof, val in (("alpha", "alpha-value"), ("beta", "beta-value")):
+        home = base / "profiles" / prof
+        home.mkdir(parents=True)
+        (home / ".env").write_text(f"OPENROUTER_API_KEY={val}\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ambient-value")
+
+    direct_entered = threading.Event()
+    release_direct = threading.Event()
+    detached_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def direct_worker():
+        try:
+            with profiles.profile_env_for_background_worker("alpha", "test"):
+                direct_entered.set()
+                out["direct_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["direct_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                assert release_direct.wait(5)
+        except BaseException as exc:
+            worker_exc.append(exc)
+
+    def detached_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("beta", "test"):
+                out["detached_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["detached_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            detached_done.set()
+
+    t_direct = threading.Thread(target=direct_worker)
+    t_detached = threading.Thread(target=detached_worker)
+    t_direct.start()
+    assert direct_entered.wait(5)
+    # Start the detached scope while the DIRECT scope is mid-body.  The shared
+    # ownership lock must serialize the full body — no early entry.
+    t_detached.start()
+    _time.sleep(0.1)
+    assert not detached_done.is_set()
+    release_direct.set()
+    t_direct.join(5)
+    t_detached.join(5)
+    if worker_exc:
+        raise worker_exc[0]
+
+    # Direct scope saw its own value on both channels throughout.
+    assert out["direct_raw"] == "alpha-value"
+    assert out["direct_tls"] == "alpha-value"
+    # Detached scope, after the direct scope exited, resolved the BETA value.
+    assert out["detached_raw"] == "beta-value"
+    assert out["detached_tls"] == "beta-value"
+    # Exact ambient restoration — no stale alpha/beta value left behind.
+    assert os.environ.get("OPENROUTER_API_KEY") == "ambient-value"
+
+
+def test_background_worker_direct_overlap_detached_detached_first(monkeypatch, tmp_path):
+    """Detached named scope overlapping a direct background-worker scope (#6327).
+
+    Mirrors test_background_worker_direct_overlap_detached_direct_first with
+    the DETACHED scope entering first: while it holds the shared ownership
+    lock the direct scope must not enter early, and after the detached scope
+    exits the direct scope must resolve ITS value on both channels with exact
+    ambient restoration.
+    """
+    import threading
+    import time as _time
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    for prof, val in (("alpha", "alpha-value"), ("beta", "beta-value")):
+        home = base / "profiles" / prof
+        home.mkdir(parents=True)
+        (home / ".env").write_text(f"OPENROUTER_API_KEY={val}\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ambient-value")
+
+    detached_entered = threading.Event()
+    release_detached = threading.Event()
+    direct_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def detached_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("beta", "test"):
+                detached_entered.set()
+                out["detached_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["detached_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                assert release_detached.wait(5)
+        except BaseException as exc:
+            worker_exc.append(exc)
+
+    def direct_worker():
+        try:
+            with profiles.profile_env_for_background_worker("alpha", "test"):
+                out["direct_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["direct_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            direct_done.set()
+
+    t_detached = threading.Thread(target=detached_worker)
+    t_direct = threading.Thread(target=direct_worker)
+    t_detached.start()
+    assert detached_entered.wait(5)
+    # Start the direct scope while the detached scope is mid-body.  The shared
+    # ownership lock must block it — no early entry.
+    t_direct.start()
+    _time.sleep(0.1)
+    assert not direct_done.is_set()
+    release_detached.set()
+    t_detached.join(5)
+    t_direct.join(5)
+    if worker_exc:
+        raise worker_exc[0]
+
+    # Detached scope saw its own value on both channels throughout.
+    assert out["detached_raw"] == "beta-value"
+    assert out["detached_tls"] == "beta-value"
+    # Direct scope, after the detached scope exited, resolved the ALPHA value.
+    assert out["direct_raw"] == "alpha-value"
+    assert out["direct_tls"] == "alpha-value"
+    # Exact ambient restoration.
+    assert os.environ.get("OPENROUTER_API_KEY") == "ambient-value"
+
+
+def test_active_request_mirrored_overlap_detached_root_active_first(monkeypatch, tmp_path):
+    """Active-request mirrored scope overlapping a detached ROOT scope (#6327).
+
+    The active-request scope (``profile_env_for_active_request`` → the shared
+    ``profile_env_for_background_worker`` path) enters first for the named
+    "work" profile; a detached DEFAULT/root worker started mid-body must not
+    enter early.  After the active scope exits, the root worker resolves the
+    ROOT credential via TLS (raw channel scrubbed of the named value), and the
+    ambient named state is restored exactly.
+    """
+    import threading
+    import time as _time
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    work_home = base / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    (work_home / ".env").write_text(
+        "OPENROUTER_API_KEY=active-value\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    # Load the named profile's .env as the process-wide (ambient) state and
+    # record ownership so the root scope can prove the value is foreign.
+    profiles._reload_dotenv(work_home)
+    assert profiles._loaded_profile_env_owner.get("OPENROUTER_API_KEY") == "work"
+    assert os.environ.get("OPENROUTER_API_KEY") == "active-value"
+    profiles._active_profile = "work"
+
+    active_entered = threading.Event()
+    release_active = threading.Event()
+    detached_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def active_worker():
+        profiles.set_request_profile("work")
+        try:
+            with profiles.profile_env_for_active_request("test"):
+                active_entered.set()
+                out["active_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["active_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                assert release_active.wait(5)
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            profiles.clear_request_profile()
+
+    def detached_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("default", "test"):
+                out["detached_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["detached_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            detached_done.set()
+
+    t_active = threading.Thread(target=active_worker)
+    t_detached = threading.Thread(target=detached_worker)
+    t_active.start()
+    assert active_entered.wait(5)
+    # Start the root detached worker while the active-request scope is
+    # mid-body.  The shared ownership lock must block it — no early entry.
+    t_detached.start()
+    _time.sleep(0.1)
+    assert not detached_done.is_set()
+    release_active.set()
+    t_active.join(5)
+    t_detached.join(5)
+    if worker_exc:
+        raise worker_exc[0]
+
+    # Active-request scope saw the NAMED value on both channels throughout.
+    assert out["active_raw"] == "active-value"
+    assert out["active_tls"] == "active-value"
+    # Root worker, after the active scope exited, resolved the ROOT value via
+    # TLS; the raw channel is scrubbed of the foreign named value.
+    assert out["detached_tls"] == "root-value"
+    assert out["detached_raw"] is None
+    # Exact ambient restoration (the named process-wide state).
+    assert os.environ.get("OPENROUTER_API_KEY") == "active-value"
+    profiles._active_profile = "default"
+    profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
+
+
+def test_active_request_mirrored_overlap_detached_root_detached_first(monkeypatch, tmp_path):
+    """Detached ROOT scope overlapping an active-request mirrored scope (#6327).
+
+    Mirrors test_active_request_mirrored_overlap_detached_root_active_first
+    with the detached DEFAULT/root worker entering first: while it holds the
+    shared ownership lock the active-request scope must not enter early, and
+    after the root worker exits the active scope resolves the NAMED value on
+    both channels with exact ambient restoration.
+    """
+    import threading
+    import time as _time
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    work_home = base / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    (work_home / ".env").write_text(
+        "OPENROUTER_API_KEY=active-value\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    profiles._reload_dotenv(work_home)
+    assert os.environ.get("OPENROUTER_API_KEY") == "active-value"
+    profiles._active_profile = "work"
+
+    detached_entered = threading.Event()
+    release_detached = threading.Event()
+    active_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def detached_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("default", "test"):
+                detached_entered.set()
+                out["detached_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["detached_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                assert release_detached.wait(5)
+        except BaseException as exc:
+            worker_exc.append(exc)
+
+    def active_worker():
+        profiles.set_request_profile("work")
+        try:
+            with profiles.profile_env_for_active_request("test"):
+                out["active_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["active_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            profiles.clear_request_profile()
+            active_done.set()
+
+    t_detached = threading.Thread(target=detached_worker)
+    t_active = threading.Thread(target=active_worker)
+    t_detached.start()
+    assert detached_entered.wait(5)
+    # Start the active-request scope while the root detached scope is
+    # mid-body.  The shared ownership lock must block it — no early entry.
+    t_active.start()
+    _time.sleep(0.1)
+    assert not active_done.is_set()
+    release_detached.set()
+    t_detached.join(5)
+    t_active.join(5)
+    if worker_exc:
+        raise worker_exc[0]
+
+    # Root worker saw the ROOT value via TLS (raw scrubbed) throughout.
+    assert out["detached_tls"] == "root-value"
+    assert out["detached_raw"] is None
+    # Active-request scope, after the root worker exited, resolved the NAMED
+    # value on both channels.
+    assert out["active_raw"] == "active-value"
+    assert out["active_tls"] == "active-value"
+    # Exact ambient restoration.
+    assert os.environ.get("OPENROUTER_API_KEY") == "active-value"
+    profiles._active_profile = "default"
+    profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Facet E — ROOT scopes under the shared full-body ownership lock (#6327)
+#
+# The shared _PROCESS_ENV_OWNERSHIP_LOCK must also serialize ROOT/default
+# direct and mirrored active-request bodies: a root body can otherwise observe
+# a named scope's raw env mid-overlap, and the named scope can restore a stale
+# snapshot over a concurrent root-body change.  These tests use a recording
+# lock proxy as a deterministic attempted-entry barrier — the proxy records the
+# blocked thread's real acquire() call, so "no early entry" is proven without
+# sleeps.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _AttemptRecordingOwnershipLock:
+    """RLock-compatible proxy around the shared ownership lock.
+
+    Records the first acquire() attempt made AFTER arm() (the first scope
+    enters before arming, so its own acquire is not recorded).  Lets a test
+    prove deterministically that a second thread actually tried to enter the
+    lock — and was blocked — instead of sleeping and hoping.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._armed = threading.Event()
+        self._attempted = threading.Event()
+
+    def arm(self):
+        self._armed.set()
+
+    @property
+    def attempted(self):
+        return self._attempted
+
+    def acquire(self, *args, **kwargs):
+        if self._armed.is_set():
+            self._attempted.set()
+        return self._inner.acquire(*args, **kwargs)
+
+    def release(self, *args, **kwargs):
+        return self._inner.release(*args, **kwargs)
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info):
+        self.release()
+        return False
+
+
+def test_background_worker_direct_root_overlap_detached_named_direct_first(
+    monkeypatch, tmp_path
+):
+    """Direct ROOT background scope overlapping a detached NAMED scope (#6327).
+
+    A DIRECT ``profile_env_for_background_worker("default")`` scope enters
+    first and holds the shared full-body ownership lock.  A detached named
+    worker started mid-body must not enter early — the recording proxy proves
+    the acquire attempt happened while the root body still held the lock.
+    Inside the root body the raw channel is scrubbed of the foreign named
+    value while TLS resolves the ROOT credential; after the root scope exits
+    the detached worker resolves ITS value on both channels, and the pre-test
+    env is restored exactly.
+    """
+    import threading
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    beta_home = base / "profiles" / "beta"
+    beta_home.mkdir(parents=True)
+    (beta_home / ".env").write_text("OPENROUTER_API_KEY=beta-value\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    # Simulate a named profile switch that loaded beta's .env as the current
+    # process-wide state: the root scope must scrub this foreign value from
+    # the raw channel for its whole body.
+    profiles._reload_dotenv(beta_home)
+    assert profiles._loaded_profile_env_owner.get("OPENROUTER_API_KEY") == "beta"
+    assert os.environ.get("OPENROUTER_API_KEY") == "beta-value"
+
+    proxy = _AttemptRecordingOwnershipLock(profiles._PROCESS_ENV_OWNERSHIP_LOCK)
+    monkeypatch.setattr(profiles, "_PROCESS_ENV_OWNERSHIP_LOCK", proxy)
+
+    root_entered = threading.Event()
+    release_root = threading.Event()
+    detached_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def root_worker():
+        try:
+            with profiles.profile_env_for_background_worker("default", "test"):
+                root_entered.set()
+                out["root_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["root_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                assert release_root.wait(5)
+        except BaseException as exc:
+            worker_exc.append(exc)
+
+    def detached_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("beta", "test"):
+                out["detached_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["detached_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            detached_done.set()
+
+    t_root = threading.Thread(target=root_worker)
+    t_detached = threading.Thread(target=detached_worker)
+    t_root.start()
+    assert root_entered.wait(5)
+    proxy.arm()
+    t_detached.start()
+    # Deterministic attempted-entry barrier: the detached thread's acquire()
+    # call must actually have happened (and blocked) — no sleeps.
+    assert proxy.attempted.wait(5), "detached worker never attempted the ownership lock"
+    assert not detached_done.is_set(), "detached worker entered before root released"
+    release_root.set()
+    t_root.join(5)
+    t_detached.join(5)
+    if worker_exc:
+        raise worker_exc[0]
+
+    # Root body: raw channel scrubbed of the foreign beta value; TLS root value.
+    assert out["root_raw"] is None
+    assert out["root_tls"] == "root-value"
+    # Detached worker, after the root scope exited, resolved the BETA value.
+    assert out["detached_raw"] == "beta-value"
+    assert out["detached_tls"] == "beta-value"
+    # Exact restoration — the pre-test named-loaded state, no stale root leak.
+    assert os.environ.get("OPENROUTER_API_KEY") == "beta-value"
+    profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
+
+
+def test_background_worker_direct_root_overlap_detached_named_detached_first(
+    monkeypatch, tmp_path
+):
+    """Detached NAMED scope overlapping a direct ROOT background scope (#6327).
+
+    Mirrors test_background_worker_direct_root_overlap_detached_named_direct_first
+    with the DETACHED named worker entering first: while it holds the shared
+    ownership lock the direct root scope must not enter early (attempted-entry
+    barrier), and after the detached scope exits the root body resolves the
+    ROOT credential via TLS with the raw channel scrubbed of the foreign named
+    value — plus exact ambient restoration.
+    """
+    import threading
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    beta_home = base / "profiles" / "beta"
+    beta_home.mkdir(parents=True)
+    (beta_home / ".env").write_text("OPENROUTER_API_KEY=beta-value\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    profiles._reload_dotenv(beta_home)
+    assert os.environ.get("OPENROUTER_API_KEY") == "beta-value"
+
+    proxy = _AttemptRecordingOwnershipLock(profiles._PROCESS_ENV_OWNERSHIP_LOCK)
+    monkeypatch.setattr(profiles, "_PROCESS_ENV_OWNERSHIP_LOCK", proxy)
+
+    detached_entered = threading.Event()
+    release_detached = threading.Event()
+    root_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def detached_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("beta", "test"):
+                detached_entered.set()
+                out["detached_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["detached_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                assert release_detached.wait(5)
+        except BaseException as exc:
+            worker_exc.append(exc)
+
+    def root_worker():
+        try:
+            with profiles.profile_env_for_background_worker("default", "test"):
+                out["root_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["root_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            root_done.set()
+
+    t_detached = threading.Thread(target=detached_worker)
+    t_root = threading.Thread(target=root_worker)
+    t_detached.start()
+    assert detached_entered.wait(5)
+    proxy.arm()
+    t_root.start()
+    assert proxy.attempted.wait(5), "root worker never attempted the ownership lock"
+    assert not root_done.is_set(), "root worker entered before detached released"
+    release_detached.set()
+    t_detached.join(5)
+    t_root.join(5)
+    if worker_exc:
+        raise worker_exc[0]
+
+    # Detached worker saw the NAMED value on both channels throughout.
+    assert out["detached_raw"] == "beta-value"
+    assert out["detached_tls"] == "beta-value"
+    # Root worker, after the detached scope exited, resolved the ROOT value
+    # via TLS; the raw channel is scrubbed of the foreign named value.
+    assert out["root_tls"] == "root-value"
+    assert out["root_raw"] is None
+    # Exact restoration.
+    assert os.environ.get("OPENROUTER_API_KEY") == "beta-value"
+    profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
+
+
+def test_active_request_root_overlap_detached_named_active_first(
+    monkeypatch, tmp_path
+):
+    """Active-request ROOT scope overlapping a detached NAMED scope (#6327).
+
+    The active-request scope (``profile_env_for_active_request`` with the
+    thread-local profile set to ``default`` → the shared
+    ``profile_env_for_background_worker`` root branch) enters first and holds
+    the ownership lock.  A detached named worker started mid-body must not
+    enter early (attempted-entry barrier).  The root body RAISES to prove
+    exact exception restoration: the scrubbed foreign value is restored and
+    the lock released, then the detached worker resolves ITS value on both
+    channels and the pre-test env is restored exactly.
+    """
+    import threading
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    beta_home = base / "profiles" / "beta"
+    beta_home.mkdir(parents=True)
+    (beta_home / ".env").write_text("OPENROUTER_API_KEY=beta-value\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    profiles._reload_dotenv(beta_home)
+    assert os.environ.get("OPENROUTER_API_KEY") == "beta-value"
+
+    proxy = _AttemptRecordingOwnershipLock(profiles._PROCESS_ENV_OWNERSHIP_LOCK)
+    monkeypatch.setattr(profiles, "_PROCESS_ENV_OWNERSHIP_LOCK", proxy)
+
+    active_entered = threading.Event()
+    detached_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+    expected_boom: list[str] = []
+
+    def active_worker():
+        profiles.set_request_profile("default")
+        try:
+            with profiles.profile_env_for_active_request("test"):
+                active_entered.set()
+                out["active_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["active_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                raise ValueError("boom")
+        except ValueError:
+            expected_boom.append("boom")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            profiles.clear_request_profile()
+
+    def detached_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("beta", "test"):
+                out["detached_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["detached_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            detached_done.set()
+
+    t_active = threading.Thread(target=active_worker)
+    t_detached = threading.Thread(target=detached_worker)
+    t_active.start()
+    assert active_entered.wait(5)
+    proxy.arm()
+    t_detached.start()
+    assert proxy.attempted.wait(5), "detached worker never attempted the ownership lock"
+    assert not detached_done.is_set(), "detached worker entered before active released"
+    t_active.join(5)
+    t_detached.join(5)
+    if worker_exc:
+        raise worker_exc[0]
+    assert expected_boom == ["boom"], "root active-request body exception not propagated"
+
+    # Active-request root body saw the ROOT value via TLS; raw scrubbed.
+    assert out["active_tls"] == "root-value"
+    assert out["active_raw"] is None
+    # Detached worker, after the raising root scope restored everything,
+    # resolved the BETA value on both channels.
+    assert out["detached_raw"] == "beta-value"
+    assert out["detached_tls"] == "beta-value"
+    # Exact restoration even though the root body raised.
+    assert os.environ.get("OPENROUTER_API_KEY") == "beta-value"
+    profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
+
+
+def test_active_request_root_overlap_detached_named_detached_first(
+    monkeypatch, tmp_path
+):
+    """Detached NAMED scope overlapping an active-request ROOT scope (#6327).
+
+    Mirrors test_active_request_root_overlap_detached_named_active_first with
+    the DETACHED named worker entering first: while it holds the shared
+    ownership lock the active-request root scope must not enter early
+    (attempted-entry barrier), and after the detached scope exits the root
+    body resolves the ROOT credential via TLS with the raw channel scrubbed —
+    plus exact ambient restoration.
+    """
+    import threading
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    beta_home = base / "profiles" / "beta"
+    beta_home.mkdir(parents=True)
+    (beta_home / ".env").write_text("OPENROUTER_API_KEY=beta-value\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    profiles._reload_dotenv(beta_home)
+    assert os.environ.get("OPENROUTER_API_KEY") == "beta-value"
+
+    proxy = _AttemptRecordingOwnershipLock(profiles._PROCESS_ENV_OWNERSHIP_LOCK)
+    monkeypatch.setattr(profiles, "_PROCESS_ENV_OWNERSHIP_LOCK", proxy)
+
+    detached_entered = threading.Event()
+    release_detached = threading.Event()
+    active_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def detached_worker():
+        try:
+            with profiles.profile_scope_for_detached_worker("beta", "test"):
+                detached_entered.set()
+                out["detached_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["detached_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                assert release_detached.wait(5)
+        except BaseException as exc:
+            worker_exc.append(exc)
+
+    def active_worker():
+        profiles.set_request_profile("default")
+        try:
+            with profiles.profile_env_for_active_request("test"):
+                out["active_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["active_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            profiles.clear_request_profile()
+            active_done.set()
+
+    t_detached = threading.Thread(target=detached_worker)
+    t_active = threading.Thread(target=active_worker)
+    t_detached.start()
+    assert detached_entered.wait(5)
+    proxy.arm()
+    t_active.start()
+    assert proxy.attempted.wait(5), "active-request root never attempted the ownership lock"
+    assert not active_done.is_set(), "active-request root entered before detached released"
+    release_detached.set()
+    t_detached.join(5)
+    t_active.join(5)
+    if worker_exc:
+        raise worker_exc[0]
+
+    # Detached worker saw the NAMED value on both channels throughout.
+    assert out["detached_raw"] == "beta-value"
+    assert out["detached_tls"] == "beta-value"
+    # Active-request root scope, after the detached scope exited, resolved the
+    # ROOT value via TLS; raw channel scrubbed of the foreign named value.
+    assert out["active_tls"] == "root-value"
+    assert out["active_raw"] is None
+    # Exact restoration.
+    assert os.environ.get("OPENROUTER_API_KEY") == "beta-value"
+    profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+    profiles._loaded_profile_env_owner.pop("OPENROUTER_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
+
+
+def test_streaming_legacy_skill_lock_order_no_deadlock_with_direct_named(
+    monkeypatch, tmp_path
+):
+    """Forced legacy/static-module deadlock regression (#6327).
+
+    The streaming legacy/static fallback holds _SKILL_HOME_MODULE_PATCH_LOCK
+    for the whole turn and, mid-turn, enters profile_scope_for_detached_worker()
+    (a full-body _PROCESS_ENV_OWNERSHIP_LOCK holder) for model resolution.  A
+    direct named background scope holds the ownership lock and can wait on the
+    skill lock — if streaming took SKILL before PROCESS, the two threads would
+    form a cross-thread AB/BA cycle and neither would ever terminate.
+
+    This test composes the REAL locks in the fixed streaming order
+    (PROCESS -> SKILL, then the nested detached/model-resolution scope) against
+    a direct named background scope, and asserts BOTH threads terminate with
+    owner-correct raw/TLS values.  A source-order assertion pins the streaming
+    acquire order so reverting the fix fails the test even though the runtime
+    composition itself is well-ordered.
+    """
+    import threading
+    import time as _time
+
+    # Source-order pin: api/streaming.py must acquire the shared process-env
+    # ownership lock BEFORE the skill-module patch lock in the legacy/static
+    # full-turn block (single global lock order PROCESS -> SKILL -> ENV).
+    src = Path(__file__).parent.parent / "api" / "streaming.py"
+    text = src.read_text(encoding="utf-8")
+    proc_acquire = text.find("_PROCESS_ENV_OWNERSHIP_LOCK.acquire()")
+    skill_acquire = text.find("_SKILL_HOME_MODULE_PATCH_LOCK.acquire()")
+    assert proc_acquire != -1, "streaming must acquire _PROCESS_ENV_OWNERSHIP_LOCK"
+    assert skill_acquire != -1, "streaming must acquire _SKILL_HOME_MODULE_PATCH_LOCK"
+    assert 0 <= proc_acquire < skill_acquire, (
+        "global lock order violated: streaming must acquire "
+        "_PROCESS_ENV_OWNERSHIP_LOCK BEFORE _SKILL_HOME_MODULE_PATCH_LOCK"
+    )
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    for prof, val in (("alpha", "alpha-value"), ("beta", "beta-value")):
+        home = base / "profiles" / prof
+        home.mkdir(parents=True)
+        (home / ".env").write_text(f"OPENROUTER_API_KEY={val}\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ambient-value")
+
+    streaming_entered = threading.Event()
+    release_streaming = threading.Event()
+    direct_done = threading.Event()
+    out: dict = {}
+    worker_exc: list[BaseException] = []
+
+    def streaming_thread():
+        # The FIXED streaming order: the legacy/static full-turn block acquires
+        # the shared process-env ownership lock BEFORE the skill-module patch
+        # lock, then re-enters the detached/model-resolution scope mid-turn.
+        try:
+            with profiles._PROCESS_ENV_OWNERSHIP_LOCK:
+                with profiles._SKILL_HOME_MODULE_PATCH_LOCK:
+                    with profiles.profile_scope_for_detached_worker("beta", "test"):
+                        streaming_entered.set()
+                        out["streaming_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                        out["streaming_tls"] = config._thread_local_env_value(
+                            "OPENROUTER_API_KEY"
+                        )
+                    assert release_streaming.wait(10)
+        except BaseException as exc:
+            worker_exc.append(exc)
+
+    def direct_thread():
+        try:
+            with profiles.profile_env_for_background_worker("alpha", "test"):
+                out["direct_raw"] = os.environ.get("OPENROUTER_API_KEY")
+                out["direct_tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        except BaseException as exc:
+            worker_exc.append(exc)
+        finally:
+            direct_done.set()
+
+    t_streaming = threading.Thread(target=streaming_thread)
+    t_direct = threading.Thread(target=direct_thread)
+    t_streaming.start()
+    assert streaming_entered.wait(5)
+    t_direct.start()
+    _time.sleep(0.1)
+    assert not direct_done.is_set(), "direct scope entered while streaming held the turn"
+    release_streaming.set()
+    t_streaming.join(15)
+    t_direct.join(15)
+    if worker_exc:
+        raise worker_exc[0]
+    assert not t_streaming.is_alive(), "streaming thread deadlocked on SKILL/PROCESS"
+    assert not t_direct.is_alive(), "direct background thread deadlocked on PROCESS/SKILL"
+
+    # Streaming nested detached scope resolved the BETA value on both channels.
+    assert out["streaming_raw"] == "beta-value"
+    assert out["streaming_tls"] == "beta-value"
+    # Direct named scope, after the streaming turn released, resolved ALPHA.
+    assert out["direct_raw"] == "alpha-value"
+    assert out["direct_tls"] == "alpha-value"
+    # Exact ambient restoration.
+    assert os.environ.get("OPENROUTER_API_KEY") == "ambient-value"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Facet F — production-composed streaming ownership (#6327, round 2)
+#
+# The Facet E lock-order tests compose the REAL locks by hand but never run
+# _run_agent_streaming(), the checkpoint thread, the bounded joins, or the
+# unwind paths — so they cannot see the two remaining concurrency schedules:
+#
+#   B1 — the streaming turn snapshots/mutates raw os.environ UNCONDITIONALLY
+#        but, on the dynamic/nonlegacy branch, used to take the shared
+#        _PROCESS_ENV_OWNERSHIP_LOCK only for the legacy skill-module block.
+#        A direct named profile scope could then run concurrently while the
+#        turn's env was installed (both observe the wrong profile; reversed
+#        restoration leaves stale values).  Fix: the turn now acquires
+#        PROCESS before ANY raw-env snapshot/mutation, in every mode.
+#
+#   B2 — the periodic checkpoint thread holds the per-session agent lock and
+#        used to enter profile_env_for_background_worker(), which blocks on
+#        the turn's full-body PROCESS ownership; the turn's bounded join then
+#        blocks on the same agent lock → AGENT↔PROCESS deadlock.  Fix:
+#        _save_streaming_checkpoint() uses a READ-ONLY explicit-profile scope
+#        (thread/context-local only, never mirrors os.environ) so the
+#        AGENT → PROCESS edge is gone.
+#
+# These tests drive the REAL _run_agent_streaming() with a fake session/agent
+# and assert both schedules on real unlock paths (normal completion, cancel,
+# exception).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _StreamingFakeHomeOverride:
+    """Minimal hermes_constants stand-in for the context-local home override."""
+
+    def set_hermes_home_override(self, home):
+        return ("override-token",)
+
+    def reset_hermes_home_override(self, token):
+        return None
+
+
+class _StreamingFakeSession:
+    """Minimal Session stand-in (mirrors test_issue2965's shape)."""
+
+    def __init__(self, session_id, profile, workspace, stream_id):
+        self.session_id = session_id
+        self.title = "Streaming ownership"
+        self.workspace = str(workspace)
+        self.model = "test-model"
+        self.model_provider = None
+        self.profile = profile
+        self.personality = None
+        self.messages = []
+        self.context_messages = []
+        self.tool_calls = []
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.estimated_cost = None
+        self.context_length = 0
+        self.threshold_tokens = 0
+        self.last_prompt_tokens = 0
+        self.active_stream_id = stream_id
+        self.pending_user_message = None
+        self.pending_attachments = []
+        self.pending_started_at = None
+        self.llm_title_generated = True
+
+    def save(self, *args, **kwargs):
+        return None
+
+    def compact(self):
+        return {
+            "session_id": self.session_id,
+            "title": self.title,
+            "workspace": self.workspace,
+            "model": self.model,
+            "created_at": 0,
+            "updated_at": 0,
+            "pinned": False,
+            "archived": False,
+            "project_id": None,
+            "profile": self.profile,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "estimated_cost": self.estimated_cost,
+            "personality": self.personality,
+        }
+
+
+def _install_streaming_profile_env(monkeypatch, tmp_path, profile_values):
+    """Wire fake profile homes + streaming deps; return (session, stream_id)."""
+    import queue
+
+    import api.config as cfg
+    import api.oauth as oauth
+    import api.profiles as profiles
+    import api.streaming as streaming
+
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True)
+    (base / ".env").write_text("OPENROUTER_API_KEY=root-value\n", encoding="utf-8")
+    homes = {}
+    for prof, val in profile_values.items():
+        home = base / "profiles" / prof
+        home.mkdir(parents=True)
+        (home / ".env").write_text(f"OPENROUTER_API_KEY={val}\n", encoding="utf-8")
+        homes[prof] = home
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+
+    def fake_get_home(profile_name):
+        name = str(profile_name or "").strip() or "default"
+        if name == "default":
+            return base
+        return homes.get(name, base / "profiles" / name)
+
+    def fake_runtime_env(home):
+        home_str = str(Path(home))
+        for prof, val in profile_values.items():
+            if home_str == str(homes[prof]):
+                return {"OPENROUTER_API_KEY": val}
+        if home_str == str(base):
+            return {"OPENROUTER_API_KEY": "root-value"}
+        return {}
+
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", fake_get_home)
+    monkeypatch.setattr(profiles, "get_profile_runtime_env", fake_runtime_env)
+
+    session = _StreamingFakeSession(
+        session_id="issue6327-stream-session",
+        profile="alpha",
+        workspace=tmp_path,
+        stream_id="issue6327-stream",
+    )
+    stream_id = session.active_stream_id
+
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: session)
+    monkeypatch.setattr(
+        streaming, "_maybe_schedule_title_refresh", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        streaming,
+        "resolve_model_provider",
+        lambda _model, **_kw: ("test-model", "test-provider", None),
+    )
+    monkeypatch.setattr("api.config.get_config", lambda: {})
+    monkeypatch.setattr("api.config._resolve_cli_toolsets", lambda _cfg: [])
+    monkeypatch.setattr("api.config.load_settings", lambda: {})
+    monkeypatch.setattr(
+        oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda _resolver, requested=None: {
+            "provider": requested or "test-provider",
+            "api_key": "synthetic-key",
+            "base_url": None,
+        },
+    )
+
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    fake_runtime_module.resolve_runtime_provider = lambda requested=None: {
+        "provider": requested or "test-provider",
+        "api_key": "synthetic-key",
+        "base_url": None,
+    }
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.runtime_provider = fake_runtime_module
+    fake_hermes_state = types.ModuleType("hermes_state")
+
+    class _FakeSessionDB:
+        def __init__(self, db_path=None):
+            self.db_path = db_path
+
+        def close(self):
+            return None
+
+    fake_hermes_state.SessionDB = _FakeSessionDB
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+    monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
+
+    with cfg.SESSION_AGENT_CACHE_LOCK:
+        cfg.SESSION_AGENT_CACHE.clear()
+    streaming.STREAMS.clear()
+    streaming.CANCEL_FLAGS.clear()
+    streaming.AGENT_INSTANCES.clear()
+    streaming.STREAM_PARTIAL_TEXT.clear()
+    streaming.STREAM_REASONING_TEXT.clear()
+    streaming.STREAM_LIVE_TOOL_CALLS.clear()
+    streaming.STREAMS[stream_id] = queue.Queue()
+
+    return session, stream_id
+
+
+class _StreamingFakeAgent:
+    """Agent stand-in: subclasses implement run_conversation()."""
+
+    def __init__(self, **kwargs):
+        self.session_db = kwargs.get("session_db")
+        self._session_db = self.session_db
+        self.session_prompt_tokens = 0
+        self.session_completion_tokens = 0
+        self.session_estimated_cost_usd = None
+        self.context_compressor = None
+        self._last_error = None
+        self.ephemeral_system_prompt = None
+
+    def run_conversation(self, **kwargs):
+        raise NotImplementedError
+
+    def interrupt(self, _message):
+        return None
+
+
+def _streaming_env_keys():
+    return (
+        "OPENROUTER_API_KEY",
+        "TERMINAL_CWD",
+        "HERMES_EXEC_ASK",
+        "HERMES_SESSION_KEY",
+        "HERMES_SESSION_ID",
+        "HERMES_SESSION_PLATFORM",
+        "HERMES_SESSION_CHAT_ID",
+        "HERMES_HOME",
+    )
+
+
+def _snapshot_streaming_env():
+    return {k: os.environ.get(k) for k in _streaming_env_keys()}
+
+
+def test_streaming_dynamic_env_ownership_blocks_direct_profile_overlap(
+    monkeypatch, tmp_path
+):
+    """DYNAMIC/nonlegacy streaming holds PROCESS for the whole turn (#6327 B1).
+
+    Drives the REAL ``_run_agent_streaming()`` with the context-local
+    override installed and skill modules reporting profile-home support — the
+    branch where the old code skipped ``_PROCESS_ENV_OWNERSHIP_LOCK`` while
+    still installing raw ``os.environ`` for the entire turn.  A direct named
+    background scope started mid-turn must attempt the ownership lock and be
+    blocked until the turn releases it (recording-proxy barrier, no sleeps);
+    raw + TLS resolve the STREAM's alpha profile during the turn; after both
+    scopes complete, the ambient env is restored exactly.
+    """
+    import api.profiles as profiles
+    import api.streaming as streaming
+
+    session, stream_id = _install_streaming_profile_env(
+        monkeypatch, tmp_path, {"alpha": "alpha-value", "beta": "beta-value"}
+    )
+    monkeypatch.setattr(
+        streaming,
+        "_set_streaming_hermes_home_override",
+        lambda home: (_StreamingFakeHomeOverride(), "tok", True),
+    )
+    monkeypatch.setattr(profiles, "_skill_modules_support_profile_home", lambda home: True)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ambient-value")
+
+    entered = threading.Event()
+    release_agent = threading.Event()
+    stream_done = threading.Event()
+    stream_out: dict = {}
+    stream_exc: list[BaseException] = []
+
+    class _Agent(_StreamingFakeAgent):
+        def run_conversation(self, **kwargs):
+            try:
+                stream_out["raw"] = os.environ.get("OPENROUTER_API_KEY")
+                stream_out["tls"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+                entered.set()
+                assert release_agent.wait(10)
+                history = list(kwargs.get("conversation_history") or [])
+                return {
+                    "messages": history
+                    + [
+                        {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                        {"role": "assistant", "content": "ok"},
+                    ]
+                }
+            except BaseException as exc:
+                stream_exc.append(exc)
+                raise
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: _Agent)
+
+    proxy = _AttemptRecordingOwnershipLock(profiles._PROCESS_ENV_OWNERSHIP_LOCK)
+    monkeypatch.setattr(profiles, "_PROCESS_ENV_OWNERSHIP_LOCK", proxy)
+    env_before = _snapshot_streaming_env()
+
+    def stream_runner():
+        try:
+            streaming._run_agent_streaming(
+                session_id=session.session_id,
+                msg_text="hello",
+                model="test-model",
+                model_provider="test-provider",
+                workspace=str(tmp_path),
+                stream_id=stream_id,
+            )
+        except BaseException as exc:
+            stream_exc.append(exc)
+        finally:
+            stream_done.set()
+
+    t_stream = threading.Thread(target=stream_runner)
+    t_stream.start()
+    direct_done = threading.Event()
+    direct_out: dict = {}
+    direct_exc: list[BaseException] = []
+    try:
+        assert entered.wait(15), "streaming turn never entered run_conversation"
+        proxy.arm()
+
+        def direct_worker():
+            try:
+                with profiles.profile_env_for_background_worker("beta", "test"):
+                    direct_out["raw"] = os.environ.get("OPENROUTER_API_KEY")
+                    direct_out["tls"] = config._thread_local_env_value(
+                        "OPENROUTER_API_KEY"
+                    )
+            except BaseException as exc:
+                direct_exc.append(exc)
+            finally:
+                direct_done.set()
+
+        t_direct = threading.Thread(target=direct_worker)
+        t_direct.start()
+        assert proxy.attempted.wait(10), (
+            "direct scope never attempted the ownership lock while streaming ran"
+        )
+        assert not direct_done.is_set(), (
+            "direct profile scope entered while the dynamic streaming turn held the env"
+        )
+        # During the turn both channels resolve the STREAM's alpha profile and
+        # the direct scope could not corrupt the raw channel.
+        assert stream_out["raw"] == "alpha-value"
+        assert stream_out["tls"] == "alpha-value"
+        assert os.environ.get("OPENROUTER_API_KEY") == "alpha-value"
+    finally:
+        release_agent.set()
+    t_stream.join(30)
+    assert not t_stream.is_alive(), "streaming thread deadlocked"
+    t_direct.join(30)
+    assert not t_direct.is_alive(), "direct background thread deadlocked"
+    if stream_exc:
+        raise stream_exc[0]
+    if direct_exc:
+        raise direct_exc[0]
+
+    # After the turn released, the direct scope resolved BETA on both channels.
+    assert direct_out["raw"] == "beta-value"
+    assert direct_out["tls"] == "beta-value"
+    # Ownership lock is free and the ambient env is restored exactly.
+    assert proxy.acquire(blocking=False), "streaming turn leaked the ownership lock"
+    proxy.release()
+    assert _snapshot_streaming_env() == env_before, (
+        "streaming turn left stale raw env behind after teardown"
+    )
+
+
+def test_streaming_checkpoint_no_agent_process_deadlock_normal(
+    monkeypatch, tmp_path
+):
+    """LEGACY streaming + forced checkpoint: no AGENT↔PROCESS deadlock (#6327 B2).
+
+    Real ``_run_agent_streaming()`` on the legacy/static branch (holds
+    PROCESS + SKILL for the whole turn).  While the turn is live, a checkpoint
+    action runs EXACTLY as ``_periodic_checkpoint()`` does — acquire the
+    per-session agent lock, then call the real ``_save_streaming_checkpoint()``.
+    The read-only explicit-profile scope must complete while the turn holds
+    PROCESS (no AGENT → PROCESS edge), then the turn's bounded join and
+    ``with _agent_lock`` finalize must not deadlock; ambient env is restored
+    exactly and no lock is left held.
+    """
+    import api.profiles as profiles
+    import api.streaming as streaming
+
+    session, stream_id = _install_streaming_profile_env(
+        monkeypatch, tmp_path, {"alpha": "alpha-value", "beta": "beta-value"}
+    )
+    # Force the LEGACY/static branch: override installed but skill modules do
+    # not support profile-home resolution (real snapshot/patch run — they are
+    # tolerant of missing modules).
+    monkeypatch.setattr(
+        streaming,
+        "_set_streaming_hermes_home_override",
+        lambda home: (_StreamingFakeHomeOverride(), "tok", True),
+    )
+    monkeypatch.setattr(profiles, "_skill_modules_support_profile_home", lambda home: False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ambient-value")
+
+    entered = threading.Event()
+    release_agent = threading.Event()
+    stream_done = threading.Event()
+    ckpt_done = threading.Event()
+    ckpt_out: dict = {}
+    ckpt_exc: list[BaseException] = []
+    stream_exc: list[BaseException] = []
+
+    class _Agent(_StreamingFakeAgent):
+        def run_conversation(self, **kwargs):
+            entered.set()
+
+            def checkpoint_action():
+                try:
+                    # Identical schedule to _periodic_checkpoint(): hold the
+                    # per-session agent lock, then save the checkpoint.  The
+                    # save must NOT wait on the turn's PROCESS ownership.
+                    with streaming._get_session_agent_lock(session.session_id):
+                        ckpt_out["raw_before"] = os.environ.get("OPENROUTER_API_KEY")
+                        streaming._save_streaming_checkpoint(session)
+                        # The read-only scope restored this fresh thread's
+                        # thread-local env on exit (no TLS residue).
+                        ckpt_out["thread_env_after"] = getattr(
+                            config._thread_ctx, "env", None
+                        )
+                except BaseException as exc:
+                    ckpt_exc.append(exc)
+                finally:
+                    ckpt_done.set()
+
+            threading.Thread(target=checkpoint_action, daemon=True).start()
+            assert ckpt_done.wait(10), (
+                "checkpoint save deadlocked on the streaming turn's PROCESS lock"
+            )
+            assert ckpt_out["raw_before"] == "alpha-value"
+            assert release_agent.wait(10)
+            history = list(kwargs.get("conversation_history") or [])
+            return {
+                "messages": history
+                + [
+                    {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                    {"role": "assistant", "content": "ok"},
+                ]
+            }
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: _Agent)
+    env_before = _snapshot_streaming_env()
+
+    def stream_runner():
+        try:
+            streaming._run_agent_streaming(
+                session_id=session.session_id,
+                msg_text="hello",
+                model="test-model",
+                model_provider="test-provider",
+                workspace=str(tmp_path),
+                stream_id=stream_id,
+            )
+        except BaseException as exc:
+            stream_exc.append(exc)
+        finally:
+            stream_done.set()
+
+    t_stream = threading.Thread(target=stream_runner)
+    t_stream.start()
+    assert entered.wait(15), "streaming turn never entered run_conversation"
+    release_agent.set()
+    t_stream.join(30)
+    assert not t_stream.is_alive(), (
+        "streaming thread deadlocked on the checkpoint join / session lock"
+    )
+    if stream_exc:
+        raise stream_exc[0]
+    if ckpt_exc:
+        raise ckpt_exc[0]
+    assert ckpt_done.is_set(), "checkpoint never completed"
+    # The read-only scope restored the (empty) thread env on the ckpt thread.
+    assert ckpt_out["thread_env_after"] == {}
+    # No lock left held; ambient env restored exactly.
+    assert profiles._PROCESS_ENV_OWNERSHIP_LOCK.acquire(blocking=False), (
+        "streaming turn leaked the ownership lock"
+    )
+    profiles._PROCESS_ENV_OWNERSHIP_LOCK.release()
+    assert _snapshot_streaming_env() == env_before, (
+        "streaming turn left stale raw env behind after teardown"
+    )
+
+
+def test_streaming_checkpoint_no_agent_process_deadlock_cancel_exception(
+    monkeypatch, tmp_path
+):
+    """LEGACY streaming + forced checkpoint on the cancel/exception path (#6327 B2).
+
+    Same real-turn composition as the normal-path test, but the agent sets the
+    stream's cancel event and RAISES mid-turn (with a checkpoint already
+    completed under the session agent lock).  The exception handler's bounded
+    join + ``with _agent_lock`` finalize must settle without deadlock, and the
+    ambient env must be restored exactly.
+    """
+    import api.profiles as profiles
+    import api.streaming as streaming
+
+    session, stream_id = _install_streaming_profile_env(
+        monkeypatch, tmp_path, {"alpha": "alpha-value", "beta": "beta-value"}
+    )
+    monkeypatch.setattr(
+        streaming,
+        "_set_streaming_hermes_home_override",
+        lambda home: (_StreamingFakeHomeOverride(), "tok", True),
+    )
+    monkeypatch.setattr(profiles, "_skill_modules_support_profile_home", lambda home: False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ambient-value")
+    # The cancel/exception unwind appends journal events + persists the
+    # cancelled turn; those are orthogonal to the lock schedule under test.
+    monkeypatch.setattr(streaming, "append_turn_journal_event_for_stream", lambda *a, **k: None)
+    monkeypatch.setattr(streaming, "_finalize_cancelled_turn", lambda *a, **k: None)
+
+    entered = threading.Event()
+    stream_done = threading.Event()
+    ckpt_done = threading.Event()
+    ckpt_exc: list[BaseException] = []
+    stream_exc: list[BaseException] = []
+
+    class _Agent(_StreamingFakeAgent):
+        def run_conversation(self, **kwargs):
+            entered.set()
+
+            def checkpoint_action():
+                try:
+                    with streaming._get_session_agent_lock(session.session_id):
+                        streaming._save_streaming_checkpoint(session)
+                except BaseException as exc:
+                    ckpt_exc.append(exc)
+                finally:
+                    ckpt_done.set()
+
+            threading.Thread(target=checkpoint_action, daemon=True).start()
+            assert ckpt_done.wait(10), (
+                "checkpoint save deadlocked on the streaming turn's PROCESS lock"
+            )
+            # Cancel + raise mid-turn: the exception handler must join the
+            # (already finished) checkpoint thread and take the session lock.
+            cancel_event = streaming.CANCEL_FLAGS.get(stream_id)
+            assert cancel_event is not None
+            cancel_event.set()
+            raise RuntimeError("simulated provider failure")
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: _Agent)
+    env_before = _snapshot_streaming_env()
+
+    def stream_runner():
+        try:
+            streaming._run_agent_streaming(
+                session_id=session.session_id,
+                msg_text="hello",
+                model="test-model",
+                model_provider="test-provider",
+                workspace=str(tmp_path),
+                stream_id=stream_id,
+            )
+        except BaseException as exc:
+            stream_exc.append(exc)
+        finally:
+            stream_done.set()
+
+    t_stream = threading.Thread(target=stream_runner)
+    t_stream.start()
+    assert entered.wait(15), "streaming turn never entered run_conversation"
+    t_stream.join(30)
+    assert not t_stream.is_alive(), (
+        "streaming thread deadlocked on the cancel/exception unwind"
+    )
+    if stream_exc:
+        raise stream_exc[0]
+    if ckpt_exc:
+        raise ckpt_exc[0]
+    assert ckpt_done.is_set(), "checkpoint never completed"
+    # No lock left held; ambient env restored exactly.
+    assert profiles._PROCESS_ENV_OWNERSHIP_LOCK.acquire(blocking=False), (
+        "streaming turn leaked the ownership lock"
+    )
+    profiles._PROCESS_ENV_OWNERSHIP_LOCK.release()
+    assert _snapshot_streaming_env() == env_before, (
+        "streaming turn left stale raw env behind after teardown"
+    )
