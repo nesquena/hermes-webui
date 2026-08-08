@@ -7958,6 +7958,12 @@ def _set_state_db_session_archived(sid: str, archived: bool) -> bool:
     raised an unhandled ``ValueError`` -> HTTP 500, #6843).
 
     Returns True when the row was found and updated, False otherwise.
+    Older/minimal state.db schemas may not have the optional ``archived``
+    column at all; the sidebar projection already tolerates that via
+    ``_optional_col``, so the UPDATE must too — an unconditional UPDATE would
+    raise a suppressed SQLite "no such column" error that surfaces as a
+    misleading 404 and leaves the imported session visible and unarchivable
+    (review #6855).
     """
     if not sid:
         return False
@@ -7968,6 +7974,14 @@ def _set_state_db_session_archived(sid: str, archived: bool) -> bool:
             return False
         import sqlite3 as _sqlite
         with closing(_sqlite.connect(str(db_path))) as _conn:
+            # Make the UPDATE conditional on the column's existence: add the
+            # WebUI-local view-state column first when the agent schema is too
+            # old to have it (same tolerance as the projection's _optional_col).
+            cols = {row[1] for row in _conn.execute("PRAGMA table_info(sessions)")}
+            if "archived" not in cols:
+                _conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN archived INTEGER DEFAULT 0"
+                )
             cur = _conn.execute(
                 "UPDATE sessions SET archived = ? WHERE id = ?",
                 (1 if archived else 0, sid),
@@ -14999,18 +15013,6 @@ def handle_post(handler, parsed) -> bool:
         sid = body.get("session_id", "")
         if not sid:
             return bad(handler, "session_id is required")
-        if not is_safe_session_id(sid):
-            # #6843: imported api_server-class rows (e.g. ``miloco:...``) can
-            # carry ids that are not path-safe as sidecar filenames (colons,
-            # ...). They are still genuine local state.db rows, so allow the
-            # delete when the row's source is the imported/read-only
-            # api_server class; the sidecar-unlink below is a safe no-op and
-            # delete_cli_session() removes the state.db row with a
-            # parameterized query. ANY other real state.db row (messaging,
-            # gateway, cron, subagent, ...) must keep the path-safe id
-            # requirement so an unsafe id can't bypass the guard.
-            if not _is_api_server_class_state_db_source(_state_db_session_source(sid)):
-                return bad(handler, "Invalid session_id", 400)
         cli_meta_for_delete = _lookup_cli_session_metadata(sid)
         if cli_meta_for_delete.get("read_only"):
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
@@ -15062,6 +15064,20 @@ def handle_post(handler, parsed) -> bool:
                     logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
+        # #6843: imported api_server-class rows (e.g. ``miloco:...``) can carry
+        # ids that are not path-safe as sidecar filenames (colons, ...). They
+        # are still genuine local state.db rows, so allow the delete when the
+        # row's source is the imported/read-only api_server class. ANY other
+        # real state.db row (messaging, gateway, cron, subagent, ...) must keep
+        # the path-safe id requirement so an unsafe id can't bypass the guard.
+        # Checked AFTER the standard cleanup: for state.db-only rows the
+        # sidecar unlink / index prune / .json.bak unlink above are safe
+        # no-ops, and delete_cli_session() below removes the state.db row with
+        # a parameterized query.
+        if not is_safe_session_id(sid) and not _is_api_server_class_state_db_source(
+            _state_db_session_source(sid)
+        ):
+            return bad(handler, "Invalid session_id", 400)
         # Evict outside the mutation lock: lifecycle commit may perform provider
         # I/O and must not hold a per-session Session lock.
         from api.config import _evict_session_agent
