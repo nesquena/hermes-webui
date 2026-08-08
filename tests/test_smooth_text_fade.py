@@ -1,5 +1,6 @@
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -86,6 +87,7 @@ let _streamFadeVisibleWords=0;
 let _streamFadeHoldUntilMs=0;
 let _streamFadeCurrentMs=620;
 let _streamFadeDomText='';
+let _streamFadeSilentPrefixChars=0;
 const _STREAM_FADE_MS=620;
 const _STREAM_FADE_MAX_MS=900;
 const _STREAM_FADE_DONE_MAX_MS=1000;
@@ -96,6 +98,25 @@ const performance={performance_stub};
 
 
 def run_node(script: str) -> subprocess.CompletedProcess[str]:
+    # Windows cmdline length limit (~32K): long extracted function blocks
+    # (e.g. _smdWrite with its comment block) overflow `node -e`. Write long
+    # scripts to a temp file and run `node <file>` instead.
+    if len(script) > 24000:
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
+            f.write(script)
+            tmp_path = f.name
+        try:
+            result = subprocess.run(
+                ["node", tmp_path],
+                cwd=REPO,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+        assert result.returncode == 0, result.stderr
+        return result
     result = subprocess.run(
         ["node", "-e", script],
         cwd=REPO,
@@ -218,6 +239,7 @@ def test_stream_fade_appends_new_spans_without_replacing_existing_nodes():
 const _STREAM_FADE_MS=620;
 let _streamFadeLatestAnimationEndAt=0;
 let _streamFadeCurrentMs=620;
+let _streamFadeSilentPrefixChars=0;
 const performance={_t:0,now(){return this._t;}};
 function _streamFadeReduceMotionEnabled(){ return false; }
 class FakeNode{
@@ -554,6 +576,260 @@ for(let frame=0;frame<8&&!out.text.includes('\n\n');frame++){
 if(!out.text.includes('\n\n')) throw new Error(`expected paragraph break: ${JSON.stringify(out.text)}`);
 const afterBreak=_streamFadeNextText(pausedTarget);
 if(afterBreak.changed) throw new Error('expected paragraph pause to hold next reveal');
+"""
+    )
+    run_node(script)
+
+
+def test_stream_fade_rewind_keeps_common_prefix_visible():
+    """A display-text REWIND (tool-call XML stripped mid-stream) must not reset
+    the playout to zero — that would replay the fade on every already-visible
+    word and produce a full-message blink per tool call (#fade-flash)."""
+    script = (
+        fade_helper_script()
+        + r"""
+// Phase 1: play out a sentence normally.
+let out=_streamFadeNextText('alpha beta gamma delta');
+for(let frame=0;frame<60&&!out.caughtUp;frame++){
+  performance._t += 33;
+  out=_streamFadeNextText('alpha beta gamma delta');
+}
+if(!out.caughtUp) throw new Error(`never caught up: ${JSON.stringify(out.text)}`);
+const fullText=out.text;
+// Phase 2: the stream text REWINDS (e.g. <function_calls> stripped): the
+// target becomes a strict prefix of what was already shown.
+performance._t += 33;
+out=_streamFadeNextText('alpha beta');
+// The playout must stay at the common prefix, NOT reset to ''.
+if(!out.text.startsWith('alpha beta')) throw new Error(`rewind dropped prefix: ${JSON.stringify(out.text)}`);
+if(out.text.length>fullText.length) throw new Error(`rewind grew text: ${JSON.stringify(out.text)}`);
+if(!out.caughtUp) throw new Error(`rewind to prefix should be caught up, got changed=${out.changed}`);
+"""
+    )
+    run_node(script)
+
+
+def test_stream_fade_rewind_remount_mutes_common_prefix():
+    """When the DOM must be rebuilt after a rewind (smd self-heal), words inside
+    the common prefix must be written as plain text so their fade animation is
+    not replayed; only the post-rewind tail may animate."""
+    script = (
+        function_block(MESSAGES_JS, "_streamFadeAppendText")
+        + r"""
+const _STREAM_FADE_MS=620;
+let _streamFadeLatestAnimationEndAt=0;
+let _streamFadeCurrentMs=620;
+let _streamFadeSilentPrefixChars=0;
+const performance={_t:0,now(){return this._t;}};
+function _streamFadeReduceMotionEnabled(){ return false; }
+class FakeNode{
+  constructor(type,text=''){
+    this.type=type;
+    this.children=[];
+    this.className='';
+    this.textContent=text;
+    this.style={values:{},setProperty:(name,value)=>{this.style.values[name]=value;}};
+  }
+  appendChild(child){
+    if(child&&child.type==='fragment'){
+      child.children.forEach(n=>this.children.push(n));
+    }else{
+      this.children.push(child);
+    }
+    return child;
+  }
+}
+global.document={
+  createDocumentFragment(){ return new FakeNode('fragment'); },
+  createTextNode(text){ return new FakeNode('text',String(text)); },
+  createElement(tag){ const node=new FakeNode(tag); node.tagName=String(tag).toUpperCase(); return node; },
+};
+const body=new FakeNode('div');
+// Simulate a rebuild: the rewind-triggered self-heal mutes the common prefix
+// ("alpha beta" = 10 chars) so those words must NOT become animated spans.
+_streamFadeSilentPrefixChars=10;
+_streamFadeAppendText(body,'alpha beta gamma');
+const spans=body.children.filter(node=>node.className==='stream-fade-word is-new');
+if(spans.length!==1) throw new Error(`expected exactly 1 animated span, got ${spans.length}`);
+if(spans[0].textContent!=='gamma') throw new Error(`wrong animated word: ${spans[0].textContent}`);
+const plain=body.children.filter(node=>node.type==='text').map(n=>n.textContent).join('');
+if(!plain.includes('alpha beta')) throw new Error(`common prefix not written as plain text: ${plain}`);
+if(_streamFadeSilentPrefixChars!==0) throw new Error(`silent prefix not consumed: ${_streamFadeSilentPrefixChars}`);
+"""
+    )
+    run_node(script)
+
+
+def test_stream_fade_smd_write_self_heal_sets_silent_prefix_on_rewind():
+    """_smdWrite's self-heal rebuild (triggered when the display text REWINDS,
+    e.g. tool-call XML stripped mid-stream) must mute the rebuild's rendered
+    common prefix. Without this the cleared + rebuilt body would replay the
+    fade on every already-visible word — the full-message blink. The prefix is
+    computed in RENDERED-text space (old node text vs new node text), never in
+    source space (#6783 review)."""
+    write_block = function_block(MESSAGES_JS, "_smdWrite")
+    script = (
+        write_block
+        + r"""
+let _smdParser=null;
+let _smdWrittenLen=0;
+let _smdWrittenText='';
+let _streamFadeSilentPrefixChars=0;
+let rebuildCalls=0;
+let muteCalls=[];
+const writes=[];
+global.window={
+  smd:{
+    parser(renderer){ return { renderer }; },
+    parser_write(parser,delta){ writes.push(String(delta)); },
+  },
+};
+function _streamFadeMuteRenderedPrefix(el, prev){ muteCalls.push(prev); }
+const assistantBody={ innerHTML:'', textContent:'' };
+function _smdNewParser(el, fade){ _smdParser={fresh:fade?true:false}; rebuildCalls+=1; }
+function _scheduleStreamingKatex(){}
+// Phase 0: parser already attached (as after _smdNewParser on stream start).
+_smdParser={};
+// Phase 1: normal incremental write of the full text.
+_smdWrite('alpha beta gamma', true);
+if(_smdWrittenText!=='alpha beta gamma') throw new Error(`phase1 writtenText wrong: ${_smdWrittenText}`);
+if(rebuildCalls!==0) throw new Error('phase1 must not rebuild');
+// Phase 2: the display text REWINDS to a strict prefix (tool-call XML tail
+// stripped). Simulate the rendered body state (what smd already painted)
+// before the rebuild; the self-heal must snapshot it and hand it to
+// _streamFadeMuteRenderedPrefix (rendered-space mute).
+assistantBody.textContent='alpha beta gamma';
+_smdWrite('alpha beta', true);
+if(rebuildCalls!==1) throw new Error(`expected 1 rebuild, got ${rebuildCalls}`);
+if(muteCalls.length!==1) throw new Error(`expected 1 mute call, got ${muteCalls.length}`);
+if(muteCalls[0]!=='alpha beta gamma') throw new Error(`mute prev wrong: ${JSON.stringify(muteCalls[0])}`);
+if(_smdWrittenText!=='alpha beta') throw new Error(`phase2 writtenText wrong: ${_smdWrittenText}`);
+// Phase 3: after the tool call completes, new text continues past the rewind
+// point; the written delta must start exactly at the rewind point (no replay
+// of the prefix). No rewind now → no mute call.
+writes.length=0;
+muteCalls.length=0;
+_smdWrite('alpha beta new tail', true);
+if(writes.length!==1||writes[0]!==' new tail') throw new Error(`delta wrong: ${JSON.stringify(writes)}`);
+if(muteCalls.length!==0) throw new Error(`phase3 must not mute, got ${muteCalls.length}`);
+"""
+    )
+    run_node(script)
+
+
+def _fade_fake_node(tag='div', text=''):
+    """Fake DOM node with dynamic textContent (sums descendant text), parentNode
+    backlinks and classList — enough for _streamFadeMuteRenderedPrefix."""
+    return """
+class FakeNode{
+  constructor(tag='div',text=''){
+    this.tagName=String(tag).toUpperCase();
+    this.nodeType=(tag==='#text')?3:1;
+    this.type=(tag==='#text')?'text':undefined;
+    this.children=[];
+    this.parentNode=null;
+    this.className='';
+    this._text=text;
+    if(text!=='' && tag!=='#text'){ this.appendChild(new FakeNode('#text',text)); }
+  }
+  appendChild(child){ child.parentNode=this; this.children.push(child); return child; }
+  get childNodes(){ return this.children; }
+  get textContent(){
+    if(this.nodeType===3) return this._text;
+    let s='';
+    for(const c of this.children) s+=c.textContent;
+    return s;
+  }
+  set textContent(v){ this._text=String(v); }
+  get classList(){
+    const self=this;
+    return {
+      contains(c){ return (' '+self.className+' ').indexOf(' '+c+' ')>-1; },
+      remove(c){ self.className=(' '+self.className+' ').replace(' '+c+' ',' ').trim(); },
+    };
+  }
+}
+"""
+
+
+def test_stream_fade_mute_rendered_prefix_plain_words():
+    """Rendered-space mute: only spans fully inside the rendered common prefix
+    lose is-new; the first genuinely new word keeps its fade span. Old text
+    'alpha beta' vs new 'alpha beta gamma' → alpha+beta plain, gamma animated."""
+    script = (
+        function_block(MESSAGES_JS, "_streamFadeMuteRenderedPrefix")
+        + _fade_fake_node()
+        + r"""
+const body=new FakeNode('div');
+const a=new FakeNode('span','alpha'); a.className='stream-fade-word is-new';
+const sp1=new FakeNode('#text',' ');
+const b=new FakeNode('span','beta');  b.className='stream-fade-word is-new';
+const sp2=new FakeNode('#text',' ');
+const g=new FakeNode('span','gamma'); g.className='stream-fade-word is-new';
+body.appendChild(a); body.appendChild(sp1); body.appendChild(b);
+body.appendChild(sp2); body.appendChild(g);
+// Rebuild scenario: old rendered text was 'alpha beta' (rewind point), new
+// rendered text is 'alpha beta gamma'. Common prefix = 'alpha beta ' (11).
+_streamFadeMuteRenderedPrefix(body,'alpha beta');
+if(a.classList.contains('is-new')) throw new Error('alpha must be muted');
+if(b.classList.contains('is-new')) throw new Error('beta must be muted');
+if(!g.classList.contains('is-new')) throw new Error('gamma must stay animated');
+"""
+    )
+    run_node(script)
+
+
+def test_stream_fade_mute_rendered_prefix_markdown_and_media_bytes():
+    """Regression for the #6783 blocker: source-space budgets over-mute because
+    markdown delimiters (`**alpha**`) and MEDIA tokens add bytes that never
+    reach the fade add_text hook. The mute must operate on RENDERED text only:
+    old rendered 'alpha beta' (from `**alpha** beta`) rewritten to `**alpha**
+    gamma` renders 'alpha gamma' → alpha muted, gamma animated."""
+    script = (
+        function_block(MESSAGES_JS, "_streamFadeMuteRenderedPrefix")
+        + _fade_fake_node()
+        + r"""
+const body=new FakeNode('div');
+const a=new FakeNode('span','alpha'); a.className='stream-fade-word is-new';
+const sp=new FakeNode('#text',' ');
+const g=new FakeNode('span','gamma'); g.className='stream-fade-word is-new';
+body.appendChild(a); body.appendChild(sp); body.appendChild(g);
+// Rendered common prefix 'alpha ' = 6 chars. A SOURCE-space compare of
+// `**alpha** beta` vs `**alpha** gamma` would count 10 (4 delimiters +
+// 'alpha' + space) and mute gamma too — exactly the bug this test locks in.
+_streamFadeMuteRenderedPrefix(body,'alpha beta');
+if(a.classList.contains('is-new')) throw new Error('alpha must be muted');
+if(!g.classList.contains('is-new')) throw new Error('gamma must stay animated (source-space budget bug)');
+"""
+    )
+    run_node(script)
+
+
+def test_stream_fade_mute_rendered_prefix_scoped_per_root():
+    """The mute is scoped to the passed root: muting one parser's node must not
+    touch another parser's node (main vs anchor prose). Two concurrent roots
+    with identical text content stay independent."""
+    script = (
+        function_block(MESSAGES_JS, "_streamFadeMuteRenderedPrefix")
+        + _fade_fake_node()
+        + r"""
+function buildBody(){
+  const body=new FakeNode('div');
+  const w1=new FakeNode('span','alpha'); w1.className='stream-fade-word is-new';
+  const sp=new FakeNode('#text',' ');
+  const w2=new FakeNode('span','beta');  w2.className='stream-fade-word is-new';
+  body.appendChild(w1); body.appendChild(sp); body.appendChild(w2);
+  return body;
+}
+const main=buildBody();
+const anchor=buildBody();
+_streamFadeMuteRenderedPrefix(main,'alpha'); // common prefix 'alpha' (5)
+// main: alpha muted, beta animated.
+if(main.children[0].classList.contains('is-new')) throw new Error('main alpha must be muted');
+if(!main.children[2].classList.contains('is-new')) throw new Error('main beta must stay animated');
+// anchor: untouched.
+if(!anchor.children[0].classList.contains('is-new')) throw new Error('anchor must be untouched');
+if(!anchor.children[2].classList.contains('is-new')) throw new Error('anchor must be untouched');
 """
     )
     run_node(script)
