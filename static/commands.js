@@ -20,6 +20,7 @@ const COMMANDS=[
   {name:'use',       desc:t('cmd_use'),      fn:cmdUse,      arg:'skill-name', subArgs:'skills', noEcho:true},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
   {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|pause|resume|clear|text]', subArgs:['status','pause','resume','clear']},
+  {name:'validation',desc:'Livrer le plan approuvé jusqu’au live vérifié',fn:cmdValidation},
   {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'message', noEcho:true},
   {name:'interrupt', desc:t('cmd_interrupt'), fn:cmdInterrupt, arg:'message', noEcho:true},
   {name:'steer',     desc:t('cmd_steer'),    fn:cmdSteer,     arg:'message', noEcho:true},
@@ -1225,6 +1226,16 @@ async function cmdStop(){
     else showToast(t('cancel_failed'),null,'error');
   }
   else showToast(t('cancel_unavailable'));
+}
+
+const PICHOT_VALIDATION_GOAL=`/validation
+outcome: Exécuter le plan approuvé jusqu’à la livraison live vérifiée.
+verify: toutes les validations, preuves, publications et vérifications live prévues par le skill validation sont terminées avec succès.
+constraints: respecter le périmètre approuvé et toutes les gates de sécurité, de données et d’irréversibilité.
+stop when: aucune tâche, délégation, revue, intégration, publication, déploiement ou vérification live ne reste ouverte.`;
+
+function cmdValidation(){
+  return cmdGoal(PICHOT_VALIDATION_GOAL);
 }
 
 async function cmdGoal(args){
