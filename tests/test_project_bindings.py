@@ -12,6 +12,7 @@ A project can pin a workspace / model / reasoning effort so the quick-create
 import json
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from tests._pytest_port import BASE
 
@@ -43,24 +44,30 @@ def _post(path, body):
             return {}
 
 
+HOME_WS = str(Path.home())
+
+
 def _create_project():
     res = _post("/api/projects/create", {"name": "bind-test", "color": "#50c878"})
     assert res.get("ok"), f"create failed: {res}"
     return res["project"]["project_id"]
 
 
-def test_bind_workspace_model_effort_roundtrip():
+def test_bind_workspace_model_effort_roundtrip(tmp_path):
     pid = _create_project()
+    ws_dir = tmp_path / "roundtrip-ws"
+    ws_dir.mkdir()
+    ws_str = str(ws_dir)
     res = _post("/api/projects/bind", {
         "project_id": pid,
-        "workspace": "C:/Users/Admin/workspace",
+        "workspace": ws_str,
         "model": "test-model-1",
         "model_provider": "custom:test",
         "reasoning_effort": "high",
     })
     assert res.get("ok"), f"bind failed: {res}"
     p = res["project"]
-    assert p["workspace"] == "C:\\Users\\Admin\\workspace"
+    assert p["workspace"] == str(ws_dir.resolve())
     assert p["model"] == "test-model-1"
     assert p["model_provider"] == "custom:test"
     assert p["reasoning_effort"] == "high"
@@ -80,7 +87,10 @@ def test_bind_workspace_auto_registers_in_workspace_list(tmp_path):
     import pathlib
     ws_dir = tmp_path / "bound-ws"
     ws_dir.mkdir()
-    ws_str = str(ws_dir).replace("/", "\\")
+    # Use the native path string (no manual slash translation — Windows and
+    # POSIX CI both pass through; the server canonicalizes to the platform
+    # form before storing).
+    ws_str = str(ws_dir)
     res = _post("/api/projects/bind", {"project_id": pid, "workspace": ws_str})
     assert res.get("ok"), f"bind failed: {res}"
     assert pathlib.Path(res["project"]["workspace"]).resolve() == ws_dir.resolve()
@@ -116,7 +126,7 @@ def test_bind_null_unbinds_field():
     pid = _create_project()
     _post("/api/projects/bind", {
         "project_id": pid,
-        "workspace": "C:/Users/Admin/workspace",
+        "workspace": HOME_WS,
         "reasoning_effort": "medium",
     })
     res = _post("/api/projects/bind", {
@@ -133,7 +143,7 @@ def test_bind_null_unbinds_field():
 def test_bind_unknown_project_404():
     res = _post("/api/projects/bind", {
         "project_id": "deadbeef0000",
-        "workspace": "C:/Users/Admin/workspace",
+        "workspace": HOME_WS,
     })
     assert "error" in res, "unknown project must be rejected"
 
@@ -146,7 +156,7 @@ def test_bind_multiple_workspaces_with_default(tmp_path):
     ws_b = tmp_path / "ws-b"
     ws_a.mkdir()
     ws_b.mkdir()
-    a, b = str(ws_a).replace("/", "\\"), str(ws_b).replace("/", "\\")
+    a, b = str(ws_a), str(ws_b)
 
     res = _post("/api/projects/bind", {
         "project_id": pid,
@@ -174,8 +184,8 @@ def test_bind_workspaces_clear_with_null():
     pid = _create_project()
     _post("/api/projects/bind", {
         "project_id": pid,
-        "workspaces": ["C:/Users/Admin/workspace"],
-        "default_workspace": "C:/Users/Admin/workspace",
+        "workspaces": [HOME_WS],
+        "default_workspace": HOME_WS,
     })
     res = _post("/api/projects/bind", {"project_id": pid, "workspaces": None})
     assert res.get("ok"), f"unbind failed: {res}"
@@ -188,7 +198,7 @@ def test_bind_auto_assign_off():
     pid = _create_project()
     _post("/api/projects/bind", {
         "project_id": pid,
-        "workspaces": ["C:/Users/Admin/workspace"],
+        "workspaces": [HOME_WS],
         "auto_assign": True,
     })
     res = _post("/api/projects/bind", {
@@ -199,6 +209,29 @@ def test_bind_auto_assign_off():
     assert "auto_assign" not in res["project"]
 
 
+def test_bind_workspaces_replace_keeps_legacy_alias_in_sync(tmp_path):
+    """Replacing the workspace list must keep the legacy single `workspace`
+    alias consistent (first entry, or removed when the list empties)."""
+    pid = _create_project()
+    ws_a = tmp_path / "alias-a"
+    ws_b = tmp_path / "alias-b"
+    ws_a.mkdir()
+    ws_b.mkdir()
+    a, b = str(ws_a), str(ws_b)
+
+    r1 = _post("/api/projects/bind", {"project_id": pid, "workspaces": [a, b]})
+    assert r1.get("ok")
+    assert r1["project"]["workspace"] == a, "alias must mirror first entry"
+
+    r2 = _post("/api/projects/bind", {"project_id": pid, "workspaces": [b]})
+    assert r2.get("ok")
+    assert r2["project"]["workspace"] == b, "alias must follow replacement"
+
+    r3 = _post("/api/projects/bind", {"project_id": pid, "workspaces": None})
+    assert r3.get("ok")
+    assert "workspace" not in r3["project"], "alias must vanish when cleared"
+
+
 def test_auto_assign_project_for_workspace(tmp_path, monkeypatch):
     """_auto_assign_project_for_workspace picks the owning project in list order."""
     import api.routes as routes
@@ -207,7 +240,7 @@ def test_auto_assign_project_for_workspace(tmp_path, monkeypatch):
     pid2 = _create_project()
     ws = tmp_path / "shared"
     ws.mkdir()
-    ws_str = str(ws).replace("/", "\\")
+    ws_str = str(ws)
     _post("/api/projects/bind", {
         "project_id": pid1,
         "workspaces": [ws_str],
@@ -239,14 +272,14 @@ def test_apply_project_auto_assign_files_existing_sessions(tmp_path, monkeypatch
     # workspace, one in another workspace.
     ws = tmp_path / "bound-ws"
     ws.mkdir()
-    ws_str = str(ws).replace("/", "\\")
+    ws_str = str(ws)
     index_file = tmp_path / "_index.json"
     index_file.write_text(json.dumps([
         {"session_id": "sess_aaa", "workspace": ws_str, "profile": "default",
          "project_id": None, "message_count": 3},
         {"session_id": "sess_bbb", "workspace": ws_str, "profile": "default",
          "project_id": "already-owned", "message_count": 1},
-        {"session_id": "sess_ccc", "workspace": "C:/Users/Admin/workspace",
+        {"session_id": "sess_ccc", "workspace": HOME_WS,
          "profile": "default", "project_id": None, "message_count": 2},
         {"session_id": "sess_ddd", "workspace": ws_str, "profile": "other",
          "project_id": None, "message_count": 4},
@@ -278,4 +311,46 @@ def test_apply_project_auto_assign_files_existing_sessions(tmp_path, monkeypatch
     assert "sess_ccc" not in saved
     # sess_ddd: other profile → untouched.
     assert "sess_ddd" not in saved
+    assert changed == 1
+
+
+def test_apply_project_auto_assign_named_profile_never_sweeps_default(tmp_path, monkeypatch):
+    """A NAMED-profile project must not re-file default/unprofiled sessions —
+    they would end up tagged with a foreign project_id."""
+    import api.routes as routes
+
+    ws = tmp_path / "named-ws"
+    ws.mkdir()
+    ws_str = str(ws)
+    index_file = tmp_path / "_index.json"
+    index_file.write_text(json.dumps([
+        {"session_id": "sess_def", "workspace": ws_str, "profile": "default",
+         "project_id": None, "message_count": 1},
+        {"session_id": "sess_none", "workspace": ws_str, "profile": None,
+         "project_id": None, "message_count": 1},
+        {"session_id": "sess_haku", "workspace": ws_str, "profile": "haku",
+         "project_id": None, "message_count": 1},
+    ]))
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+
+    saved = {}
+    class _FakeSession:
+        def __init__(self, sid):
+            self.session_id = sid
+            self.project_id = None
+        def save(self):
+            saved[self.session_id] = self.project_id
+
+    monkeypatch.setattr(routes, "get_session",
+                        lambda sid: _FakeSession(sid) if sid in (
+                            "sess_def", "sess_none", "sess_haku") else None)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    proj = {"project_id": "proj_named", "profile": "haku",
+            "workspaces": [ws_str], "auto_assign": True}
+    changed = routes._apply_project_auto_assign(proj)
+
+    assert saved.get("sess_haku") == "proj_named"
+    assert "sess_def" not in saved, "named project must not sweep default sessions"
+    assert "sess_none" not in saved, "named project must not sweep unprofiled sessions"
     assert changed == 1

@@ -1494,9 +1494,12 @@ async function newSession(flash, options={}){
       // server fast path passes the pair through verbatim (no validation) and
       // silently routes to the wrong backend — so leave model_provider=null and
       // let the slow-path family repair run (mirrors routes.py _normalize_provider_id).
-      const _fallbackProvider=_bareModel
-        ? ((usingConfiguredDefault?window._activeProvider:(window._activeProvider||(S.session&&S.session.model_provider)))||'')
-        : '';
+      const _fallbackProvider=boundModel&&!boundProvider
+        ? ''  // project-bound model without an explicit provider: pin nothing,
+              // let the server's slow-path normalization resolve the family
+        : (_bareModel
+          ? ((usingConfiguredDefault?window._activeProvider:(window._activeProvider||(S.session&&S.session.model_provider)))||'')
+          : '');
       const _familyProvider=(m=>{const s=String(m||'').toLowerCase();
         if(s.startsWith('gpt'))return 'openai';if(s.startsWith('claude'))return 'anthropic';
         if(s.startsWith('gemini'))return 'google';return '';})(newModelState.model);
@@ -1505,11 +1508,9 @@ async function newSession(flash, options={}){
         if(s.startsWith('google')||s.startsWith('gemini'))return 'google';return s;};
       const _familyMismatch=_familyProvider&&_fallbackProvider&&_normProv(_fallbackProvider)!==_familyProvider;
       const _fallbackIsNamedCustom=String(_fallbackProvider||'').toLowerCase().startsWith('custom:');
-      reqBody.model_provider=boundModel
-        ? (boundProvider||null)  // project-bound model: pin its provider, or null → server resolves
-        : (newModelState.model_provider
-          ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
-          ||null);
+      reqBody.model_provider=newModelState.model_provider
+        ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
+        ||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
@@ -9529,6 +9530,23 @@ function _makeBindingsCombo(o){
         menu.appendChild(row);
       });
     }
+    // Position the menu FIXED to the trigger's viewport rect so the dialog's
+    // overflow:auto can never clip it. Flip upward when the bottom edge of
+    // the viewport would be hit.
+    const rect=trigger.getBoundingClientRect();
+    const menuHeight=Math.min(menu.scrollHeight||240, 320);
+    const spaceBelow=window.innerHeight-rect.bottom-8;
+    const flipUp=spaceBelow<menuHeight+8&&rect.top>spaceBelow;
+    if(flipUp){
+      menu.style.top='auto';
+      menu.style.bottom=(window.innerHeight-rect.top+6)+'px';
+    }else{
+      menu.style.top=(rect.bottom+4)+'px';
+      menu.style.bottom='auto';
+    }
+    menu.style.left=rect.left+'px';
+    menu.style.width=rect.width+'px';
+    menu.style.position='fixed';
     menu.classList.add('open');
     trigger.classList.add('open');
     trigger.setAttribute('aria-expanded','true');
@@ -9679,7 +9697,8 @@ function _showProjectBindingsDialog(proj){
   }
 
   // Add-workspace combobox: saved workspaces not yet bound + a "type a path"
-  // entry that opens a prompt (the server auto-registers fresh paths).
+  // entry that opens a small input dialog (the server auto-registers fresh
+  // paths).
   const addCombo=_makeBindingsCombo({
     placeholder:'Add workspace…',
     value:'',
@@ -9734,29 +9753,8 @@ function _showProjectBindingsDialog(proj){
   })();
 
   const wsWrap=_field('Workspaces',wsListEl);
-  dialog.appendChild(wsWrap);
-  dialog.appendChild(addRow);
-
-  // ── Auto-assign checkbox: file every session in bound workspaces ──
-  const aaRow=document.createElement('label');
-  aaRow.className='project-bindings-auto-assign';
-  const aaCb=document.createElement('input');
-  aaCb.type='checkbox';
-  aaCb.checked=!!proj.auto_assign;
-  aaRow.appendChild(aaCb);
-  const aaText=document.createElement('span');
-  const aaTitle=document.createElement('div');
-  aaTitle.className='aa-label';
-  aaTitle.textContent='Auto-assign sessions by workspace';
-  const aaHint=document.createElement('div');
-  aaHint.className='aa-hint';
-  aaHint.textContent='All existing and future sessions in the bound workspaces are filed under this project.';
-  aaText.appendChild(aaTitle);
-  aaText.appendChild(aaHint);
-  aaRow.appendChild(aaText);
-  dialog.appendChild(aaRow);
-
-  _seedWsList();
+  // NOTE: appended below Model/Reasoning effort (layout: config on top,
+  // workspace list + auto-assign underneath).
 
   // ── Model: name-first combobox cloned from the composer modelSelect ──
   const modelOptions=[{value:'',name:'(none) — inherit default'}];
@@ -9791,6 +9789,30 @@ function _showProjectBindingsDialog(proj){
   });
   dialog.appendChild(_field('Reasoning effort',effortCombo.el));
 
+  // ── Workspaces list + auto-assign (below the model/effort config) ──
+  dialog.appendChild(wsWrap);
+  dialog.appendChild(addRow);
+
+  const aaRow=document.createElement('label');
+  aaRow.className='project-bindings-auto-assign';
+  const aaCb=document.createElement('input');
+  aaCb.type='checkbox';
+  aaCb.checked=!!proj.auto_assign;
+  aaRow.appendChild(aaCb);
+  const aaText=document.createElement('span');
+  const aaTitle=document.createElement('div');
+  aaTitle.className='aa-label';
+  aaTitle.textContent='Auto-assign sessions by workspace';
+  const aaHint=document.createElement('div');
+  aaHint.className='aa-hint';
+  aaHint.textContent='All existing and future sessions in the bound workspaces are filed under this project.';
+  aaText.appendChild(aaTitle);
+  aaText.appendChild(aaHint);
+  aaRow.appendChild(aaText);
+  dialog.appendChild(aaRow);
+
+  _seedWsList();
+
   // ── Actions ──
   const btnRow=document.createElement('div');
   btnRow.style.cssText='display:flex;gap:8px;justify-content:flex-end;margin-top:16px;';
@@ -9815,10 +9837,13 @@ function _showProjectBindingsDialog(proj){
     fields.default_workspace=(def&&def.value)||null;
     fields.auto_assign=!!aaCb.checked;
     // Model: empty → unbind; else bind model (+ provider from the option).
+    // Always send model_provider — a selected model WITHOUT provider metadata
+    // must CLEAR any previously-bound provider, otherwise the server keeps the
+    // stale one and quick-create submits an incompatible pair.
     if(modelVal){
       fields.model=modelVal;
       const hit=modelOptions.find(x=>x.value===modelVal);
-      if(hit&&hit.sub) fields.model_provider=hit.sub;
+      fields.model_provider=(hit&&hit.sub)||null;
     }else{
       fields.model=null;
     }

@@ -586,10 +586,14 @@ def _apply_project_auto_assign(proj) -> int:
     active_ids = set(_active_stream_ids())
     changed = 0
     deferred_to_stream = 0
+    # Profile boundary: a project may only claim sessions from its OWN
+    # profile. The root/default project may take unprofiled (legacy) rows
+    # too; a NAMED-profile project must never sweep default/unprofiled
+    # sessions (they would end up tagged with a foreign project_id).
+    # _profiles_match handles the renamed-root alias (kinni == default).
     for entry in index:
-        if entry.get("profile") not in (None, profile, "default"):
-            # Cross-profile sessions are never touched by another profile's
-            # project (mirrors the profile-scoping rule on the bind route).
+        entry_profile = entry.get("profile") or "default"
+        if not _profiles_match(entry_profile, profile):
             continue
         ws = entry.get("workspace")
         if not ws or str(ws) not in bound:
@@ -644,9 +648,13 @@ def _auto_assign_project_for_workspace(workspace, profile=None) -> str | None:
     for p in projects:
         if not p.get("auto_assign"):
             continue
-        if p.get("profile") and profile and not _profiles_match(
-            p.get("profile"), profile
-        ):
+        proj_profile = p.get("profile") or "default"
+        # Profile boundary: a NAMED-profile project only claims sessions
+        # explicitly created under that profile. The root/default project
+        # claims default-profile (and unprofiled) sessions. _profiles_match
+        # handles the renamed-root alias (kinni == default) for us.
+        req_profile = (profile or "default")
+        if not _profiles_match(proj_profile, req_profile):
             continue
         if ws_str in _project_workspaces(p):
             return p.get("project_id")
@@ -16734,6 +16742,7 @@ def handle_post(handler, parsed) -> bool:
             if raw is None:
                 proj.pop("workspaces", None)
                 proj.pop("default_workspace", None)
+                proj.pop("workspace", None)  # keep legacy alias in sync
             else:
                 try:
                     resolved = _resolve_ws_list(raw)
@@ -16743,6 +16752,11 @@ def handle_post(handler, parsed) -> bool:
                 # Keep the default valid: drop a default no longer in the list.
                 if proj.get("default_workspace") not in resolved:
                     proj.pop("default_workspace", None)
+                # Legacy alias must mirror the new list (or disappear).
+                if resolved:
+                    proj["workspace"] = resolved[0]
+                else:
+                    proj.pop("workspace", None)
 
         # ── Legacy single-workspace field (compat) ──
         if "workspace" in body and "workspaces" not in body:
@@ -16837,12 +16851,12 @@ def handle_post(handler, parsed) -> bool:
         if proj.get("auto_assign") and proj.get("workspaces"):
             from api.session_lifecycle import _register_background_commit_thread
 
-            def _file_existing_sessions(_proj=dict(proj)):
+            def _file_existing_sessions(_proj=None):
                 try:
-                    _apply_project_auto_assign(_proj)
+                    _apply_project_auto_assign(_proj if _proj is not None else proj)
                 except Exception as exc:
                     logger.warning("auto-assign for project %s failed: %s",
-                                   _proj.get("project_id"), exc)
+                                   (proj or {}).get("project_id"), exc)
 
             t = threading.Thread(
                 target=_file_existing_sessions,
