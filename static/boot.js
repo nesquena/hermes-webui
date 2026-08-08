@@ -3285,6 +3285,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._defaultMessageMode=_persistDefaultMessageMode(s.default_message_mode||s.busy_input_mode);
     window._showBusyPlaceholderHint=!!s.show_busy_placeholder_hint;
     window._newChatOnWorkspaceSwitch=!!s.new_chat_on_workspace_switch;  // #5473 opt-in
+    window._profileSwitchResumeSession=!!s.profile_switch_resume_session;  // opt-in: resume target profile's most recent session on profile switch
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._autoScrollFollow=s.auto_scroll_follow!==false;
     window._largeTextPasteAsAttachment=s.large_text_paste_as_attachment!==false;
