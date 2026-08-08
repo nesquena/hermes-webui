@@ -198,7 +198,14 @@ def _unwrap_profile_home_to_base(home: Path) -> Path:
 # are operator/deployment-level postures, not per-profile toggles. Letting a
 # profile .env set HERMES_WEBUI_ISOLATED_PROFILE=0 would let a contained user
 # escape isolation (#4589).
-_PROTECTED_ENV_KEYS = frozenset({'HERMES_WEBUI_ISOLATED_PROFILE'})
+_PROTECTED_ENV_KEYS = frozenset({
+    'HERMES_WEBUI_ISOLATED_PROFILE',
+    # Deployment-security gates must stay OPERATOR decisions: a profile's own
+    # .env feeding os.environ could otherwise flip an RCE-capable surface
+    # (plugin install/update/remove) open on a server the operator started
+    # closed (plugin-lifecycle gate finding #1).
+    'HERMES_WEBUI_ALLOW_PLUGIN_WRITE',
+})
 
 
 def _isolated_profile_opt_in() -> bool:
