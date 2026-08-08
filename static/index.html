@@ -44,13 +44,26 @@
       return !/\/api\/(auth\/login|csp-report)$/.test(url.pathname);
     }catch(_){return false;}
   }
+  function adoptRotatedToken(res){
+    // Trusted-header reconciliation can rotate the session mid-request; the
+    // 403 carries the replacement CSRF token so the retry succeeds without a
+    // page reload.
+    if(res&&res.status===403&&typeof res.clone==='function'){
+      try{
+        res.clone().json().then(function(body){
+          if(body&&body.reason==='session_rotated'&&typeof body.csrf_token==='string'&&body.csrf_token)token=body.csrf_token;
+        }).catch(function(){});
+      }catch(_){}
+    }
+    return res;
+  }
   window.fetch=function(input,init){
     if(sameOriginUnsafe(input,init)){
       var opts=init?Object.assign({},init):{};
       var headers=new Headers(opts.headers!==undefined?opts.headers:((input&&input.headers)||{}));
       if(!headers.has('X-Hermes-CSRF-Token'))headers.set('X-Hermes-CSRF-Token',token);
       opts.headers=headers;
-      return originalFetch(input,opts);
+      return originalFetch(input,opts).then(adoptRotatedToken);
     }
     return originalFetch(input,init);
   };

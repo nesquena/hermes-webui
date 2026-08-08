@@ -746,10 +746,15 @@ def _trusted_auth_bound_profile(handler) -> str | None:
     if mapping is None:
         return None
     groups = set(_trusted_groups_header_value(handler))
-    for group, profile in mapping.items():
-        if group in groups:
-            return profile
-    return 'default'
+    matches = [profile for group, profile in mapping.items() if group in groups]
+    # A mapping value of "*" means the group is not bound to a single
+    # profile: the session can switch freely across all profiles (admin
+    # access). The wildcard dominates concrete mappings regardless of map
+    # order — an identity in both a bound group and a wildcard group must
+    # never end up bound. Among concrete profiles, mapping order wins.
+    if '*' in matches:
+        return None
+    return matches[0] if matches else 'default'
 
 
 def _queue_pending_cookie(handler, cookie_header: str) -> None:
@@ -855,6 +860,7 @@ def reset_trusted_auth_request_state(handler) -> None:
     for name in (
         '_trusted_auth_session_reconciled',
         '_trusted_auth_session_rejected',
+        '_trusted_auth_session_rotated',
         '_trusted_auth_session_info',
         '_trusted_auth_session_cookie_value',
         # Clear any auth cookie queued by a prior request but not yet flushed.
@@ -887,15 +893,28 @@ def ensure_trusted_auth_session(handler) -> dict | None:
         return handler._trusted_auth_session_reconciled
     cookie_value = parse_cookie(handler)
     info = get_session_info(cookie_value) if cookie_value and verify_session(cookie_value) else None
-    if info and info.get('auth_type') != 'trusted':
+
+    # A request that arrives through the trusted proxy and asserts an
+    # identity via the trusted header must always be reconciled below,
+    # even when a stale non-trusted session cookie is already present
+    # (e.g. a shared-password session created before trusted-header auth
+    # was enabled, or another trusted user's leftover cookie on a shared
+    # browser). Otherwise that old cookie wins forever and Authelia's
+    # asserted identity/profile binding is silently ignored.
+    from api.routes import _raw_peer_is_trusted_proxy
+
+    trusted_request = (
+        is_trusted_auth_enabled()
+        and _raw_peer_is_trusted_proxy(handler)
+        and bool(_trusted_auth_username(handler))
+    )
+    if info and info.get('auth_type') != 'trusted' and not trusted_request:
         return _remember_trusted_auth_session(handler, info)
     if not is_trusted_auth_enabled():
         if info:
             invalidate_session(cookie_value)
             handler._trusted_auth_session_rejected = True
         return _remember_trusted_auth_session(handler, None)
-    from api.routes import _raw_peer_is_trusted_proxy
-
     if not _raw_peer_is_trusted_proxy(handler):
         if info:
             invalidate_session(cookie_value)
@@ -908,11 +927,41 @@ def ensure_trusted_auth_session(handler) -> dict | None:
             handler._trusted_auth_session_rejected = True
         return _remember_trusted_auth_session(handler, None)
     bound_profile = _trusted_auth_bound_profile(handler)
-    if info and info.get('username') == username and info.get('bound_profile') == bound_profile:
+    # Reuse is only safe when the existing session is itself trusted: a
+    # non-trusted record carrying the same username/bound_profile (which
+    # create_session permits for other auth flows) must not carry its
+    # security context across authentication mechanisms.
+    if (
+        info
+        and info.get('auth_type') == 'trusted'
+        and info.get('username') == username
+        and info.get('bound_profile') == bound_profile
+    ):
         _apply_trusted_session_profile(handler, bound_profile, cookie_value)
         return _remember_trusted_auth_session(handler, info, cookie_value)
+    preserved_profile = None
     if info:
+        if bound_profile is None:
+            # The request's profile cookie is signed against the session
+            # being invalidated. A bound replacement re-signs its own
+            # profile below, but an UNBOUND one (no group map, or a "*"
+            # mapping) would leave the dead signature in place: the next
+            # request rejects it and silently falls back to the process
+            # default profile. Capture the authenticated selection while
+            # the old session can still verify it.
+            try:
+                from api.helpers import get_profile_cookie
+
+                preserved_profile = get_profile_cookie(handler)
+            except Exception:
+                preserved_profile = None
         invalidate_session(cookie_value)
+        # The request's cookie was just replaced mid-request. An unsafe
+        # request whose CSRF token was minted for the old session will fail
+        # token validation; flag the rotation so the CSRF gate can reject it
+        # as deliberately retryable (the replacement cookie and its CSRF
+        # token are emitted with the 403, so a retry/reload succeeds).
+        handler._trusted_auth_session_rotated = True
     cookie_value = create_session(
         auth_type='trusted',
         username=username,
@@ -920,6 +969,19 @@ def ensure_trusted_auth_session(handler) -> dict | None:
     )
     _queue_pending_cookie(handler, _auth_cookie_header(cookie_value, handler))
     _apply_trusted_session_profile(handler, bound_profile, cookie_value)
+    if preserved_profile:
+        try:
+            from api.profiles import set_request_profile
+
+            set_request_profile(preserved_profile)
+            _queue_pending_cookie(
+                handler, _build_profile_cookie_header(preserved_profile, cookie_value)
+            )
+        except Exception:
+            logger.warning(
+                "Failed to re-sign profile cookie for rotated unbound session",
+                exc_info=True,
+            )
     info = get_session_info(cookie_value)
     return _remember_trusted_auth_session(handler, info, cookie_value)
 
