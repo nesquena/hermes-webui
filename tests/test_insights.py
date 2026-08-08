@@ -508,3 +508,59 @@ def test_insights_cache_hit_rate_is_none_without_cache_reads(monkeypatch, tmp_pa
     assert data["models"][0]["cache_hit_percent"] is None
     assert data["total_cache_hit_percent"] is None
 
+
+
+def test_skill_usage_table_overflow_trio_stays_together():
+    """PR #6775 regression: the skill-usage table must keep its 3-piece
+    narrow-screen overflow contract. A future CSS cleanup that removes one
+    half of the fix (card min-width floor, table overflow scroller, or the
+    shared head/row min-width) silently reintroduces the card overflow bug
+    on narrow screens, so the trio is asserted as a unit."""
+    # 1) The card that hosts the table must be allowed to shrink below its
+    #    intrinsic grid width, or the table can never overflow-scroll locally.
+    card_line = [l for l in STYLE_CSS.splitlines() if l.startswith(".insights-card{")][0]
+    assert "min-width:0" in card_line, (
+        f".insights-card must carry min-width:0 so the grid item can shrink; got: {card_line}"
+    )
+
+    # 2) The table owns a local horizontal scroller (display:block so the
+    #    wrapper participates in layout; overflow-x:auto contains the width).
+    table_block = [l for l in STYLE_CSS.splitlines() if l.startswith(".skill-usage-table{")][0]
+    assert "overflow-x:auto" in table_block, (
+        f".skill-usage-table must own overflow-x:auto; got: {table_block}"
+    )
+    assert "display:block" in table_block, (
+        f".skill-usage-table must be display:block for the scroller to size; got: {table_block}"
+    )
+
+    # 3) Header AND data rows share the same minimum content width (352px) so
+    #    columns stay aligned while the wrapper scrolls. The rule covers both
+    #    selectors in one declaration (the selector list may wrap across two
+    #    lines), exactly like the PR fix.
+    css_lines = STYLE_CSS.splitlines()
+    head_idx = next(
+        (i for i, l in enumerate(css_lines)
+         if ".skill-usage-table .insights-table-head" in l),
+        None,
+    )
+    assert head_idx is not None, "a .skill-usage-table head rule must exist"
+    # The selector list may span two lines: head selector + comma, then the
+    # row selector with the declaration block. Collect both lines.
+    joined = css_lines[head_idx]
+    if not joined.strip().endswith("{"):
+        # Look ahead for the continuation line carrying the row selector and
+        # the declaration block.
+        for j in range(head_idx + 1, min(head_idx + 3, len(css_lines))):
+            nxt = css_lines[j].strip()
+            if ".insights-table-row" in nxt:
+                joined = joined + "\n" + css_lines[j]
+                break
+    assert ".skill-usage-table .insights-table-row" in joined, (
+        "head and row selectors must be declared together"
+    )
+    assert "min-width:352px" in joined, (
+        f"head and row must share min-width:352px; got: {joined}"
+    )
+    assert "grid-template-columns" in joined, (
+        f"head and row must keep the shared grid-template-columns; got: {joined}"
+    )
