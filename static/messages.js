@@ -2072,6 +2072,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
+  const _liveOwnerScope=(typeof globalThis!=='undefined'&&globalThis)
+    || (typeof window!=='undefined'&&window)
+    || {};
+  const _liveOwnerToken=((typeof _liveOwnerScope._LIVE_STREAM_OWNER_SEQ==='number'
+    ? _liveOwnerScope._LIVE_STREAM_OWNER_SEQ
+    : 0)+1);
+  _liveOwnerScope._LIVE_STREAM_OWNER_SEQ=_liveOwnerToken;
+  let _closureRetired=false;
+  let _liveTransportGenerationSeq=1;
+  LIVE_STREAMS[activeSid]={streamId,source:null,ownerToken:_liveOwnerToken};
+  LIVE_STREAMS[activeSid].transportGeneration=_liveTransportGenerationSeq;
   if(!reconnecting&&typeof resetTurnWorkspaceMutations==='function') resetTurnWorkspaceMutations();
   if(!reconnecting&&typeof _resetStreamScrollFollow==='function') _resetStreamScrollFollow();
   // Phase D: restore bottom run status after closeLiveStream(); that helper
@@ -2150,16 +2161,68 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
+  function _currentLiveOwnerEntry(){
+    const live=LIVE_STREAMS[activeSid];
+    return live&&live.ownerToken===_liveOwnerToken ? live : null;
+  }
+  function _currentLiveOwnerActive(transportGeneration=null){
+    const live=_currentLiveOwnerEntry();
+    const liveTransportGeneration=live&&typeof live.transportGeneration==='number'
+      ? live.transportGeneration
+      : 1;
+    return !!(
+      !_closureRetired &&
+      live &&
+      (transportGeneration==null || liveTransportGeneration===transportGeneration)
+    );
+  }
+  function _currentLiveTransportGenerationOwns(transportGeneration){
+    const live=_currentLiveOwnerEntry();
+    return !!(
+      !_closureRetired &&
+      live &&
+      live.transportGeneration===transportGeneration &&
+      _ownsActiveStreamOrBackground()
+    );
+  }
+  function _currentLiveEventSourceOwnsStream(source,transportGeneration){
+    const live=_currentLiveOwnerEntry();
+    const liveTransportGeneration=live&&typeof live.transportGeneration==='number'
+      ? live.transportGeneration
+      : 1;
+    return !!(
+      !_closureRetired &&
+      live &&
+      live.source===source &&
+      (transportGeneration==null || liveTransportGeneration===transportGeneration) &&
+      _ownsActiveStreamOrBackground()
+    );
+  }
+  function _captureCurrentLiveTransportGeneration(){
+    const live=_currentLiveOwnerEntry();
+    if(_closureRetired || !live) return null;
+    return typeof live.transportGeneration==='number' ? live.transportGeneration : 1;
+  }
+  function _captureCurrentEventTransportGeneration(source,transportGeneration){
+    if(!_currentLiveEventSourceOwnsStream(source,transportGeneration)) return null;
+    return _captureCurrentLiveTransportGeneration();
+  }
+  function _nextLiveTransportGeneration(){
+    _liveTransportGenerationSeq+=1;
+    return _liveTransportGenerationSeq;
+  }
   function _ownsActiveStreamOrBackground(){
     return !_isActiveSession() || S.activeStreamId===streamId;
   }
-  function _bailOutOfTerminalEventsFromStaleStream(source){
-    if(_ownsActiveStreamOrBackground()) return false;
-    // This stale stream no longer owns the session — schedule cleanup of ITS own
-    // anchor registry (identity-guarded, so it can't clobber the newer stream's
-    // registry for the same session) before closing. (Codex leak catch.)
-    _scheduleAnchorRegistryCleanup(120000);
-    _closeSource(source);
+  function _currentPaneRecoveryOwnerLost(){
+    return !_currentLiveOwnerActive() || !_isSessionCurrentPane(activeSid) || !_ownsActiveStreamOrBackground();
+  }
+  function _bailOutOfTerminalEventsFromStaleStream(source, transportGeneration=null){
+    if(_currentLiveEventSourceOwnsStream(source, transportGeneration)) return false;
+    // Stale callbacks must be a pure no-op. The live owner transition now
+    // carries cleanup and teardown explicitly; a buffered old-source event may
+    // arrive after a replacement source is wired and must not retire that
+    // shared closure or reclaim its cleanup lease. (#6504 same-token transport)
     return true;
   }
   function _clearActivePaneInflightIfOwner(){
@@ -2251,6 +2314,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
   }
   function persistInflightState(){
+    if(!_currentLiveOwnerActive()) return;
     const inflight=INFLIGHT[activeSid];
     if(!inflight||typeof saveInflightState!=='function') return;
     saveInflightState(activeSid,{
@@ -2272,6 +2336,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
   }
   function snapshotLiveTurn(){
+    if(!_currentLiveOwnerActive()) return;
     if(typeof snapshotLiveTurnHtmlForSession==='function') snapshotLiveTurnHtmlForSession(activeSid);
   }
   // Throttled per-frame variant. snapshotLiveTurnHtmlForSession serializes the
@@ -2282,6 +2347,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // coarse trailing snapshot during streaming is sufficient. (#5455 WS2.2)
   let _snapshotLiveTurnTimer=null;
   function _throttledSnapshotLiveTurn(){
+    if(!_currentLiveOwnerActive()) return;
     if(_snapshotLiveTurnTimer) return;
     _snapshotLiveTurnTimer=setTimeout(()=>{_snapshotLiveTurnTimer=null;snapshotLiveTurn();},700);
   }
@@ -2297,19 +2363,91 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // directly so no more than 2s of progress is lost on a crash.
   let _persistTimer=null;
   function _throttledPersist(){
+    if(!_currentLiveOwnerActive()) return;
     if(_persistTimer) return;
     _persistTimer=setTimeout(()=>{_persistTimer=null;persistInflightState();},2000);
   }
-  function _closeSource(source){
-    closeLiveStream(activeSid, streamId, source);
-  }
-  function _clearStreamEndRecovery(){
-    if(_streamEndRecoveryTimer){
-      clearTimeout(_streamEndRecoveryTimer);
-      _streamEndRecoveryTimer=null;
+  function _retireLiveClosure(source, transportGeneration){
+    if(_closureRetired) return;
+    const live=_currentLiveOwnerEntry();
+    const ownsActiveStreamOrBackground=typeof _ownsActiveStreamOrBackground==='function'
+      ? _ownsActiveStreamOrBackground()
+      : true;
+    const currentLiveTransportGeneration=live&&typeof live.transportGeneration==='number'
+      ? live.transportGeneration
+      : 1;
+    const requiredTransportGeneration=transportGeneration;
+    if(source===null){
+      if(requiredTransportGeneration!=null && !(_currentLiveOwnerActive(requiredTransportGeneration) && ownsActiveStreamOrBackground)) return;
+      if(!_currentLiveOwnerActive() || !ownsActiveStreamOrBackground) return;
+    }else if(
+      !_closureRetired &&
+      live &&
+      live.source===source &&
+      ownsActiveStreamOrBackground &&
+      (requiredTransportGeneration==null || currentLiveTransportGeneration===requiredTransportGeneration)
+    ){
+      // keep going
+    }else{
+      return;
     }
-    _pendingStreamEndRecovery=false;
-    _streamEndRecoveryAttempts=0;
+    _closureRetired=true;
+    if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+    _cancelThrottledSnapshotTimer();
+    _clearStreamEndRecovery(transportGeneration);
+    _cancelAnimationFramePendingStreamRender();
+    if(_deferredStreamRecoveryResume){
+      try{window.removeEventListener('focus',_deferredStreamRecoveryResume);}catch(_){}
+      try{window.removeEventListener('pageshow',_deferredStreamRecoveryResume);}catch(_){}
+      try{document.removeEventListener('visibilitychange',_deferredStreamRecoveryResume);}catch(_){}
+      _deferredStreamRecoveryResume=null;
+      _deferredStreamRecoveryBound=false;
+    }
+    if(_currentLiveOwnerEntry()) closeLiveStream(activeSid, streamId, source);
+  }
+  function _closeSource(source, options=null){
+    const live=_currentLiveOwnerEntry();
+    const ownsActiveStreamOrBackground=typeof _ownsActiveStreamOrBackground==='function'
+      ? _ownsActiveStreamOrBackground()
+      : true;
+    const currentLiveTransportGeneration=live&&typeof live.transportGeneration==='number'
+      ? live.transportGeneration
+      : 1;
+    const requiredTransportGeneration=options&&typeof options.transportGeneration==='number'
+      ? options.transportGeneration
+      : null;
+    if(options&&options.retainOwner){
+      if(!live) return;
+      if(source===null){
+        if(requiredTransportGeneration!=null && !_currentLiveOwnerActive(requiredTransportGeneration)) return;
+        if(!_currentLiveOwnerActive() || !ownsActiveStreamOrBackground) return;
+      }else if(!(
+        !_closureRetired &&
+        live &&
+        live.source===source &&
+        ownsActiveStreamOrBackground &&
+        (requiredTransportGeneration==null || currentLiveTransportGeneration===requiredTransportGeneration)
+      )){
+        return;
+      }
+      if(typeof snapshotLiveTurnHtmlForSession==='function') snapshotLiveTurnHtmlForSession(activeSid);
+      if(typeof _clearLiveRunStatusTimer==='function') _clearLiveRunStatusTimer(activeSid);
+      if(typeof hideLiveRunStatus==='function') hideLiveRunStatus(activeSid);
+      try{if(live.source&&live.source.readyState!==2)live.source.close();}catch(_){ }
+      const nextTransportGeneration=typeof _nextLiveTransportGeneration==='function'
+        ? _nextLiveTransportGeneration()
+        : (currentLiveTransportGeneration+1);
+      LIVE_STREAMS[activeSid]={...live,source:null,transportGeneration:nextTransportGeneration};
+      return;
+    }
+    _retireLiveClosure(source, requiredTransportGeneration);
+  }
+  function _clearStreamEndRecovery(transportGeneration){
+    const recovery=_streamEndRecoveryLease;
+    if(!recovery || (transportGeneration!=null && recovery.generation!==transportGeneration)) return false;
+    if(recovery.timer) clearTimeout(recovery.timer);
+    _streamEndRecoveryLease=null;
+    return true;
   }
   function _liveStreamEndScenePresent(){
     if(assistantText||assistantRow) return true;
@@ -2325,13 +2463,52 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       '.agent-activity-thinking[data-thinking-active="1"]'
     ));
   }
-  function _scheduleStreamEndRecovery(source, delay=180){
-    if(_streamEndRecoveryTimer) clearTimeout(_streamEndRecoveryTimer);
-    _pendingStreamEndRecovery=true;
-    _streamEndRecoveryTimer=setTimeout(()=>{void _runStreamEndRecovery(source);},delay);
+  function _scheduleStreamEndRecovery(source, delay=180, transportGeneration, attempts=null){
+    const live=_currentLiveOwnerEntry();
+    const existingRecovery=typeof _streamEndRecoveryLease!=='undefined' ? _streamEndRecoveryLease : null;
+    const ownsActiveStreamOrBackground=typeof _ownsActiveStreamOrBackground==='function'
+      ? _ownsActiveStreamOrBackground()
+      : true;
+    const activeTransportGeneration=transportGeneration;
+    if(!_currentLiveOwnerActive(activeTransportGeneration) || !ownsActiveStreamOrBackground) return;
+    if(existingRecovery&&existingRecovery.timer) clearTimeout(existingRecovery.timer);
+    const recoveryAttempts=typeof attempts==='number'
+      ? attempts
+      : (
+        existingRecovery&&typeof existingRecovery.attempts==='number'
+          ? existingRecovery.attempts
+          : 0
+      );
+    const recovery={generation:activeTransportGeneration,source,timer:null,attempts:recoveryAttempts};
+    if(typeof _streamEndRecoveryLease!=='undefined') _streamEndRecoveryLease=recovery;
+    recovery.timer=setTimeout(()=>{
+      if(typeof _streamEndRecoveryLease!=='undefined'&&_streamEndRecoveryLease!==recovery) return;
+      recovery.timer=null;
+      const stillOwnsActiveStreamOrBackground=typeof _ownsActiveStreamOrBackground==='function'
+        ? _ownsActiveStreamOrBackground()
+        : true;
+      if(!_currentLiveOwnerActive(activeTransportGeneration) || !stillOwnsActiveStreamOrBackground) return;
+      void _runStreamEndRecovery(source,activeTransportGeneration);
+    },delay);
   }
-  function _finalizeStreamEndFallback(source){
-    _clearStreamEndRecovery();
+  function _visibleLiveAssistantAnswerPresent(){
+    if(!_isActiveSession()) return false;
+    const liveBody=(assistantBody&&assistantBody.isConnected)
+      ? assistantBody
+      : (typeof document!=='undefined'
+          ? (($('liveAssistantTurn')||{}).querySelector&&$('liveAssistantTurn').querySelector('.assistant-segment[data-live-assistant="1"] .msg-body,[data-live-assistant="1"] .msg-body'))
+          : null);
+    return !!(
+      String(assistantText||'').trim()
+      && String(liveBody&&liveBody.textContent||'').trim()
+    );
+  }
+  function _finalizeStreamEndFallback(source, options=null){
+    const live=_currentLiveOwnerEntry();
+    const transportGeneration=options&&typeof options.transportGeneration==='number'
+      ? options.transportGeneration : null;
+    if(!_currentLiveOwnerActive(transportGeneration) || !_ownsActiveStreamOrBackground()) return false;
+    _clearStreamEndRecovery(transportGeneration);
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _cancelThrottledSnapshotTimer();
     _terminalStateReached=true;
@@ -2348,32 +2525,98 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _clearAnchorProseIncrementalNode();
     _clearApprovalForOwner();
     _clearClarifyForOwner('terminal');
+    const preserveVisibleAnswer=!!(options&&options.preserveVisibleAnswer)&&_visibleLiveAssistantAnswerPresent();
+    _closeSource(source,{transportGeneration});
     if(_isActiveSession()){
       S.activeStreamId=null;
       clearLiveToolCards();if(!assistantText)removeThinking();
-      renderMessages({preserveScroll:true});
+      if(!preserveVisibleAnswer) renderMessages({preserveScroll:true});
     }
     renderSessionList();
     _setActivePaneIdleIfOwner();
-    _closeSource(source);
+    return true;
   }
-  async function _runStreamEndRecovery(source){
-    if(_streamFinalized || _terminalStateReached || !_pendingStreamEndRecovery){
-      _clearStreamEndRecovery();
+  async function _reconcileStreamEndRecoveryExhaustion(source,transportGeneration){
+    const live=_currentLiveOwnerEntry();
+    if(!_currentLiveOwnerActive(transportGeneration) || !_ownsActiveStreamOrBackground() || _currentPaneRecoveryOwnerLost()){
+      _closeSource(source,{retainOwner:true,transportGeneration});
+      _clearStreamEndRecovery(transportGeneration);
+      return true;
+    }
+    try{
+      if(streamId){
+        const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+        if(!_currentLiveOwnerActive(transportGeneration) || !_ownsActiveStreamOrBackground() || _currentPaneRecoveryOwnerLost()){
+          _closeSource(source,{transportGeneration});
+          _clearStreamEndRecovery(transportGeneration);
+          return true;
+        }
+        if(st&&st.active){
+          setComposerStatus('Reconnected');
+          _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}),transportGeneration);
+          _clearStreamEndRecovery(transportGeneration);
+          return true;
+        }
+        if(st&&st.replay_available){
+          setComposerStatus('Restoring stream…');
+          _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}),transportGeneration);
+          _clearStreamEndRecovery(transportGeneration);
+          return true;
+        }
+      }
+    }catch(_){ }
+    if(await _restoreSettledSession(source,{preserveVisibleOnShorterTerminalSnapshot:true,transportGeneration})) return true;
+    if(!_currentLiveOwnerActive(transportGeneration) || !_ownsActiveStreamOrBackground() || (_isActiveSession() && S.activeStreamId!==streamId)){
+      _closeSource(source,{retainOwner:true,transportGeneration});
+      _clearStreamEndRecovery(transportGeneration);
+      return true;
+    }
+    _finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});
+    return true;
+  }
+  async function _runStreamEndRecovery(source,transportGeneration){
+    const recovery=_streamEndRecoveryLease;
+    if(_streamFinalized || _terminalStateReached ||
+      (recovery.generation!=null&&recovery.generation!==transportGeneration) || !_currentLiveOwnerActive(transportGeneration)){
+      _clearStreamEndRecovery(transportGeneration);
       return;
     }
-    _streamEndRecoveryTimer=null;
-    const status=await _restoreSettledSession(source,{status:true});
-    if(status==='restored'){
-      _clearStreamEndRecovery();
+    if(!_currentLiveOwnerActive(transportGeneration) || !_ownsActiveStreamOrBackground()){
+      if(source) _closeSource(source,{retainOwner:true,transportGeneration});
+      _clearStreamEndRecovery(transportGeneration);
       return;
     }
-    if(status==='active'&&_streamEndRecoveryAttempts<10){
-      _streamEndRecoveryAttempts+=1;
-      _scheduleStreamEndRecovery(source,200);
+    const status=await _restoreSettledSession(source,{status:true,transportGeneration});
+    if(status==='restored'||status==='stale'){
+      _clearStreamEndRecovery(transportGeneration);
       return;
     }
-    _finalizeStreamEndFallback(source);
+    if(status==='active'){
+      recovery.attempts+=1;
+      let nextRecoverySource=source;
+      let nextRecoveryTransportGeneration=transportGeneration;
+      if(recovery.attempts===10){
+        // stream_end already told us the chat SSE is terminal; after the fast
+        // polls exhaust, close that owner and keep waiting for the settled
+        // session instead of finalizing whatever partial live DOM is visible.
+        _closeSource(source,{retainOwner:true,transportGeneration});
+        nextRecoverySource=null;
+        const retainedTransportGeneration=_captureCurrentLiveTransportGeneration();
+        if(retainedTransportGeneration!=null) nextRecoveryTransportGeneration=retainedTransportGeneration;
+      }
+      if(recovery.attempts<16){
+        _scheduleStreamEndRecovery(
+          nextRecoverySource,
+          recovery.attempts<10?200:1000,
+          nextRecoveryTransportGeneration,
+          recovery.attempts
+        );
+        return;
+      }
+      await _reconcileStreamEndRecoveryExhaustion(nextRecoverySource,nextRecoveryTransportGeneration);
+      return;
+    }
+    _finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});
   }
   function _stripLiveVisibleAssistantEchoFromThinking(text, snippets){
     let out=String(text||'');
@@ -2528,36 +2771,38 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _reconnectAttempted=false;
   let _terminalStateReached=false;
   let _deferredStreamRecoveryBound=false;
-  let _pendingStreamEndRecovery=false;
-  let _streamEndRecoveryTimer=null;
-  let _streamEndRecoveryAttempts=0;
+  let _deferredStreamRecoveryResume=null;
+  let _streamEndRecoveryLease=null;
+  let _acceptedCompletionLease=null;
 
   function _pageHiddenForStreamError(){
     return (typeof document!=='undefined'&&document.visibilityState==='hidden')||
       (typeof document!=='undefined'&&document.wasDiscarded===true);
   }
 
-  function _reattachOrRestoreAfterDeferredStreamError(source){
-    if(_terminalStateReached||_streamFinalized) return;
+  function _reattachOrRestoreAfterDeferredStreamError(source,transportGeneration){
+    if(_terminalStateReached||_streamFinalized||!_currentLiveOwnerActive(transportGeneration)||!_ownsActiveStreamOrBackground()) return;
     if((S.session&&S.session.session_id)!==activeSid) return;
     (async()=>{
       try{
         if(streamId){
           const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+          if(!_currentLiveOwnerActive(transportGeneration) || !_ownsActiveStreamOrBackground() || _currentPaneRecoveryOwnerLost()) return;
           if(st.active){
             setComposerStatus('Reconnected');
-            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}),transportGeneration);
             return;
           }
         }
       }catch(_){
         if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
       }
-      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true,transportGeneration})) return;
+      if(!_currentLiveOwnerActive(transportGeneration) || !_ownsActiveStreamOrBackground()) return;
       if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup(120000);
-      _handleStreamError(source);
+      _handleStreamError(source,transportGeneration);
     })();
   }
 
@@ -2565,6 +2810,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!_pageHiddenForStreamError()) return false;
     setComposerStatus('Connection paused. Reconnecting when this tab returns…');
     if(S.session&&S.session.session_id===activeSid&&streamId) S.activeStreamId=streamId;
+    const issuedGeneration=(_currentLiveOwnerEntry()&&_currentLiveOwnerEntry().transportGeneration);
+    _closeSource(source,{retainOwner:true,transportGeneration:issuedGeneration});
+    const deferredLive=_currentLiveOwnerEntry();
+    const deferredTransportGeneration=deferredLive
+      ? (typeof deferredLive.transportGeneration==='number' ? deferredLive.transportGeneration : 1)
+      : null;
     if(!_deferredStreamRecoveryBound){
       _deferredStreamRecoveryBound=true;
       const resume=()=>{
@@ -2572,9 +2823,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         window.removeEventListener('focus',resume);
         window.removeEventListener('pageshow',resume);
         document.removeEventListener('visibilitychange',resume);
+        _deferredStreamRecoveryResume=null;
         _deferredStreamRecoveryBound=false;
-        _reattachOrRestoreAfterDeferredStreamError(source);
+        if(deferredTransportGeneration==null || !_currentLiveOwnerActive(deferredTransportGeneration) || !_ownsActiveStreamOrBackground()) return;
+        _reattachOrRestoreAfterDeferredStreamError(source,deferredTransportGeneration);
       };
+      _deferredStreamRecoveryResume=resume;
       document.addEventListener('visibilitychange',resume);
       window.addEventListener('focus',resume);
       window.addEventListener('pageshow',resume);
@@ -2635,10 +2889,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _anchorReasoningFlushed=false;
   let _anchorLocalSeq=0;
   if(_anchorRegistryMap&&_anchorRegistry) _anchorRegistryMap.set(streamId,_anchorRegistry);
+  if(_anchorRegistry&&typeof _anchorRegistry==='object') _anchorRegistry._cleanupOwnerToken=_liveOwnerToken;
   function _scheduleAnchorRegistryCleanup(delayMs=600000){
     if(!_anchorRegistryMap||!_anchorRegistry) return;
+    const cleanupOwnerToken=_liveOwnerToken;
     setTimeout(()=>{
-      if(_anchorRegistryMap.get(streamId)===_anchorRegistry) _anchorRegistryMap.delete(streamId);
+      if(
+        _anchorRegistryMap.get(streamId)===_anchorRegistry
+        && _anchorRegistry
+        && _anchorRegistry._cleanupOwnerToken===cleanupOwnerToken
+      ) _anchorRegistryMap.delete(streamId);
     },delayMs);
   }
   // Backstop: schedule an identity-guarded cleanup at creation so this shadow
@@ -5057,7 +5317,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _smdEndParser();
     _resetStreamFadeState();
   }
-  function _rememberRunJournalCursor(e){
+  function _rememberRunJournalCursor(e, transportGeneration=null){
+    const source=(e&&((typeof e.currentTarget!=='undefined'&&e.currentTarget)||e.target))||null;
+    if(!_currentLiveEventSourceOwnsStream(source, transportGeneration)) return;
     const raw=String(e&&e.lastEventId||'').trim();
     if(!raw) return;
     const tail=raw.includes(':')?raw.slice(raw.lastIndexOf(':')+1):raw;
@@ -5340,6 +5602,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _cachedParsedText='';
   let _cachedParsedReasoning='';
   function _scheduleRender(parsed){
+    if(_closureRetired||!_currentLiveOwnerEntry()) return;
     // If caller provides a pre-computed parse result, cache it for _doRender.
     if(parsed){
       _cachedParsed=parsed;
@@ -5362,7 +5625,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _pendingRafHandle=null;
       _renderPending=false;
       // Guard: a pending setTimeout+rAF can outlive stream finalization.
-      if(_streamFinalized) return;
+      if(_streamFinalized||_closureRetired||!_currentLiveOwnerEntry()) return;
       // Mobile scroll-jank guard: temporarily disable overflow-anchor before DOM
       // writes to suppress Chromium scroll re-anchoring during streaming growth.
       if(typeof window._fixMobileScrollJank==='function') window._fixMobileScrollJank();
@@ -5433,12 +5696,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return true;
   }
 
-  function _wireSSE(source){
-    const existingLive=LIVE_STREAMS[activeSid];
-    if(existingLive&&existingLive.source&&existingLive.source!==source){
-      try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
+  function _wireSSE(candidate,expectedGeneration){
+    const live=_currentLiveOwnerEntry();
+    if(!live||_closureRetired||!_ownsActiveStreamOrBackground()||
+      live.streamId!==streamId||live.transportGeneration!==expectedGeneration||live.source){
+      try{if(candidate&&candidate.readyState!==2)candidate.close();}catch(_){ }
+      return null;
     }
-    LIVE_STREAMS[activeSid]={streamId,source};
+    const existingLive=live;
+    const transportGeneration=typeof _nextLiveTransportGeneration==='function'
+      ? _nextLiveTransportGeneration()
+      : ((typeof existingLive.transportGeneration==='number' ? existingLive.transportGeneration : 1)+1);
+    LIVE_STREAMS[activeSid]={...existingLive,streamId,source:candidate,transportGeneration};
+    const source=candidate;
 
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
@@ -5456,6 +5726,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // terminal handlers) address it without needing a reset here.
 
     source.addEventListener('token',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source,transportGeneration)) return;
       if(_terminalStateReached||_streamFinalized) return;
       const d=JSON.parse(e.data);
       assistantText+=d.text;
@@ -5480,6 +5751,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('interim_assistant',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source,transportGeneration)) return;
       if(_terminalStateReached||_streamFinalized) return;
       const d=JSON.parse(e.data);
       const visible=String(d&&d.text?d.text:'').trim();
@@ -5563,6 +5835,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('reasoning',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       if(_terminalStateReached||_streamFinalized) return;
       if(!_ownsActiveStreamOrBackground()) return;
       const d=JSON.parse(e.data);
@@ -5586,6 +5859,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('tool',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       if(_terminalStateReached||_streamFinalized) return;
       if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
       const d=JSON.parse(e.data);
@@ -5622,6 +5896,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('tool_complete',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       if(_terminalStateReached||_streamFinalized) return;
       if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
       const d=JSON.parse(e.data);
@@ -5668,6 +5943,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Cross-session protection mirrors every other live listener:
     // payload.session_id must match activeSid or the event is dropped.
     source.addEventListener('todo_state',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       let d;
       try{ d=JSON.parse(e.data||'{}'); }catch(_){ return; }
       if(!d||typeof d!=='object') return;
@@ -5701,6 +5977,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('approval',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       const d=JSON.parse(e.data);
       _applyToAnchor('approval',d,e);
       showApprovalForSession(activeSid, d, d.pending_count || 1);
@@ -5709,6 +5986,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('clarify',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       const d=JSON.parse(e.data);
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
@@ -5717,6 +5995,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('state_saved',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -5726,6 +6005,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('title',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -5733,6 +6013,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('title_status',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -5748,6 +6029,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('context_status',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -5776,6 +6058,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
 
     source.addEventListener('goal',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
@@ -5794,6 +6077,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('goal_continue',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       try{
         const d=JSON.parse(e.data||'{}');
         const sid=d.session_id||activeSid;
@@ -5832,6 +6116,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // `_handleBgTaskCompleteEvent` function below is shared between both
     // paths (dedupe only; the wakeup itself is server-side).
     source.addEventListener('bg_task_complete',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       if(typeof _handleBgTaskCompleteEvent==='function'){
         _handleBgTaskCompleteEvent(e, activeSid, {source:'stream'});
       }
@@ -5839,19 +6124,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;
-      _clearStreamEndRecovery();
-      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      if(!_currentLiveEventSourceOwnsStream(source,transportGeneration)) return;
+      _clearStreamEndRecovery(transportGeneration);
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
       // _streamFinalized=false, calls _restoreSettledSession(), and overwrites
       // S.messages with stale server data (issue #3195).
       _streamFinalized=true;
       _terminalStateReached=true;
+      _acceptedCompletionLease={ownerToken:_liveOwnerToken,generation:transportGeneration,settled:false};
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _cancelThrottledSnapshotTimer();
       const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
       const _finishDone=()=>{
+        const completionLease=_acceptedCompletionLease;
+        if(!completionLease||completionLease.settled||completionLease.ownerToken!==_liveOwnerToken||
+          !_currentLiveOwnerActive()) return;
+        completionLease.settled=true;
         // Bug A fix: cancel any pending rAF and mark stream finalized before
         // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
         // can reintroduce a stale thinking card or duplicate content.
@@ -5910,6 +6200,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           ? _shouldFollowMessagesOnDomReplace()
           : (typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(1200)));
         const _settledStreamId=isActiveSession?(S.activeStreamId||(d&&d.stream_id)||''):'';
+        if(completionLease.closePending){
+          const settledTransportGeneration=_captureCurrentLiveTransportGeneration();
+          if(settledTransportGeneration!=null){
+            _closeSource(null,{transportGeneration:settledTransportGeneration});
+          }
+        }
         if(isActiveSession){
           S.activeStreamId=null;
         }
@@ -6137,18 +6433,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('stream_end',async e=>{
+      if(!_currentLiveEventSourceOwnsStream(source,transportGeneration)) return;
       if(_streamFinalized){
-        _closeSource(source);
+        const completionLease=_acceptedCompletionLease;
+        if(completionLease&&completionLease.ownerToken===_liveOwnerToken&&!completionLease.settled){
+          completionLease.closePending=true;
+          _closeSource(source,{retainOwner:true,transportGeneration});
+          return;
+        }
+        _closeSource(source,{transportGeneration});
         return;
       }
-      _clearStreamEndRecovery();
-      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      _clearStreamEndRecovery(transportGeneration);
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
       }catch(_){}
       if(S.activeStreamId===streamId && _liveStreamEndScenePresent()){
-        _scheduleStreamEndRecovery(source);
+        _scheduleStreamEndRecovery(source,180,transportGeneration);
         return;
       }
       // Some replay/journal paths can deliver stream_end without a preceding
@@ -6156,18 +6458,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // live DOM/inflight state remains projected and can duplicate Thinking or
       // assistant content until a later session switch. Settle from the persisted
       // session before closing so the pane converges on canonical state.
-      const status=await _restoreSettledSession(source,{status:true});
-      if(status==='restored'){
+      const status=await _restoreSettledSession(source,{status:true,transportGeneration});
+      if(status==='restored'||status==='stale'){
         return;
       }
       if(status==='active'&&S.activeStreamId===streamId){
-        _scheduleStreamEndRecovery(source,200);
+        _scheduleStreamEndRecovery(source,200,transportGeneration);
         return;
       }
-      _finalizeStreamEndFallback(source);
+      _finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});
     });
 
     source.addEventListener('pending_steer_leftover',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       // The agent finished its turn with steer text still stashed (no
       // tool-result boundary fired). Match the CLI's leftover-delivery
       // behaviour: queue the leftover text as a next-turn user message
@@ -6193,6 +6496,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('compressing',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       // Context auto-compression is starting. Surface the same calm running
       // compression card as manual /compress while the summarizer LLM call runs.
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -6223,6 +6527,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('compressed',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       // Context was auto-compressed during this turn. Keep the live timeline
       // honest by transitioning the running divider into a completed divider;
       // final settlement removes live-only compression rows from the Worklog.
@@ -6258,6 +6563,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('metering',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
@@ -6279,7 +6585,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('apperror',e=>{
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
-      _clearStreamEndRecovery();
+      _clearStreamEndRecovery(transportGeneration);
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _cancelThrottledSnapshotTimer();
@@ -6379,7 +6685,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(isRecoveryControlMessage){
           (async()=>{
-            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true,transportGeneration})) return;
             if(S.session&&S.session.session_id===activeSid){
               S.messages=_filterRecoveryControlMessages(S.messages||[]);
               _markSessionViewed(activeSid, S.messages.length);
@@ -6399,6 +6705,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('warning',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       // Non-fatal warning from server (e.g. fallback activated, retrying)
       if(!S.session||S.session.session_id!==activeSid) return;
       try{
@@ -6414,34 +6721,66 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // Show as a small inline notice, not a full error
         setComposerStatus(`${d.message||'Warning'}`);
         // If it's a fallback notice, show it briefly then clear
-        if(d.type==='fallback') setTimeout(()=>setComposerStatus(''),4000);
+        if(d.type==='fallback') setTimeout(()=>{
+          if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+          setComposerStatus('');
+        },4000);
       }catch(_){}
     });
 
     source.addEventListener('error',async e=>{
-      if(_bailOutOfTerminalEventsFromStaleStream(source) && !_streamFinalized){
-        return;
-      }
+      const _errorLive=_currentLiveOwnerEntry();
+      if(!_errorLive || _errorLive.source!==source || !_ownsActiveStreamOrBackground()) return;
+      _rememberRunJournalCursor(e,transportGeneration);
       if(_terminalStateReached || _streamFinalized){
-        _closeSource(source);
+        const completionLease=_acceptedCompletionLease;
+        if(completionLease&&completionLease.ownerToken===_liveOwnerToken&&!completionLease.settled){
+          completionLease.closePending=true;
+          _closeSource(source,{retainOwner:true,transportGeneration});
+          return;
+        }
+        _closeSource(source,{transportGeneration});
         return;
       }
       // #3885: if a stream_end recovery is in flight, don't start a competing
       // reconnect — recovery polls server state and owns the terminal decision
       // (else its exhaustion could mute a freshly reconnected stream). Opus stage-LK.
-      if(_pendingStreamEndRecovery){
-        _closeSource(source);
+      if(typeof _streamEndRecoveryLease!=='undefined'&&_streamEndRecoveryLease&&_streamEndRecoveryLease.generation===transportGeneration){
+        const recoveryLease=_streamEndRecoveryLease;
+        const recoveryAttempts=(recoveryLease&&typeof recoveryLease.attempts==='number')
+          ? recoveryLease.attempts
+          : 0;
+        _closeSource(source,{retainOwner:true,transportGeneration});
+        const retainedTransportGeneration=_captureCurrentLiveTransportGeneration();
+        if(retainedTransportGeneration!=null && _currentLiveOwnerActive(retainedTransportGeneration) && _ownsActiveStreamOrBackground()){
+          if(recoveryAttempts<16){
+            _scheduleStreamEndRecovery(
+              null,
+              recoveryAttempts<10?200:1000,
+              retainedTransportGeneration,
+              recoveryAttempts
+            );
+          }else{
+            void _reconcileStreamEndRecoveryExhaustion(null,retainedTransportGeneration);
+          }
+        }
         return;
       }
       if(typeof recordClientSSEError==='function') recordClientSSEError('chat-response',{ready_state:source?source.readyState:null,session_id:activeSid,stream_id:streamId,reason:'chat EventSource.onerror'});
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden(source)) return;
-      _closeSource(source);
+      _closeSource(source,{retainOwner:true,transportGeneration});
+      const retainedLive=_currentLiveOwnerEntry();
+      const retainedTransportGeneration=retainedLive
+        ? (typeof retainedLive.transportGeneration==='number' ? retainedLive.transportGeneration : 1)
+        : null;
+      if(retainedTransportGeneration==null || !_currentLiveOwnerActive(retainedTransportGeneration) || !_ownsActiveStreamOrBackground()) return;
       // If the user has switched to a different session, don't attempt to
       // reconnect — the old stream's EventSource was closed intentionally
       // during session switch and reconnecting would leak a background stream.
       if(!_isSessionCurrentPane(activeSid)) return;
+      if(!_currentLiveOwnerActive(retainedTransportGeneration) || !_ownsActiveStreamOrBackground() || !_isSessionCurrentPane(activeSid)) return;
       if(_terminalStateReached || _streamFinalized){
         return;
       }
@@ -6459,23 +6798,25 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`);
         const _probeReconnect=async(attempt=0)=>{
           if(_terminalStateReached || _streamFinalized) return;
-          if(!_isSessionCurrentPane(activeSid)) return;
+          if(!_currentLiveOwnerActive(retainedTransportGeneration) || !_ownsActiveStreamOrBackground() || !_isSessionCurrentPane(activeSid)) return;
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+            if(!_currentLiveOwnerActive(retainedTransportGeneration) || !_ownsActiveStreamOrBackground() || _currentPaneRecoveryOwnerLost()) return;
             if(st&&st.active){
               setComposerStatus('Reconnected');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}),retainedTransportGeneration);
               return;
             }
             if(st&&st.replay_available){
               setComposerStatus('Restoring stream…');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}),retainedTransportGeneration);
               return;
             }
           }catch(_){
             if(_deferStreamErrorIfOffline()) return;
           }
-          if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+          if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true,transportGeneration:retainedTransportGeneration})) return;
+          if(!_currentLiveOwnerActive(retainedTransportGeneration) || !_ownsActiveStreamOrBackground()) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
           const nextDelay=_retryDelays[attempt+1];
@@ -6492,20 +6833,25 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           setComposerStatus('Restoring session…');
           let _restoreTimedOut=false;
           const _restoreTimer=setTimeout(()=>{
+            const _restoreLease=retainedTransportGeneration;
             // If _restoreSettledSession hangs (flaky Tailscale), don't leave
             // the UI stuck on "Restoring session…" forever. Fall through to
             // _handleStreamError after 8s.
             _restoreTimedOut=true;
+            if(!_currentLiveOwnerActive(_restoreLease) || !_ownsActiveStreamOrBackground() || _currentPaneRecoveryOwnerLost()){
+              _closeSource(source,{transportGeneration:retainedTransportGeneration});
+              return;
+            }
             if(!_terminalStateReached&&!_streamFinalized){
               if(_deferStreamErrorIfOffline()) return;
               if(_deferStreamErrorIfPageHidden(source)) return;
               _flushReasoningToAnchor();
               _scheduleAnchorRegistryCleanup(120000);
-              _handleStreamError(source);
+              _handleStreamError(source,retainedTransportGeneration);
             }
           },8000);
           try{
-            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})){
+            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true,transportGeneration:retainedTransportGeneration})){
               if(_restoreTimedOut) return; // timer already fired _handleStreamError
               clearTimeout(_restoreTimer);
               return;
@@ -6517,27 +6863,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }
           if(_restoreTimedOut) return; // timer already fired _handleStreamError
           clearTimeout(_restoreTimer);
-          if(_terminalStateReached||_streamFinalized) return;
+          if(_terminalStateReached||_streamFinalized||!_currentLiveOwnerActive(retainedTransportGeneration)||!_ownsActiveStreamOrBackground()) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
           _flushReasoningToAnchor();
           _scheduleAnchorRegistryCleanup(120000);
-          _handleStreamError(source);
+          _handleStreamError(source,retainedTransportGeneration);
         };
         setTimeout(()=>{void _probeReconnect(0);},_retryDelays[0]);
         return;
       }
-      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true,transportGeneration:retainedTransportGeneration})) return;
+      if(!_currentLiveOwnerActive(retainedTransportGeneration) || !_ownsActiveStreamOrBackground()) return;
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden(source)) return;
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup(120000);
-      _handleStreamError(source);
+      _handleStreamError(source,retainedTransportGeneration);
     });
 
     source.addEventListener('cancel',e=>{
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
-      _clearStreamEndRecovery();
+      _clearStreamEndRecovery(transportGeneration);
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _cancelThrottledSnapshotTimer();
@@ -6565,7 +6912,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;
       }
+      const _cancelOwnerLost=()=>{
+        const live=_currentLiveOwnerEntry();
+        if(live&&live.source===source&&_isSessionCurrentPane(activeSid)) return false;
+        _scheduleAnchorRegistryCleanup(120000);
+        _closeSource(source,{transportGeneration});
+        return true;
+      };
       const _applyCancelSessionPayload=(sessionPayload)=>{
+        if(_cancelOwnerLost()) return false;
         if(!sessionPayload||typeof sessionPayload!=='object'||!S.session||S.session.session_id!==activeSid) return false;
         // Belt-and-suspenders: the embedded cancel snapshot must be for THIS session.
         // The GET path guarantees it via the URL; the embedded path via the stream→session
@@ -6601,13 +6956,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       (async()=>{
         try{
           if(_applyCancelSessionPayload(_cancelSessionPayload)) return;
+          if(_cancelOwnerLost()) return;
           // Fetch latest session from server to get accurate message list (includes cancel status)
           // This ensures messages stay in sync with server, fixing race condition where local
           // "*Task cancelled.*" message gets lost when done event overwrites S.messages
           const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+          if(_cancelOwnerLost()) return;
           if(data&&data.session) _applyCancelSessionPayload(data.session);
         }catch(_){
           // Fallback to local cancel message if API fails
+          if(_cancelOwnerLost()) return;
           if(S.session&&S.session.session_id===activeSid){
             const _wasFollowingAtCancelFb=((typeof _isMessagePaneNearBottom==='function')
                 ? _isMessagePaneNearBottom(1200)
@@ -6629,9 +6987,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _setActivePaneIdleIfOwner();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
-      source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
+    for(const _runJournalEventName of [
+      'token',
+      'interim_assistant',
+      'reasoning',
+      'tool',
+      'tool_complete',
+      'todo_state','approval',
+      'clarify',
+      'state_saved',
+      'title',
+      'title_status',
+      'context_status',
+      'goal',
+      'goal_continue',
+      'compressing',
+      'compressed',
+      'metering',
+      'done',
+      'stream_end',
+      'pending_steer_leftover',
+      'apperror',
+      'warning',
+      'error',
+      'cancel',
+    ]){
+      source.addEventListener(_runJournalEventName,e=>_rememberRunJournalCursor(e,transportGeneration));
     }
+
   }
 
   // #3018: per-turn ephemeral fields are computed client-side in _finishDone
@@ -6686,12 +7069,35 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   async function _restoreSettledSession(source, options=null){
     const returnStatus=!!(options&&options.status);
     const preserveVisibleOnShorterTerminalSnapshot=!!(options&&options.preserveVisibleOnShorterTerminalSnapshot);
-    if(_isActiveSession() && S.activeStreamId!==streamId){
-      _closeSource(source);
-      return returnStatus?'stale':false;
+    const transportGeneration=options&&typeof options.transportGeneration==='number'
+      ? options.transportGeneration : null;
+    const _restoreStartedAsCurrentPane=_isSessionCurrentPane(activeSid);
+    const _restoreOwnerLost=()=>(
+      !_currentLiveOwnerActive(transportGeneration) ||
+      !_isSessionCurrentPane(activeSid) ||
+      (_isActiveSession() && S.activeStreamId!==streamId)
+    );
+    const _restoreBackgroundOwnerLost=()=>(
+      !_currentLiveOwnerActive(transportGeneration) ||
+      (_isActiveSession() && S.activeStreamId!==streamId)
+    );
+    const _staleRestoreResult=()=>{
+      _closeSource(source,{retainOwner:true,transportGeneration});
+      _clearStreamEndRecovery(transportGeneration);
+      return returnStatus?'stale':true;
+    };
+    if(_restoreStartedAsCurrentPane){
+      if(_restoreOwnerLost()) return _staleRestoreResult();
+    }else if(_restoreBackgroundOwnerLost()){
+      return _staleRestoreResult();
     }
     try{
       const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      if(_restoreStartedAsCurrentPane){
+        if(_restoreOwnerLost()) return _staleRestoreResult();
+      }else if(_restoreBackgroundOwnerLost()){
+        return _staleRestoreResult();
+      }
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
@@ -6709,7 +7115,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearOwnerInflightState();
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup();
-      _closeSource(source);
+      _closeSource(source,{transportGeneration});
       _clearApprovalForOwner();
       _clearClarifyForOwner('terminal');
       const isSessionViewed=_isSessionActivelyViewed(activeSid);
@@ -6782,16 +7188,25 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _setActivePaneIdleIfOwner();
       return returnStatus?'restored':true;
     }catch(_){
+      if(_restoreStartedAsCurrentPane){
+        if(_restoreOwnerLost()) return _staleRestoreResult();
+      }else if(_restoreBackgroundOwnerLost()){
+        return _staleRestoreResult();
+      }
       return returnStatus?'error':false;
     }
   }
 
-  function _handleStreamError(source){
-    if(_isActiveSession() && S.activeStreamId!==streamId){
-      _closeSource(source);
+  function _handleStreamError(source,activeTransportGeneration){
+    if(activeTransportGeneration==null || !_currentLiveOwnerActive(activeTransportGeneration) || !_ownsActiveStreamOrBackground() || _currentPaneRecoveryOwnerLost()){
+      _closeSource(source,{transportGeneration:activeTransportGeneration});
       return;
     }
-    _clearStreamEndRecovery();
+    if(_isActiveSession() && S.activeStreamId!==streamId){
+      _closeSource(source,{transportGeneration:activeTransportGeneration});
+      return;
+    }
+    _clearStreamEndRecovery(activeTransportGeneration);
     // Opus review Q1: mirror done/apperror/cancel finalization so any pending rAF
     // cannot fire after renderMessages() has settled the DOM with the error message.
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -6802,7 +7217,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeCleanupReduceMotionListener();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     _clearOwnerInflightState();
-    _closeSource(source);
+    _closeSource(source,{transportGeneration:activeTransportGeneration});
     _clearApprovalForOwner();
     _clearClarifyForOwner('terminal');
     if(S.session&&S.session.session_id===activeSid){
@@ -6859,10 +7274,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   (async()=>{
     // Reattach path can carry stale stream ids after server restart; preflight
     // status avoids opening a dead SSE URL that will 404 in the console.
+    const reconnectLive=_currentLiveOwnerEntry();
+    const reconnectTransportGeneration=reconnectLive
+      ? (typeof reconnectLive.transportGeneration==='number' ? reconnectLive.transportGeneration : 1)
+      : null;
     let replayOnly=false;
+    let replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
     if(reconnecting){
       try{
         const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+        if(_currentPaneRecoveryOwnerLost()){
+          _closeSource(null);
+          return;
+        }
         if(!st.active&&st.replay_available){
           replayOnly=true;
         }else if(!st.active){
@@ -6889,13 +7313,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(_wasFollowingAtReconnectDead && typeof scrollToBottom==='function') scrollToBottom();
             renderSessionList();
           }
+          _closeSource(null);
           _scheduleAnchorRegistryCleanup(120000);
           return;
         }
       }catch(_){}
     }
-    const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
-    _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
+    if(reconnecting&&(reconnectTransportGeneration==null || !_currentLiveOwnerActive(reconnectTransportGeneration) || !_ownsActiveStreamOrBackground() || _currentPaneRecoveryOwnerLost())){
+      _closeSource(null);
+      return;
+    }
+    replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
+    _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}),reconnectTransportGeneration);
   })();
 
 }

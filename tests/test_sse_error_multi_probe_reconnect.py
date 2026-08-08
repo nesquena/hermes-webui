@@ -6,7 +6,7 @@ sidecar / run-journal replay) or only come back on refresh.
 
 Root cause: the `EventSource.onerror` handler made a SINGLE 1.5s reconnect probe
 and, if `/api/chat/stream/status` did not yet report `active`/`replay_available`,
-fell straight through to `_handleStreamError(source)`. `_handleStreamError`
+fell straight through to `_handleStreamError(source, transportGeneration)`. `_handleStreamError`
 clears the owner INFLIGHT state, nulls `S.activeStreamId`, pushes a
 "Connection interrupted" message and re-renders — wiping the live DOM even
 though the backend was frequently still producing tokens (or the replay file was
@@ -108,7 +108,8 @@ def test_next_stage_is_scheduled_before_giving_up():
 
 
 def test_handle_stream_error_only_after_retry_window_exhausted():
-    # Inside the reconnect block, the terminal _handleStreamError(source) call
+    # Inside the reconnect block, the terminal _handleStreamError(source, retainedTransportGeneration)
+    # call
     # must come AFTER the "schedule next stage" guard, so live state is held
     # across the whole window and the error is surfaced only once every stage
     # has failed. This is the exact ordering that prevents the premature
@@ -118,8 +119,8 @@ def test_handle_stream_error_only_after_retry_window_exhausted():
     guard_idx = block.find("if(nextDelay){")
     assert guard_idx != -1, "expected the next-stage scheduling guard in the reconnect block"
 
-    hse_idx = block.find("_handleStreamError(source);", guard_idx)
-    assert hse_idx != -1, "expected a terminal _handleStreamError(source) in the reconnect block"
+    hse_idx = block.find("_handleStreamError(source,retainedTransportGeneration);", guard_idx)
+    assert hse_idx != -1, "expected a terminal _handleStreamError(source, retainedTransportGeneration) in the reconnect block"
     # The terminal error call sits after the next-stage guard (retry window first).
     assert guard_idx < hse_idx
 
@@ -132,7 +133,7 @@ def test_live_state_not_cleared_mid_window():
     # before its terminal _handleStreamError (those belong only in
     # _handleStreamError, reached after the window).
     block = _reconnect_block(_compact(MESSAGES_JS))
-    end = block.find("_handleStreamError(source);")
+    end = block.find("_handleStreamError(source,retainedTransportGeneration);")
     assert end != -1
     body = block[:end]
     assert "_clearOwnerInflightState()" not in body, (

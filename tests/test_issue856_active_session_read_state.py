@@ -39,14 +39,16 @@ def test_cancel_path_marks_active_session_as_viewed():
 def test_restore_and_error_paths_mark_active_session_as_viewed():
     restore_idx = MESSAGES_JS.find("async function _restoreSettledSession(source")
     assert restore_idx != -1, "_restoreSettledSession(source) not found in messages.js"
-    restore_block = MESSAGES_JS[restore_idx:MESSAGES_JS.find("function _handleStreamError(source)", restore_idx)]
+    restore_block = MESSAGES_JS[
+        restore_idx:MESSAGES_JS.find("function _handleStreamError(source,activeTransportGeneration)", restore_idx)
+    ]
     assert "const completedSid=session.session_id||activeSid;" in restore_block
     assert "_markSessionViewed(completedSid" in restore_block, (
         "_restoreSettledSession() must mark the final session id as viewed"
     )
 
-    error_idx = MESSAGES_JS.find("function _handleStreamError(source)")
-    assert error_idx != -1, "_handleStreamError(source) not found in messages.js"
+    error_idx = MESSAGES_JS.find("function _handleStreamError(source,activeTransportGeneration)")
+    assert error_idx != -1, "_handleStreamError(source,activeTransportGeneration) not found in messages.js"
     error_block = MESSAGES_JS[error_idx:]
     assert "_markSessionViewed(activeSid" in error_block, (
         "_handleStreamError() must mark the active session as viewed"

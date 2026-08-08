@@ -125,6 +125,7 @@ def test_chat_stream_approval_listener_renders_received_count():
     let activeSid = 'sid-browser';
     const source = {{ listeners: {{}}, addEventListener(name, cb) {{ this.listeners[name] = cb; }} }};
     function _applyToAnchor() {{}}
+    function _bailOutOfTerminalEventsFromStaleStream() {{ return false; }}
     function showApprovalForSession(sid, data, count) {{ rendered.push({{sid, data, count}}); }}
     function playAttentionSound() {{}}
     function _attentionSoundKey() {{ return 'approval'; }}
