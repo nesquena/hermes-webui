@@ -48,7 +48,6 @@ def test_board_modal_default_workdir_layout(locale, width, height):
                     const row = document.getElementById('kanbanBoardModalDefaultWorkdirRow');
                     return !!modal && !modal.hidden && !!label && !!row && label.textContent.trim() === expected;
                 }""", arg=[EXPECTED_LABELS[locale]])
-                modal = page.locator("#kanbanBoardModal")
                 row = page.locator("#kanbanBoardModalDefaultWorkdirRow")
                 field = page.locator("#kanbanBoardModalDefaultWorkdir")
                 assert row.is_visible()
@@ -57,15 +56,14 @@ def test_board_modal_default_workdir_layout(locale, width, height):
                 assert label.is_visible()
                 assert label.text_content().strip() == EXPECTED_LABELS[locale]
                 page.evaluate("""() => {
-                    document.getElementById('kanbanBoardModalDefaultWorkdir')?.scrollIntoView({
-                        block: 'center',
-                        inline: 'nearest',
-                    });
+                    const modal = document.querySelector('#kanbanBoardModal .kanban-modal');
+                    if (modal) modal.scrollTop = modal.scrollHeight;
                 }""")
                 page.wait_for_function("""() => {
                     const field = document.getElementById('kanbanBoardModalDefaultWorkdir');
                     const modal = document.querySelector('#kanbanBoardModal .kanban-modal');
                     if (!field || !modal) return false;
+                    if (modal.scrollHeight > modal.clientHeight) modal.scrollTop = modal.scrollHeight;
                     const fieldBox = field.getBoundingClientRect();
                     const modalBox = modal.getBoundingClientRect();
                     return fieldBox.top >= modalBox.top && fieldBox.bottom <= modalBox.bottom;
