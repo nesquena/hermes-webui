@@ -2531,7 +2531,11 @@ function _clearSessionSourceTabCounts() {
 }
 
 function _requestedSessionSidebarSource() {
-  return window._showCliSessions ? _sessionSourceFilter : 'webui';
+  if (!window._showCliSessions) return 'webui';
+  // When the preference is enabled and the user is on the default (all) view,
+  // don't filter by source — the backend should return all sessions.
+  if (_sessionSourceFilter === 'webui') return null;
+  return 'cli';
 }
 
 function _sessionListExcludeHiddenEnabled() {
@@ -2549,7 +2553,8 @@ function _sessionArchivePagingFilterActive() {
 
 function _sessionListQueryString() {
   const qs = new URLSearchParams();
-  qs.set('sidebar_source', _requestedSessionSidebarSource());
+  const src = _requestedSessionSidebarSource();
+  if (src !== undefined && src !== null) qs.set('sidebar_source', src);
   if(_sessionListExcludeHiddenEnabled()) qs.set('exclude_hidden','1');
   if(_showAllProfiles) qs.set('all_profiles','1');
   if(_showArchived){
@@ -5352,6 +5357,7 @@ function _sessionListRenderSignature(){
       !!_showAllProfiles,
       _otherProfileCount,_archivedWebuiCount,_archivedCliCount,
       _serverWebuiSessionCount,_serverCliSessionCount,
+      window._showSubagentSessions!==false,
     ]);
   }catch(_){ return null; }
 }
@@ -6645,6 +6651,15 @@ function _isChildSession(s){
   return !!(s&&s.parent_session_id&&s.relationship_type==='child_session');
 }
 
+function _isDelegatedSubagentSession(s){
+  if(!s) return false;
+  // A delegated subagent session is a child session whose source identifies it
+  // as a subagent (spawned by delegate_task), not a regular fork or lineage child.
+  if(!_isChildSession(s)) return false;
+  const source=String(s.raw_source||s.source_tag||s.session_source||s.source||'').toLowerCase();
+  return source==='subagent';
+}
+
 function _isForkWithResolvableParent(s, sessionIdsInList){
   return !!(s&&s.session_source==='fork'&&s.parent_session_id&&sessionIdsInList&&sessionIdsInList.has(s.parent_session_id));
 }
@@ -7435,6 +7450,8 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     const isCli=_isCliSession(s);
     if(isCli) cliSessionCount++;
     if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;
+    // #6373: hide delegated subagent sessions when the user opts out
+    if(window._showSubagentSessions===false&&_isDelegatedSubagentSession(s)) continue;
     const profileFiltered=isCli ? cliProfileFiltered : webuiProfileFiltered;
     const referenceRaw=isCli ? cliReferenceRaw : webuiReferenceRaw;
     const sessionsRaw=isCli ? cliSessionsRaw : webuiSessionsRaw;
