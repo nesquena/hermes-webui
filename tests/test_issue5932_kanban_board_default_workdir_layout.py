@@ -56,8 +56,26 @@ def test_board_modal_default_workdir_layout(locale, width, height):
                 label = page.locator("label[for='kanbanBoardModalDefaultWorkdir']")
                 assert label.is_visible()
                 assert label.text_content().strip() == EXPECTED_LABELS[locale]
-                modal_box = modal.bounding_box()
-                field_box = field.bounding_box()
+                page.evaluate("""() => {
+                    document.getElementById('kanbanBoardModalDefaultWorkdir')?.scrollIntoView({
+                        block: 'center',
+                        inline: 'nearest',
+                    });
+                }""")
+                page.wait_for_function("""() => {
+                    const field = document.getElementById('kanbanBoardModalDefaultWorkdir');
+                    const modal = document.querySelector('#kanbanBoardModal .kanban-modal');
+                    if (!field || !modal) return false;
+                    const fieldBox = field.getBoundingClientRect();
+                    const modalBox = modal.getBoundingClientRect();
+                    return fieldBox.top >= modalBox.top && fieldBox.bottom <= modalBox.bottom;
+                }""")
+                boxes = page.evaluate("""() => ({
+                    modal: document.getElementById('kanbanBoardModal')?.getBoundingClientRect().toJSON(),
+                    field: document.getElementById('kanbanBoardModalDefaultWorkdir')?.getBoundingClientRect().toJSON(),
+                })""")
+                modal_box = boxes["modal"]
+                field_box = boxes["field"]
                 assert modal_box and field_box
                 assert field_box["x"] >= modal_box["x"]
                 assert field_box["x"] + field_box["width"] <= modal_box["x"] + modal_box["width"]
