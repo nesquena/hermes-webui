@@ -7979,9 +7979,16 @@ def _set_state_db_session_archived(sid: str, archived: bool) -> bool:
             # old to have it (same tolerance as the projection's _optional_col).
             cols = {row[1] for row in _conn.execute("PRAGMA table_info(sessions)")}
             if "archived" not in cols:
-                _conn.execute(
-                    "ALTER TABLE sessions ADD COLUMN archived INTEGER DEFAULT 0"
-                )
+                try:
+                    _conn.execute(
+                        "ALTER TABLE sessions ADD COLUMN archived INTEGER DEFAULT 0"
+                    )
+                except _sqlite.OperationalError:
+                    # Concurrent archive requests can both observe the column
+                    # missing and race the ALTER (review #6855); the second one
+                    # fails with "duplicate column name". Tolerate it — the
+                    # UPDATE below targets the column either way.
+                    pass
             cur = _conn.execute(
                 "UPDATE sessions SET archived = ? WHERE id = ?",
                 (1 if archived else 0, sid),
