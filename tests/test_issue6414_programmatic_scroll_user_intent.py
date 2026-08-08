@@ -31,6 +31,17 @@ def _function_body(name: str, source: str = UI_JS) -> str:
     raise AssertionError(f"{name} did not terminate")
 
 
+TRANSCRIPT_REPLACEMENT_HELPERS = "\n".join(
+    _function_body(name, SESSIONS_JS)
+    for name in (
+        "_bumpMessagesGeneration",
+        "_captureTranscriptReplacement",
+        "_transcriptReplacementIsCurrent",
+        "_commitTranscriptReplacement",
+    )
+)
+
+
 def _run_small_upward_wheel_case(programmatic_scroll_age_ms: int) -> dict[str, bool | int]:
     script = f"""
 let now = 1000;
@@ -181,6 +192,7 @@ function _restoreMessageViewportAnchor() {{ return false; }}
 function _messageVirtualPrependedHeightDelta() {{ return null; }}
 function requestAnimationFrame() {{ return 0; }}
 {_function_body('_freshProgrammaticScrollActive')}
+{TRANSCRIPT_REPLACEMENT_HELPERS}
 {_function_body('_loadOlderMessages', SESSIONS_JS)}
 
 await _loadOlderMessages();
