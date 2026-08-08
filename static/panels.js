@@ -7381,8 +7381,9 @@ async function deleteProfile(name) {
   } catch (e) { showToast(t('delete_failed') + e.message); }
 }
 
-// ── Memory panel ──
+// ── Memory panel (flat view — no section sidebar) ──
 async function loadMemory(force) {
+  _currentMemorySection = 'memory';
   const panel = $('memoryPanel');
   try {
     const memoryUrl = S.session && S.session.session_id
@@ -7390,29 +7391,11 @@ async function loadMemory(force) {
       : '/api/memory';
     const data = await api(memoryUrl);
     _memoryData = data;
-    if (_currentMemorySection === 'external_notes' && !data.external_notes_enabled) {
-      _currentMemorySection = null;
-    }
-    if (_currentMemorySection === 'external_notes') {
-      await loadNotesSources(!!force);
-    }
     if (panel) {
-      panel.innerHTML = '';
-      for (const s of MEMORY_SECTIONS) {
-        if (s.key === 'external_notes' && !_memoryData.external_notes_enabled) continue;
-        const el = document.createElement('button');
-        el.type = 'button';
-        el.className = 'side-menu-item';
-        if (_currentMemorySection === s.key) el.classList.add('active');
-        el.innerHTML = `${li(s.iconKey,16)}<span>${esc(_memorySectionLabel(s))}</span>`;
-        const sectionPath = _memorySectionPath(s.key);
-        if (sectionPath) el.title = sectionPath;
-        el.onclick = () => openMemorySection(s.key, el);
-        panel.appendChild(el);
-      }
+      panel.innerHTML = '<div style="flex:1"></div>';
     }
-    if (_currentMemorySection && _memoryMode !== 'edit') {
-      _renderMemoryDetail(_currentMemorySection);
+    if (_memoryMode !== 'edit') {
+      _renderMemoryDetail('memory');
     }
   } catch(e) {
     if (panel) panel.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
@@ -8708,6 +8691,9 @@ function _preferencesPayloadFromUi(){
   if(showBusyPlaceholderHintCb) payload.show_busy_placeholder_hint=showBusyPlaceholderHintCb.checked;
   const newChatOnWorkspaceSwitchCb=$('settingsNewChatOnWorkspaceSwitch');
   if(newChatOnWorkspaceSwitchCb) payload.new_chat_on_workspace_switch=newChatOnWorkspaceSwitchCb.checked;
+  // Handle always-new-chat localStorage setting (no backend payload, just UI)
+  const alwaysNewChatCb=$('settingsAlwaysNewChat');
+  if(alwaysNewChatCb) localStorage.setItem('hermes-always-new-chat', alwaysNewChatCb.checked?'true':'false');
   const botNameField=$('settingsBotName');
   if(botNameField) payload.bot_name=botNameField.value;
   Object.assign(payload,_speechPreferencesPayloadFromUi());
@@ -9541,6 +9527,12 @@ async function loadSettingsPanel(){
       newChatOnWorkspaceSwitchCb.checked=!!settings.new_chat_on_workspace_switch;
       window._newChatOnWorkspaceSwitch=newChatOnWorkspaceSwitchCb.checked;
       newChatOnWorkspaceSwitchCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
+    // Always-new-chat checkbox (localStorage-backed, no backend)
+    const alwaysNewChatCb=$('settingsAlwaysNewChat');
+    if(alwaysNewChatCb){
+      alwaysNewChatCb.checked=localStorage.getItem('hermes-always-new-chat')==='true';
+      alwaysNewChatCb.addEventListener('change',()=>localStorage.setItem('hermes-always-new-chat', alwaysNewChatCb.checked?'true':'false'),{once:false});
     }
     // Bot name — debounced autosave (text input)
     const botNameField=$('settingsBotName');

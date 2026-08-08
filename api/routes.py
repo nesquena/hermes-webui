@@ -5541,7 +5541,7 @@ def apply_cors_preflight_headers(handler) -> None:
     handler.send_header("Access-Control-Allow-Origin", origin)
     handler.send_header("Vary", "Origin")
     handler.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-    handler.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Hermes-CSRF-Token")
 
 
 def _csrf_exempt_path(path: str) -> bool:
@@ -5882,6 +5882,55 @@ def _ip_is_loopback_or_private(raw: str):
     return (True, bool(addr.is_loopback or addr.is_private))
 
 
+def _ip_is_loopback(raw: str):
+    """Parse an IP string; return (parsed_ok, is_loopback).
+
+    Returns (False, False) for empty/malformed input so callers fail closed.
+    """
+    import ipaddress
+
+    raw = (raw or "").strip()
+    if not raw:
+        return (False, False)
+    try:
+        addr = ipaddress.ip_address(raw)
+    except ValueError:
+        return (False, False)
+    return (True, bool(addr.is_loopback))
+
+
+def _request_is_loopback(handler) -> bool:
+    """Return True when the effective client is loopback (not merely private/LAN).
+
+    Same forwarded-header trust model as ``_onboarding_request_is_local``, but
+    classified loopback-only. Used for high-risk passwordless surfaces (embedded
+    PTY, ``/api/media``) where a LAN peer is not enough.
+    """
+    trust_forwarded = _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_FOR")
+    peer_is_trusted_proxy = _raw_peer_is_trusted_proxy(handler)
+
+    if trust_forwarded and peer_is_trusted_proxy:
+        client_ip = _forwarded_client_ip_from_trusted_proxy(handler)
+        if client_ip is None:
+            return False
+        parsed_ok, is_loop = _ip_is_loopback(client_ip)
+        return parsed_ok and is_loop
+
+    raw = _request_client_ip(handler)
+    parsed_ok, is_loop = _ip_is_loopback(raw)
+    return parsed_ok and is_loop
+
+
+def _passwordless_loopback_gate_allows(handler, auth_enabled: bool | None = None) -> bool:
+    """Auth-on or ONBOARDING_OPEN → allow; otherwise require loopback client."""
+    from api.auth import is_auth_enabled
+
+    auth_enabled = is_auth_enabled() if auth_enabled is None else auth_enabled
+    if auth_enabled or _truthy_env("HERMES_WEBUI_ONBOARDING_OPEN"):
+        return True
+    return _request_is_loopback(handler)
+
+
 def _trusted_proxy_networks():
     """Networks whose socket peer is allowed to assert a forwarded client IP.
 
@@ -6090,27 +6139,26 @@ def _onboarding_gate_allows(handler, auth_enabled: bool | None = None) -> bool:
 
 # Operator-facing copy reused by every embedded-terminal endpoint refusal.
 _EMBEDDED_TERMINAL_GATE_DENIED_MESSAGE = (
-    "Embedded terminal is only available from local networks when authentication "
+    "Embedded terminal is only available from loopback when authentication "
     "is not configured. Configure a password/passkey, or set "
     "HERMES_WEBUI_ONBOARDING_OPEN=1 to allow it on a deliberately-exposed server."
 )
 
 
 def _embedded_terminal_gate_allows(handler) -> bool:
-    """Local-origin gate for the embedded-terminal endpoints.
+    """Loopback-only gate for the embedded-terminal endpoints when auth is off.
 
     The embedded terminal spawns a PTY shell that runs arbitrary commands as the
-    server-process user, so admitting an unauthenticated remote caller is remote
-    code execution. When auth is enabled, ``check_auth()`` has already verified
-    the session cookie before the request reaches these handlers, so this returns
-    True. When auth is DISABLED (the default out-of-the-box state) ``check_auth()``
-    admits every caller unconditionally, so restrict the terminal to local/private
-    origins — the same trust model the onboarding/bootstrap endpoints use, ignoring
-    spoofable forwarded headers unless an operator has opted into trusting them.
-    A deliberately-exposed passwordless server (access secured at another layer)
-    opts out with ``HERMES_WEBUI_ONBOARDING_OPEN=1``.
+    server-process user, so admitting an unauthenticated remote (or even LAN)
+    caller is remote code execution. When auth is enabled, ``check_auth()`` has
+    already verified the session cookie before the request reaches these
+    handlers, so this returns True. When auth is DISABLED (the default
+    out-of-the-box state) ``check_auth()`` admits every caller unconditionally,
+    so restrict the terminal to loopback clients only — stricter than the
+    onboarding private/LAN gate. A deliberately-exposed passwordless server
+    (access secured at another layer) opts out with ``HERMES_WEBUI_ONBOARDING_OPEN=1``.
     """
-    return _onboarding_gate_allows(handler)
+    return _passwordless_loopback_gate_allows(handler)
 
 
 # Above this many distinct client keys, sweep out entries whose timestamps have
@@ -12290,6 +12338,13 @@ def handle_get(handler, parsed) -> bool:
         payload = {
             "auth_enabled": auth_enabled,
             "logged_in": logged_in,
+            "authenticated": (True if not auth_enabled else logged_in),
+            "method": (
+                "none"
+                if not auth_enabled
+                else ("oidc" if oidc_enabled and not password_auth_enabled else "password")
+            ),
+            "csrf_token": "",
             "oidc_enabled": oidc_enabled,
             "password_auth_enabled": password_auth_enabled,
             "passwordless_enabled": bool(passkeys) and not password_auth_enabled,
@@ -12298,6 +12353,14 @@ def handle_get(handler, parsed) -> bool:
             "passkey_feature_flag": passkey_flag,
             "auth_disabled_acknowledged": bool(load_settings().get("auth_disabled_acknowledged")) if not auth_enabled else False,
         }
+        if logged_in:
+            from api.auth import csrf_token_for_session, parse_cookie
+
+            cookie_val = parse_cookie(handler)
+            if cookie_val:
+                token = csrf_token_for_session(cookie_val)
+                if token:
+                    payload["csrf_token"] = token
         if is_trusted_auth_enabled() or (session_info and session_info.get("auth_type") == "trusted"):
             payload["trusted_auth_enabled"] = True
         if session_info and session_info.get("auth_type") == "trusted":
@@ -13515,52 +13578,11 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, payload)
 
     if parsed.path == "/api/chat/cancel":
-        stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
-        if not stream_id:
-            return bad(handler, "stream_id required")
-        if not _stream_id_visible_to_request_profile(handler, stream_id):
-            return True
-        gateway_stop_blocked = False
-        try:
-            from api.gateway_chat import (
-                GATEWAY_RUN_ID_WAIT_TIMEOUT,
-                stop_gateway_run,
-                wait_for_gateway_run_id,
-            )
-
-            structured_gateway, run_id = wait_for_gateway_run_id(stream_id, GATEWAY_RUN_ID_WAIT_TIMEOUT)
-            if not run_id and structured_gateway:
-                gateway_stop_blocked = True
-            if run_id:
-                if stop_gateway_run(run_id):
-                    owner_sid = stream_owner_session_id(stream_id)
-                    if owner_sid:
-                        retire_gateway_pending_mirror(owner_sid, run_id=run_id)
-                else:
-                    gateway_stop_blocked = True
-        except Exception:
-            logger.debug("Failed to stop gateway run during chat cancellation", exc_info=True)
-            gateway_stop_blocked = True
-        if gateway_stop_blocked:
-            return j(
-                handler,
-                {
-                    "ok": False,
-                    "cancelled": False,
-                    "stream_id": stream_id,
-                    "error": "Gateway stop failed",
-                },
-                status=502,
-            )
-
-        from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
-
-        if runtime_adapter_enabled():
-            adapter = LegacyJournalRuntimeAdapter(cancel_delegate=cancel_stream)
-            cancelled = adapter.cancel_run(stream_id).accepted
-        else:
-            cancelled = cancel_stream(stream_id)
-        return j(handler, {"ok": True, "cancelled": cancelled, "stream_id": stream_id})
+        return bad(
+            handler,
+            "Use POST /api/chat/cancel (GET cancel is disabled to prevent CSRF)",
+            405,
+        )
 
     if parsed.path == "/api/chat/stream":
         return _handle_sse_stream(handler, parsed)
@@ -13855,6 +13877,10 @@ def handle_get(handler, parsed) -> bool:
         return _handle_notes_search(handler, parsed)
     if parsed.path == "/api/notes/item":
         return _handle_notes_item(handler, parsed)
+    if parsed.path == "/api/notes/local/search":
+        return _handle_notes_local_search(handler, parsed)
+    if parsed.path == "/api/notes/local/read":
+        return _handle_notes_local_read(handler, parsed)
 
     # ── Checkpoints / Rollback (GET) ──
     if parsed.path == "/api/rollback/list":
@@ -15473,6 +15499,12 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/bg-task-complete-ack":
         return _handle_bg_task_complete_ack(handler, body)
+
+    if parsed.path == "/api/chat/cancel":
+        stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
+        if not stream_id and isinstance(body, dict):
+            stream_id = str(body.get("stream_id") or "")
+        return _handle_chat_cancel(handler, stream_id)
 
     if parsed.path == "/api/chat/start":
         return _handle_chat_start(handler, body, diag=diag)
@@ -19036,7 +19068,8 @@ def _handle_media(handler, parsed):
     _HOME = Path(_os.path.expanduser("~"))
     _HERMES_HOME = Path(_os.getenv("HERMES_HOME", str(_HOME / ".hermes"))).expanduser()
 
-    # Auth check
+    # Auth check — when auth is on, require a session. When auth is off,
+    # only serve media to loopback clients (LAN peers must enable auth).
     if is_auth_enabled():
         cv = parse_cookie(handler)
         if not (cv and verify_session(cv)):
@@ -19047,6 +19080,14 @@ def _handle_media(handler, parsed):
             handler.end_headers()
             handler.wfile.write(body)
             return
+    elif not _passwordless_loopback_gate_allows(handler, auth_enabled=False):
+        body = b'{"error":"Media is only available from loopback when authentication is not configured"}'
+        handler.send_response(403)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+        return
 
     qs = parse_qs(parsed.query)
     raw_path = qs.get("path", [""])[0].strip()
@@ -22222,6 +22263,56 @@ def _handle_goal_command(handler, body):
     return j(handler, payload)
 
 
+def _handle_chat_cancel(handler, stream_id: str):
+    """Cancel an active chat stream (POST /api/chat/cancel)."""
+    stream_id = (stream_id or "").strip()
+    if not stream_id:
+        return bad(handler, "stream_id required")
+    if not _stream_id_visible_to_request_profile(handler, stream_id):
+        return True
+    gateway_stop_blocked = False
+    try:
+        from api.gateway_chat import (
+            GATEWAY_RUN_ID_WAIT_TIMEOUT,
+            stop_gateway_run,
+            wait_for_gateway_run_id,
+        )
+
+        structured_gateway, run_id = wait_for_gateway_run_id(stream_id, GATEWAY_RUN_ID_WAIT_TIMEOUT)
+        if not run_id and structured_gateway:
+            gateway_stop_blocked = True
+        if run_id:
+            if stop_gateway_run(run_id):
+                owner_sid = stream_owner_session_id(stream_id)
+                if owner_sid:
+                    retire_gateway_pending_mirror(owner_sid, run_id=run_id)
+            else:
+                gateway_stop_blocked = True
+    except Exception:
+        logger.debug("Failed to stop gateway run during chat cancellation", exc_info=True)
+        gateway_stop_blocked = True
+    if gateway_stop_blocked:
+        return j(
+            handler,
+            {
+                "ok": False,
+                "cancelled": False,
+                "stream_id": stream_id,
+                "error": "Gateway stop failed",
+            },
+            status=502,
+        )
+
+    from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
+
+    if runtime_adapter_enabled():
+        adapter = LegacyJournalRuntimeAdapter(cancel_delegate=cancel_stream)
+        cancelled = adapter.cancel_run(stream_id).accepted
+    else:
+        cancelled = cancel_stream(stream_id)
+    return j(handler, {"ok": True, "cancelled": cancelled, "stream_id": stream_id})
+
+
 def _handle_chat_start(handler, body, diag=None):
     try:
         diag.stage("validate_session_id") if diag else None
@@ -22333,6 +22424,27 @@ def _handle_chat_start(handler, body, diag=None):
         msg = str(body.get("message", "")).strip()
         if not msg:
             return bad(handler, "message is required")
+        # Apply mode prefixes for chat-type modes (Ask / Plan / Build / Team).
+        # Queue is handled client-side via /api/background — do not prefix here.
+        mode = str(body.get("mode") or "").strip().lower()
+        if mode == "ask":
+            msg = "[Ask mode] Answer directly and concisely. You may search the web for information. Do NOT run shell commands, execute code, or use any other tools.\n\n" + msg
+        elif mode == "plan":
+            msg = "[Plan mode] Create a detailed step-by-step plan. Analyze the request and break it into specific, actionable tasks. Show the plan clearly. Do NOT execute any steps yet — wait for approval.\n\n" + msg
+        elif mode == "build":
+            msg = (
+                "[Build mode] Implement the request. Prefer concrete changes over speculation. "
+                "Scaffold project structure, files, and setup when the task needs a foundation. "
+                "Execute tools as needed to complete the work.\n\n"
+                + msg
+            )
+        elif mode == "team":
+            msg = (
+                "[Team mode] Treat this as a coordinated multi-specialist task. "
+                "Decompose the work, delegate to appropriate specialist roles or sub-agents when available, "
+                "and synthesize their results. Prefer orchestration and parallel specialist work over a single monolithic pass.\n\n"
+                + msg
+            )
         diag.stage("normalize_attachments") if diag else None
         attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
         recovery = compression_recovery_payload_for_session(s)
@@ -22362,6 +22474,14 @@ def _handle_chat_start(handler, body, diag=None):
             else getattr(s, "model_provider", None)
         )
         _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
+        # Treat a model the client explicitly marked as a deliberate pick.
+        # Without this, cross-family bare model names (e.g. ``gpt-4o``,
+        # ``claude-3-5-sonnet``) fall into the profile-default repair path and
+        # get silently rewritten to the profile default model — the backend then
+        # reports ``effective_model`` as the default and the WebUI adopts it,
+        # so the user's chosen model "switches" to the default on every message.
+        # Only honor the client flag — do NOT infer "explicit" from a non-empty
+        # model id, or every session-carried model would skip provider repair.
         explicit_model_pick = bool(body.get("explicit_model_pick"))
         moa_config = None
         config_snapshot = get_config_snapshot()
@@ -26726,6 +26846,24 @@ def _notes_sources_from_mcp_inventory(server_summaries: dict, tools: list[dict])
         })
     sources.sort(key=lambda row: (not row.get("active"), row.get("label", "")))
     return sources
+
+
+def _handle_notes_local_search(handler, parsed):
+    """Search local knowledge base files."""
+    try:
+        from api.notes_local import handle_notes_local_search
+        return handle_notes_local_search(handler, parsed)
+    except Exception:
+        return j(handler, {"results": []})
+
+
+def _handle_notes_local_read(handler, parsed):
+    """Read a local knowledge base file."""
+    try:
+        from api.notes_local import handle_notes_local_read
+        return handle_notes_local_read(handler, parsed)
+    except Exception:
+        return bad(handler, "local notes unavailable")
 
 
 def _handle_notes_sources_list(handler):

@@ -38,11 +38,16 @@ so it works well as a daily-driver agent interface from your phone.
 
 1. Install [Tailscale](https://tailscale.com/download) on your server and
    your iPhone/Android.
-2. Start the WebUI listening on all interfaces with password auth enabled:
+2. Start the WebUI listening on all interfaces with password auth enabled
+   (required — a non-loopback bind without auth refuses to start):
 
 ```bash
 HERMES_WEBUI_HOST=0.0.0.0 HERMES_WEBUI_PASSWORD=your-secret ./start.sh
 ```
+
+   Docker / compose must also set `HERMES_WEBUI_PASSWORD` (or OIDC/passkeys).
+   The escape hatch `HERMES_WEBUI_ALLOW_INSECURE_BIND=1` exists for operators who
+   terminate TLS/auth at another layer; it still logs a loud warning.
 
 3. Open `http://<server-tailscale-ip>:8787` in your phone's browser
    (find your server's Tailscale IP in the Tailscale app or with
@@ -70,6 +75,7 @@ or VM host may be needed for longer-running sessions.
 
 > **Tip:** If using Docker, set `HERMES_WEBUI_HOST=0.0.0.0` in your
 > `docker-compose.yml` environment (already the default) and set
-> `HERMES_WEBUI_PASSWORD`.
+> `HERMES_WEBUI_PASSWORD`. Non-loopback binds without auth now refuse to start;
+> use `HERMES_WEBUI_ALLOW_INSECURE_BIND=1` only if you terminate auth elsewhere.
 
 ---

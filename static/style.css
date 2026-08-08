@@ -5876,7 +5876,7 @@ main.main > #mainPlugin{display:none;}
      • tighter type scale (11/12/13/14/16 — no more 10/10.5/12.5)
    ═══════════════════════════════════════════════════════════════════ */
 :root {
-  --msg-rail: 0;
+  --msg-rail: 20px;
   --msg-max: 780px;
   --user-bubble-bg: var(--accent);
   --user-bubble-border: var(--accent-hover);
@@ -5946,11 +5946,22 @@ main.main > #mainPlugin{display:none;}
      WebKit and on Android it re-opens the #4856 / #5338 mobile jump-to-top
      regression the scroll-anchor work fought hard to close. */
 }
-.msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); }
+.msg-body { padding-left: var(--msg-rail); padding-right: 20px; padding-top: 8px; max-width: var(--msg-max); animation: msg-fade-in 150ms ease-out; }
 .msg-body code,
 .msg-body pre,
 .msg-body table { font-family: 'SF Mono', ui-monospace, monospace; }
 .msg-body:empty { display: none; }
+/* Smooth the live→settled transition. Only applies when new DOM elements
+   are created by renderMessages — the streaming live turn updates in place
+   and skips the animation. */
+@keyframes msg-fade-in {
+  from { opacity: 0.5; }
+  to { opacity: 1; }
+}
+/* Suppress fade-in for the live streaming turn — content builds incrementally */
+#liveAssistantTurn .msg-body,
+.msg-row[data-live-assistant-turn] .msg-body,
+.msg-row[data-live-assistant] .msg-body { animation: none; }
 .assistant-turn { width: 100%; }
 .assistant-turn-blocks { display: flex; flex-direction: column; }
 .status-card{margin:8px 0 8px var(--msg-rail);max-width:min(var(--msg-max),760px);border:1px solid var(--border-subtle);background:var(--surface-subtle);border-radius:var(--radius-card);box-shadow:0 10px 24px rgba(0,0,0,.05);overflow:hidden;}
@@ -7287,4 +7298,76 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 .settings-search-empty { padding: 10px 12px; font-size: 12px; color: var(--muted); }
 /* Settings field highlight (mirrors msg-question-highlight / _highlightQuestionRow pattern) */
 .settings-field-highlight { animation: settings-field-pulse 1.6s ease-out; }
+
+/* ── iMessage-style bubble polish (theme-compatible) ── */
+
+/* 1. Entrance animation */
+@keyframes fadeSlideIn {
+  0% { opacity: 0; transform: translateY(6px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+.msg-row { animation: fadeSlideIn .25s ease-out; }
+
+/* 2. Asymmetric iMessage corners — override skin !important rules */
+.msg-row[data-role="user"] .msg-body {
+  border-radius: 14px 14px 4px 14px !important;
+}
+.msg-row[data-role="assistant"] .msg-body {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px 14px 14px 4px;
+  padding: 10px 14px;
+  overflow-wrap: anywhere;
+}
+
+/* 3. Thin Mac-style scrollbar */
+.messages-inner {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.messages-inner::-webkit-scrollbar { width: 6px; }
+.messages-inner::-webkit-scrollbar-track { background: transparent; }
+.messages-inner::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+.messages-inner::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+
+/* 4. Frosted glass composer */
+.composer-box {
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.composer-box:focus-within {
+  box-shadow: 0 8px 32px rgba(0,0,0,0.08);
+}
+
+/* ── Mobile responsive: polish for the existing slide-out drawer system ── */
+/* The WebUI has a full mobile system at ≤640px (sidebar drawer, hamburger, 52px titlebar, 44px touch targets).
+   These rules fill gaps without breaking the existing overlay. */
+
+/* Tablet portrait (641-900px): rail is visible but space is tight — narrower sidebar */
+@media (min-width: 641px) and (max-width: 900px) {
+  .sidebar { width: 220px !important; }
+  .main-panel { min-width: 0; }
+  .messages-inner { max-width: 100%; }
+  .rightpanel { width: 200px !important; }
+  .msg { max-width: 100%; }
+}
+
+/* Narrow mobile (≤400px): very small screens need tighter spacing */
+@media (max-width: 400px) {
+  :root { font-size: 13px; }
+  #msg { font-size: 16px; }
+  .msg-body { font-size: 13px; }
+  .msg-role { font-size: 10px; }
+  .session-item { font-size: 12px; padding: 8px 6px; }
+  .app-titlebar-title { max-width: 50vw; }
+  .composer-area { padding-left: 4px; padding-right: 4px; }
+  .composer-box { border-radius: 8px; }
+  pre, code { white-space: pre-wrap; word-break: break-word; }
+  .msg-media-img { max-width: 100%; height: auto; }
+}
 @keyframes settings-field-pulse { 0% { box-shadow: 0 0 0 0 var(--focus-ring); } 35% { box-shadow: 0 0 0 4px var(--focus-ring); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }

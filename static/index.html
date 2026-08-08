@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=0.5, maximum-scale=3">
 <title>Hermes</title>
 <!-- base href enables subpath mount support; all static paths must stay relative (no leading slash).
      MUST appear before manifest/favicon links so browsers resolve relative URLs against the
@@ -809,8 +809,8 @@
       <div class="main-view-body" id="memoryDetailBody" style="display:none"></div>
       <div class="main-view-empty" id="memoryDetailEmpty">
         <svg class="main-view-empty-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2z"/></svg>
-        <div class="main-view-empty-title" data-i18n="memory_empty_title">Select a memory section</div>
-        <div class="main-view-empty-sub" data-i18n="memory_empty_sub">Pick a section from the sidebar to view or edit its contents.</div>
+        <div class="main-view-empty-title" data-i18n="memory_empty_title">No memory yet</div>
+        <div class="main-view-empty-sub" data-i18n="memory_empty_sub">Your agent memory will appear here. Send messages with content your agent should remember.</div>
       </div>
     </div>
     <div id="mainTasks" class="main-view">
@@ -1385,6 +1385,13 @@
                 <span data-i18n="settings_label_new_chat_on_workspace_switch">Start a new chat when switching workspace</span>
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_new_chat_on_workspace_switch">When on, selecting a different workspace starts a fresh conversation bound to that workspace and leaves your current chat on its original workspace — avoiding stale cross-workspace context. When off (default), switching workspace changes the current conversation's workspace in place.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsAlwaysNewChat" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_always_new_chat">Always start fresh chat on launch</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_always_new_chat">When enabled, the WebUI always starts with an empty composer instead of resuming the last session.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
