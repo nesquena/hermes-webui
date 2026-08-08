@@ -830,3 +830,93 @@ console.log(JSON.stringify({{
     assert payload["lastKey"] == "?model=claude-sonnet&provider=anthropic"
     assert payload["clearPos"] >= 0
     assert payload["clearPos"] < payload["noSessionSyncPos"]
+
+
+# ── #6559: profile tab URL helper ──────────────────────────────────────────
+
+def test_profile_tab_url_builds_correct_href():
+    source = _node_prelude() + """
+evalSession('_profileTabUrl');
+const PANELS_SRC = """ + repr(PANELS_JS) + """;
+function makeGlobal() {
+  globalThis.window = { location: { href: 'https://example.test/app/', pathname: '/app/', search: '?keep=1', hash: '#frag' } };
+  globalThis.document = { baseURI: 'https://example.test/app/' };
+  globalThis.sessionStorage = { store: {}, getItem(k) { return this.store[k] || null; }, setItem(k, v) { this.store[k] = v; } };
+}
+makeGlobal();
+// Test 1: basic href
+const basic = _profileTabUrl('vops');
+// Test 2: with sessionStorage context
+const ctx = 'abc123token';
+globalThis.sessionStorage.setItem('hermes-tab-profile-ctx', ctx);
+const withCtx = _profileTabUrl('vops');
+// Test 3: encoded profile name
+const encoded = _profileTabUrl('my-profile');
+// Test 4: panels.js renders <a> with href
+const anchorCreateMatch = PANELS_SRC.match(/createElement\('a'\)/);
+const anchorHrefMatch = PANELS_SRC.match(/profileHref = _profileTabUrl\(p\.name\)/);
+const setsHrefMatch = PANELS_SRC.match(/opt\.href = profileHref/);
+console.log(JSON.stringify({
+  basic, withCtx, encoded,
+  createsAnchor: !!anchorCreateMatch,
+  usesProfileHref: !!anchorHrefMatch,
+  setsHrefAttr: !!setsHrefMatch
+}));
+"""
+    payload = json.loads(_run_node(source))
+    assert payload["createsAnchor"], "dropdown should create <a> elements"
+    assert payload["usesProfileHref"], "dropdown should call _profileTabUrl"
+    assert payload["setsHrefAttr"], "dropdown should set opt.href"
+    assert "profile=vops" in payload["basic"], f"basic href should contain profile=vops, got {payload['basic']}"
+    assert payload["basic"].startswith("/app/"), f"basic href should preserve path, got {payload['basic']}"
+    assert "tab_context=abc123token" in payload["withCtx"], f"withCtx should contain tab_context, got {payload['withCtx']}"
+    assert "profile=my-profile" in payload["encoded"], f"encoded should contain profile=my-profile, got {payload['encoded']}"
+
+
+def test_profile_tab_url_preserves_existing_query_and_hash():
+    source = _node_prelude() + """
+evalSession('_profileTabUrl');
+globalThis.window = { location: { href: 'https://example.test/app/?q=hello&keep=1#frag', pathname: '/app/', search: '?q=hello&keep=1', hash: '#frag' } };
+globalThis.document = { baseURI: 'https://example.test/app/' };
+globalThis.sessionStorage = { getItem() { return null; } };
+const url = _profileTabUrl('vops');
+console.log(JSON.stringify({ url }));
+"""
+    payload = json.loads(_run_node(source))
+    assert "profile=vops" in payload["url"], f"url should contain profile=vops, got {payload['url']}"
+    assert "keep=1" in payload["url"], f"url should preserve keep=1, got {payload['url']}"
+    assert "#frag" in payload["url"], f"url should preserve hash, got {payload['url']}"
+
+
+def test_profile_dropdown_creates_anchor_elements_with_click_guards():
+    render_start = PANELS_JS.index("function renderProfileDropdown(")
+    render_end = PANELS_JS.index("function toggleProfileDropdown(", render_start)
+    render_func = PANELS_JS[render_start:render_end]
+    assert "createElement('a')" in render_func, "must create <a> elements"
+    assert "opt.href = profileHref" in render_func, "must set href attribute"
+    assert "addEventListener" in render_func, "must use addEventListener"
+    has_mod = "e.button !== 0" in render_func or "e.ctrlKey" in render_func
+    assert has_mod, "must check modifier keys"
+    assert "preventDefault" in render_func, "must call preventDefault on plain click"
+    assert "switchToProfile(p.name)" in render_func, "must call switchToProfile on plain click"
+
+
+def test_log_redaction_removes_tab_context_from_path():
+    import re as _re
+    redact_re = _re.compile(r'(?<=[?&])tab_context=[^&\s]+')
+    cases = [
+        ("/api/sessions/events", "/api/sessions/events"),
+        ("/api/sessions/events?tab_context=abc123", "/api/sessions/events?tab_context=<redacted>"),
+        ("/api/chat/stream?stream_id=xyz", "/api/chat/stream?stream_id=xyz"),
+        ("/api/chat/stream?stream_id=xyz&tab_context=abc123&keep=1",
+         "/api/chat/stream?stream_id=xyz&tab_context=<redacted>&keep=1"),
+        ("/api/profile/active?tab_context=abc123", "/api/profile/active?tab_context=<redacted>"),
+        ("?tab_context=abc123", "?tab_context=<redacted>"),
+        ("/api/upload?tab_context=abc123", "/api/upload?tab_context=<redacted>"),
+    ]
+    for raw, expected in cases:
+        result = redact_re.sub('tab_context=<redacted>', raw)
+        assert result == expected, f"redact({raw!r}) = {result!r}, expected {expected!r}"
+    server_src = (Path(__file__).parent.parent / "server.py").read_text(encoding="utf-8")
+    assert "_REDACT_TAB_CONTEXT" in server_src
+    assert "tab_context=<redacted>" in server_src

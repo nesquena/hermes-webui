@@ -5,7 +5,26 @@ function _markSessionViewed(sid, messageCount) {
 }
 
 function _apiUrl(path) {
-  return new URL(path, document.baseURI || location.href).href;
+  return _tabContextUrl(new URL(path, document.baseURI || location.href).href);
+}
+
+// ── Per-tab profile context helpers (#6559) ──────────────────────────────────
+function _tabContextUrl(urlStr) {
+  // Append ?tab_context= from sessionStorage to any URL
+  try {
+    const ctx = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('hermes-tab-profile-ctx') : null;
+    if (!ctx) return urlStr;
+    const u = new URL(urlStr, document.baseURI || location.href);
+    if (!u.searchParams.has('tab_context')) {
+      u.searchParams.set('tab_context', ctx);
+    }
+    return u.href;
+  } catch (e) { return urlStr; }
+}
+
+function _tabContextEventSource(urlStr) {
+  // Create an EventSource whose URL carries the per-tab profile context
+  return new EventSource(_tabContextUrl(urlStr), { withCredentials: true });
 }
 
 // Module-scope dedupe ring buffer for bg_task_complete events. Shared between
@@ -2546,7 +2565,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
           if(st.active){
             setComposerStatus('Reconnected');
-            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+            _wireSSE(new EventSource(_tabContextUrl(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href),{withCredentials:true}));
             return;
           }
         }
@@ -6464,12 +6483,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
             if(st&&st.active){
               setComposerStatus('Reconnected');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+              _wireSSE(new EventSource(_tabContextUrl(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href),{withCredentials:true}));
               return;
             }
             if(st&&st.replay_available){
               setComposerStatus('Restoring stream…');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+              _wireSSE(new EventSource(_tabContextUrl(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href),{withCredentials:true}));
               return;
             }
           }catch(_){
@@ -6895,7 +6914,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     }
     const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
-    _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
+    _wireSSE(new EventSource(_tabContextUrl(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href),{withCredentials:true}));
   })();
 
 }

@@ -3580,6 +3580,18 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       console.warn('[boot] profile query switch failed', e);
     }
   }
+  // Acquire a per-tab profile context token (opaque server-issued, stored in sessionStorage)
+  // for all tabs, not just profile-booted ones (#6559)
+  (async function _acquireTabContext(){
+    try{
+      if(typeof sessionStorage==='undefined') return;
+      if(sessionStorage.getItem('hermes-tab-profile-ctx')) return; // already have one
+      const res=await fetch('/api/profile/tab-context',{credentials:'include'});
+      if(!res.ok) return;
+      const data=await res.json();
+      if(data&&data.token) sessionStorage.setItem('hermes-tab-profile-ctx',data.token);
+    }catch(e){console.warn('[boot] tab context acquisition failed',e);}
+  })();
   if(typeof fetchReasoningChip==='function'&&(!_profileSwitchCompleted||!_profileSwitchChangedProfile)) fetchReasoningChip();
   // Fetch available models without blocking session restore. The static HTML
   // options enough for first paint; the dynamic provider list can settle

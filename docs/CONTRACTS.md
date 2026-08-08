@@ -78,6 +78,18 @@ contributor guidance; it does not change runtime behavior or CI gates.
   proof gates. Prefer the RFC's **Authoritative emitted events** table (live
   `/api/chat/stream` wire names) over the aspirational semantic taxonomy when
   writing clients against current source.
+- [`Per-tab profile context (#6559)`](../api/profiles.py):
+  implemented opaque server-issued tab context for simultaneous profile tabs.
+  A short-lived random token is issued by `GET /api/profile/tab-context`,
+  stored in the client's `sessionStorage`, and sent as `?tab_context=<token>`
+  on every API and SSE request. The server resolves the token to the issuing
+  tab's profile via `resolve_profile_with_tab_context()` before falling back
+  to the browser-wide `hermes_profile` cookie. Tokens expire after 5 minutes
+  of inactivity (refreshed on each use). Invalid/stale tokens fall back to the
+  cookie profile LOUDLY — the resolver returns `None` rather than silently
+  misrouting. The query parameter is redacted from access-log output. Start
+  here for any work that touches multi-tab profile isolation, tab context
+  lifecycle, or the profile resolution priority chain.
 
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,

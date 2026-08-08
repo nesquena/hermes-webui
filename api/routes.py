@@ -13837,6 +13837,12 @@ def handle_get(handler, parsed) -> bool:
             },
         )
 
+    if parsed.path == "/api/profile/tab-context":
+        from api import profiles as profiles_api
+        active_profile_name = profiles_api.get_active_profile_name()
+        token = profiles_api.issue_tab_context(active_profile_name)
+        return j(handler, {"token": token})
+
     # ── Gateway Status (GET) ──
     if parsed.path == "/api/gateway/status":
         return j(handler, _gateway_status_payload())

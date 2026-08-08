@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 import threading
+import time  # needed for tab-context TTL
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
@@ -497,6 +498,89 @@ def clear_request_profile() -> None:
     Safe to call even if set_request_profile() was never called.
     """
     _tls.profile = None
+
+
+# ── Per-tab opaque profile context (#6559) ───────────────────────────────────
+_TAB_CONTEXT_TTL = 300  # 5 minutes — refreshed on each use
+_TAB_CONTEXT_LOCK = threading.Lock()
+_TAB_CONTEXT_MAP: dict[str, tuple[str, float]] = {}  # token → (profile_name, expiry_ts)
+
+
+def issue_tab_context(profile_name: str) -> str:
+    """Create an opaque tab context token bound to the given profile.
+
+    The token is a short random string stored server-side. The client keeps it
+    in sessionStorage and sends it as ?tab_context=<token> on every API and SSE
+    request. The server resolves it back to the profile without trusting an
+    arbitrary client-supplied profile name.
+    """
+    import secrets as _secrets
+    token = _secrets.token_urlsafe(24)
+    now = time.time()
+    with _TAB_CONTEXT_LOCK:
+        # Evict expired entries
+        expired = [k for k, (_, t) in _TAB_CONTEXT_MAP.items() if t < now]
+        for k in expired:
+            del _TAB_CONTEXT_MAP[k]
+        _TAB_CONTEXT_MAP[token] = (profile_name, now + _TAB_CONTEXT_TTL)
+    return token
+
+
+def resolve_tab_context(token: str) -> str | None:
+    """Resolve an opaque tab context token to a profile name.
+
+    Returns None if the token is unknown or expired.
+    On successful resolution, refreshes the TTL.
+    """
+    now = time.time()
+    with _TAB_CONTEXT_LOCK:
+        entry = _TAB_CONTEXT_MAP.get(token)
+        if entry is None:
+            return None
+        profile_name, expiry = entry
+        if expiry < now:
+            del _TAB_CONTEXT_MAP[token]
+            return None
+        # Refresh TTL on successful use
+        _TAB_CONTEXT_MAP[token] = (profile_name, now + _TAB_CONTEXT_TTL)
+    return profile_name
+
+
+def resolve_profile_with_tab_context(handler, *, url_profile: str | None = None) -> str | None:
+    """Resolve active profile, checking tab-context query param before cookie.
+
+    Priority:
+      1. url_profile (from ?profile=, pre-validated)
+      2. ?tab_context= query param → resolve to stored profile
+      3. hermes_profile cookie (existing browser-wide fallback)
+
+    Fail-closed: invalid/expired tab_context falls through to cookie, and
+    the caller can detect which source was used.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    # If an explicit url_profile was already extracted from ?profile= and it's
+    # valid, that takes priority (tab is booting with a known target profile).
+    if url_profile is not None:
+        return url_profile
+
+    # Check ?tab_context= query param
+    try:
+        parsed = urlparse(handler.path)
+        qs = parse_qs(parsed.query)
+        ctx_tokens = qs.get('tab_context', [])
+        if ctx_tokens:
+            resolved = resolve_tab_context(ctx_tokens[0])
+            if resolved is not None:
+                return resolved
+            # Expired/invalid: fall through to cookie; caller should detect
+            # and surface a status so the client re-establishes context.
+    except Exception:
+        pass
+
+    # Fall back to cookie
+    from api.helpers import get_profile_cookie
+    return get_profile_cookie(handler)
 
 
 def _resolve_profile_home_for_name(name: str) -> Path:
