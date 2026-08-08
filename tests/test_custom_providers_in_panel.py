@@ -228,12 +228,13 @@ class TestCustomProvidersInGetProviders:
 
         from api.providers import _get_provider_api_key, _provider_has_key, get_providers
         try:
-            provider_id = "custom:local-127.0.0.1-15721"
+            # Agent convention: only spaces → hyphens; parens/colons preserved.
+            provider_id = "custom:local-(127.0.0.1:15721)"
             result = get_providers()
             provider_ids = {p["id"] for p in result["providers"]}
             assert provider_id in provider_ids
             assert "custom:Local (127.0.0.1:15721)" not in provider_ids
-            assert "custom:local-(127.0.0.1:15721)" not in provider_ids
+            assert "custom:local-127.0.0.1-15721" not in provider_ids
 
             local = [p for p in result["providers"] if p["id"] == provider_id][0]
             assert local["display_name"] == "Local (127.0.0.1:15721)"

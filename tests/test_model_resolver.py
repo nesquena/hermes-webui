@@ -897,7 +897,7 @@ def test_custom_provider_models_object_list_routes_to_named_custom_provider_6121
 # ── Issue #2047: parenthesized local provider names with ports ────────────
 
 def test_custom_provider_name_with_parenthesized_port_uses_safe_slug():
-    """Setup-generated names like 'Local (host:port)' must not leak ':' into slugs."""
+    """Setup-generated names like 'Local (host:port)' mirror the agent's slug convention."""
     model, provider, base_url = _resolve_with_config(
         'deepseek-v4-flash',
         provider='custom',
@@ -908,7 +908,9 @@ def test_custom_provider_name_with_parenthesized_port_uses_safe_slug():
         }],
     )
     assert model == 'deepseek-v4-flash'
-    assert provider == 'custom:local-127.0.0.1-15721'
+    # Agent's _normalize_custom_pool_name only does strip().lower().replace(" ", "-"),
+    # so parentheses and colons are preserved in the slug.
+    assert provider == 'custom:local-(127.0.0.1:15721)'
     assert base_url == 'http://127.0.0.1:15721/v1'
 
 

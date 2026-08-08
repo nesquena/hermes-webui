@@ -6663,9 +6663,7 @@ def _custom_provider_slug_for_context(name: object) -> str:
             return ""
         if raw.startswith("custom:"):
             return raw
-        slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
-        slug = re.sub(r"-{2,}", "-", slug)
-        return f"custom:{slug}" if slug else ""
+        return "custom:" + raw.replace(" ", "-")
 
 
 def _providers_match_for_context(config_key: object, requested_provider: str) -> bool:
@@ -20055,7 +20053,13 @@ def _handle_live_models(handler, parsed):
                     if _mid and _mid not in _ids:
                         _ids.append(_mid)
 
-                _append(_cp.get("model", ""))
+                # Only the plural ``models`` allowlist participates in the
+                # live-catalog filter (#6646 finding 3).  The singular
+                # ``model`` field is sticky/default metadata, NOT an allowlist
+                # signal — treating it as one hides the rest of the live
+                # catalog (e.g. a provider with ``model: assistant`` and a live
+                # list of [assistant, assistant-pro, remote-extra] would show
+                # only ``assistant``).
                 _models = _cp.get("models")
                 if isinstance(_models, dict):
                     for _mid in _models:
@@ -20088,11 +20092,18 @@ def _handle_live_models(handler, parsed):
             # Collect config-specified model IDs separately so they don't
             # prevent the live fetch below from running (#3718).
             _config_ids = []
+            _sticky_model_ids = []
             if provider == "custom" or provider.startswith("custom:"):
                 for _cp in _custom_provider_entries_for_request():
                     if custom_provider_entry is None:
                         custom_provider_entry = _cp
                     _config_ids.extend(_custom_provider_model_ids(_cp))
+                    # The singular ``model`` field is sticky/default metadata:
+                    # it does not filter the live catalog, but it IS the
+                    # fallback when the live fetch fails (#6646 finding 3).
+                    _m = str(_cp.get("model") or "").strip()
+                    if _m and _m not in _sticky_model_ids:
+                        _sticky_model_ids.append(_m)
             
             # Always try live fetch for custom providers — config entries are a
             # fallback, not a replacement.  The live endpoint should return ALL
@@ -20163,15 +20174,26 @@ def _handle_live_models(handler, parsed):
                     except Exception as _fetch_err:
                         logger.debug("Live fetch from custom provider failed: %s", _fetch_err)
 
-                # If live fetch succeeded, merge with config entries (live takes
-                # priority).  If live fetch failed, fall back to config-only list.
+                # If live fetch succeeded, filter to only models configured in
+                # custom_providers config — live fetch returns ALL models the
+                # key has access to, but for proxy gateways like New-API that
+                # may include hundreds of unrelated models from other channels.
+                # When no models are explicitly configured for this provider,
+                # return the live list as-is (provider has no config filter).
                 if ids:
-                    _live_set = set(ids)
-                    for _cid in _config_ids:
-                        if _cid not in _live_set:
-                            ids.append(_cid)
+                    if _config_ids:
+                        _configured_set = set(_config_ids)
+                        ids = [mid for mid in ids if mid in _configured_set]
                 else:
-                    ids = list(_config_ids)
+                    # Live fetch failed (or returned nothing): fall back to
+                    # the singular sticky ``model`` first, then the plural
+                    # ``models`` allowlist — preserving the pre-#6646 order
+                    # (sticky default before configured siblings) so a
+                    # model-only provider still resolves (#6646 finding 3).
+                    ids = list(_sticky_model_ids)
+                    for _mid in _config_ids:
+                        if _mid not in ids:
+                            ids.append(_mid)
 
         # ── OpenAI-compat live fetch fallback ──────────────────────────────────
         # When provider_model_ids() is unavailable or returns [] for a provider
