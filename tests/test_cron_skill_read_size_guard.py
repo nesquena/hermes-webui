@@ -1,0 +1,1401 @@
+"""Tests: cron/skill file reads are size-guarded (bounded).
+
+Regression: three handlers read whole operator-authored files into memory via
+``read_text()`` with no ``st_size`` guard — inconsistent with the git-diff
+``DIFF_SIZE_LIMIT`` pattern and the bounded log tail reader. A cron job (or
+skill linked file) that produced a very large output file was loaded whole (and,
+for the run-detail endpoint, fully serialized into the JSON response) before any
+truncation. The cron-recent batch reader could read up to 500 such files fully.
+
+Each site now checks ``st_size`` before reading: files at or under
+``_FILE_READ_MAX_BYTES`` (512 KiB, mirroring DIFF_SIZE_LIMIT) are returned
+verbatim; larger files are read only up to the cap and flagged ``truncated``.
+The cron-recent batch also has a cumulative byte budget across its file list.
+"""
+from __future__ import annotations
+
+import io
+import json
+import os
+import sys
+import types
+from types import SimpleNamespace
+
+import api.routes as routes
+from api.routes import _FILE_READ_MAX_BYTES
+
+
+class _JSONHandler:
+    def __init__(self):
+        self.status = None
+        self.response_headers = []
+        self.wfile = io.BytesIO()
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        self.response_headers.append((key, value))
+
+    def end_headers(self):
+        pass
+
+
+def _payload(handler):
+    return json.loads(handler.wfile.getvalue().decode("utf-8"))
+
+
+def _stub_cron_jobs(monkeypatch, *, output_dir):
+    cron_pkg = types.ModuleType("cron")
+    cron_pkg.__path__ = []
+    cron_jobs = types.ModuleType("cron.jobs")
+    cron_jobs.OUTPUT_DIR = output_dir
+    monkeypatch.setitem(sys.modules, "cron", cron_pkg)
+    monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
+    return cron_jobs
+
+
+# ── _read_text_bounded unit ─────────────────────────────────────────────────
+
+
+def test_read_text_bounded_under_cap_returns_full(tmp_path):
+    f = tmp_path / "small.txt"
+    f.write_text("hello world", encoding="utf-8")
+    text, truncated, _ok = routes._read_text_bounded(f)
+    assert text == "hello world"
+    assert truncated is False
+
+
+def test_read_text_bounded_over_cap_returns_head_and_flag(tmp_path):
+    f = tmp_path / "big.txt"
+    payload = "A" * (_FILE_READ_MAX_BYTES + 4096)
+    f.write_text(payload, encoding="utf-8")
+    text, truncated, _ok = routes._read_text_bounded(f)
+    assert truncated is True
+    # Only up to the cap was read (never the full oversized payload).
+    assert len(text.encode("utf-8")) <= _FILE_READ_MAX_BYTES
+    assert len(text) < len(payload)
+
+
+# ── cron run detail (single file) ────────────────────────────────────────────
+
+
+def test_cron_run_detail_normal_file_returns_full_content(monkeypatch, tmp_path):
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    (out_dir / "run.md").write_text("## Response\nthe answer is 42\n", encoding="utf-8")
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    handler = _JSONHandler()
+    routes._handle_cron_run_detail(
+        handler, SimpleNamespace(query="job_id=job1&filename=run.md")
+    )
+    assert handler.status == 200
+    body = _payload(handler)
+    assert body["truncated"] is False
+    assert "the answer is 42" in body["content"]
+
+
+def test_cron_run_detail_oversized_file_is_truncated(monkeypatch, tmp_path):
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    # Oversized cron output (well past the cap).
+    (out_dir / "run.md").write_text(
+        "## Response\n" + ("B" * (_FILE_READ_MAX_BYTES + 8192)), encoding="utf-8"
+    )
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    handler = _JSONHandler()
+    routes._handle_cron_run_detail(
+        handler, SimpleNamespace(query="job_id=job1&filename=run.md")
+    )
+    assert handler.status == 200
+    body = _payload(handler)
+    assert body["truncated"] is True
+    # The returned content was bounded, not the full oversized payload.
+    # _read_cron_output_bounded composites a bounded head (frontmatter) + a
+    # bounded tail (marker + body), de-duplicating the overlap so the body is
+    # not doubled. Result is bounded to roughly 2 * _FILE_READ_MAX_BYTES.
+    assert len(body["content"].encode("utf-8")) <= _FILE_READ_MAX_BYTES * 2 + 200, (
+        f"content must be bounded; got {len(body['content'].encode('utf-8'))}"
+    )
+    assert "## Response" in body["content"], "the response marker must survive"
+
+
+# ── cron recent (batch) ──────────────────────────────────────────────────────
+
+
+def test_cron_output_normal_files_returned(monkeypatch, tmp_path):
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    for i in range(3):
+        f = out_dir / f"run-{i}.md"
+        f.write_text(f"## Response\noutput {i}\n", encoding="utf-8")
+        os.utime(f, (1000 + i, 1000 + i))
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    handler = _JSONHandler()
+    routes._handle_cron_output(
+        handler, SimpleNamespace(query="job_id=job1&limit=10")
+    )
+    assert handler.status == 200
+    body = _payload(handler)
+    assert len(body["outputs"]) == 3
+    assert body.get("truncated", False) is False
+
+
+def test_cron_output_batch_byte_budget_truncates(monkeypatch, tmp_path):
+    """Many large files exceed the cumulative batch budget → batch flagged
+    truncated and reading stops before loading all of them."""
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    # Create many files that together exceed _FILE_READ_MAX_BYTES * 4. Each file
+    # is individually under the per-file cap so the per-file bound doesn't fire,
+    # forcing the cumulative budget to be what truncates the batch.
+    per_file = _FILE_READ_MAX_BYTES // 2
+    n_files = 12  # total ~6x the batch budget
+    for i in range(n_files):
+        f = out_dir / f"run-{i}.md"
+        f.write_text("## Response\n" + ("C" * per_file), encoding="utf-8")
+        os.utime(f, (i, i))  # newest last
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    handler = _JSONHandler()
+    routes._handle_cron_output(
+        handler, SimpleNamespace(query="job_id=job1&limit=500")
+    )
+    assert handler.status == 200
+    body = _payload(handler)
+    # The budget stopped reading before all n_files were loaded.
+    assert body.get("truncated") is True
+    assert len(body["outputs"]) < n_files
+    assert len(body["outputs"]) >= 1
+
+
+# ── skill linked file ────────────────────────────────────────────────────────
+
+
+def test_skill_linked_file_oversized_is_truncated(monkeypatch, tmp_path):
+    """The skill linked-file read is bounded: an oversized file returns the head
+    + a truncated flag instead of loading the whole file. The skill branch lives
+    inside handle_get, so stub the skill-dir resolver and drive the
+    /api/skills/content path directly (auth is enforced at the server level, not
+    inside handle_get)."""
+    skill_dir = tmp_path / "skills" / "myskill"
+    skill_dir.mkdir(parents=True)
+    big = skill_dir / "big.md"
+    big.write_text("D" * (_FILE_READ_MAX_BYTES + 8192), encoding="utf-8")
+
+    # Resolve the skill to our temp dir regardless of real settings.
+    monkeypatch.setattr(routes, "_active_skills_dir", lambda: tmp_path / "skills")
+    monkeypatch.setattr(
+        routes,
+        "_find_skill_in_dirs",
+        lambda name, dirs: (skill_dir, skill_dir / "SKILL.md"),
+    )
+
+    handler = _JSONHandler()
+    handler.headers = {}
+    routes.handle_get(
+        handler,
+        SimpleNamespace(path="/api/skills/content", query="name=myskill&file=big.md"),
+    )
+    body = _payload(handler)
+    assert "content" in body, f"unexpected payload: {body}"
+    assert body["truncated"] is True
+    # Only the bounded head was loaded, not the full oversized file.
+    assert len(body["content"].encode("utf-8")) <= _FILE_READ_MAX_BYTES
+
+
+def test_skill_linked_file_normal_returns_full(monkeypatch, tmp_path):
+    """A normal-size skill linked file returns full content, not truncated."""
+    skill_dir = tmp_path / "skills" / "myskill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "notes.md").write_text("# Notes\nsmall skill file body\n", encoding="utf-8")
+
+    monkeypatch.setattr(routes, "_active_skills_dir", lambda: tmp_path / "skills")
+    monkeypatch.setattr(
+        routes,
+        "_find_skill_in_dirs",
+        lambda name, dirs: (skill_dir, skill_dir / "SKILL.md"),
+    )
+
+    handler = _JSONHandler()
+    handler.headers = {}
+    routes.handle_get(
+        handler,
+        SimpleNamespace(path="/api/skills/content", query="name=myskill&file=notes.md"),
+    )
+    body = _payload(handler)
+    assert body["truncated"] is False
+    assert "small skill file body" in body["content"]
+
+
+# ── cron ## Response head-vs-tail policy ──────────────────────────────────────
+
+
+def _write_cron_output_with_huge_prompt(path):
+    """Write a cron output whose ## Prompt section alone exceeds the cap, with
+    ## Response (the section the UI wants) at the END of the file."""
+    prompt_blob = "P" * (_FILE_READ_MAX_BYTES + 50000)
+    path.write_text(
+        f"# Cron Run\nmodel: x\n\n## Prompt\n{prompt_blob}\n\n"
+        "## Response\nThis is the actual reply the UI wants to show.\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_cron_run_detail_oversized_preserves_response_section(monkeypatch, tmp_path):
+    """Regression: cron output puts ## Response at the END. A pure head cap drops
+    it when the prompt section is large, leaving the snippet to serve prompt
+    bytes. _read_cron_output_bounded must fall back to a tail read so the
+    response survives."""
+    from api.routes import _read_cron_output_bounded, _cron_output_snippet
+
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    fpath = _write_cron_output_with_huge_prompt(out_dir / "run.md")
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    # Direct helper check: the bounded read preserves ## Response.
+    txt, truncated, _ok, _bytes_read, _declined = _read_cron_output_bounded(fpath)
+    assert truncated is True
+    assert "## Response" in txt
+    snippet = _cron_output_snippet(txt)
+    assert "actual reply the UI wants to show" in snippet, (
+        "snippet must show the response, not prompt bytes"
+    )
+
+
+def test_cron_run_detail_oversized_response_survives_in_handler(monkeypatch, tmp_path):
+    """End-to-end: /api/crons/run-detail on a file whose prompt exceeds the cap
+    returns a snippet containing the response, not prompt bytes."""
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    _write_cron_output_with_huge_prompt(out_dir / "run.md")
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    handler = _JSONHandler()
+    routes._handle_cron_run_detail(
+        handler, SimpleNamespace(query="job_id=job1&filename=run.md")
+    )
+    assert handler.status == 200
+    body = _payload(handler)
+    assert body["truncated"] is True
+    assert "actual reply the UI wants to show" in body["snippet"]
+
+
+def test_cron_output_batch_surfaces_per_file_truncation(monkeypatch, tmp_path):
+    """Regression: a single file > 512 KiB that still fits under the batch budget
+    used to have its per-file truncation flag silently discarded. The batch
+    output entry must now carry `truncated: true` so a client can tell that
+    file's content was clipped."""
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    # One file over the per-file cap (within the batch budget), with ## Response
+    # at the end so it takes the head-then-tail path.
+    _write_cron_output_with_huge_prompt(out_dir / "run-big.md")
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    handler = _JSONHandler()
+    routes._handle_cron_output(
+        handler, SimpleNamespace(query="job_id=job1&limit=10")
+    )
+    assert handler.status == 200
+    body = _payload(handler)
+    assert len(body["outputs"]) == 1
+    entry = body["outputs"][0]
+    assert entry["filename"] == "run-big.md"
+    # Per-file truncation is surfaced on the entry (not just the batch flag).
+    assert entry.get("truncated") is True
+    # And the response content survived (head-then-tail bias).
+    assert "actual reply the UI wants to show" in entry["content"]
+
+
+def test_read_text_bounded_tail_mode_reads_trailing_bytes(tmp_path):
+    """_read_text_bounded(tail=True) reads the trailing max_bytes and drops the
+    partial line at the seek boundary — the primitive the cron head-then-tail
+    policy relies on."""
+    from api.routes import _read_text_bounded
+
+    p = tmp_path / "t.txt"
+    # 10 lines, each a complete marker. Cap at a small tail window.
+    p.write_text("".join(f"line{i:02d}marker\n" for i in range(10)), encoding="utf-8")
+    text, truncated, _ok = _read_text_bounded(p, max_bytes=40, tail=True)
+    assert truncated is True
+    # The last line must be present (it's within the tail window).
+    assert "line09marker" in text
+    # No partial leading fragment (the seek-boundary line was dropped): the
+    # first retained line is a complete marker (strip CR for CRLF portability).
+    first_line = text.split("\n", 1)[0].rstrip("\r")
+    assert first_line.startswith("line") and first_line.endswith("marker"), (
+        f"first line looks like a partial fragment: {first_line!r}"
+    )
+
+
+# ── head+tail preserves frontmatter/usage (regression) ────────────────────────
+
+
+def test_cron_run_detail_oversized_preserves_usage_and_response(monkeypatch, tmp_path):
+    """Regression (reviewer): when the prompt exceeds the cap and ## Response is
+    at the end, a tail-ONLY read dropped the frontmatter/usage block, so the
+    detail endpoint returned an empty usage object. The head+tail composite
+    preserves BOTH: usage parses from the head frontmatter, and the response
+    parses from the tail."""
+    from api.routes import _read_cron_output_bounded, _cron_output_usage_metadata
+
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    prompt_blob = "P" * (_FILE_READ_MAX_BYTES + 50000)
+    # Real cron output format the usage parser expects (bolded **Model:** etc.).
+    (out_dir / "run.md").write_text(
+        "# Cron Run\n\n**Model:** gpt-5\n**Tokens:** 1000 input, 500 output\n\n"
+        f"## Prompt\n{prompt_blob}\n\n## Response\nThe actual reply.\n",
+        encoding="utf-8",
+    )
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    fpath = out_dir / "run.md"
+    txt, truncated, _ok, _bytes_read, _declined = _read_cron_output_bounded(fpath)
+    assert truncated is True
+    # The response survives (tail).
+    assert "## Response" in txt
+    assert "actual reply" in txt
+    # The usage block survives (head frontmatter) — this was the regression.
+    usage = _cron_output_usage_metadata(txt)
+    assert usage.get("model") == "gpt-5", f"usage model lost: {usage}"
+    assert usage.get("input_tokens") == 1000, f"usage tokens lost: {usage}"
+
+    # End-to-end through the detail handler.
+    handler = _JSONHandler()
+    routes._handle_cron_run_detail(
+        handler, SimpleNamespace(query="job_id=job1&filename=run.md")
+    )
+    body = _payload(handler)
+    assert body["truncated"] is True
+    assert body["usage"].get("model") == "gpt-5"
+    assert "actual reply" in body["snippet"]
+
+
+def test_cron_output_batch_newest_oversized_file_still_returned(monkeypatch, tmp_path):
+    """Regression (reviewer): the batch endpoint charged the full on-disk
+    st_size against the budget before the bounded read, so a single oversized
+    NEWEST file exceeded the remaining budget and was skipped entirely (blank
+    output). The fix charges the BOUNDED read size and always admits at least
+    the newest file, so the newest run is never blank."""
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    # One oversized file (well over the per-file cap) with a real response marker.
+    prompt_blob = "P" * (_FILE_READ_MAX_BYTES * 3)
+    (out_dir / "run-newest.md").write_text(
+        f"## Prompt\n{prompt_blob}\n\n## Response\nNewest run reply.\n",
+        encoding="utf-8",
+    )
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    handler = _JSONHandler()
+    routes._handle_cron_output(
+        handler, SimpleNamespace(query="job_id=job1&limit=10")
+    )
+    assert handler.status == 200
+    body = _payload(handler)
+    # The newest file is returned (not skipped) with a bounded preview.
+    assert len(body["outputs"]) >= 1, f"newest file was skipped: {body}"
+    entry = body["outputs"][0]
+    assert entry["filename"] == "run-newest.md"
+    assert "Newest run reply." in entry["content"], (
+        f"newest file's response missing from batch output: {entry}"
+    )
+    assert entry.get("truncated") is True
+
+
+def test_cron_run_detail_response_marker_split_at_head_boundary(monkeypatch, tmp_path):
+    """Regression (reviewer round 2): when the seek splits the ## Response marker
+    line so neither head nor tail has it intact, the composite must re-inject the
+    marker so the snippet shows the reply body. Byte-exact padding so the marker
+    straddles the cap (the round-1 fixture was off by 7 — it included '# Cron\\n'
+    in the content but not in the filler-length math, so the marker landed past
+    the cap rather than straddling it)."""
+    from api.routes import _read_cron_output_bounded, _cron_output_snippet
+
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    marker = "## Response\n"
+    # Byte-exact: frontmatter + filler + marker where filler fills exactly to
+    # the cap, so the marker starts AT the cap and straddles it (split marker).
+    frontmatter = "# Cron\n"
+    filler_len = _FILE_READ_MAX_BYTES - len(frontmatter.encode("utf-8"))
+    content = frontmatter + ("F" * filler_len) + marker + "Split-marker reply body.\n"
+    (out_dir / "run.md").write_text(content, encoding="utf-8")
+    fpath = out_dir / "run.md"
+    txt, truncated, _ok, _bytes_read, _declined = _read_cron_output_bounded(fpath)
+    assert truncated is True
+    snippet = _cron_output_snippet(txt)
+    assert "Split-marker reply body." in snippet, (
+        f"response body lost at split-marker boundary: snippet={snippet!r}"
+    )
+
+
+def test_cron_run_detail_marker_ends_exactly_at_boundary(monkeypatch, tmp_path):
+    """Regression (reviewer round 3): when the COMPLETE ## Response heading ends
+    EXACTLY at the head cap (preceded by a newline so it's recognized, but zero
+    body bytes follow it in the head), marker presence used to trigger an early
+    head-only return → snippet: "(empty)". The fix tail-splices the body when the
+    head has the marker but no body, de-duplicating the marker so it appears once."""
+    from api.routes import _read_cron_output_bounded, _cron_output_snippet
+
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    marker_b = b"## Response\n"
+    body = "Reply body entirely past the boundary.".encode("utf-8")
+    frontmatter = b"# Cron\n"
+    pre_marker_newline = b"\n"  # so _cron_response_marker_index recognizes it
+    # frontmatter + filler + newline + marker == exactly cap bytes (marker ends at cap)
+    filler = b"F" * (_FILE_READ_MAX_BYTES - len(frontmatter) - len(pre_marker_newline) - len(marker_b))
+    head_portion = frontmatter + filler + pre_marker_newline + marker_b
+    assert len(head_portion) == _FILE_READ_MAX_BYTES, len(head_portion)
+    (out_dir / "run.md").write_bytes(head_portion + body + b"\n")
+    fpath = out_dir / "run.md"
+    txt, truncated, _ok, _bytes_read, _declined = _read_cron_output_bounded(fpath)
+    assert truncated is True
+    snippet = _cron_output_snippet(txt)
+    # Body survives (was "(empty)" before the round-3 fix).
+    assert "Reply body entirely past the boundary." in snippet, (
+        f"response body lost when marker ends exactly at boundary: snippet={snippet!r}"
+    )
+    # Marker appears exactly once (de-duplicated, not duplicated by the splice).
+    assert txt.count("## Response") == 1, (
+        f"marker duplicated in splice: count={txt.count('## Response')}"
+    )
+
+
+
+
+
+# ── Gate blocker regressions (2026-07-23 RED gate) ────────────────────────────
+
+
+def test_read_text_bounded_stat_failure_never_returns_unbounded(monkeypatch, tmp_path):
+    """Blocker 1: if stat() raises, _read_text_bounded must NOT fall back to an
+    unbounded read_text(). The previous shape returned the whole >512 KiB file
+    with truncated=False on a stat failure — the exact OOM path the PR exists to
+    close. Now it opens once + fstat on the descriptor + always capped read."""
+    from pathlib import Path
+    from api.routes import _read_text_bounded
+
+    big = tmp_path / "big.txt"
+    big.write_text("x" * (_FILE_READ_MAX_BYTES + 5000))
+    real_stat = Path.stat
+
+    def failing_stat(self, *a, **k):
+        if self == big:
+            raise OSError("simulated stat failure")
+        return real_stat(self, *a, **k)
+
+    monkeypatch.setattr(Path, "stat", failing_stat)
+    text, trunc, _ok = _read_text_bounded(big)
+    # Must NOT return the whole file. Either empty (open also failed) or bounded.
+    assert len(text) <= _FILE_READ_MAX_BYTES, (
+        f"stat failure must not trigger unbounded read; got {len(text)} bytes"
+    )
+
+
+def test_read_text_bounded_always_caps_oversized_file(tmp_path):
+    """Blocker 1: an oversized file is always read at most max_bytes, never
+    whole (no matter the stat/open race outcome)."""
+    from api.routes import _read_text_bounded
+
+    big = tmp_path / "big.txt"
+    big.write_text("y" * (_FILE_READ_MAX_BYTES + 10000))
+    text, trunc, _ok = _read_text_bounded(big)
+    assert trunc is True
+    assert len(text) <= _FILE_READ_MAX_BYTES
+
+
+def test_read_cron_output_bounded_body_survives_marker_at_boundary(tmp_path):
+    """Blocker 2: when ## Response sits near the head cap with minimal body in
+    the head, the response body at EOF must survive (not be reduced to a prefix).
+
+    Constructs a file where the prompt section pushes ## Response + a byte of
+    body into the head, with the real body continuing at EOF. The previous
+    head-only early return yielded snippet: 'R'; now the tail-splice preserves
+    the full body."""
+    from api.routes import _read_cron_output_bounded, _cron_output_snippet
+
+    marker = "## Response\n\n"
+    # Push the marker near the cap so only ~1 body byte lands in the head.
+    prompt_len = _FILE_READ_MAX_BYTES - len(marker) - 1
+    content = (
+        "## Prompt\n" + ("P" * (prompt_len - 20)) + "\n" + marker
+        + "R" + ("EST_OF_BODY_LINE\n" * 50)
+    )
+    f = tmp_path / "cron.md"
+    f.write_text(content)
+    text, trunc, _ok, _bytes_read, _declined = _read_cron_output_bounded(f)
+    snippet = _cron_output_snippet(text)
+    # The snippet must contain body content well beyond the single 'R' prefix.
+    assert "BODY" in snippet or "EST_OF_BODY" in snippet, (
+        f"response body must survive the cap splice; snippet={snippet!r}"
+    )
+
+
+def test_read_cron_output_bounded_no_body_duplication(tmp_path):
+    """Blocker 2 de-dup: when head and tail both contain ## Response (overlap),
+    the body must not be duplicated in the spliced result."""
+    from api.routes import _read_cron_output_bounded
+
+    # File just over 1 cap so head and tail overlap heavily.
+    content = "## Response\n" + ("B" * (_FILE_READ_MAX_BYTES + 8192))
+    f = tmp_path / "cron.md"
+    f.write_text(content)
+    text, trunc, _ok, _bytes_read, _declined = _read_cron_output_bounded(f)
+    # Exactly one ## Response marker (the head's partial body was dropped in
+    # favor of the tail's complete marker + body).
+    assert text.count("## Response") == 1, (
+        f"marker/body must not duplicate on overlap; count="
+        f"{text.count('## Response')}"
+    )
+
+
+def test_cron_batch_charges_budget_only_after_successful_read(monkeypatch, tmp_path):
+    """Round-3 residual + r5: a real I/O failure (NOT a budget decline) must not
+    terminate the batch or consume budget. The previous shape computed `charge`
+    from f.stat() and broke when `spent + charge > total_budget` BEFORE calling
+    _read_cron_output_bounded — so a large unreadable row was never tried and
+    every valid older output after it was suppressed.
+
+    Scenario (corrected chronology, descending sort by mtime):
+      1. a small successful newer row,
+      2. a large unreadable row whose real reader boundary fails (I/O failure,
+         declined=False — NOT a budget decline),
+      3. a small valid older row.
+    The failed read is attempted (not pre-empted), continued past (not broken,
+    because it's an I/O failure not a budget decline), and skipped without
+    charging budget — so the valid older output remains within the allowance."""
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    # One small successful newer row (well under the cap).
+    new_a = out_dir / "run-2.md"
+    new_a.write_text("## Response\nNEW_OK\n", encoding="utf-8")
+    # Large unreadable row (stat-visible as ~2 caps, will fail the real read).
+    unreadable = out_dir / "run-1.md"
+    unreadable.write_text("## Response\n" + ("X" * (_FILE_READ_MAX_BYTES * 2)), encoding="utf-8")
+    # Small valid older row.
+    valid = out_dir / "run-0.md"
+    valid.write_text("## Response\nVALID_OLDER_OUTPUT\n", encoding="utf-8")
+    # Descending mtime order: newest first. unreadable is between the successful
+    # newer row and the valid older row.
+    os.utime(new_a, (300, 300))
+    os.utime(unreadable, (200, 200))
+    os.utime(valid, (100, 100))
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    # Make the large middle row fail the real read (return ok=False with
+    # declined=False, simulating an open/fstat/seek/read OSError — NOT a budget
+    # decline, so the batch continues past it).
+    original = routes._read_cron_output_bounded
+
+    def failing_for_unreadable(path, *a, **kw):
+        if path.name == "run-1.md":
+            return "", False, False, 0, False  # real I/O failure (5-tuple)
+        return original(path, *a, **kw)
+
+    monkeypatch.setattr(routes, "_read_cron_output_bounded", failing_for_unreadable)
+
+    handler = _JSONHandler()
+    routes._handle_cron_output(
+        handler, SimpleNamespace(query="job_id=job1&limit=10")
+    )
+    body = _payload(handler)
+    contents = [e.get("content", "") for e in body.get("outputs", [])]
+    # The valid older output must still appear — the failed read was an I/O
+    # failure (continued past, not charged), so budget remained for it.
+    assert any("VALID_OLDER_OUTPUT" in c for c in contents), (
+        f"valid older output must survive a failed (I/O) large row; got {contents}"
+    )
+    # No empty entries from the failed read.
+    assert all(c.strip() for c in contents), (
+        f"failed read must not append an empty entry; got {contents}"
+    )
+
+
+# ── Gate round-2 residuals (2026-07-23 re-gate) ──────────────────────────────
+
+
+def test_read_text_bounded_same_inode_growth_does_not_read_unbounded(monkeypatch, tmp_path):
+    """Round-2 #1: if the file grows between fstat and read (same inode), the
+    small-file branch must NOT read the grown content unbounded. The pinned
+    size guards the seek, but the read itself must be capped at max_bytes + 1
+    so growth beyond the cap is reported truncated, not materialized."""
+    from api.routes import _read_text_bounded
+
+    f = tmp_path / "growable.txt"
+    # Start at the cap exactly (size <= max_bytes branch).
+    f.write_text("x" * _FILE_READ_MAX_BYTES)
+
+    # Wrap the file handle's read so that when the small-file branch reads, the
+    # file has "grown" (simulating append-after-fstat): return cap + 5000 bytes.
+    real_open = open
+
+    def growing_read(self, n=-1):
+        # The small-file branch calls fh.read(max_bytes + 1); simulate growth by
+        # returning more than max_bytes.
+        data = real_open(self.name, "rb").read()
+        if n and n > _FILE_READ_MAX_BYTES:
+            return data + (b"g" * 5000)  # grew under us
+        return data[:n] if n and n > 0 else data
+
+    # Patch the read on the file object returned by open. Simplest: patch
+    # _read_text_bounded's internal read via a wrapper file class.
+    class GrowingFile:
+        def __init__(self, name):
+            self.name = name
+            self._real = real_open(name, "rb")
+            self.fileno = self._real.fileno
+        def read(self, n=-1):
+            data = self._real.read(n)
+            if n and n > _FILE_READ_MAX_BYTES and len(data) >= _FILE_READ_MAX_BYTES:
+                return data + (b"g" * 5000)  # grew between fstat and read
+            return data
+        def seek(self, *a): return self._real.seek(*a)
+        def close(self): return self._real.close()
+
+    import builtins
+    def growing_open(name, *a, **k):
+        if str(name) == str(f):
+            return GrowingFile(str(f))
+        return real_open(name, *a, **k)
+    monkeypatch.setattr(builtins, "open", growing_open)
+
+    text, trunc, ok = _read_text_bounded(f)
+    assert len(text) <= _FILE_READ_MAX_BYTES, (
+        f"same-inode growth must not read unbounded; got {len(text)} bytes"
+    )
+    assert trunc is True, "growth beyond the pinned size must be flagged truncated"
+
+
+def test_read_cron_output_bounded_body_never_exceeds_source(tmp_path):
+    """Round-2 #2: the returned body must never contain MORE bytes than the
+    source file. The just-over-cap shape (marker in head, tail starts mid-body)
+    previously concatenated two overlapping windows and nearly doubled the body."""
+    from api.routes import _read_cron_output_bounded
+
+    body = "B" * (_FILE_READ_MAX_BYTES + 8192)
+    content = "## Response\n" + body
+    f = tmp_path / "cron.md"
+    f.write_text(content)
+    text, trunc, ok, _bytes_read, _declined = _read_cron_output_bounded(f)
+    # The returned text's 'B' count must not exceed the source's 'B' count.
+    assert text.count("B") <= content.count("B"), (
+        f"body duplicated: returned {text.count('B')} B's vs source "
+        f"{content.count('B')}"
+    )
+
+
+def test_cron_batch_real_read_failure_not_charged(monkeypatch, tmp_path):
+    """Round-2 #3: a real open/fstat/read failure (not a legitimate empty file)
+    must NOT be appended as an entry or charged against the batch budget.
+
+    Fixture chronology corrected per the gate note: unreadable files have the
+    HIGHEST mtimes (processed first by the descending sort), valid file has the
+    LOWEST mtime (processed last). Two unreadable newest files must not consume
+    the budget and suppress the valid older output."""
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    # Two large files that will be made unreadable + one valid smaller file.
+    # Unreadable files have HIGHER mtimes (processed first by descending sort).
+    unreadable_a = out_dir / "run-2.md"
+    unreadable_a.write_text("## Response\n" + ("A" * (_FILE_READ_MAX_BYTES * 2)), encoding="utf-8")
+    unreadable_b = out_dir / "run-1.md"
+    unreadable_b.write_text("## Response\n" + ("B" * (_FILE_READ_MAX_BYTES * 2)), encoding="utf-8")
+    valid = out_dir / "run-0.md"
+    valid.write_text("## Response\nVALID_OLDER_OUTPUT\n", encoding="utf-8")
+    # Correct chronology: unreadable = newest (300/200), valid = oldest (100).
+    os.utime(unreadable_a, (300, 300))
+    os.utime(unreadable_b, (200, 200))
+    os.utime(valid, (100, 100))
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    # Make the two large files "unreadable" by patching _read_cron_output_bounded
+    # to return ok=False (simulating a real open/fstat/read failure, NOT a
+    # legitimate empty file). The valid file reads normally.
+    original = routes._read_cron_output_bounded
+
+    def failing_for_unreadable(path, *a, **kw):
+        if path.name in ("run-1.md", "run-2.md"):
+            return "", False, False, 0, False  # real I/O failure (5-tuple)
+        return original(path, *a, **kw)
+
+    monkeypatch.setattr(routes, "_read_cron_output_bounded", failing_for_unreadable)
+
+    handler = _JSONHandler()
+    routes._handle_cron_output(
+        handler, SimpleNamespace(query="job_id=job1&limit=10")
+    )
+    body = _payload(handler)
+    # The valid older file's output must still appear — failed reads were not
+    # charged, so budget remained for the valid file.
+    contents = [e.get("content", "") for e in body.get("outputs", [])]
+    assert any("VALID_OLDER_OUTPUT" in c for c in contents), (
+        f"valid older output must survive unreadable newer files (failed reads "
+        f"not charged); got {contents}"
+    )
+    # No empty entries from the failed reads.
+    assert all(c.strip() for c in contents), (
+        f"failed reads must not append empty entries; got {contents}"
+    )
+
+
+# ── Gate round-4 residuals (2026-07-24 re-gate) ──────────────────────────────
+
+
+def test_cron_batch_charge_uses_descriptor_bytes_not_second_stat(monkeypatch, tmp_path):
+    """Round-4 #1: the charge for a successfully read file must come from the
+    descriptor-derived bytes_read, NOT a second f.stat() on the pathname. A
+    post-read replace/truncate must not undercharge (allowing budget bypass) or
+    a post-read unlink overcharge (suppressing valid older output).
+
+    This test replaces the path between the read and what would have been the
+    second stat. With the fix, the charge is locked to the bytes actually read
+    from the first descriptor, so the replace cannot change the accounting."""
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    # One large file (2 caps worth of read) + one valid older file.
+    big = out_dir / "run-1.md"
+    big.write_text("## Response\n" + ("A" * (_FILE_READ_MAX_BYTES * 3)), encoding="utf-8")
+    valid = out_dir / "run-0.md"
+    valid.write_text("## Response\nVALID_OLDER\n", encoding="utf-8")
+    os.utime(big, (200, 200))   # newest
+    os.utime(valid, (100, 100))
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    # Wrap _read_cron_output_bounded so that AFTER a successful read of `big`,
+    # the path is replaced with a tiny file. The old code's second f.stat()
+    # would then see a tiny size and undercharge (budget bypass). The fix uses
+    # the descriptor-derived bytes_read, so the charge stays at ~2 caps
+    # regardless of the post-read replace.
+    original = routes._read_cron_output_bounded
+    call_log = []
+
+    def replacing_reader(path, *a, **kw):
+        result = original(path, *a, **kw)
+        text, trunc, ok, bytes_read, declined = result
+        if ok and path.name == "run-1.md" and bytes_read > _FILE_READ_MAX_BYTES:
+            # Replace the path with a tiny file AFTER the successful read but
+            # before the (now-removed) second stat would have run.
+            path.write_text("tiny", encoding="utf-8")
+            call_log.append(("big_read", bytes_read))
+        return result
+
+    monkeypatch.setattr(routes, "_read_cron_output_bounded", replacing_reader)
+
+    handler = _JSONHandler()
+    routes._handle_cron_output(
+        handler, SimpleNamespace(query="job_id=job1&limit=10")
+    )
+    body = _payload(handler)
+    # The valid older output must still appear. If the charge had been
+    # re-derived from the post-replace tiny file (undercharge), the budget
+    # would have been bypassed but valid would still appear — so the real
+    # assertion is on the charge: the big file's charge must reflect ~2 caps,
+    # not the tiny replacement.
+    assert call_log, "the large file must have been read"
+    big_charge = call_log[0][1]
+    assert big_charge >= _FILE_READ_MAX_BYTES, (
+        f"charge must come from the descriptor bytes read (~2 caps), not the "
+        f"post-replace tiny file; got charge={big_charge}"
+    )
+    # And valid output survives regardless.
+    contents = [e.get("content", "") for e in body.get("outputs", [])]
+    assert any("VALID_OLDER" in c for c in contents), (
+        f"valid older output must survive; got {contents}"
+    )
+
+
+def test_cron_batch_total_successful_bytes_within_four_caps(monkeypatch, tmp_path):
+    """Round-4 #2: the cumulative successful batch read must stay within the
+    four-cap bound. A previous shape checked the budget only AFTER the full
+    read, so with `spent` just below four caps another readable large row
+    consumed up to two more caps and was discarded — nearly six caps of reads.
+
+    With the budget passed INTO the reader, an over-budget probe declines
+    before reading, so total successful bytes stay <= 4 * cap."""
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    # Three large files, each requiring 2 caps of read. Total attempted would
+    # be 6 caps; the four-cap budget must cap successful reads at <= 4 caps.
+    for i, mtime in enumerate([300, 200, 100]):
+        f = out_dir / f"run-{i}.md"
+        f.write_text("## Response\n" + ("X" * (_FILE_READ_MAX_BYTES * 3)), encoding="utf-8")
+        os.utime(f, (mtime, mtime))
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    # Wrap the reader to record total bytes read across successful calls.
+    original = routes._read_cron_output_bounded
+    total_read = []
+
+    def recording_reader(path, *a, **kw):
+        result = original(path, *a, **kw)
+        text, trunc, ok, bytes_read, declined = result
+        if ok:
+            total_read.append(bytes_read)
+        return result
+
+    monkeypatch.setattr(routes, "_read_cron_output_bounded", recording_reader)
+
+    handler = _JSONHandler()
+    routes._handle_cron_output(
+        handler, SimpleNamespace(query="job_id=job1&limit=10")
+    )
+    successful_total = sum(total_read)
+    assert successful_total <= _FILE_READ_MAX_BYTES * 4, (
+        f"total successful batch reads must stay within 4 caps "
+        f"({_FILE_READ_MAX_BYTES * 4}); got {successful_total} "
+        f"({successful_total / _FILE_READ_MAX_BYTES:.1f} caps)"
+    )
+
+
+def test_cron_batch_reader_call_order_and_exact_outputs(monkeypatch, tmp_path):
+    """Round-4 #3: explicit reader call log + exact output order. Verifies the
+    batch reads files in descending mtime order, continues past failures, and
+    appends only successful reads in order."""
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    # newest (success) → middle (fails read) → oldest (success)
+    new_ok = out_dir / "run-2.md"
+    new_ok.write_text("## Response\nNEW_OK\n", encoding="utf-8")
+    mid_fail = out_dir / "run-1.md"
+    mid_fail.write_text("## Response\n" + ("M" * (_FILE_READ_MAX_BYTES * 2)), encoding="utf-8")
+    old_ok = out_dir / "run-0.md"
+    old_ok.write_text("## Response\nOLD_OK\n", encoding="utf-8")
+    os.utime(new_ok, (300, 300))
+    os.utime(mid_fail, (200, 200))
+    os.utime(old_ok, (100, 100))
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    original = routes._read_cron_output_bounded
+    call_log = []
+
+    def logging_reader(path, *a, **kw):
+        result = original(path, *a, **kw)
+        text, trunc, ok, bytes_read, declined = result
+        call_log.append((path.name, ok))
+        if path.name == "run-1.md":
+            # Force the middle file to fail the read (real open/fstat failure,
+            # NOT a budget decline — declined=False so the batch continues).
+            return "", False, False, 0, False
+        return result
+
+    monkeypatch.setattr(routes, "_read_cron_output_bounded", logging_reader)
+
+    handler = _JSONHandler()
+    routes._handle_cron_output(
+        handler, SimpleNamespace(query="job_id=job1&limit=10")
+    )
+    body = _payload(handler)
+    # Call order: descending mtime (newest first), all three attempted (the
+    # middle file's failure does not terminate the batch).
+    assert [c[0] for c in call_log] == ["run-2.md", "run-1.md", "run-0.md"], (
+        f"reader call order must be descending mtime, all three attempted; got {call_log}"
+    )
+    # Outputs: exactly two entries (the successful reads), in order, NO empty
+    # entry for the failed middle file. Small files pass through
+    # _cron_output_content_window unchanged, so the marker is included.
+    contents = [e.get("content", "") for e in body.get("outputs", [])]
+    assert len(contents) == 2, (
+        f"exactly two outputs (no entry for failed middle file); got {contents}"
+    )
+    assert "NEW_OK" in contents[0] and "OLD_OK" in contents[1], (
+        f"outputs must be the two successful reads in mtime order; got {contents}"
+    )
+
+
+# ── Gate round-5 (2026-07-25): physical-read bound + short-read accounting ───
+
+
+def test_cron_batch_no_reader_call_after_budget_exhaustion(monkeypatch, tmp_path):
+    """Round-5 #2: once the four-cap budget is spent, the handler must NOT call
+    the reader for any remaining file. Instruments physical reads and proves
+    total bytes read never exceeds 4 * cap, and no reader is called after
+    exhaustion."""
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    # Five large files (each ~2 caps). Budget is 4 caps, so after the first two
+    # successful reads the budget is exhausted and the remaining three must NOT
+    # be read at all.
+    for i, mtime in enumerate([500, 400, 300, 200, 100]):
+        f = out_dir / f"run-{i}.md"
+        f.write_text("## Response\n" + ("X" * (_FILE_READ_MAX_BYTES * 3)), encoding="utf-8")
+        os.utime(f, (mtime, mtime))
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    original = routes._read_cron_output_bounded
+    physical_bytes = []
+    calls_after_exhaustion = []
+
+    def instrumented_reader(path, *a, **kw):
+        result = original(path, *a, **kw)
+        text, trunc, ok, bytes_read, declined = result
+        # Record EVERY physical read (successful or failed), with the path and
+        # the descriptor-derived bytes consumed. This independently observes
+        # what the reader reports as physically read, including growth-probe
+        # bytes and partial-failure consumption. (#6141 r6)
+        physical_bytes.append(bytes_read)
+        if not ok:
+            calls_after_exhaustion.append((path.name, declined))
+        return result
+
+    monkeypatch.setattr(routes, "_read_cron_output_bounded", instrumented_reader)
+
+    handler = _JSONHandler()
+    routes._handle_cron_output(
+        handler, SimpleNamespace(query="job_id=job1&limit=10")
+    )
+    body = _payload(handler)
+    # Total physical bytes (successful + failed-consumed) must stay within the
+    # four-cap bound — every byte the descriptor returned is charged.
+    physical_total = sum(physical_bytes)
+    assert physical_total <= _FILE_READ_MAX_BYTES * 4, (
+        f"total physical reads must stay within 4 caps; got "
+        f"{physical_total} ({physical_total / _FILE_READ_MAX_BYTES:.1f} caps)"
+    )
+    # No reader should be called after budget exhaustion — the handler stops.
+    assert calls_after_exhaustion == [] or all(
+        not d for _, d in calls_after_exhaustion
+    ), (
+        f"no reader call after exhaustion (only I/O failures may appear after "
+        f"budget remains); got {calls_after_exhaustion}"
+    )
+    # The batch is marked truncated (some files were skipped).
+    assert body.get("truncated") is True, (
+        f"batch must be flagged truncated when files were skipped; got {body}"
+    )
+
+
+def test_read_cron_output_bounded_short_read_accounts_actual_bytes(tmp_path, monkeypatch):
+    """Round-5 #3: bytes_read must reflect the ACTUAL bytes returned by the
+    descriptor, not the planned fstat window lengths. If the inode shrinks or
+    returns short reads after fstat, the accounting must use len(raw)."""
+    from api.routes import _read_cron_output_bounded
+
+    f = tmp_path / "cron.md"
+    # Large file (over cap → disjoint head+tail path).
+    f.write_text("## Response\n" + ("B" * (_FILE_READ_MAX_BYTES * 3)), encoding="utf-8")
+
+    # Wrap the file handle so reads return FEWER bytes than requested (short
+    # read), simulating shrink-after-fstat or a flaky descriptor.
+    real_open = open
+
+    class ShortReadFile:
+        def __init__(self, name):
+            self._real = real_open(name, "rb")
+            self.name = name
+            self.fileno = self._real.fileno
+        def seek(self, *a): return self._real.seek(*a)
+        def read(self, n=-1):
+            data = self._real.read(n)
+            # Return only half the requested bytes (short read).
+            if n and n > 0:
+                return data[: n // 2]
+            return data
+        def close(self): return self._real.close()
+
+    import builtins
+    def short_open(name, *a, **k):
+        if str(name) == str(f):
+            return ShortReadFile(str(f))
+        return real_open(name, *a, **k)
+    monkeypatch.setattr(builtins, "open", short_open)
+    text, trunc, ok, bytes_read, declined = _read_cron_output_bounded(f)
+    # The planned windows were head_len + tail_len = 2 * cap. With short reads
+    # (half returned), bytes_read must be ~cap, not 2*cap.
+    assert bytes_read < _FILE_READ_MAX_BYTES * 2, (
+        f"bytes_read must reflect actual (short) reads, not planned windows; "
+        f"got {bytes_read} (planned would be {_FILE_READ_MAX_BYTES * 2})"
+    )
+    assert ok is True
+
+
+# ── Gate round-6 (2026-07-26): physical-read bound contract tests ────────────
+
+
+def test_read_cron_output_bounded_growth_probe_byte_is_charged(tmp_path, monkeypatch):
+    """Round-6 #1: the cap+1 growth-probe byte must be charged. A file that
+    grows under the read returns cap+1 bytes physically; bytes_read must be
+    cap+1 (the physical-I/O bound counts what was read, not what's returned)."""
+    from api.routes import _read_cron_output_bounded
+
+    f = tmp_path / "grow.md"
+    f.write_text("x" * _FILE_READ_MAX_BYTES)  # exactly cap bytes
+    real_open = open
+
+    class GrowFile:
+        def __init__(self, name):
+            self._real = real_open(name, "rb")
+            self.name = name
+            self.fileno = self._real.fileno
+        def seek(self, *a): return self._real.seek(*a)
+        def read(self, n=-1):
+            data = self._real.read(n)
+            # Append 1 byte when the growth probe (cap+1) read runs.
+            if n and n > _FILE_READ_MAX_BYTES:
+                return data + b"G"
+            return data
+        def close(self): return self._real.close()
+
+    import builtins
+    def grow_open(name, *a, **k):
+        if str(name) == str(f):
+            return GrowFile(str(f))
+        return real_open(name, *a, **k)
+    monkeypatch.setattr(builtins, "open", grow_open)
+
+    text, trunc, ok, bytes_read, declined = _read_cron_output_bounded(f)
+    assert bytes_read == _FILE_READ_MAX_BYTES + 1, (
+        f"growth-probe byte must be charged; got {bytes_read} "
+        f"(expected {_FILE_READ_MAX_BYTES + 1})"
+    )
+    assert trunc is True  # file grew past the cap
+
+
+def test_read_cron_output_bounded_partial_failure_preserves_head_bytes(tmp_path, monkeypatch):
+    """Round-6 #2: if head read succeeds but tail seek/read raises OSError,
+    the consumed head bytes must still be reported (bytes_read > 0) so the
+    handler can charge them. They were physically read and cannot vanish."""
+    from api.routes import _read_cron_output_bounded
+
+    f = tmp_path / "big.md"
+    f.write_text("## Response\n" + ("B" * (_FILE_READ_MAX_BYTES * 3)))
+    real_open = open
+
+    class PartialFailFile:
+        def __init__(self, name):
+            self._real = real_open(name, "rb")
+            self.name = name
+            self.fileno = self._real.fileno
+            self._head_done = False
+        def seek(self, pos):
+            # Second seek (tail) raises — simulates tail seek/read failure.
+            if self._head_done:
+                raise OSError("simulated tail seek failure")
+            self._real.seek(pos)
+        def read(self, n=-1):
+            data = self._real.read(n)
+            if n and n >= _FILE_READ_MAX_BYTES:
+                self._head_done = True  # head read done; next seek will fail
+            return data
+        def close(self): return self._real.close()
+
+    import builtins
+    def partial_open(name, *a, **k):
+        if str(name) == str(f):
+            return PartialFailFile(str(f))
+        return real_open(name, *a, **k)
+    monkeypatch.setattr(builtins, "open", partial_open)
+
+    text, trunc, ok, bytes_read, declined = _read_cron_output_bounded(f)
+    # ok=False (read incomplete), but the consumed head bytes must be reported.
+    assert ok is False, f"partial failure must return ok=False; got ok={ok}"
+    assert bytes_read > 0, (
+        f"consumed head bytes must be preserved on partial failure; got "
+        f"bytes_read={bytes_read}"
+    )
+    assert bytes_read >= _FILE_READ_MAX_BYTES, (
+        f"head read (~1 cap) must be charged; got {bytes_read}"
+    )
+
+
+def test_read_cron_output_bounded_small_file_admitted_when_actual_size_fits(tmp_path):
+    """Round-6 #3: a pinned small file must be admitted when its ACTUAL size
+    fits the remaining budget, not declined because cap+1 > budget. A 10-byte
+    file with budget=10 must succeed."""
+    from api.routes import _read_cron_output_bounded
+
+    f = tmp_path / "tiny.md"
+    f.write_text("x" * 10)
+    text, trunc, ok, bytes_read, declined = _read_cron_output_bounded(f, budget=10)
+    assert ok is True, (
+        f"10-byte file with budget=10 must be admitted (actual size fits); "
+        f"got ok={ok}, declined={declined}"
+    )
+    assert declined is False
+    assert bytes_read == 10
+
+
+# ── Gate round-7 (2026-07-26): exact-remainder growth edge ───────────────────
+
+
+def test_cron_batch_exact_remainder_growth_does_not_exceed_hard_cap(monkeypatch, tmp_path):
+    """Round-7 + reviewer fixes: when newer files consume 4*cap - 1 bytes (remaining = 1)
+    and a pinned 1-byte file grows during its descriptor read, the total physical
+    read must NEVER exceed 4*cap. The reader caps the physical read at the remaining
+    budget (not budget+1), so a same-inode growth cannot return more than the caller's
+    allowance. Proven by instrumenting ALL fixture files' read(n) calls and asserting
+    the exact event/order matrix, and by adding a 4th older readable file that must
+    NOT be read after the budget is exhausted (proves the stop-guard fires).
+
+    Schedule (descending mtime = handler iteration order):
+      - run-2.md: newest, size 2*cap (large file → contributes 2*cap bytes via head+tail)
+      - run-1.md: second newest, size 2*cap - 1 (large → contributes 2*cap - 1 bytes)
+      - run-0.md: third newest, pinned 1-byte file that grows to 2 bytes between fstat and read
+      - run-3.md: oldest, normal readable small file (~50 bytes) — MUST NOT be read
+
+    The two newest files consume exactly 4*cap - 1 bytes, leaving exactly 1 byte of
+    remaining allowance for the third file. That file's fstat sees size=1 (admitted),
+    but the same inode grows to 2 bytes before the read. The fixed helper caps the
+    read at budget (=1), so read(1) -> 1, keeping total at exactly 4*cap. The handler's
+    stop-guard (spent > 0 and remaining <= 0: break) then prevents any read of run-3.md.
+
+    Expected read(n) event matrix (exact order, file + requested + returned):
+      - run-2.md: read(cap) -> cap (head)
+      - run-2.md: read(cap) -> cap (tail)
+      - run-1.md: read(cap) -> cap (head)
+      - run-1.md: read(cap-1) -> (cap-1) (tail)
+      - run-0.md: read(1) -> 1 (budget-capped small-file read, growth byte NOT returned)
+      - run-3.md: NO read events at all (stop-guard fired)
+
+    Assert this exact sequence, the sum of returned lengths is exactly 4*cap (independent
+    of helper-reported bytes_read), the helper-level call_log excludes run-3.md, and the
+    outputs list excludes run-3.md. Keep existing pinned-one-byte-growth assertions."""
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    cap = _FILE_READ_MAX_BYTES
+
+    prefix = "## Response\n"
+    prefix_bytes = len(prefix.encode("utf-8"))
+
+    # run-2.md: newest, size 2*cap bytes -> contributes 2*cap (head + tail)
+    run_2 = out_dir / "run-2.md"
+    filler_2_bytes = cap * 2 - prefix_bytes
+    content_2_bytes = prefix.encode("utf-8") + (b"A" * filler_2_bytes)
+    run_2.write_bytes(content_2_bytes)
+
+    # run-1.md: second newest, size 2*cap - 1 bytes -> contributes 2*cap - 1
+    run_1 = out_dir / "run-1.md"
+    filler_1_bytes = cap * 2 - 1 - prefix_bytes
+    content_1_bytes = prefix.encode("utf-8") + (b"B" * filler_1_bytes)
+    run_1.write_bytes(content_1_bytes)
+
+    # Verify exact sizes (large-file tail_len arithmetic depends on them)
+    assert os.path.getsize(run_2) == cap * 2, f"run_2 size mismatch: {os.path.getsize(run_2)}"
+    assert os.path.getsize(run_1) == cap * 2 - 1, f"run_1 size mismatch: {os.path.getsize(run_1)}"
+
+    # run-0.md: third newest (mtimes below), pinned 1-byte file that grows to 2 bytes
+    old_0 = out_dir / "run-0.md"
+    old_0.write_text("x", encoding="utf-8")
+    assert os.path.getsize(old_0) == 1, f"old_0 size must be 1: {os.path.getsize(old_0)}"
+
+    # run-3.md: oldest, normal readable small file — must NOT be read
+    old_3 = out_dir / "run-3.md"
+    old_3.write_text("## Response\nOlder file content that must never be read.\n", encoding="utf-8")
+
+    # Set mtimes for descending order (newest first, processed first)
+    os.utime(run_2, (400, 400))  # newest
+    os.utime(run_1, (300, 300))
+    os.utime(old_0, (200, 200))
+    os.utime(old_3, (100, 100))  # oldest
+
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    # Instrument ALL fixture files' read(n) calls independently of helper returns
+    read_events = []
+    requested_amounts_for_grown = []
+    returned_lengths_for_grown = []
+    real_open = open
+
+    class TrackingFile:
+        def __init__(self, name, *a, **k):
+            self._real = real_open(name, *a, **k)
+            self._name = str(name)
+            self._base = os.path.basename(self._name)
+            self._grown = False
+
+        def fileno(self):
+            return self._real.fileno()
+
+        def seek(self, *a, **k):
+            return self._real.seek(*a, **k)
+
+        def read(self, n=-1):
+            # Growth: only run-0.md (the grown file) grows on first read
+            if self._base == "run-0.md" and not self._grown and n and n > 0:
+                with real_open(self._real.name, "ab") as wf:
+                    wf.write(b"G")
+                self._grown = True
+
+            data = self._real.read(n)
+
+            # Record EVERY read(n) call independently of helper-reported bytes_read
+            read_events.append((self._base, n, len(data)))
+
+            # Also track the grown file specifically for existing assertions
+            if self._base == "run-0.md":
+                requested_amounts_for_grown.append(n)
+                returned_lengths_for_grown.append(len(data))
+
+            return data
+
+        def close(self):
+            return self._real.close()
+
+    import builtins
+    fixture_names = {"run-2.md", "run-1.md", "run-0.md", "run-3.md"}
+
+    def tracking_open(name, *a, **k):
+        if os.path.basename(str(name)) in fixture_names:
+            return TrackingFile(name, *a, **k)
+        return real_open(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", tracking_open)
+
+    # Instrument the helper-level reader to record call_log (helper-state view)
+    original_reader = routes._read_cron_output_bounded
+    call_log = []
+
+    def instrumented_reader(path, *a, **kw):
+        result = original_reader(path, *a, **kw)
+        text, trunc, ok, bytes_read, declined = result
+        call_log.append((path.name, ok, declined, bytes_read))
+        return result
+
+    monkeypatch.setattr(routes, "_read_cron_output_bounded", instrumented_reader)
+
+    # Drive the batch endpoint
+    handler = _JSONHandler()
+    routes._handle_cron_output(
+        handler, SimpleNamespace(query="job_id=job1&limit=10")
+    )
+    body = _payload(handler)
+
+    # Assertion 1: exact read(n) event matrix (order, file, requested, returned)
+    expected_events = [
+        ("run-2.md", cap, cap),      # head
+        ("run-2.md", cap, cap),      # tail
+        ("run-1.md", cap, cap),      # head
+        ("run-1.md", cap - 1, cap - 1),  # tail
+        ("run-0.md", 1, 1),          # budget-capped small-file read
+    ]
+    assert read_events == expected_events, (
+        f"exact read(n) event matrix must match; expected {expected_events}, "
+        f"got {read_events}"
+    )
+
+    # Assertion 2: sum of returned lengths is exactly 4*cap (independent proof)
+    total_returned = sum(event[2] for event in read_events)
+    assert total_returned == cap * 4, (
+        f"sum of returned lengths must be exactly 4*cap ({cap * 4}); "
+        f"got {total_returned}"
+    )
+
+    # Assertion 3: run-3.md appears in NEITHER read_events NOR call_log NOR outputs
+    read_event_files = {event[0] for event in read_events}
+    assert "run-3.md" not in read_event_files, (
+        f"run-3.md must not be in read_events (no read() calls); got {read_event_files}"
+    )
+    call_log_files = {entry[0] for entry in call_log}
+    assert "run-3.md" not in call_log_files, (
+        f"run-3.md must not be in call_log (helper never called); got {call_log_files}"
+    )
+    output_filenames = {e.get("filename") for e in body.get("outputs", [])}
+    assert "run-3.md" not in output_filenames, (
+        f"run-3.md must not be in outputs (not returned); got {output_filenames}"
+    )
+
+    # Assertion 4: helper-level reader-call list is exactly the three files (no run-3.md)
+    assert [c[0] for c in call_log] == ["run-2.md", "run-1.md", "run-0.md"], (
+        f"helper call_log must be exactly three files in order; got {[c[0] for c in call_log]}"
+    )
+
+    # Assertion 5: outputs filenames list is exactly the three files (no run-3.md)
+    assert output_filenames == {"run-2.md", "run-1.md", "run-0.md"}, (
+        f"outputs filenames must be exactly three files; got {output_filenames}"
+    )
+
+    # Assertion 6: grown file's specific read (pinned budget=1, read(1) -> 1)
+    assert requested_amounts_for_grown == [1], (
+        f"the grown file must be read with exactly 1 byte request (budget capped); "
+        f"got {requested_amounts_for_grown}"
+    )
+    assert returned_lengths_for_grown == [1], (
+        f"the grown file's read must return exactly 1 byte even though it grew to 2; "
+        f"got {returned_lengths_for_grown}"
+    )
+
+    # Assertion 7: grown file entry is flagged truncated (conservative)
+    outputs = body.get("outputs", [])
+    grown_entry = next((e for e in outputs if e.get("filename") == "run-0.md"), None)
+    assert grown_entry is not None, "run-0.md should be in outputs"
+    assert grown_entry.get("truncated") is True, (
+        f"the grown file must be conservatively truncated; got {grown_entry.get('truncated')}"
+    )
+
+    # Assertion 8: helper-level state for grown file (ok=True, declined=False, bytes_read=1)
+    grown_call = next((c for c in call_log if c[0] == "run-0.md"), None)
+    assert grown_call is not None
+    _name, ok, declined, bytes_read = grown_call
+    assert ok is True, "the grown file read should succeed (ok=True)"
+    assert declined is False, "the grown file should not be declined"
+    assert bytes_read == 1, f"helper should report bytes_read=1 for the grown file; got {bytes_read}"
+
+
+def test_read_cron_output_bounded_budget_limited_read_never_exceeds_budget(
+    tmp_path, monkeypatch
+):
+    """Round-7 unit: when budget is smaller than cap+1 (no room for the growth
+    probe), the physical read is capped at exactly budget — never budget+1.
+    A file that grows during read cannot return more than the budget."""
+    from api.routes import _read_cron_output_bounded
+
+    f = tmp_path / "small.md"
+    f.write_text("x")  # 1 byte pinned size
+    real_open = open
+    requested_amounts = []
+
+    class TrackingFile:
+        def __init__(self, name):
+            self._real = real_open(name, "rb")
+            self.name = name
+            self.fileno = self._real.fileno
+        def seek(self, *a): return self._real.seek(*a)
+        def read(self, n=-1):
+            requested_amounts.append(n)
+            # A real read(n) returns at most n bytes. Simulate growth by having
+            # 2 bytes available, but read(n) still returns at most n.
+            return (b"xG")[:n] if n and n > 0 else b"xG"
+        def close(self): return self._real.close()
+
+    import builtins
+    def tracking_open(name, *a, **k):
+        if str(name) == str(f):
+            return TrackingFile(str(f))
+        return real_open(name, *a, **k)
+    monkeypatch.setattr(builtins, "open", tracking_open)
+
+    text, trunc, ok, bytes_read, declined = _read_cron_output_bounded(f, budget=1)
+    # The read request must have been capped at budget (1), not budget+1 (2).
+    # Strengthened: exactly ONE read request, of exactly 1 byte.
+    assert requested_amounts == [1], (
+        f"physical read must be exactly one request of 1 byte; got "
+        f"{requested_amounts}"
+    )
+    # Strengthened: exact bytes_read value (not just <=)
+    assert bytes_read == 1, (
+        f"bytes_read must be exactly 1 (not just <=1); got {bytes_read}"
+    )
+    # Strengthened: exact text content
+    assert text == "x", (
+        f"text must be exactly the 1 byte that was read; got {text!r}"
+    )
+    # Strengthened: ok and declined states
+    assert ok is True, (
+        f"the read should succeed (ok=True); got ok={ok}"
+    )
+    assert declined is False, (
+        f"the file should not be declined; got declined={declined}"
+    )
+    # Conservatively truncated (no room for growth probe, read filled budget).
+    assert trunc is True, (
+        f"read that fills the budget without a growth probe must be "
+        f"conservatively truncated; got trunc={trunc}"
+    )
