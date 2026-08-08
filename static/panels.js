@@ -8520,7 +8520,7 @@ function _scheduleAppearanceAutosave(){
 
 async function _autosaveAppearanceSettings(payload){
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
     _settingsAppearanceAutosaveRetryPayload=null;
     _rememberAppearanceSaved(payload);
     if(saved&&saved.font_size){
@@ -8739,6 +8739,23 @@ function _speechPreferencesPayloadFromUi(){
   return payload;
 }
 
+// Keep same-page settings merges FIFO so one response cannot race the next read-modify-write.
+let _settingsPanelPostQueue=Promise.resolve();
+
+function _enqueueSettingsPost(options){
+  const requestOptions={...(options||{})};
+  if(typeof requestOptions.body==='string') requestOptions.body=String(requestOptions.body);
+  const run=_settingsPanelPostQueue.then(async()=>{
+    const saved=await api('/api/settings',requestOptions);
+    if(!saved||typeof saved!=='object'||Array.isArray(saved)){
+      throw new Error('Invalid settings response');
+    }
+    return saved;
+  });
+  _settingsPanelPostQueue=run.catch(()=>{});
+  return run;
+}
+
 // Ownership token for the shared preferences autosave status slot. Prevents
 // the channel writer from clearing or overwriting a 'failed'+Retry state the
 // generic preferences autosave set; that Retry button has exactly one call
@@ -8799,7 +8816,7 @@ function _schedulePreferencesAutosave(){
 
 async function _autosavePreferencesSettings(payload){
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
     if(payload&&payload.terminal_auto_expand_on_output!==undefined){
       window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
     }
@@ -8903,20 +8920,13 @@ async function _saveUpdateChannelFromSelector(channelSel){
   const seq=++_channelSaveSeq;
   if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus('saving','channel');
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify({update_channel:val})});
-    // Discard a stale response: a newer in-flight write already owns the selector
-    // and the server state. Without this guard, two rapid selections (Experimental
-    // then Stable) can leave the selector on the first response while the server
-    // holds the second.
-    if(seq!==_channelSaveSeq) return;
-    // Re-sync the selector from the server response. Fall back to val (the value
-    // sent in the POST body) rather than a literal 'stable': api() resolves
-    // without throwing on a 401 redirect (returns undefined) and on a non-JSON
-    // 200 body (returns a string), both of which land in this branch. 'stable'
-    // is the one fallback guaranteed wrong when the user picked 'experimental'.
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify({update_channel:val})});
     const confirmed=(saved&&(saved.update_channel==='experimental'||saved.update_channel==='stable'))
       ?saved.update_channel:val;
     _confirmedUpdateChannel=confirmed;
+    // The queue makes the server state FIFO; the sequence guard protects only
+    // the selector and other response-driven UI from stale completions.
+    if(seq!==_channelSaveSeq) return;
     channelSel.value=confirmed;
     if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus('saved','channel');
     // Run the update check and badge sync against the confirmed server value,
@@ -10586,7 +10596,7 @@ async function handlePluginEnableToggle(pluginKey, checked){
   try{
     const body={dashboard_plugins:{}};
     body.dashboard_plugins[pluginKey]=!!checked;
-    await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+    await _enqueueSettingsPost({method:'POST',body:JSON.stringify(body)});
     loadPluginsPanel();
   }catch(e){
     showToast(t('settings_save_failed')+e.message);
@@ -11201,7 +11211,7 @@ function _attachBudgetControls(wrap,history,card,paceNum){
 
   async function _saveBudget(value){
     try{
-      await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_cost_budget:value})});
+      await _enqueueSettingsPost({method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_cost_budget:value})});
       const existing=card.querySelector('.provider-cost-chart-wrap');
       if(existing) existing.remove();
       renderProviderCostChart(card);
@@ -11818,7 +11828,7 @@ function _updateAuthDisabledWarning(authStatus){
 
 async function _setAuthDisabledAck(checked){
   try{
-    await api('/api/settings',{method:'POST',body:JSON.stringify({_auth_disabled_acknowledged:!!checked})});
+    await _enqueueSettingsPost({method:'POST',body:JSON.stringify({_auth_disabled_acknowledged:!!checked})});
     try{
       const authStatus=await api('/api/auth/status');
       _updateAuthWarningBadge(authStatus);
@@ -12607,7 +12617,6 @@ async function saveSettings(andClose){
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
-  body.update_channel=($('settingsUpdateChannel')||{}).value==='experimental'?'experimental':'stable';
   body.ignore_agent_updates=!!($('settingsIgnoreAgentUpdates')||{}).checked;
   body.whats_new_summary_enabled=!!($('settingsWhatsNewSummary')||{}).checked;
   body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
@@ -12631,7 +12640,7 @@ async function saveSettings(andClose){
     const payload={...body,_set_password:pw.trim()};
     if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
     try{
-      const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+      const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
       if(modelChanged && model){
         try{
           await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
@@ -12661,7 +12670,7 @@ async function saveSettings(andClose){
     }catch(e){showToast(t('settings_save_failed')+e.message);return;}
   }
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(body)});
     if(modelChanged && model){
       try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
@@ -12698,7 +12707,7 @@ async function goPasswordless(){
   const payload={_passwordless:true};
   if(_settingsPasswordAuthEnabled && currentPw) payload._current_password=currentPw;
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
     showToast('Password removed. Passkey sign-in remains enabled.');
     _setSettingsAuthButtonsVisible(!!saved.auth_enabled);
     _syncPasswordlessButton({auth_enabled:saved.auth_enabled,password_auth_enabled:false,passkeys_count:1});
@@ -12728,7 +12737,7 @@ async function disableAuth(){
   const payload={_clear_password:true};
   if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
     showToast(t('auth_disabled'));
     const disableBtn=$('btnDisableAuth');
     if(disableBtn) disableBtn.style.display='none';

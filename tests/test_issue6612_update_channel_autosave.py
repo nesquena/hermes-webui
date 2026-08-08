@@ -87,6 +87,7 @@ function extractFunc(src, name) {{
 // Module-scope variables referenced as free variables inside the extracted functions.
 global._channelSaveSeq = 0;
 global._confirmedUpdateChannel = null;
+global._settingsPanelPostQueue = Promise.resolve();
 """
 
 
@@ -132,6 +133,9 @@ def _channel_writer_script_prelude(panels_src: str) -> str:
     return _node_prelude(panels_src) + """
 global._saveUpdateChannelFromSelector = (0, eval)(
   '(' + extractFunc(panelsSrc, '_saveUpdateChannelFromSelector') + ')'
+);
+global._enqueueSettingsPost = (0, eval)(
+  '(' + extractFunc(panelsSrc, '_enqueueSettingsPost') + ')'
 );
 """
 
@@ -296,7 +300,7 @@ def test_dedicated_channel_writer_exists():
     assert "async function _saveUpdateChannelFromSelector(" in PANELS_JS
     block = _function_block(PANELS_JS, "_saveUpdateChannelFromSelector")
     assert "update_channel" in block
-    assert "/api/settings" in block
+    assert "_enqueueSettingsPost" in block
     assert "channelSel.value" in block
     # Monotonic guard
     assert "_channelSaveSeq" in block
@@ -307,6 +311,80 @@ def test_dedicated_channel_writer_exists():
     assert "_setPreferencesAutosaveStatus" in block
     assert "'saving'" in block
     assert "'saved'" in block
+    assert block.index("_confirmedUpdateChannel=confirmed") < block.index("if(seq!==_channelSaveSeq)"), (
+        "confirmed baseline must update before the stale-response UI guard"
+    )
+
+
+def test_settings_panel_posts_use_shared_queue_and_channel_is_single_owner():
+    """Every settings-panel writer shares the queue and Save Settings carries no channel."""
+    assert PANELS_JS.count("_enqueueSettingsPost({") == 10
+    direct_post_sites = re.findall(r"api\('/api/settings',\{method:'POST'", PANELS_JS)
+    assert direct_post_sites == [], f"direct settings POST bypasses queue: {direct_post_sites!r}"
+    assert "body.update_channel=" not in _function_block(PANELS_JS, "saveSettings")
+    assert "_settingsPanelPostQueue=Promise.resolve()" in PANELS_JS
+    producer_blocks = (
+        "_autosaveAppearanceSettings",
+        "_autosavePreferencesSettings",
+        "_saveUpdateChannelFromSelector",
+        "handlePluginEnableToggle",
+        "_setAuthDisabledAck",
+        "saveSettings",
+        "goPasswordless",
+        "disableAuth",
+    )
+    for producer in producer_blocks:
+        assert "_enqueueSettingsPost" in _function_block(PANELS_JS, producer), producer
+    provider_block = _function_block(PANELS_JS, "_attachBudgetControls")
+    assert "_enqueueSettingsPost" in provider_block, "provider budget writer must use the queue"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_settings_post_queue_serializes_and_recovers_after_failure():
+    """FIFO queue preserves request order and a rejected request does not poison its tail."""
+    script = _channel_writer_script_prelude(PANELS_JS) + """
+(async () => {
+  const started = [];
+  let releaseFirst;
+  const firstBlocker = new Promise(resolve => { releaseFirst = resolve; });
+  global.api = async function(url, opts) {
+    const body = JSON.parse(opts.body);
+    started.push(body);
+    if (started.length === 1) await firstBlocker;
+    return { ok: true };
+  };
+  const p1 = _enqueueSettingsPost({method: 'POST', body: JSON.stringify({first: true})});
+  const p2 = _enqueueSettingsPost({method: 'POST', body: JSON.stringify({second: true})});
+  await Promise.resolve();
+  const beforeRelease = started.length;
+  releaseFirst();
+  await Promise.all([p1, p2]);
+
+  global._settingsPanelPostQueue = Promise.resolve();
+  let attempts = 0;
+  global.api = async function() {
+    attempts++;
+    return attempts === 1 ? undefined : { ok: true };
+  };
+  const rejected = _enqueueSettingsPost({method: 'POST', body: '{}'}).then(
+    () => 'resolved', err => err.message
+  );
+  const follows = _enqueueSettingsPost({method: 'POST', body: '{}'});
+  console.log(JSON.stringify({
+    started,
+    beforeRelease,
+    rejected: await rejected,
+    following: await follows,
+    attempts,
+  }));
+})().catch(err => { console.error(err.stack || err.message); process.exit(1); });
+"""
+    result = json.loads(_run_node(script))
+    assert result["beforeRelease"] == 1, result
+    assert result["started"] == [{"first": True}, {"second": True}], result
+    assert result["rejected"] == "Invalid settings response", result
+    assert result["following"] == {"ok": True}, result
+    assert result["attempts"] == 2, result
 
 
 def test_channel_listener_calls_dedicated_writer():
@@ -564,54 +642,110 @@ def test_channel_writer_rejected_post():
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_channel_writer_undefined_response():
-    """api() returning undefined (workspace.js:63: 401 redirect path) must
-    fall back to val, not to 'stable'.
-
-    When a session expires, api() resolves with undefined rather than throwing.
-    The confirmed-value extraction must not silently revert the selector to
-    'stable' when the user picked 'experimental'.
-    """
+    """api() returning undefined on the 401 path must enter the failure branch."""
     script = _channel_writer_script_prelude(PANELS_JS) + """
 (async () => {
+  const statuses = [];
+  const badges = [];
+  global._setPreferencesAutosaveStatus = function(s) { statuses.push(s); };
+  global._syncUpdateChannelBadge = function(v) { badges.push(v); };
   global.api = async function() { return undefined; };
   global._confirmedUpdateChannel = 'stable';
   const sel = { value: 'experimental' };
   await _saveUpdateChannelFromSelector(sel);
-  console.log(JSON.stringify({ selectorValue: sel.value, confirmed: _confirmedUpdateChannel }));
+  console.log(JSON.stringify({ selectorValue: sel.value, confirmed: _confirmedUpdateChannel, statuses, badges }));
 })().catch(err => { console.error(err.message); process.exit(1); });
 """
     result = json.loads(_run_node(script))
-    assert result["selectorValue"] == "experimental", (
-        f"undefined api() response must fall back to val ('experimental'), not 'stable'; "
+    assert result["selectorValue"] == "stable", (
+        f"undefined api() response must revert to the confirmed value 'stable'; "
         f"got {result['selectorValue']!r}"
     )
-    assert result["confirmed"] == "experimental", (
-        f"_confirmedUpdateChannel must be set to val ('experimental'); got {result['confirmed']!r}"
+    assert result["confirmed"] == "stable", (
+        f"_confirmedUpdateChannel must remain 'stable'; got {result['confirmed']!r}"
     )
+    assert result["badges"] == ["stable"]
+    assert result["statuses"] == ["saving", None]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_channel_writer_string_response():
-    """api() returning a string body (workspace.js:81: non-JSON 200 response,
-    e.g. a reverse-proxy auth interstitial) must fall back to val, not to 'stable'.
-    """
+    """api() returning a string body on a non-JSON 200 must enter the failure branch."""
     script = _channel_writer_script_prelude(PANELS_JS) + """
 (async () => {
+  const statuses = [];
+  const badges = [];
+  global._setPreferencesAutosaveStatus = function(s) { statuses.push(s); };
+  global._syncUpdateChannelBadge = function(v) { badges.push(v); };
   global.api = async function() { return '<html>login required</html>'; };
   global._confirmedUpdateChannel = 'stable';
   const sel = { value: 'experimental' };
   await _saveUpdateChannelFromSelector(sel);
-  console.log(JSON.stringify({ selectorValue: sel.value, confirmed: _confirmedUpdateChannel }));
+  console.log(JSON.stringify({ selectorValue: sel.value, confirmed: _confirmedUpdateChannel, statuses, badges }));
 })().catch(err => { console.error(err.message); process.exit(1); });
 """
     result = json.loads(_run_node(script))
-    assert result["selectorValue"] == "experimental", (
-        f"string api() response must fall back to val ('experimental'), not 'stable'; "
+    assert result["selectorValue"] == "stable", (
+        f"string api() response must revert to the confirmed value 'stable'; "
         f"got {result['selectorValue']!r}"
     )
-    assert result["confirmed"] == "experimental", (
-        f"_confirmedUpdateChannel must be set to val ('experimental'); got {result['confirmed']!r}"
+    assert result["confirmed"] == "stable", (
+        f"_confirmedUpdateChannel must remain 'stable'; got {result['confirmed']!r}"
     )
+    assert result["badges"] == ["stable"]
+    assert result["statuses"] == ["saving", None]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("response", [None, [], 7, False], ids=["null", "array", "number", "boolean"])
+def test_channel_writer_non_object_response_reverts(response):
+    """All JSON non-object response shapes are failed saves, not confirmations."""
+    script = _channel_writer_script_prelude(PANELS_JS) + f"""
+(async () => {{
+  const statuses = [];
+  global._setPreferencesAutosaveStatus = function(s) {{ statuses.push(s); }};
+  global._syncUpdateChannelBadge = function() {{}};
+  global.api = async function() {{ return {json.dumps(response)}; }};
+  global._confirmedUpdateChannel = 'stable';
+  const sel = {{ value: 'experimental' }};
+  await _saveUpdateChannelFromSelector(sel);
+  console.log(JSON.stringify({{ selectorValue: sel.value, confirmed: _confirmedUpdateChannel, statuses }}));
+}})().catch(err => {{ console.error(err.message); process.exit(1); }});
+"""
+    result = json.loads(_run_node(script))
+    assert result == {
+        "selectorValue": "stable",
+        "confirmed": "stable",
+        "statuses": ["saving", None],
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_channel_writer_valid_object_missing_or_invalid_channel_falls_back_to_posted_value():
+    """A valid JSON object with no usable channel preserves the server merge contract."""
+    script = _channel_writer_script_prelude(PANELS_JS) + """
+(async () => {
+  const confirmed = [];
+  let response = {};
+  global._setPreferencesAutosaveStatus = function() {};
+  global._syncUpdateChannelBadge = function(v) { confirmed.push(v); };
+  global.api = async function() { return response; };
+  const missing = { value: 'experimental' };
+  global._confirmedUpdateChannel = 'stable';
+  await _saveUpdateChannelFromSelector(missing);
+  response = { update_channel: 'nightly' };
+  const invalid = { value: 'experimental' };
+  await _saveUpdateChannelFromSelector(invalid);
+  console.log(JSON.stringify({ missing: missing.value, invalid: invalid.value, confirmedValue: _confirmedUpdateChannel, confirmed }));
+})().catch(err => { console.error(err.message); process.exit(1); });
+"""
+    result = json.loads(_run_node(script))
+    assert result == {
+        "missing": "experimental",
+        "invalid": "experimental",
+        "confirmedValue": "experimental",
+        "confirmed": ["experimental", "experimental"],
+    }
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -660,6 +794,9 @@ global._setPreferencesAutosaveStatus = (0, eval)(
 global._saveUpdateChannelFromSelector = (0, eval)(
   '(' + extractFunc(panelsSrc, '_saveUpdateChannelFromSelector') + ')'
 );
+global._enqueueSettingsPost = (0, eval)(
+  '(' + extractFunc(panelsSrc, '_enqueueSettingsPost') + ')'
+);
 
 (async () => {
   const results = {};
@@ -706,15 +843,18 @@ global._saveUpdateChannelFromSelector = (0, eval)(
 
   const p1 = _saveUpdateChannelFromSelector({ value: 'experimental' });  // seq=1, blocks
 
-  // Channel write 2 starts (seq=2) and resolves; seq now 2.
+  await Promise.resolve();
+  // Channel write 2 is queued behind write 1; seq advances but api is not called.
   const sel2 = { value: 'stable' };
   const p2 = _saveUpdateChannelFromSelector(sel2);  // seq=2
-  await p2;
-  results.s2_afterSecondWrite = { cls: statusEl._cls.trim(), owner: _preferencesAutosaveStatusOwner };
+  await Promise.resolve();
+  results.s2_whileFirstBlocked = { cls: statusEl._cls.trim(), owner: _preferencesAutosaveStatusOwner, callCount };
 
-  // Unblock write 1; its catch fires but seq(1)!==_channelSaveSeq(2) → no null-clear.
+  // Unblock write 1; its catch fires but seq(1)!==_channelSaveSeq(2) -> no null-clear.
   resolveBlock();
   await p1;
+  await p2;
+  results.s2_afterSecondWrite = { cls: statusEl._cls.trim(), owner: _preferencesAutosaveStatusOwner };
   results.s2_afterStaleFailure = { cls: statusEl._cls.trim(), owner: _preferencesAutosaveStatusOwner };
 
   console.log(JSON.stringify(results));
@@ -743,6 +883,9 @@ global._saveUpdateChannelFromSelector = (0, eval)(
     assert "is-failed" in result["s2_afterGenericFailed"]["cls"], (
         f"generic 'failed' must be set before channel write; got {result['s2_afterGenericFailed']!r}"
     )
+    assert result["s2_whileFirstBlocked"]["callCount"] == 1, (
+        f"queued write must not reach api before write 1 resolves; got {result['s2_whileFirstBlocked']!r}"
+    )
     # After write 2 succeeds: write 2 tried to write 'saving' then 'saved', but
     # generic 'failed' blocks both → slot still shows 'failed'
     assert "is-failed" in result["s2_afterSecondWrite"]["cls"], (
@@ -757,54 +900,54 @@ global._saveUpdateChannelFromSelector = (0, eval)(
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_channel_writer_concurrent_selection():
-    """Two rapid selections: the earlier response must be discarded via seq guard.
-
-    Sequence: Call 1 (Experimental) blocks; Call 2 (Stable) resolves immediately.
-    Call 2's response applies; Call 1's late response is discarded.
-    The selector must show 'stable' (Call 2's confirmed value) throughout.
-    """
+    """Two rapid selections serialize server writes and retain the latest UI value."""
     script = _channel_writer_script_prelude(PANELS_JS) + """
 (async () => {
   const results = [];
   let resolveFirst;
   const firstCallBlocker = new Promise(resolve => { resolveFirst = resolve; });
   let apiCallCount = 0;
+  let persisted = { update_channel: 'stable' };
 
   global.api = async function(url, opts) {
     apiCallCount++;
     const body = JSON.parse(opts.body);
-    if (apiCallCount === 1) {
-      await firstCallBlocker;  // block until manually released
-      return { update_channel: body.update_channel };
-    }
-    return { update_channel: body.update_channel };  // resolves immediately
+    if (apiCallCount === 1) await firstCallBlocker;
+    persisted = { ...persisted, ...body };
+    return { ...persisted };
   };
 
   const sel = { value: 'experimental' };
   global._confirmedUpdateChannel = null;
   const p1 = _saveUpdateChannelFromSelector(sel);  // seq=1, blocked
   sel.value = 'stable';                            // user changes selection again
-  const p2 = _saveUpdateChannelFromSelector(sel);  // seq=2, resolves immediately
+  const p2 = _saveUpdateChannelFromSelector(sel);  // seq=2, queued
 
-  await p2;
-  results.push({ after_second_completes: sel.value });
+  await Promise.resolve();
+  results.push({ while_first_blocked: sel.value, apiCallCount, persisted });
 
-  resolveFirst(null);  // unblock first call's response
-  await p1;
-  results.push({ after_first_completes: sel.value });
+  resolveFirst(null);  // unblock first call's response, then start the queued second call
+  await Promise.all([p1, p2]);
+  results.push({ after_both_complete: sel.value, apiCallCount, persisted, confirmed: _confirmedUpdateChannel });
 
   console.log(JSON.stringify({ results, finalSeq: _channelSaveSeq }));
 })().catch(err => { console.error(err.message); process.exit(1); });
 """
     result = json.loads(_run_node(script))
     results = result["results"]
-    assert results[0]["after_second_completes"] == "stable", (
-        f"after Call 2 resolves, selector must be 'stable'; got {results[0]!r}"
+    assert results[0]["while_first_blocked"] == "stable", (
+        f"second selection must remain visible while first request is queued; got {results[0]!r}"
     )
-    assert results[1]["after_first_completes"] == "stable", (
-        f"after Call 1's late response, selector must still be 'stable' (discarded); "
+    assert results[0]["apiCallCount"] == 1, (
+        f"only the first settings POST may be in flight; got {results[0]!r}"
+    )
+    assert results[1]["after_both_complete"] == "stable", (
+        f"after both serialized writes, selector must be 'stable'; "
         f"got {results[1]!r}"
     )
+    assert results[1]["persisted"] == {"update_channel": "stable"}, results
+    assert results[1]["confirmed"] == "stable", results
+    assert results[1]["apiCallCount"] == 2, results
     assert result["finalSeq"] == 2, (
         f"_channelSaveSeq must be 2 after two calls; got {result['finalSeq']!r}"
     )
