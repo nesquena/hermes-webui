@@ -10,20 +10,24 @@ from __future__ import annotations
 
 import base64
 import html
+import ipaddress
 import io
 import json
 import logging
 import mimetypes
 import os
+import posixpath
 import re
 import secrets
 import tempfile
 import threading
 import time
+import unicodedata
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
-from api.config import STATE_DIR
+from api.config import HOST, PORT, STATE_DIR
 from api.helpers import redact_session_data
 # _redact_fn_cached is the ALWAYS-ON credential redactor (agent redactor with
 # force=True + local fallback regex). Unlike redact_session_data it does NOT
@@ -115,14 +119,47 @@ def _redact_share_paths(text: str, extra_paths) -> str:
     return text
 
 
-# Regex matching local MEDIA:<path> references — same pattern that
-# _inlineMediaHtmlForRef() in ui.js handles when rendering messages.
-# Excludes MEDIA: followed by http/https URLs so external images pass
-# through unchanged.  file:// references are NOT matched here — they are
-# always rejected at the public-share boundary (absolute, un-scoped).
-_SHARE_MEDIA_RE = re.compile(
-    r"MEDIA:(?!https?://)([^\s\)\]>]+)"
+_MEDIA_TOKEN_PREFIX = "MEDIA:"
+_MARKDOWN_FILE_URI_RE = re.compile(
+    r"!?\[[^\]\n]*\]\(\s*file://[^\s\)]+\s*\)",
+    re.IGNORECASE,
 )
+_ANGLE_FILE_URI_RE = re.compile(r"<file://[^\s>]+>", re.IGNORECASE)
+_FILE_URI_RE = re.compile(r"(^|\s)(file://[^\s<>'\"\)\]]+)", re.IGNORECASE)
+_API_MEDIA_PATH_RE = re.compile(r"(?:^|/)api/media(?:/|$)", re.IGNORECASE)
+_RAW_PRE_REGION_RE = re.compile(r"<pre\b[^>]*>[\s\S]*?</pre>", re.IGNORECASE)
+_ENTITY_PRE_REGION_RE = re.compile(
+    r"&lt;(?i:pre)\b(?:[^&]|&(?!gt;))*&gt;[\s\S]*?&lt;/(?i:pre)&gt;"
+)
+_RENDERER_LINE_RE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n|$)")
+_BLOCKQUOTE_FENCE_OPEN_RE = re.compile(r"^[ ]{0,3}(`{3,})([^\r\n`]*)$")
+_BLOCKQUOTE_FENCE_CLOSE_RE = re.compile(r"^[ ]{0,3}(`{3,})[ \t]*$")
+_NESTED_HTTP_START_RE = re.compile(r"https?://", re.IGNORECASE)
+_SCHEME_RELATIVE_URL_RE = re.compile(r"(?<!:)//[^\s<>'\"\)\]]+")
+_RELATIVE_API_MEDIA_PAYLOAD_RE = re.compile(
+    r"(?:^|[=&?#])(?:\.{0,2}/)*/?api/media(?:[/?#=&]|$)",
+    re.IGNORECASE,
+)
+_FENCED_CODE_REGION_RE = re.compile(
+    r"(^|\r\n|\r|\n)[ ]{0,3}(?P<fence>`{3,})([^\r\n`]*)"
+    r"(?:\r\n|\r|\n)"
+    r"(?:[\s\S]*?(?:\r\n|\r|\n))?[ ]{0,3}(?P=fence)`*[ \t]*(?=\r\n|\r|\n|$)"
+)
+_INLINE_CODE_REGION_RE = re.compile(r"`[^`\r\n]+`")
+_DATA_IMAGE_RE = re.compile(
+    r"^data:image/(?:png|jpe?g|gif|webp|avif)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*$",
+    re.IGNORECASE,
+)
+_DATA_IMAGE_MAX_LEN = 2 * 1024 * 1024
+_EMBEDDED_IPV4_RE = re.compile(
+    r"(?<!\d)(\d{1,3})[.-](\d{1,3})[.-](\d{1,3})[.-](\d{1,3})(?!\d)"
+)
+_BROWSER_IPV4_PART = r"(?:0[xX][0-9A-Fa-f]+|[0-9]+)"
+_BROWSER_IPV4_LITERAL_RE = re.compile(
+    rf"^{_BROWSER_IPV4_PART}(?:\.{_BROWSER_IPV4_PART}){{0,3}}\.?$"
+)
+_LOCAL_ONLY_HOSTNAMES = {"localhost", "host.docker.internal"}
+_LOCAL_ONLY_HOSTNAME_SUFFIXES = (".localhost", ".local", ".home.arpa")
 
 # Max size (in bytes) for files we'll embed as base64 in a share snapshot.
 _SHARE_EMBED_MAX_BYTES = 512 * 1024  # 512 KiB
@@ -153,6 +190,7 @@ _DANGEROUS_HREF_RE = re.compile(r"^\s*javascript\s*:", re.IGNORECASE)
 
 # Static placeholder emitted when a media reference cannot be embedded.
 _PLACEHOLDER = "[*Local attachment omitted from public share*]"
+_LOCAL_ATTACHMENT_PLACEHOLDER = _PLACEHOLDER
 
 # Magic byte signatures for allowed image formats — content-based validation
 # that catches mismatched extensions (e.g. a .png that is actually a script).
@@ -167,6 +205,641 @@ _IMAGE_MAGIC: dict[str, bytes] = {
 # Offset for WebP magic: "RIFF" at 0, file size at 4, "WEBP" at 8.
 _WEBP_MAGIC_OFFSET = 8
 _WEBP_MAGIC = b"WEBP"
+
+
+def _hostname_has_non_global_embedded_ip(hostname: str) -> bool:
+    for match in _EMBEDDED_IPV4_RE.finditer(hostname):
+        try:
+            if not ipaddress.ip_address(".".join(match.groups())).is_global:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _parse_browser_ipv4_number(part: str) -> int:
+    raw = str(part or "")
+    lower = raw.lower()
+    if lower.startswith("0x"):
+        return int(raw[2:], 16)
+    if len(raw) > 1 and raw.startswith("0"):
+        return int(raw[1:] or "0", 8)
+    return int(raw, 10)
+
+
+def _parse_browser_ipv4_literal(hostname: str):
+    """Parse legacy IPv4 host forms accepted by browser URL parsers."""
+    host = str(hostname or "").rstrip(".")
+    if not _BROWSER_IPV4_LITERAL_RE.fullmatch(host):
+        return None
+    parts = host.split(".")
+    numbers = [_parse_browser_ipv4_number(part) for part in parts]
+    if len(numbers) > 4:
+        raise ValueError("too many ipv4 parts")
+    for number in numbers[:-1]:
+        if number > 255:
+            raise ValueError("ipv4 part out of range")
+    max_last = (256 ** (5 - len(numbers))) - 1
+    if numbers[-1] > max_last:
+        raise ValueError("ipv4 final part out of range")
+    value = numbers[-1]
+    for index, number in enumerate(numbers[:-1]):
+        value += number * (256 ** (3 - index))
+    return ipaddress.IPv4Address(value)
+
+
+def _browser_normalized_hostname(hostname: str) -> str:
+    try:
+        decoded = unquote(str(hostname or ""), errors="strict")
+        normalized = unicodedata.normalize("NFKC", decoded)
+        return normalized.encode("idna").decode("ascii").strip(".").lower()
+    except UnicodeError as exc:
+        raise ValueError("invalid hostname") from exc
+
+
+def _is_safe_data_image_uri(raw_ref: str) -> bool:
+    value = str(raw_ref or "")
+    return len(value) <= _DATA_IMAGE_MAX_LEN and _DATA_IMAGE_RE.fullmatch(value) is not None
+
+
+def _media_url_path_for_boundary_check(path: str) -> str:
+    decoded = str(path or "")
+    for _ in range(4):
+        next_decoded = unquote(decoded)
+        if next_decoded == decoded:
+            break
+        decoded = next_decoded
+    decoded = decoded.replace("\\", "/")
+    normalized = posixpath.normpath(decoded)
+    if normalized == ".":
+        return ""
+    if decoded.startswith("/") and not normalized.startswith("/"):
+        normalized = f"/{normalized}"
+    return normalized
+
+
+def _url_port(parsed) -> int | None:
+    try:
+        return parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid port") from exc
+
+
+def _default_origin_port(scheme: str) -> int:
+    return 443 if str(scheme or "").lower() == "https" else 80
+
+
+def _origin_ports_match(scheme: str, left: int | None, right: int | None) -> bool:
+    if left == right:
+        return True
+    default = _default_origin_port(scheme)
+    return (left is None and right == default) or (right is None and left == default)
+
+
+def _trusted_webui_origin_parts() -> set[tuple[str, str, int | None]]:
+    origins: set[tuple[str, str, int | None]] = set()
+
+    def add_origin(raw_origin: str) -> None:
+        raw = str(raw_origin or "").strip().rstrip("/")
+        if not raw:
+            return
+        try:
+            parsed = urlsplit(raw)
+            scheme = parsed.scheme.lower()
+            hostname = _browser_normalized_hostname(parsed.hostname or "")
+            port = _url_port(parsed)
+        except ValueError:
+            return
+        if scheme in {"http", "https"} and hostname:
+            origins.add((scheme, hostname, port))
+
+    for value in os.getenv("HERMES_WEBUI_ALLOWED_ORIGINS", "").split(","):
+        add_origin(value)
+
+    configured_host = str(HOST or "").strip()
+    if configured_host and configured_host not in {"0.0.0.0", "::"}:
+        if ":" in configured_host and not configured_host.startswith("["):
+            configured_host = f"[{configured_host}]"
+        add_origin(f"http://{configured_host}:{int(PORT)}")
+
+    return origins
+
+
+def _is_trusted_webui_origin(parsed, hostname: str) -> bool:
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or not hostname:
+        return False
+    port = _url_port(parsed)
+    for allowed_scheme, allowed_host, allowed_port in _trusted_webui_origin_parts():
+        if (
+            scheme == allowed_scheme
+            and hostname == allowed_host
+            and _origin_ports_match(scheme, port, allowed_port)
+        ):
+            return True
+    return False
+
+
+def _has_invalid_bracketed_authority(parsed) -> bool:
+    netloc = str(parsed.netloc or "").rsplit("@", 1)[-1]
+    if not netloc.startswith("["):
+        return False
+    end = netloc.find("]")
+    if end <= 1:
+        return True
+    try:
+        ipaddress.ip_address(_browser_normalized_hostname(netloc[1:end]))
+    except ValueError:
+        return True
+    return False
+
+
+class _MediaPayloadScanContext:
+    def __init__(self, *, max_steps: int = 160, max_decoded_bytes: int = 65536):
+        self.remaining_steps = max_steps
+        self.remaining_decoded_bytes = max_decoded_bytes
+
+    def consume(self, value: str) -> bool:
+        self.remaining_steps -= 1
+        self.remaining_decoded_bytes -= len(str(value or "").encode("utf-8", "ignore"))
+        return self.remaining_steps >= 0 and self.remaining_decoded_bytes >= 0
+
+
+def _bounded_unquote_variants(
+    value: str,
+    *,
+    scan_context: _MediaPayloadScanContext,
+) -> tuple[list[str], bool]:
+    variants: list[str] = []
+    decoded = str(value or "")
+    for _ in range(5):
+        normalized = decoded.replace("\\", "/")
+        if not scan_context.consume(normalized):
+            return variants, True
+        if normalized not in variants:
+            variants.append(normalized)
+        next_decoded = unquote(decoded)
+        if next_decoded == decoded:
+            return variants, False
+        decoded = next_decoded
+    return variants, unquote(decoded) != decoded
+
+
+def _payload_candidate_end(value: str, start: int) -> int:
+    end = start
+    while end < len(value) and value[end] not in " \t\r\n<>'\")]\x00":
+        end += 1
+    return end
+
+
+def _nested_http_payload_has_local_media_reference(
+    variant: str,
+    *,
+    scan_context: _MediaPayloadScanContext,
+    payload_budget: int,
+) -> bool:
+    for match in _NESTED_HTTP_START_RE.finditer(variant):
+        if payload_budget <= 0:
+            return True
+        end = _payload_candidate_end(variant, match.start())
+        candidate = variant[match.start():end]
+        if not candidate or not _is_public_media_url(
+            candidate,
+            scan_context=scan_context,
+            payload_budget=payload_budget - 1,
+        ):
+            return True
+    return False
+
+
+def _scheme_relative_payload_has_local_media_reference(
+    variant: str,
+    *,
+    base_scheme: str,
+    scan_context: _MediaPayloadScanContext,
+    payload_budget: int,
+) -> bool:
+    for match in _SCHEME_RELATIVE_URL_RE.finditer(variant):
+        if match.start() > 0 and variant[match.start() - 1] not in "=&?#":
+            continue
+        if payload_budget <= 0:
+            return True
+        scheme = base_scheme if base_scheme in {"http", "https"} else "https"
+        if not _is_public_media_url(
+            f"{scheme}:{match.group(0)}",
+            scan_context=scan_context,
+            payload_budget=payload_budget - 1,
+        ):
+            return True
+    return False
+
+
+def _relative_payload_has_local_api_media_reference(
+    value: str,
+    *,
+    base_scheme: str,
+    scan_context: _MediaPayloadScanContext,
+    payload_budget: int,
+) -> bool:
+    index = 0
+    while index < len(value):
+        starts_path = (
+            value[index] == "/"
+            or value.startswith("./", index)
+            or value.startswith("../", index)
+        )
+        if not starts_path:
+            index += 1
+            continue
+        if value.startswith("//", index):
+            index += 1
+            continue
+        end = _payload_candidate_end(value, index)
+        candidate = value[index:end]
+        if not candidate or not scan_context.consume(candidate):
+            return True
+        try:
+            parsed = urlsplit(candidate)
+        except ValueError:
+            return True
+        normalized_path = _media_url_path_for_boundary_check(parsed.path)
+        if _API_MEDIA_PATH_RE.search(normalized_path):
+            return True
+        if payload_budget <= 0:
+            return True
+        if (
+            _payload_has_local_media_reference(
+                parsed.query,
+                relative_api_media=True,
+                base_scheme=base_scheme,
+                scan_context=scan_context,
+                payload_budget=payload_budget - 1,
+            )
+            or _payload_has_local_media_reference(
+                parsed.fragment,
+                relative_api_media=True,
+                base_scheme=base_scheme,
+                scan_context=scan_context,
+                payload_budget=payload_budget - 1,
+            )
+        ):
+            return True
+        index += 1
+    return False
+
+
+def _payload_has_local_media_reference(
+    value: str,
+    *,
+    relative_api_media: bool,
+    base_scheme: str,
+    scan_context: _MediaPayloadScanContext,
+    payload_budget: int,
+) -> bool:
+    if payload_budget <= 0:
+        return bool(value)
+    variants, exhausted = _bounded_unquote_variants(value, scan_context=scan_context)
+    if exhausted:
+        return True
+    for variant in variants:
+        lowered = variant.lower()
+        if "file://" in lowered or "file:/" in lowered:
+            return True
+        if relative_api_media and _RELATIVE_API_MEDIA_PAYLOAD_RE.search(variant):
+            return True
+        if (
+            relative_api_media
+            and _relative_payload_has_local_api_media_reference(
+                variant,
+                base_scheme=base_scheme,
+                scan_context=scan_context,
+                payload_budget=payload_budget,
+            )
+        ):
+            return True
+        if _nested_http_payload_has_local_media_reference(
+            variant,
+            scan_context=scan_context,
+            payload_budget=payload_budget,
+        ):
+            return True
+        if _scheme_relative_payload_has_local_media_reference(
+            variant,
+            base_scheme=base_scheme,
+            scan_context=scan_context,
+            payload_budget=payload_budget,
+        ):
+            return True
+    return False
+
+
+def _media_url_has_local_payload(
+    parsed,
+    *,
+    scan_context: _MediaPayloadScanContext,
+    payload_budget: int,
+) -> bool:
+    scheme = parsed.scheme.lower()
+    return (
+        _payload_has_local_media_reference(
+            parsed.path,
+            relative_api_media=False,
+            base_scheme=scheme,
+            scan_context=scan_context,
+            payload_budget=payload_budget,
+        )
+        or _payload_has_local_media_reference(
+            parsed.query,
+            relative_api_media=True,
+            base_scheme=scheme,
+            scan_context=scan_context,
+            payload_budget=payload_budget,
+        )
+        or _payload_has_local_media_reference(
+            parsed.fragment,
+            relative_api_media=True,
+            base_scheme=scheme,
+            scan_context=scan_context,
+            payload_budget=payload_budget,
+        )
+    )
+
+
+def _is_public_media_url(
+    raw_ref: str,
+    *,
+    scan_context: _MediaPayloadScanContext | None = None,
+    payload_budget: int = 5,
+) -> bool:
+    ref = str(raw_ref or "")
+    if payload_budget < 0:
+        return False
+    scan_context = scan_context or _MediaPayloadScanContext()
+    if not scan_context.consume(ref):
+        return False
+    if "[" in ref or "]" in ref:
+        return False
+    try:
+        parsed = urlsplit(ref.replace("\\", "/"))
+        hostname = _browser_normalized_hostname(parsed.hostname or "")
+        _url_port(parsed)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in {"http", "https"} or not hostname:
+        return False
+    if _has_invalid_bracketed_authority(parsed):
+        return False
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if getattr(ip, "ipv4_mapped", None) is not None:
+            ip = ip.ipv4_mapped
+        if not ip.is_global:
+            return False
+    except ValueError:
+        try:
+            browser_ipv4 = _parse_browser_ipv4_literal(hostname)
+        except ValueError:
+            return False
+        if browser_ipv4 is not None:
+            if not browser_ipv4.is_global:
+                return False
+        elif (
+            hostname in _LOCAL_ONLY_HOSTNAMES
+            or hostname.endswith(_LOCAL_ONLY_HOSTNAME_SUFFIXES)
+            or "." not in hostname
+            or _hostname_has_non_global_embedded_ip(hostname)
+        ):
+            return False
+    if _media_url_has_local_payload(
+        parsed,
+        scan_context=scan_context,
+        payload_budget=payload_budget,
+    ):
+        return False
+    if _API_MEDIA_PATH_RE.search(_media_url_path_for_boundary_check(parsed.path)):
+        return not _is_trusted_webui_origin(parsed, hostname)
+    return True
+
+
+def _is_public_media_reference(raw_ref: str) -> bool:
+    return _is_safe_data_image_uri(raw_ref) or _is_public_media_url(raw_ref)
+
+
+def _media_authority_brackets(text: str, start: int) -> tuple[int, int] | None:
+    scheme_match = re.match(r"https?://", text[start:], re.IGNORECASE)
+    if not scheme_match:
+        return None
+    authority_start = start + scheme_match.end()
+    authority_end = len(text)
+    for index in range(authority_start, len(text)):
+        if text[index] in "/?# \t\r\n)`<":
+            authority_end = index
+            break
+    userinfo_end = text.rfind("@", authority_start, authority_end)
+    host_start = userinfo_end + 1 if userinfo_end >= 0 else authority_start
+    if host_start >= authority_end or text[host_start] != "[":
+        return None
+    host_end = text.find("]", host_start + 1, authority_end)
+    if host_end < 0:
+        return (host_start, max(host_start, authority_end - 1))
+    return (host_start, host_end)
+
+
+def _scan_media_ref_end(text: str, start: int, *, bracket_wrapped: bool) -> tuple[int, bool]:
+    authority_brackets = _media_authority_brackets(text, start)
+    index = start
+    while index < len(text):
+        if index > start and text.startswith(_MEDIA_TOKEN_PREFIX, index):
+            return index, False
+        ch = text[index]
+        if ch in " \t\r\n)`<":
+            return index, False
+        if ch == "[":
+            if authority_brackets is not None and index == authority_brackets[0]:
+                index = authority_brackets[1] + 1
+                continue
+            return index, False
+        if ch == "]":
+            if bracket_wrapped:
+                return index, True
+            return index, False
+        index += 1
+    return index, False
+
+
+def _replace_media_tokens(text: str, replace_token) -> str:
+    pieces: list[str] = []
+    cursor = 0
+    while True:
+        media_start = text.find(_MEDIA_TOKEN_PREFIX, cursor)
+        if media_start < 0:
+            pieces.append(text[cursor:])
+            break
+
+        bracket_start = media_start - 1
+        has_wrapper = bracket_start >= cursor and text[bracket_start] == "["
+        raw_start = media_start + len(_MEDIA_TOKEN_PREFIX)
+        if has_wrapper:
+            raw_end, wrapper_closed = _scan_media_ref_end(
+                text,
+                raw_start,
+                bracket_wrapped=True,
+            )
+            if wrapper_closed:
+                pieces.append(text[cursor:bracket_start])
+                raw_ref = text[raw_start:raw_end]
+                pieces.append(replace_token(text[bracket_start : raw_end + 1], raw_ref))
+                cursor = raw_end + 1
+                continue
+
+        raw_end, _ = _scan_media_ref_end(text, raw_start, bracket_wrapped=False)
+        pieces.append(text[cursor:media_start])
+        raw_ref = text[raw_start:raw_end]
+        pieces.append(replace_token(text[media_start:raw_end], raw_ref))
+        cursor = raw_end
+
+    return "".join(pieces)
+
+
+def _line_content(line: str) -> str:
+    if line.endswith("\r\n"):
+        return line[:-2]
+    if line.endswith("\n") or line.endswith("\r"):
+        return line[:-1]
+    return line
+
+
+def _share_lines_with_offsets(text: str) -> list[tuple[int, str]]:
+    lines: list[tuple[int, str]] = []
+    for match in _RENDERER_LINE_RE.finditer(str(text or "")):
+        line = match.group(0)
+        if line:
+            lines.append((match.start(), _line_content(line)))
+    return lines
+
+
+def _blockquote_depth_and_remainder(line: str) -> tuple[int, str]:
+    depth = 0
+    index = 0
+    while index < len(line):
+        if line[index] == ">":
+            index += 1
+        elif line.startswith("&gt;", index):
+            index += 4
+        else:
+            break
+        if index < len(line) and line[index] == " ":
+            index += 1
+        depth += 1
+    return depth, line[index:]
+
+
+def _is_fence_close_line(line: str, min_len: int) -> bool:
+    match = _BLOCKQUOTE_FENCE_CLOSE_RE.fullmatch(line)
+    return bool(match and len(match.group(1)) >= min_len)
+
+
+def _stash_blockquote_fenced_code_regions(text: str, stash) -> str:
+    lines = _share_lines_with_offsets(text)
+    if not lines:
+        return text
+
+    regions: list[tuple[int, int]] = []
+    active_fences: dict[int, tuple[int, int]] = {}
+    for line_start, line in lines:
+        depth, remainder = _blockquote_depth_and_remainder(line)
+        for active_depth in [active_depth for active_depth in active_fences if active_depth > depth]:
+            del active_fences[active_depth]
+
+        active = active_fences.get(depth)
+        if active is not None:
+            region_start, fence_len = active
+            if _is_fence_close_line(remainder, fence_len):
+                if depth > 0:
+                    regions.append((region_start, line_start + len(line)))
+                del active_fences[depth]
+            continue
+
+        if any(active_depth < depth for active_depth in active_fences):
+            continue
+
+        opener = _BLOCKQUOTE_FENCE_OPEN_RE.fullmatch(remainder)
+        if opener:
+            active_fences[depth] = (line_start, len(opener.group(1)))
+
+    if not regions:
+        return text
+
+    pieces: list[str] = []
+    cursor = 0
+    for region_start, region_end in regions:
+        pieces.append(text[cursor:region_start])
+        pieces.append(stash(text[region_start:region_end]))
+        cursor = region_end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _stash_share_code_regions(text: str):
+    stashed: list[str] = []
+    stash_prefix = f"\x00SHARE_CODE_{secrets.token_hex(8)}_"
+
+    def stash(match: re.Match | str) -> str:
+        stashed.append(match.group(0) if hasattr(match, "group") else str(match))
+        return f"{stash_prefix}{len(stashed) - 1}\x00"
+
+    protected = _stash_blockquote_fenced_code_regions(text, stash)
+    protected = _FENCED_CODE_REGION_RE.sub(stash, protected)
+    protected = _INLINE_CODE_REGION_RE.sub(stash, protected)
+    protected = _RAW_PRE_REGION_RE.sub(stash, protected)
+    protected = _ENTITY_PRE_REGION_RE.sub(stash, protected)
+
+    def restore(value: str) -> str:
+        for index in reversed(range(len(stashed))):
+            original = stashed[index]
+            value = value.replace(f"{stash_prefix}{index}\x00", original)
+        if stash_prefix in value:
+            marker_re = re.compile(rf"{re.escape(stash_prefix)}\d+\x00")
+            value = marker_re.sub(_PLACEHOLDER, value)
+        return value
+
+    return protected, restore
+
+
+def _stash_public_media_tokens(text: str):
+    stashed: list[str] = []
+    stash_prefix = f"\x00SHARE_MEDIA_{secrets.token_hex(8)}_"
+
+    def maybe_stash(token: str, raw_ref: str) -> str:
+        if _is_public_media_reference((raw_ref or "").strip()):
+            stashed.append(token)
+            return f"{stash_prefix}{len(stashed) - 1}\x00"
+        return token
+
+    protected = _replace_media_tokens(text, maybe_stash)
+
+    def restore(value: str) -> str:
+        for index, original in enumerate(stashed):
+            value = value.replace(f"{stash_prefix}{index}\x00", original)
+        return value
+
+    return protected, restore
+
+
+def _omit_file_uri_references(text: str, *, protect_code_regions: bool = True) -> str:
+    if not isinstance(text, str) or not text:
+        return text
+    restore_code_regions = None
+    if protect_code_regions:
+        text, restore_code_regions = _stash_share_code_regions(text)
+    text, restore_media_tokens = _stash_public_media_tokens(text)
+    text = _MARKDOWN_FILE_URI_RE.sub(_PLACEHOLDER, text)
+    text = _ANGLE_FILE_URI_RE.sub(_PLACEHOLDER, text)
+    text = _FILE_URI_RE.sub(lambda match: f"{match.group(1)}{_PLACEHOLDER}", text)
+    text = restore_media_tokens(text)
+    if restore_code_regions is not None:
+        text = restore_code_regions(text)
+    return text
 
 
 def _check_image_magic(data: bytes, mime_type: str) -> bool:
@@ -289,10 +962,20 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
                 return candidate
         return None
 
-    def _replace_ref(m: re.Match) -> str:
-        raw = (m.group(1) or "").strip()
+    def _replace_ref(token: str, raw_ref: str) -> str:
+        raw = (raw_ref or "").strip()
         if not raw:
-            return m.group(0)
+            return token
+
+        if _is_public_media_reference(raw):
+            return token
+
+        if (
+            raw.startswith("[")
+            or raw.startswith("]")
+            or re.match(r"^(?:https?://|data:)", raw, re.IGNORECASE)
+        ):
+            return _PLACEHOLDER
 
         # --- Resolve and validate against allowed roots -----------------------
         p = _resolve_against_roots(raw)
@@ -339,7 +1022,7 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
         except (OSError, MemoryError):
             return _PLACEHOLDER
 
-    return _SHARE_MEDIA_RE.sub(_replace_ref, text)
+    return _replace_media_tokens(text, _replace_ref)
 
 
 def _sanitize_message(message: dict, *, redact_paths=(), allowed_roots: tuple[Path, ...] = ()) -> dict | None:
@@ -359,6 +1042,7 @@ def _sanitize_message(message: dict, *, redact_paths=(), allowed_roots: tuple[Pa
     # available for file reads.  MEDIA: references become self-contained data
     # URIs — or a static placeholder if the path is outside the allowed roots.
     text = _embed_share_media(text, allowed_roots=allowed_roots)
+    text = _omit_file_uri_references(text)
     text = _redact_share_paths(text, redact_paths)
     if not text.strip():
         return None
@@ -440,6 +1124,8 @@ def build_share_snapshot(session) -> dict:
     _raw_title = safe_session.get("title")
     _raw_title = _raw_title if isinstance(_raw_title, str) else "Untitled"
     title = _force_redact_credentials(_raw_title or "Untitled")
+    title = _embed_share_media(title, allowed_roots=())
+    title = _omit_file_uri_references(title, protect_code_regions=False)
     title = _redact_share_paths(title, redact_paths) or "Untitled"
     return {
         "title": title,
