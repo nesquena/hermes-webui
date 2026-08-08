@@ -5747,6 +5747,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('tool',e=>{
       if(_terminalStateReached||_streamFinalized) return;
+      if(!_ownsAttachSeam(source)) return;
       if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
@@ -5783,6 +5784,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('tool_complete',e=>{
       if(_terminalStateReached||_streamFinalized) return;
+      if(!_ownsAttachSeam(source)) return;
       if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
@@ -5828,6 +5830,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Cross-session protection mirrors every other live listener:
     // payload.session_id must match activeSid or the event is dropped.
     source.addEventListener('todo_state',e=>{
+      if(!_ownsAttachSeam(source)) return;
       let d;
       try{ d=JSON.parse(e.data||'{}'); }catch(_){ return; }
       if(!d||typeof d!=='object') return;
@@ -5861,6 +5864,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('approval',e=>{
+      if(!_ownsAttachSeam(source)) return;
       const d=JSON.parse(e.data);
       _applyToAnchor('approval',d,e);
       showApprovalForSession(activeSid, d, d.pending_count || 1);
@@ -5869,6 +5873,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('clarify',e=>{
+      if(!_ownsAttachSeam(source)) return;
       const d=JSON.parse(e.data);
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
@@ -5877,6 +5882,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('state_saved',e=>{
+      if(!_ownsAttachSeam(source)) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -5886,6 +5892,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('title',e=>{
+      if(!_ownsAttachSeam(source)) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -5893,6 +5900,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('title_status',e=>{
+      if(!_ownsAttachSeam(source)) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -5908,6 +5916,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('context_status',e=>{
+      if(!_ownsAttachSeam(source)) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -5936,6 +5945,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
 
     source.addEventListener('goal',e=>{
+      if(!_ownsAttachSeam(source)) return;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
@@ -5954,6 +5964,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('goal_continue',e=>{
+      if(!_ownsAttachSeam(source)) return;
       try{
         const d=JSON.parse(e.data||'{}');
         const sid=d.session_id||activeSid;
@@ -5992,6 +6003,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // `_handleBgTaskCompleteEvent` function below is shared between both
     // paths (dedupe only; the wakeup itself is server-side).
     source.addEventListener('bg_task_complete',e=>{
+      if(!_ownsAttachSeam(source)) return;
       if(typeof _handleBgTaskCompleteEvent==='function'){
         _handleBgTaskCompleteEvent(e, activeSid, {source:'stream'});
       }
@@ -6339,6 +6351,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('pending_steer_leftover',e=>{
+      if(!_ownsAttachSeam(source)) return;
       // The agent finished its turn with steer text still stashed (no
       // tool-result boundary fired). Match the CLI's leftover-delivery
       // behaviour: queue the leftover text as a next-turn user message
@@ -6364,6 +6377,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('compressing',e=>{
+      if(!_ownsAttachSeam(source)) return;
       // Context auto-compression is starting. Surface the same calm running
       // compression card as manual /compress while the summarizer LLM call runs.
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -6394,6 +6408,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('compressed',e=>{
+      if(!_ownsAttachSeam(source)) return;
       // Context was auto-compressed during this turn. Keep the live timeline
       // honest by transitioning the running divider into a completed divider;
       // final settlement removes live-only compression rows from the Worklog.
@@ -6429,6 +6444,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('metering',e=>{
+      if(!_ownsAttachSeam(source)) return;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
@@ -6549,6 +6565,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           },0);
         }
         if(isRecoveryControlMessage){
+          if(!_ownsAttachSeam(source)) return;
           (async()=>{
             if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
             if(S.session&&S.session.session_id===activeSid){
@@ -6571,6 +6588,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('warning',e=>{
+      if(!_ownsAttachSeam(source)) return;
       // Non-fatal warning from server (e.g. fallback activated, retrying)
       if(!S.session||S.session.session_id!==activeSid) return;
       try{
@@ -6812,7 +6830,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
-      source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
+      source.addEventListener(_runJournalEventName,e=>{
+        if(_ownsAttachSeam(source)) _rememberRunJournalCursor(e);
+      });
     }
   }
 
